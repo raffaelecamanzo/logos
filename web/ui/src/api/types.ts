@@ -1248,9 +1248,11 @@ export interface ClassificationCounts {
  *
  *  Read it before drawing any conclusion from `bound`: that counter adds a
  *  declared endpoint matched to a controller (`contract-surface`) to a resolved
- *  outbound call site (`invocation`), and on the 84-member reference workspace the
- *  split is 81 / **0** — no call site in the estate resolves at all, which a bare
- *  `bound: 81` reads as healthy (CR-120 §3.1, NFR-CC-04). */
+ *  outbound call site (`invocation`), so a bare `bound` says nothing about whether
+ *  any outbound call site resolves. On the 84-member reference workspace the split
+ *  is 81 `contract-surface` and **45** `invocation` (2026-09-18; it was 81 and 15
+ *  on 2026-09-13, and 81 and **0** for as long as no call site resolved at all).
+ *  **No floor is asserted on either figure** (CR-120 §3.1, NFR-CC-04). */
 export interface IntakeSplit {
   contract_surface: ClassificationCounts;
   invocation: ClassificationCounts;
@@ -1294,9 +1296,12 @@ export interface CrossServiceCoverage {
    *  estate published `"0 resolved cross-service edges; egress resolution 0.032 (5
    *  of 155 egress sites resolved)"` (CR-127).
    *
-   *  It is **not** the count of edges the bridge drew. A row whose target was
-   *  composed from committed configuration resolves here and seeds no
-   *  cross-service reachability root, because the bridge keys on the raw target.
+   *  It is **not** the count of edges the bridge drew. The two diverge wherever a
+   *  resolution draws several edges (a fan-out topic) or none (an ambiguous
+   *  composition). Until S-420 (CR-133) they also diverged on the HTTP arm, where
+   *  the coverage tier composed a target from committed configuration and the
+   *  bridge did not, so a `config-bound` row resolved here and seeded no
+   *  cross-service reachability root. Both arms now key on the committed value.
    *  That second quantity is `bridge_invocation_edges` on the reachability
    *  rider — a different payload, under a name that says which it is. */
   resolved_cross_service_edges: number;
@@ -1314,8 +1319,8 @@ export interface CrossServiceCoverage {
    *  figure). Present even when the rate is absent, where `0` *is* the finding:
    *  nothing outbound was captured at all. */
   egress_resolution_measured: number;
-  /** The resolved-edge count and its rate as one line, e.g. `"15 resolved
-   *  cross-service edges; egress resolution 0.128 (15 of 117 egress sites
+  /** The resolved-edge count and its rate as one line, e.g. `"51 resolved
+   *  cross-service edges; egress resolution 0.385 (45 of 117 egress sites
    *  resolved)"`. The structural form of BR-51: a view that renders this line
    *  cannot render the count without the rate — and since S-403 both halves are
    *  counted over one population by one walk, so the line cannot disagree with
