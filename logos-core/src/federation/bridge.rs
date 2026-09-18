@@ -1161,37 +1161,41 @@ pub(super) fn identify(
 /// edges, and handing each the site's entire evidence would leave a reader
 /// unable to say which overlay drew which edge ([NFR-CC-04]).
 ///
-/// **The unprofiled base is kept on every composition**, and that is the one
-/// place this narrowing is deliberately inclusive rather than exact: a
-/// composition under profile `P` uses `P`'s value for a key `P` defines and
-/// falls back to the unprofiled one for a key it does not, and the composed
-/// string does not record which of the two it used. Keeping the base is the
-/// direction that never drops evidence; dropping it would let a two-key target
-/// lose the key its profile is silent about.
+/// **Exact, because the composer says which value it used.** An earlier version
+/// of this function inferred the attribution from the candidate's profile set —
+/// keeping every value whose profiles intersected it, plus the unprofiled base
+/// unconditionally — and that inference over-claimed in the estate's dominant
+/// idiom: a key committed once in `application.yml` and again under a profile
+/// composes the profiled value *instead of* the base
+/// ([`values_under`](crate::resolve::binding)), so the profiled edge would have
+/// named a value that produced the *other* edge. Two values one profile set
+/// cannot tell apart (a key two unprofiled sources commit differently) had no
+/// inference at all. [`ProfiledTemplate::used`] records the substitution, so
+/// there is nothing left to infer.
 ///
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn composition_evidence(bound: &[ConfigBound], candidate: &ProfiledTemplate) -> Vec<ConfigBound> {
     bound
         .iter()
-        .map(|entry| {
-            let values: Vec<_> = entry
-                .values
-                .iter()
-                .filter(|value| {
-                    value.unprofiled
-                        || value
-                            .profiles
-                            .iter()
-                            .any(|profile| candidate.profiles.contains(profile))
-                })
-                .cloned()
-                .collect();
-            // Unreachable by construction — a composition exists only where every
-            // key it names has a value under one of its profiles or unprofiled —
-            // and the full evidence is the honest fallback if it ever is reached:
-            // an empty list would read as "nothing proved this", which is a
-            // stronger claim than the narrowing is entitled to make.
+        .enumerate()
+        .map(|(key, entry)| {
+            // `used` is one value per key of `bound`, in the same order, so the
+            // index is the join. A short list means the composer and this reader
+            // disagree about the key count, which cannot happen — both read the
+            // same `ResolvedTemplate` — and is answered with the full evidence
+            // rather than a panic, because a read-model never answers a
+            // disagreement between two scans with a crash.
+            let Some(used) = candidate.used.get(key) else {
+                debug_assert!(false, "composition {candidate:?} names no value for {entry:?}");
+                return entry.clone();
+            };
+            let values: Vec<_> =
+                entry.values.iter().filter(|value| &value.value == used).cloned().collect();
+            // Also unreachable: the substituted value came out of this very
+            // entry. Same rule as above if it ever is reached — an empty list
+            // would read as "nothing proved this", a stronger claim than the
+            // narrowing is entitled to make.
             debug_assert!(
                 !values.is_empty(),
                 "a composition's own key proved nothing: {entry:?} for {candidate:?}"
@@ -3334,6 +3338,118 @@ mod tests {
                 ),
             ],
             "each edge carries only the overlay that produced it"
+        );
+    }
+
+    /// **A profiled overlay over an unprofiled base attributes each edge to the
+    /// value that produced IT** — the estate's dominant idiom, and the shape an
+    /// inference from the profile set alone gets wrong.
+    ///
+    /// `orders.base` is committed once in `application.yml` and again under
+    /// `prod`. The composer substitutes the profiled value **instead of** the
+    /// base wherever the profile defines the key
+    /// ([`crate::resolve::binding`]'s `values_under`), so the `prod` edge is
+    /// produced by `/orders-v2` alone. Review found the first version of
+    /// [`composition_evidence`] keeping the unprofiled base on every
+    /// composition, which put `/orders` — the value behind the *other* edge —
+    /// on this one ([ADR-64] decision point 3, [NFR-CC-04]).
+    #[test]
+    fn a_profiled_overlay_and_its_base_each_name_only_their_own_value() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config(
+            "web",
+            "orders.base",
+            &[
+                ("application.yml", None, "/orders"),
+                ("application-prod.yml", Some("prod"), "/orders-v2"),
+            ],
+        );
+        set_member(
+            "orders",
+            0,
+            vec![
+                route("GET /orders/{oid}", "local show"),
+                route("GET /orders-v2/{oid}", "local show_v2"),
+            ],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(edges.len(), 2, "one edge per committed composition: {edges:?}");
+        let mut seen: Vec<(String, Vec<String>, Vec<String>)> = edges
+            .iter()
+            .map(|e| {
+                let mut ev = evidence(&e.from_value);
+                assert_eq!(ev.len(), 1, "one key, one evidence entry: {ev:?}");
+                let (_key, profiles, values) = ev.remove(0);
+                (e.to.symbol.as_str().to_string(), profiles, values)
+            })
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    "local show".to_string(),
+                    Vec::<String>::new(),
+                    vec!["/orders".to_string()]
+                ),
+                (
+                    "local show_v2".to_string(),
+                    vec!["prod".to_string()],
+                    vec!["/orders-v2".to_string()]
+                ),
+            ],
+            "the profiled edge names the profiled value ALONE — the base produced the other edge"
+        );
+    }
+
+    /// The same exactness where **no profile discriminates at all**: one key,
+    /// two unprofiled sources committing two values ([`ConfigBound`] divergence
+    /// with an empty profile set on both). A profile-set inference is a no-op
+    /// here — both values pass it — so each edge would have named the other's
+    /// value. [`ProfiledTemplate::used`] is what separates them.
+    #[test]
+    fn two_unprofiled_sources_still_name_one_value_per_edge() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config(
+            "web",
+            "orders.base",
+            &[
+                ("application.yml", None, "/orders"),
+                ("common.yml", None, "/orders-v2"),
+            ],
+        );
+        set_member(
+            "orders",
+            0,
+            vec![
+                route("GET /orders/{oid}", "local show"),
+                route("GET /orders-v2/{oid}", "local show_v2"),
+            ],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(edges.len(), 2, "one edge per committed composition: {edges:?}");
+        let mut seen: Vec<(String, Vec<String>)> = edges
+            .iter()
+            .map(|e| {
+                let mut ev = evidence(&e.from_value);
+                let (_key, _profiles, values) = ev.remove(0);
+                (e.to.symbol.as_str().to_string(), values)
+            })
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("local show".to_string(), vec!["/orders".to_string()]),
+                ("local show_v2".to_string(), vec!["/orders-v2".to_string()]),
+            ],
+            "neither edge names the value that produced the other"
         );
     }
 
