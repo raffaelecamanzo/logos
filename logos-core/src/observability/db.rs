@@ -42,7 +42,16 @@ pub(crate) const RETENTION_DAYS: u32 = 90;
 /// pre-migration rows `NULL`, which the read-model treats as `'main'`
 /// (`COALESCE(origin, 'main')`).
 ///
+/// v3 adds the nullable `session_id` column ([FR-OB-12]) the same way: a plain
+/// `ADD COLUMN` over an existing v2 store, leaving pre-migration rows `NULL`.
+/// Unlike `origin`, a `NULL` `session_id` is **not** folded into any real
+/// session — there is no fallback value analogous to `'main'`, because doing
+/// so would attribute a pre-migration row to an arbitrary session it never
+/// belonged to. A reader groups on `COALESCE(session_id, 'unattributed')`, a
+/// sentinel no real session id can ever equal.
+///
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
+/// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -75,6 +84,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // Nullable: legacy rows stay NULL and read back as 'main'. STRICT
         // permits ADD COLUMN of a typed, non-NOT-NULL column with no default.
         "ALTER TABLE events ADD COLUMN origin TEXT;    -- branch, or 'main' (FR-OB-08)",
+    ),
+    (
+        3,
+        // Nullable: legacy rows stay NULL and read back as 'unattributed', never
+        // folded into a real session (FR-OB-12).
+        "ALTER TABLE events ADD COLUMN session_id TEXT;    -- opaque per-process id (FR-OB-12)",
     ),
 ];
 
@@ -174,6 +189,29 @@ pub(crate) fn open_in_memory_v1() -> Connection {
     conn
 }
 
+/// An in-memory telemetry store migrated **only through v2** — the pre-
+/// `session_id` shape, so a test can drive the v3 forward migration
+/// ([FR-OB-12]) over it and prove legacy rows read as unattributed.
+///
+/// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
+#[cfg(test)]
+pub(crate) fn open_in_memory_v2() -> Connection {
+    let mut conn = Connection::open_in_memory().expect("in-memory telemetry store");
+    let tx = conn.transaction().expect("v1+v2 migration transaction");
+    for &(version, sql) in &MIGRATIONS[..2] {
+        tx.execute_batch(sql).expect("v1/v2 schema");
+        tx.execute(
+            "INSERT INTO schema_versions (version, applied_at) VALUES (?1, unixepoch())",
+            [version],
+        )
+        .expect("record v1/v2");
+    }
+    tx.pragma_update(None, "user_version", 2)
+        .expect("set v2 user_version");
+    tx.commit().expect("commit v1+v2");
+    conn
+}
+
 /// Apply every pending migration to `conn` — the test seam for driving the
 /// forward migration ledger directly ([FR-OB-08]).
 #[cfg(test)]
@@ -197,8 +235,8 @@ pub(crate) fn write_batch(conn: &mut Connection, batch: &[EventRecord]) -> Resul
     {
         let mut stmt = tx
             .prepare_cached(
-                "INSERT INTO events (at, surface, tool, duration_ms, ok, origin)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )
             .context("preparing the telemetry insert")?;
         for e in batch {
@@ -209,6 +247,7 @@ pub(crate) fn write_batch(conn: &mut Connection, batch: &[EventRecord]) -> Resul
                 e.duration_ms as i64,
                 e.ok as i64,
                 e.origin,
+                e.session_id,
             ])
             .context("inserting a telemetry event")?;
         }

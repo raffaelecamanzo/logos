@@ -300,6 +300,21 @@ pub(crate) struct EventRecord {
     ///
     /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
     pub(crate) origin: String,
+    /// An opaque per-process session stamp ([FR-OB-12]): every event this
+    /// process emits carries the same value, so the store can count sessions
+    /// and not just calls — `origin` is a branch name and collapses every
+    /// process in a worktree into one bucket, which is what made "what
+    /// fraction of dev sessions made a navigation call?" unanswerable. A
+    /// per-process constant computed once at [`init`] — never on the hot path
+    /// ([NFR-OO-02]) — and orthogonal to both [`surface`](Self::surface) and
+    /// [`origin`](Self::origin). Carries no user, machine or account identity
+    /// ([NFR-CC-03]): it is [`generate_session_id`]'s process-random bits,
+    /// nothing derived from the environment.
+    ///
+    /// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
+    /// [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
+    /// [NFR-CC-03]: ../../../docs/specs/requirements/NFR-CC-03.md
+    pub(crate) session_id: String,
 }
 
 /// The development-increment `origin` stamped onto every event this process
@@ -337,6 +352,33 @@ fn telemetry_origin_for(primary: Option<&Path>, root: &Path) -> String {
         .unwrap_or_else(|| "main".to_string())
 }
 
+/// A fresh opaque per-process `session_id` ([FR-OB-12]): 128 random bits, hex
+/// encoded. Computed **once** by [`init`] at startup — a cheap, one-time call,
+/// never on the hot path ([NFR-OO-02]) — and copied onto every event the
+/// process emits.
+///
+/// Dependency-free, following the [`agent_core::retry`] jitter precedent:
+/// [`std::collections::hash_map::RandomState`] is reseeded from the OS's CSPRNG
+/// on every construction (it exists to resist HashDoS), so two independently
+/// constructed instances give two independent 64-bit draws with no `rand`
+/// crate and no socket surface ([NFR-SE-01]). This is exactly what
+/// [NFR-CC-03] asks for: the value carries no user, machine or account
+/// identity — it is pure per-process randomness, not a hash of the
+/// environment.
+///
+/// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
+/// [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
+/// [NFR-CC-03]: ../../../docs/specs/requirements/NFR-CC-03.md
+/// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
+fn generate_session_id() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let hi = RandomState::new().build_hasher().finish();
+    let lo = RandomState::new().build_hasher().finish();
+    format!("{hi:016x}{lo:016x}")
+}
+
 /// Install the global subscriber for a surface process: fmt layer → **stderr
 /// only** ([NFR-RA-01]), telemetry layer → `telemetry.db` ([ADR-13]).
 ///
@@ -356,6 +398,9 @@ fn telemetry_origin_for(primary: Option<&Path>, root: &Path) -> String {
 /// - Every event is stamped with an `origin` ([FR-OB-08]) — the worktree's
 ///   branch, or `"main"` — computed once here by [`telemetry_origin`] so the
 ///   shared store can be split dev-vs-main. Off the hot path ([NFR-OO-02]).
+/// - Every event is also stamped with an opaque per-process `session_id`
+///   ([FR-OB-12]), computed once here by [`generate_session_id`] — orthogonal
+///   to `origin` and never on the hot path.
 /// - A second call (or a test that already installed a subscriber) is a
 ///   no-op for logging; the returned guard is still safe to drop.
 ///
@@ -378,8 +423,12 @@ pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
         // The per-process origin stamp (FR-OB-08): computed once here, only on
         // the active path, so a telemetry-less run never pays the git cost.
         let origin = telemetry_origin_for(primary.as_deref(), root);
+        // The per-process session stamp (FR-OB-12): computed once here too,
+        // independently of origin — no shared resolution, since it needs no
+        // git call at all.
+        let session_id = generate_session_id();
         let (sink, guard) = layer::spawn_writer(logos_dir.join(TELEMETRY_DB_FILENAME));
-        let telemetry = layer::TelemetryLayer::new(surface.into(), origin, sink)
+        let telemetry = layer::TelemetryLayer::new(surface.into(), origin, session_id, sink)
             .with_filter(filter_fn(|meta| meta.target() == TELEMETRY_TARGET));
         (Some(telemetry), guard)
     } else {
