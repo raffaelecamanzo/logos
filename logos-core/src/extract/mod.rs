@@ -58,7 +58,12 @@ pub(crate) mod refs;
 // The message-broker publish/subscribe invocation arm's capture side (S-254,
 // FR-WS-10): runs a grammar's optional `brokers` query and funnels topic-keyed
 // sites through the generic `capture_invocation_refs` interpreter.
-mod broker;
+//
+// PUBLIC since S-417, for the same reason `composer` is: the
+// reference-workspace measurement must read the two-frame hop's own verdict
+// (`Facts::forwarding`) rather than re-deriving a second one beside it. Only the
+// forwarding carrier is reachable — the capture entry point stays `pub(super)`.
+pub mod broker;
 // The path-neutral composer contract test (S-405, CR-129, FR-WS-08 AC2): the
 // byte-range reconciliation that lets a plugin query declare an arbitrary-length
 // fluent URI-composer chain, which a fixed-nesting tree-sitter pattern cannot.
@@ -282,6 +287,19 @@ pub struct Facts {
     ///
     /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
     pub config_source: Option<config::corpus::ConfigSourceFact>,
+    /// The broker publish/subscribe sites of this file whose topic operand is a
+    /// bare parameter of the method enclosing it, and what the two-frame wrapper
+    /// hop decided about each (S-417, [FR-WS-26]).
+    ///
+    /// Every entry names a site this pass has **already reported refused**
+    /// (`topic-not-literal`); the hop can only retract that refusal, never add
+    /// one. Each carries [`broker::ForwardingCandidate::outcome`], which is
+    /// [`None`] on the single-file [`extract`] entry point — one file cannot
+    /// answer a cross-file question, and saying so beats reporting a refusal
+    /// that was never tested.
+    ///
+    /// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
+    pub forwarding: Vec<broker::ForwardingCandidate>,
 }
 
 /// One captured declaration, retained with its tree-sitter node for the metrics
@@ -373,7 +391,7 @@ pub fn extract_files(
         registry,
         inputs.iter().map(|i| (i.path.as_str(), i.source.as_str())),
     );
-    inputs
+    let mut facts: Vec<Facts> = inputs
         .par_iter()
         // `map_init` runs the init closure once per rayon worker thread, so each
         // worker owns exactly one Parser — the AR-05 mitigation — and reuses it
@@ -385,7 +403,16 @@ pub fn extract_files(
         // `rayon`'s `collect` preserves input order even through this
         // `Option`-flattening, so the result is deterministic (NFR-RA-06).
         .flatten()
-        .collect()
+        .collect();
+    // The two-frame wrapper hop (S-417, [FR-WS-26]) is a **post**-pass, not a
+    // pre-pass, and that is the one structural difference from the binding index
+    // above: it needs the `Calls` ledger the map has just produced to know which
+    // files to re-read, where the binding index needs only the text. It is
+    // sequential and it reads a handful of files, so it is not inside the
+    // parallel map; a workspace whose broker sites carry no parameter operand
+    // returns from it on one `is_empty` test.
+    broker::resolve_forwarded_topics(&mut facts, inputs, registry, &properties);
+    facts
 }
 
 /// Resolve the plugin for a file by its **extension or claimed basename**, or
@@ -434,6 +461,7 @@ fn extract_one(
         refs: Vec::new(),
         warnings: Vec::new(),
         config_source: None,
+        forwarding: Vec::new(),
     };
 
     // A grammar that fails to bind (ABI skew) is skipped-and-warned, never fatal.

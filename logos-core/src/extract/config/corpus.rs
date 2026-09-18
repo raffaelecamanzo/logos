@@ -66,7 +66,7 @@ const CONFIG_EXTENSIONS: [&str; 3] = ["yml", "yaml", "properties"];
 
 /// Build descriptors whose directory is a module root — the scope one
 /// deployable's configuration is assembled from.
-const MODULE_DESCRIPTORS: [&str; 5] =
+pub(crate) const MODULE_DESCRIPTORS: [&str; 5] =
     ["pom.xml", "build.gradle", "build.gradle.kts", "package.json", "go.mod"];
 
 /// One discovered configuration source.

@@ -126,18 +126,20 @@
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [`capture_invocation_refs`]: crate::extract::config::refs::capture_invocation_refs
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
-use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
-use crate::extract::config::accessor::BindingView;
+use crate::extract::config::accessor::{BindingView, DeclaredTypes};
+use crate::extract::config::binding::PropertiesIndex;
 use crate::extract::config::refs::{
-    capture_invocation_refs, record_refusals, InvocationSite, RefusalCandidate,
+    capture_invocation_refs, record_refusals, surviving_refusals, InvocationSite, RefusalCandidate,
 };
 use crate::extract::refs::unquote;
-use crate::extract::Facts;
-use crate::model::{ArtifactRelation, LogosSymbol, RefForm};
+use crate::extract::{Facts, FileInput};
+use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, RefForm};
+use crate::plugin::{LanguagePlugin, LanguageRegistry};
 
 /// Which side of the broker arm a captured site is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -207,6 +209,10 @@ where
     // which supplies such a query, because nothing in the shipped set reaches it.
     let mut bound: Vec<(ArtifactRelation, Range<usize>)> = Vec::new();
     let mut candidates: Vec<RefusalCandidate> = Vec::new();
+    // The S-417 forwarding shape of each refusal candidate, by its index in
+    // `candidates`, so the two lists are reconciled after the loop by position
+    // rather than by a second reading of the tree.
+    let mut pending_forwards: Vec<(usize, Option<PendingForward>)> = Vec::new();
 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
@@ -331,11 +337,21 @@ where
                 // is a change to the [FR-WS-05] reason set no acceptance
                 // criterion asks for, on either arm.
                 None => {
-                    if let Some(source) = enclosing(slot_node) {
+                    if let Some(source_symbol) = enclosing(slot_node) {
+                        // The S-417 forwarding population is a SUBSET of this
+                        // one: a refused operand that is a bare parameter of the
+                        // method enclosing it. It is derived here because this
+                        // is where the operand's node is, and reconciled after
+                        // the loop against the refusals that actually survive —
+                        // a site whose refusal is cancelled by a sibling literal
+                        // bound already, so there is nothing for the hop to
+                        // retract.
+                        pending_forwards
+                            .push((candidates.len(), forwarding_at(slot_node, source)));
                         candidates.push(RefusalCandidate {
                             relation: slot_side.relation(),
                             site: site.byte_range(),
-                            source,
+                            source: source_symbol,
                             line: slot_node.start_position().row as u32 + 1,
                         });
                     }
@@ -408,8 +424,121 @@ where
     // `.scm` declares (wider than the operand on purpose, so a sibling literal
     // admitted inside the same site cancels the refusal), and the operand is the
     // `@broker.*.topic.slot` node, which supplies the declaration and the line.
+    //
+    // The S-417 forwarding population is read off the SAME reconcile, through
+    // the same function the recorder uses ([`surviving_refusals`]), so the hop
+    // can never be handed a site whose refusal was cancelled — it would then
+    // retract a keyless row that was never written and emit a second reference
+    // beside a literal that already bound.
+    record_forwarding_candidates(facts, &candidates, &bound, pending_forwards);
     emitted += record_refusals(facts, RefForm::Method, candidates, &bound);
     emitted
+}
+
+/// The tree-derived half of a [`ForwardingCandidate`], read at the refusal slot
+/// and held until the reconcile says whether that refusal survives.
+struct PendingForward {
+    wrapper: Callee,
+    slot: usize,
+    declaring_class: Option<String>,
+    signature_supported: bool,
+}
+
+/// Record one [`ForwardingCandidate`] per **surviving** refusal whose operand is
+/// a bare parameter of the method enclosing it.
+///
+/// The dedup grain is the recorder's own — one row per
+/// `(relation, declaration, line)` — so a candidate is recorded exactly where a
+/// keyless row is, and `refusals_at_source` counts the survivors sharing that
+/// row's ledger identity.
+fn record_forwarding_candidates(
+    facts: &mut Facts,
+    candidates: &[RefusalCandidate],
+    bound: &[(ArtifactRelation, Range<usize>)],
+    pending: Vec<(usize, Option<PendingForward>)>,
+) {
+    if pending.iter().all(|(_, forward)| forward.is_none()) {
+        return;
+    }
+    let survivors = surviving_refusals(candidates, bound);
+    // Counted over surviving SITES, not over the rows they dedup to. Two refused
+    // sites on ONE line are two sites behind one row, and counting the row would
+    // let the hop retract it after resolving only the first — the second site
+    // would then carry neither a topic nor a refusal, which is less evidence than
+    // before this hop existed ([NFR-CC-04]).
+    let mut refusals_at_source: HashMap<(ArtifactRelation, String), usize> = HashMap::new();
+    for at in &survivors {
+        let candidate = &candidates[*at];
+        *refusals_at_source
+            .entry((candidate.relation, candidate.source.as_str().to_string()))
+            .or_default() += 1;
+    }
+
+    let mut forwards: HashMap<usize, PendingForward> = pending
+        .into_iter()
+        .filter_map(|(at, forward)| forward.map(|f| (at, f)))
+        .collect();
+    // One candidate per surviving site, in the order the sites were raised. No
+    // dedup by line here, for the same reason the count above does not: a second
+    // site on one line is a second operand, and dropping it means never looking
+    // it up.
+    for at in survivors {
+        let Some(forward) = forwards.remove(&at) else {
+            continue;
+        };
+        let candidate = &candidates[at];
+        let at_source = refusals_at_source
+            .get(&(candidate.relation, candidate.source.as_str().to_string()))
+            .copied()
+            .unwrap_or(1);
+        facts.forwarding.push(ForwardingCandidate {
+            relation: candidate.relation,
+            source: candidate.source.clone(),
+            line: candidate.line,
+            wrapper: forward.wrapper,
+            slot: forward.slot,
+            declaring_class: forward.declaring_class,
+            signature_supported: forward.signature_supported,
+            refusals_at_source: at_source,
+            outcome: None,
+        });
+    }
+}
+
+/// The forwarding shape of a refused topic operand, or `None` when the operand
+/// is not a bare parameter of a method.
+///
+/// Three shapes return `None` and they are the same answer: the operand is not a
+/// bare name at all; the name is bound by no enclosing parameter list (a field,
+/// a local, a constant); or the list that binds it belongs to a constructor or a
+/// **lambda**, neither of which is a positional method call site. The lambda
+/// case is the one worth naming — `(topic) -> producer.send(topic)` binds
+/// `topic` at the lambda, so the slot arithmetic must not be done against the
+/// enclosing method's parameter list, which is a different list entirely.
+fn forwarding_at(operand: Node<'_>, src: &[u8]) -> Option<PendingForward> {
+    if operand.kind() != "identifier" {
+        return None;
+    }
+    let name = operand.utf8_text(src).ok()?;
+    let scope = declaring_scope(operand, name, src)?;
+    if scope.kind() != "method_declaration" {
+        return None;
+    }
+    let params = scope.child_by_field_name("parameters")?;
+    let (slot, arity) = parameter_slot(scope, name, src)?;
+    Some(PendingForward {
+        wrapper: Callee {
+            name: scope
+                .child_by_field_name("name")?
+                .utf8_text(src)
+                .ok()?
+                .to_string(),
+            arity,
+        },
+        slot,
+        declaring_class: enclosing_type_name(scope, src),
+        signature_supported: !unsupported_signature(params),
+    })
 }
 
 /// Normalize a captured broker site's slots into the portable topic key two
@@ -731,6 +860,1260 @@ fn literal_text(node: Node<'_>, source: &[u8]) -> Option<String> {
     let raw = node.utf8_text(source).ok()?;
     let value = unquote(raw).trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+
+// ── THE TWO-FRAME WRAPPER HOP (S-417, [FR-WS-26], [CR-131] §3.2 C2) ─────────
+//
+// Read the accessor hop above first: this is that hop's population **minus**
+// the part it can prove. A publish site whose topic operand is a
+// `@ConfigurationProperties` accessor resolves inside one file. A site whose
+// operand is a bare **parameter** of the method that encloses it proves nothing
+// in that file at all — the topic is written at the wrapper's callers, one or
+// two call frames up, and [FR-WS-19]'s accessor chain names it as one of its
+// nine faults.
+//
+// S-392 measured that residue at one frame and FALSIFIED it (0 of 13 production
+// publish sites, floor 7), which is why [FR-WS-23] is WITHDRAWN in place. S-416
+// re-measured the SAME population at two frames and it HOLDS (8 of 13, floor
+// 7). This section spends that verdict, and nothing wider: **two frames on this
+// idiom, and no dataflow**. [CR-131] §7 records "the two-frame bound is read as
+// a licence for general dataflow" as a risk against [ADR-64]; the bound is in
+// [FR-WS-26]'s acceptance criteria, not in this comment.
+//
+// # Why it cannot live where the accessor hop lives
+//
+// The accessor hop is taken at the refusal slot, inside `extract_one`, because
+// everything it needs is in one parse tree. This hop needs the wrapper's
+// **callers**, which are in other files by construction, so it runs once per
+// pass in [`resolve_forwarded_topics`] — after the parallel map, over the facts
+// that map produced. The shape is [`crate::extract::config::binding::PropertiesIndex`]'s:
+// a cross-file answer assembled from the text the pass has already read, adding
+// no file IO of its own ([FR-WS-19] AC7's rule, applied to a second index).
+//
+// # Direction from the ledger, operand from the file
+//
+// The hop asks two different questions and takes each from the place that can
+// answer it, which is the whole of why it is affordable:
+//
+// * **Which files call the wrapper?** — the `Calls` ledger this pass has just
+//   produced. Its target text is a bare method name and nothing else, so the
+//   answer is a superset (every file calling *any* method of that name), which
+//   is exactly the right direction for a work list: it may open a file that
+//   proves nothing, never miss one that proves something.
+// * **What does the caller pass?** — re-read from the named file's own parse
+//   tree. The ledger cannot answer this; it records no operand. That split is
+//   pinned on the estate by S-416's `the_ledger_answers_the_direction_and_never_the_operand`.
+//
+// # What it refuses, and where each refusal is written down
+//
+// [FR-WS-26]'s acceptance criteria, not this comment, fix the bound. Named here
+// only so the code below is readable: a third frame; a caller outside the build
+// module; callers that disagree; a caller passing anything the file does not
+// prove (a bare variable, a folded constant, a runtime expression); and a
+// wrapper whose signature is varargs or carries an explicit receiver, refused
+// before any slot arithmetic because the positional correspondence the hop rests
+// on does not hold for either. A call site in a **test** tree neither admits nor
+// vetoes: it is excluded before the agreement is taken, which is the
+// `src/main`-only reading S-416's decisive figure is stated over.
+//
+// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+// [FR-WS-23]: ../../../docs/specs/requirements/FR-WS-23.md
+// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
+
+/// A method the hop looks up, keyed the only two ways a positional lookup can
+/// be: by the name the `Calls` ledger carries, and by the arity that makes the
+/// slot index meaningful.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Callee {
+    /// The method's simple name.
+    pub name: String,
+    /// The number of parameters it declares, comments and an explicit receiver
+    /// excluded (see [`parameter_slots`]).
+    pub arity: usize,
+}
+
+/// A publish or subscribe site whose topic operand is a bare parameter of the
+/// method enclosing it — the population [FR-WS-26] is about.
+///
+/// Recorded by [`capture_broker_invocations`] at the refusal slot, for a site
+/// whose keyless `topic-not-literal` row actually **survived** the reconcile,
+/// and decided later by [`resolve_forwarded_topics`]. A site recorded here has
+/// already been reported refused; the hop can only retract that refusal, never
+/// add one.
+///
+/// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardingCandidate {
+    /// Which side of the arm the refused site is.
+    pub relation: ArtifactRelation,
+    /// The declaration the refusal was attributed to — the wrapper itself.
+    pub source: LogosSymbol,
+    /// The 1-based line the refusal was reported at.
+    pub line: u32,
+    /// The wrapper's `(name, arity)`, the signature a caller is matched on.
+    pub wrapper: Callee,
+    /// The positional slot the topic operand occupies in that signature.
+    pub slot: usize,
+    /// The simple name of the type declaring the wrapper, for the receiver rule
+    /// ([`dispatches_past`]). `None` inside an anonymous class body.
+    pub declaring_class: Option<String>,
+    /// `false` when the wrapper is varargs or declares an explicit receiver.
+    ///
+    /// Decided where the parameter list is — at capture time — and carried
+    /// rather than re-derived, because the hop runs after the parse tree is
+    /// gone. A candidate is still **recorded** when this is `false`, so the
+    /// refusal is reported as [`ForwardingRefusal::UnsupportedSignature`]
+    /// instead of the site vanishing from the population it belongs to.
+    pub signature_supported: bool,
+    /// How many keyless refusal rows this file recorded for this
+    /// `(relation, source)` pair.
+    ///
+    /// The ledger collapses them to **one** row, so the hop may retract it only
+    /// once every one of them has resolved. Carried on the candidate because the
+    /// count is knowable only where the refusals are raised, and the hop runs
+    /// after the parse tree is gone.
+    pub refusals_at_source: usize,
+    /// What the hop decided. `None` when the hop did not run — the single-file
+    /// [`crate::extract::extract`] entry point, which cannot answer a cross-file
+    /// question and says so rather than reporting a refusal it never tested.
+    pub outcome: Option<ForwardingOutcome>,
+}
+
+/// What the two-frame hop proved about one [`ForwardingCandidate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardingOutcome {
+    /// The callers agree, and this is the topic they agree on.
+    Resolved(Forwarded),
+    /// They do not, or there are none this reading admits.
+    Refused(ForwardingRefusal),
+}
+
+/// A resolved forwarded topic and the chain that proved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forwarded {
+    /// The key the site is now stored under: the canonical `${prefix.key}`
+    /// placeholder when the caller passed a `@ConfigurationProperties` accessor
+    /// (the same form the in-file accessor hop stores, so the two cannot produce
+    /// two spellings of one topic), or the literal's own text when the caller
+    /// wrote one.
+    pub topic: String,
+    /// The hop chain, innermost frame first: the wrapper itself, and then every
+    /// method whose callers the second frame read.
+    ///
+    /// **Length is not a frame count.** One entry means one frame, but two
+    /// admitted call sites can forward into two DIFFERENT methods and both
+    /// resolve at the second frame, which lists three entries for a two-frame
+    /// resolution. The bound is enforced by not taking a third frame (see
+    /// [`ForwardingRefusal::ThreeOrMoreFrames`]), never by this length, and a
+    /// reader must not treat it as the depth.
+    ///
+    /// This is the provenance [NFR-CC-04] asks for on an admitted value: a topic
+    /// on this path was *proved from another file*, and a surface that cannot
+    /// tell it from one written at the site would be presenting an inference as
+    /// an observation.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub chain: Vec<String>,
+}
+
+/// Why a [`ForwardingCandidate`] stayed refused. Every variant emits no
+/// reference and leaves the keyless `topic-not-literal` row exactly as the
+/// capture pass wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardingRefusal {
+    /// The wrapper is varargs, or declares an explicit receiver: the positional
+    /// correspondence between a parameter slot and an argument slot does not
+    /// hold, so there is no arithmetic to do.
+    UnsupportedSignature,
+    /// Nothing this reading admits calls it: no call site at all, or none left
+    /// after the module and `src/main` rules, or none whose receiver is the type
+    /// declaring it.
+    NoCallSite,
+    /// It is called, and every caller is outside the wrapper's build module.
+    OutOfModule,
+    /// Admitted callers pass operands that do not agree. Never averaged.
+    Disagree,
+    /// An admitted caller passes something this pass cannot prove — a bare
+    /// variable, a constant, a runtime expression, a `Mockito.any()` stub in a
+    /// file the test-tree rule did not exclude.
+    ///
+    /// A wrapper reached only by a **method reference** lands here rather than on
+    /// [`NoCallSite`](Self::NoCallSite), and the distinction is the point: a
+    /// `Foo::bar` IS an observed call site, it simply supplies no argument, so it
+    /// vetoes the agreement instead of being absent from it. Pinned by the
+    /// method-reference row of
+    /// `each_named_forwarding_refusal_is_pinned_on_its_own_tree`.
+    UnresolvableOperand,
+    /// The chain is longer than the bound: an admitted caller forwards a
+    /// parameter of its own, whose own callers forward again.
+    ThreeOrMoreFrames,
+}
+
+impl ForwardingRefusal {
+    /// The stable token a report or a fixture names this refusal by.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedSignature => "unsupported-signature",
+            Self::NoCallSite => "no-call-site",
+            Self::OutOfModule => "out-of-module",
+            Self::Disagree => "disagree",
+            Self::UnresolvableOperand => "unresolvable-operand",
+            Self::ThreeOrMoreFrames => "three-or-more-frames",
+        }
+    }
+}
+
+/// Every call site of a named method, **and every method reference** to one.
+///
+/// Compiled against each plugin's own grammar, which is also the admission rule:
+/// a language whose grammar spells none of these node kinds fails
+/// [`Query::new`] and contributes nothing — absence, not error ([NFR-MA-01]).
+/// The name is filtered in Rust rather than by a `#match?` predicate because the
+/// wanted set is only known at runtime.
+///
+/// The reference arm is the direction in which this could over-read.
+/// `list.forEach(producer::sendMessage)` reaches the wrapper and proves nothing
+/// about its topic, so it must **veto** the agreement rather than be skipped —
+/// skipping it would let a module containing one report the wrapper resolved off
+/// its other call sites alone.
+///
+/// # This half of the hop is Java-only today — stated, not implied
+///
+/// `method_invocation` and `method_reference` are Java's spellings. Go and Rust
+/// spell a call `call_expression`, so [`Query::new`] fails for both and
+/// [`observe_calls`] returns immediately: **no Go or Rust file can ever supply a
+/// caller**, and the whole cross-file half of the hop is Java-only in practice
+/// rather than merely "absent until a grammar ships the capture".
+///
+/// The capture half is not query-gated and walks node kinds directly, and Go
+/// happens to spell `method_declaration` the same way — so a Go wrapper IS
+/// recorded as a [`ForwardingCandidate`] and then always refuses
+/// [`ForwardingRefusal::NoCallSite`]. That is wasted work, not a wrong answer,
+/// and [NFR-RA-05] holds either way; it is written down because the module
+/// header's "no per-language branching" claim ([NFR-MA-01]) is about the
+/// *receiver gate* above and must not be read as covering this.
+///
+/// Two latent correspondence gaps sit behind that dead path and would matter the
+/// moment a grammar made it live: Go's varargs node is
+/// `variadic_parameter_declaration`, which [`unsupported_signature`] does not
+/// name, and Go's comma-grouped `func f(a, b int)` puts two names in one
+/// parameter node, which [`parameter_slots`] counts as one slot. Both are
+/// recorded here rather than guessed at, because the safety net that makes them
+/// inert today is the query gate above and nothing stronger.
+///
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+const FORWARDING_CALL_QUERY: &str = r"
+[
+  (method_invocation
+    name: (identifier) @call.name
+    arguments: (argument_list) @call.args)
+  (method_reference) @call.ref
+]
+";
+
+/// What one positional argument at one call site proves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArgValue {
+    /// A committed key: the canonical `${prefix.key}` an accessor resolved to,
+    /// or the text of a string literal written at the call site.
+    Proved(String),
+    /// A bare parameter of the calling method — one frame further out.
+    Forwarded(Forward),
+    /// Anything the file does not prove: a bare variable, a constant, a
+    /// concatenation, a `Mockito.any()` stub, a runtime expression.
+    Unprovable,
+}
+
+/// Where the next frame must look, for an argument that was itself a parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Forward {
+    callee: Callee,
+    slot: usize,
+    /// The simple name of the type declaring the forwarding method. A method in
+    /// an **anonymous** class has none, and there is then no receiver to compare
+    /// a `super.m(…)` against, so [`forward_from`] declines the forward outright
+    /// rather than following it under a rule it cannot apply.
+    declaring_class: String,
+}
+
+/// One observed call site of a looked-up method, with the arguments at the
+/// wanted slots already reduced to what they prove.
+struct Observation {
+    callee: Callee,
+    module: String,
+    main_tree: bool,
+    values: BTreeMap<usize, ArgValue>,
+    /// `true` when the call was written `super.m(…)`.
+    receiver_is_super: bool,
+    /// For such a call, the simple name of the class it dispatches to.
+    super_dispatches_to: Option<String>,
+    /// The simple name of the type this call's receiver is **declared** with,
+    /// when the calling file declares it and the receiver is a shape this pass
+    /// can read. [`None`] means *unknown*, never *unrelated* — the distinction is
+    /// the whole of [`declares_a_different_receiver`]'s safety argument.
+    receiver_type: Option<String>,
+}
+
+/// The build modules a set of project-relative paths declares, and which one
+/// owns a path.
+///
+/// The roots are read from the **module descriptor** basenames
+/// [`crate::extract::config::corpus::MODULE_DESCRIPTORS`] already names, so the
+/// hop's notion of "the same build module" is the one the configuration corpus
+/// uses and not a second one free to disagree with it. It is a path-only answer:
+/// no descriptor is opened, and a tree declaring none is one module rooted at
+/// `""`.
+struct ModuleMap {
+    roots: Vec<String>,
+}
+
+impl ModuleMap {
+    fn from_paths<'p>(paths: impl IntoIterator<Item = &'p str>) -> Self {
+        let mut roots: Vec<String> = paths
+            .into_iter()
+            .filter(|rel| {
+                let name = rel.rsplit('/').next().unwrap_or(rel);
+                crate::extract::config::corpus::MODULE_DESCRIPTORS.contains(&name)
+            })
+            .map(|rel| rel.rfind('/').map_or(String::new(), |i| rel[..i].to_string()))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        Self { roots }
+    }
+
+    /// The longest declared module root that is a path-segment prefix of `rel`,
+    /// or `""` when none is.
+    fn module_of<'s>(&'s self, rel: &str) -> &'s str {
+        self.roots
+            .iter()
+            .filter(|m| m.is_empty() || rel.starts_with(&format!("{m}/")))
+            .max_by_key(|m| m.len())
+            .map_or("", String::as_str)
+    }
+}
+
+/// The named children of an argument or parameter list, **minus comments and an
+/// explicit receiver**.
+///
+/// Tree-sitter counts a comment as a named sibling, so an unfiltered
+/// `named_children` shifts every slot after a documented argument by one and the
+/// hop would read the *wrong* positional operand — worse than reading none. The
+/// predicate is `ends_with("comment")`, not `== "comment"`: tree-sitter-java
+/// spells them `line_comment` and `block_comment`, so an exact test filters
+/// neither. Both facts are S-416's, found by running its harness rather than by
+/// reading it.
+fn parameter_slots<'t>(list: Node<'t>) -> Vec<Node<'t>> {
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor)
+        .filter(|n| !n.kind().ends_with("comment") && n.kind() != "receiver_parameter")
+        .collect()
+}
+
+/// `true` when a parameter list admits no positional lookup at all: it declares
+/// a varargs parameter, or an explicit receiver.
+///
+/// Both break the correspondence the hop rests on — one argument per parameter,
+/// in order. A varargs slot absorbs any number of arguments, so the argument at
+/// index *i* need not be the parameter at index *i*; an explicit receiver
+/// occupies a parameter slot that **no** argument ever supplies. [FR-WS-26]
+/// refuses the signature rather than guessing which of the two readings the call
+/// site meant.
+///
+/// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
+fn unsupported_signature(list: Node<'_>) -> bool {
+    let mut cursor = list.walk();
+    let unsupported = list
+        .named_children(&mut cursor)
+        .any(|n| n.kind() == "spread_parameter" || n.kind() == "receiver_parameter");
+    drop(cursor);
+    unsupported
+}
+
+/// A parameter's declared name, across the shapes a grammar writes one in: a
+/// `formal_parameter` with a `name` field, a varargs parameter whose name hangs
+/// off a `variable_declarator`, and a lambda's bare `identifier`.
+fn parameter_name(param: Node<'_>, src: &[u8]) -> Option<String> {
+    if param.kind() == "identifier" {
+        return param.utf8_text(src).ok().map(str::to_string);
+    }
+    if let Some(name) = param.child_by_field_name("name") {
+        return name.utf8_text(src).ok().map(str::to_string);
+    }
+    let mut cursor = param.walk();
+    let declarator = param
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "variable_declarator");
+    drop(cursor);
+    declarator
+        .and_then(|d| d.child_by_field_name("name"))
+        .and_then(|n| n.utf8_text(src).ok())
+        .map(str::to_string)
+}
+
+/// The positional slot `name` occupies in `scope`'s parameter list, and the
+/// list's length — `None` when `scope` declares no such parameter.
+fn parameter_slot(scope: Node<'_>, name: &str, src: &[u8]) -> Option<(usize, usize)> {
+    let params = scope.child_by_field_name("parameters")?;
+    // A single-parameter lambda written without parentheses — `topic -> …` — puts
+    // a bare `identifier` in the `parameters` field, with no list around it. It
+    // has to be recognised HERE, or `declaring_scope` walks past the lambda and
+    // attributes the name to the enclosing method's parameter list: a different
+    // list, a different arity, and a slot index that means nothing. Found by
+    // writing the negative fixture, not by reading the grammar.
+    if params.kind() == "identifier" {
+        return (params.utf8_text(src).ok()? == name).then_some((0, 1));
+    }
+    let list = parameter_slots(params);
+    let index = list
+        .iter()
+        .position(|p| parameter_name(*p, src).as_deref() == Some(name))?;
+    Some((index, list.len()))
+}
+
+/// The innermost declaration that binds `name` as a parameter.
+///
+/// A lambda is in the list deliberately: `(topic) -> producer.send(topic)` binds
+/// `topic` at the lambda, not at the enclosing method, and stopping at the
+/// method would read the wrong parameter list and the wrong slot. A lambda scope
+/// is not a method call site, so the hop then refuses — but it refuses knowing
+/// what bound the name.
+fn declaring_scope<'t>(node: Node<'t>, name: &str, src: &[u8]) -> Option<Node<'t>> {
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if matches!(
+            scope.kind(),
+            "method_declaration" | "constructor_declaration" | "lambda_expression"
+        ) && parameter_slot(scope, name, src).is_some()
+        {
+            return Some(scope);
+        }
+        current = scope.parent();
+    }
+    None
+}
+
+/// `true` for the body of an anonymous class — `new Foo() { … }`.
+fn anonymous_class_body(node: Node<'_>) -> bool {
+    node.kind() == "class_body"
+        && node
+            .parent()
+            .is_some_and(|p| p.kind() == "object_creation_expression")
+}
+
+/// The simple name of the type declaration enclosing `node`, or `None` inside an
+/// anonymous class body.
+///
+/// The walk **stops** at an anonymous body rather than passing through it: an
+/// anonymous class has no name a `super.m()` written elsewhere can target, and
+/// climbing past it attributes the method to whatever the OUTER class declares.
+fn enclosing_type_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if anonymous_class_body(scope) {
+            return None;
+        }
+        if matches!(
+            scope.kind(),
+            "class_declaration" | "enum_declaration" | "record_declaration" | "interface_declaration"
+        ) {
+            return scope
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
+                .map(str::to_string);
+        }
+        current = scope.parent();
+    }
+    None
+}
+
+/// A type node's simple name, through the two wrappers a grammar puts around one
+/// in an `extends` clause: `Foo<K, V>` is a `generic_type` whose FIRST named
+/// child is the identifier, `a.b.Foo` a `scoped_type_identifier` whose LAST is.
+fn simple_type_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "identifier" => node.utf8_text(src).ok().map(str::to_string),
+        "generic_type" | "scoped_type_identifier" => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+            drop(cursor);
+            let pick = if node.kind() == "generic_type" {
+                children.first()
+            } else {
+                children.last()
+            };
+            pick.and_then(|n| simple_type_name(*n, src))
+        }
+        _ => None,
+    }
+}
+
+/// The simple name of the class a `super.m(…)` at `node` dispatches to: what the
+/// enclosing type extends, or — inside an anonymous class — the type being
+/// instantiated. `None` when there is no `extends` clause at all.
+fn enclosing_superclass_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if anonymous_class_body(scope) {
+            let created = scope.parent()?.child_by_field_name("type")?;
+            return simple_type_name(created, src);
+        }
+        if scope.kind() == "class_declaration" {
+            let extends = scope.child_by_field_name("superclass")?;
+            let mut cursor = extends.walk();
+            let first = extends.named_children(&mut cursor).next();
+            drop(cursor);
+            return first.and_then(|t| simple_type_name(t, src));
+        }
+        current = scope.parent();
+    }
+    None
+}
+
+/// A call site that is **not** a caller of the method being looked up, although
+/// its name and arity match — [FR-WS-26]'s *receiver-aware*.
+///
+/// One shape, decidable from the tokens rather than from a type: a `super.m(…)`
+/// written inside `class C extends B` calls **`B.m`**. It is a caller of the
+/// looked-up method only when that method is declared in `B` — never when it is
+/// declared in `C` itself, and never when it is declared in a SIBLING subclass
+/// of `B`.
+///
+/// Both halves were found by S-416 running against the estate, not by reading
+/// it, and each cost the measurement a wrong figure: without the first, a
+/// `super.sendMessage(…)` inside the very override being looked up reads that
+/// override's own parameter and reports three frames (0 of 13, every named site
+/// mis-filed); without the second, two sibling producers extending one base each
+/// pick up the other's `super` line as a phantom caller (8 of 13 with five sites
+/// still wrong). Neither conjunct is a proxy for a type, and the cases that must
+/// stay in do: a recursive `m()` or `this.m()` has no `super` receiver, and the
+/// legitimate `D.send` → `super.send` → `C.send` chain has
+/// `super_dispatches_to == Some("C")`, which is the method being looked up.
+///
+/// **Applied at both frames**, unlike S-416's harness, which applies it where it
+/// found the fault. Nothing about the fault is frame-two-specific — a phantom
+/// caller at frame one over-reads exactly the same way — and the rule can only
+/// remove callers, so applying it wider cannot admit a site the harness refused.
+///
+/// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
+fn dispatches_past(observation: &Observation, declaring_class: Option<&str>) -> bool {
+    observation.receiver_is_super && observation.super_dispatches_to.as_deref() != declaring_class
+}
+
+/// A call site whose receiver is declared with a type that is **not** the one
+/// declaring the method being looked up — so it calls a homonym, not this method.
+///
+/// [`Callee`] is `(name, arity)`, which is all the `Calls` ledger's target text
+/// can express, so without this rule any same-signature call in the module is
+/// admitted as a caller. That is not a theoretical over-read; it fabricates.
+/// Reproduced during review: a module declaring `KafkaProducer.sendMessage/3`
+/// (the wrapper, with **no** callers) beside an unrelated
+/// `AuditProducer.sendMessage/3` resolved the wrapper's publish site to
+/// `"audit-log"` — the topic passed to the *other* class — and then retracted the
+/// keyless row, so the fabricated key was the only thing left ([NFR-RA-05]). The
+/// same shape cuts the other way: a homonym beside a genuine accessor caller
+/// turned a correct resolution into `Disagree`.
+///
+/// **A veto, and only ever a veto.** `None` — a receiver whose type this file does
+/// not declare, a chained call, an injected field declared in a supertype — is
+/// *unknown*, and unknown stays admitted. So the rule can only remove call sites,
+/// never add one, which is the same safety argument [`dispatches_past`] makes:
+/// the worst it can do is refuse something that would have resolved, and
+/// refusing is the side of [NFR-RA-05] this whole arm sits on.
+///
+/// It is deliberately **not** a type check. It compares two simple names read off
+/// the same file, with no inheritance knowledge — a caller holding a declared
+/// **base** type is therefore vetoed for the *subclass*'s override and admitted
+/// for the base's own declaration, which is exactly what static dispatch says and
+/// is what makes the two-frame chain land on the right frame.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn declares_a_different_receiver(observation: &Observation, declaring_class: Option<&str>) -> bool {
+    match (observation.receiver_type.as_deref(), declaring_class) {
+        (Some(receiver), Some(declarer)) => receiver != declarer,
+        // Unknown on either side: nothing to compare, so nothing is vetoed.
+        _ => false,
+    }
+}
+
+/// What one positional argument proves, in the order the questions must be
+/// asked.
+///
+/// **A parameter is decided first**, and that precedence is load-bearing rather
+/// than stylistic: a method parameter shadowing a same-named field would
+/// otherwise resolve to the *field's* binding and the hop would key the site on
+/// a value the call site never passed ([NFR-RA-05]).
+///
+/// Then the accessor chain — the same [`BindingView::placeholder_for`] the
+/// in-file accessor hop takes, so a topic proved here and a topic proved there
+/// are stored in one spelling — and then a string literal written at the call
+/// site. Everything else is unprovable, and that deliberately includes a
+/// same-unit `static final` constant: folding one is evidence this pass does not
+/// gather, and [FR-WS-26] refuses a bare variable rather than guessing.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
+fn arg_value(node: Node<'_>, src: &[u8], binding: Option<&BindingView<'_>>) -> ArgValue {
+    if node.kind() == "identifier" {
+        return match forward_from(node, src) {
+            Some(forward) => ArgValue::Forwarded(forward),
+            // A bare name that no enclosing parameter list binds is a field, a
+            // local or a constant: unprovable here by the paragraph above.
+            None => ArgValue::Unprovable,
+        };
+    }
+    if let Some(placeholder) = binding.and_then(|b| b.placeholder_for(node, src)) {
+        return ArgValue::Proved(placeholder);
+    }
+    if node.kind().ends_with("string_literal") {
+        if let Some(text) = literal_text(node, src) {
+            return ArgValue::Proved(text);
+        }
+    }
+    ArgValue::Unprovable
+}
+
+/// The next frame's lookup target for a forwarded argument, or `None` when there
+/// is no method call site to follow.
+///
+/// `None` covers three shapes and they are all the same answer: a name bound by
+/// a constructor, a name bound by a lambda, and a name bound by a method whose
+/// signature [`unsupported_signature`] refuses. None of them is a positional
+/// method call site, so the chain stops and the argument is unprovable.
+fn forward_from(argument: Node<'_>, src: &[u8]) -> Option<Forward> {
+    let name = argument.utf8_text(src).ok()?;
+    let scope = declaring_scope(argument, name, src)?;
+    if scope.kind() != "method_declaration" {
+        return None;
+    }
+    let params = scope.child_by_field_name("parameters")?;
+    if unsupported_signature(params) {
+        return None;
+    }
+    let (slot, arity) = parameter_slot(scope, name, src)?;
+    let method = scope
+        .child_by_field_name("name")?
+        .utf8_text(src)
+        .ok()?
+        .to_string();
+    Some(Forward {
+        callee: Callee { name: method, arity },
+        slot,
+        declaring_class: enclosing_type_name(scope, src)?,
+    })
+}
+
+/// Read every call site of a wanted method out of one already-read source,
+/// resolving the argument at each wanted slot as it goes.
+///
+/// The argument's value is read **here**, at the only point where its AST node
+/// and its own file's [`BindingView`] are both in hand. A later pass holding
+/// only the ledger could not: the ledger records a call's target name and never
+/// its operands.
+#[allow(clippy::too_many_arguments)]
+fn observe_calls(
+    rel: &str,
+    text: &str,
+    plugin: &dyn LanguagePlugin,
+    modules: &ModuleMap,
+    properties: &PropertiesIndex,
+    want: &BTreeMap<Callee, BTreeSet<usize>>,
+    names: &BTreeSet<String>,
+    out: &mut Vec<Observation>,
+) {
+    let mut parser = Parser::new();
+    if parser.set_language(plugin.language()).is_err() {
+        return;
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return;
+    };
+    let Ok(query) = Query::new(plugin.language(), FORWARDING_CALL_QUERY) else {
+        return;
+    };
+    let root = tree.root_node();
+    let src = text.as_bytes();
+    let binding = super::accessor_binding(plugin, root, src, properties);
+    // The receiver-type view, built unconditionally — unlike the binding view
+    // above, whose `!properties.is_empty()` guard is a cost guard for a member
+    // with no configuration-bound class. This one has to answer for EVERY module,
+    // because `declares_a_different_receiver` is what stops a homonymous method
+    // fabricating a topic, and a member with no `@ConfigurationProperties` class
+    // is no less exposed to that. It is the same walk `accessor_binding` makes
+    // when it does build a view; paying it twice on those files is the price of
+    // not threading a prebuilt index through two call sites in `extract::mod`.
+    let declared_types = DeclaredTypes::build(root, src);
+    let module = modules.module_of(rel).to_string();
+    let main_tree = !crate::navigate::is_test_path(rel);
+
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, root, src);
+    while let Some(m) = matches.next() {
+        let mut name_node = None;
+        let mut args_node = None;
+        let mut ref_node = None;
+        for cap in m.captures {
+            match capture_names[cap.index as usize] {
+                "call.name" => name_node = Some(cap.node),
+                "call.args" => args_node = Some(cap.node),
+                "call.ref" => ref_node = Some(cap.node),
+                _ => {}
+            }
+        }
+        // A `Foo::bar` reference reaches the wrapper and supplies no argument.
+        // Its arity is unknown, so it is recorded against EVERY wanted arity of
+        // that name with an unprovable value at every wanted slot: it vetoes the
+        // agreement rather than being absent from it.
+        if let Some(reference) = ref_node {
+            let Ok(text) = reference.utf8_text(src) else {
+                continue;
+            };
+            let Some(name) = text.rsplit("::").next().map(str::trim) else {
+                continue;
+            };
+            if !names.contains(name) {
+                continue;
+            }
+            for (callee, slots) in want.iter().filter(|(c, _)| c.name == name) {
+                out.push(Observation {
+                    callee: callee.clone(),
+                    module: module.clone(),
+                    main_tree,
+                    values: slots.iter().map(|s| (*s, ArgValue::Unprovable)).collect(),
+                    receiver_is_super: false,
+                    super_dispatches_to: None,
+                    // `Foo::bar` names a type, but the reference proves nothing
+                    // about the operand either way — it is already recorded as
+                    // unprovable, so narrowing it further would change nothing.
+                    receiver_type: None,
+                });
+            }
+            continue;
+        }
+        let (Some(name_node), Some(args_node)) = (name_node, args_node) else {
+            continue;
+        };
+        let Ok(name) = name_node.utf8_text(src) else {
+            continue;
+        };
+        if !names.contains(name) {
+            continue;
+        }
+        let arguments = parameter_slots(args_node);
+        let callee = Callee { name: name.to_string(), arity: arguments.len() };
+        let Some(wanted_slots) = want.get(&callee) else {
+            continue;
+        };
+        let values: BTreeMap<usize, ArgValue> = wanted_slots
+            .iter()
+            .map(|s| {
+                let value = arguments
+                    .get(*s)
+                    .map_or(ArgValue::Unprovable, |a| arg_value(*a, src, binding.as_ref()));
+                (*s, value)
+            })
+            .collect();
+        let receiver_is_super = name_node
+            .parent()
+            .and_then(|call| call.child_by_field_name("object"))
+            .is_some_and(|object| object.kind() == "super");
+        let super_dispatches_to = receiver_is_super
+            .then(|| enclosing_superclass_name(name_node, src))
+            .flatten();
+        out.push(Observation {
+            callee,
+            module: module.clone(),
+            main_tree,
+            values,
+            receiver_is_super,
+            super_dispatches_to,
+            receiver_type: receiver_type(name_node, src, &declared_types),
+        });
+    }
+}
+
+/// The simple type a call's receiver is declared with, or [`None`] when this
+/// file does not say.
+///
+/// Four shapes, and the answer for three of them is deliberately `None`:
+///
+/// * **no receiver** — `sendMessage(…)`, an implicit `this` — is the enclosing
+///   type. Read from the tree, not guessed.
+/// * **a bare identifier** — `producer.sendMessage(…)` — is what the file
+///   declares that name as. [`DeclaredTypes::get`] is scope-blind and poisons a
+///   disagreement, so it answers only where the file is unambiguous.
+/// * **`super`** is [`dispatches_past`]'s question, not this one, and answering
+///   it here would apply two rules to one call.
+/// * **anything else** — `this.producer`, a chained call, a qualified name — is
+///   `None`, which admits the call site. Narrowing those needs the self-reference
+///   vocabulary [`crate::extract::config::accessor`] owns, and reaching for it
+///   here would cost this function that module's `PropertiesIndex`, which a
+///   member with no bound class does not have.
+///
+/// `None` means unknown and never unrelated; see
+/// [`declares_a_different_receiver`] for why that asymmetry is what makes the
+/// rule safe.
+fn receiver_type(
+    name_node: Node<'_>,
+    src: &[u8],
+    declared: &DeclaredTypes,
+) -> Option<String> {
+    let call = name_node.parent()?;
+    let Some(receiver) = call.child_by_field_name("object") else {
+        // An unqualified call: the receiver is the enclosing type itself.
+        return enclosing_type_name(name_node, src);
+    };
+    if receiver.kind() != "identifier" {
+        return None;
+    }
+    declared
+        .get(receiver.utf8_text(src).ok()?)
+        .map(str::to_string)
+}
+
+/// Group observations by the method they call.
+fn index_by_callee(observations: &[Observation]) -> BTreeMap<&Callee, Vec<&Observation>> {
+    let mut out: BTreeMap<&Callee, Vec<&Observation>> = BTreeMap::new();
+    for o in observations {
+        out.entry(&o.callee).or_default().push(o);
+    }
+    out
+}
+
+/// The call sites of `callee` this reading admits for a caller in `module`:
+/// same build module, `src/main` only, and the receiver rule applied.
+///
+/// Returns the structural refusal instead when the reading admits none, so the
+/// three causes — never called, called only across the boundary, called only
+/// from the test tree — are named apart rather than collapsed into one absence.
+fn admitted_call_sites<'o>(
+    callee: &Callee,
+    module: &str,
+    declaring_class: Option<&str>,
+    index: &BTreeMap<&Callee, Vec<&'o Observation>>,
+) -> Result<Vec<&'o Observation>, ForwardingRefusal> {
+    let all: Vec<&Observation> = index
+        .get(callee)
+        .map(|sites| {
+            sites
+                .iter()
+                .copied()
+                .filter(|o| {
+                    !dispatches_past(o, declaring_class)
+                        && !declares_a_different_receiver(o, declaring_class)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if all.is_empty() {
+        return Err(ForwardingRefusal::NoCallSite);
+    }
+    let in_module: Vec<&Observation> =
+        all.iter().copied().filter(|o| o.module == module).collect();
+    if in_module.is_empty() {
+        return Err(ForwardingRefusal::OutOfModule);
+    }
+    let admitted: Vec<&Observation> =
+        in_module.iter().copied().filter(|o| o.main_tree).collect();
+    if admitted.is_empty() {
+        // Every caller is in this module and every one is in a test tree. A test
+        // call site neither admits nor vetoes, so the main-tree reading is left
+        // with no call site at all — which is what it reports.
+        return Err(ForwardingRefusal::NoCallSite);
+    }
+    Ok(admitted)
+}
+
+/// Reduce the values a set of admitted call sites supply at one slot to a single
+/// proved key, or to the refusal that stopped them.
+///
+/// The precedence is **declared, not incidental**, and it is the one S-416's
+/// harness applies: an unfinished chain outranks an unprovable operand, and both
+/// outrank disagreement — because two sites, one of which has not finished
+/// resolving, are not yet known to disagree at all.
+fn agree_on(values: &[ArgValue]) -> Result<String, ForwardingRefusal> {
+    if values.iter().any(|v| matches!(v, ArgValue::Forwarded(_))) {
+        return Err(ForwardingRefusal::ThreeOrMoreFrames);
+    }
+    if values.contains(&ArgValue::Unprovable) {
+        return Err(ForwardingRefusal::UnresolvableOperand);
+    }
+    let keys: BTreeSet<&str> = values
+        .iter()
+        .filter_map(|v| match v {
+            ArgValue::Proved(key) => Some(key.as_str()),
+            _ => None,
+        })
+        .collect();
+    match keys.len() {
+        1 => Ok(keys.iter().next().expect("one key").to_string()),
+        _ => Err(ForwardingRefusal::Disagree),
+    }
+}
+
+/// Take the second frame for one forwarded argument: what do the forwarding
+/// method's own callers supply?
+///
+/// This is the first frame applied once more, to a target the first frame named
+/// — [`admitted_call_sites`] and [`agree_on`] unchanged. A value that is itself
+/// forwarded reaches [`agree_on`] and becomes
+/// [`ForwardingRefusal::ThreeOrMoreFrames`]: the bound is enforced by not taking
+/// a third frame, never by a depth counter that could be raised.
+fn second_frame(
+    forward: &Forward,
+    module: &str,
+    index: &BTreeMap<&Callee, Vec<&Observation>>,
+) -> Result<String, ForwardingRefusal> {
+    let admitted = admitted_call_sites(
+        &forward.callee,
+        module,
+        Some(forward.declaring_class.as_str()),
+        index,
+    )?;
+    let values: Vec<ArgValue> = admitted
+        .iter()
+        .map(|o| o.values.get(&forward.slot).cloned().unwrap_or(ArgValue::Unprovable))
+        .collect();
+    agree_on(&values)
+}
+
+/// How a refusal ranks when several admitted call sites refuse for different
+/// reasons — lower wins.
+///
+/// Declared once, in the order [`agree_on`] itself applies: the hop-count
+/// refusal outranks everything, then an operand nothing proves, then the two
+/// structural boundaries, then disagreement. A refusal that reports the *wrong*
+/// cause is the reporting fault [NFR-CC-04] exists to prevent, so the ranking is
+/// a table rather than whichever site happened to be read first.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn refusal_rank(refusal: ForwardingRefusal) -> u8 {
+    match refusal {
+        ForwardingRefusal::UnsupportedSignature => 0,
+        ForwardingRefusal::ThreeOrMoreFrames => 1,
+        ForwardingRefusal::UnresolvableOperand => 2,
+        ForwardingRefusal::NoCallSite => 3,
+        ForwardingRefusal::OutOfModule => 4,
+        ForwardingRefusal::Disagree => 5,
+    }
+}
+
+/// One frame of a hop chain: the declaring type and the signature whose callers
+/// were read, `Producer.sendMessage/3`.
+///
+/// The type is part of the name because two frames of one chain routinely share
+/// a signature — an override and the base it calls `super` on — and a chain that
+/// printed `sendMessage/3` twice would name one frame twice rather than two
+/// frames.
+fn frame_name(declaring_class: Option<&str>, callee: &Callee) -> String {
+    format!(
+        "{}.{}/{}",
+        declaring_class.unwrap_or("<anonymous>"),
+        callee.name,
+        callee.arity
+    )
+}
+
+/// Decide one candidate at up to two frames.
+fn decide(
+    candidate: &ForwardingCandidate,
+    module: &str,
+    frame_one: &BTreeMap<&Callee, Vec<&Observation>>,
+    frame_two: &BTreeMap<&Callee, Vec<&Observation>>,
+) -> ForwardingOutcome {
+    let admitted = match admitted_call_sites(
+        &candidate.wrapper,
+        module,
+        candidate.declaring_class.as_deref(),
+        frame_one,
+    ) {
+        Ok(sites) => sites,
+        Err(refusal) => return ForwardingOutcome::Refused(refusal),
+    };
+
+    // Each admitted call site's operand, with a forwarded one replaced by what
+    // the second frame proved about it. The result is fed to the same
+    // `agree_on` the first frame uses, so the two readings share one agreement
+    // rule rather than two spellings of it.
+    let mut second_frame_refusals: Vec<ForwardingRefusal> = Vec::new();
+    let mut frames = 1usize;
+    let values: Vec<ArgValue> = admitted
+        .iter()
+        .map(|o| {
+            let value = o
+                .values
+                .get(&candidate.slot)
+                .cloned()
+                .unwrap_or(ArgValue::Unprovable);
+            let ArgValue::Forwarded(forward) = &value else {
+                return value;
+            };
+            frames = 2;
+            match second_frame(forward, &o.module, frame_two) {
+                Ok(key) => ArgValue::Proved(key),
+                Err(refusal) => {
+                    second_frame_refusals.push(refusal);
+                    // A third frame keeps the hop-count refusal; every other
+                    // second-frame refusal is an admitted call site whose
+                    // argument did not resolve, which is the same fault one
+                    // frame deeper.
+                    match refusal {
+                        ForwardingRefusal::ThreeOrMoreFrames => value,
+                        _ => ArgValue::Unprovable,
+                    }
+                }
+            }
+        })
+        .collect();
+
+    match agree_on(&values) {
+        Ok(topic) => {
+            let mut chain = vec![frame_name(
+                candidate.declaring_class.as_deref(),
+                &candidate.wrapper,
+            )];
+            if frames == 2 {
+                chain.extend(admitted.iter().filter_map(|o| {
+                    match o.values.get(&candidate.slot) {
+                        Some(ArgValue::Forwarded(f)) => {
+                            Some(frame_name(Some(&f.declaring_class), &f.callee))
+                        }
+                        _ => None,
+                    }
+                }));
+                chain.dedup();
+            }
+            ForwardingOutcome::Resolved(Forwarded { topic, chain })
+        }
+        // `agree_on` saw the frame-two refusals only as unprovable operands, so
+        // where it says so the named second-frame cause is the honest one.
+        Err(ForwardingRefusal::UnresolvableOperand) => ForwardingOutcome::Refused(
+            second_frame_refusals
+                .into_iter()
+                .min_by_key(|r| refusal_rank(*r))
+                .unwrap_or(ForwardingRefusal::UnresolvableOperand),
+        ),
+        Err(refusal) => ForwardingOutcome::Refused(refusal),
+    }
+}
+
+/// Resolve every [`ForwardingCandidate`] the pass recorded, and rewrite the
+/// sites that resolved — the cross-file half of the broker arm (S-417,
+/// [FR-WS-26]).
+///
+/// Returns the number of references emitted. Called once from
+/// [`crate::extract::extract_files`], after the parallel map, because this is
+/// the first point at which the whole set's `Calls` ledger and the whole set's
+/// text are both in hand.
+///
+/// **A workspace with no candidate pays one `is_empty` test.** That is the guard
+/// below and it is a correctness-neutral cost guard, the same kind
+/// [`super::accessor_binding`]'s `!properties.is_empty()` is: with it removed the
+/// output is byte-identical, because no candidate means nothing to look up.
+///
+/// # What an incremental sync sees, stated rather than discovered
+///
+/// `inputs` is the dirty set on an incremental sync, exactly as it is for the
+/// [`PropertiesIndex`] pre-pass, so the same sentence applies here: a wrapper
+/// re-extracted **without** its callers sees a ledger and a text set that do not
+/// hold them, and its site records no topic — reverting to the keyless
+/// `topic-not-literal` row it carried before this hop existed, until the next
+/// full walk restores it. That is the conservative direction and not a
+/// correctness hole: the failure mode is losing evidence, never inventing it
+/// ([NFR-RA-05]). Closing it needs an index that outlives one pass, which is the
+/// same unbuilt thing [FR-WS-19] AC7 declines for the accessor chain.
+///
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// Public for one reason and one caller: the reference-workspace harness measures
+/// this pass's cost **apart from** the extraction it rides on
+/// ([FR-WS-26](../../../docs/specs/requirements/FR-WS-26.md) AC7,
+/// [NFR-PE-02](../../../docs/specs/requirements/NFR-PE-02.md)). Timing
+/// `extract_files` as a whole cannot answer "what did the hop add"; timing this
+/// can, without a second build of the estate to compare against.
+pub fn resolve_forwarded_topics(
+    facts: &mut [Facts],
+    inputs: &[FileInput],
+    registry: &LanguageRegistry,
+    properties: &PropertiesIndex,
+) -> usize {
+    if facts.iter().all(|f| f.forwarding.is_empty()) {
+        return 0;
+    }
+
+    let modules = ModuleMap::from_paths(inputs.iter().map(|i| i.path.as_str()));
+    let by_path: HashMap<&str, &str> = inputs
+        .iter()
+        .map(|i| (i.path.as_str(), i.source.as_str()))
+        .collect();
+
+    let mut wanted: BTreeMap<Callee, BTreeSet<usize>> = BTreeMap::new();
+    for candidate in facts.iter().flat_map(|f| f.forwarding.iter()) {
+        if candidate.signature_supported {
+            wanted
+                .entry(candidate.wrapper.clone())
+                .or_default()
+                .insert(candidate.slot);
+        }
+    }
+    let frame_one = observe_wanted(&wanted, facts, &by_path, registry, &modules, properties);
+
+    // The second frame's lookup set is read off the FIRST frame's own
+    // observations, so a method reaches it only because a real admitted call
+    // site forwarded a real parameter into it. It is not a second scan for
+    // "methods that look like wrappers", which would be a second population.
+    let mut wanted_two: BTreeMap<Callee, BTreeSet<usize>> = BTreeMap::new();
+    for value in frame_one.iter().flat_map(|o| o.values.values()) {
+        if let ArgValue::Forwarded(forward) = value {
+            wanted_two
+                .entry(forward.callee.clone())
+                .or_default()
+                .insert(forward.slot);
+        }
+    }
+    let frame_two = observe_wanted(&wanted_two, facts, &by_path, registry, &modules, properties);
+
+    let index_one = index_by_callee(&frame_one);
+    let index_two = index_by_callee(&frame_two);
+
+    let mut decisions: Vec<(usize, usize, ForwardingOutcome)> = Vec::new();
+    for (file, f) in facts.iter().enumerate() {
+        let module = modules.module_of(&f.path);
+        for (at, candidate) in f.forwarding.iter().enumerate() {
+            let outcome = if candidate.signature_supported {
+                decide(candidate, module, &index_one, &index_two)
+            } else {
+                ForwardingOutcome::Refused(ForwardingRefusal::UnsupportedSignature)
+            };
+            decisions.push((file, at, outcome));
+        }
+    }
+
+    let mut emitted = 0;
+    for (file, f) in facts.iter_mut().enumerate() {
+        for (_, at, outcome) in decisions.iter().filter(|(i, _, _)| *i == file) {
+            f.forwarding[*at].outcome = Some(outcome.clone());
+        }
+        emitted += admit_resolved_topics(f);
+    }
+    emitted
+}
+
+/// Observe every call site of every wanted method, over the files the `Calls`
+/// ledger names as callers of one.
+///
+/// The ledger's target text is a bare method name, so the file set it yields is
+/// a **superset** of the real callers. That is the right direction for a work
+/// list — it may open a file that proves nothing, it cannot miss one that proves
+/// something — and it is why this pass reads a handful of files rather than the
+/// corpus.
+fn observe_wanted(
+    want: &BTreeMap<Callee, BTreeSet<usize>>,
+    facts: &[Facts],
+    by_path: &HashMap<&str, &str>,
+    registry: &LanguageRegistry,
+    modules: &ModuleMap,
+    properties: &PropertiesIndex,
+) -> Vec<Observation> {
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let names: BTreeSet<String> = want.keys().map(|c| c.name.clone()).collect();
+    // A `Foo::bar` method reference files no `Calls` row, so the ledger cannot
+    // name the file that writes one — and a reference must **veto** the
+    // agreement, so a file the hop never opens is the one direction in which it
+    // could over-read. The needle closes it, and it is a pre-filter in the sense
+    // [`PropertiesIndex`]'s annotation test is: it can only cause a parse, never
+    // admit one, because the parse then decides with the same query as every
+    // other file.
+    let reference_needles: Vec<String> = names.iter().map(|n| format!("::{n}")).collect();
+    let mut out = Vec::new();
+    for f in facts {
+        let Some(text) = by_path.get(f.path.as_str()) else {
+            continue;
+        };
+        let names_a_wanted_method = f.refs.iter().any(|r| {
+            r.kind == EdgeKind::Calls
+                && names.contains(r.target.rsplit("::").next().unwrap_or(&r.target))
+        });
+        if !names_a_wanted_method && !reference_needles.iter().any(|n| text.contains(n)) {
+            continue;
+        }
+        let Some(plugin) = registry.for_path(&f.path) else {
+            continue;
+        };
+        observe_calls(
+            &f.path, text, plugin, modules, properties, want, &names, &mut out,
+        );
+    }
+    out
+}
+
+/// Turn one file's resolved candidates into bound broker references, retracting
+/// the keyless rows they supersede.
+///
+/// **A keyless row is retracted only when every refusal it stands for has
+/// resolved.** The ledger dedups on `(source, target, form, kind, relation)` and
+/// ignores the line, so two refused sites in one declaration reach it as ONE
+/// row; retracting on the first resolution would silence the second site, which
+/// is still refused. The count each candidate carries
+/// ([`ForwardingCandidate::refusals_at_source`]) is what makes that decidable
+/// here, after the parse tree is gone.
+fn admit_resolved_topics(facts: &mut Facts) -> usize {
+    let resolved: Vec<(ArtifactRelation, LogosSymbol, u32, String)> = facts
+        .forwarding
+        .iter()
+        .filter_map(|c| match &c.outcome {
+            Some(ForwardingOutcome::Resolved(f)) => {
+                Some((c.relation, c.source.clone(), c.line, f.topic.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    if resolved.is_empty() {
+        return 0;
+    }
+
+    let mut resolved_at: HashMap<(ArtifactRelation, String), usize> = HashMap::new();
+    for (relation, source, _, _) in &resolved {
+        *resolved_at
+            .entry((*relation, source.as_str().to_string()))
+            .or_default() += 1;
+    }
+    let retract: HashSet<(ArtifactRelation, String)> = facts
+        .forwarding
+        .iter()
+        .filter_map(|c| {
+            let key = (c.relation, c.source.as_str().to_string());
+            let resolved_here = resolved_at.get(&key).copied().unwrap_or(0);
+            (resolved_here >= c.refusals_at_source).then_some(key)
+        })
+        .collect();
+    facts.refs.retain(|r| {
+        !(r.target.is_empty()
+            && r.relation.is_some_and(|relation| {
+                retract.contains(&(relation, r.source.as_str().to_string()))
+            }))
+    });
+
+    let mut emitted = 0;
+    for (relation, source, line, topic) in resolved {
+        let mut slots = BTreeMap::new();
+        slots.insert("topic".to_string(), topic);
+        emitted += capture_invocation_refs(
+            facts,
+            relation,
+            RefForm::Method,
+            [InvocationSite { source, slots, line }],
+            broker_topic_key,
+        );
+    }
+    super::dedup_sort_refs(&mut facts.refs);
+    emitted
 }
 
 #[cfg(test)]
@@ -1446,6 +2829,7 @@ class OrderService {
             refs: Vec::new(),
             warnings: Vec::new(),
             config_source: None,
+            forwarding: Vec::new(),
         };
         let index = props.map(|p| {
             crate::extract::config::binding::PropertiesIndex::from_sources(

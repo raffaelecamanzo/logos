@@ -309,21 +309,19 @@ pub(crate) fn record_refusals(
 ) -> usize {
     let mut seen: HashSet<(ArtifactRelation, String, u32)> = HashSet::new();
     let mut recorded = 0;
-    for candidate in candidates {
-        // Did the arm resolve an operand at this site? Then it is not a refusal.
-        if resolved.iter().any(|(relation, at)| {
-            *relation == candidate.relation
-                && at.start >= candidate.site.start
-                && at.end <= candidate.site.end
-        }) {
-            continue;
-        }
+    for at in surviving_refusals(&candidates, resolved) {
+        let candidate = &candidates[at];
+        // Survivors dedup to one row per `(relation, declaration, line)` — the
+        // grain documented above. It is applied HERE, on the row being written,
+        // and deliberately not inside `surviving_refusals`: a caller asking
+        // *which sites are still refused* must see every one of them, and two
+        // sites can share a line.
         if !seen.insert((
             candidate.relation,
             candidate.source.as_str().to_string(),
             candidate.line,
         )) {
-            continue; // this site already recorded its one refusal
+            continue;
         }
         if push_artifact_ref(
             facts,
@@ -337,6 +335,47 @@ pub(crate) fn record_refusals(
         }
     }
     recorded
+}
+
+/// The indices of the refusal candidates that survive the cancel rule, in the
+/// order they were raised — **one per surviving SITE, not one per row**.
+///
+/// Extracted so a second reader can ask *which sites are still refused* without
+/// re-spelling the cancel rule [`record_refusals`] documents. The S-417 two-frame
+/// wrapper hop ([`crate::extract::broker`]) is that reader, and it needs the site
+/// grain rather than the row grain for a reason worth stating, because the first
+/// version of this function returned the row grain and was wrong:
+///
+/// A keyless row is deduped to one per `(relation, declaration, line)` and the
+/// ledger then collapses it further to one per declaration. So ONE row can stand
+/// for several refused sites, and the hop may retract it only once **every** one
+/// of them has resolved ([NFR-CC-04]). Counting rows instead of sites made two
+/// refused sites on the SAME line look like one: the hop resolved the first,
+/// retracted the row, and the second site left the output with neither a topic
+/// nor a refusal — strictly less evidence than before the hop existed.
+///
+/// Returning indices rather than keys is what lets the caller recover the whole
+/// candidate, and it keeps the two readers from matching on a key that is not
+/// unique.
+///
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) fn surviving_refusals(
+    candidates: &[RefusalCandidate],
+    resolved: &[(ArtifactRelation, Range<usize>)],
+) -> Vec<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        // Did the arm resolve an operand at this site? Then it is not a refusal.
+        .filter(|(_, candidate)| {
+            !resolved.iter().any(|(relation, at)| {
+                *relation == candidate.relation
+                    && at.start >= candidate.site.start
+                    && at.end <= candidate.site.end
+            })
+        })
+        .map(|(at, _)| at)
+        .collect()
 }
 
 /// Capture every cross-artifact reference fact for one config/artifact file
@@ -1394,6 +1433,7 @@ mod tests {
             refs: Vec::new(),
             warnings: Vec::new(),
             config_source: None,
+            forwarding: Vec::new(),
         }
     }
 
@@ -1826,6 +1866,7 @@ mod infra_tests {
             refs: Vec::new(),
             warnings: Vec::new(),
             config_source: None,
+            forwarding: Vec::new(),
         }
     }
 
