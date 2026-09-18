@@ -1869,6 +1869,11 @@ where
     // applied "the SAME collapse"; it now does.
     let mut ledger_endpoints: std::collections::HashSet<(PortableKey, bool, String, String)> =
         std::collections::HashSet::new();
+    // The HTTP arm's own repeat set, keyed on `(target, member, symbol)` — the
+    // SITE, not its composed keys. See the consumer branch for why the two arms
+    // judge a repeat differently.
+    let mut http_sites: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
     // Arm-tagged ledger refs from each member (HTTP client calls, gRPC stub calls,
     // broker publishes **and subscribes**) — degrade-don't-abort via the same
     // `read_members` the bridge uses ([ADR-53]). Read through the **same seam** the
@@ -1919,36 +1924,67 @@ where
                 // would lose the refusal the broker arm files.
                 //
                 // A broker consumer can reduce to **more than one** key, when
-                // its key's overlays commit different values ([S-410]); so can a
-                // configuration-bound HTTP one, when its overlays compose the
-                // target to different templates (S-420). Either is a repeat only
-                // when every one of its keys has been seen before.
+                // its key's overlays commit different values ([S-410]).
                 let identity = arm_identity(&reference, corpus);
                 let keys = identity.keys();
+                // **What counts as a repeat is the arm's own question, and the
+                // answer is whatever the BRIDGE collapses** — otherwise this tier
+                // reports a population the service map does not draw, which is
+                // the drift [ADR-52] forbids.
+                //
+                // The broker arm collapses endpoints **per resolved topic key**
+                // (`broker_edges`'s own dedup, which this mirrors including the
+                // role), so its repeat test is per key. The HTTP arm collapses
+                // whole **edges** (`collapse_by_coupling`), and two of its edges
+                // are identical only when one endpoint captured the same target
+                // twice — so its repeat test is the SITE.
+                //
+                // S-420's review found the difference the hard way. Filing an
+                // HTTP consumer per composed key dropped a second, genuinely
+                // distinct call site in the same enclosing symbol whenever its
+                // composed keys were a subset of the first site's: two refs
+                // `GET ${a.base}/{id}` and `GET ${b.base}/{id}` on one method,
+                // where `a.base`'s overlays already composed `b.base`'s value,
+                // produced ONE row where the literal arm produces two — and the
+                // second site's key and committed value then appeared on no
+                // surface at all ([FR-WS-19] AC6).
+                let repeat = match &identity {
+                    ArmIdentity::Http(_) if !keys.is_empty() => !http_sites.insert((
+                        reference.target.clone(),
+                        member.clone(),
+                        reference.symbol.as_str().to_string(),
+                    )),
+                    _ if !keys.is_empty() => {
+                        // `|=`, and a loop rather than `any`: EVERY key is
+                        // inserted. A short-circuiting reduction would leave a
+                        // site that resolves under two overlays filed under only
+                        // the first, and the second overlay would then admit a
+                        // duplicate row the next time the same endpoint appeared.
+                        let mut fresh = false;
+                        for key in keys {
+                            fresh |= ledger_endpoints.insert((
+                                key,
+                                false,
+                                member.clone(),
+                                reference.symbol.as_str().to_string(),
+                            ));
+                        }
+                        !fresh
+                    }
+                    // A consumer row that does not reduce to a portable key is
+                    // still a captured site and is reported (the tier classifies
+                    // it below), so an unkeyable row bypasses the dedup rather
+                    // than being dropped here — dropping it would lose the
+                    // refusal the broker arm files.
+                    _ => false,
+                };
+                if repeat {
+                    continue;
+                }
                 // Only the arms this walk resolved are carried on; the rest are
                 // re-derived for free by the recorder, and carrying `None` for
                 // them keeps the `Some` genuinely meaningful.
-                let identity = identity.carried();
-                if !keys.is_empty() {
-                    // `|=`, and a loop rather than `any`: EVERY key is
-                    // inserted. A short-circuiting reduction would leave a
-                    // site that resolves under two overlays filed under only
-                    // the first, and the second overlay would then admit a
-                    // duplicate row the next time the same endpoint appeared.
-                    let mut fresh = false;
-                    for key in keys {
-                        fresh |= ledger_endpoints.insert((
-                            key,
-                            false,
-                            member.clone(),
-                            reference.symbol.as_str().to_string(),
-                        ));
-                    }
-                    if !fresh {
-                        continue; // a repeat of this exact endpoint on these keys
-                    }
-                }
-                consumers.push((member, reference, identity));
+                consumers.push((member, reference, identity.carried()));
             }
             Some(BridgeRole::Provider) => {
                 // A ledger-only provider (a broker subscribe) keys on exactly the
@@ -5037,6 +5073,102 @@ mod tests {
                 .edges(&reg)
                 .is_empty(),
             "and the bridge fabricates no edge for it"
+        );
+    }
+
+    /// **Two distinct call sites in one method are two rows, however their
+    /// composed keys overlap.**
+    ///
+    /// Review found S-420's first version filing a configuration-bound HTTP
+    /// consumer under each of its **composed keys**, which is the broker arm's
+    /// rule. A second site whose composed key the first site had already named —
+    /// here `${b.base}` composing to a value one of `${a.base}`'s overlays also
+    /// composes — was then read as a repeat and dropped, so its key and its
+    /// committed value appeared on no surface at all ([FR-WS-19] AC6). The
+    /// literal HTTP arm has always produced two rows for this shape.
+    #[test]
+    fn two_call_sites_in_one_symbol_are_two_rows_however_their_keys_overlap() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers(
+            "web",
+            vec![
+                http_call("GET ${a.base}/{id}", "local fetch_order"),
+                http_call("GET ${b.base}/{id}", "local fetch_order"),
+            ],
+        );
+        commit_config(
+            "web",
+            "a.base",
+            &[
+                ("application.yml", None, "/orders-a"),
+                ("application-p.yml", Some("p"), "/orders-b"),
+            ],
+        );
+        commit_config("web", "b.base", &[("application.yml", None, "/orders-b")]);
+        set_member(
+            "orders",
+            vec![
+                route("GET /orders-a/{oid}", "local show_a"),
+                route("GET /orders-b/{oid}", "local show_b"),
+            ],
+        );
+
+        let cov = cross_service_coverage(&registry(&["orders", "web"]).answer());
+
+        assert_eq!(
+            cov.references.len(),
+            2,
+            "two captured sites are two rows: {:?}",
+            cov.references
+        );
+        let mut keys: Vec<String> = cov
+            .references
+            .iter()
+            .flat_map(|r| match &r.provenance {
+                Provenance::ConfigBound { bound } => {
+                    bound.iter().map(|b| b.key.clone()).collect::<Vec<_>>()
+                }
+                other => panic!("both rows are config-bound, not {other:?}"),
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["a.base".to_string(), "b.base".to_string()],
+            "each site's own key reaches a surface"
+        );
+    }
+
+    /// The other half of the same rule: a **true** ledger duplicate — one
+    /// endpoint, one target, captured twice (two rows differing only in `form`)
+    /// — is still one row, matching the single edge the bridge collapses to.
+    #[test]
+    fn one_target_captured_twice_at_one_endpoint_is_one_row() {
+        reset();
+        set_member("web", vec![]);
+        set_consumers(
+            "web",
+            vec![
+                http_call("GET ${orders.base}/{id}", "local fetch_order"),
+                http_call("GET ${orders.base}/{id}", "local fetch_order"),
+            ],
+        );
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+        set_member("orders", vec![route("GET /orders/{oid}", "local show")]);
+
+        let reg = registry(&["orders", "web"]);
+        let cov = cross_service_coverage(&reg.answer());
+        assert_eq!(
+            cov.references.len(),
+            1,
+            "one site captured twice is one row: {:?}",
+            cov.references
+        );
+        assert_eq!(
+            super::super::bridge::ContractBridge::new().edges(&reg).len(),
+            1,
+            "…and the bridge draws one edge for it, so the two tiers reconcile"
         );
     }
 
