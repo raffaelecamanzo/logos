@@ -848,7 +848,7 @@ pub struct XserviceReachabilityParams {
 #[tool_router(router = xservice_tool_router)]
 impl LogosMcp {
     #[tool(
-        description = "Cross-service resolved route bindings (FR-WS-05): each consumer endpoint → its sole cross-member provider route, both repo-qualified (member, symbol). `repo` scopes to routes that member provides."
+        description = "Cross-service resolved route bindings (FR-WS-05, FR-WS-10): each consumer endpoint's binding across the `route`, `grpc-call` and `broker-topic` relations, both repo-qualified (member, symbol). `route`/`grpc-call` bind to exactly one provider; a `broker-topic` binding FANS OUT — one publish binds every subscribe on the topic, so `providers` carries one edge per subscriber, never a sole provider chosen from the set. Each edge carries `intake` (how it entered the overlay) plus `from_value`/`to_value` provenance (`literal`, `config-bound` or `config-unresolved`) naming the consumer's and the provider's evidence respectively. `repo` scopes to routes that member provides."
     )]
     async fn xservice_route_providers(
         &self,
