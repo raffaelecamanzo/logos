@@ -132,19 +132,11 @@
 //!
 //! **The coverage tier is byte-identical across the pair** — every counter, every
 //! row. What moved is the bridge, and only on the `route` arm. The 18 that arrive
-//! are exactly the 18 bound HTTP rows, over exactly their 8 member pairs:
-//!
-//! ```text
-//! consumer                  provider                 rows   edges before   after
-//! funnel-aggregator-api  -> filters-api                 2               0       2
-//! funnel-aggregator-api  -> notification-api            2               0       2
-//! mailbox-aggregator-api -> filters-api                 2               0       2
-//! mailbox-aggregator-api -> mailbox-api                 4               0       4
-//! mailbox-aggregator-api -> notification-api            2               0       2
-//! mailbox-aggregator-api -> pecserver-facade            4               0       4
-//! mailbox-aggregator-api -> reporting-api               1               0       1
-//! notification-adapter   -> notification-api            1               0       1
-//! ```
+//! are exactly the 18 bound HTTP rows, over exactly their 8 member pairs; the
+//! pairs themselves are [`RECORDED_HTTP_PAIRS`], where they are asserted, and the
+//! dated copy is in the artifact this file prints in full. **They are not restated
+//! here**: three copies of one table inside one compilation unit is two copies
+//! that nothing checks.
 //!
 //! [CR-133]'s hypothesis — *18 rows over 8 member pairs become edges* — is
 //! **confirmed to the pair and to the row**, and it is recorded as an outcome, not
