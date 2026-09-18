@@ -1120,6 +1120,53 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
              assertion stays green — rewrite the narration in the same change rather \
              than relaxing this.",
         );
+
+        // **The three arithmetic relations this file NARRATES, checked.** Added with
+        // S-420 T2's constants because they are the same class of claim as the two
+        // above — "this file must not narrate a relation it does not hold" — and
+        // because each was demonstrably free: the constants were reachable only from
+        // the estate-gated body, so `RECORDED_ADMITTED_BROKER` could be set to 999,
+        // the route edge count to 7, or a pair's count to 40, and a default
+        // `cargo test` stayed green over docs that had become arithmetically false.
+        //
+        // They are pure functions of this file's own constants, so they are decided
+        // here at compile time and cost no corpus. `while` rather than `for` because
+        // this is a `const` block.
+        let mut broker = 0;
+        let mut http = 0;
+        let mut i = 0;
+        while i < RECORDED_BUCKETS.len() {
+            let (arm, _, _, n) = RECORDED_BUCKETS[i];
+            if matches!(arm.as_bytes(), b"broker-topic") {
+                broker += n;
+            } else {
+                http += n;
+            }
+            i += 1;
+        }
+        assert!(
+            broker == RECORDED_ADMITTED_BROKER,
+            "the broker rows of RECORDED_BUCKETS must sum to RECORDED_ADMITTED_BROKER:              the split and the headline are two recordings of one measurement",
+        );
+        assert!(
+            http == RECORDED_ADMITTED,
+            "the route rows of RECORDED_BUCKETS must sum to RECORDED_ADMITTED, for the              same reason",
+        );
+
+        let mut pairs = 0;
+        let mut j = 0;
+        while j < RECORDED_HTTP_PAIRS.len() {
+            pairs += RECORDED_HTTP_PAIRS[j].2;
+            j += 1;
+        }
+        assert!(
+            pairs == RECORDED_BUCKETS[3].3,
+            "the per-member-pair table must account for every BOUND route row — it is              that bucket, decomposed",
+        );
+        assert!(
+            pairs == RECORDED_BRIDGE_INVOCATION_EDGES[1].1,
+            "…and for every `route` invocation edge the bridge draws. This is the              18-over-8 outcome this file narrates, and CR-133's whole subject: the two              tiers count one set of couplings. A constant that breaks it makes the              module docs false.",
+        );
     }
 
 }
