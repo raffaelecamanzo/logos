@@ -366,10 +366,20 @@ pub struct CoverageRider {
     /// figure carries that claim changed in S-403 T1:** it is
     /// [`bridge_invocation_edges`](Self::bridge_invocation_edges), not
     /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges),
-    /// because the coverage tier resolves configuration placeholders the bridge
-    /// does not ([CR-127]). Both fields state which of the two they are.
+    /// because the two count different things wherever a resolution draws
+    /// several edges (a fan-out topic) or none (an ambiguous or refused
+    /// composition) ([CR-127]). **S-403's own reason — that the coverage tier
+    /// resolves configuration placeholders the bridge does not — is no longer
+    /// one:** [S-410] gave the bridge that read on the broker arm and S-420
+    /// ([CR-133]) closed the HTTP arm, so both tiers now key on the committed
+    /// value and the divergence above is the whole of what is left. The
+    /// distinction outlives its original ground; see
+    /// [`resolved_cross_service_edges`](Self::resolved_cross_service_edges) for
+    /// the dated figures. Both fields state which of the two they are.
     ///
     /// [CR-127]: ../../../docs/requests/CR-127-resolved-edge-counter-contradicts-its-payload.md
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+    /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
     ///
     /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
