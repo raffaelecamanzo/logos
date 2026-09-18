@@ -131,7 +131,7 @@ use std::ops::Range;
 
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
-use crate::extract::config::accessor::BindingView;
+use crate::extract::config::accessor::{BindingView, DeclaredTypes};
 use crate::extract::config::binding::PropertiesIndex;
 use crate::extract::config::refs::{
     capture_invocation_refs, record_refusals, surviving_refusals, InvocationSite, RefusalCandidate,
@@ -461,29 +461,32 @@ fn record_forwarding_candidates(
         return;
     }
     let survivors = surviving_refusals(candidates, bound);
+    // Counted over surviving SITES, not over the rows they dedup to. Two refused
+    // sites on ONE line are two sites behind one row, and counting the row would
+    // let the hop retract it after resolving only the first — the second site
+    // would then carry neither a topic nor a refusal, which is less evidence than
+    // before this hop existed ([NFR-CC-04]).
     let mut refusals_at_source: HashMap<(ArtifactRelation, String), usize> = HashMap::new();
-    for (relation, source, _) in &survivors {
+    for at in &survivors {
+        let candidate = &candidates[*at];
         *refusals_at_source
-            .entry((*relation, source.as_str().to_string()))
+            .entry((candidate.relation, candidate.source.as_str().to_string()))
             .or_default() += 1;
     }
-    let keys: HashSet<(ArtifactRelation, String, u32)> = survivors
-        .into_iter()
-        .map(|(relation, source, line)| (relation, source.as_str().to_string(), line))
-        .collect();
 
-    let mut seen: HashSet<(ArtifactRelation, String, u32)> = HashSet::new();
-    for (at, forward) in pending {
-        let Some(forward) = forward else { continue };
-        let candidate = &candidates[at];
-        let key = (
-            candidate.relation,
-            candidate.source.as_str().to_string(),
-            candidate.line,
-        );
-        if !keys.contains(&key) || !seen.insert(key.clone()) {
+    let mut forwards: HashMap<usize, PendingForward> = pending
+        .into_iter()
+        .filter_map(|(at, forward)| forward.map(|f| (at, f)))
+        .collect();
+    // One candidate per surviving site, in the order the sites were raised. No
+    // dedup by line here, for the same reason the count above does not: a second
+    // site on one line is a second operand, and dropping it means never looking
+    // it up.
+    for at in survivors {
+        let Some(forward) = forwards.remove(&at) else {
             continue;
-        }
+        };
+        let candidate = &candidates[at];
         let at_source = refusals_at_source
             .get(&(candidate.relation, candidate.source.as_str().to_string()))
             .copied()
@@ -1108,6 +1111,11 @@ struct Observation {
     receiver_is_super: bool,
     /// For such a call, the simple name of the class it dispatches to.
     super_dispatches_to: Option<String>,
+    /// The simple name of the type this call's receiver is **declared** with,
+    /// when the calling file declares it and the receiver is a shape this pass
+    /// can read. [`None`] means *unknown*, never *unrelated* — the distinction is
+    /// the whole of [`declares_a_different_receiver`]'s safety argument.
+    receiver_type: Option<String>,
 }
 
 /// The build modules a set of project-relative paths declares, and which one
@@ -1356,6 +1364,42 @@ fn dispatches_past(observation: &Observation, declaring_class: Option<&str>) -> 
     observation.receiver_is_super && observation.super_dispatches_to.as_deref() != declaring_class
 }
 
+/// A call site whose receiver is declared with a type that is **not** the one
+/// declaring the method being looked up — so it calls a homonym, not this method.
+///
+/// [`Callee`] is `(name, arity)`, which is all the `Calls` ledger's target text
+/// can express, so without this rule any same-signature call in the module is
+/// admitted as a caller. That is not a theoretical over-read; it fabricates.
+/// Reproduced during review: a module declaring `KafkaProducer.sendMessage/3`
+/// (the wrapper, with **no** callers) beside an unrelated
+/// `AuditProducer.sendMessage/3` resolved the wrapper's publish site to
+/// `"audit-log"` — the topic passed to the *other* class — and then retracted the
+/// keyless row, so the fabricated key was the only thing left ([NFR-RA-05]). The
+/// same shape cuts the other way: a homonym beside a genuine accessor caller
+/// turned a correct resolution into `Disagree`.
+///
+/// **A veto, and only ever a veto.** `None` — a receiver whose type this file does
+/// not declare, a chained call, an injected field declared in a supertype — is
+/// *unknown*, and unknown stays admitted. So the rule can only remove call sites,
+/// never add one, which is the same safety argument [`dispatches_past`] makes:
+/// the worst it can do is refuse something that would have resolved, and
+/// refusing is the side of [NFR-RA-05] this whole arm sits on.
+///
+/// It is deliberately **not** a type check. It compares two simple names read off
+/// the same file, with no inheritance knowledge — a caller holding a declared
+/// **base** type is therefore vetoed for the *subclass*'s override and admitted
+/// for the base's own declaration, which is exactly what static dispatch says and
+/// is what makes the two-frame chain land on the right frame.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn declares_a_different_receiver(observation: &Observation, declaring_class: Option<&str>) -> bool {
+    match (observation.receiver_type.as_deref(), declaring_class) {
+        (Some(receiver), Some(declarer)) => receiver != declarer,
+        // Unknown on either side: nothing to compare, so nothing is vetoed.
+        _ => false,
+    }
+}
+
 /// What one positional argument proves, in the order the questions must be
 /// asked.
 ///
@@ -1454,6 +1498,15 @@ fn observe_calls(
     let root = tree.root_node();
     let src = text.as_bytes();
     let binding = super::accessor_binding(plugin, root, src, properties);
+    // The receiver-type view, built unconditionally — unlike the binding view
+    // above, whose `!properties.is_empty()` guard is a cost guard for a member
+    // with no configuration-bound class. This one has to answer for EVERY module,
+    // because `declares_a_different_receiver` is what stops a homonymous method
+    // fabricating a topic, and a member with no `@ConfigurationProperties` class
+    // is no less exposed to that. It is the same walk `accessor_binding` makes
+    // when it does build a view; paying it twice on those files is the price of
+    // not threading a prebuilt index through two call sites in `extract::mod`.
+    let declared_types = DeclaredTypes::build(root, src);
     let module = modules.module_of(rel).to_string();
     let main_tree = !crate::navigate::is_test_path(rel);
 
@@ -1494,6 +1547,10 @@ fn observe_calls(
                     values: slots.iter().map(|s| (*s, ArgValue::Unprovable)).collect(),
                     receiver_is_super: false,
                     super_dispatches_to: None,
+                    // `Foo::bar` names a type, but the reference proves nothing
+                    // about the operand either way — it is already recorded as
+                    // unprovable, so narrowing it further would change nothing.
+                    receiver_type: None,
                 });
             }
             continue;
@@ -1535,8 +1592,48 @@ fn observe_calls(
             values,
             receiver_is_super,
             super_dispatches_to,
+            receiver_type: receiver_type(name_node, src, &declared_types),
         });
     }
+}
+
+/// The simple type a call's receiver is declared with, or [`None`] when this
+/// file does not say.
+///
+/// Four shapes, and the answer for three of them is deliberately `None`:
+///
+/// * **no receiver** — `sendMessage(…)`, an implicit `this` — is the enclosing
+///   type. Read from the tree, not guessed.
+/// * **a bare identifier** — `producer.sendMessage(…)` — is what the file
+///   declares that name as. [`DeclaredTypes::get`] is scope-blind and poisons a
+///   disagreement, so it answers only where the file is unambiguous.
+/// * **`super`** is [`dispatches_past`]'s question, not this one, and answering
+///   it here would apply two rules to one call.
+/// * **anything else** — `this.producer`, a chained call, a qualified name — is
+///   `None`, which admits the call site. Narrowing those needs the self-reference
+///   vocabulary [`crate::extract::config::accessor`] owns, and reaching for it
+///   here would cost this function that module's `PropertiesIndex`, which a
+///   member with no bound class does not have.
+///
+/// `None` means unknown and never unrelated; see
+/// [`declares_a_different_receiver`] for why that asymmetry is what makes the
+/// rule safe.
+fn receiver_type(
+    name_node: Node<'_>,
+    src: &[u8],
+    declared: &DeclaredTypes,
+) -> Option<String> {
+    let call = name_node.parent()?;
+    let Some(receiver) = call.child_by_field_name("object") else {
+        // An unqualified call: the receiver is the enclosing type itself.
+        return enclosing_type_name(name_node, src);
+    };
+    if receiver.kind() != "identifier" {
+        return None;
+    }
+    declared
+        .get(receiver.utf8_text(src).ok()?)
+        .map(str::to_string)
 }
 
 /// Group observations by the method they call.
@@ -1566,7 +1663,10 @@ fn admitted_call_sites<'o>(
             sites
                 .iter()
                 .copied()
-                .filter(|o| !dispatches_past(o, declaring_class))
+                .filter(|o| {
+                    !dispatches_past(o, declaring_class)
+                        && !declares_a_different_receiver(o, declaring_class)
+                })
                 .collect()
         })
         .unwrap_or_default();

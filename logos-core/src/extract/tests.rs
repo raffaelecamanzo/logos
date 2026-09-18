@@ -4063,19 +4063,31 @@ const WRAPPER_MODULE_POM: &str = "producer/pom.xml";
 #[cfg(feature = "lang-java")]
 const WRAPPER_PROPS_FILE: &str = "producer/src/main/java/KafkaTopics.java";
 
-/// One in-module `src/main` caller that supplies `accessor` at the topic slot.
+/// One in-module `src/main` caller that supplies `accessor` at the topic slot,
+/// through a field declared with type `receiver`.
+///
+/// The receiver's declared type is a parameter and not a constant because it is
+/// what decides WHICH declaration of `sendMessage/3` the call site is a caller
+/// of — the rule `declares_a_different_receiver` applies. A fixture that always
+/// held the base type could not express the two-frame case at all.
 #[cfg(feature = "lang-java")]
-fn wrapper_caller(class: &str, accessor: &str) -> String {
+fn wrapper_caller_via(class: &str, receiver: &str, accessor: &str) -> String {
     format!(
         "package a;\n\
          public class {class} {{\n\
          \x20   private final KafkaTopics kafkaTopics;\n\
-         \x20   private final KafkaProducer producer;\n\
+         \x20   private final {receiver} producer;\n\
          \x20   void archive(String key, String payload) {{\n\
          \x20     producer.sendMessage(key, payload, {accessor});\n\
          \x20   }}\n\
          }}\n"
     )
+}
+
+/// The common case: the caller holds the wrapper's own declaring type.
+#[cfg(feature = "lang-java")]
+fn wrapper_caller(class: &str, accessor: &str) -> String {
+    wrapper_caller_via(class, "KafkaProducer", accessor)
 }
 
 /// The base inputs every fixture starts from: the module descriptor, the
@@ -4192,7 +4204,17 @@ fn a_super_override_resolves_the_wrapper_at_two_frames() {
         ),
         (
             "producer/src/main/java/ArchiveService.java",
-            wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+            // The service holds the CONCRETE producer — Spring's own injection
+            // shape, and the only one that makes this a genuine two-frame case.
+            // A service holding the base type calls the BASE's declaration
+            // directly, which frame one resolves without ever needing a second;
+            // it is the override's parameter that has no caller then, and the
+            // hop says so. Pinned below.
+            wrapper_caller_via(
+                "ArchiveService",
+                "ArchiveEventKafkaProducer",
+                "kafkaTopics.getArchiveEvents()",
+            ),
         ),
     ];
 
@@ -4224,6 +4246,138 @@ fn a_super_override_resolves_the_wrapper_at_two_frames() {
         vec!["no-call-site"],
         "with nothing calling the override, the second frame has no call site and \
          the wrapper refuses",
+    );
+}
+
+/// **[FR-WS-26] AC3, the receiver rule's second half.** A homonymous
+/// `(name, arity)` on an **unrelated** type is not a caller, and must not supply
+/// the operand.
+///
+/// This is the shape review reproduced, and it is the reason the rule exists.
+/// [`Callee`] is `(name, arity)` — all the `Calls` ledger's target text can
+/// express — so without the rule every same-signature call in the module is
+/// admitted. `sendMessage`, `send` and `publish` are exactly the names the
+/// population is built on, so the collision is the common case rather than a
+/// contrived one.
+///
+/// Both directions are pinned on one estate, because the hazard is symmetric and
+/// a fixture for either alone would leave the other free to regress:
+///
+/// * **fabrication** — the wrapper has NO caller of its own, and the homonym's
+///   topic must not become its topic. Before the rule this emitted a
+///   `BrokerPublish` on `"audit-log"` and retracted the keyless row, so the
+///   invented key was the only thing left ([NFR-RA-05]).
+/// * **destruction** — the wrapper HAS a genuine accessor caller, and the
+///   homonym beside it must not turn that resolution into a disagreement.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_homonym_on_an_unrelated_type_is_not_a_caller() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    // A different class, the same (name, arity), and a caller that holds IT.
+    let homonym = (
+        "producer/src/main/java/AuditProducer.java",
+        "package a;\n\
+         public class AuditProducer {\n\
+         \x20   void sendMessage(String key, String payload, String topic) {}\n\
+         }\n"
+            .to_string(),
+    );
+    let audit_caller = (
+        "producer/src/main/java/AuditService.java",
+        wrapper_caller_via("AuditService", "AuditProducer", "\"audit-log\""),
+    );
+
+    let fabrication = extract_files(
+        &wrapper_estate(&[homonym.clone(), audit_caller.clone()]),
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        forwarding_refusals(&fabrication, WRAPPER_FILE),
+        vec!["no-call-site"],
+        "the wrapper has no caller of its own, so it refuses — it does not borrow \
+         the topic the homonym's caller passed",
+    );
+    assert_eq!(
+        broker_targets(&fabrication, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+        vec![String::new()],
+        "and the keyless refusal row stands: no topic is fabricated",
+    );
+
+    let beside_a_real_caller = extract_files(
+        &wrapper_estate(&[
+            homonym,
+            audit_caller,
+            (
+                "producer/src/main/java/ArchiveService.java",
+                wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+            ),
+        ]),
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        broker_targets(&beside_a_real_caller, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+        vec![ARCHIVE_EVENTS_KEY.to_string()],
+        "and the homonym does not destroy a genuine resolution either — it is not \
+         a disagreeing caller, it is not a caller",
+    );
+}
+
+/// **[FR-WS-26] AC3.** A caller holding the **base** type calls the base's own
+/// declaration, so the wrapper resolves at ONE frame — and the override's
+/// parameter, which nothing then calls, is what refuses.
+///
+/// The counterpart to [`a_super_override_resolves_the_wrapper_at_two_frames`],
+/// on a tree identical but for the receiver's declared type. Together they pin
+/// that the receiver rule decides WHICH frame carries the answer, rather than
+/// merely removing call sites: the same two files resolve through one frame or
+/// through two depending on a single type name.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_base_typed_caller_resolves_the_base_at_one_frame() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    let override_source = "package a;\n\
+        public class ArchiveEventKafkaProducer extends KafkaProducer {\n\
+        \x20   @Override\n\
+        \x20   void sendMessage(String key, String payload, String topic) {\n\
+        \x20     super.sendMessage(key, payload, topic);\n\
+        \x20   }\n\
+        }\n";
+    let facts = extract_files(
+        &wrapper_estate(&[
+            (
+                "producer/src/main/java/ArchiveEventKafkaProducer.java",
+                override_source.to_string(),
+            ),
+            (
+                "producer/src/main/java/ArchiveService.java",
+                wrapper_caller_via(
+                    "ArchiveService",
+                    "KafkaProducer",
+                    "kafkaTopics.getArchiveEvents()",
+                ),
+            ),
+        ]),
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        forwarding_refusals(&facts, WRAPPER_FILE),
+        vec!["no-call-site"],
+        "the base-typed call site resolves frame one, but the override's OWN \
+         super-call still forwards a parameter nothing supplies, and the \
+         agreement refuses on the frame-two cause rather than averaging it away",
+    );
+    assert_eq!(
+        broker_targets(&facts, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+        vec![String::new()],
+        "so no topic is admitted, and the keyless row stands",
     );
 }
 
@@ -4588,6 +4742,69 @@ fn a_keyless_row_standing_for_two_refusals_survives_one_resolution() {
     );
 }
 
+/// **[FR-WS-26] AC6, at the grain that actually broke it.** Two refused sites on
+/// **one physical line** are two sites behind one row, and resolving one of them
+/// must not retract it.
+///
+/// The sibling test above covers two sites on two lines, which the first version
+/// of this hop got right. This one covers the same declaration with both
+/// publishes on ONE line, which it got wrong: the keyless row is deduped per
+/// `(relation, declaration, line)`, so counting ROWS instead of SITES made the
+/// two look like one — the hop resolved the first, retracted the row, and the
+/// second site left the output carrying neither a topic nor a refusal. That is
+/// strictly less evidence than before the hop existed, which is the one thing it
+/// is never allowed to produce ([NFR-CC-04]).
+///
+/// Java permits the shape and the reference estate does not write it; it is
+/// pinned because the invariant is stated in the ledger contract, not because
+/// the input is likely.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn two_refused_sites_on_one_line_are_two_sites_behind_one_row() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    // Both publishes on one physical line, in one declaration.
+    let two_sites = "package a;\n\
+        public class KafkaProducer {\n\
+        \x20   void sendBoth(String t1, String t2) {\n\
+        \x20     MessageBuilder.withPayload(\"p\").setHeader(KafkaHeaders.TOPIC, t1).build(); MessageBuilder.withPayload(\"p\").setHeader(KafkaHeaders.TOPIC, t2).build();\n\
+        \x20   }\n\
+        }\n";
+    let inputs = vec![
+        FileInput::new(WRAPPER_MODULE_POM, "<project/>\n"),
+        FileInput::new(WRAPPER_PROPS_FILE, TOPIC_PROPS_SOURCE),
+        FileInput::new(WRAPPER_FILE, two_sites),
+        FileInput::new(
+            "producer/src/main/java/Caller2.java",
+            "package a;\n\
+             public class Caller2 {\n\
+             \x20   private final KafkaTopics kafkaTopics;\n\
+             \x20   private final KafkaProducer two;\n\
+             \x20   void go() {\n\
+             \x20     two.sendBoth(kafkaTopics.getArchiveEvents(), UNPROVABLE);\n\
+             \x20   }\n\
+             }\n",
+        ),
+    ];
+
+    let facts = extract_files(&inputs, &reg, &ctx);
+    assert_eq!(
+        forwarding_refusals(&facts, WRAPPER_FILE),
+        vec!["resolved", "unresolvable-operand"],
+        "BOTH sites are looked up — the second is not dropped by a line dedup",
+    );
+    let mut targets = broker_targets(&facts, WRAPPER_FILE, ArtifactRelation::BrokerPublish);
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![String::new(), ARCHIVE_EVENTS_KEY.to_string()],
+        "the resolved site is admitted AND the keyless row survives for the one \
+         that is still refused — never fewer rows than before the hop existed",
+    );
+}
+
 /// **[FR-WS-26] and [NFR-PE-02].** A literal topic operand is outside the
 /// population, and a tree whose broker site carries one is untouched by the hop.
 ///
@@ -4673,3 +4890,4 @@ fn the_single_file_entry_point_records_the_candidate_and_decides_nothing() {
     );
     assert_eq!(facts.forwarding[0].slot, 2);
 }
+
