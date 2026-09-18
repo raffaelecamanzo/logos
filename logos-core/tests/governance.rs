@@ -27,10 +27,51 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
+use logos_core::graph_store::{CheckRunRow, ViolationRow};
 use logos_core::model::NodeKind;
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
+
+// ── git fixture helpers (mirroring tests/read_only_accessors.rs conventions) ──
+
+fn sh_git(cwd: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["-c", "user.email=dev@logos", "-c", "user.name=Logos Dev"])
+        .args(args)
+        .output()
+        .expect("git is on PATH");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn commit(cwd: &Path, rel: &str, contents: &str, msg: &str) {
+    let path = cwd.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+    sh_git(cwd, &["add", rel]);
+    sh_git(cwd, &["commit", "-q", "-m", msg]);
+}
+
+/// `git rev-parse HEAD` at `cwd` — the value the governance engine records as
+/// the marker's `commit_sha`, read here independently so the test compares two
+/// sources rather than the production code against itself.
+fn git_head(cwd: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git is on PATH");
+    assert!(out.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
 
 /// Write `contents` at `root/rel`, creating parents.
 fn write(root: &Path, rel: &str, contents: &str) {
@@ -1439,11 +1480,12 @@ fn health_reports_store_integrity_and_counts() {
         health.structural_ok && health.structural_faults.is_empty(),
         "a clean graph is structurally sound (CR-052, NFR-RA-13)"
     );
-    // Migration 19 (S-380, CR-121) added the member-local configuration-corpus
-    // tables, following migration 18's (S-290, CR-080) relation-aware ledger key.
-    // This assertion tracks the latest applied migration — the store reports 19
-    // once fully migrated (`federation::broker` asserts the same).
-    assert_eq!(health.schema_version, 19, "migration 19 applied");
+    // Migration 20 (S-313, CR-096) added the check_rules run marker, following
+    // migration 19's (S-380, CR-121) member-local configuration-corpus tables.
+    // This assertion tracks the latest applied migration — the store reports 20
+    // once fully migrated (`federation::broker`'s
+    // `the_broker_arm_introduces_no_schema_migration` pins the same number).
+    assert_eq!(health.schema_version, 20, "migration 20 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);
@@ -2249,5 +2291,209 @@ pub fn walk() {
         !report.violations.iter().any(|v| v.rule == "max_cycles"),
         "max_cycles = 0 passes when only intra-module/self recursion remains: {:?}",
         report.violations
+    );
+}
+
+// ── S-313 / FR-GV-21 / CR-096: check_rules records a run marker ─────────────
+//
+// The gap these cover: `violations` is replaced wholesale per run, so a run
+// that finds nothing leaves a table byte-identical to one a never-checked
+// project has. Everything below turns on that distinction being recorded.
+
+/// The singleton run marker, read through the public read seam.
+fn check_run(engine: &Engine) -> Option<CheckRunRow> {
+    engine
+        .runtime()
+        .expect("a started engine has a runtime")
+        .submit_read(|store| store.check_run())
+        .expect("read the check-run marker")
+}
+
+/// The persisted violation rows, read through the public read seam.
+fn persisted_violations(engine: &Engine) -> Vec<ViolationRow> {
+    engine
+        .runtime()
+        .expect("a started engine has a runtime")
+        .submit_read(|store| store.violations())
+        .expect("read the persisted violations")
+}
+
+/// A store that has never been checked has **no** marker — and that is the
+/// whole point: absence means absence of a run, never a clean result.
+#[test]
+fn a_store_never_checked_has_no_marker() {
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+
+    assert!(
+        persisted_violations(&engine).is_empty(),
+        "nothing has been checked, so nothing is recorded"
+    );
+    assert!(
+        check_run(&engine).is_none(),
+        "no marker before the first check_rules run (FR-GV-21)"
+    );
+}
+
+/// A run that finds nothing leaves a marker saying so: `violation_count = 0`
+/// with zero rows. This is the case the empty table alone cannot express, and
+/// the reason the marker exists at all.
+#[test]
+fn a_clean_check_records_a_marker_with_zero_violations() {
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.check_rules(None, true).expect("check_rules runs");
+    assert!(
+        report.violations.is_empty(),
+        "the clean fixture must find nothing: {:?}",
+        report.violations
+    );
+
+    let marker = check_run(&engine).expect("a clean run still records a marker (FR-GV-21)");
+    assert_eq!(
+        marker.violation_count, 0,
+        "a recorded clean run, distinguishable from a never-checked store"
+    );
+    assert!(
+        persisted_violations(&engine).is_empty(),
+        "zero rows alongside the zero count"
+    );
+    assert_eq!(
+        report.ran_at,
+        Some(marker.ran_at),
+        "check --json reports the run it just recorded"
+    );
+}
+
+/// A run that finds violations leaves a marker whose count equals the rows
+/// written and whose `ran_at` is the rows' own `created_at` — one run, one
+/// time — and N runs leave exactly **one** marker row.
+#[test]
+fn n_runs_leave_one_marker_whose_count_and_time_match_the_rows() {
+    let tmp = layered_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    for run in 1..=3 {
+        let report = engine.check_rules(None, true).expect("check_rules runs");
+        let rows = persisted_violations(&engine);
+        let marker = check_run(&engine).expect("every run records a marker");
+
+        assert!(!rows.is_empty(), "run {run} must find the layered violation");
+        assert_eq!(
+            marker.violation_count,
+            rows.len() as i64,
+            "run {run}: the marker counts the rows actually written"
+        );
+        assert!(
+            rows.iter().all(|r| r.created_at == marker.ran_at),
+            "run {run}: every row carries the run's own time (one run, one time)"
+        );
+        assert_eq!(
+            report.ran_at,
+            Some(marker.ran_at),
+            "run {run}: the report names the run it recorded"
+        );
+    }
+
+    // The singleton is the schema's job (CHECK (id = 1)), so three runs cannot
+    // have left three rows — but assert the count rather than trusting it.
+    let markers: i64 = engine
+        .runtime()
+        .unwrap()
+        .submit_read(|store| Ok(store.check_run()?.map_or(0, |_| 1)))
+        .expect("read");
+    assert_eq!(markers, 1, "three runs, one marker row (BR-40)");
+}
+
+/// A tree with no resolvable `HEAD` stores `commit_sha` NULL. The fixtures are
+/// plain temp directories with no git repo, which is exactly that tree.
+#[test]
+fn a_tree_with_no_resolvable_head_records_a_null_commit_sha() {
+    let tmp = clean_project();
+    assert!(
+        !tmp.path().join(".git").exists(),
+        "the fixture must genuinely have no repo for this to mean anything"
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check_rules runs");
+
+    let marker = check_run(&engine).expect("a marker is still recorded without git");
+    assert_eq!(
+        marker.commit_sha, None,
+        "no resolvable HEAD stores NULL, never a placeholder (FR-GV-21)"
+    );
+}
+
+/// In a repo, `commit_sha` is `HEAD` **at write time** — that and nothing more.
+/// Committing after the run leaves the marker pinned to the old `HEAD`, which
+/// is precisely what makes "has the tree moved since this ran" answerable and
+/// what forbids reading the field as "the commit that introduced these
+/// findings".
+#[test]
+fn commit_sha_is_head_at_write_time_and_does_not_follow_the_tree() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    sh_git(repo, &["init", "-q", "-b", "main"]);
+    commit(repo, "src/lib.rs", "pub fn api() {}\n", "first");
+    let head_at_run = git_head(repo);
+
+    let engine = Engine::start(repo).expect("engine starts");
+    engine.check_rules(None, true).expect("check_rules runs");
+    let marker = check_run(&engine).expect("a marker is recorded");
+    assert_eq!(
+        marker.commit_sha.as_deref(),
+        Some(head_at_run.as_str()),
+        "the marker pins HEAD as it stood when the run happened"
+    );
+
+    // Move the tree on. The recorded run did not change, so neither does its sha.
+    commit(repo, "src/other.rs", "pub fn other() {}\n", "second");
+    let head_now = git_head(repo);
+    assert_ne!(head_now, head_at_run, "the fixture must actually have moved");
+    let unchanged = check_run(&engine).expect("the marker survives a commit");
+    assert_eq!(
+        unchanged.commit_sha.as_deref(),
+        Some(head_at_run.as_str()),
+        "a commit after the run never re-attributes the recorded run to it"
+    );
+}
+
+/// The marker and the rows are written atomically: a write job that fails
+/// after both have been issued must leave the store exactly as it was — no
+/// marker without its rows, and no rows without a marker ([NFR-RA-07]).
+#[test]
+fn an_interrupted_run_leaves_neither_the_marker_nor_the_rows() {
+    let tmp = layered_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    // A first, successful run gives the store a known good state to roll back to.
+    engine.check_rules(None, true).expect("check_rules runs");
+    let good_rows = persisted_violations(&engine);
+    let good_marker = check_run(&engine).expect("the good run recorded a marker");
+    assert!(!good_rows.is_empty(), "the fixture violates its contract");
+
+    // Now a write job that replaces the violations, records the marker, and
+    // then fails. The whole job is one transaction, so neither half survives.
+    let err = engine
+        .runtime()
+        .unwrap()
+        .submit_write(|w| {
+            w.replace_violations(&[], 999_999, Some("deadbeef"))?;
+            Err::<(), _>(anyhow::anyhow!("interrupted mid-run"))
+        })
+        .expect_err("the job must fail");
+    assert!(err.to_string().contains("interrupted mid-run"));
+
+    assert_eq!(
+        persisted_violations(&engine),
+        good_rows,
+        "the rolled-back run left the previous rows untouched"
+    );
+    assert_eq!(
+        check_run(&engine),
+        Some(good_marker),
+        "and left the previous marker untouched — never a marker without its rows"
     );
 }

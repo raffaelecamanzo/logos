@@ -597,6 +597,54 @@ fn check_exits_zero_with_a_clean_loaded_contract() {
     assert_eq!(json["passed"], true);
 }
 
+/// S-313 / FR-GV-21: `check --json` gains `ran_at` **additively** — every
+/// field the surface already carried is still there, unrenamed, and the exit
+/// code is unmoved by the new one.
+///
+/// `ran_at` is the run marker this run recorded, so it is present even on a
+/// clean pass: the recorded-clean-run case is the one the violations array
+/// cannot express. The field is `null` only where nothing was persisted.
+#[test]
+fn check_json_carries_the_run_timestamp_additively() {
+    let tmp = fixture();
+    write(
+        tmp.path(),
+        ".logos/rules.toml",
+        "[[forbidden_imports]]\nfrom = \"src/nope_*.rs\"\nto = \"src/also_nope_*.rs\"\n",
+    );
+    logos(tmp.path(), &["index", "--quiet"]);
+    let out = logos(tmp.path(), &["check", "--json"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "the added field moves no verdict: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+
+    // Additive: nothing renamed or removed.
+    for existing in [
+        "passed",
+        "checked_rules",
+        "rules_present",
+        "violations",
+        "freshness",
+        "warnings",
+    ] {
+        assert!(
+            json.get(existing).is_some(),
+            "`{existing}` must survive the widening: {json}"
+        );
+    }
+    let ran_at = json["ran_at"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("check --json must carry ran_at: {json}"));
+    assert!(
+        ran_at > 1_600_000_000,
+        "ran_at is a unix-seconds run time, not a counter: {ran_at}"
+    );
+}
+
 /// FR-GV-05 / UAT-CL-02: a regression after `gate --save` exits 1 through
 /// the real binary.
 #[test]

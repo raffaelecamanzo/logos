@@ -2055,6 +2055,118 @@ mod tests {
         );
     }
 
+    /// Migration 20 adds the [FR-GV-21] check-run marker to a **populated**
+    /// store, in place, leaving every pre-existing fact verbatim — including
+    /// the `violations` rows a pre-migration `check_rules` already wrote, which
+    /// still carry the `created_at` that dates them (S-313, [CR-096]).
+    ///
+    /// Four claims, in the order a reader should doubt them: the version
+    /// advances by exactly **one**; the graph and the existing governance rows
+    /// are byte-for-byte unchanged (so the upgrade needs no re-index); the new
+    /// table arrives **empty**, so an upgraded store honestly reads "no check
+    /// has run" rather than "clean"; and the singleton is enforced by the
+    /// schema — a second row is rejected by SQLite, not by a caller remembering
+    /// to upsert.
+    ///
+    /// [CR-096]: ../../../../docs/requests/CR-096-recorded-check-marker.md
+    /// [FR-GV-21]: ../../../../docs/specs/requirements/FR-GV-21.md
+    #[test]
+    fn migration_20_adds_the_check_run_marker_preserving_the_graph_byte_for_byte() {
+        let mut conn = contract_conn();
+
+        // Stop at v19 and populate the graph plus the governance rows a store
+        // that has already been checked would carry.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..19]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path) VALUES (1, 'a.rs');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, is_test, body) VALUES
+                 (10, 1, 7, 'caller', 1, 1, 3, 0, 'the body prose');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111);
+             INSERT INTO violations
+                 (id, snapshot_id, rule_type, rule_key, node_id, file, message, severity, created_at)
+             VALUES (1, NULL, 'constraint', 'max_cc', 10, 'a.rs', 'too complex', 'error', 1700000000);",
+        )
+        .unwrap();
+
+        let graph_before = read_graph(&conn);
+        let violations_before = read_table(&conn, "violations", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..20]).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            20,
+            "PRAGMA user_version advances by exactly one (19 → 20)"
+        );
+
+        assert_eq!(
+            read_graph(&conn),
+            graph_before,
+            "nodes, edges and shingles are byte-for-byte unchanged across migration 20"
+        );
+        // The pre-migration findings survive WITH their created_at — the half of
+        // CR-096 that dates an existing store's violations without a marker.
+        assert_eq!(
+            read_table(&conn, "violations", "id"),
+            violations_before,
+            "the violations already recorded are unchanged, created_at included"
+        );
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (nodes never touched by migration 20, NFR-RA-09)");
+
+        // No marker yet: an upgraded store has not been checked *since*, and
+        // absence of the marker means absence of a run — never a clean result.
+        let markers: i64 = conn
+            .query_row("SELECT count(*) FROM check_run", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            markers, 0,
+            "the upgrade itself records no run (FR-GV-21: no marker = never checked)"
+        );
+
+        // The singleton is structural. A second row is refused by the CHECK,
+        // and an upsert on id 1 replaces rather than accumulates (BR-40).
+        conn.execute(
+            "INSERT INTO check_run (id, ran_at, commit_sha, violation_count) VALUES (1, 100, NULL, 0)",
+            [],
+        )
+        .unwrap();
+        let second_row = conn.execute(
+            "INSERT INTO check_run (id, ran_at, commit_sha, violation_count) VALUES (2, 200, NULL, 7)",
+            [],
+        );
+        assert!(
+            second_row.is_err(),
+            "CHECK (id = 1) must reject a second marker row — the singleton is the schema's job"
+        );
+        conn.execute(
+            "INSERT INTO check_run (id, ran_at, commit_sha, violation_count) VALUES (1, 200, 'abc', 7) \
+             ON CONFLICT(id) DO UPDATE SET ran_at = 200, commit_sha = 'abc', violation_count = 7",
+            [],
+        )
+        .unwrap();
+        let (rows, ran_at, sha, count): (i64, i64, Option<String>, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM check_run), ran_at, commit_sha, violation_count \
+                 FROM check_run",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (rows, ran_at, sha.as_deref(), count),
+            (1, 200, Some("abc"), 7),
+            "N runs leave exactly one marker row, carrying the LAST run"
+        );
+
+        assert_eq!(
+            foreign_key_violations(&conn),
+            0,
+            "no FK violations after migration 20"
+        );
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

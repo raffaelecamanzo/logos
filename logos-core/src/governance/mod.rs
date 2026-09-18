@@ -1665,17 +1665,30 @@ fn materialise_and_evaluate(
     Ok(evaluate(&input))
 }
 
-/// Persist the violation set ([FR-GV-02], SRS §5.1: written per run,
-/// replaced wholesale — idempotent like the derived policy graph).
+/// Persist the violation set and the run marker that describes it
+/// ([FR-GV-02], SRS §5.1: written per run, replaced wholesale — idempotent
+/// like the derived policy graph; [FR-GV-21]).
+///
+/// Returns the `ran_at` it stamped, so the caller can report the run it just
+/// recorded without re-reading the store. Both writes go through one
+/// `submit_write`, and a write job is one transaction ([NFR-RA-07]), so the
+/// marker and its rows can never describe different runs.
+///
+/// `head` is `HEAD` as the run's freshness step resolved it — `None` outside a
+/// repo, stored as NULL rather than a placeholder ([FR-GV-21]).
 ///
 /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
+/// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+/// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
 fn persist_violations(
     runtime: &Runtime,
     snapshot_id: Option<i64>,
     violations: &[Violation],
-) -> Result<()> {
+    head: Option<&str>,
+) -> Result<i64> {
     let owned: Vec<Violation> = violations.to_vec();
-    let created_at = unix_now();
+    let head_owned: Option<String> = head.map(str::to_owned);
+    let ran_at = unix_now();
     runtime.submit_write(move |w| {
         let rows: Vec<NewViolation<'_>> = owned
             .iter()
@@ -1687,11 +1700,11 @@ fn persist_violations(
                 file: (!v.file.is_empty()).then_some(v.file.as_str()),
                 message: &v.message,
                 severity: &v.severity,
-                created_at,
             })
             .collect();
-        w.replace_violations(&rows)
-    })
+        w.replace_violations(&rows, ran_at, head_owned.as_deref())
+    })?;
+    Ok(ran_at)
 }
 
 // ── The aggregate runs (Engine method bodies) ───────────────────────────────
@@ -1716,7 +1729,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     let thresholds = effective_thresholds(&compiled.rules);
     let (snapshot_id, metrics) =
         crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
-    persist_violations(runtime, Some(snapshot_id), &violations)?;
+    persist_violations(runtime, Some(snapshot_id), &violations, fresh.head.as_deref())?;
 
     // Per-dimension worst-offender detail (CR-005 §3.2): the top-N offenders per
     // new dimension, deterministically ordered and capped — review-phase
@@ -2127,7 +2140,9 @@ pub(crate) fn check_rules(
     let runtime = quality_runtime(engine)?;
 
     let (mut violations, checked_rules) = materialise_and_evaluate(engine, &compiled, None)?;
-    persist_violations(runtime, None, &violations)?;
+    // FR-GV-21: the marker records HEAD at write time, which is the HEAD the
+    // freshness step already resolved for this run.
+    let ran_at = persist_violations(runtime, None, &violations, fresh.head.as_deref())?;
 
     // CR-052 / FR-GV-18: fold the fast structural-integrity verdict in as an
     // error-severity finding, so a drifted graph fails `check_rules` (exit 1)
@@ -2182,6 +2197,7 @@ pub(crate) fn check_rules(
         checked_rules,
         rules_present,
         violations,
+        ran_at: Some(ran_at),
         freshness: fresh.line(),
         warnings: fresh.warnings,
     })
