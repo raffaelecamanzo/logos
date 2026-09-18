@@ -786,6 +786,53 @@ fn admission(payload: &serde_json::Value) -> Admission {
     out
 }
 
+/// Invocation-intake `BridgeEdge`s per relation, ascending by relation.
+type EdgesByRelation = Vec<(String, usize)>;
+
+/// Invocation-intake `route` `BridgeEdge`s per `(consumer, provider)` member pair,
+/// ascending by the pair — the same shape and order as [`RECORDED_HTTP_PAIRS`], so
+/// the two are directly comparable.
+type EdgesByPair = Vec<(String, String, usize)>;
+
+/// The bridge's own invocation-intake edges, tallied by relation and — on the
+/// HTTP arm — by member pair.
+///
+/// Read over the **same** `registry` the coverage payload is read from, so the two
+/// tiers are compared on one estate state rather than across two runs;
+/// `ContractBridge::edges` is the call `xservice route-providers` and the
+/// reachability view both make, so this is the published figure and not a
+/// re-derivation of it.
+///
+/// A free function rather than a block inside the measurement, and rather than
+/// fields on [`Admission`]: that struct is documented as what the `--json` PAYLOAD
+/// says and every one of its fields is derived inside [`admission`], so writing a
+/// bridge-derived value into it would quietly make its contract "the payload, plus
+/// whatever the test body computed".
+fn bridge_invocation_tally<E>(registry: &EngineRegistry<E>) -> (EdgesByRelation, EdgesByPair)
+where
+    E: logos_core::federation::MemberContracts + logos_core::federation::MemberEngine,
+{
+    let mut by_relation: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut by_pair: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for edge in ContractBridge::new().edges(registry).iter() {
+        if edge.intake != BridgeIntake::Invocation {
+            continue;
+        }
+        *by_relation.entry(edge.relation.to_string()).or_default() += 1;
+        if edge.relation == "route" {
+            *by_pair
+                .entry((edge.from.member.clone(), edge.to.member.clone()))
+                .or_default() += 1;
+        }
+    }
+    (
+        by_relation.into_iter().collect(),
+        by_pair.into_iter().map(|((f, t), n)| (f, t, n)).collect(),
+    )
+}
+
 /// The measurement [S-397] AC2 and [S-398] AC5 name, through the surface they name.
 ///
 /// The verdict is **asserted**, not printed. Without assertions a regression that
@@ -832,31 +879,7 @@ fn measure_config_bound_admission_over_the_reference_workspace_when_one_is_confi
     let payload = serde_json::to_value(workspace_status(&registry)).expect("the payload serializes");
     let a = admission(&payload);
 
-    // The bridge's own edges, over the SAME registry, so the two tiers are read
-    // off one estate state rather than two runs. `ContractBridge::edges` is the
-    // call `xservice route-providers` and the reachability view both make.
-    let mut drawn: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut drawn_pairs: std::collections::BTreeMap<(String, String), usize> =
-        std::collections::BTreeMap::new();
-    for edge in ContractBridge::new().edges(&registry).iter() {
-        if edge.intake != BridgeIntake::Invocation {
-            continue;
-        }
-        *drawn.entry(edge.relation.to_string()).or_default() += 1;
-        if edge.relation == "route" {
-            *drawn_pairs
-                .entry((edge.from.member.clone(), edge.to.member.clone()))
-                .or_default() += 1;
-        }
-    }
-    // Locals, not fields on `Admission`: that struct is documented as what the
-    // `--json` PAYLOAD says, and every other field on it is derived inside
-    // `admission(payload)`. These two are bridge-derived, so keeping them beside it
-    // is what stops the struct's contract from quietly becoming "the payload, plus
-    // whatever the test body computed".
-    let drawn_by_relation: Vec<(String, usize)> = drawn.into_iter().collect();
-    let drawn_pairs: Vec<(String, String, usize)> =
-        drawn_pairs.into_iter().map(|((f, t), n)| (f, t, n)).collect();
+    let (drawn_by_relation, drawn_pairs) = bridge_invocation_tally(&registry);
 
     println!(
         "S-398 T2 / S-420 T2 — `config-bound` admission over {} ({} of {} members read, \
