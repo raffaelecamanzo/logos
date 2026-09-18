@@ -373,7 +373,9 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
 
     const detail = screen.getByText(/Binding evidence/).closest("section")!;
     expect(within(detail).getByRole("cell", { name: "billing.grpc.target" })).toBeInTheDocument();
-    expect(within(detail).getByRole("cell", { name: "The key is not defined" })).toBeInTheDocument();
+    expect(
+      within(detail).getByRole("cell", { name: "No committed source defines it" }),
+    ).toBeInTheDocument();
     expect(within(detail).getByText(/Consumer · api/)).toBeInTheDocument();
     // …and the table says so too, rather than calling the coupling observed.
     expect(

@@ -132,11 +132,20 @@ export const LINK_PROVENANCE_LABEL: Record<LinkProvenanceKind, string> = {
   unstated: "Provenance not stated",
 };
 
-/** The human label for each refusal a `config-unresolved` end travels with. */
+/** The human label for each refusal a `config-unresolved` end travels with.
+ *
+ *  These MIRROR `ValueRefusal::label()` in `logos-core/src/resolve/binding.rs`,
+ *  which is the vocabulary's one author — only sentence-cased for a table cell.
+ *  The three are not interchangeable and naming them loosely sends an operator
+ *  to the wrong remedy (NFR-CC-04): `uncommitted` means the value arrives at
+ *  runtime from something the repository does not commit — an environment
+ *  variable with no committed default, a config server, a secret store — so
+ *  there is no key to go and define; `missing-key` means the committed sources
+ *  prove no value for the operand, which IS the "go and define it" case. */
 export const CONFIG_REFUSAL_LABEL: Record<ConfigValueRefusal, string> = {
-  uncommitted: "No committed source defines the key",
+  uncommitted: "Not committed by the repository",
   "placeholder-value": "The committed value is itself a placeholder",
-  "missing-key": "The key is not defined",
+  "missing-key": "No committed source defines it",
 };
 
 /** How many of a link's bindings fall under each kind. Every kind is present even

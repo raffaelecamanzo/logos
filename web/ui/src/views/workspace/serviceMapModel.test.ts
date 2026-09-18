@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 import type {
   BridgeEdge,
   ConfigBoundKey,
+  ConfigValueRefusal,
   MemberTopics,
   ValueProvenance,
   WorkspaceStatus,
 } from "../../api/types.ts";
 import {
   buildServiceMap,
+  CONFIG_REFUSAL_LABEL,
   edgeProvenanceKind,
   hasNonLiteralBinding,
   LINK_PROVENANCE_KINDS,
@@ -548,6 +550,38 @@ describe("edge provenance (S-419, CR-132, ADR-64, FR-WS-19 AC6)", () => {
     );
     const map = buildServiceMap([member("api"), member("web")], [binding("api", "web")]);
     expect(Object.keys(map.links[0].provenance).sort()).toEqual([...LINK_PROVENANCE_KINDS].sort());
+  });
+
+  it("carries EVERY refusal token through to its own label, and never confuses two", () => {
+    // Review finding: only `missing-key` was exercised, so the other two labels
+    // could be replaced with garbage and the suite stayed green — which is how
+    // `uncommitted` came to carry `missing-key`'s wording. The three refusals
+    // are different remedies: `uncommitted` means the value arrives from
+    // something the repository does not commit (nothing to go and define);
+    // `missing-key` means the committed sources prove no value (go and define
+    // it). Labelling one as the other sends an operator the wrong way
+    // (NFR-CC-04), so every token is pinned, and pinned against the wording
+    // `ValueRefusal::label()` in logos-core/src/resolve/binding.rs authors.
+    const refusals: ConfigValueRefusal[] = ["uncommitted", "placeholder-value", "missing-key"];
+    for (const refusal of refusals) {
+      const map = buildServiceMap(
+        [member("api"), member("web")],
+        [
+          bindingWith("api", "web", {
+            from_value: { provenance: "config-unresolved", keys: ["k"], refusal },
+          }),
+        ],
+      );
+      expect(linkEvidence(map.links[0])[0].refusal).toBe(refusal);
+    }
+    expect(CONFIG_REFUSAL_LABEL).toEqual({
+      uncommitted: "Not committed by the repository",
+      "placeholder-value": "The committed value is itself a placeholder",
+      "missing-key": "No committed source defines it",
+    });
+    // The label map covers the union exactly — a token added server-side with no
+    // label here would render as `undefined` in the table cell.
+    expect(Object.keys(CONFIG_REFUSAL_LABEL).sort()).toEqual([...refusals].sort());
   });
 
   it("lists one evidence row PER OVERLAY, per end, naming key, sources and profiles", () => {
