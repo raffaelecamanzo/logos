@@ -14,7 +14,12 @@
 //! - two matching routes make the call ambiguous — no edge (acceptance 1);
 //! - a runtime-composed (bare-variable) path never binds — no approximate edge is
 //!   fabricated even when a matching route exists (acceptance 2/3);
+//! - a call whose path is composed from the calling member's own **committed
+//!   configuration** binds the matching route with `config-bound` provenance, and
+//!   binds nothing when the key is undefined (S-420, [CR-133]);
 //! - computing the bridge mutates no member database file ([ADR-52]).
+//!
+//! [CR-133]: ../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
 //!
 //! Gated on the Rust grammar so a build excluding it does not run it.
 #![cfg(feature = "lang-rust")]
@@ -23,8 +28,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use logos_core::federation::{
-    cross_service_coverage, ContractBridge, EngineRegistry, Federation, Member, RegistryMode,
+    app_wide_reachability, cross_service_coverage, ContractBridge, EngineRegistry, Federation,
+    Member, RegistryMode,
 };
+use logos_core::resolve::binding::Provenance;
 use logos_core::Engine;
 
 /// A client module making a static outbound call `GET /users/{id}` — captured as
@@ -48,6 +55,34 @@ use reqwest::Client;
 
 pub async fn fetch_user(client: Client, url: String) {
     let _ = client.get(url).await;
+}
+"#;
+
+/// A client module whose request path is composed from a **committed
+/// configuration key** — `${orders.base}` names a key the member's own
+/// `application.yml` proves, so the arm stores the target verbatim (S-382) and
+/// both federation tiers resolve it against that corpus (S-420).
+const CLIENT_CONFIG_BOUND: &str = r#"
+use reqwest::Client;
+
+pub async fn fetch_order(client: Client) {
+    let _ = client.get("${orders.base}/{id}").await;
+}
+"#;
+
+/// The calling member's own committed configuration, proving `orders.base`.
+const WEB_APPLICATION_YML: &str = "orders:\n  base: /orders\n";
+
+/// An axum app registering `GET /orders/{id}` — the provider the
+/// configuration-bound call composes its way to.
+const ORDERS_MAIN: &str = r#"
+use axum::routing::get;
+use axum::Router;
+
+async fn get_order() {}
+
+fn app() -> Router {
+    Router::new().route("/orders/{order_id}", get(get_order))
 }
 "#;
 
@@ -343,4 +378,159 @@ fn member_facts(root: &Path) -> MemberFacts {
         })
     })
     .expect("read runs")
+}
+
+/// **[CR-133] AC1 and AC7 on the real pipeline.** `web` calls
+/// `GET ${orders.base}/{id}` and commits `orders.base: /orders`; `orders` routes
+/// `GET /orders/{order_id}`. The bridge draws exactly one invocation edge, keyed
+/// on the **committed** value, carrying `config-bound` provenance at the consumer
+/// end and `literal` at the provider end — and the reachability rider that a
+/// `live-via-cross-service` promotion rests on reads 1 instead of 0.
+///
+/// Before S-420 this fixture drew **zero** edges: `compute_edges` keyed the
+/// consumer on the raw `"GET ${orders.base}/{id}"`, which normalizes to no
+/// portable key, while `cross_service_coverage` beside it reported the very same
+/// reference **bound** ([ADR-52]'s one-classifier contract).
+///
+/// [ADR-52]: ../../docs/specs/architecture/decisions/ADR-52.md
+/// [CR-133]: ../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+#[test]
+fn a_config_bound_client_call_binds_its_committed_target_in_another_member() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let web = root.join("web");
+    let orders = root.join("orders");
+    write(&web, "src/client.rs", CLIENT_CONFIG_BOUND);
+    write(&web, "application.yml", WEB_APPLICATION_YML);
+    write(&orders, "src/main.rs", ORDERS_MAIN);
+    index_member(&web);
+    index_member(&orders);
+
+    let registry = EngineRegistry::<Engine>::new(
+        federation(root, vec![member("web", &web), member("orders", &orders)]),
+        RegistryMode::Lazy,
+    );
+    let bridge = ContractBridge::new();
+    let edges = bridge.edges(&registry);
+
+    assert_eq!(
+        edges.len(),
+        1,
+        "the committed composition binds the sole matching route: {edges:?}"
+    );
+    let edge = &edges[0];
+    assert_eq!(edge.relation, "route");
+    assert_eq!(edge.from.member, "web", "the call site is in member `web`");
+    assert_eq!(edge.to.member, "orders", "the route is in member `orders`");
+    assert!(
+        edge.intake.seeds_reachability_root(),
+        "a captured call site is invocation intake"
+    );
+    let Provenance::ConfigBound { bound } = &edge.from_value else {
+        panic!("the consumer end is admitted from configuration: {:?}", edge.from_value);
+    };
+    assert_eq!(
+        bound.iter().map(|b| b.key.as_str()).collect::<Vec<_>>(),
+        ["orders.base"],
+        "and it names the key it was admitted from: {bound:?}"
+    );
+    assert!(
+        bound[0].values.iter().any(|v| v.value == "/orders"
+            && v.sources.iter().any(|s| s.ends_with("application.yml"))),
+        "…with the committed value and its defining source: {bound:?}"
+    );
+    assert_eq!(
+        edge.to_value,
+        Provenance::Literal,
+        "the route was observed in its own member's source, never admitted"
+    );
+
+    // The coverage tier reports the same reference bound — one classifier.
+    let coverage = cross_service_coverage(&registry.answer());
+    assert_eq!(coverage.bound, 1, "the call is bound in the coverage tier too");
+    assert_eq!(coverage.ambiguous, 0);
+
+    // [CR-133] AC7: the figure a `live-via-cross-service` promotion rests on.
+    let view = app_wide_reachability(&registry, &edges);
+    assert_eq!(
+        view.coverage.bridge_invocation_edges, 1,
+        "the rider counts the invocation edge the bridge drew"
+    );
+    let orders_tally = view
+        .members
+        .iter()
+        .find(|m| m.member == "orders")
+        .expect("orders has a tally");
+    assert_eq!(
+        (orders_tally.extra_roots, orders_tally.unresolved_roots),
+        (1, 0),
+        "the provider route resolves as an extra reachability root — the \
+         BridgeEndpoint and reachability-surface spellings agree"
+    );
+
+    // **Nothing is PROMOTED here, and the reason is structural rather than a gap
+    // in this change.** The union view is monotone toward live: it promotes a
+    // callable its own repository marked **dead**. A framework route is an entry
+    // point in its own repository, so `get_order` is already live in `orders`
+    // before any cross-service edge exists, and a `live-via-cross-service`
+    // verdict on it would be a claim the view is not entitled to make. What S-420
+    // moves is the figure above: the seeded root and the rider that now counts
+    // this edge, where both read 0 before. The same property was recorded for the
+    // contract-surface arm in `xservice_reachability.rs`; the promotion set is
+    // non-empty on the **broker** arm, where a subscribe handler genuinely is
+    // dead per-repo (`xservice_reachability_broker_promotion.rs`).
+    assert!(
+        !view
+            .dead
+            .iter()
+            .any(|claim| claim.member == "orders" && claim.name == "get_order"),
+        "the handler behind a framework route is live in its own repo: {:?}",
+        view.dead
+    );
+    assert!(
+        view.live_via_cross_service.is_empty(),
+        "and nothing is promoted, because nothing behind this edge was dead: {:?}",
+        view.live_via_cross_service
+    );
+}
+
+/// [CR-133] AC2 on the real pipeline: the same call with `orders.base` committed
+/// **nowhere** binds nothing. A key no committed source defines is a refusal, and
+/// a refusal never becomes an edge ([NFR-RA-05]).
+#[test]
+fn a_config_bound_client_call_with_an_undefined_key_binds_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let web = root.join("web");
+    let orders = root.join("orders");
+    write(&web, "src/client.rs", CLIENT_CONFIG_BOUND);
+    // No `application.yml` anywhere: nothing commits `orders.base`.
+    write(&orders, "src/main.rs", ORDERS_MAIN);
+    index_member(&web);
+    index_member(&orders);
+
+    let registry = EngineRegistry::<Engine>::new(
+        federation(root, vec![member("web", &web), member("orders", &orders)]),
+        RegistryMode::Lazy,
+    );
+
+    let edges = ContractBridge::new().edges(&registry);
+    assert!(
+        edges.is_empty(),
+        "a key no committed source defines binds nothing: {edges:?}"
+    );
+
+    let coverage = cross_service_coverage(&registry.answer());
+    assert_eq!(coverage.bound, 0, "and the coverage tier binds nothing either");
+    let reasons: Vec<String> = coverage
+        .references
+        .iter()
+        .map(|r| serde_json::to_value(r.state).unwrap().to_string())
+        .collect();
+    assert!(
+        reasons.iter().any(|r| r.contains("config-key-missing")),
+        "the row keeps its own reason: {reasons:?}"
+    );
 }

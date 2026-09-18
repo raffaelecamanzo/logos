@@ -56,7 +56,9 @@ use crate::model::{
     ArtifactRelation, BridgeNamespace, BridgeRole, EdgeKind, LogosSymbol, MatchDiscipline, NodeId,
     NodeKind,
 };
-use crate::resolve::binding::{placeholder_keys, ConfigLookup, Provenance};
+use crate::resolve::binding::{
+    placeholder_keys, ConfigBound, ConfigLookup, ProfiledTemplate, Provenance, Resolver,
+};
 use crate::resolve::route_method::preferred_candidates;
 use crate::resolve::route_template::route_key;
 
@@ -920,12 +922,23 @@ impl ConfigLookup for MemberCorpus {
 /// **the single predicate for "is this a configuration-bound reference?"**
 /// (S-382, [ADR-64], extended to the broker arm by [S-410]).
 ///
-/// One helper, two callers — [`member_corpora`] below and the coverage tier's
-/// classification loop — because the two used to ask the question separately and
-/// had already drifted once: the classification loop tested the arm's namespace
-/// and the corpus read did not, so a member whose only placeholders were
-/// **broker topics** had its store opened to read a corpus that was then never
-/// consulted.
+/// One helper, every caller — [`member_corpora`] below, which decides **which
+/// members are opened**, and [`identify`], which decides **which HTTP targets are
+/// resolved** — because those two questions used to be asked separately and had
+/// already drifted once: the coverage tier's classification loop tested the arm's
+/// namespace and the corpus read did not, so a member whose only placeholders
+/// were **broker topics** had its store opened to read a corpus that was then
+/// never consulted.
+///
+/// A gate that opens a store and a gate that resolves an operand **must** be one
+/// predicate: were they two, a member could be opened for a target nothing
+/// resolves (the wasted read above) or — worse — a target could resolve in a
+/// member whose corpus was never read, and resolve against nothing. Hence the
+/// `(relation, target)` form below, which the HTTP classifier calls directly. The
+/// broker arm reaches the same answer through
+/// [`super::broker::topic_identity`]'s own `placeholder_keys` call, which is a
+/// narrower test — it has already established its own relation — and is left
+/// where it is rather than routed through here for a relation it knows.
 ///
 /// The arm test is on the **relation**, not on its namespace. The guard admits a
 /// site and each body then classifies it on its own arm, so asking about the
@@ -951,14 +964,247 @@ impl ConfigLookup for MemberCorpus {
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
 pub(super) fn config_bound_keys(reference: &InvocationRef) -> Option<Vec<String>> {
+    config_bound_keys_of(reference.relation, &reference.target)
+}
+
+/// [`config_bound_keys`] over a relation and a target that are not (yet) an
+/// [`InvocationRef`] — the form the arm classifiers hold their operand in.
+///
+/// Split out rather than duplicated: a hand-mirrored second copy of this test is
+/// exactly how the member-open gate and the resolve gate would drift apart again.
+pub(super) fn config_bound_keys_of(
+    relation: ArtifactRelation,
+    target: &str,
+) -> Option<Vec<String>> {
     matches!(
-        reference.relation,
+        relation,
         ArtifactRelation::HttpClientCall
             | ArtifactRelation::BrokerPublish
             | ArtifactRelation::BrokerSubscribe
     )
-    .then(|| placeholder_keys(&reference.target))
+    .then(|| placeholder_keys(target))
     .flatten()
+}
+
+/// What committed configuration proves about one **HTTP invocation site's
+/// target**, and every portable key the site therefore meets a provider on —
+/// the HTTP twin of [`super::broker::identify`] (S-420, [CR-133]).
+///
+/// Built only by [`identify`], which is the single place the HTTP arm's
+/// committed-value rule is applied: the bridge's consumer arm
+/// ([`compute_edges`]), the coverage tier's `arm_identity` and its
+/// `record_config_bound` all reduce their targets through that one function, so
+/// *"why did this bind"* and *"why didn't this bind"* cannot drift ([ADR-52])
+/// the way they did while the bridge keyed a consumer on its **raw** ledger
+/// target and the coverage tier resolved the same target through committed
+/// configuration. Two call sites sharing a predicate is not one classifier; one
+/// function is.
+///
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+#[derive(Debug, Clone)]
+pub(super) struct HttpIdentity {
+    /// The canonical configuration keys the target names, in source order —
+    /// **empty** for a target that names none.
+    ///
+    /// The same question [`config_bound_keys`] answers, answered here as part of
+    /// the one resolution rather than asked again afterwards: a caller that
+    /// re-asked could get a different answer, which is the drift this type
+    /// exists to close.
+    pub(super) named_keys: Vec<String>,
+    /// One entry per committed composition that reduces to a portable key, with
+    /// the evidence proving **that** composition ([ADR-64] decision point 3:
+    /// *edges carry the profiles that produce them*).
+    ///
+    /// Empty means the site keys on nothing: a target no committed source
+    /// proves, or one whose every composition failed to normalize. It is **not**
+    /// the same as `composed` being empty — see that field.
+    ///
+    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    pub(super) keyed: Vec<(PortableKey, Provenance)>,
+    /// Every committed composition, whether or not it reduced to a key, in the
+    /// resolver's own deterministic order ([NFR-RA-06]).
+    ///
+    /// Empty whenever no configuration was read — a target naming no key, and a
+    /// target whose keys the corpus refused. The coverage recorder names its
+    /// *nothing-keyed* refusal from the first entry, which is why the
+    /// compositions travel even when none of them keyed.
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub(super) composed: Vec<String>,
+    /// The provenance of the **site**, as opposed to of one composition:
+    /// `Literal` for a target naming no key, `ConfigBound` carrying every key's
+    /// whole evidence where the sources prove one, and `ConfigUnresolved`
+    /// naming the keys and the refusal where they prove nothing.
+    ///
+    /// This is what a coverage row carries — one row per reference, however many
+    /// overlays — while [`keyed`](Self::keyed) carries what an *edge* carries.
+    pub(super) value: Provenance,
+}
+
+/// Reduce an HTTP invocation reference's stored target to [`HttpIdentity`], or
+/// [`None`] when `relation` is not an [`Http`](BridgeNamespace::Http) arm
+/// (S-420, [CR-133]).
+///
+/// The three outcomes are the whole rule, and the third is where the HTTP arm
+/// and the broker arm genuinely differ:
+///
+/// - **No `${…}` at all** — the target is keyed by its own text through
+///   [`consumer_portable_key`], exactly as it was before this story, with
+///   `Literal` provenance. A target that does not normalize keys nothing.
+/// - **The committed sources prove it** — the target is resolved against the
+///   member's own corpus ([FR-WS-19], [ADR-64]'s within-reach rule is the
+///   caller's) and **each** composition is keyed independently, so a key two
+///   overlays commit differently yields one key per overlay ([FR-WS-19] AC2). A
+///   composition that does not normalize — the estate's dominant
+///   `base-url: https://orders:8080` idiom composes an absolute URL, and
+///   [`route_key`] takes only a rooted path — simply contributes no key; it is
+///   the caller's business to name that refusal, and `composed` carries what it
+///   needs to.
+/// - **The sources prove nothing** — no key is admitted and none is fabricated
+///   ([NFR-RA-05]). This is the arm difference: a broker operand the corpus
+///   refuses keeps its placeholder-as-written key ([FR-WS-10]'s re-proposed
+///   criterion), an HTTP one is reported unbound. The refusal still travels, as
+///   [`Provenance::ConfigUnresolved`].
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [route_key]: crate::resolve::route_template::route_key
+pub(super) fn identify(
+    relation: ArtifactRelation,
+    target: &str,
+    corpus: &dyn ConfigLookup,
+) -> Option<HttpIdentity> {
+    if relation.bridge_namespace()? != BridgeNamespace::Http {
+        return None;
+    }
+    // The pre-S-420 rule, kept in one expression because all three branches that
+    // read a target verbatim must read it the same way.
+    let verbatim = || -> Vec<(PortableKey, Provenance)> {
+        consumer_portable_key(relation, target)
+            .into_iter()
+            .map(|key| (key, Provenance::Literal))
+            .collect()
+    };
+    // The SAME predicate `member_corpora` gates a member's store open on, so a
+    // target this function resolves is a target whose member was opened.
+    let Some(named_keys) = config_bound_keys_of(relation, target) else {
+        return Some(HttpIdentity {
+            named_keys: Vec::new(),
+            keyed: verbatim(),
+            composed: Vec::new(),
+            value: Provenance::Literal,
+        });
+    };
+    let resolver = Resolver { corpus, module: "" };
+    match resolver.resolve_template(target) {
+        // `placeholder_keys` above already said the target carries a placeholder,
+        // so `resolve_template` cannot answer `None` here. Mapped to the literal
+        // rule rather than unwrapped: a panic in a read-model is never the right
+        // answer to a disagreement between two scans — the same choice
+        // `super::broker::topic_identity` makes for the identical impossibility.
+        None => Some(HttpIdentity {
+            named_keys,
+            keyed: verbatim(),
+            composed: Vec::new(),
+            value: Provenance::Literal,
+        }),
+        Some(Err(refusal)) => Some(HttpIdentity {
+            keyed: Vec::new(),
+            composed: Vec::new(),
+            value: Provenance::ConfigUnresolved {
+                keys: named_keys.clone(),
+                refusal,
+            },
+            named_keys,
+        }),
+        Some(Ok(resolved)) => {
+            let keyed = resolved
+                .candidates
+                .iter()
+                .filter_map(|candidate| {
+                    consumer_portable_key(relation, &candidate.template).map(|key| {
+                        (
+                            key,
+                            Provenance::ConfigBound {
+                                bound: composition_evidence(&resolved.bound, candidate),
+                            },
+                        )
+                    })
+                })
+                .collect();
+            Some(HttpIdentity {
+                named_keys,
+                keyed,
+                composed: resolved
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.template.clone())
+                    .collect(),
+                value: Provenance::ConfigBound {
+                    bound: resolved.bound,
+                },
+            })
+        }
+    }
+}
+
+/// The evidence behind **one** committed composition: for each key the target
+/// names, the values whose profiles prove this composition ([ADR-64] decision
+/// point 3).
+///
+/// Narrowed rather than copied whole, because an edge carries the profiles that
+/// produce **it**: two overlays committing one key to two templates yield two
+/// edges, and handing each the site's entire evidence would leave a reader
+/// unable to say which overlay drew which edge ([NFR-CC-04]).
+///
+/// **The unprofiled base is kept on every composition**, and that is the one
+/// place this narrowing is deliberately inclusive rather than exact: a
+/// composition under profile `P` uses `P`'s value for a key `P` defines and
+/// falls back to the unprofiled one for a key it does not, and the composed
+/// string does not record which of the two it used. Keeping the base is the
+/// direction that never drops evidence; dropping it would let a two-key target
+/// lose the key its profile is silent about.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn composition_evidence(bound: &[ConfigBound], candidate: &ProfiledTemplate) -> Vec<ConfigBound> {
+    bound
+        .iter()
+        .map(|entry| {
+            let values: Vec<_> = entry
+                .values
+                .iter()
+                .filter(|value| {
+                    value.unprofiled
+                        || value
+                            .profiles
+                            .iter()
+                            .any(|profile| candidate.profiles.contains(profile))
+                })
+                .cloned()
+                .collect();
+            // Unreachable by construction — a composition exists only where every
+            // key it names has a value under one of its profiles or unprofiled —
+            // and the full evidence is the honest fallback if it ever is reached:
+            // an empty list would read as "nothing proved this", which is a
+            // stronger claim than the narrowing is entitled to make.
+            debug_assert!(
+                !values.is_empty(),
+                "a composition's own key proved nothing: {entry:?} for {candidate:?}"
+            );
+            if values.is_empty() {
+                return entry.clone();
+            }
+            ConfigBound {
+                values,
+                ..entry.clone()
+            }
+        })
+        .collect()
 }
 
 /// Read, per member, the committed definitions of every configuration key its
@@ -978,9 +1224,20 @@ pub(super) fn config_bound_keys(reference: &InvocationRef) -> Option<Vec<String>
 /// ([ADR-53]).
 ///
 /// `consumers` is whatever slice the caller wants resolved, and callers pass
-/// **only the arms they will consult**: the bridge passes its broker references
-/// alone, because reading an HTTP key it does not resolve would open a member
-/// store to produce nothing ([NFR-PE-10]).
+/// **only the arms they will consult** — which since S-420 ([CR-133]) is every
+/// configuration-bound arm on both tiers: the bridge resolves its HTTP consumer
+/// targets through [`identify`] exactly as the coverage tier does, so it passes
+/// its HTTP references alongside its broker ones. That costs no store open on a
+/// workspace whose HTTP targets carry no `${…}`: the gate below is
+/// [`config_bound_keys`], a string test over references already in memory, so a
+/// member naming no key is never opened ([NFR-PE-10]).
+///
+/// Until S-420 the bridge passed its broker references alone, and the reason
+/// recorded here was that *"reading an HTTP key it does not resolve would open a
+/// member store to produce nothing"* — true while the bridge did not resolve
+/// HTTP keys, and superseded by its doing so.
+///
+/// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
 ///
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
@@ -1390,15 +1647,27 @@ where
     // `InvocationRef`s here rather than reduced to candidates in place: the keys
     // they name have to be known before any member store is opened, so one read
     // per member serves every one of its broker sites.
-    let mut broker_refs: Vec<(String, InvocationRef)> = Vec::new();
+    //
+    // **The HTTP arm is buffered for the same reason since S-420** ([CR-133]):
+    // its targets are keyed by their committed value wherever committed
+    // configuration proves one, through the shared [`identify`] the coverage
+    // tier also calls, so the keys a member's references name have to be known
+    // before any member store is opened. Until then the bridge keyed an HTTP
+    // consumer on its RAW ledger target, a `${…}` path reduced to no key, and
+    // the reference was dropped — while the coverage tier reported the very same
+    // reference bound. One fact, two classifications: the drift [ADR-52]'s
+    // one-classifier contract forbids.
+    let mut ledger_refs: Vec<(String, InvocationRef)> = Vec::new();
     for (member, refs) in read_members(answer, "invocation references", |e| e.invocation_refs()) {
         for reference in refs {
             match reference.relation.bridge_namespace() {
-                Some(BridgeNamespace::BrokerTopic) => {
-                    broker_refs.push((member.clone(), reference));
+                Some(BridgeNamespace::BrokerTopic) | Some(BridgeNamespace::Http) => {
+                    ledger_refs.push((member.clone(), reference));
                 }
-                // Every other arm feeds the loop's consumer index directly; its
-                // providers are contract-surface nodes, already indexed above.
+                // Every remaining arm feeds the loop's consumer index directly;
+                // its providers are contract-surface nodes, already indexed
+                // above, and it reads its stored target verbatim — no corpus is
+                // opened for it and none would tell it anything.
                 _ => {
                     if reference.relation.bridge_role() != Some(BridgeRole::Consumer) {
                         continue;
@@ -1414,36 +1683,56 @@ where
                     // A ledger reference is a captured call site ([FR-WS-08]/
                     // [FR-WS-09]) — an invocation edge that seeds a reachability
                     // root ([CR-083]).
-                    //
-                    // `Literal` even for an HTTP target carrying `${…}`: this
-                    // loop reads the stored target verbatim and nothing here
-                    // resolves it, so claiming otherwise would be the over-read
-                    // [ADR-64] forbids. The HTTP arm's configuration-bound
-                    // resolution lives in the coverage tier alone
-                    // (`record_config_bound`) and is untouched by [S-410].
                     consumers.push((key, endpoint, BridgeIntake::Invocation, Provenance::Literal));
                 }
             }
         }
     }
 
-    // One read per member that names a configuration key in a broker operand,
-    // and none at all for a workspace whose broker operands are all literals —
-    // which is what keeps a workspace with no broker topics byte-for-byte
-    // unaffected by this story ([NFR-PE-10]).
-    let corpora = member_corpora(answer, &broker_refs);
-    let broker_candidates = broker_refs.into_iter().map(|(member, reference)| {
-        super::broker::BrokerCandidate {
-            relation: reference.relation,
-            key: reference.target,
-            endpoint: BridgeEndpoint {
-                member,
-                symbol: reference.symbol,
-            },
+    // ONE read per member that names a configuration key, over every key its own
+    // references name on either arm — never one read per arm and never one per
+    // row. A workspace whose broker operands and HTTP targets are all literals
+    // names no key at all and opens nothing ([NFR-PE-10]).
+    let corpora = member_corpora(answer, &ledger_refs);
+    let empty = MemberCorpus::new();
+    let mut broker_candidates = Vec::new();
+    for (member, reference) in ledger_refs {
+        // A member that named no configuration key is absent from `corpora` and
+        // resolves against nothing — never against another member's
+        // configuration, which is [ADR-64]'s within-reach rule.
+        let corpus = corpora.get(&member).unwrap_or(&empty);
+        let Some(identity) = identify(reference.relation, &reference.target, corpus) else {
+            // Not an HTTP arm: the broker arm's own classifier owns it, and
+            // builds BOTH indexes itself because its provider side (a subscribe)
+            // stands behind no contract-surface node.
+            broker_candidates.push(super::broker::BrokerCandidate {
+                relation: reference.relation,
+                key: reference.target,
+                endpoint: BridgeEndpoint {
+                    member,
+                    symbol: reference.symbol,
+                },
+            });
+            continue;
+        };
+        if reference.relation.bridge_role() != Some(BridgeRole::Consumer) {
+            continue; // the HTTP arm has no ledger-side provider to index
         }
-    });
+        let endpoint = BridgeEndpoint {
+            member,
+            symbol: reference.symbol,
+        };
+        // One consumer entry per committed composition that keys, each carrying
+        // the evidence that proves ITS composition ([ADR-64] decision point 3).
+        // A literal target yields exactly one, with `Literal` provenance — the
+        // pre-S-420 behaviour, byte for byte.
+        for (key, value) in identity.keyed {
+            consumers.push((key, endpoint.clone(), BridgeIntake::Invocation, value));
+        }
+    }
 
     let mut edges = match_indexed(providers, consumers);
+    collapse_by_coupling(&mut edges);
     // The broker arm's cross-member fan-out: one publish binds every subscribe on
     // the same topic identity, across members ([FR-WS-10], [FR-WS-11]).
     edges.extend(super::broker::broker_edges(broker_candidates, &corpora));
@@ -1451,6 +1740,87 @@ where
     // ([NFR-RA-06]).
     edges.sort();
     edges
+}
+
+/// Collapse edges that differ **only** in the consumer end's evidence: one
+/// coupling is one edge, however many committed compositions produce it (S-420,
+/// [CR-133]; the rule [S-410] gave the broker arm's `edges.dedup()`).
+///
+/// Two overlays committing one key to two templates normally bind two *different*
+/// providers — two couplings, two edges, each carrying its own profile set. They
+/// bind the **same** provider when one symbol declares both templates
+/// (`@RequestMapping({"/a","/b"})`), and there the two edges are one coupling: a
+/// second row would be a fabricated count, because `resolved_cross_service_edges`
+/// reconciles the bridge's edges against the coverage tier's bound rows and that
+/// tier names one provider for this site ([NFR-RA-05], [CR-118]).
+///
+/// The surviving edge carries the **union** of the two evidences, which is what
+/// its `to` end is actually proved by: both overlays produce it. The union is a
+/// re-widening of [`composition_evidence`]'s narrowing, so it can only restore
+/// entries the site's own resolution already held.
+///
+/// Scoped to `ConfigBound` consumer ends on purpose. Two `Literal` edges that are
+/// wholly equal are a pre-existing ledger-duplication question this story does
+/// not touch, and collapsing them here would change what a workspace with no
+/// committed configuration reports.
+///
+/// `edges` must be sorted, which is [`match_indexed`]'s postcondition: the
+/// derived `Ord` compares `(relation, from, to, intake)` before either
+/// provenance, so every candidate for a collapse is adjacent.
+///
+/// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+/// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+fn collapse_by_coupling(edges: &mut Vec<BridgeEdge>) {
+    let mut out: Vec<BridgeEdge> = Vec::with_capacity(edges.len());
+    for edge in edges.drain(..) {
+        let merged = out.last_mut().is_some_and(|prev| {
+            let same_coupling = prev.relation == edge.relation
+                && prev.from == edge.from
+                && prev.to == edge.to
+                && prev.intake == edge.intake
+                && prev.to_value == edge.to_value;
+            match (same_coupling, &mut prev.from_value, &edge.from_value) {
+                (
+                    true,
+                    Provenance::ConfigBound { bound: into },
+                    Provenance::ConfigBound { bound: from },
+                ) => {
+                    union_bound(into, from);
+                    true
+                }
+                _ => false,
+            }
+        });
+        if !merged {
+            out.push(edge);
+        }
+    }
+    *edges = out;
+}
+
+/// Merge one composition's evidence into another's, key by key — the union
+/// [`collapse_by_coupling`] carries onto the edge it keeps.
+///
+/// Values are re-sorted and de-duplicated, which restores the order
+/// [`crate::resolve::binding::Agreement`] produced them in (by value): both
+/// operands are subsets of one resolution's evidence, so the union is that
+/// resolution's own list filtered to what the merged compositions prove.
+fn union_bound(into: &mut Vec<ConfigBound>, from: &[ConfigBound]) {
+    for entry in from {
+        match into
+            .iter_mut()
+            .find(|held| held.key == entry.key && held.source == entry.source)
+        {
+            Some(held) => {
+                held.values.extend(entry.values.iter().cloned());
+                held.values.sort();
+                held.values.dedup();
+            }
+            None => into.push(entry.clone()),
+        }
+    }
 }
 
 /// File one provider under its bucket, keeping its method facet beside the
@@ -1639,6 +2009,9 @@ mod tests {
         /// When set, the FIRST contract-surface read re-syncs `web` — a member
         /// re-indexing mid-answer, which is what `logos serve`'s watcher does.
         static RESYNC_ON_FIRST_READ: Cell<bool> = const { Cell::new(false) };
+        /// How many times each member's committed configuration was read — the
+        /// corpus-open budget [NFR-PE-10] bounds (S-420).
+        static CONFIG_READS: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
     }
 
     #[derive(Clone, Default)]
@@ -1646,12 +2019,45 @@ mod tests {
         stamp: u64,
         nodes: Vec<ContractNode>,
         consumers: Vec<InvocationRef>,
+        /// This member's own committed configuration (S-382, [FR-WS-19]).
+        config: MemberCorpus,
     }
 
     fn reset() {
         FIXTURES.with(|f| f.borrow_mut().clear());
         SURFACE_READS.with(|c| c.set(0));
         RESYNC_ON_FIRST_READ.with(|c| c.set(false));
+        CONFIG_READS.with(|c| c.borrow_mut().clear());
+    }
+
+    /// Commit `key` in `member`'s own configuration, once per `(file, profile,
+    /// value)` triple — the shape `config_definitions` reads off the store.
+    ///
+    /// The same helper `coverage::tests` carries, and deliberately a second copy
+    /// rather than a shared one: the two harnesses are independent fixtures over
+    /// two different `FakeEngine`s, and neither module exports its thread-locals.
+    fn commit_config(member: &str, key: &str, defs: &[(&str, Option<&str>, &str)]) {
+        FIXTURES.with(|f| {
+            f.borrow_mut()
+                .entry(member.to_string())
+                .or_default()
+                .config
+                .insert(
+                    crate::extract::config::corpus::canonical_key(key),
+                    defs.iter()
+                        .map(|(path, profile, value)| ConfigDefinition {
+                            path: (*path).to_string(),
+                            profile: profile.map(str::to_string),
+                            value: (*value).to_string(),
+                        })
+                        .collect(),
+                );
+        });
+    }
+
+    /// How many times `member`'s committed configuration was opened.
+    fn config_reads(member: &str) -> usize {
+        CONFIG_READS.with(|c| c.borrow().get(member).copied().unwrap_or(0))
     }
     fn set_member(name: &str, stamp: u64, nodes: Vec<ContractNode>) {
         FIXTURES.with(|f| {
@@ -1939,6 +2345,23 @@ mod tests {
                     .get(&self.member)
                     .map(|m| m.consumers.clone())
                     .unwrap_or_default()
+            }))
+        }
+        fn config_definitions(&self, keys: &[String]) -> Result<MemberCorpus> {
+            CONFIG_READS.with(|c| *c.borrow_mut().entry(self.member.clone()).or_default() += 1);
+            if self.member == "unreadable" {
+                anyhow::bail!("store read failed");
+            }
+            Ok(FIXTURES.with(|f| {
+                let all = f.borrow();
+                let Some(member) = all.get(&self.member) else {
+                    return MemberCorpus::new();
+                };
+                // Only the keys asked for, so a fixture cannot accidentally prove
+                // a key the reference never named.
+                keys.iter()
+                    .filter_map(|k| member.config.get(k).map(|d| (k.clone(), d.clone())))
+                    .collect()
             }))
         }
     }
@@ -2756,6 +3179,274 @@ mod tests {
 
         let edges = ContractBridge::new().edges(&registry(&["web", "api"]));
         assert!(edges.is_empty(), "a POST call never binds a GET route: {edges:?}");
+    }
+
+    // ── S-420 / CR-133: the HTTP arm keys on its COMMITTED target ─────────────
+    //
+    // The bind side of the same rule the coverage tier applies to these fixtures
+    // in `coverage::tests`; the cross-tier walk that asserts the two agree lives
+    // there, where both tiers are reachable from one fixture.
+
+    /// The evidence a `config-bound` consumer end carries: `(key, profiles,
+    /// values)` per configuration key, in the provenance's own order. The
+    /// defining sources are asserted separately where they matter — they are per
+    /// *value*, not per key, so folding them in here would flatten the one
+    /// distinction [FR-WS-19] AC6 asks the provenance to keep.
+    ///
+    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    fn evidence(value: &Provenance) -> Vec<(String, Vec<String>, Vec<String>)> {
+        let Provenance::ConfigBound { bound } = value else {
+            panic!("not a config-bound provenance: {value:?}");
+        };
+        bound
+            .iter()
+            .map(|b| {
+                (
+                    b.key.clone(),
+                    b.profiles().into_iter().map(str::to_string).collect(),
+                    b.values.iter().map(|v| v.value.clone()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// [CR-133] AC1: a client call whose path is composed from a committed
+    /// configuration value binds the matching route in another member, and the
+    /// edge names the key, its defining source and its profile set at the
+    /// consumer end while the observed route stays `Literal` at the provider end.
+    ///
+    /// Before S-420 this fixture drew **zero** edges: `compute_edges` keyed the
+    /// consumer on the raw `"GET ${orders.base}/{id}"`, which normalizes to no
+    /// portable key — while the coverage tier beside it reported the very same
+    /// reference bound.
+    ///
+    /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
+    #[test]
+    fn a_config_bound_client_call_binds_its_committed_target_in_another_member() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+        set_member("orders", 0, vec![route("GET /orders/{oid}", "local show")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(edges.len(), 1, "exactly one edge: {edges:?}");
+        let edge = &edges[0];
+        assert_eq!(edge.relation, "route");
+        assert_eq!(edge.intake, BridgeIntake::Invocation);
+        assert_eq!(edge.from.member, "web");
+        assert_eq!(edge.to.member, "orders");
+        assert_eq!(edge.to.symbol.as_str(), "local show");
+        assert_eq!(
+            evidence(&edge.from_value),
+            vec![(
+                "orders.base".to_string(),
+                Vec::<String>::new(),
+                vec!["/orders".to_string()]
+            )],
+            "the consumer end names the key and the value its unprofiled source commits"
+        );
+        let Provenance::ConfigBound { bound } = &edge.from_value else {
+            unreachable!("`evidence` above already proved the variant");
+        };
+        assert_eq!(
+            bound[0].values[0].sources,
+            ["application.yml"],
+            "…and the defining source behind that value ([FR-WS-19] AC6): {bound:?}"
+        );
+        assert!(
+            bound[0].values[0].unprofiled,
+            "the unprofiled base proves it, stated rather than inferred from an \
+             empty profile list: {bound:?}"
+        );
+        assert_eq!(
+            edge.to_value,
+            Provenance::Literal,
+            "the route was observed in its own member's source, not admitted"
+        );
+    }
+
+    /// [CR-133] AC2: with the key undefined in every committed source the bridge
+    /// draws nothing — a refusal is never a bind ([NFR-RA-05]).
+    #[test]
+    fn a_config_bound_client_call_with_an_undefined_key_binds_nothing() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        set_member("orders", 0, vec![route("GET /orders/{oid}", "local show")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert!(
+            edges.is_empty(),
+            "a key no committed source defines binds nothing: {edges:?}"
+        );
+    }
+
+    /// [CR-133] AC3: two profiles composing the target two ways, each matching a
+    /// sole provider, draw **two** edges — and each carries the profile set that
+    /// produced it ([ADR-64] decision point 3), not the site's whole evidence.
+    #[test]
+    fn two_profiles_draw_one_edge_each_carrying_its_own_profile_set() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config(
+            "web",
+            "orders.base",
+            &[
+                ("application-a.yml", Some("a"), "/orders-a"),
+                ("application-b.yml", Some("b"), "/orders-b"),
+            ],
+        );
+        set_member(
+            "orders",
+            0,
+            vec![
+                route("GET /orders-a/{oid}", "local show_a"),
+                route("GET /orders-b/{oid}", "local show_b"),
+            ],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(edges.len(), 2, "one edge per committed composition: {edges:?}");
+        let mut seen: Vec<(String, Vec<String>, Vec<String>)> = edges
+            .iter()
+            .map(|e| {
+                let mut ev = evidence(&e.from_value);
+                assert_eq!(ev.len(), 1, "one key, one evidence entry: {ev:?}");
+                let (key, profiles, values) = ev.remove(0);
+                (format!("{}|{key}", e.to.symbol.as_str()), profiles, values)
+            })
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    "local show_a|orders.base".to_string(),
+                    vec!["a".to_string()],
+                    vec!["/orders-a".to_string()]
+                ),
+                (
+                    "local show_b|orders.base".to_string(),
+                    vec!["b".to_string()],
+                    vec!["/orders-b".to_string()]
+                ),
+            ],
+            "each edge carries only the overlay that produced it"
+        );
+    }
+
+    /// [CR-133] AC4: a **single** composition matching two providers stays
+    /// ambiguous and binds nothing — unchanged from before S-420. The union the
+    /// coverage tier performs is across compositions, never within one.
+    #[test]
+    fn one_composition_matching_two_providers_is_ambiguous_no_edge() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+        set_member("orders", 0, vec![route("GET /orders/{oid}", "local show")]);
+        set_member("legacy", 0, vec![route("GET /orders/{id}", "local legacy_show")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders", "legacy"]));
+        assert!(
+            edges.is_empty(),
+            "two providers of one composed key are ambiguous — no edge: {edges:?}"
+        );
+    }
+
+    /// **One coupling is one edge, however many compositions produce it.** Two
+    /// overlays compose the target two ways and one symbol declares both
+    /// templates (`@RequestMapping({"/a","/b"})`), so both compositions bind the
+    /// *same* provider endpoint. That is one coupling, and the surviving edge
+    /// carries the union of what proved it — a second row would be a fabricated
+    /// count against the coverage tier's single bound row ([NFR-RA-05], [CR-118]).
+    ///
+    /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
+    #[test]
+    fn two_compositions_binding_one_provider_collapse_to_one_edge() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET ${orders.base}/{id}", "local fetch_order")]);
+        commit_config(
+            "web",
+            "orders.base",
+            &[
+                ("application-a.yml", Some("a"), "/orders-a"),
+                ("application-b.yml", Some("b"), "/orders-b"),
+            ],
+        );
+        set_member(
+            "orders",
+            0,
+            vec![
+                route("GET /orders-a/{oid}", "local show"),
+                route("GET /orders-b/{oid}", "local show"),
+            ],
+        );
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(
+            edges.len(),
+            1,
+            "one coupling, however many compositions reach it: {edges:?}"
+        );
+        assert_eq!(
+            evidence(&edges[0].from_value),
+            vec![(
+                "orders.base".to_string(),
+                vec!["a".to_string(), "b".to_string()],
+                vec!["/orders-a".to_string(), "/orders-b".to_string()]
+            )],
+            "and it carries BOTH overlays, because both produce it"
+        );
+    }
+
+    /// [CR-133] AC6, first half: a workspace whose HTTP targets carry no `${…}`
+    /// opens **no** member configuration at all. The gate is a string predicate
+    /// over references already in memory, so the corpus read the HTTP arm gained
+    /// costs a workspace without placeholders nothing ([NFR-PE-10]).
+    #[test]
+    fn a_workspace_with_no_placeholder_target_opens_no_member_configuration() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers("web", vec![http_call("GET /orders/{id}", "local fetch_order")]);
+        set_member("orders", 0, vec![route("GET /orders/{oid}", "local show")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(edges.len(), 1, "the literal call binds as it always did: {edges:?}");
+        assert_eq!(edges[0].from_value, Provenance::Literal);
+        assert_eq!(config_reads("web"), 0, "no key named, no store opened");
+        assert_eq!(config_reads("orders"), 0);
+    }
+
+    /// [CR-133] AC6, second half: a key-naming member's configuration is opened
+    /// **once** per bridge computation, over every key its own references name —
+    /// never once per reference and never once per arm ([NFR-PE-10]).
+    #[test]
+    fn a_key_naming_member_is_opened_once_per_bridge_computation() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers(
+            "web",
+            vec![
+                http_call("GET ${orders.base}/{id}", "local fetch_order"),
+                http_call("GET ${orders.base}/{id}/lines", "local fetch_lines"),
+                broker_publish("${orders.topic}", "local emit"),
+            ],
+        );
+        commit_config("web", "orders.base", &[("application.yml", None, "/orders")]);
+        commit_config("web", "orders.topic", &[("application.yml", None, "orders-v1")]);
+        set_member("orders", 0, vec![route("GET /orders/{oid}", "local show")]);
+
+        let _ = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(
+            config_reads("web"),
+            1,
+            "three key-naming references across two arms, one corpus read"
+        );
+        assert_eq!(config_reads("orders"), 0, "a member naming no key is never opened");
     }
 
     // ── S-253 / FR-WS-09: the gRPC stub-call → proto-service arm ──────────────
