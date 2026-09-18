@@ -11,6 +11,7 @@
 //! (`tests/extraction.rs`).
 
 use super::*;
+use crate::extract::broker::{Callee, Forwarded, ForwardingOutcome};
 use crate::model::{EdgeKind, NodeKind};
 use crate::plugin::{LanguagePlugin, LanguageRegistry, Semantics};
 use tree_sitter::{Language, Query};
@@ -4030,4 +4031,645 @@ fn the_broker_hop_changes_the_broker_row_and_nothing_else() {
         vec![String::new()],
         "without the class, the same site is the keyless refusal row it always was",
     );
+}
+
+// ── S-417: the two-frame wrapper hop ([FR-WS-26], [CR-131] §3.2 C2) ──────────
+//
+// The population is the one S-392 measured and FALSIFIED at one frame and S-416
+// re-measured and carried at two: a header-form publish whose topic operand is a
+// bare parameter of the method enclosing it. Every fixture below is that shape,
+// and every one carries its own negative control — the same tree with the thing
+// under test removed — because a positive assertion about a hop is only about
+// the hop if the same fixture refuses without it.
+//
+// [CR-131]: ../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+
+/// The wrapper: a publish whose topic is its own third parameter. Nothing in
+/// this file proves the topic, and nothing ever will — that is the point.
+#[cfg(feature = "lang-java")]
+const WRAPPER_FILE: &str = "producer/src/main/java/KafkaProducer.java";
+#[cfg(feature = "lang-java")]
+const WRAPPER_SOURCE: &str = "package a;\n\
+    public class KafkaProducer {\n\
+    \x20   void sendMessage(String key, String payload, String topic) {\n\
+    \x20     MessageBuilder.withPayload(payload)\n\
+    \x20       .setHeader(KafkaHeaders.TOPIC, topic)\n\
+    \x20       .build();\n\
+    \x20   }\n\
+    }\n";
+#[cfg(feature = "lang-java")]
+const WRAPPER_MODULE_POM: &str = "producer/pom.xml";
+#[cfg(feature = "lang-java")]
+const WRAPPER_PROPS_FILE: &str = "producer/src/main/java/KafkaTopics.java";
+
+/// One in-module `src/main` caller that supplies `accessor` at the topic slot.
+#[cfg(feature = "lang-java")]
+fn wrapper_caller(class: &str, accessor: &str) -> String {
+    format!(
+        "package a;\n\
+         public class {class} {{\n\
+         \x20   private final KafkaTopics kafkaTopics;\n\
+         \x20   private final KafkaProducer producer;\n\
+         \x20   void archive(String key, String payload) {{\n\
+         \x20     producer.sendMessage(key, payload, {accessor});\n\
+         \x20   }}\n\
+         }}\n"
+    )
+}
+
+/// The base inputs every fixture starts from: the module descriptor, the
+/// properties class, and the wrapper.
+#[cfg(feature = "lang-java")]
+fn wrapper_estate(extra: &[(&str, String)]) -> Vec<FileInput> {
+    let mut inputs = vec![
+        FileInput::new(WRAPPER_MODULE_POM, "<project/>\n"),
+        FileInput::new(WRAPPER_PROPS_FILE, TOPIC_PROPS_SOURCE),
+        FileInput::new(WRAPPER_FILE, WRAPPER_SOURCE),
+    ];
+    inputs.extend(extra.iter().map(|(path, src)| FileInput::new(*path, src.clone())));
+    inputs
+}
+
+/// The forwarding outcomes recorded for `path`, in ledger order.
+#[cfg(feature = "lang-java")]
+fn forwarding_outcomes(facts: &[Facts], path: &str) -> Vec<ForwardingOutcome> {
+    facts
+        .iter()
+        .filter(|f| f.path == path)
+        .flat_map(|f| f.forwarding.iter())
+        .map(|c| {
+            c.outcome
+                .clone()
+                .expect("extract_files always decides every candidate")
+        })
+        .collect()
+}
+
+/// The refusal reasons recorded for `path`, by their stable token.
+#[cfg(feature = "lang-java")]
+fn forwarding_refusals(facts: &[Facts], path: &str) -> Vec<&'static str> {
+    forwarding_outcomes(facts, path)
+        .iter()
+        .map(|o| match o {
+            ForwardingOutcome::Refused(r) => r.as_str(),
+            ForwardingOutcome::Resolved(_) => "resolved",
+        })
+        .collect()
+}
+
+/// **[FR-WS-26] AC1, one frame.** A wrapper whose only `src/main` callers pass
+/// one `@ConfigurationProperties` accessor resolves to that accessor's canonical
+/// key, and the keyless `topic-not-literal` row it used to leave is **retracted**
+/// — asserted by exact equality, because an uncancelled refusal reads as an extra
+/// empty target.
+///
+/// The provenance names the one frame that was taken. Its negative control is
+/// the same tree with the caller removed: the wrapper alone still refuses, which
+/// is what makes this assertion about the hop rather than about the fixture.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_wrapper_whose_main_callers_pass_one_accessor_resolves_at_one_frame() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    let caller = (
+        "producer/src/main/java/ArchiveService.java",
+        wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+    );
+
+    let facts = extract_files(&wrapper_estate(&[caller]), &reg, &ctx);
+    assert_eq!(
+        broker_targets(&facts, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+        vec![ARCHIVE_EVENTS_KEY.to_string()],
+        "the wrapper's site is keyed on what its callers pass, and the keyless \
+         refusal row beside it is retracted",
+    );
+    assert_eq!(
+        forwarding_outcomes(&facts, WRAPPER_FILE),
+        vec![ForwardingOutcome::Resolved(Forwarded {
+            topic: ARCHIVE_EVENTS_KEY.to_string(),
+            chain: vec!["KafkaProducer.sendMessage/3".to_string()],
+        })],
+        "one frame, and the provenance names it",
+    );
+
+    let alone = extract_files(&wrapper_estate(&[]), &reg, &ctx);
+    assert_eq!(
+        broker_targets(&alone, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+        vec![String::new()],
+        "with no caller the identical site is the keyless refusal row it always was",
+    );
+    assert_eq!(forwarding_refusals(&alone, WRAPPER_FILE), vec!["no-call-site"]);
+}
+
+/// **[FR-WS-26] AC1, two frames.** The same wrapper reached through a
+/// `super.sendMessage(…)` override resolves at the second frame, with provenance
+/// naming **both**.
+///
+/// The override is the estate's own shape, and it is why the receiver rule
+/// exists: the `super` call inside the override is a caller of the BASE, and it
+/// must not also count as a caller of the override when the second frame looks
+/// that override up — following it there reads the override's own parameter and
+/// reports three frames.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_super_override_resolves_the_wrapper_at_two_frames() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    let override_source = "package a;\n\
+        public class ArchiveEventKafkaProducer extends KafkaProducer {\n\
+        \x20   @Override\n\
+        \x20   void sendMessage(String key, String payload, String topic) {\n\
+        \x20     super.sendMessage(key, payload, topic);\n\
+        \x20   }\n\
+        }\n";
+    let files = [
+        (
+            "producer/src/main/java/ArchiveEventKafkaProducer.java",
+            override_source.to_string(),
+        ),
+        (
+            "producer/src/main/java/ArchiveService.java",
+            wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+        ),
+    ];
+
+    let facts = extract_files(&wrapper_estate(&files), &reg, &ctx);
+    assert_eq!(
+        forwarding_outcomes(&facts, WRAPPER_FILE),
+        vec![ForwardingOutcome::Resolved(Forwarded {
+            topic: ARCHIVE_EVENTS_KEY.to_string(),
+            chain: vec![
+                "KafkaProducer.sendMessage/3".to_string(),
+                "ArchiveEventKafkaProducer.sendMessage/3".to_string(),
+            ],
+        })],
+        "the provenance names both frames, and names them apart — the two share a \
+         signature, so a chain keyed on the signature alone would print one frame \
+         twice",
+    );
+    assert_eq!(
+        broker_targets(&facts, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+        vec![ARCHIVE_EVENTS_KEY.to_string()],
+    );
+
+    // The negative control that isolates the SECOND frame: drop the service and
+    // the only caller left is the `super` call, whose operand is the override's
+    // own parameter with nothing behind it.
+    let without = extract_files(&wrapper_estate(&files[..1]), &reg, &ctx);
+    assert_eq!(
+        forwarding_refusals(&without, WRAPPER_FILE),
+        vec!["no-call-site"],
+        "with nothing calling the override, the second frame has no call site and \
+         the wrapper refuses",
+    );
+}
+
+/// **[FR-WS-26] AC2.** The five refusals, each pinned, and each on a tree whose
+/// only difference from the resolving one is the thing being refused.
+///
+/// They are one test because they are one table: the same wrapper, the same
+/// module, one caller shape per row. Splitting them would repeat the estate
+/// three hundred lines over and let a row drift from the shape it is contrasted
+/// with.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn each_named_forwarding_refusal_is_pinned_on_its_own_tree() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+
+    // A third frame: the wrapper's caller forwards a parameter of its own, and
+    // *that* method's caller forwards again.
+    let relay = "package a;\n\
+        public class Relay {\n\
+        \x20   private final KafkaProducer producer;\n\
+        \x20   void relay(String topic) {\n\
+        \x20     producer.sendMessage(\"k\", \"p\", topic);\n\
+        \x20   }\n\
+        \x20   void outer(String topic) {\n\
+        \x20     relay(topic);\n\
+        \x20   }\n\
+        }\n";
+
+    // (case, the caller files it adds to the base estate, the refusal it must
+    // report). A named alias so the table's shape reads as one thing.
+    type RefusalCase<'a> = (&'a str, Vec<(&'a str, String)>, &'a str);
+    let cases: [RefusalCase<'_>; 5] = [
+        (
+            "a third frame",
+            vec![("producer/src/main/java/Relay.java", relay.to_string())],
+            "three-or-more-frames",
+        ),
+        (
+            "a caller outside the build module",
+            vec![
+                ("consumer/pom.xml", "<project/>\n".to_string()),
+                (
+                    "consumer/src/main/java/ArchiveService.java",
+                    wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+                ),
+            ],
+            "out-of-module",
+        ),
+        (
+            "two callers passing different keys",
+            vec![
+                (
+                    "producer/src/main/java/ArchiveService.java",
+                    wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+                ),
+                (
+                    "producer/src/main/java/ReportService.java",
+                    wrapper_caller("ReportService", "kafkaTopics.getArchiveReporting()"),
+                ),
+            ],
+            "disagree",
+        ),
+        (
+            "a caller passing a bare variable",
+            vec![(
+                "producer/src/main/java/ArchiveService.java",
+                wrapper_caller("ArchiveService", "ARCHIVE_TOPIC"),
+            )],
+            "unresolvable-operand",
+        ),
+        (
+            "a caller reaching the wrapper by method reference only",
+            vec![(
+                "producer/src/main/java/ArchiveService.java",
+                "package a;\n\
+                 public class ArchiveService {\n\
+                 \x20   private final KafkaProducer producer;\n\
+                 \x20   void archive(java.util.List<String> all) {\n\
+                 \x20     all.forEach(producer::sendMessage);\n\
+                 \x20   }\n\
+                 }\n"
+                    .to_string(),
+            )],
+            "unresolvable-operand",
+        ),
+    ];
+
+    for (case, files, want) in cases {
+        let facts = extract_files(&wrapper_estate(&files), &reg, &ctx);
+        assert_eq!(
+            forwarding_refusals(&facts, WRAPPER_FILE),
+            vec![want],
+            "{case}: refuses, and reports the cause it actually had",
+        );
+        assert_eq!(
+            broker_targets(&facts, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+            vec![String::new()],
+            "{case}: the keyless refusal row stands, and no topic is fabricated",
+        );
+    }
+}
+
+/// **[FR-WS-26] AC2, the signature refusals.** A varargs or explicit-receiver
+/// wrapper is refused **before** any slot arithmetic, because the positional
+/// correspondence the hop rests on does not hold for either — a varargs slot
+/// absorbs any number of arguments, and a receiver parameter is supplied by
+/// none.
+///
+/// Both are contrasted with the ordinary signature on an otherwise identical
+/// tree, so the row is about the signature and not about the caller.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_varargs_or_explicit_receiver_signature_is_refused_before_the_slot_arithmetic() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    let wrapper = |params: &str, call: &str| {
+        format!(
+            "package a;\n\
+             public class KafkaProducer {{\n\
+             \x20   void sendMessage({params}) {{\n\
+             \x20     MessageBuilder.withPayload(\"p\")\n\
+             \x20       .setHeader(KafkaHeaders.TOPIC, topic)\n\
+             \x20       .build();\n\
+             \x20   }}\n\
+             \x20   void call(KafkaTopics kafkaTopics) {{\n\
+             \x20     {call};\n\
+             \x20   }}\n\
+             }}\n"
+        )
+    };
+
+    for (case, params, call, want) in [
+        (
+            "the ordinary signature, which must resolve",
+            "String topic",
+            "sendMessage(kafkaTopics.getArchiveEvents())",
+            "resolved",
+        ),
+        (
+            "varargs",
+            "String topic, String... headers",
+            "sendMessage(kafkaTopics.getArchiveEvents())",
+            "unsupported-signature",
+        ),
+        (
+            "an explicit receiver",
+            "KafkaProducer this, String topic",
+            "sendMessage(kafkaTopics.getArchiveEvents())",
+            "unsupported-signature",
+        ),
+    ] {
+        let inputs = vec![
+            FileInput::new(WRAPPER_MODULE_POM, "<project/>\n"),
+            FileInput::new(WRAPPER_PROPS_FILE, TOPIC_PROPS_SOURCE),
+            FileInput::new(WRAPPER_FILE, wrapper(params, call)),
+        ];
+        let facts = extract_files(&inputs, &reg, &ctx);
+        assert_eq!(
+            forwarding_refusals(&facts, WRAPPER_FILE),
+            vec![want],
+            "{case}",
+        );
+    }
+}
+
+/// **[FR-WS-26] AC2, the test tree.** A `src/test` call site neither admits nor
+/// vetoes: the `Mockito.any()` stub beside a real `src/main` caller does not stop
+/// the wrapper resolving, and on its own it is an absence rather than a refusal
+/// with a cause it did not have.
+///
+/// The control is the same file moved into `src/main`, where the identical
+/// `any()` operand DOES veto. That is what proves the exclusion is the tree rule
+/// and not the operand shape.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_test_tree_call_site_neither_admits_nor_vetoes() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    let stub = "package a;\n\
+        public class ArchiveServiceTest {\n\
+        \x20   private final KafkaProducer producer;\n\
+        \x20   void sends() {\n\
+        \x20     producer.sendMessage(any(), any(), any());\n\
+        \x20   }\n\
+        }\n";
+    let real = (
+        "producer/src/main/java/ArchiveService.java",
+        wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+    );
+
+    let beside = extract_files(
+        &wrapper_estate(&[
+            real.clone(),
+            (
+                "producer/src/test/java/ArchiveServiceTest.java",
+                stub.to_string(),
+            ),
+        ]),
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        forwarding_refusals(&beside, WRAPPER_FILE),
+        vec!["resolved"],
+        "a test call site beside a real one does not veto",
+    );
+
+    let alone = extract_files(
+        &wrapper_estate(&[(
+            "producer/src/test/java/ArchiveServiceTest.java",
+            stub.to_string(),
+        )]),
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        forwarding_refusals(&alone, WRAPPER_FILE),
+        vec!["no-call-site"],
+        "and on its own it does not admit either — the main-tree reading is left \
+         with no call site, which is what it reports",
+    );
+
+    let promoted = extract_files(
+        &wrapper_estate(&[(
+            "producer/src/main/java/ArchiveServiceStub.java",
+            stub.to_string(),
+        )]),
+        &reg,
+        &ctx,
+    );
+    assert_eq!(
+        forwarding_refusals(&promoted, WRAPPER_FILE),
+        vec!["unresolvable-operand"],
+        "the identical operand in src/main DOES veto, so the exclusion above is \
+         the tree rule and not the operand's shape",
+    );
+}
+
+/// **[FR-WS-26], the population boundary.** A topic that is a **lambda**
+/// parameter is not a forwarding candidate at all — a lambda is not a positional
+/// method call site, so there is nothing to look up.
+///
+/// Both spellings are pinned. The parenthesised one puts a `formal_parameters`
+/// list in the lambda's `parameters` field; the bare one puts a single
+/// `identifier` there, and without recognising that shape the walk climbs past
+/// the lambda and does the slot arithmetic against the ENCLOSING method's
+/// parameter list — a different list, a wrong arity, and a slot index that means
+/// nothing.
+///
+/// The enclosing method therefore declares a parameter of the **same name**,
+/// deliberately: that is the only shape in which climbing past the lambda finds
+/// anything at all, so a fixture without it would pass with the lambda rule
+/// removed and pin nothing.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_lambda_parameter_topic_is_not_a_forwarding_candidate() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    for (case, lambda) in [
+        ("parenthesised", "(String topic) ->"),
+        ("bare", "topic ->"),
+    ] {
+        let src = format!(
+            "package a;\n\
+             public class Registrar {{\n\
+             \x20   void register(String topic, java.util.function.Consumer<Object> sink) {{\n\
+             \x20     sink.accept({lambda} MessageBuilder.withPayload(topic)\n\
+             \x20       .setHeader(KafkaHeaders.TOPIC, topic)\n\
+             \x20       .build());\n\
+             \x20   }}\n\
+             }}\n"
+        );
+        let path = "producer/src/main/java/Registrar.java";
+        let facts = extract_files(
+            &[
+                FileInput::new(WRAPPER_MODULE_POM, "<project/>\n"),
+                FileInput::new(WRAPPER_PROPS_FILE, TOPIC_PROPS_SOURCE),
+                FileInput::new(path, &src),
+            ],
+            &reg,
+            &ctx,
+        );
+        assert!(
+            forwarding_outcomes(&facts, path).is_empty(),
+            "{case}: a lambda parameter is outside the population, so no candidate \
+             is recorded and none is decided",
+        );
+        assert_eq!(
+            broker_targets(&facts, path, ArtifactRelation::BrokerPublish),
+            vec![String::new()],
+            "{case}: the site is still reported refused, exactly as before the hop",
+        );
+    }
+}
+
+/// **[FR-WS-26], the ledger contract.** The hop retracts a keyless row only when
+/// **every** refusal that row stands for has resolved.
+///
+/// The ledger dedups on `(source, target, form, kind, relation)` and ignores the
+/// line, so two refused sites in one declaration reach it as ONE row. Retracting
+/// it on the first resolution would silence the second site, which is still
+/// refused — the invisible loss [NFR-CC-04] forbids, in the one shape this hop
+/// could create.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_keyless_row_standing_for_two_refusals_survives_one_resolution() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    // One declaration, two publish sites: one forwards its own parameter (which
+    // the hop resolves), one forwards a parameter of a wrapper nothing calls.
+    let two_sites = "package a;\n\
+        public class KafkaProducer {\n\
+        \x20   void sendMessage(String key, String payload, String topic) {\n\
+        \x20     MessageBuilder.withPayload(payload)\n\
+        \x20       .setHeader(KafkaHeaders.TOPIC, topic)\n\
+        \x20       .build();\n\
+        \x20     MessageBuilder.withPayload(payload)\n\
+        \x20       .setHeader(KafkaHeaders.TOPIC, key)\n\
+        \x20       .build();\n\
+        \x20   }\n\
+        }\n";
+    let inputs = vec![
+        FileInput::new(WRAPPER_MODULE_POM, "<project/>\n"),
+        FileInput::new(WRAPPER_PROPS_FILE, TOPIC_PROPS_SOURCE),
+        FileInput::new(WRAPPER_FILE, two_sites),
+        FileInput::new(
+            "producer/src/main/java/ArchiveService.java",
+            format!(
+                "package a;\n\
+                 public class ArchiveService {{\n\
+                 \x20   private final KafkaTopics kafkaTopics;\n\
+                 \x20   private final KafkaProducer producer;\n\
+                 \x20   void archive(String payload) {{\n\
+                 \x20     producer.sendMessage(UNPROVABLE, payload, {});\n\
+                 \x20   }}\n\
+                 }}\n",
+                "kafkaTopics.getArchiveEvents()"
+            ),
+        ),
+    ];
+
+    let facts = extract_files(&inputs, &reg, &ctx);
+    assert_eq!(
+        forwarding_refusals(&facts, WRAPPER_FILE),
+        vec!["resolved", "unresolvable-operand"],
+        "the topic slot resolves; the key slot does not",
+    );
+    let mut targets = broker_targets(&facts, WRAPPER_FILE, ArtifactRelation::BrokerPublish);
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec![String::new(), ARCHIVE_EVENTS_KEY.to_string()],
+        "the resolved site is admitted AND the keyless row stays, because the row \
+         still stands for a site that is refused",
+    );
+}
+
+/// **[FR-WS-26] and [NFR-PE-02].** A literal topic operand is outside the
+/// population, and a tree whose broker site carries one is untouched by the hop.
+///
+/// Two assertions, and the second is what makes this more than a statement about
+/// emptiness: the wrapper file's whole [`Facts`] is compared against the SAME
+/// tree with the accessor-bearing caller removed, so a hop that retracted, moved
+/// or re-lined a literal row in passing fails here even though it recorded no
+/// candidate.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+/// [NFR-PE-02]: ../../docs/specs/requirements/NFR-PE-02.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_tree_with_no_parameter_operand_is_untouched_by_the_hop() {
+    let (reg, ctx) = (registry(), SymbolContext::cargo("logos-core", "0.1.0"));
+    let literal = "package a;\n\
+        public class KafkaProducer {\n\
+        \x20   void sendMessage(String key, String payload) {\n\
+        \x20     MessageBuilder.withPayload(payload)\n\
+        \x20       .setHeader(KafkaHeaders.TOPIC, \"archive-events\")\n\
+        \x20       .build();\n\
+        \x20   }\n\
+        }\n";
+    let inputs = vec![
+        FileInput::new(WRAPPER_MODULE_POM, "<project/>\n"),
+        FileInput::new(WRAPPER_PROPS_FILE, TOPIC_PROPS_SOURCE),
+        FileInput::new(WRAPPER_FILE, literal),
+        FileInput::new(
+            "producer/src/main/java/ArchiveService.java",
+            wrapper_caller("ArchiveService", "kafkaTopics.getArchiveEvents()"),
+        ),
+    ];
+    let facts = extract_files(&inputs, &reg, &ctx);
+    let wrapper = facts
+        .iter()
+        .find(|f| f.path == WRAPPER_FILE)
+        .expect("the wrapper was extracted");
+    assert!(
+        wrapper.forwarding.is_empty(),
+        "a literal topic is not a forwarding candidate",
+    );
+    assert_eq!(
+        broker_targets(&facts, WRAPPER_FILE, ArtifactRelation::BrokerPublish),
+        vec!["archive-events".to_string()],
+        "and the literal keys exactly as it did before the hop existed",
+    );
+
+    let without_caller = extract_files(&inputs[..3], &reg, &ctx);
+    assert_eq!(
+        without_caller.iter().find(|f| f.path == WRAPPER_FILE),
+        Some(wrapper),
+        "every field of the wrapper's facts is identical with the caller removed:          the hop moved no node, no edge, no warning and no reference in passing",
+    );
+}
+
+/// **[FR-WS-26].** The single-file [`extract`] entry point records the candidate
+/// and decides **nothing**.
+///
+/// One file cannot answer a cross-file question, and the honest output is an
+/// undecided candidate rather than a refusal that was never tested. The same
+/// distinction [`extract`] already documents for the accessor chain's properties
+/// index.
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+#[test]
+#[cfg(feature = "lang-java")]
+fn the_single_file_entry_point_records_the_candidate_and_decides_nothing() {
+    let reg = registry();
+    let plugin = reg.for_extension("java").expect("java plugin present");
+    let facts = extract(
+        &FileInput::new(WRAPPER_FILE, WRAPPER_SOURCE),
+        plugin,
+        &SymbolContext::cargo("logos-core", "0.1.0"),
+    );
+    assert_eq!(facts.forwarding.len(), 1, "the site is in the population");
+    assert_eq!(
+        facts.forwarding[0].outcome, None,
+        "and is left undecided, not refused",
+    );
+    assert_eq!(
+        facts.forwarding[0].wrapper,
+        Callee { name: "sendMessage".to_string(), arity: 3 },
+    );
+    assert_eq!(facts.forwarding[0].slot, 2);
 }

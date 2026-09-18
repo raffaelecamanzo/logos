@@ -114,6 +114,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use logos_core::extract::config::corpus::{canonical_key, source_facts};
+use logos_core::extract::broker::ForwardingOutcome;
 use logos_core::extract::{extract, extract_files, FileInput, SymbolContext};
 use logos_core::federation::broker::{topic_identity, TopicIdentity};
 use logos_core::graph_store::ConfigDefinition;
@@ -1976,5 +1977,152 @@ fn the_reference_workspace_reports_its_topic_identities_before_and_after_the_com
         "an edge was lost although NEITHER end admitted a committed value — two \
          operands kept as written key exactly as they did before, so this can \
          only be a defect in the join: {unexplained:?}",
+    );
+}
+
+/// **S-417 / [FR-WS-26] AC8 — the two-frame wrapper hop, measured on the estate
+/// with its denominator, and no floor asserted on it.**
+///
+/// The population is exactly the one [S-392] measured and falsified at one frame
+/// and [S-416] carried at two: a publish or subscribe site whose topic operand is
+/// a bare parameter of the method enclosing it. Every such site was **refused**
+/// before this hop existed — that is what a `ForwardingCandidate` is — so the
+/// "before" figure is 0 by construction and the only interesting numbers are the
+/// after-count, the denominator, and the census of what still refuses.
+///
+/// # Why the census is the deliverable and the headline is not
+///
+/// [S-416] measured **8 of 13** production publish sites at two frames against a
+/// tracked floor of 7, and this pass is expected to come in **at or below** that:
+/// the harness folds a same-unit `static final` constant at a call site and the
+/// production rule refuses one ([FR-WS-26] AC4, and the Notes there for why a
+/// harness and an admission carry opposite burdens). A gap is therefore a
+/// *reconciliation*, not a regression, and the per-reason census below is what
+/// makes the two comparable. **No floor is asserted on any figure here** — the
+/// gate that governs this story is [S-416]'s, already passed, and re-asserting a
+/// measurement as an acceptance floor is the trap [S-397] recorded.
+///
+/// # What is asserted, and why only this
+///
+/// One thing: that the walk found the population at all. A run over a corpus that
+/// writes no wrapper-parameter operand reports zero for reasons that have nothing
+/// to do with this code, and a green zero is indistinguishable from a working
+/// hop. Everything else is printed.
+///
+/// The per-member and per-reason figures live **here and nowhere else**. They are
+/// deliberately not transcribed into prose beside the assertion that prints them,
+/// for the reason this module's S-409 sibling gives: a number copied into a doc
+/// comment is a twin that goes stale on its own schedule.
+///
+/// ```text
+/// cargo build -p logos-core --test broker_topic_corpus --features agents
+/// LOGOS_REF_WORKSPACE=~/source/pec-services RAYON_NUM_THREADS=2 \
+///   ./target/debug/deps/broker_topic_corpus-<hash> \
+///   the_reference_workspace_reports_its_two_frame_wrapper_resolutions --nocapture
+/// ```
+///
+/// [FR-WS-26]: ../../docs/specs/requirements/FR-WS-26.md
+/// [S-392]: ../../docs/planning/journal.md#s-392-measure-the-one-hop-parameter-forwarding-residue
+/// [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+/// [S-416]: ../../docs/planning/journal.md#s-416-measure-the-two-frame-wrapper-residue-over-main-tree-call-sites
+#[test]
+fn the_reference_workspace_reports_its_two_frame_wrapper_resolutions() {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-417 two-frame wrapper-hop corpus measurement."
+        );
+        return;
+    };
+
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let ctx = SymbolContext::default();
+
+    let mut by_member: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for entry in corpus_walker(&root).flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let (Ok(rel), Ok(source)) = (path.strip_prefix(&root), std::fs::read_to_string(path))
+        else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Some(member) = rel.split('/').next().map(str::to_string) else {
+            continue;
+        };
+        by_member.entry(member).or_default().push((rel, source));
+    }
+
+    // Per member: candidates, resolved, and the elapsed cost of the whole
+    // `extract_files` pass. The cost denominator is the member's file count, so a
+    // per-file figure is derivable rather than asserted.
+    let mut rows: Vec<(String, usize, usize, usize, u128)> = Vec::new();
+    let mut census: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut chains: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut topics: BTreeSet<(String, String)> = BTreeSet::new();
+
+    for (member, files) in &by_member {
+        let inputs: Vec<FileInput> = files
+            .iter()
+            .map(|(rel, source)| FileInput::new(rel, source))
+            .collect();
+        let started = std::time::Instant::now();
+        let facts = extract_files(&inputs, &registry, &ctx);
+        let elapsed = started.elapsed().as_millis();
+
+        let (mut candidates, mut resolved) = (0usize, 0usize);
+        for candidate in facts.iter().flat_map(|f| f.forwarding.iter()) {
+            candidates += 1;
+            match candidate.outcome.as_ref() {
+                Some(ForwardingOutcome::Resolved(forwarded)) => {
+                    resolved += 1;
+                    *chains.entry(forwarded.chain.len()).or_default() += 1;
+                    topics.insert((member.clone(), forwarded.topic.clone()));
+                }
+                Some(ForwardingOutcome::Refused(reason)) => {
+                    *census.entry(reason.as_str()).or_default() += 1;
+                }
+                None => panic!("extract_files decides every candidate"),
+            }
+        }
+        if candidates > 0 {
+            rows.push((member.clone(), candidates, resolved, inputs.len(), elapsed));
+        }
+    }
+
+    eprintln!("S-417 corpus: root={}", root.display());
+    eprintln!(
+        "  per member — resolved/candidates, over the member's Java file count, \
+         with the whole extract_files pass's wall time (no floor is asserted on \
+         any of these):"
+    );
+    for (member, candidates, resolved, files, elapsed) in &rows {
+        eprintln!(
+            "    {member:<44} {resolved:>3}/{candidates:<3}  files={files:<5} \
+             extract_files={elapsed}ms"
+        );
+    }
+    let candidates: usize = rows.iter().map(|r| r.1).sum();
+    let resolved: usize = rows.iter().map(|r| r.2).sum();
+    eprintln!(
+        "  TOTAL over {} member(s) writing a parameter-passed topic operand: \
+         resolved {resolved}/{candidates}",
+        rows.len(),
+    );
+    eprintln!("  frames taken, by chain length: {chains:?}");
+    eprintln!("  refusal census (the residue, by cause): {census:?}");
+    eprintln!("  distinct (member, topic) admitted by the hop: {}", topics.len());
+
+    assert!(
+        candidates > 0,
+        "the reference workspace at {} writes no parameter-passed broker topic \
+         operand at all — that is not the population S-416 measured, and a zero \
+         here says nothing about the hop",
+        root.display(),
     );
 }

@@ -307,8 +307,35 @@ pub(crate) fn record_refusals(
     candidates: Vec<RefusalCandidate>,
     resolved: &[(ArtifactRelation, Range<usize>)],
 ) -> usize {
-    let mut seen: HashSet<(ArtifactRelation, String, u32)> = HashSet::new();
     let mut recorded = 0;
+    for (relation, source, line) in surviving_refusals(&candidates, resolved) {
+        if push_artifact_ref(facts, &source, "", relation, form, line) {
+            recorded += 1;
+        }
+    }
+    recorded
+}
+
+/// Which refusal candidates survive the reconcile, in the order they were
+/// raised: one `(relation, declaration, line)` per row [`record_refusals`] is
+/// about to write.
+///
+/// Extracted so a second reader can ask *which* rows survive without re-spelling
+/// either half of the discipline [`record_refusals`] documents — the cancel rule
+/// and the dedup grain. The S-417 two-frame wrapper hop
+/// ([`crate::extract::broker`]) is that reader: a forwarding candidate is only a
+/// candidate where a keyless row actually survives here, and the hop may retract
+/// that row only once **every** refusal sharing its `(relation, declaration)` has
+/// resolved — the ledger collapses them to one row, so retracting on the first
+/// would silence a site that is still refused ([NFR-CC-04]).
+///
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) fn surviving_refusals(
+    candidates: &[RefusalCandidate],
+    resolved: &[(ArtifactRelation, Range<usize>)],
+) -> Vec<(ArtifactRelation, LogosSymbol, u32)> {
+    let mut seen: HashSet<(ArtifactRelation, String, u32)> = HashSet::new();
+    let mut out = Vec::new();
     for candidate in candidates {
         // Did the arm resolve an operand at this site? Then it is not a refusal.
         if resolved.iter().any(|(relation, at)| {
@@ -325,18 +352,13 @@ pub(crate) fn record_refusals(
         )) {
             continue; // this site already recorded its one refusal
         }
-        if push_artifact_ref(
-            facts,
-            &candidate.source,
-            "",
+        out.push((
             candidate.relation,
-            form,
+            candidate.source.clone(),
             candidate.line,
-        ) {
-            recorded += 1;
-        }
+        ));
     }
-    recorded
+    out
 }
 
 /// Capture every cross-artifact reference fact for one config/artifact file
@@ -1394,6 +1416,7 @@ mod tests {
             refs: Vec::new(),
             warnings: Vec::new(),
             config_source: None,
+            forwarding: Vec::new(),
         }
     }
 
@@ -1826,6 +1849,7 @@ mod infra_tests {
             refs: Vec::new(),
             warnings: Vec::new(),
             config_source: None,
+            forwarding: Vec::new(),
         }
     }
 
