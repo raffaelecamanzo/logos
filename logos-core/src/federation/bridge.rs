@@ -1768,9 +1768,25 @@ where
 /// not touch, and collapsing them here would change what a workspace with no
 /// committed configuration reports.
 ///
+/// **Only within one call site.** `from` is a `(member, symbol)` endpoint, not a
+/// reference, so two different targets in one method that bind the same provider
+/// reach this function as a collapsible pair — and merging them would hand the
+/// surviving edge a `bound` list naming keys **no single target names**, which
+/// [`Provenance::ConfigBound`]'s contract ("one entry per configuration key the
+/// target names") forbids. The key sequence is what separates the two cases:
+/// every composition of one target narrows the *same* `ResolvedTemplate::bound`,
+/// so two edges from one site name the same keys in the same order, and the
+/// union then only restores values of those keys. Review found this; the guard
+/// is the `same_keys` test below.
+///
 /// `edges` must be sorted, which is [`match_indexed`]'s postcondition: the
 /// derived `Ord` compares `(relation, from, to, intake)` before either
-/// provenance, so every candidate for a collapse is adjacent.
+/// provenance, so every candidate for a collapse is adjacent — and it stays
+/// adjacent only because an HTTP coupling group's `to_value` is uniform
+/// (`Literal` for every contract-surface provider), which is what keeps
+/// `to_value` sorting *after* `from_value` harmless. A future provider arm
+/// carrying admitted provenance would need a group-wise scan instead of this
+/// single-step one.
 ///
 /// [CR-118]: ../../../docs/requests/CR-118-coverage-names-the-provider-and-records-the-ambiguity-ceiling.md
 /// [CR-133]: ../../../docs/requests/CR-133-bridge-keys-http-consumer-on-committed-target.md
@@ -1791,8 +1807,19 @@ fn collapse_by_coupling(edges: &mut Vec<BridgeEdge>) {
                     Provenance::ConfigBound { bound: into },
                     Provenance::ConfigBound { bound: from },
                 ) => {
-                    union_bound(into, from);
-                    true
+                    // Two edges of ONE site name the same keys in the same
+                    // order; two sites do not. See the doc above.
+                    let same_keys = into.len() == from.len()
+                        && into
+                            .iter()
+                            .zip(from.iter())
+                            .all(|(held, incoming)| {
+                                held.key == incoming.key && held.source == incoming.source
+                            });
+                    if same_keys {
+                        union_bound(into, from);
+                    }
+                    same_keys
                 }
                 _ => false,
             }
@@ -3516,6 +3543,46 @@ mod tests {
                 vec!["/orders-a".to_string(), "/orders-b".to_string()]
             )],
             "and it carries BOTH overlays, because both produce it"
+        );
+    }
+
+    /// **The collapse never merges two call sites.** `from` is a `(member,
+    /// symbol)` endpoint, so two different targets in one method that bind the
+    /// same provider arrive as a collapsible pair. Review found the first
+    /// version merging them, which handed the surviving edge a `bound` list
+    /// naming `a.base` **and** `b.base` — keys no single target names, which
+    /// [`Provenance::ConfigBound`]'s contract forbids and which S-419 would
+    /// render on the service map.
+    #[test]
+    fn two_call_sites_binding_one_provider_are_not_merged() {
+        reset();
+        set_member("web", 0, vec![]);
+        set_consumers(
+            "web",
+            vec![
+                http_call("GET ${a.base}/{id}", "local fetch_order"),
+                http_call("GET ${b.base}/{id}", "local fetch_order"),
+            ],
+        );
+        commit_config("web", "a.base", &[("application.yml", None, "/orders")]);
+        commit_config("web", "b.base", &[("application.yml", None, "/orders")]);
+        set_member("orders", 0, vec![route("GET /orders/{oid}", "local show")]);
+
+        let edges = ContractBridge::new().edges(&registry(&["web", "orders"]));
+        assert_eq!(
+            edges.len(),
+            2,
+            "two call sites are two edges, however they collide at the provider: {edges:?}"
+        );
+        let mut named: Vec<Vec<String>> = edges
+            .iter()
+            .map(|e| evidence(&e.from_value).into_iter().map(|(key, _, _)| key).collect())
+            .collect();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![vec!["a.base".to_string()], vec!["b.base".to_string()]],
+            "and each edge names ONLY the keys its own target names"
         );
     }
 
