@@ -574,32 +574,70 @@ pub(crate) fn self_referential_tools() -> Vec<&'static str> {
 }
 
 /// A SQL predicate keeping only [`EventClass::EngineQuery`] rows, over a table
-/// whose `tool` column is in scope ([FR-OB-09]).
+/// whose `tool` **and** `surface` columns are in scope ([FR-OB-09]) — `events`
+/// and `daily_rollup`, the two the read-model reads.
+///
+/// # Two axes, because two things can be self-referential
+///
+/// A **tool** is self-referential when its subject is Logos's own state
+/// whoever calls it ([`Tool::event_class`]); a **surface** is when every event
+/// it can carry is of that kind by construction
+/// ([`Surface::event_class`](super::Surface::event_class), widened for shell
+/// chrome by [CR-097]). The second axis is what an adapter uses to classify a
+/// read the tool arm cannot: the app header calling a *navigation* tool is
+/// still nobody's question ([BR-42]). Both lists are derived from the
+/// classifications rather than written out here, so neither can drift from it.
 ///
 /// # Why interpolation is safe here
 ///
-/// The interpolated values are `&'static str` literals from a closed enum —
-/// never user input, never a stored value. `every_registered_tool_is_classified_and_sql_safe` pins
-/// them to `[a-z][a-z0-9_]*`, so the fragment cannot carry a quote, and the
-/// guard fails the build's test run if a future wire name ever could.
+/// The interpolated values are `&'static str` literals from closed enums —
+/// never user input, never a stored value.
+/// `every_registered_tool_is_classified_and_sql_safe` and
+/// `every_surface_is_classified_and_sql_safe` pin them to `[a-z][a-z0-9_]*`, so
+/// the fragment cannot carry a quote, and the guards fail the build's test run
+/// if a future wire name ever could.
 ///
 /// An **unrecognised** stored tool (a name registered by an older build and
 /// since retired) is *kept*, not dropped: history is reported as it was
 /// recorded rather than silently rewritten by today's registry ([NFR-CC-04]).
+/// The same holds for an unrecognised stored `surface`.
 ///
+/// [CR-097]: ../../../docs/requests/CR-097-header-graph-state-readout.md
+/// [BR-42]: ../../../docs/specs/software-spec.md#316-observability--telemetry
 /// [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub(crate) fn engine_query_predicate() -> String {
-    let excluded = self_referential_tools();
-    if excluded.is_empty() {
+    /// `column NOT IN ('a', 'b')`, or `None` when the classification excludes
+    /// nothing on that axis — so an empty axis contributes no clause at all
+    /// rather than the invalid `NOT IN ()`.
+    fn not_in(column: &str, excluded: Vec<&'static str>) -> Option<String> {
+        if excluded.is_empty() {
+            return None;
+        }
+        let names = excluded
+            .into_iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("{column} NOT IN ({names})"))
+    }
+
+    let clauses: Vec<String> = [
+        not_in("tool", self_referential_tools()),
+        not_in("surface", super::self_referential_surfaces()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if clauses.is_empty() {
         // Nothing is classified self-referential: an always-true predicate, so
         // the caller's `AND` composition stays valid SQL rather than `IN ()`.
         return "1 = 1".to_string();
     }
-    let names = excluded
-        .into_iter()
-        .map(|n| format!("'{n}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("tool NOT IN ({names})")
+    // `AND` throughout, so the fragment needs no parentheses of its own to
+    // survive the caller's own `AND` composition. It must stay that way: an
+    // `OR` introduced here without wrapping would silently widen every
+    // interpolating query's `WHERE`.
+    clauses.join(" AND ")
 }

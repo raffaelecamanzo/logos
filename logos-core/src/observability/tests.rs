@@ -16,8 +16,8 @@ use super::tool::{
     class_of_wire, self_referential_tools, EventClass, Tool, ToolClass, UNREGISTERED_CLASS,
 };
 use super::{
-    db, generate_session_id, in_surface, telemetry_logos_dir, telemetry_origin, traced,
-    EventRecord, Surface, TELEMETRY_TARGET,
+    db, generate_session_id, in_surface, self_referential_surfaces, telemetry_logos_dir,
+    telemetry_origin, traced, EventRecord, Surface, TELEMETRY_TARGET,
 };
 
 /// An event record `secs_ago` seconds before the fixed "now" used in tests.
@@ -729,6 +729,115 @@ fn unclassified_tool_fails_the_build() {
     }
 }
 
+/// **An unclassified surface must fail the build** ([BR-42]) — the second half
+/// of the rule `unclassified_tool_fails_the_build` pins for tools.
+///
+/// The requirement is written about *reads*, not about tools: "adding such a
+/// read must register its classification; an unclassified read is a build
+/// failure, never a silent inclusion". Since [CR-097] an adapter registers by
+/// naming a [`Surface`], so `Surface::event_class` is now a place a wildcard
+/// would reinstate the silent default — and a wildcard there is *worse* than
+/// one in `Tool::event_class`, because `None` ("the tool decides") is the arm a
+/// careless fallback would pick, quietly putting a new adapter's chrome back
+/// into the figures.
+///
+/// Same construction as the tool guard, and deliberately so: comments stripped,
+/// set equality against the vocabulary, plus a scan for a fallback arm however
+/// it is spelled. See that test for why each half is there.
+///
+/// [BR-42]: ../../../docs/specs/software-spec.md#316-observability--telemetry
+/// [CR-097]: ../../../docs/requests/CR-097-header-graph-state-readout.md
+#[test]
+fn unclassified_surface_fails_the_build() {
+    fn strip_comments(body: &str) -> String {
+        body.lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn variants_named_in(code: &str) -> std::collections::BTreeSet<String> {
+        code.match_indices("Surface::")
+            .map(|(at, marker)| {
+                code[at + marker.len()..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            })
+            .filter(|ident| !ident.is_empty())
+            .collect()
+    }
+
+    /// The variants the `Surface` enum *declares*, read from its own source.
+    ///
+    /// `Surface::ALL` would be the obvious roster and is the wrong one here:
+    /// [`Surface::Chat`] is `#[cfg(feature = "agents")]`, so under a bare
+    /// `cargo test -p logos-core` it is absent from `ALL` while still being
+    /// named — correctly — in the match. Comparing source against source makes
+    /// the guard feature-independent, and widens it: a variant declared but
+    /// left to a fallback fails here under *either* feature configuration.
+    fn variants_declared_in(source: &str) -> std::collections::BTreeSet<String> {
+        let body = source
+            .split_once("pub enum Surface {")
+            .expect("the Surface enum is where this test believes it is")
+            .1
+            .split_once("\n}\n")
+            .expect("the Surface enum is brace-delimited")
+            .0;
+        strip_comments(body)
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.strip_suffix(','))
+            .filter(|ident| {
+                ident.starts_with(|c: char| c.is_ascii_uppercase())
+                    && ident.chars().all(|c| c.is_alphanumeric() || c == '_')
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    let source = include_str!("mod.rs");
+    let vocabulary = variants_declared_in(source);
+    assert!(
+        vocabulary.contains("Shell"),
+        "the CR-097 shell-chrome surface is declared: {vocabulary:?}"
+    );
+    let signature = "pub(crate) const fn event_class(self) -> Option<EventClass> {";
+    let body = source
+        .split_once(signature)
+        .expect("Surface::event_class is where this test believes it is")
+        .1;
+    let body = body
+        .split_once("\n    }\n")
+        .expect("Surface::event_class is brace-delimited")
+        .0;
+    let code = strip_comments(body);
+
+    for line in code.lines() {
+        let Some((pattern, _)) = line.split_once("=>") else {
+            continue;
+        };
+        let pattern = pattern.trim().trim_start_matches('|').trim();
+        let is_catch_all = pattern == "_"
+            || (!pattern.is_empty()
+                && pattern.starts_with(|c: char| c.is_ascii_lowercase())
+                && pattern.chars().all(|c| c.is_alphanumeric() || c == '_'));
+        assert!(
+            !is_catch_all,
+            "`{pattern} =>` in Surface::event_class is a catch-all arm; it defeats \
+             the build-time completeness guarantee (FR-OB-09, BR-42) by giving a \
+             new surface a silent default instead of failing to compile"
+        );
+    }
+
+    assert_eq!(
+        variants_named_in(&code),
+        vocabulary,
+        "Surface::event_class must name exactly the {} declared surfaces",
+        vocabulary.len()
+    );
+}
+
 /// Every registered tool carries one of the **five** [FR-OB-11] classes, the
 /// labels are exactly that vocabulary, and none of the five is dead.
 ///
@@ -923,6 +1032,180 @@ fn the_self_referential_exclusion_reaches_rollup_rows() {
     assert_eq!(info.calls_by_tool[0].tool, "impact");
     let day_calls: u64 = info.activity_by_day.iter().map(|d| d.calls).sum();
     assert_eq!(day_calls, 6, "and the daily series applies the same rule");
+}
+/// [FR-OB-09] widened by [CR-097]: the app shell's own chrome is a
+/// **surface**, and every event it carries is self-referential by construction.
+///
+/// The tool arm alone cannot express this. The header's readout happens to call
+/// `status`, which is already excluded as a tool — but that exclusion is
+/// incidental to *which engine method the handler picked*, and it says nothing
+/// about the next chrome read. So the fixture seeds a chrome-issued `search`:
+/// a wire name the tool arm **counts**, excluded here only because the shell
+/// declared the surface at its adapter boundary ([BR-42]). Flip the surface arm
+/// off and that row alone reappears in the figures.
+#[test]
+fn shell_chrome_is_excluded_by_the_surface_arm_of_the_classification() {
+    let mut conn = db::open_in_memory();
+    let event = |surface: &'static str, tool: &str| EventRecord {
+        at: NOW - 60,
+        surface,
+        tool: tool.to_string(),
+        duration_ms: 10,
+        ok: true,
+        origin: "main".to_string(),
+        session_id: "test-session".to_string(),
+    };
+    db::write_batch(
+        &mut conn,
+        &[
+            // A graph query the user issued through the SPA — real use.
+            event("web", "search"),
+            // The header's graph-state readout (FR-UI-34), one per navigation.
+            event("shell", "status"),
+            // Chrome reading the graph itself: the tool arm would count this.
+            event("shell", "search"),
+        ],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).expect("stats compute");
+
+    let counted: Vec<(&str, &str)> = info
+        .calls_by_tool
+        .iter()
+        .map(|u| (u.surface.as_str(), u.tool.as_str()))
+        .collect();
+    assert_eq!(
+        counted,
+        vec![("web", "search")],
+        "only the user's own query counts"
+    );
+    assert_eq!(info.calls_total, 1, "the shell's two reads count nowhere");
+    // Nothing was destroyed — the rows are still in the raw store, only
+    // attributed away from the usage figures ([NFR-CC-04]).
+    let stored: i64 = conn
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, 3, "every event survives; only its attribution changed");
+}
+
+/// The same exclusion reaches `daily_rollup`, whose rows carry `surface` too —
+/// so a window long enough to touch rolled-up days applies one rule, not two.
+///
+/// This is why the classification is derived from the stored `surface` rather
+/// than from a per-row class column: the rollup aggregates away everything but
+/// `(day, surface, tool)`, and a class that lived anywhere else could not
+/// survive it.
+#[test]
+fn the_shell_chrome_exclusion_reaches_rollup_rows() {
+    let conn = db::open_in_memory();
+    // `impact` deliberately, not `status`: a rolled-up `status` row is already
+    // excluded by the tool arm, so seeding one would prove nothing about the
+    // surface arm this test exists for.
+    for (surface, tool, calls) in [("shell", "impact", 40), ("web", "impact", 6)] {
+        conn.execute(
+            "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                       total_duration_ms, max_duration_ms)
+             VALUES (date(?1, 'unixepoch'), ?2, ?3, ?4, ?4, 100, 50)",
+            rusqlite::params![NOW - 86_400, surface, tool, calls],
+        )
+        .unwrap();
+    }
+
+    let info = stats_from(&conn, 7, NOW).expect("stats compute");
+
+    assert_eq!(info.calls_total, 6, "the rolled-up chrome reads are excluded");
+    assert_eq!(info.calls_by_tool.len(), 1);
+    assert_eq!(info.calls_by_tool[0].tool, "impact");
+    let day_calls: u64 = info.activity_by_day.iter().map(|d| d.calls).sum();
+    assert_eq!(day_calls, 6, "and the daily series applies the same rule");
+}
+
+/// [FR-UI-34] end to end through the emission path: a read entered under
+/// [`Surface::Shell`] is stored as `shell` and never reaches a usage figure,
+/// while the same tool called outside that scope still counts.
+///
+/// Mirrors `chat_agent_calls_are_separable_from_web_and_mcp` — the two are the
+/// same mechanism (an adapter naming itself at its boundary) pointed at
+/// opposite conclusions: the chat agent's calls are separable **and counted**,
+/// the shell's are separable **and excluded**.
+#[test]
+fn shell_chrome_reads_are_separable_from_the_web_surface_that_hosts_them() {
+    assert_eq!(Surface::Shell.as_str(), "shell", "the CR-097 wire value");
+
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let subscriber = tracing_subscriber::registry()
+        // The shell runs *inside* `serve --ui`, whose process surface is web.
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), "test-session".to_string(), sink));
+    tracing::subscriber::with_default(subscriber, || {
+        in_surface(Surface::Shell, || {
+            traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+        });
+        traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].surface, "shell", "the header's own read");
+    assert_eq!(records[1].surface, "web", "a human browsing the dashboard");
+
+    let mut conn = db::open_in_memory();
+    let rows: Vec<EventRecord> = records
+        .into_iter()
+        .map(|r| EventRecord { at: NOW - 60, ..r })
+        .collect();
+    db::write_batch(&mut conn, &rows).unwrap();
+    let info = stats_from(&conn, 7, NOW).expect("stats compute");
+    assert_eq!(info.calls_total, 1, "only the human's call is usage");
+    assert_eq!(info.calls_by_tool[0].surface, "web");
+}
+
+/// Every surface is classified, its wire name is unique and SQL-safe to
+/// interpolate, and the self-referential set is exactly the one the acceptance
+/// criteria name.
+///
+/// The SQL-safety half matters for the same reason it does for tools:
+/// [`engine_query_predicate`] interpolates these names into a `NOT IN (…)`
+/// list, and the guard is what makes that interpolation provably quote-free.
+#[test]
+fn every_surface_is_classified_and_sql_safe() {
+    let mut names: Vec<&str> = Surface::ALL.iter().map(|s| s.as_str()).collect();
+    let total = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), total, "surface wire names are unique");
+
+    for surface in Surface::ALL {
+        let name = surface.as_str();
+        assert!(!name.is_empty(), "{surface:?} has a wire name");
+        // The same shape the tool guard pins, for the same reason: both lists
+        // are interpolated into the one predicate.
+        let mut chars = name.chars();
+        assert!(
+            chars.next().is_some_and(|c| c.is_ascii_lowercase()),
+            "{name} starts with a lowercase ascii letter"
+        );
+        assert!(
+            chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "{name} is [a-z0-9_] throughout — SQL-safe to interpolate"
+        );
+        assert_eq!(
+            Surface::from_wire(name),
+            Some(*surface),
+            "{name} round-trips through the wire vocabulary"
+        );
+        // Total by construction (an exhaustive match); this asserts calling it
+        // is infallible for every variant.
+        let _: Option<EventClass> = surface.event_class();
+    }
+
+    assert_eq!(
+        self_referential_surfaces(),
+        vec!["shell"],
+        "the shell is the one surface whose every event is self-referential by \
+         construction; `web` carries both a user's query and a Statistics-tab \
+         render, which is exactly why the blanket surface filter had to go"
+    );
 }
 
 /// The exclusion holds across **every** query the read-model runs, not just the

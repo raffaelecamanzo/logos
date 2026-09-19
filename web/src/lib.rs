@@ -62,6 +62,7 @@ use logos_core::config::{ConfigError, PolicyFile};
 use logos_core::federation::{discover, Backing, ContractBridge, EngineRegistry};
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
+use logos_core::observability::{in_surface, Surface};
 use logos_core::Engine;
 
 use crate::member::MemberEngine;
@@ -1351,7 +1352,7 @@ async fn config_save(
             .into_response();
     };
     let content = form.get("content").cloned().unwrap_or_default();
-    let result = bridge(engine, "config_save", move |e| e.config_write(file, &content)).await;
+    let result = bridge(engine, "config_save", Surface::Web, move |e| e.config_write(file, &content)).await;
     match result {
         Ok(outcome) => Json(outcome).into_response(),
         // Honest-error translation at the façade boundary (ADR-14): a validation
@@ -1390,7 +1391,7 @@ async fn config_apply(
         return (StatusCode::BAD_REQUEST, "unknown policy file (expected file=config|rules)")
             .into_response();
     };
-    let result = bridge(engine, "config_apply", move |e| e.config_apply(file)).await;
+    let result = bridge(engine, "config_apply", Surface::Web, move |e| e.config_apply(file)).await;
     match result {
         Ok(outcome) => Json(outcome).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
@@ -1410,7 +1411,7 @@ async fn config_save_secret(
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let api_key = form.get("api_key").cloned().unwrap_or_default();
-    let result = bridge(engine, "config_save_secret", move |e| {
+    let result = bridge(engine, "config_save_secret", Surface::Web, move |e| {
         e.config_write_secret(&api_key)
     })
     .await;
@@ -1447,7 +1448,7 @@ struct ThreadSummary {
 /// (S-250): the list is that member's `.logos/chat.db`.
 #[cfg(feature = "agents")]
 async fn chat_threads(MemberEngine(engine): MemberEngine) -> Response {
-    let result = bridge(engine, "chat_threads", move |e| {
+    let result = bridge(engine, "chat_threads", Surface::Web, move |e| {
         let store = chat_agent::ChatStore::open(e.root())?;
         store.list_threads()
     })
@@ -1480,7 +1481,7 @@ async fn chat_thread_messages(
     MemberEngine(engine): MemberEngine,
     axum::extract::Path(thread_id): axum::extract::Path<i64>,
 ) -> Response {
-    let result = bridge(engine, "chat_thread_messages", move |e| {
+    let result = bridge(engine, "chat_thread_messages", Surface::Web, move |e| {
         let store = chat_agent::ChatStore::open(e.root())?;
         // Distinguish "no such thread" (→ 404) from "a real thread with no
         // messages" (→ an honest empty list) — `messages` alone cannot.
@@ -1514,7 +1515,7 @@ async fn chat_thread_delete(
     MemberEngine(engine): MemberEngine,
     axum::extract::Path(thread_id): axum::extract::Path<i64>,
 ) -> Response {
-    let result = bridge(engine, "chat_thread_delete", move |e| {
+    let result = bridge(engine, "chat_thread_delete", Surface::Web, move |e| {
         let mut store = chat_agent::ChatStore::open(e.root())?;
         store.delete_thread(thread_id)
     })
@@ -1527,22 +1528,60 @@ async fn chat_thread_delete(
 }
 
 /// The ADR-03 submit-and-await bridge: run one blocking `Engine` call on the
-/// blocking pool (tokio never enters logos-core) and emit the per-render
-/// telemetry event (surface=web) through the tracing chokepoint (ADR-13).
-pub(crate) async fn bridge<T, F>(engine: Arc<Engine>, view: &'static str, call: F) -> T
+/// blocking pool (tokio never enters logos-core), attributed to the [`Surface`]
+/// the handler names, and emit the per-render log line through the tracing
+/// chokepoint (ADR-13).
+///
+/// # Why every caller names its surface
+///
+/// `surface` used to be the literal `"web"` here, which is true of the
+/// *process* and says nothing about **whose question** a handler answers.
+/// Almost every route answers the user's — [`Surface::Web`] — but the app
+/// header's graph-state readout ([FR-UI-34]) answers nobody's: the shell
+/// re-issues it on every client-side navigation, so counting it would make the
+/// shell's own furniture the loudest event in the store ([BR-42], [CR-097]).
+/// Only the adapter knows which it is; the engine chokepoint underneath sees
+/// one `status` read and cannot tell the header's from `logos status` typed by
+/// a developer ([ADR-01]).
+///
+/// So the surface is a **parameter, not a default**: a handler added without
+/// one does not compile, which is what makes "an unclassified read is a build
+/// failure, never a silent inclusion" ([BR-42]) true at this boundary and not
+/// merely intended. `agent-core`'s own chat bridges arrived at the same shape
+/// and their doc prescribes it for the next caller — "give the bridges a
+/// surface parameter and let each caller name itself".
+///
+/// The scope is entered **inside** the `spawn_blocking` closure, not around the
+/// `await`: [`in_surface`] scopes per thread, and the blocking pool is where
+/// the engine — and so the telemetry event — actually runs. Resolution
+/// therefore happens once per request at this adapter boundary, never per
+/// engine call, and costs one thread-local `Cell` read on the emission path
+/// ([NFR-OO-02]).
+///
+/// [ADR-01]: ../../docs/specs/architecture/decisions/ADR-01.md
+/// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
+/// [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
+/// [FR-UI-34]: ../../docs/specs/requirements/FR-UI-34.md
+/// [NFR-OO-02]: ../../docs/specs/requirements/NFR-OO-02.md
+pub(crate) async fn bridge<T, F>(
+    engine: Arc<Engine>,
+    view: &'static str,
+    surface: Surface,
+    call: F,
+) -> T
 where
     F: FnOnce(&Engine) -> T + Send + 'static,
     T: Send + 'static,
 {
     let started = Instant::now();
-    let out = tokio::task::spawn_blocking(move || call(&engine))
+    let out = tokio::task::spawn_blocking(move || in_surface(surface, || call(&engine)))
         .await
         // The Engine read-models are infallible at the surface (ADR-14); a
         // panic crossing the pool is a core bug — re-raise rather than mask it.
         .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
     tracing::info!(
         target: "logos::web",
-        surface = "web",
+        surface = surface.as_str(),
         view,
         duration_ms = started.elapsed().as_millis() as u64,
         "page render",
@@ -1598,6 +1637,76 @@ mod tests {
             &wiki_for(&injected_wiki, &default, Arc::clone(&other)),
             &injected_wiki
         ));
+    }
+
+    /// The [`bridge`] installs the boundary scope its caller names, and
+    /// installs it **inside** the blocking closure — where the engine (and so
+    /// the telemetry event) actually runs ([FR-OB-09], [CR-097]).
+    ///
+    /// Asserting it here rather than in `logos-core` is the point: the core
+    /// proves the scope *works*, this proves the web adapter *enters* it. The
+    /// probe closure stands in for a real handler body, which is exactly what
+    /// `bridge` hands to the engine. Mirrors
+    /// `both_engine_bridges_run_under_the_chat_surface` in `agent-core`, whose
+    /// doc prescribed this shape for the next caller.
+    #[tokio::test]
+    async fn the_bridge_runs_the_engine_call_under_the_surface_its_caller_names() {
+        let dir = tempfile::tempdir().expect("temp project root");
+        let engine = Arc::new(Engine::open(dir.path()));
+
+        let seen = bridge(Arc::clone(&engine), "probe", Surface::Shell, |_| {
+            logos_core::observability::current_surface_override()
+        })
+        .await;
+        assert_eq!(
+            seen,
+            Some(Surface::Shell),
+            "a chrome handler's engine call is attributed to the shell"
+        );
+
+        let seen = bridge(engine, "probe", Surface::Web, |_| {
+            logos_core::observability::current_surface_override()
+        })
+        .await;
+        assert_eq!(
+            seen,
+            Some(Surface::Web),
+            "and an ordinary handler's to the web surface it is served from"
+        );
+
+        assert_eq!(
+            logos_core::observability::current_surface_override(),
+            None,
+            "and the scope does not leak back to the serve loop's thread"
+        );
+    }
+
+    /// The status handler is the **only** `/api/v1` handler that is not
+    /// [`Surface::Web`] ([CR-097] §5.2, [BR-42]).
+    ///
+    /// A scan rather than a behavioural assertion, and deliberately: the
+    /// failure this guards is a *future* handler quietly copying
+    /// `Surface::Shell` from its neighbour, which no single request can
+    /// observe. The exclusion is total over a surface, so a second handler
+    /// naming it would drop that endpoint's reads out of the usage figures
+    /// with nothing failing — the same closed-list failure mode [CR-091] was
+    /// filed about, one layer up.
+    #[test]
+    fn only_the_status_handler_names_the_shell_surface() {
+        let source = include_str!("api_v1.rs");
+        let shell_sites: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains("Surface::Shell") && line.contains("bridge("))
+            .collect();
+        assert_eq!(
+            shell_sites.len(),
+            1,
+            "exactly one handler classifies itself as shell chrome: {shell_sites:?}"
+        );
+        assert!(
+            shell_sites[0].contains("\"api_v1_status\""),
+            "and it is the status handler: {shell_sites:?}"
+        );
     }
 
     #[test]

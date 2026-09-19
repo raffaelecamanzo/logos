@@ -47,7 +47,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
 
 pub use layer::TelemetryGuard;
-pub(crate) use tool::Tool;
+pub(crate) use tool::{EventClass, Tool};
 
 /// The reserved target tagging events for the telemetry layer ([FR-OB-03]).
 /// Everything else on the stream is human-log material for the stderr layer.
@@ -126,6 +126,23 @@ pub enum Surface {
     /// The debounced filesystem watcher (S-022). Override-only: it runs inside
     /// the `serve --mcp` process, whose process surface is [`Surface::Mcp`].
     Watcher,
+    /// The application's own **shell chrome** ([FR-UI-34], [CR-097]).
+    /// Override-only: it runs inside the `serve --ui` process, whose process
+    /// surface is [`Surface::Web`], and without this a header render is
+    /// indistinguishable from a graph query the user issued through the SPA.
+    ///
+    /// This is the one surface whose every event is self-referential *by
+    /// construction* (see [`Surface::event_class`]): the app header re-reads
+    /// the graph-state readout on **every** client-side navigation, so what it
+    /// emits is a request the user's own navigation caused incidentally and
+    /// never a question the user asked ([BR-42]). The test the classification
+    /// applies is *whose question a request answers*, not which view issued it
+    /// — which is why the answer lives at the adapter that knows, and not in
+    /// the engine chokepoint that cannot ([FR-OB-09]).
+    ///
+    /// [FR-UI-34]: ../../../docs/specs/requirements/FR-UI-34.md
+    /// [BR-42]: ../../../docs/specs/software-spec.md#316-observability--telemetry
+    Shell,
     /// The in-process chat agent ([FR-OB-10]). Override-only: it reaches the
     /// engine through the web adapter, so without this it is indistinguishable
     /// from a human browsing the dashboard — and *"Logos's own agent navigated
@@ -179,14 +196,59 @@ impl From<ProcessSurface> for Surface {
 }
 
 impl Surface {
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// The wire value stored in the `surface` column.
+    ///
+    /// `pub` rather than crate-private because an adapter that *names* its own
+    /// surface ([`in_surface`]) also has to say so in its own logs, and the
+    /// value it prints must be the value the store holds or the two readouts
+    /// disagree about the same event (the web adapter's `bridge`, [CR-097]).
+    pub const fn as_str(self) -> &'static str {
         match self {
             Surface::Cli => "cli",
             Surface::Mcp => "mcp",
             Surface::Web => "web",
             Surface::Watcher => "watcher",
+            Surface::Shell => "shell",
             #[cfg(feature = "agents")]
             Surface::Chat => "chat",
+        }
+    }
+
+    /// The [`EventClass`] this surface *fixes* for every event it carries, or
+    /// `None` when the surface does not decide and the tool does ([FR-OB-09],
+    /// widened by [CR-097]).
+    ///
+    /// # Why most surfaces return `None`
+    ///
+    /// `web` carries both a graph query the user issued through the SPA and a
+    /// Statistics-tab render — that they are indistinguishable by surface is
+    /// precisely the defect [CR-091] was filed about, and answering `Some` here
+    /// for `web` would reinstate the blanket `surface <> 'web'` filter under a
+    /// new name. A surface answers `Some` only when *every* event it can carry
+    /// is of one class by construction, which is true of exactly one of them:
+    /// [`Surface::Shell`] exists solely so shell chrome can say so.
+    ///
+    /// # This match must stay exhaustive
+    ///
+    /// **Never add a `_ =>` arm** — the same rule, and the same reason, as
+    /// [`Tool::event_class`](tool::Tool::event_class). Registering a surface is
+    /// how an adapter declares whose question its reads answer ([BR-42]), so a
+    /// surface that reached a wildcard would default silently *into* the usage
+    /// figures. `unclassified_surface_fails_the_build` (in [`super::tests`])
+    /// scans this function's source and fails if a fallback arm appears.
+    ///
+    /// [CR-091]: ../../../docs/requests/CR-091-telemetry-surface-classification-and-usage-attribution.md
+    /// [CR-097]: ../../../docs/requests/CR-097-header-graph-state-readout.md
+    /// [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
+    pub(crate) const fn event_class(self) -> Option<EventClass> {
+        match self {
+            // Shell chrome: the subject is Logos's own state, and nobody asked.
+            Surface::Shell => Some(EventClass::ReadModelRequest),
+
+            // Everything else carries both kinds; the tool decides.
+            Surface::Cli | Surface::Mcp | Surface::Web | Surface::Watcher => None,
+            #[cfg(feature = "agents")]
+            Surface::Chat => None,
         }
     }
 
@@ -197,6 +259,7 @@ impl Surface {
         Surface::Mcp,
         Surface::Web,
         Surface::Watcher,
+        Surface::Shell,
         #[cfg(feature = "agents")]
         Surface::Chat,
     ];
@@ -206,9 +269,29 @@ impl Surface {
     ///
     /// This is what bounds the per-event override ([FR-OB-03]): an arbitrary
     /// string cannot invent a surface, only name one this enum already declares.
-    fn from_wire(value: &str) -> Option<Surface> {
+    pub(crate) fn from_wire(value: &str) -> Option<Surface> {
         Surface::ALL.iter().copied().find(|s| s.as_str() == value)
     }
+}
+
+/// The wire names of every surface whose events are self-referential, in
+/// declaration order.
+///
+/// Derived from [`Surface::event_class`] over [`Surface::ALL`], so it *is* the
+/// classification and cannot drift from it — the same construction
+/// [`tool::self_referential_tools`] uses over the tool registry, and the other
+/// half of the predicate [`tool::engine_query_predicate`] builds.
+///
+/// Deriving it rather than storing a per-row class is what makes the exclusion
+/// apply uniformly to raw events, rolled-up days, and rows written before the
+/// classification existed: `surface` is a column on both `events` and
+/// `daily_rollup`, and the rollup aggregates away everything else.
+pub(crate) fn self_referential_surfaces() -> Vec<&'static str> {
+    Surface::ALL
+        .iter()
+        .filter(|s| matches!(s.event_class(), Some(EventClass::ReadModelRequest)))
+        .map(|s| s.as_str())
+        .collect()
 }
 
 // ── The generalised per-event surface override ([FR-OB-03], [FR-OB-09]) ──────

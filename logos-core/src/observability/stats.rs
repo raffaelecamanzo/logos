@@ -50,8 +50,17 @@
 //! navigation and every in-process chat-agent tool call as collateral, and the
 //! remainder was reported as adoption ([CR-091]).
 //!
-//! **The exclusion is derived, not stored.** The predicate is built in Rust from
-//! [`super::Tool`]'s exhaustive classification, so a new tool cannot escape it
+//! The predicate **does** name a surface — `shell` ([CR-097]) — and that is not
+//! the old filter returning. `shell` is a per-**event** classification an
+//! adapter enters at its route boundary, not the per-process tag `web` is, so
+//! every event it can carry is chrome by construction; `web` still carries both
+//! a user's graph query and a Statistics-tab render, and still excludes
+//! neither. The distinction the old filter could not draw is exactly the one
+//! this draws.
+//!
+//! **The exclusion is derived, not stored.** The predicate is built in Rust
+//! from the exhaustive classifications on [`super::Tool`] *and*
+//! [`super::Surface`], so neither a new tool nor a new surface can escape it
 //! and a per-row class column is unnecessary. That is also what makes the
 //! correction retroactive: rows written *before* this classification existed are
 //! filtered by the same rule as rows written after, which is the only way
@@ -61,6 +70,7 @@
 //! function of `tool` could not survive the rollup either.
 //!
 //! [CR-091]: ../../../docs/requests/CR-091-telemetry-surface-classification-and-usage-attribution.md
+//! [CR-097]: ../../../docs/requests/CR-097-header-graph-state-readout.md
 //! [FR-OB-03]: ../../../docs/specs/requirements/FR-OB-03.md
 //! [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
 //!
