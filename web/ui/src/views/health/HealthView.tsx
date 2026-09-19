@@ -97,8 +97,10 @@ function Health({ data }: { data: HealthModel }) {
  *  step that changes it, and the unscorable case naming none.
  *
  *  A signal that survives a de-index is neither of those: the figures are real,
- *  but the graph they describe is gone. That band keeps them and drops the
- *  current-verdict wording and tone (CR-135 §3.2) — the third branch below. */
+ *  but the graph they describe is gone. That band keeps every figure — PASS/FAIL
+ *  among them, as plain text — and drops only what asserts they are CURRENT: the
+ *  pass/fail badge with its green/red tone, and the word "current" before the
+ *  signal (CR-135 §3.2). The third branch below. */
 function GateBand({
   gate,
   absence,
