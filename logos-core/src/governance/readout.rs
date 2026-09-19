@@ -86,17 +86,29 @@ fn short_sha(sha: &str) -> String {
 /// seconds. The largest unit that fits wins, truncating rather than rounding,
 /// so the phrase never overstates how recent a run was.
 ///
-/// A negative age is **named, not clamped**. It means the marker is stamped
-/// after now — a store carried between machines, or a clock stepped back — and
-/// rendering that as "just now" would invent the most reassuring reading of a
-/// fact the readout cannot establish.
+/// An age that cannot be true is **named, not rendered**. Two cases, both of
+/// which mean the stored timestamp is wrong rather than old:
+/// - **Negative** — the marker is stamped after now (a store carried between
+///   machines, a clock stepped back). Rendering it as "just now" would invent
+///   the most reassuring reading of a fact the readout cannot establish.
+/// - **Implausibly large** — a run older than [`IMPLAUSIBLE_AGE_SECS`] predates
+///   any plausible project. It arrives from a corrupted or hand-edited row (the
+///   producer saturates rather than overflowing on one), and "106751991167300
+///   days ago" is a fabricated precision, not a fact.
 fn render_age(seconds: i64) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
+    /// A century. Past this the stored value is wrong, not merely old — no
+    /// `check` run predates the tool by decades.
+    const IMPLAUSIBLE_AGE_SECS: i64 = 100 * 365 * DAY;
 
     if seconds < 0 {
         return "at an unknown age (recorded ahead of now — check the clock)".to_string();
+    }
+    if seconds > IMPLAUSIBLE_AGE_SECS {
+        return "at an unknown age (the recorded time is implausibly old — check the store)"
+            .to_string();
     }
     let (count, unit) = match seconds {
         s if s < MINUTE => return "just now".to_string(),
@@ -713,6 +725,18 @@ mod tests {
             "a skewed clock is named, not rendered as a plausible age: {skewed}"
         );
         assert!(!skewed.contains("ago"), "and is not phrased as an age at all: {skewed}");
+
+        // The other end: a saturated age from a corrupted row is named too,
+        // rather than rendered as a confident count of a hundred million days.
+        let absurd = render_age(i64::MAX);
+        assert!(
+            absurd.contains("implausibly old"),
+            "an impossible age is named, not counted: {absurd}"
+        );
+        assert!(!absurd.contains("ago"), "and is not phrased as an age: {absurd}");
+        // The boundary still renders normally — a century is implausible, a
+        // decade is merely stale.
+        assert_eq!(render_age(10 * 365 * 24 * 60 * 60), "3650 days ago");
     }
 
     /// A marker and the rows it supposedly wrote disagreeing is a store that

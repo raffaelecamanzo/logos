@@ -419,6 +419,44 @@ fn a_marker_disagreeing_with_its_rows_is_warned_about_not_resolved() {
     );
 }
 
+/// A corrupted `ran_at` degrades to a named age — it never panics. The report
+/// tier's whole contract is that it reports and never blocks ([FR-GV-05]), and
+/// a crash on read is the most extreme form of blocking there is. Unchecked
+/// `now - ran_at` panicked here in a debug build and wrapped silently in a
+/// release one, so the two builds disagreed about what a corrupt store does.
+#[test]
+fn a_corrupted_run_timestamp_is_named_never_panicked_on() {
+    let tmp = indexed_repo();
+    write_breaching_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+
+    let conn = Connection::open(tmp.path().join(".logos/logos.db")).expect("open logos.db");
+    conn.execute("UPDATE check_run SET ran_at = ?1 WHERE id = 1", [i64::MIN])
+        .expect("corrupt the marker's timestamp");
+
+    // The assertion is that this returns at all — the pre-fix code panicked.
+    let readout = engine.quality_readout().expect("a corrupt timestamp is not an error");
+    let record = readout.check.expect("the run is still known of");
+    assert_eq!(
+        record.age_seconds,
+        i64::MAX,
+        "the age saturates rather than overflowing"
+    );
+
+    // And the rendering names it rather than counting a hundred million days.
+    let payload = engine.quality_report_hook_payload().expect("payload renders");
+    let context = payload.hook_specific_output.additional_context;
+    assert!(
+        context.contains("implausibly old"),
+        "the impossible age is named: {context}"
+    );
+    assert!(
+        !context.contains("days ago"),
+        "and never rendered as a confident age: {context}"
+    );
+}
+
 /// [UAT-GV-13] step 5: repeated readouts leave the marker byte-identical. The
 /// [CR-095] row-counting guard, extended to the table [CR-096] added — reading
 /// a run is not running one.

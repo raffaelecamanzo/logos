@@ -2129,7 +2129,12 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
     let check = match &marker {
         Some(row) => Some(CheckRun {
             ran_at: row.ran_at,
-            age_seconds: now - row.ran_at,
+            // Saturating, never raw: a corrupted or hand-edited `ran_at` would
+            // otherwise overflow and PANIC in a debug build — a crash on read,
+            // in the one tier whose whole contract is that it reports and never
+            // blocks ([FR-GV-05]). An implausible result is named by the
+            // rendering rather than crashed on.
+            age_seconds: now.saturating_sub(row.ran_at),
             commit_sha: row.commit_sha.clone(),
             head_sha: fresh.head.clone(),
             // An unresolvable HEAD on either side is never *treated* as a moved
@@ -2148,7 +2153,7 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         // says so.
         None => rows.first().map(|row| CheckRun {
             ran_at: row.created_at,
-            age_seconds: now - row.created_at,
+            age_seconds: now.saturating_sub(row.created_at),
             commit_sha: None,
             head_sha: fresh.head.clone(),
             tree_moved: false,
