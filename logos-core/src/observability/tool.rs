@@ -222,6 +222,12 @@ registered_tools! {
     LatestMetrics => "latest_metrics",
     LatestScan => "latest_scan",
     LatestGate => "latest_gate",
+    /// The Health bundle's two snapshot-derived fields from **one** read of the
+    /// last persisted snapshot ([FR-UI-04], CR-135) — the seam that replaced a
+    /// `latest_gate` + `latest_scan` pair whose two reads could straddle a
+    /// `scan`. Registered in its own right because it is a distinct chokepoint,
+    /// not either of the two it projects.
+    LatestHealth => "latest_health",
     LatestTemporalReport => "latest_temporal_report",
     LatestHotspots => "latest_hotspots",
     QualityReadout => "quality_readout",
@@ -357,6 +363,7 @@ impl Tool {
             | Tool::LatestMetrics
             | Tool::LatestScan
             | Tool::LatestGate
+            | Tool::LatestHealth
             | Tool::LatestTemporalReport
             | Tool::LatestHotspots
             | Tool::QualityReadout
@@ -471,6 +478,7 @@ impl Tool {
             | Tool::LatestMetrics
             | Tool::LatestScan
             | Tool::LatestGate
+            | Tool::LatestHealth
             | Tool::LatestTemporalReport
             | Tool::LatestHotspots
             | Tool::QualityReadout

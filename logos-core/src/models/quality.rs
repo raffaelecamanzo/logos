@@ -456,6 +456,40 @@ pub struct GateResult {
     pub warnings: Vec<String>,
 }
 
+/// The Health bundle's snapshot-derived pair ([FR-UI-04]): the read-only gate
+/// verdict and the read-only scan result, **projected from a single read** of
+/// the last persisted snapshot ([CR-135] §3.2, [ADR-28], [ADR-43]).
+///
+/// The shape exists so that one property holds by construction rather than by
+/// timing: both fields describe the *same* `metric_snapshots` row. Built from
+/// two independent reads — as the Health handler did until [CR-135] — a `scan`
+/// committing between them leaves the verdict describing the older row and the
+/// metric grid the newer one, and nothing in the payload lets a reader tell the
+/// two generations apart. The window is **removed** here rather than narrowed:
+/// there is one read, and the two fields are projections of its value.
+///
+/// This is the treatment `navigate::status` already gives the [FR-IX-12] LOC
+/// roll-up's two keys, for the same reason and with the same reasoning recorded
+/// at the read.
+///
+/// Not a wire shape of its own: the web surface destructures the pair into the
+/// existing Health DTO's `gate` and `scan` fields, so the [FR-UI-21] payload is
+/// byte-unchanged.
+///
+/// [FR-UI-04]: ../../../docs/specs/requirements/FR-UI-04.md
+/// [FR-UI-21]: ../../../docs/specs/requirements/FR-UI-21.md
+/// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
+/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+/// [ADR-43]: ../../../docs/specs/architecture/decisions/ADR-43.md
+/// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+#[derive(Debug, Default, Serialize)]
+pub struct LatestHealth {
+    /// The read-only gate verdict over the snapshot this pair was read from.
+    pub gate: GateResult,
+    /// The read-only scan result over that **same** snapshot.
+    pub scan: ScanResult,
+}
+
 /// One metric's regression vs the baseline (FR-GV-05 detail reporting).
 #[derive(Debug, Default, Serialize)]
 pub struct MetricRegression {

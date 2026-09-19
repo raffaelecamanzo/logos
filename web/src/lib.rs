@@ -1717,35 +1717,39 @@ mod tests {
     /// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
     /// [CR-091]: ../../docs/requests/CR-091-telemetry-surface-classification-and-usage-attribution.md
     /// [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
+    /// Production code only: the test module's own mentions of a marker are not
+    /// handler code, and comments are prose about them.
+    ///
+    /// Shared by the two source-scanning pins below rather than written twice:
+    /// a second copy that drifted from this one would make whichever pin held
+    /// the stale copy quietly measure something else.
+    fn production_code(source: &str) -> String {
+        let code = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map_or(source, |(before, _)| before);
+        code.lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The name of the `async fn` enclosing `at` — how an occurrence is
+    /// attributed to a handler without depending on line layout.
+    fn enclosing_fn(code: &str, at: usize) -> &str {
+        code[..at]
+            .rfind("async fn ")
+            .map(|start| {
+                let rest = &code[start + "async fn ".len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .unwrap_or("<no enclosing async fn>")
+    }
+
     #[test]
     fn every_handler_names_its_surface_and_only_status_names_the_shell() {
-        /// Production code only: the test module's own mentions of `Surface::…`
-        /// are not handler classifications, and comments are prose about them.
-        fn production_code(source: &str) -> String {
-            let code = source
-                .split_once("\n#[cfg(test)]\nmod tests {")
-                .map_or(source, |(before, _)| before);
-            code.lines()
-                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-
-        /// The name of the `async fn` enclosing `at` — how an occurrence is
-        /// attributed to a handler without depending on line layout.
-        fn enclosing_fn(code: &str, at: usize) -> &str {
-            code[..at]
-                .rfind("async fn ")
-                .map(|start| {
-                    let rest = &code[start + "async fn ".len()..];
-                    let end = rest
-                        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-                        .unwrap_or(rest.len());
-                    &rest[..end]
-                })
-                .unwrap_or("<no enclosing async fn>")
-        }
-
         // Both files define handlers that cross an adapter boundary: the 23
         // `bridge` + 6 `workspace_fan` sites in `api_v1.rs`, and the 6 `bridge`
         // sites in `lib.rs`, three of which are `/api/v1/chat/*` routes.
@@ -1796,6 +1800,94 @@ mod tests {
         assert!(
             web_sites >= 34,
             "the other handlers all name Surface::Web (found {web_sites})"
+        );
+    }
+
+    /// The Health handler reads the last persisted snapshot **once**, through
+    /// the single-read seam, and never as a `latest_gate` + `latest_scan` pair
+    /// ([FR-UI-04], [CR-135] §3.2).
+    ///
+    /// # Why a source scan and not a race
+    ///
+    /// The defect is a window *between* two reads. A test that races the
+    /// handler to land a `scan` inside that window is flaky by nature: against
+    /// the broken composition it fails only sometimes, which is the one
+    /// direction a regression test must not be unreliable in, and [CR-135] §7
+    /// settles it — "pin the invariant structurally … rather than racing the
+    /// handler. The reproduction is evidence the bug exists, not the regression
+    /// test."
+    ///
+    /// So the invariant is pinned where it is actually decided. How many reads
+    /// one response takes is a property of *which accessor the handler calls*,
+    /// and that is a fact about this source. This assertion fails against the
+    /// two-read composition the handler carried until this story
+    /// (`gate: e.latest_gate()?` beside `scan: e.latest_scan()?`).
+    ///
+    /// # Scoped to `health`, not to the file
+    ///
+    /// `overview` legitimately reads the standalone verdict and must keep
+    /// doing so — `latest_gate` and `latest_scan` are kept for their other
+    /// callers, they are not removed. Every occurrence is therefore attributed
+    /// to its enclosing `async fn`, and the second assertion pins that sibling
+    /// as the reason the scope is a handler rather than the file: a change that
+    /// "fixed" the pin by deleting the other caller would fail there.
+    ///
+    /// [CR-135]: ../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+    #[test]
+    fn the_health_handler_reads_the_snapshot_once() {
+        let code = production_code(include_str!("api_v1.rs"));
+
+        /// Is the match at `at` a whole identifier, or the tail of a longer
+        /// one? `latest_gate(` is a substring of `not_latest_gate(`, and a
+        /// bare substring search would book that unrelated call against the
+        /// accessor it happens to end with.
+        fn whole_identifier(code: &str, at: usize) -> bool {
+            code[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+        }
+
+        // The matcher probed with the near miss it must reject — one character
+        // from matching, and the only way to know is to run it.
+        let decoy = "async fn health() { e.not_latest_gate(); e.latest_gate(); }";
+        assert_eq!(
+            decoy
+                .match_indices("latest_gate(")
+                .filter(|(at, _)| whole_identifier(decoy, *at))
+                .count(),
+            1,
+            "`not_latest_gate(` ends with the accessor's name and is not a call to it"
+        );
+
+        // Every accessor that reads the last persisted snapshot, attributed to
+        // the handler it is called from. Located in the whole comment-stripped
+        // source rather than per line, so wrapping the call the way rustfmt
+        // does cannot hide it.
+        let mut snapshot_reads: Vec<&str> = Vec::new();
+        for accessor in ["latest_health", "latest_gate", "latest_scan"] {
+            for (at, _) in code.match_indices(&format!("{accessor}(")) {
+                if whole_identifier(&code, at) && enclosing_fn(&code, at) == "health" {
+                    snapshot_reads.push(accessor);
+                }
+            }
+        }
+        snapshot_reads.sort_unstable();
+
+        assert_eq!(
+            snapshot_reads,
+            ["latest_health"],
+            "the Health handler must read the last persisted snapshot exactly once, through \
+             the single-read seam. Two reads of the same logical row in one response can \
+             describe two generations with nothing in the payload saying so (CR-135 §3.2); \
+             found {snapshot_reads:?}"
+        );
+
+        assert!(
+            code.match_indices("latest_gate(")
+                .any(|(at, _)| enclosing_fn(&code, at) == "overview"),
+            "the Overview handler still reads the standalone verdict — the seam re-points \
+             `latest_gate`/`latest_scan`, it does not remove them (CR-135 §3.2)"
         );
     }
 

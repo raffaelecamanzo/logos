@@ -668,6 +668,110 @@ fn latest_gate_without_saved_baseline_is_informational_pass() {
     );
 }
 
+/// The Health pair's two fields are projections of **one** read of the last
+/// persisted snapshot, and each is byte-identical to what its standalone
+/// accessor returns ([FR-UI-04], [CR-135] §3.2, [ADR-28]).
+///
+/// The equality half is the guard the story's AC names: `latest_gate` and
+/// `latest_scan` keep working for their other callers *by projecting from the
+/// same seam*, not by retaining reads of their own. Three sources of one
+/// verdict is exactly how the three drift; this fails the moment they do.
+///
+/// It does **not** pin the one-read property itself — with no concurrent writer
+/// a two-read bundle answers identically, and racing one is the flaky test
+/// [CR-135] §7 rules out. That property is pinned structurally, at the handler
+/// that composes the bundle (`the_health_handler_reads_the_snapshot_once`, in
+/// the web crate).
+#[test]
+fn latest_health_projects_one_snapshot_into_both_fields() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine
+        .gate(None, true, true)
+        .expect("gate --save persists a snapshot and a baseline");
+    let before = metric_snapshot_count(tmp.path());
+
+    let health = engine.latest_health().expect("the Health pair");
+
+    assert_eq!(
+        serde_json::to_string(&health.gate).unwrap(),
+        serde_json::to_string(&engine.latest_gate().unwrap()).unwrap(),
+        "the bundled verdict is the standalone verdict — one seam, one source"
+    );
+    assert_eq!(
+        serde_json::to_string(&health.scan).unwrap(),
+        serde_json::to_string(&engine.latest_scan().unwrap()).unwrap(),
+        "the bundled scan is the standalone scan — one seam, one source"
+    );
+
+    // Internal consistency: both halves describe the same snapshot, so the
+    // figures they share are the same figures ([FR-EH-04]).
+    assert_eq!(
+        health.gate.signal, health.scan.signal,
+        "the verdict gated on the signal the metric grid renders"
+    );
+    assert_eq!(
+        health.gate.test_function_count, health.scan.metrics.test_function_count,
+        "and on the same FR-QM-08 production-scope exclusion count"
+    );
+    assert!(
+        !health.scan.metrics.empty,
+        "the fixture scanned a non-empty graph"
+    );
+    assert!(
+        !health.gate.message.contains("no snapshot yet"),
+        "a populated grid cannot sit beside a no-snapshot verdict (CR-135 §2.1): {}",
+        health.gate.message
+    );
+
+    // ADR-28: reading the pair, once or repeatedly, persists nothing.
+    for _ in 0..3 {
+        engine.latest_health().unwrap();
+    }
+    assert_eq!(
+        metric_snapshot_count(tmp.path()),
+        before,
+        "reading the Health pair appended no snapshot"
+    );
+}
+
+/// On a never-`scan`-ned store **both** halves of the Health pair take the
+/// empty branch, because there is one snapshot value and both read it.
+///
+/// This is the reproduced symptom stated as an invariant ([CR-135] §2.1): the
+/// no-signal callout beside a fully populated quality grid is the pairing of a
+/// `None` snapshot on the gate side with a `Some` one on the scan side, and a
+/// single read cannot produce it in either direction.
+#[test]
+fn never_scanned_store_health_pair_is_empty_on_both_sides() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let health = engine.latest_health().expect("the Health pair");
+
+    assert!(
+        health.scan.metrics.empty,
+        "no snapshot → the empty sentinel on the scan side, never zeros (NFR-CC-04)"
+    );
+    assert!(health.scan.signal.is_none(), "no fabricated signal");
+    assert!(
+        health.gate.signal.is_none(),
+        "and none on the verdict side either — one read, one answer"
+    );
+    assert!(health.gate.passed, "no snapshot cannot regress — informational pass");
+    assert!(
+        health.gate.message.contains("no snapshot yet"),
+        "the verdict names the producing command: {}",
+        health.gate.message
+    );
+
+    assert_eq!(
+        metric_snapshot_count(tmp.path()),
+        0,
+        "reading the Health pair created no snapshot"
+    );
+}
+
 /// CLI/MCP `scan` keeps persisting on every call — the read-only seam is
 /// additive and leaves the evaluate-and-persist path byte-unchanged ([ADR-28]).
 #[test]

@@ -68,9 +68,9 @@ use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint,
-    EvolutionReport, GateResult, HealthInfo, MetricDelta, MetricRegression, MetricSnapshot,
-    MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo, TemporalTier, VerifyCensus,
-    VerifyReport, Violation,
+    EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta, MetricRegression,
+    MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo, TemporalTier,
+    VerifyCensus, VerifyReport, Violation,
 };
 use crate::runtime::Runtime;
 
@@ -1922,13 +1922,31 @@ fn metric_snapshot_from_row(row: LatestMetricSnapshot) -> MetricSnapshot {
 /// evolution series carries it. Either way the view renders an honest empty state,
 /// never zeros ([NFR-CC-04]).
 pub(crate) fn latest_scan(engine: &Engine) -> Result<ScanResult> {
-    let metrics = latest_metrics(engine)?.unwrap_or(MetricSnapshot {
+    Ok(scan_from_snapshot(engine, latest_metrics(engine)?))
+}
+
+/// Project an **already-read** snapshot into the read-only [`ScanResult`].
+///
+/// Split out of [`latest_scan`] so [`latest_health`] can derive the Health
+/// bundle's scan result from the *same* value its gate verdict was derived from
+/// ([CR-135] §3.2). [`latest_scan`] keeps its own signature and behaviour for
+/// its other callers by taking the read and handing it straight here — it does
+/// not retain a second read of its own, so there is exactly one place the last
+/// persisted snapshot becomes a `ScanResult`.
+///
+/// `None` (a never-`scan`-ned store) becomes the honest empty sentinel, never a
+/// fabricated zero ([NFR-CC-04]) — see [`latest_scan`] for why the flag alone
+/// does not say which of the two empties happened.
+///
+/// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+fn scan_from_snapshot(engine: &Engine, snapshot: Option<MetricSnapshot>) -> ScanResult {
+    let metrics = snapshot.unwrap_or(MetricSnapshot {
         empty: true,
         ..MetricSnapshot::default()
     });
     let mut warnings = Vec::new();
     let temporal = latest_temporal_tier(engine, &mut warnings);
-    Ok(ScanResult {
+    ScanResult {
         signal: metrics.aggregate_signal,
         freshness: String::new(),
         violations: Vec::new(),
@@ -1936,7 +1954,7 @@ pub(crate) fn latest_scan(engine: &Engine) -> Result<ScanResult> {
         worst_offenders: Default::default(),
         temporal,
         warnings,
-    })
+    }
 }
 
 /// The read-only gate **verdict**: compare the last persisted snapshot's signal
@@ -1947,8 +1965,26 @@ pub(crate) fn latest_scan(engine: &Engine) -> Result<ScanResult> {
 /// or threshold hash) is reported as an informational pass, not an auto-save.
 /// A never-`scan`-ned store returns an `n/a` verdict naming the producing command.
 pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
+    let snapshot = latest_metrics(engine)?;
+    gate_from_snapshot(engine, snapshot.as_ref())
+}
+
+/// Project an **already-read** snapshot into the read-only gate verdict.
+///
+/// The gate-side twin of [`scan_from_snapshot`], split out for the same reason:
+/// [`latest_health`] derives both Health fields from one snapshot value, and
+/// [`latest_gate`] keeps working for its other callers by handing its own read
+/// straight here rather than retaining a second one ([CR-135] §3.2).
+///
+/// The baseline is read **here** and not at the seam, deliberately. It is the
+/// gate's own operand, it is compared against whatever snapshot it is given, and
+/// it carries no cross-field invariant with the scan result — joining it to the
+/// snapshot read would buy no atomicity, only a wider read.
+///
+/// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+fn gate_from_snapshot(engine: &Engine, snapshot: Option<&MetricSnapshot>) -> Result<GateResult> {
     let runtime = quality_runtime(engine)?;
-    let Some(metrics) = latest_metrics(engine)? else {
+    let Some(metrics) = snapshot else {
         return Ok(GateResult {
             passed: true,
             epsilon: EPSILON,
@@ -1997,7 +2033,7 @@ pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
         }
         Some(base) => {
             result.baseline_signal = base.aggregate_signal.map(|s| s as u32);
-            result.regressions = metric_regressions(&base, &metrics);
+            result.regressions = metric_regressions(&base, metrics);
             match (metrics.aggregate_signal, base.aggregate_signal) {
                 (Some(current), Some(baseline_signal)) => {
                     // BR-10: fail iff current < baseline − epsilon.
@@ -2020,6 +2056,46 @@ pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
     }
 
     Ok(result)
+}
+
+/// **One** read of the last persisted snapshot, projected into both fields of
+/// the Health bundle ([FR-UI-04], [CR-135] §3.2).
+///
+/// # Why this exists rather than calling the two accessors
+///
+/// [`latest_gate`] and [`latest_scan`] each read the last persisted snapshot.
+/// The Health handler called both, so one page load opened **two** reads of the
+/// same logical row over an append-only ledger, in two transactions. A `scan`
+/// committing between them left the verdict describing the older row and the
+/// metric grid the newer one — reproduced during [S-406]'s review as a no-signal
+/// callout beside a fully populated quality grid — and nothing in the payload
+/// let a reader tell the two generations apart.
+///
+/// Taking the read **once** and projecting its value twice removes that window
+/// instead of narrowing it: the two fields are projections of one value, so the
+/// interleaving has nowhere left to happen. Wrapping the two reads in one
+/// transaction would have narrowed it for this one caller and left the next
+/// caller that pairs the two accessors free to reopen the bug.
+///
+/// This is the treatment `navigate::status` already gives the [FR-IX-12] LOC
+/// roll-up's two keys, and the reasoning is recorded at that read for the same
+/// reason it is recorded here.
+///
+/// A pure read: no compute, no reconcile, no persist ([ADR-28]).
+///
+/// [S-406]: ../../../docs/planning/journal.md#s-406-a-readout-names-a-step-that-can-change-what-it-reports
+/// [FR-UI-04]: ../../../docs/specs/requirements/FR-UI-04.md
+/// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
+/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+/// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+pub(crate) fn latest_health(engine: &Engine) -> Result<LatestHealth> {
+    // THE read. Everything below is a projection of this one value — do not add
+    // a second `latest_metrics` call here, in either projection or at a caller
+    // that wants both fields ([CR-135] §3.2).
+    let snapshot = latest_metrics(engine)?;
+    let gate = gate_from_snapshot(engine, snapshot.as_ref())?;
+    let scan = scan_from_snapshot(engine, snapshot);
+    Ok(LatestHealth { gate, scan })
 }
 
 /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
