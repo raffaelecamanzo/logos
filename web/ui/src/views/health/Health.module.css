@@ -12,7 +12,8 @@
   gap: var(--space-5);
 }
 
-/* The gate band's PASS/FAIL badge + the current-vs-baseline figure on one line. */
+/* The gate band's verdict badge + its figures on one line — PASS/FAIL against the
+   baseline, or the CR-135 STALE variant carrying the same figures labelled. */
 .gateBody {
   display: inline-flex;
   flex-wrap: wrap;
@@ -23,6 +24,15 @@
 .aggregate {
   margin: 0 0 var(--space-3);
   color: var(--text-1);
+}
+
+/* A populated signal over a de-indexed graph: the figures stay, labelled as
+   history rather than a current reading (CR-135 §3.2). Secondary weight — it
+   qualifies the figures beside it, it does not compete with them. */
+.staleNote {
+  margin: 0 0 var(--space-3);
+  color: var(--text-2);
+  font-size: var(--text-sm);
 }
 
 /* ── Folded structural drill-downs (rendered open for the no-JS reader) ─────── */

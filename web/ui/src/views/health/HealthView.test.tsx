@@ -2,6 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
+import { Badge, Callout } from "../../components/index.ts";
 import { HealthView } from "./HealthView.tsx";
 
 function mv(n: number): MetricValue {
@@ -199,6 +200,108 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     // The false claim the old discriminant would have made, and the no-op remedy.
     expect(screen.queryByText(/no scan has been run/i)).not.toBeInTheDocument();
     expect(screen.queryByText("logos scan")).not.toBeInTheDocument();
+    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+  });
+
+  // ── CR-135 §3.2: a populated signal over a de-indexed graph ────────────────
+  // The figures survive a de-index, so without this they render as a confident
+  // CURRENT verdict for a graph that no longer exists (reproduced during S-406's
+  // review as finding #9). They are labelled, not suppressed: genuine history.
+  it("labels both cards as describing a graph no longer indexed, dated, naming `logos index` (CR-135)", async () => {
+    const m = clone();
+    m.status.indexed = false; // de-indexed AFTER the scan that recorded the snapshot
+    m.evolution.snapshots[1].created_at = 1_758_240_000; // 2025-09-19 UTC
+    stub(m);
+    render(<HealthView />);
+    // Both cards carry the same single sentence — one classification, two cards.
+    expect((await screen.findAllByText(/no longer indexed/i)).length).toBe(2);
+    expect(screen.getAllByText(/Describes the snapshot of 2025-09-19/i).length).toBe(2);
+    // …each naming the command that does change what is reported (FR-EH-04).
+    expect(screen.getAllByText("logos index").length).toBe(2);
+    // The figures are still there — labelled, never discarded.
+    expect(screen.getByText("STALE")).toBeInTheDocument();
+    expect(screen.getByText(/PASS · signal 8000 vs baseline 7800/)).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
+    // …but the unqualified current-verdict wording is gone.
+    expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
+  });
+
+  // A stale verdict keeps the figures it recorded, and a FAIL recorded before the
+  // de-index is still a FAIL. Nothing pinned this: hardcoding "PASS" in the stale
+  // band left the whole suite green.
+  it("carries the recorded FAIL verdict, not a PASS, when the stale snapshot failed (CR-135)", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    m.gate.passed = false;
+    m.gate.signal = 7000;
+    stub(m);
+    render(<HealthView />);
+    expect(await screen.findByText(/FAIL · signal 7000 vs baseline 7800/)).toBeInTheDocument();
+    expect(screen.queryByText(/PASS · signal/)).not.toBeInTheDocument();
+  });
+
+  // The undated fallback was pinned at the model level but never in rendered DOM,
+  // so its wording could be changed freely with the suite green. It is reachable
+  // whenever the series carries no point to date the label by.
+  it("renders the undated fallback rather than a fabricated date when nothing dates the snapshot", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    m.evolution.snapshots = []; // populated signal, but no point to date it by
+    stub(m);
+    render(<HealthView />);
+    expect((await screen.findAllByText(/Describes the last recorded snapshot/i)).length).toBe(2);
+    // Still labelled, still dateless, still naming the step — never a made-up date.
+    expect(screen.getAllByText(/no longer indexed/i).length).toBe(2);
+    expect(screen.getAllByText("logos index").length).toBe(2);
+    expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
+  });
+
+  // The tone is the contract this view got WRONG on the way in, so it is pinned
+  // rather than left to the eye: `Callout` documents "signal — red (GATE/FAIL,
+  // STALE, …)", `Badge` documents "red — fail / error / stale", and the SPA's
+  // three other STALE chips are all red. Hash-agnostic, like ScoreBar's tone
+  // test: render a reference chip of the intended tone and compare class names,
+  // never a literal CSS-module hash.
+  it("renders the STALE band and chip in the signal/red tone, not the in-flight orange (CR-135)", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    stub(m);
+    render(<HealthView />);
+    const chip = await screen.findByText("STALE");
+
+    // Reference renders of the intended tones, queried the same way as the
+    // subject so the comparison is class-for-class.
+    const chipClass = (tone: "red" | "orange") => {
+      const { container } = render(<Badge tone={tone}>REF</Badge>);
+      return within(container).getByText("REF").className;
+    };
+    const bandClass = (tone: "signal" | "warm") => {
+      const { container } = render(
+        <Callout label="Gate" tone={tone}>
+          <span>ref</span>
+        </Callout>,
+      );
+      return container.querySelector("section")?.className ?? "";
+    };
+
+    expect(chip.className).toBe(chipClass("red"));
+    expect(chip.className).not.toBe(chipClass("orange"));
+    expect(chip.closest("section")?.className).toBe(bandClass("signal"));
+    expect(chip.closest("section")?.className).not.toBe(bandClass("warm"));
+  });
+
+  // The other half of the same contract: the staleness branch must not leak into
+  // the ordinary case. Same populated payload, `indexed` true.
+  it("renders both cards exactly as today while the graph is still indexed (CR-135)", async () => {
+    stub(HEALTH); // `status.indexed` is true
+    render(<HealthView />);
+    expect(await screen.findByText("PASS")).toBeInTheDocument();
+    expect(screen.getByText(/current 8000 vs baseline 7800/i)).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
+    // None of the staleness wording reaches an indexed project.
+    expect(screen.queryByText("STALE")).not.toBeInTheDocument();
+    expect(screen.queryByText(/no longer indexed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
     expect(screen.queryByText("logos index")).not.toBeInTheDocument();
   });
 
