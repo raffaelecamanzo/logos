@@ -30,9 +30,15 @@ use crate::models::pipeline::RelationCoverage;
 ///   whole derived policy graph on every run (BR-12), which is a write. So the
 ///   readout reports what was last recorded rather than paying a write to look
 ///   current, and the rendering says "last recorded" rather than implying live.
-///   No timestamp is offered because none is available: `check_rules` persists
-///   its violations with a `NULL` snapshot id, so there is nothing honest to
-///   stamp them with.
+///   Since [CR-096] the staleness is **quantified** rather than merely
+///   labelled: [`check`](crate::Engine::check_rules) records a run marker
+///   ([FR-GV-21]) the readout dates its findings from, and whose mere presence
+///   is what licenses stating a *recorded* clean check ([BR-41]). See
+///   [`CheckRun`].
+///
+/// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+/// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+/// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
 ///
 /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
 /// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
@@ -58,20 +64,111 @@ pub struct QualityReadout {
     /// Violation messages from the last recorded `check_rules` run, capped by
     /// the caller.
     ///
-    /// `None` means **nothing is recorded** — which is genuinely ambiguous, and
-    /// is reported as such rather than resolved by guessing: `check_rules`
-    /// clears and rewrites the table on every run, so an empty table is left
-    /// equally by a clean check and by no check at all. Rendering must say
-    /// "none recorded", never "0 violations", because the latter would assert a
-    /// passing check that may never have happened — the same fabrication the
-    /// readout refuses everywhere else.
+    /// `None` means **the table is empty**, which on its own is ambiguous:
+    /// `check_rules` clears and rewrites the table on every run, so a clean
+    /// check and no check at all leave it identical. The table is therefore
+    /// never the ground for a verdict — [`check`](Self::check) is. A rendering
+    /// may say "clean" only from a marker recording a run that found nothing
+    /// ([BR-41]); with no marker it must say "no check has run", never
+    /// "0 violations", which would assert a pass that may never have happened.
+    ///
+    /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
     pub violations: Option<Vec<String>>,
     /// How many violations the last recorded run found in total, before any
     /// display cap — so a truncated list can say what it dropped.
+    ///
+    /// Strictly derived from the persisted `violations` **rows**, exactly as
+    /// before [CR-096]. The marker's own recorded total lives on
+    /// [`CheckRun::recorded_count`] and is deliberately not mirrored here: one
+    /// transaction writes both halves, so a second copy of the figure could
+    /// only ever disagree with this one, and a disagreement is reported as a
+    /// warning rather than silently resolved.
+    ///
+    /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
     pub violation_count: Option<usize>,
+    /// What is known about the [`check`](crate::Engine::check_rules) run those
+    /// violations came from ([CR-096]); `None` = **no run is known of at all**,
+    /// which is what licenses the rendering to say "no check has run".
+    ///
+    /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+    pub check: Option<CheckRun>,
     /// Degradations (an unreadable store, an absent graph) — never an error:
     /// the report tier reports, it never blocks ([FR-GV-05]).
     pub warnings: Vec<String>,
+}
+
+/// What the readout knows about the [`check`](crate::Engine::check_rules) run
+/// its violations came from ([CR-096], [FR-GV-21]).
+///
+/// Two things can produce one of these, and they are **not** equally
+/// authoritative — which is why [`recorded_count`](Self::recorded_count)
+/// carries the distinction rather than a separate flag that could drift from
+/// it:
+///
+/// - **The [FR-GV-21] marker** (`recorded_count: Some(_)`). A run demonstrably
+///   happened, at a known time and a known `HEAD`. Only this licenses stating
+///   a *clean* check ([BR-41]) — a clean run records `Some(0)`, which is
+///   precisely the fact an empty `violations` table cannot express.
+/// - **The violation rows' own `created_at`** (`recorded_count: None`), on a
+///   store written before the marker migration. The rows date themselves, so
+///   such a store gets dated findings immediately — but with no marker there
+///   is nothing to say a run happened at all when the table is empty, and no
+///   `HEAD` was ever recorded, so no clean check and no tree comparison is
+///   asserted from it.
+///
+/// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+/// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+/// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct CheckRun {
+    /// Unix-seconds the run happened at.
+    pub ran_at: i64,
+    /// How long ago that was, in seconds, **at the moment this readout was
+    /// taken**.
+    ///
+    /// Derived here rather than in the rendering so the renderer stays a pure
+    /// function of this read-model — otherwise every rendering test would read
+    /// the wall clock. Negative under clock skew (a store carried across
+    /// machines, a clock stepped back); the rendering names that case rather
+    /// than clamping it into a plausible-looking age.
+    pub age_seconds: i64,
+    /// What `HEAD` was **when the run happened**, and nothing more.
+    ///
+    /// It supports "has the tree moved since this ran". It does *not* mean the
+    /// findings were introduced by that commit — the same field on
+    /// `metric_snapshots` was once read the second way and produced a
+    /// confidently wrong attribution ([CR-095] review, finding 12, retracted).
+    /// `None` when `HEAD` did not resolve at run time, or when the record came
+    /// from the rows rather than a marker; the rendering then omits the tree
+    /// comparison rather than substituting a placeholder.
+    ///
+    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
+    pub commit_sha: Option<String>,
+    /// Current `HEAD`, for the comparison against [`commit_sha`](Self::commit_sha);
+    /// `None` outside a repo or without git.
+    pub head_sha: Option<String>,
+    /// `HEAD` has moved since the run — the findings were measured against a
+    /// **different tree**, which is the distinction [`age_seconds`](Self::age_seconds)
+    /// alone cannot draw and the whole reason `HEAD` is recorded.
+    ///
+    /// `false` whenever the comparison cannot be drawn (either sha absent):
+    /// an unresolvable `HEAD` is never *treated* as a moved tree, mirroring the
+    /// [FR-CV-06] coverage-artifact staleness rule this follows
+    /// ([NFR-RA-05] — never guessed).
+    ///
+    /// [FR-CV-06]: ../../../docs/specs/requirements/FR-CV-06.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    pub tree_moved: bool,
+    /// The violation total the [FR-GV-21] marker recorded, or `None` when this
+    /// record was recovered from the rows of a pre-migration store.
+    ///
+    /// `Some(0)` is the **recorded clean run** — the one state an empty
+    /// `violations` table can never express, and the only ground on which the
+    /// readout may state a pass ([BR-41]).
+    ///
+    /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+    /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+    pub recorded_count: Option<i64>,
 }
 
 /// Full architecture-quality scan result (FR-QM-01..06, S-020).

@@ -222,6 +222,303 @@ fn quality_readout_never_fabricates_a_clean_check() {
         (0, None),
         "and left the store with no marker — no check has run (FR-GV-21)"
     );
+    assert!(
+        readout.check.is_none(),
+        "no marker and no rows: the readout knows of no run at all, which is what \
+         lets the rendering say 'no check has run' rather than a disjunction (CR-096)"
+    );
+}
+
+// ── the dated readout ([CR-096], [FR-GV-21], [UAT-GV-13]) ───────────────────
+
+/// Write a `rules.toml` that the fixture graph **breaches**, so a real
+/// `check_rules` run records findings rather than a clean marker. `max_cc = 0`
+/// is failed by any function with a branch, which `src/a.rs` has.
+fn write_breaching_rules(repo: &Path) {
+    // `.logos/rules.toml` is the only path `check_rules` loads from.
+    std::fs::write(repo.join(".logos/rules.toml"), "[constraints]\nmax_cc = 0\n")
+        .expect("write rules.toml");
+}
+
+/// Delete the marker row while leaving the violation rows intact — the exact
+/// read-side shape of a store written **before** the S-313 migration: findings
+/// that carry their own `created_at`, and no marker.
+fn drop_check_run_marker(repo: &Path) {
+    let conn = Connection::open(repo.join(".logos/logos.db")).expect("open logos.db");
+    conn.execute("DELETE FROM check_run", [])
+        .expect("delete the marker");
+}
+
+/// The repo's actual `HEAD`, read independently of the engine — so a test can
+/// assert the readout reports the real sha rather than merely *a* sha. Asserting
+/// `is_some()` let a hardcoded `"deadbeef…"` pass every test in this file.
+fn head_sha(repo: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git is on PATH");
+    assert!(out.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8(out.stdout).expect("utf8").trim().to_string()
+}
+
+/// The readout's own record of the last check, or a panic naming what it said
+/// instead — every assertion below is about this record's content.
+fn check_record(engine: &Engine) -> logos_core::models::quality::CheckRun {
+    engine
+        .quality_readout()
+        .expect("readout")
+        .check
+        .expect("the readout knows of a check run")
+}
+
+/// A recorded **clean** run is reported as clean, carrying the `HEAD` and the
+/// age it was measured at — the assertion [FR-IN-07] previously forbade
+/// outright. The distinction is only expressible because the marker exists:
+/// the `violations` table is byte-identical to a never-checked store's.
+#[test]
+fn a_recorded_clean_check_is_reported_as_clean_with_its_head() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+
+    assert_eq!(
+        violation_count(tmp.path()),
+        0,
+        "the fixture satisfies its (absent) rules, so the check is clean"
+    );
+    let record = check_record(&engine);
+    assert_eq!(
+        record.recorded_count,
+        Some(0),
+        "a recorded clean run — the state the empty table cannot express (FR-GV-21)"
+    );
+    assert_eq!(
+        record.commit_sha.as_deref(),
+        Some(head_sha(tmp.path()).as_str()),
+        "the run recorded the HEAD it actually saw, not merely some sha"
+    );
+    assert_eq!(
+        record.head_sha.as_deref(),
+        Some(head_sha(tmp.path()).as_str()),
+        "and the readout compares against the real current HEAD"
+    );
+    assert!(
+        !record.tree_moved,
+        "nothing was committed since the check, so the tree has not moved"
+    );
+    assert!(
+        record.age_seconds >= 0 && record.age_seconds < 300,
+        "the run just happened: {}s",
+        record.age_seconds
+    );
+}
+
+/// A run that finds violations records a marker whose count equals the rows it
+/// wrote and equals `check`'s own output, and the readout dates those findings
+/// against the `HEAD` they were measured at.
+#[test]
+fn a_breaching_check_records_a_count_that_matches_its_own_output() {
+    let tmp = indexed_repo();
+    write_breaching_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.check_rules(None, true).expect("check runs");
+    let reported = report.violations.len() as i64;
+    assert!(reported > 0, "the max_cc = 0 contract is breached by the fixture");
+
+    let readout = engine.quality_readout().expect("readout");
+    let record = readout.check.expect("a run is known of");
+    assert_eq!(
+        record.recorded_count,
+        Some(reported),
+        "the marker's count is `logos check`'s own output (CR-096 AC)"
+    );
+    assert_eq!(
+        readout.violation_count.map(|c| c as i64),
+        Some(reported),
+        "and the rows agree with it, so no disagreement warning is raised"
+    );
+    assert!(
+        readout.warnings.iter().all(|w| !w.contains("disagrees with itself")),
+        "a consistent store raises no disagreement warning: {:?}",
+        readout.warnings
+    );
+    assert_eq!(
+        record.commit_sha.as_deref(),
+        Some(head_sha(tmp.path()).as_str()),
+        "the findings are attributed to the HEAD they were measured at"
+    );
+}
+
+/// Committing after a check moves `HEAD` without re-running it. The readout
+/// then reports the **same recorded result**, marked as measured against a
+/// different tree — the case a bare timestamp cannot distinguish, and the whole
+/// reason `commit_sha` is recorded ([UAT-GV-13] step 3).
+#[test]
+fn a_commit_after_the_check_marks_the_finding_as_measured_against_another_tree() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+
+    let checked_at_head = head_sha(tmp.path());
+    let before = check_record(&engine);
+    assert!(!before.tree_moved, "no commit yet, so the tree has not moved");
+
+    commit(tmp.path(), "src/c.rs", "pub fn c() -> i64 { 1 }\n", "add c");
+    let moved_head = head_sha(tmp.path());
+    assert_ne!(moved_head, checked_at_head, "the fixture really did move HEAD");
+
+    let after = check_record(&engine);
+    assert!(
+        after.tree_moved,
+        "HEAD moved since the check, so the recorded result describes another tree"
+    );
+    assert_eq!(
+        after.ran_at, before.ran_at,
+        "the recorded run itself is untouched — only the tree moved"
+    );
+    // Both shas pinned to the real commits, not merely asserted to differ: a
+    // hardcoded constant in either field satisfies `assert_ne!` forever.
+    assert_eq!(
+        after.commit_sha.as_deref(),
+        Some(checked_at_head.as_str()),
+        "the marker still names the commit the check actually ran against"
+    );
+    assert_eq!(
+        after.head_sha.as_deref(),
+        Some(moved_head.as_str()),
+        "and the comparison is against the commit HEAD actually moved to"
+    );
+}
+
+/// A store written before the marker migration: violation rows with no marker.
+/// Its findings are dated immediately from the `created_at` the rows already
+/// carry — no re-index and nothing invented — but no `HEAD` was ever recorded
+/// for them, so none is claimed and no clean run can be asserted.
+#[test]
+fn a_pre_migration_store_dates_its_rows_without_a_marker() {
+    let tmp = indexed_repo();
+    write_breaching_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+    let rows_before = violation_count(tmp.path());
+    assert!(rows_before > 0, "the fixture recorded findings to date");
+
+    drop_check_run_marker(tmp.path());
+    assert_eq!(check_run_state(tmp.path()).0, 0, "the marker is gone; the rows are not");
+
+    let readout = engine.quality_readout().expect("readout");
+    let record = readout.check.expect("the rows still date their own run");
+    assert_eq!(
+        record.recorded_count, None,
+        "no marker, so no recorded total — and no clean assertion is possible"
+    );
+    assert_eq!(record.commit_sha, None, "no HEAD was recorded for these rows");
+    assert!(!record.tree_moved, "a comparison needs a recorded HEAD to compare against");
+    assert!(record.ran_at > 0, "the rows' own created_at dates the run");
+    assert_eq!(
+        violation_count(tmp.path()),
+        rows_before,
+        "and reading it re-persisted nothing"
+    );
+}
+
+/// The marker and the rows can only disagree on a store edited underneath
+/// Logos. The readout **reports** that rather than resolving it — silently
+/// preferring the marker would let a stale clean marker over a table holding
+/// findings render as a pass, the precise fabrication [BR-41] forbids.
+#[test]
+fn a_marker_disagreeing_with_its_rows_is_warned_about_not_resolved() {
+    let tmp = indexed_repo();
+    write_breaching_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+    assert!(violation_count(tmp.path()) > 0, "findings are stored");
+
+    // Forge a clean marker over a table that holds findings.
+    let conn = Connection::open(tmp.path().join(".logos/logos.db")).expect("open logos.db");
+    conn.execute("UPDATE check_run SET violation_count = 0 WHERE id = 1", [])
+        .expect("forge a clean marker");
+
+    let readout = engine.quality_readout().expect("readout");
+    assert!(
+        readout.warnings.iter().any(|w| w.contains("disagrees with itself")),
+        "the disagreement is surfaced: {:?}",
+        readout.warnings
+    );
+    assert!(
+        readout.violation_count.is_some_and(|c| c > 0),
+        "and the stored findings are still reported, not the flattering marker"
+    );
+}
+
+/// A corrupted `ran_at` degrades to a named age — it never panics. The report
+/// tier's whole contract is that it reports and never blocks ([FR-GV-05]), and
+/// a crash on read is the most extreme form of blocking there is. Unchecked
+/// `now - ran_at` panicked here in a debug build and wrapped silently in a
+/// release one, so the two builds disagreed about what a corrupt store does.
+#[test]
+fn a_corrupted_run_timestamp_is_named_never_panicked_on() {
+    let tmp = indexed_repo();
+    write_breaching_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+
+    let conn = Connection::open(tmp.path().join(".logos/logos.db")).expect("open logos.db");
+    conn.execute("UPDATE check_run SET ran_at = ?1 WHERE id = 1", [i64::MIN])
+        .expect("corrupt the marker's timestamp");
+
+    // The assertion is that this returns at all — the pre-fix code panicked.
+    let readout = engine.quality_readout().expect("a corrupt timestamp is not an error");
+    let record = readout.check.expect("the run is still known of");
+    assert_eq!(
+        record.age_seconds,
+        i64::MAX,
+        "the age saturates rather than overflowing"
+    );
+
+    // And the rendering names it rather than counting a hundred million days.
+    let payload = engine.quality_report_hook_payload().expect("payload renders");
+    let context = payload.hook_specific_output.additional_context;
+    assert!(
+        context.contains("implausibly old"),
+        "the impossible age is named: {context}"
+    );
+    assert!(
+        !context.contains("days ago"),
+        "and never rendered as a confident age: {context}"
+    );
+}
+
+/// [UAT-GV-13] step 5: repeated readouts leave the marker byte-identical. The
+/// [CR-095] row-counting guard, extended to the table [CR-096] added — reading
+/// a run is not running one.
+#[test]
+fn repeated_readouts_leave_the_marker_unchanged() {
+    let tmp = indexed_repo();
+    write_breaching_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+
+    let marker_before = check_run_state(tmp.path());
+    let violations_before = violation_count(tmp.path());
+    let snapshots_before = metric_snapshot_count(tmp.path());
+    assert_eq!(marker_before.0, 1, "exactly one marker row, upserted not appended (BR-40)");
+
+    for _ in 0..5 {
+        engine.quality_readout().expect("readout");
+        engine.quality_report_hook_payload().expect("hook payload");
+    }
+
+    assert_eq!(
+        check_run_state(tmp.path()),
+        marker_before,
+        "ran_at, commit_sha and violation_count are all untouched by reading"
+    );
+    assert_eq!(violation_count(tmp.path()), violations_before);
+    assert_eq!(metric_snapshot_count(tmp.path()), snapshots_before);
 }
 
 // ── metric side: latest_metrics / latest_scan / latest_gate ──────────────────
