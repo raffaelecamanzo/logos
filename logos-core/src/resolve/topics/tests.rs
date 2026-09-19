@@ -8,6 +8,8 @@
 
 use super::*;
 
+use std::collections::BTreeSet;
+
 use crate::graph_store::FileRecord;
 use crate::model::{EdgeKind as EK, RefForm};
 
@@ -63,15 +65,61 @@ fn subscribe(source: &NodeRow, topic: &str, line: i64) -> UnresolvedRefRow {
     ledger(source, ArtifactRelation::BrokerSubscribe, topic, line)
 }
 
-/// Run the pure core over a ledger + node set, with `FILE` indexed.
+/// A member that commits nothing at all: every operand then keys exactly as
+/// written, which is the pre-[S-424] behaviour every fixture above the
+/// committed-value block was written against and still pins.
+///
+/// [S-424]: ../../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+fn commits_nothing() -> MemberCorpus {
+    MemberCorpus::new()
+}
+
+/// A member corpus committing `key` (in any source spelling — it is
+/// canonicalised here, as an index would) to one definition per
+/// `(profile, value)` pair.
+///
+/// Mirrors the fixture builder in `federation::broker`'s own tests, deliberately:
+/// the two tiers are asserted equal over one roster below, and a corpus built two
+/// ways would make that equality a statement about the fixtures rather than about
+/// the code.
+fn commits(corpus: &mut MemberCorpus, key: &str, values: &[(Option<&str>, &str)]) {
+    corpus.insert(
+        crate::extract::config::corpus::canonical_key(key),
+        values
+            .iter()
+            .map(|(profile, value)| crate::graph_store::ConfigDefinition {
+                path: profile.map_or("application.yml".to_string(), |p| {
+                    format!("application-{p}.yml")
+                }),
+                profile: profile.map(str::to_string),
+                value: (*value).to_string(),
+            })
+            .collect(),
+    );
+}
+
+/// Run the pure core over a ledger + node set, with `FILE` indexed, against a
+/// member that commits nothing.
 fn promote(refs: &[UnresolvedRefRow], nodes: &[NodeRow]) -> BTreeMap<String, DesiredNode> {
+    promote_with(refs, nodes, &commits_nothing())
+}
+
+/// [`promote`] against a member whose committed configuration is `corpus` — the
+/// shape every [FR-WS-27] fixture below uses.
+///
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
+fn promote_with(
+    refs: &[UnresolvedRefRow],
+    nodes: &[NodeRow],
+    corpus: &MemberCorpus,
+) -> BTreeMap<String, DesiredNode> {
     let files = [FileRecord {
         id: FILE_ID,
         path: FILE.to_string(),
         content_hash: None,
     }];
     let by_path: HashMap<&str, i64> = files.iter().map(|f| (f.path.as_str(), f.id)).collect();
-    desired_set(refs, nodes, &by_path)
+    desired_set(refs, nodes, &by_path, corpus)
 }
 
 /// Every promoted node of one kind, by name, sorted.
@@ -405,14 +453,25 @@ fn the_pass_owns_only_its_own_three_edge_kinds() {
 /// because a fabricated `Topic` named `${…}` is exactly what a careless
 /// placeholder rule would produce ([NFR-RA-05]).
 ///
-/// The promoted topic is keyed by the **stored operand**, not by the committed
-/// value: [S-410] moves topic identity to the committed value in the
-/// *federation* join, where the two members' corpora are in scope. This pass is
-/// per-repo and pre-federation, and [FR-WS-11]'s repo-scoped topic identity is
-/// untouched by that story — see the [S-410] implementation notes.
+/// The promoted topic is keyed here by the **operand as written**, and since
+/// [S-424] that is a statement about this fixture's corpus rather than about the
+/// pass: `promote` runs against a member that commits **nothing**, so both
+/// operands resolve to nothing and keep their placeholders — [FR-WS-27] AC3's
+/// refusal branch. Hand the same rows a corpus that commits those keys and the
+/// topics are the committed values, which
+/// `two_spellings_of_one_property_promote_one_topic_with_one_producer_and_one_consumer`
+/// pins directly.
 ///
+/// This paragraph used to say the pass was *"per-repo and pre-federation"* and
+/// therefore *"untouched by [S-410]"*. That was the drift [CR-136] was filed on:
+/// the resolution is member-scoped, so being per-repo never made it inapplicable
+/// — a member's own configuration is in scope for its own graph.
+///
+/// [CR-136]: ../../../../docs/requests/CR-136-promoted-topic-identity-is-the-committed-value.md
 /// [FR-WS-11]: ../../../../docs/specs/requirements/FR-WS-11.md
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
 /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+/// [S-424]: ../../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 /// [S-408]: ../../../../docs/planning/journal.md#s-408-a-kafka-streams-topology-link-is-a-broker-publish-or-subscribe-site
 /// [S-409]: ../../../../docs/planning/journal.md#s-409-the-accessor-hop-reaches-the-broker-arm
 /// [S-410]: ../../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
@@ -481,4 +540,401 @@ fn a_resolved_streams_site_promotes_its_producer_and_consumer_and_a_refused_one_
         ],
         "two topics, and no third fabricated from the keyless row"
     );
+}
+
+// ── S-424 / FR-WS-27: one identify function, called from both tiers ──────────
+
+/// The two spellings [ADR-64]'s 2026-09-15 amendment records as the reproduction
+/// of the estate's gap, and the corpus that commits them to one value.
+///
+/// `archive-commands` is the committed value; `${…archive-commands}` and
+/// `${…archivecommands}` are the two operand spellings that reach it — the first
+/// written by hand in an annotation, the second the canonical relaxed-binding
+/// form a `@ConfigurationProperties` accessor is stored under. They are not
+/// byte-equal and never become so; they meet at the **value**.
+///
+/// [ADR-64]: ../../../../docs/specs/architecture/decisions/ADR-64.md
+const HAND_WRITTEN: &str = "${spring.kafka.topics.archive-commands}";
+const VIA_ACCESSOR: &str = "${spring.kafka.topics.archivecommands}";
+const COMMITTED: &str = "archive-commands";
+
+/// A member that commits the archive-commands property to the one value it
+/// really has.
+///
+/// **One entry covers both operand spellings**, and that is the relaxed-binding
+/// rule doing its job rather than a shortcut in the fixture: `canonical_key`
+/// folds `…archive-commands` and `…archivecommands` onto one canonical key, so
+/// a source that writes either spelling defines the same property. The spellings
+/// diverge in the *operand*, which is why the two sites did not meet before this
+/// story; they converge in the *key*, which is why they can.
+fn archive_commands_corpus() -> MemberCorpus {
+    let mut corpus = MemberCorpus::new();
+    commits(
+        &mut corpus,
+        "spring.kafka.topics.archive-commands",
+        &[(None, COMMITTED)],
+    );
+    corpus
+}
+
+/// **[FR-WS-27] AC2 — the committed value keys all three promoted kinds.**
+///
+/// A publish keyed `${…archive-commands}` and a subscribe keyed
+/// `${…archivecommands}`, both committing to `archive-commands`, promote **one**
+/// `Topic` node carrying one `Producer` and one `Consumer`.
+///
+/// This is the fixture the whole story exists for. Before [S-424] it promoted
+/// **two** `Topic` nodes — one per placeholder spelling — with the producer
+/// hanging off one and the consumer off the other, so the coupling they express
+/// had no node to be expressed on. The assertion that catches that regression is
+/// the `Publishes`/`Subscribes` pair pointing at the SAME topic symbol, not the
+/// topic count alone: two nodes named alike would still count as two.
+///
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
+/// [S-424]: ../../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+#[test]
+fn two_spellings_of_one_property_promote_one_topic_with_one_producer_and_one_consumer() {
+    let pubr = decl(1, "publish");
+    let subr = decl(2, "onArchiveCommand");
+    let desired = promote_with(
+        &[
+            publish(&pubr, HAND_WRITTEN, 12),
+            subscribe(&subr, VIA_ACCESSOR, 20),
+        ],
+        &[pubr.clone(), subr.clone()],
+        &archive_commands_corpus(),
+    );
+
+    assert_eq!(
+        names_of(&desired, NodeKind::Topic),
+        [COMMITTED],
+        "ONE topic, named by the committed value — not one per placeholder spelling"
+    );
+    assert_eq!(names_of(&desired, NodeKind::Producer), [COMMITTED]);
+    assert_eq!(names_of(&desired, NodeKind::Consumer), [COMMITTED]);
+
+    // …and the producer and the consumer hang off THAT topic, which is the half
+    // a count cannot establish.
+    let topic = only(&desired, NodeKind::Topic).symbol.as_str().to_string();
+    let producer = only(&desired, NodeKind::Producer);
+    let consumer = only(&desired, NodeKind::Consumer);
+    assert!(
+        producer
+            .edges
+            .iter()
+            .any(|e| matches!(e, DesiredEdge::Publishes(t) if *t == topic)),
+        "the Producer publishes to the one topic: {:?}",
+        producer.edges
+    );
+    assert!(
+        consumer
+            .edges
+            .iter()
+            .any(|e| matches!(e, DesiredEdge::Subscribes(t) if *t == topic)),
+        "the Consumer subscribes from the SAME topic: {:?}",
+        consumer.edges
+    );
+
+    // The site-scoped symbols carry the committed value in their topic segment
+    // too ([FR-WS-27] AC2: "a producer and the topic it hangs off can never
+    // disagree, because one value keys both"). Asserted on the symbol string,
+    // because that is the identity a re-sync reconciles on — a matching `name`
+    // with a placeholder still in the symbol would leave two site nodes.
+    for site in [producer, consumer] {
+        assert!(
+            site.symbol.as_str().contains(COMMITTED),
+            "the site symbol is keyed on the committed value: {}",
+            site.symbol.as_str()
+        );
+        assert!(
+            !site.symbol.as_str().contains("${"),
+            "no placeholder survives in a resolved site symbol: {}",
+            site.symbol.as_str()
+        );
+    }
+}
+
+/// **[FR-WS-27] AC3 — a refusal keeps the placeholder and fabricates nothing.**
+///
+/// Two refusals, each under its own existing reason, and each keeping the
+/// operand exactly as written:
+///
+/// - (a) `config-key-missing` — no committed source defines the key;
+/// - (b) `config-placeholder-value` — the committed value is itself a `${…}`
+///   indirection.
+///
+/// The near miss in (b) is the one that matters and it is asserted explicitly:
+/// the site must NOT be promoted under the indirection. A subscriber that
+/// literally writes `${another.key}` is not on this publisher's topic, and
+/// keying the publish under `${another.key}` would couple them ([NFR-RA-05]).
+///
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn a_refused_operand_keeps_its_placeholder_as_written_and_promotes_no_indirection() {
+    // (a) Nothing commits the key at all.
+    let pubr = decl(1, "publish");
+    let desired = promote_with(
+        &[publish(&pubr, HAND_WRITTEN, 12)],
+        &[pubr.clone()],
+        &commits_nothing(),
+    );
+    assert_eq!(
+        names_of(&desired, NodeKind::Topic),
+        [HAND_WRITTEN],
+        "an unresolved operand keeps the placeholder AS WRITTEN — no topic is invented"
+    );
+
+    // (b) The committed value is itself a placeholder.
+    let mut corpus = MemberCorpus::new();
+    commits(
+        &mut corpus,
+        "spring.kafka.topics.archive-commands",
+        &[(None, "${another.key}")],
+    );
+    let subr = decl(2, "onAnother");
+    let desired = promote_with(
+        &[
+            publish(&pubr, HAND_WRITTEN, 12),
+            // A subscriber that really does write the indirection. If the
+            // publish were keyed on `${another.key}`, these two would collapse
+            // onto one topic and assert a coupling nothing proves.
+            subscribe(&subr, "${another.key}", 20),
+        ],
+        &[pubr.clone(), subr.clone()],
+        &corpus,
+    );
+    assert_eq!(
+        names_of(&desired, NodeKind::Topic),
+        ["${another.key}", HAND_WRITTEN],
+        "the refused publish keeps its own placeholder and never lands on the indirection"
+    );
+    assert_eq!(names_of(&desired, NodeKind::Producer), [HAND_WRITTEN]);
+    assert_eq!(names_of(&desired, NodeKind::Consumer), ["${another.key}"]);
+}
+
+/// **[FR-WS-27] AC3 — overlays that disagree promote one topic per overlay**
+/// ([FR-WS-19] AC2), exactly as the bridge fans out under each.
+///
+/// Neither value is chosen over the other and neither is averaged: the site is a
+/// producer of both topics, because under one profile it publishes to one and
+/// under the other to the other. Both facts are true; representing one would be
+/// a guess.
+///
+/// [FR-WS-19]: ../../../../docs/specs/requirements/FR-WS-19.md
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
+#[test]
+fn a_key_whose_overlays_disagree_promotes_one_topic_per_overlay() {
+    let mut corpus = MemberCorpus::new();
+    commits(
+        &mut corpus,
+        "spring.kafka.topics.archive-commands",
+        &[(Some("prod"), "commands-prod"), (Some("staging"), "commands-staging")],
+    );
+    let pubr = decl(1, "publish");
+    let desired = promote_with(
+        &[publish(&pubr, HAND_WRITTEN, 12)],
+        &[pubr.clone()],
+        &corpus,
+    );
+
+    assert_eq!(
+        names_of(&desired, NodeKind::Topic),
+        ["commands-prod", "commands-staging"],
+        "both overlays' values are retained — neither picked, neither averaged"
+    );
+    assert_eq!(
+        names_of(&desired, NodeKind::Producer),
+        ["commands-prod", "commands-staging"],
+        "the ONE publish site is a producer of each, at its own line"
+    );
+    // One site, two nodes — and they are distinct symbols, not one node
+    // overwritten twice.
+    let producers: Vec<&str> = desired
+        .values()
+        .filter(|d| d.kind == NodeKind::Producer)
+        .map(|d| d.symbol.as_str())
+        .collect();
+    assert_eq!(producers.len(), 2, "two distinct producer symbols: {producers:?}");
+    assert_ne!(producers[0], producers[1]);
+}
+
+/// **[FR-WS-27] AC4 — only a member naming a broker key reads a corpus.**
+///
+/// [`broker_config_keys`] is the gate: it is what `member_corpus` short-circuits
+/// on, so an empty answer here IS "no store read is issued". The three cases
+/// below are the three that decide whether a repository pays anything at all.
+///
+/// The third is a **near miss** rather than a formality: an HTTP client call's
+/// target is very often `${services.orders.base-url}`, and a gate that tested
+/// for `${…}` without testing the relation would open this member's store to
+/// resolve a key the promotion pass promotes nothing for.
+///
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
+#[test]
+fn only_a_ledger_naming_a_broker_configuration_key_asks_for_a_corpus() {
+    let pubr = decl(1, "publish");
+
+    // (a) Literal broker operands: no key, so no read.
+    assert!(
+        broker_config_keys(&[publish(&pubr, "orders", 12)]).is_empty(),
+        "a literal topic names no configuration key"
+    );
+
+    // (b) A placeholder operand names exactly its CANONICAL key, once. Three
+    //     rows in two spellings ask for ONE key, because relaxed binding folds
+    //     the spellings — so the estate's duplicate-spelling groups cost one
+    //     lookup between them, not one each.
+    assert_eq!(
+        broker_config_keys(&[
+            publish(&pubr, HAND_WRITTEN, 12),
+            subscribe(&pubr, HAND_WRITTEN, 20),
+            subscribe(&pubr, VIA_ACCESSOR, 30),
+        ]),
+        ["spring.kafka.topics.archivecommands"],
+        "one canonical key, de-duplicated across rows AND across spellings"
+    );
+
+    // (c) THE NEAR MISS: a non-broker relation carrying a placeholder target
+    //     contributes nothing. The gate is on the relation, not on the `${`.
+    let http = ledger(
+        &pubr,
+        ArtifactRelation::HttpClientCall,
+        "GET ${services.orders.base-url}/orders",
+        40,
+    );
+    assert!(
+        broker_config_keys(&[http]).is_empty(),
+        "an HTTP client call's configured target is not this pass's business"
+    );
+}
+
+/// **[FR-WS-27] AC1 — the no-drift walk. One function, called from both tiers.**
+///
+/// The criterion this test exists for is the one that survives the next change
+/// to either tier: it walks **every** broker fixture in this module's roster
+/// through both tiers and asserts the topic identities they produce are equal as
+/// sets, so re-introducing a local keying rule in either one fails here.
+///
+/// The two entry points are each tier's own:
+///
+/// - the **promotion tier** runs [`desired_set`] — the exact function
+///   [`super::run`] calls — and the identities are read off the `Topic` nodes it
+///   wants promoted, which is the tier's whole output;
+/// - the **bridge tier** runs [`broker::identify`] — the exact function
+///   [`broker::broker_edges`] and `federation::coverage::arm_identity` call, and
+///   the only place either of them obtains a topic key.
+///
+/// Calling `identify` for the bridge side rather than `broker_edges` is
+/// deliberate and is the stronger reading, not a convenience: `broker_edges`
+/// emits an edge only for a publish that **meets a cross-member subscribe**, so
+/// over a roster of refusals and lone publishes it would answer the empty set
+/// and the comparison would be vacuous for precisely the fixtures that matter.
+/// `identify` is where the bridge's key comes from, so it is what the promotion
+/// tier must agree with.
+///
+/// **This test is not vacuous by construction**: revert `broker_refs` to
+/// `row.target.trim()` and every config-bound row below diverges, which is the
+/// mutation this was written against.
+///
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
+#[test]
+fn both_tiers_key_every_broker_fixture_identically() {
+    // The roster: one entry per shape a broker operand can take, each with the
+    // corpus that makes that shape the thing it is. Extended when a shape is
+    // added, which is the point — a new shape must be walked by both tiers.
+    let overlays = {
+        let mut c = MemberCorpus::new();
+        commits(
+            &mut c,
+            "spring.kafka.topics.archive-commands",
+            &[(Some("prod"), "commands-prod"), (Some("staging"), "commands-staging")],
+        );
+        c
+    };
+    let indirection = {
+        let mut c = MemberCorpus::new();
+        commits(
+            &mut c,
+            "spring.kafka.topics.archive-commands",
+            &[(None, "${another.key}")],
+        );
+        c
+    };
+    let blank = {
+        let mut c = MemberCorpus::new();
+        commits(
+            &mut c,
+            "spring.kafka.topics.archive-commands",
+            &[(None, "   ")],
+        );
+        c
+    };
+    let roster: Vec<(&str, &str, MemberCorpus)> = vec![
+        ("a plain literal", "orders", commits_nothing()),
+        (
+            "a schema-guarded literal",
+            "orders#com.acme.OrderCreated",
+            commits_nothing(),
+        ),
+        (
+            "a hand-written placeholder, committed",
+            HAND_WRITTEN,
+            archive_commands_corpus(),
+        ),
+        (
+            "an accessor-spelled placeholder, committed to the same value",
+            VIA_ACCESSOR,
+            archive_commands_corpus(),
+        ),
+        (
+            "a schema-guarded placeholder, committed",
+            "${spring.kafka.topics.archive-commands}#com.acme.Cmd",
+            archive_commands_corpus(),
+        ),
+        (
+            "a placeholder nothing commits",
+            HAND_WRITTEN,
+            commits_nothing(),
+        ),
+        ("a placeholder committed to an indirection", HAND_WRITTEN, indirection),
+        ("a placeholder committed to blank", HAND_WRITTEN, blank),
+        ("a placeholder two overlays disagree on", HAND_WRITTEN, overlays),
+        // The keyless row: the arm's `topic-not-literal` refusal. BOTH tiers
+        // must answer "nothing" — the promotion pass by promoting no topic, the
+        // bridge by `identify` returning `None`.
+        ("a keyless row", "", commits_nothing()),
+        ("an all-whitespace row", "   ", commits_nothing()),
+    ];
+
+    for (what, operand, corpus) in roster {
+        for (relation, kind) in [
+            (ArtifactRelation::BrokerPublish, NodeKind::Producer),
+            (ArtifactRelation::BrokerSubscribe, NodeKind::Consumer),
+        ] {
+            let site = decl(1, "site");
+            let row = ledger(&site, relation, operand, 12);
+
+            // Tier 1 — the promotion pass, through the function `run` calls.
+            let desired = promote_with(&[row], &[site.clone()], &corpus);
+            let promoted: BTreeSet<&str> = desired
+                .values()
+                .filter(|d| d.kind == NodeKind::Topic)
+                .map(|d| d.name.as_str())
+                .collect();
+
+            // Tier 2 — the bridge, through the function it keys on.
+            let identity = broker::identify(relation, operand, &corpus);
+            let bridged: BTreeSet<&str> = identity
+                .as_ref()
+                .map(|i| i.topics.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+
+            assert_eq!(
+                promoted, bridged,
+                "the two tiers disagree on {what} ({operand:?}) as a {kind:?}: \
+                 the promotion pass says {promoted:?}, the bridge says {bridged:?}"
+            );
+        }
+    }
 }

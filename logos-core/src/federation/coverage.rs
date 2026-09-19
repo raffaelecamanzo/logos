@@ -2238,7 +2238,18 @@ fn arm_identity(reference: &super::bridge::InvocationRef, corpus: &MemberCorpus)
                 keys: Vec::new(),
                 value: Provenance::Literal,
             },
-            |(keys, _role, value)| ArmIdentity::Broker { keys, value },
+            // The coverage tier wraps the shared topic identity into the bridge's
+            // match vocabulary at its OWN call site, exactly as the bridge's
+            // fan-out and the promotion pass each wrap it into theirs. The
+            // resolution itself happened once, inside `identify` ([FR-WS-27] AC1).
+            |identity| ArmIdentity::Broker {
+                keys: identity
+                    .topics
+                    .into_iter()
+                    .map(PortableKey::broker)
+                    .collect(),
+                value: identity.value,
+            },
         );
     }
     ArmIdentity::Verbatim {

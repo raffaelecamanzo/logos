@@ -96,7 +96,15 @@ pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(P
         return None;
     }
     let role = relation.bridge_role()?;
-    Some((PortableKey::broker(topic_key.to_string()), role))
+    // **Trimmed**, and that is the one spelling of "the operand as written" in
+    // this crate. The capture normalizer already trims, so this changes no
+    // stored row; it matters because [`identify`] hands this very string to the
+    // promotion pass, which trimmed its own operand (`row.target.trim()`) long
+    // before it called anything here. Two tiers agreeing by coincidence is what
+    // [FR-WS-27] exists to replace with agreeing by construction.
+    //
+    // [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+    Some((PortableKey::broker(topic_key.trim().to_string()), role))
 }
 
 /// What committed configuration proves about a broker site's topic operand —
@@ -213,45 +221,93 @@ pub fn topic_identity(target: &str, corpus: &dyn ConfigLookup) -> TopicIdentity 
     }
 }
 
-/// Reduce a broker relation + its stored topic operand to **every** portable key
-/// the site meets on, its role, and the provenance of the value behind those
-/// keys ([S-410]).
+/// Every topic key one broker site meets on, and the provenance of the value
+/// behind them — the answer [`identify`] gives, and the **one** topic identity
+/// every tier that names a topic is keyed by ([FR-WS-27], [S-424]).
 ///
-/// The committed-value twin of [`classify`], and the single place the
-/// committed-value rule is applied: the bridge's fan-out ([`broker_edges`]) and
-/// the coverage read-model both call it, so "why did this bind" and "why didn't
-/// this bind" cannot drift the way they could if each resolved its own operands
-/// ([ADR-52]).
+/// Keys are plain topic strings rather than [`PortableKey`]s because the bridge
+/// is no longer the only caller: the intra-repo promotion pass
+/// ([`crate::resolve::topics`]) names a `Topic`/`Producer`/`Consumer` node by
+/// this same value and has no portable key to wrap it in. Each tier wraps what
+/// it needs at its own call site — the bridge into
+/// [`PortableKey::broker`](PortableKey), the promotion pass into a symbol
+/// descriptor — from **one** resolution, which is the whole point of the shape.
+///
+/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+#[derive(Debug, Clone)]
+pub(crate) struct BrokerIdentity {
+    /// One topic key per profile-distinct committed composition, sorted and
+    /// de-duplicated — or exactly one, the operand as written and trimmed, for a
+    /// literal and for an operand the corpus refuses.
+    pub(crate) topics: Vec<String>,
+    /// Which side of the arm the site is: a publish is the
+    /// [`Consumer`](Role::Consumer), a subscribe the [`Provider`](Role::Provider).
+    pub(crate) role: Role,
+    /// The provenance of the **site's** value — what a coverage row and a
+    /// promoted node's evidence carry.
+    pub(crate) value: Provenance,
+}
+
+/// Reduce a broker relation + its stored topic operand to **every** topic key
+/// the site meets on, its role, and the provenance of the value behind those
+/// keys ([S-410], carried into the promotion pass by [S-424]).
+///
+/// The committed-value twin of [`classify`], and **the single place the
+/// committed-value rule is applied**. Three callers, in three tiers, and that is
+/// the requirement rather than an implementation detail ([FR-WS-27] AC1,
+/// [ADR-52]):
+///
+/// - the bridge's cross-member fan-out ([`broker_edges`]);
+/// - the coverage read-model (`super::coverage::arm_identity`); and
+/// - the intra-repo promotion pass (`crate::resolve::topics`), which keys its
+///   `Topic`/`Producer`/`Consumer` nodes on the same answer.
+///
+/// So *"why did this bind"*, *"why didn't this bind"* and *"what node is this"*
+/// cannot drift the way they could if each tier resolved its own operands —
+/// which is exactly what happened between [S-410] and [S-424], while both tiers
+/// were individually correct. **A predicate duplicated at two call sites does
+/// not satisfy [FR-WS-27]; one function does.**
 ///
 /// **A `Vec` of keys, not one key**, because overlays are allowed to disagree: a
 /// key two profiles commit differently yields one identity per overlay and the
-/// site is indexed — or fans out — under each of them ([FR-WS-19] AC2). A
-/// literal, and an operand the corpus refuses, both yield exactly one.
+/// site is indexed — or fans out, or promotes — under each of them
+/// ([FR-WS-19] AC2). A literal, and an operand the corpus refuses, both yield
+/// exactly one.
 ///
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
 /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
-pub(super) fn identify(
+/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+pub(crate) fn identify(
     relation: ArtifactRelation,
     target: &str,
     corpus: &dyn ConfigLookup,
-) -> Option<(Vec<PortableKey>, Role, Provenance)> {
+) -> Option<BrokerIdentity> {
     // `classify` first, so every refusal it already makes — a non-broker
     // relation, a keyless row — is made in exactly one place and nothing below
     // can re-admit one.
     let (as_written, role) = classify(relation, target)?;
+    // The bridge's own bucket string, not a second rendering of it beside the
+    // first: one operand, one spelling, whichever tier asks.
+    let as_written = || vec![as_written.key().to_string()];
     match topic_identity(target, corpus) {
-        TopicIdentity::Literal => Some((vec![as_written], role, Provenance::Literal)),
-        TopicIdentity::Committed { topics, bound } => Some((
-            topics.into_iter().map(PortableKey::broker).collect(),
+        TopicIdentity::Literal => Some(BrokerIdentity {
+            topics: as_written(),
             role,
-            Provenance::ConfigBound { bound },
-        )),
-        TopicIdentity::Unresolved { keys, refusal } => Some((
-            vec![as_written],
+            value: Provenance::Literal,
+        }),
+        TopicIdentity::Committed { topics, bound } => Some(BrokerIdentity {
+            topics,
             role,
-            Provenance::ConfigUnresolved { keys, refusal },
-        )),
+            value: Provenance::ConfigBound { bound },
+        }),
+        TopicIdentity::Unresolved { keys, refusal } => Some(BrokerIdentity {
+            topics: as_written(),
+            role,
+            value: Provenance::ConfigUnresolved { keys, refusal },
+        }),
     }
 }
 
@@ -300,11 +356,16 @@ pub(super) fn broker_edges(
 
     for cand in candidates {
         let corpus = corpora.get(&cand.endpoint.member).unwrap_or(&empty);
-        let Some((keys, role, value)) = identify(cand.relation, &cand.key, corpus) else {
+        let Some(identity) = identify(cand.relation, &cand.key, corpus) else {
             continue;
         };
+        let (role, value) = (identity.role, identity.value);
         let is_provider = matches!(role, Role::Provider);
-        for key in keys {
+        // The bridge wraps the shared identity into its own match vocabulary
+        // HERE, at its own call site — the promotion pass wraps the same answer
+        // into a symbol descriptor at its own. One resolution, two renderings
+        // ([FR-WS-27] AC1).
+        for key in identity.topics.into_iter().map(PortableKey::broker) {
             let dedup_key = (
                 key.clone(),
                 is_provider,

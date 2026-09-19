@@ -809,6 +809,18 @@ impl PortableKey {
         self.bucket.namespace
     }
 
+    /// The bucket string two candidates meet on — the arm-normalized key
+    /// itself, without its namespace or method facet.
+    ///
+    /// Read by [`super::broker::identify`] so the topic key it hands the
+    /// promotion pass is **the very string** the bridge matches on, rather than
+    /// a second rendering of the same operand built beside it ([FR-WS-27] AC1).
+    ///
+    /// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+    pub(super) fn key(&self) -> &str {
+        &self.bucket.key
+    }
+
     /// The relation class a binding on this key is filed under — the namespace's
     /// stable relation label ([`BridgeNamespace::relation`]).
     pub(super) fn relation(&self) -> &'static str {
@@ -918,7 +930,7 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
 
 /// A member's committed configuration as the federation tiers read it: canonical
 /// key → every definition of it (S-382, [FR-WS-19]).
-pub(super) type MemberCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
+pub(crate) type MemberCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
 
 impl ConfigLookup for MemberCorpus {
     /// `module` is ignored, and the reason is [ADR-64]'s rather than a
@@ -938,12 +950,16 @@ impl ConfigLookup for MemberCorpus {
 /// (S-382, [ADR-64], extended to the broker arm by [S-410]).
 ///
 /// One helper, every caller — [`member_corpora`] below, which decides **which
-/// members are opened**, and [`identify`], which decides **which HTTP targets are
-/// resolved** — because those two questions used to be asked separately and had
-/// already drifted once: the coverage tier's classification loop tested the arm's
-/// namespace and the corpus read did not, so a member whose only placeholders
-/// were **broker topics** had its store opened to read a corpus that was then
-/// never consulted.
+/// members are opened**, [`identify`], which decides **which HTTP targets are
+/// resolved**, and since [S-424] the intra-repo promotion pass
+/// ([`crate::resolve::topics`]), which decides **whether its own member's store
+/// is read for a corpus at all** — because those questions used to be asked
+/// separately and had already drifted once: the coverage tier's classification
+/// loop tested the arm's namespace and the corpus read did not, so a member
+/// whose only placeholders were **broker topics** had its store opened to read a
+/// corpus that was then never consulted.
+///
+/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 ///
 /// A gate that opens a store and a gate that resolves an operand **must** be one
 /// predicate: were they two, a member could be opened for a target nothing
@@ -987,7 +1003,7 @@ pub(super) fn config_bound_keys(reference: &InvocationRef) -> Option<Vec<String>
 ///
 /// Split out rather than duplicated: a hand-mirrored second copy of this test is
 /// exactly how the member-open gate and the resolve gate would drift apart again.
-pub(super) fn config_bound_keys_of(
+pub(crate) fn config_bound_keys_of(
     relation: ArtifactRelation,
     target: &str,
 ) -> Option<Vec<String>> {
