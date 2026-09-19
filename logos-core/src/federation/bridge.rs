@@ -51,14 +51,25 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::graph_store::{ConfigDefinition, EdgeRow, NodeRow};
+use crate::graph_store::{EdgeRow, NodeRow};
 use crate::model::{
     ArtifactRelation, BridgeNamespace, BridgeRole, EdgeKind, LogosSymbol, MatchDiscipline, NodeId,
     NodeKind,
 };
 use crate::resolve::binding::{
-    placeholder_keys, ConfigBound, ConfigLookup, ProfiledTemplate, Provenance, Resolver,
+    config_bound_keys_of, ConfigBound, ConfigLookup, ProfiledTemplate, Provenance, Resolver,
 };
+
+/// The committed-configuration corpus, re-exported under the name federation has
+/// always called it by.
+///
+/// The type itself lives in [`crate::resolve::binding`] since [S-424], because the
+/// intra-repo promotion pass reads one on every single-root index — where this
+/// module is absent by design. Re-exported rather than renamed at ~40 use sites,
+/// and because "member" *is* the right word on this side of the seam.
+///
+/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+pub(super) use crate::resolve::binding::MemberCorpus;
 use crate::resolve::route_method::preferred_candidates;
 use crate::resolve::route_template::route_key;
 
@@ -809,18 +820,6 @@ impl PortableKey {
         self.bucket.namespace
     }
 
-    /// The bucket string two candidates meet on — the arm-normalized key
-    /// itself, without its namespace or method facet.
-    ///
-    /// Read by [`super::broker::identify`] so the topic key it hands the
-    /// promotion pass is **the very string** the bridge matches on, rather than
-    /// a second rendering of the same operand built beside it ([FR-WS-27] AC1).
-    ///
-    /// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
-    pub(super) fn key(&self) -> &str {
-        &self.bucket.key
-    }
-
     /// The relation class a binding on this key is filed under — the namespace's
     /// stable relation label ([`BridgeNamespace::relation`]).
     pub(super) fn relation(&self) -> &'static str {
@@ -928,23 +927,6 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
     }
 }
 
-/// A member's committed configuration as the federation tiers read it: canonical
-/// key → every definition of it (S-382, [FR-WS-19]).
-pub(crate) type MemberCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
-
-impl ConfigLookup for MemberCorpus {
-    /// `module` is ignored, and the reason is [ADR-64]'s rather than a
-    /// simplification: this map IS one member's own store, so the member is the
-    /// reading scope already. A narrower one would need the build-module
-    /// partition, which a single member's store does not carry — see
-    /// [`ConfigLookup::definitions`]. Every resolver here passes `""` to match.
-    ///
-    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-    fn definitions(&self, key: &str, _module: &str) -> Vec<ConfigDefinition> {
-        self.get(key).cloned().unwrap_or_default()
-    }
-}
-
 /// The configuration keys a reference names, or [`None`] if it names none —
 /// **the single predicate for "is this a configuration-bound reference?"**
 /// (S-382, [ADR-64], extended to the broker arm by [S-410]).
@@ -996,25 +978,6 @@ impl ConfigLookup for MemberCorpus {
 /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
 pub(super) fn config_bound_keys(reference: &InvocationRef) -> Option<Vec<String>> {
     config_bound_keys_of(reference.relation, &reference.target)
-}
-
-/// [`config_bound_keys`] over a relation and a target that are not (yet) an
-/// [`InvocationRef`] — the form the arm classifiers hold their operand in.
-///
-/// Split out rather than duplicated: a hand-mirrored second copy of this test is
-/// exactly how the member-open gate and the resolve gate would drift apart again.
-pub(crate) fn config_bound_keys_of(
-    relation: ArtifactRelation,
-    target: &str,
-) -> Option<Vec<String>> {
-    matches!(
-        relation,
-        ArtifactRelation::HttpClientCall
-            | ArtifactRelation::BrokerPublish
-            | ArtifactRelation::BrokerSubscribe
-    )
-    .then(|| placeholder_keys(target))
-    .flatten()
 }
 
 /// What committed configuration proves about one **HTTP invocation site's
@@ -2056,6 +2019,7 @@ pub(super) fn match_indexed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_store::ConfigDefinition;
 
     use std::cell::{Cell, RefCell};
     use std::path::{Path, PathBuf};

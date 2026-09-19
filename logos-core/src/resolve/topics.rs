@@ -68,12 +68,17 @@
 //! identically, which is why they cannot disagree"* while the bridge resolved
 //! its operand through committed configuration and this pass took
 //! `row.target.trim()` verbatim. They disagreed for every configuration-bound
-//! site, which on the reference estate promoted 32 distinct topic identities
-//! where 19 topics exist and left most of the publisher→topic→subscriber
-//! couplings unrepresentable. Two tiers stating one rule is what drifted; one
-//! function is what does not ([ADR-52], [FR-WS-27] AC1). The figures live in
-//! `tests/broker_topic_corpus.rs`'s recorded finding, not here — this file is
-//! swept by no figure roster.
+//! site, splitting a publisher from its subscriber wherever the two spelled one
+//! property differently and leaving that coupling unrepresentable. Two tiers
+//! stating one rule is what drifted; one function is what does not ([ADR-52],
+//! [FR-WS-27] AC1).
+//!
+//! **No estate figure is recorded here, deliberately.** They live in
+//! `tests/broker_topic_corpus.rs`'s recorded finding and in [CR-136]'s delivery
+//! appendix — one home each. This file is swept by no figure roster, so a number
+//! copied into it is a number that ages silently.
+//!
+//! [CR-136]: ../../../docs/requests/CR-136-promoted-topic-identity-is-the-committed-value.md
 //!
 //! [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
 //! [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
@@ -92,11 +97,10 @@ use std::time::Instant;
 use anyhow::Result;
 
 use crate::extract::symbol::{descriptor_for, SymbolContext};
-use crate::federation::bridge::{config_bound_keys_of, MemberCorpus};
-use crate::federation::broker;
 use crate::graph_store::{NodeRow, UnresolvedRefRow};
-use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind};
-use crate::resolve::binding::ConfigLookup;
+use crate::model::{ArtifactRelation, BridgeNamespace, EdgeKind, LogosSymbol, NodeId, NodeKind};
+use crate::resolve::binding::{config_bound_keys_of, ConfigLookup, MemberCorpus};
+use crate::resolve::broker_identity;
 use crate::runtime::Runtime;
 
 use super::promote::{self, Promoted, PromotedEdge};
@@ -217,12 +221,17 @@ fn broker_config_keys(refs: &[UnresolvedRefRow]) -> Vec<String> {
         let Some(relation) = row.payload.as_deref().and_then(ArtifactRelation::from_wire) else {
             continue;
         };
-        // Only the two broker arms: `config_bound_keys_of` admits the HTTP arm
-        // too, whose configured targets this pass promotes nothing for.
-        if !matches!(
-            relation,
-            ArtifactRelation::BrokerPublish | ArtifactRelation::BrokerSubscribe
-        ) {
+        // Only the broker arm: `config_bound_keys_of` admits the HTTP arm too,
+        // whose configured targets this pass promotes nothing for.
+        //
+        // Tested on the **namespace**, exactly as `broker_identity::admit` is, and
+        // NOT by re-spelling the relation list. A re-spelled list is a second
+        // predicate: the day a third relation maps to `BrokerTopic`, `admit` would
+        // key the site on its committed value while this gate silently omitted its
+        // key from the corpus — one captured fact, two keys, with one identify
+        // function in place. That is the drift [FR-WS-27] AC1 exists to forbid,
+        // arriving through the corpus rather than through the rule.
+        if relation.bridge_namespace() != Some(BridgeNamespace::BrokerTopic) {
             continue;
         }
         let Some(named) = config_bound_keys_of(relation, &row.target) else {
@@ -259,23 +268,47 @@ fn broker_config_keys(refs: &[UnresolvedRefRow]) -> Vec<String> {
 /// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 fn member_corpus(runtime: &Runtime, refs: &[UnresolvedRefRow]) -> Result<MemberCorpus> {
+    corpus_for(refs, |keys| {
+        runtime.submit_read(move |store| {
+            let mut corpus = MemberCorpus::new();
+            for key in keys {
+                let defs = store.config_definitions(&key)?;
+                // A key no source defines is ABSENT rather than present-and-empty:
+                // the resolver reads an absent key as `missing`, and an empty vec
+                // would say the same thing twice. Mirrors the bridge's own reader.
+                if !defs.is_empty() {
+                    corpus.insert(key, defs);
+                }
+            }
+            Ok(corpus)
+        })
+    })
+}
+
+/// The read **gate** itself, split from the read so it can be asserted rather
+/// than argued ([FR-WS-27] AC4, [NFR-PE-10]).
+///
+/// `read` is invoked **only** when the ledger names at least one broker
+/// configuration key. That is the whole of the emptiness test the criterion asks
+/// for, and separating it is what lets a test observe the thing the criterion
+/// says — *"only members naming a broker key read a corpus"* — instead of
+/// observing the key list and inferring the rest. Before this split the
+/// short-circuit could be deleted with the entire suite staying green.
+///
+/// # Errors
+/// Propagates whatever `read` returns.
+///
+/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn corpus_for(
+    refs: &[UnresolvedRefRow],
+    read: impl FnOnce(Vec<String>) -> Result<MemberCorpus>,
+) -> Result<MemberCorpus> {
     let keys = broker_config_keys(refs);
     if keys.is_empty() {
         return Ok(MemberCorpus::new());
     }
-    runtime.submit_read(move |store| {
-        let mut corpus = MemberCorpus::new();
-        for key in keys {
-            let defs = store.config_definitions(&key)?;
-            // A key no source defines is ABSENT rather than present-and-empty:
-            // the resolver reads an absent key as `missing`, and an empty vec
-            // would say the same thing twice. Mirrors the bridge's own reader.
-            if !defs.is_empty() {
-                corpus.insert(key, defs);
-            }
-        }
-        Ok(corpus)
-    })
+    read(keys)
 }
 
 /// One node this run wants promoted, keyed in the desired map by its symbol
@@ -368,7 +401,7 @@ fn broker_refs<'a>(
                 ArtifactRelation::BrokerSubscribe => NodeKind::Consumer,
                 _ => return None,
             };
-            let identity = broker::identify(relation, &row.target, corpus)?;
+            let identity = broker_identity::identify(relation, &row.target, corpus)?;
             let enclosing = *node_by_symbol.get(row.source_symbol.as_str())?;
             // **Flattened, one `BrokerRef` per topic identity.** A site whose
             // member commits its key two ways under two overlays promotes under

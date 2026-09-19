@@ -676,7 +676,7 @@ fn a_refused_operand_keeps_its_placeholder_as_written_and_promotes_no_indirectio
     let pubr = decl(1, "publish");
     let desired = promote_with(
         &[publish(&pubr, HAND_WRITTEN, 12)],
-        &[pubr.clone()],
+        std::slice::from_ref(&pubr),
         &commits_nothing(),
     );
     assert_eq!(
@@ -734,7 +734,7 @@ fn a_key_whose_overlays_disagree_promotes_one_topic_per_overlay() {
     let pubr = decl(1, "publish");
     let desired = promote_with(
         &[publish(&pubr, HAND_WRITTEN, 12)],
-        &[pubr.clone()],
+        std::slice::from_ref(&pubr),
         &corpus,
     );
 
@@ -809,39 +809,109 @@ fn only_a_ledger_naming_a_broker_configuration_key_asks_for_a_corpus() {
     );
 }
 
+/// **[FR-WS-27] AC4 / [NFR-PE-10] — a ledger naming no broker key issues NO
+/// read**, observed rather than inferred.
+///
+/// The sibling above asserts what [`broker_config_keys`] answers; this asserts
+/// what [`corpus_for`] *does* with that answer, which is the half the criterion
+/// actually names. The distinction is not pedantic: with only the key-list
+/// assertion in place, deleting the `if keys.is_empty()` short-circuit left the
+/// whole suite green while every repository with a broker footprint and none but
+/// literal topics paid a store round-trip per index.
+///
+/// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
+/// [NFR-PE-10]: ../../../../docs/specs/requirements/NFR-PE-10.md
+#[test]
+fn a_ledger_naming_no_broker_key_issues_no_corpus_read() {
+    let pubr = decl(1, "publish");
+    let count_reads = |refs: &[UnresolvedRefRow]| -> usize {
+        let mut reads = 0usize;
+        let corpus = corpus_for(refs, |keys| {
+            reads += 1;
+            assert!(!keys.is_empty(), "the gate must never issue an empty read");
+            Ok(MemberCorpus::new())
+        })
+        .expect("the fixture reader cannot fail");
+        assert!(corpus.is_empty());
+        reads
+    };
+
+    // Literal operands only: the read is never issued at all.
+    assert_eq!(
+        count_reads(&[publish(&pubr, "orders", 12), subscribe(&pubr, "shipments", 20)]),
+        0,
+        "a literal-only ledger must not open its store for a corpus"
+    );
+    // No broker row at all — the same, and the cheapest path there is.
+    assert_eq!(count_reads(&[]), 0);
+    // A non-broker relation carrying a placeholder: still no read.
+    let http = ledger(
+        &pubr,
+        ArtifactRelation::HttpClientCall,
+        "GET ${services.orders.base-url}/orders",
+        40,
+    );
+    assert_eq!(count_reads(&[http]), 0);
+
+    // …and exactly ONE read, over the whole key set, when a key IS named —
+    // never one read per row, which three rows would otherwise show as three.
+    assert_eq!(
+        count_reads(&[
+            publish(&pubr, HAND_WRITTEN, 12),
+            subscribe(&pubr, HAND_WRITTEN, 20),
+            subscribe(&pubr, VIA_ACCESSOR, 30),
+        ]),
+        1,
+        "one read for the member, not one per site"
+    );
+}
+
 /// **[FR-WS-27] AC1 — the no-drift walk. One function, called from both tiers.**
 ///
-/// The criterion this test exists for is the one that survives the next change
-/// to either tier: it walks **every** broker fixture in this module's roster
-/// through both tiers and asserts the topic identities they produce are equal as
-/// sets, so re-introducing a local keying rule in either one fails here.
+/// Walks **every** broker fixture shape through both tiers and asserts each
+/// against a **written expectation**, then against the other. The criterion this
+/// discharges is the one that survives the next change to either tier.
+///
+/// # Why the expectation column exists, and what it fixes
+///
+/// The first version of this test asserted only `promoted == bridged`. Since the
+/// promotion pass obtains its keys *by calling the very function the bridge keys
+/// on*, that comparison is `f(x) == f(x)`: it has exactly one live failure mode
+/// (someone stops the pass delegating) and is **blind** to a change in the shared
+/// rule, because both sides move together. Delete `identify`'s `Committed` arm
+/// and every config-bound site silently re-keys on its placeholder in both tiers
+/// — [CR-136] fully reintroduced — with a green test whose docstring claimed it
+/// would fail. The roster's third column is the oracle that closes that: the
+/// *fixture* says what each shape must key to, so a change to the shared rule
+/// alone fails here.
 ///
 /// The two entry points are each tier's own:
 ///
 /// - the **promotion tier** runs [`desired_set`] — the exact function
 ///   [`super::run`] calls — and the identities are read off the `Topic` nodes it
 ///   wants promoted, which is the tier's whole output;
-/// - the **bridge tier** runs [`broker::identify`] — the exact function
-///   [`broker::broker_edges`] and `federation::coverage::arm_identity` call, and
-///   the only place either of them obtains a topic key.
+/// - the **bridge tier** runs [`broker_identity::identify`] — the exact function
+///   [`crate::federation::broker::broker_edges`] and
+///   `federation::coverage::arm_identity` call, and the only place either of them
+///   obtains a topic key.
 ///
 /// Calling `identify` for the bridge side rather than `broker_edges` is
-/// deliberate and is the stronger reading, not a convenience: `broker_edges`
-/// emits an edge only for a publish that **meets a cross-member subscribe**, so
-/// over a roster of refusals and lone publishes it would answer the empty set
-/// and the comparison would be vacuous for precisely the fixtures that matter.
-/// `identify` is where the bridge's key comes from, so it is what the promotion
-/// tier must agree with.
+/// deliberate: `broker_edges` emits an edge only for a publish that **meets a
+/// cross-member subscribe**, so over a roster of refusals and lone publishes it
+/// would answer the empty set and the comparison would be vacuous for precisely
+/// the fixtures that matter. The consequence is that this walk is **asymmetric**
+/// — a local keying rule re-introduced inside `broker_edges` is invisible here.
+/// That half is covered by `two_spellings_of_one_property_fan_out_on_the_committed_value`
+/// in `federation::broker`, which runs the real fan-out and asserts the BEFORE
+/// state too. Stated rather than implied, because the criterion's words are
+/// "either tier" and one reading of them is not delivered here.
 ///
-/// **This test is not vacuous by construction**: revert `broker_refs` to
-/// `row.target.trim()` and every config-bound row below diverges, which is the
-/// mutation this was written against.
-///
+/// [CR-136]: ../../../../docs/requests/CR-136-promoted-topic-identity-is-the-committed-value.md
 /// [FR-WS-27]: ../../../../docs/specs/requirements/FR-WS-27.md
 #[test]
 fn both_tiers_key_every_broker_fixture_identically() {
-    // The roster: one entry per shape a broker operand can take, each with the
-    // corpus that makes that shape the thing it is. Extended when a shape is
+    // The roster: one entry per shape a broker operand can take, its corpus, and
+    // **the keys that shape must produce, written out**. Extended when a shape is
     // added, which is the point — a new shape must be walked by both tiers.
     let overlays = {
         let mut c = MemberCorpus::new();
@@ -870,44 +940,84 @@ fn both_tiers_key_every_broker_fixture_identically() {
         );
         c
     };
-    let roster: Vec<(&str, &str, MemberCorpus)> = vec![
-        ("a plain literal", "orders", commits_nothing()),
+    let composed = {
+        let mut c = MemberCorpus::new();
+        commits(&mut c, "env", &[(None, "prod")]);
+        commits(&mut c, "base", &[(None, "orders")]);
+        c
+    };
+    let roster: Vec<(&str, &str, MemberCorpus, &[&str])> = vec![
+        ("a plain literal", "orders", commits_nothing(), &["orders"]),
         (
             "a schema-guarded literal",
             "orders#com.acme.OrderCreated",
             commits_nothing(),
+            &["orders#com.acme.OrderCreated"],
+        ),
+        (
+            "a whitespace-padded literal",
+            "  orders  ",
+            commits_nothing(),
+            &["orders"],
         ),
         (
             "a hand-written placeholder, committed",
             HAND_WRITTEN,
             archive_commands_corpus(),
+            &[COMMITTED],
         ),
         (
             "an accessor-spelled placeholder, committed to the same value",
             VIA_ACCESSOR,
             archive_commands_corpus(),
+            &[COMMITTED],
         ),
         (
             "a schema-guarded placeholder, committed",
             "${spring.kafka.topics.archive-commands}#com.acme.Cmd",
             archive_commands_corpus(),
+            &["archive-commands#com.acme.Cmd"],
+        ),
+        (
+            "an operand composing TWO keys with literal text between them",
+            "${env}-${base}",
+            composed,
+            &["prod-orders"],
         ),
         (
             "a placeholder nothing commits",
             HAND_WRITTEN,
             commits_nothing(),
+            &[HAND_WRITTEN],
         ),
-        ("a placeholder committed to an indirection", HAND_WRITTEN, indirection),
-        ("a placeholder committed to blank", HAND_WRITTEN, blank),
-        ("a placeholder two overlays disagree on", HAND_WRITTEN, overlays),
-        // The keyless row: the arm's `topic-not-literal` refusal. BOTH tiers
-        // must answer "nothing" — the promotion pass by promoting no topic, the
-        // bridge by `identify` returning `None`.
-        ("a keyless row", "", commits_nothing()),
-        ("an all-whitespace row", "   ", commits_nothing()),
+        (
+            "a placeholder committed to an indirection",
+            HAND_WRITTEN,
+            indirection,
+            &[HAND_WRITTEN],
+        ),
+        (
+            "a placeholder committed to blank",
+            HAND_WRITTEN,
+            blank,
+            &[HAND_WRITTEN],
+        ),
+        (
+            "a placeholder two overlays disagree on",
+            HAND_WRITTEN,
+            overlays,
+            &["commands-prod", "commands-staging"],
+        ),
+        // The keyless row: the arm's `topic-not-literal` refusal. BOTH tiers must
+        // answer *nothing*, and the empty expectation below is what asserts it —
+        // set equality alone would be satisfied by two tiers that both wrongly
+        // admitted a topic named `""`.
+        ("a keyless row", "", commits_nothing(), &[]),
+        ("an all-whitespace row", "   ", commits_nothing(), &[]),
     ];
 
-    for (what, operand, corpus) in roster {
+    for (what, operand, corpus, expected) in roster {
+        let expected: BTreeSet<&str> = expected.iter().copied().collect();
         for (relation, kind) in [
             (ArtifactRelation::BrokerPublish, NodeKind::Producer),
             (ArtifactRelation::BrokerSubscribe, NodeKind::Consumer),
@@ -916,7 +1026,7 @@ fn both_tiers_key_every_broker_fixture_identically() {
             let row = ledger(&site, relation, operand, 12);
 
             // Tier 1 — the promotion pass, through the function `run` calls.
-            let desired = promote_with(&[row], &[site.clone()], &corpus);
+            let desired = promote_with(&[row], std::slice::from_ref(&site), &corpus);
             let promoted: BTreeSet<&str> = desired
                 .values()
                 .filter(|d| d.kind == NodeKind::Topic)
@@ -924,12 +1034,26 @@ fn both_tiers_key_every_broker_fixture_identically() {
                 .collect();
 
             // Tier 2 — the bridge, through the function it keys on.
-            let identity = broker::identify(relation, operand, &corpus);
+            let identity = broker_identity::identify(relation, operand, &corpus);
             let bridged: BTreeSet<&str> = identity
                 .as_ref()
                 .map(|i| i.topics.iter().map(String::as_str).collect())
                 .unwrap_or_default();
 
+            // Against the WRITTEN expectation first, and independently per tier.
+            // This is what makes the walk a contract rather than a call-graph
+            // check: with the oracle, a change to the shared rule alone fails
+            // here, which "the two tiers agree" can never do once they share it.
+            assert_eq!(
+                promoted, expected,
+                "the PROMOTION tier keys {what} ({operand:?}) as a {kind:?} wrongly"
+            );
+            assert_eq!(
+                bridged, expected,
+                "the BRIDGE tier keys {what} ({operand:?}) as a {kind:?} wrongly"
+            );
+            // …and against each other, which is the criterion's own words and
+            // catches a divergence in a shape the expectation column got wrong.
             assert_eq!(
                 promoted, bridged,
                 "the two tiers disagree on {what} ({operand:?}) as a {kind:?}: \

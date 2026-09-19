@@ -43,16 +43,19 @@
 // then it was proven only by this module's tests, mirroring how S-251 shipped
 // `capture_invocation_refs` ahead of its arm callers.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use crate::model::{ArtifactRelation, BridgeNamespace};
-use crate::resolve::binding::{
-    placeholder_keys, ConfigBound, ConfigLookup, Provenance, Resolver, ValueRefusal,
-};
+use crate::model::ArtifactRelation;
+use crate::resolve::binding::{MemberCorpus, Provenance};
+// The topic-identity rule lives in `resolve` because the intra-repo promotion
+// pass calls it on every single-root index, where this module is absent
+// ([CR-136] §4.4, [FR-WS-27]). The dependency runs federation -> resolve, which
+// is the direction `architecture.md` §4.1 declares.
+use crate::resolve::broker_identity::{identify, BrokerIdentity};
 
 use super::bridge::{
-    index_provider, match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, MemberCorpus,
-    PortableKey, ProviderIndex, Role,
+    index_provider, match_indexed, BridgeEdge, BridgeEndpoint, BridgeIntake, PortableKey,
+    ProviderIndex, Role,
 };
 
 /// One captured broker reference promoted to a bridge candidate: which side it
@@ -69,246 +72,6 @@ pub(super) struct BrokerCandidate {
     pub(super) key: String,
     /// The database-portable endpoint identity.
     pub(super) endpoint: BridgeEndpoint,
-}
-
-/// Reduce a broker relation + its normalized topic key to the portable key and
-/// role the bridge matches on, or `None` when `relation` is not a
-/// [`BrokerTopic`](BridgeNamespace::BrokerTopic) arm.
-///
-/// Purely a function of the arm's two pure descriptors — the namespace-generic
-/// contract ([FR-WS-07], [ADR-54]) — so it never names a match discipline: the
-/// loop reads the namespace's own [`match_discipline`] (fan-out).
-///
-/// [FR-WS-07]: ../../../docs/specs/requirements/FR-WS-07.md
-/// [ADR-54]: ../../../docs/specs/architecture/decisions/ADR-54.md
-/// [`match_discipline`]: crate::model::BridgeNamespace::match_discipline
-pub(super) fn classify(relation: ArtifactRelation, topic_key: &str) -> Option<(PortableKey, Role)> {
-    // Only the broker-topic namespace is this arm's business; an HTTP/gRPC arm
-    // (or a non-arm contract relation) is classified elsewhere / not at all.
-    let namespace = relation.bridge_namespace()?;
-    if namespace != BridgeNamespace::BrokerTopic {
-        return None;
-    }
-    // A keyless row is the arm's recorded `topic-not-literal` refusal ([CR-107]),
-    // never a topic: it fans out to nothing and is indexed as nothing, so a refusal
-    // can never become a cross-service edge ([NFR-RA-05]).
-    if topic_key.trim().is_empty() {
-        return None;
-    }
-    let role = relation.bridge_role()?;
-    // **Trimmed**, and that is the one spelling of "the operand as written" in
-    // this crate. The capture normalizer already trims, so this changes no
-    // stored row; it matters because [`identify`] hands this very string to the
-    // promotion pass, which trimmed its own operand (`row.target.trim()`) long
-    // before it called anything here. Two tiers agreeing by coincidence is what
-    // [FR-WS-27] exists to replace with agreeing by construction.
-    //
-    // [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
-    Some((PortableKey::broker(topic_key.trim().to_string()), role))
-}
-
-/// What committed configuration proves about a broker site's topic operand —
-/// the **committed-value topic identity** ([FR-WS-10] as re-proposed 2026-09-15,
-/// [CR-131] §3.2 A3, delivered by [S-410]).
-///
-/// The three variants are the whole rule, and the third is the half a reader is
-/// most likely to get wrong:
-///
-/// - [`Literal`](Self::Literal) — the operand carries no `${…}` at all, so no
-///   configuration is read for it. Unchanged from every release before [S-410]:
-///   *a topic literal is keyed by its own text, exactly as written.*
-/// - [`Committed`](Self::Committed) — the operand names configuration keys and
-///   the committed sources prove a value for them. **That value is the topic
-///   identity**, one per profile-distinct composition, so a subscribe spelled
-///   `${spring.kafka.topics.archive-volume-counters}` and a publish whose
-///   accessor resolved to the canonical `${spring.kafka.topics.archivevolumecounters}`
-///   meet — they resolve to one committed value even though the two placeholder
-///   spellings are not byte-equal. Closing that spelling gap is what [ADR-64]'s
-///   2026-09-15 amendment handed this story, and it is closed **at the value**,
-///   never by rewriting how a literal row is stored.
-/// - [`Unresolved`](Self::Unresolved) — the operand names keys and the sources
-///   prove nothing (or prove only a further indirection). **No topic is
-///   fabricated** ([NFR-RA-05]), and the site keeps the placeholder-as-written
-///   key it had before [S-410]: [FR-WS-10]'s re-proposed criterion says so
-///   outright — *a literal that resolves to nothing keeps the
-///   placeholder-as-written key*. The refusal still travels, as
-///   [`Provenance::ConfigUnresolved`], so the row names the key and the existing
-///   reason rather than reading as an ordinary literal.
-///
-/// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
-/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TopicIdentity {
-    /// No `${…}` placeholder in the operand: the topic is the operand's own
-    /// text and no configuration was read.
-    Literal,
-    /// The committed sources prove the operand's value.
-    ///
-    /// The keys are deliberately **not** repeated here: each entry of `bound`
-    /// carries its own canonical `key`, so a second list would be a copy that
-    /// can go stale. [`Unresolved`](Self::Unresolved) has no such carrier and
-    /// therefore does name its keys.
-    Committed {
-        /// One topic identity per profile-distinct committed composition,
-        /// sorted and de-duplicated. Two entries mean the overlays disagree and
-        /// **both** are retained — the site binds under each ([FR-WS-19] AC2).
-        ///
-        /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
-        topics: Vec<String>,
-        /// The provenance of each key: defining sources and profile set.
-        bound: Vec<ConfigBound>,
-    },
-    /// The operand names keys and the committed sources admit no value.
-    Unresolved {
-        /// The canonical configuration keys the operand names, in source order.
-        keys: Vec<String>,
-        /// Why they admitted nothing — the **existing** value-refusal
-        /// vocabulary, never a reason minted for this arm.
-        refusal: ValueRefusal,
-    },
-}
-
-/// Resolve one broker site's topic operand against `corpus` — the member's own
-/// committed configuration ([ADR-64]'s within-reach rule is the caller's, which
-/// reads one member's corpus and no other's).
-///
-/// `target` is the arm-normalized topic key as the ledger stores it: a topic
-/// name, optionally `#`-guarded by a message-schema FQN. A guard is carried
-/// through the substitution untouched, so `${x}#com.acme.Foo` resolves its topic
-/// half and keeps guarding on the same FQN.
-///
-/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
-pub fn topic_identity(target: &str, corpus: &dyn ConfigLookup) -> TopicIdentity {
-    let Some(keys) = placeholder_keys(target) else {
-        return TopicIdentity::Literal;
-    };
-    let resolver = Resolver { corpus, module: "" };
-    match resolver.resolve_template(target) {
-        // `placeholder_keys` above already said the target carries a placeholder,
-        // so `resolve_template` cannot answer `None` here. Mapped to the literal
-        // rule rather than unwrapped: a panic in a read-model is never the right
-        // answer to a disagreement between two scans (the same choice
-        // `record_config_bound` makes for the identical impossibility).
-        None => TopicIdentity::Literal,
-        Some(Err(refusal)) => TopicIdentity::Unresolved { keys, refusal },
-        Some(Ok(resolved)) => {
-            let topics: BTreeSet<String> = resolved
-                .candidates
-                .iter()
-                .map(|candidate| candidate.template.trim().to_string())
-                .filter(|topic| !topic.is_empty())
-                .collect();
-            if topics.is_empty() {
-                // Every committed composition is blank. A blank string is no more
-                // a topic identity than an absent one — the same test `classify`
-                // applies to a keyless row — so nothing is admitted and the site
-                // falls back to its placeholder-as-written key. Reported under
-                // the refusal an empty corpus gives, because that is what the
-                // sources proved: no value.
-                return TopicIdentity::Unresolved {
-                    keys,
-                    refusal: ValueRefusal::MissingKey,
-                };
-            }
-            TopicIdentity::Committed {
-                topics: topics.into_iter().collect(),
-                bound: resolved.bound,
-            }
-        }
-    }
-}
-
-/// Every topic key one broker site meets on, and the provenance of the value
-/// behind them — the answer [`identify`] gives, and the **one** topic identity
-/// every tier that names a topic is keyed by ([FR-WS-27], [S-424]).
-///
-/// Keys are plain topic strings rather than [`PortableKey`]s because the bridge
-/// is no longer the only caller: the intra-repo promotion pass
-/// ([`crate::resolve::topics`]) names a `Topic`/`Producer`/`Consumer` node by
-/// this same value and has no portable key to wrap it in. Each tier wraps what
-/// it needs at its own call site — the bridge into
-/// [`PortableKey::broker`](PortableKey), the promotion pass into a symbol
-/// descriptor — from **one** resolution, which is the whole point of the shape.
-///
-/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
-/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
-#[derive(Debug, Clone)]
-pub(crate) struct BrokerIdentity {
-    /// One topic key per profile-distinct committed composition, sorted and
-    /// de-duplicated — or exactly one, the operand as written and trimmed, for a
-    /// literal and for an operand the corpus refuses.
-    pub(crate) topics: Vec<String>,
-    /// Which side of the arm the site is: a publish is the
-    /// [`Consumer`](Role::Consumer), a subscribe the [`Provider`](Role::Provider).
-    pub(crate) role: Role,
-    /// The provenance of the **site's** value — what a coverage row and a
-    /// promoted node's evidence carry.
-    pub(crate) value: Provenance,
-}
-
-/// Reduce a broker relation + its stored topic operand to **every** topic key
-/// the site meets on, its role, and the provenance of the value behind those
-/// keys ([S-410], carried into the promotion pass by [S-424]).
-///
-/// The committed-value twin of [`classify`], and **the single place the
-/// committed-value rule is applied**. Three callers, in three tiers, and that is
-/// the requirement rather than an implementation detail ([FR-WS-27] AC1,
-/// [ADR-52]):
-///
-/// - the bridge's cross-member fan-out ([`broker_edges`]);
-/// - the coverage read-model (`super::coverage::arm_identity`); and
-/// - the intra-repo promotion pass (`crate::resolve::topics`), which keys its
-///   `Topic`/`Producer`/`Consumer` nodes on the same answer.
-///
-/// So *"why did this bind"*, *"why didn't this bind"* and *"what node is this"*
-/// cannot drift the way they could if each tier resolved its own operands —
-/// which is exactly what happened between [S-410] and [S-424], while both tiers
-/// were individually correct. **A predicate duplicated at two call sites does
-/// not satisfy [FR-WS-27]; one function does.**
-///
-/// **A `Vec` of keys, not one key**, because overlays are allowed to disagree: a
-/// key two profiles commit differently yields one identity per overlay and the
-/// site is indexed — or fans out, or promotes — under each of them
-/// ([FR-WS-19] AC2). A literal, and an operand the corpus refuses, both yield
-/// exactly one.
-///
-/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
-/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
-/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
-/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
-pub(crate) fn identify(
-    relation: ArtifactRelation,
-    target: &str,
-    corpus: &dyn ConfigLookup,
-) -> Option<BrokerIdentity> {
-    // `classify` first, so every refusal it already makes — a non-broker
-    // relation, a keyless row — is made in exactly one place and nothing below
-    // can re-admit one.
-    let (as_written, role) = classify(relation, target)?;
-    // The bridge's own bucket string, not a second rendering of it beside the
-    // first: one operand, one spelling, whichever tier asks.
-    let as_written = || vec![as_written.key().to_string()];
-    match topic_identity(target, corpus) {
-        TopicIdentity::Literal => Some(BrokerIdentity {
-            topics: as_written(),
-            role,
-            value: Provenance::Literal,
-        }),
-        TopicIdentity::Committed { topics, bound } => Some(BrokerIdentity {
-            topics,
-            role,
-            value: Provenance::ConfigBound { bound },
-        }),
-        TopicIdentity::Unresolved { keys, refusal } => Some(BrokerIdentity {
-            topics: as_written(),
-            role,
-            value: Provenance::ConfigUnresolved { keys, refusal },
-        }),
-    }
 }
 
 /// Fan out captured broker candidates into cross-service edges through the
@@ -356,16 +119,20 @@ pub(super) fn broker_edges(
 
     for cand in candidates {
         let corpus = corpora.get(&cand.endpoint.member).unwrap_or(&empty);
-        let Some(identity) = identify(cand.relation, &cand.key, corpus) else {
+        let Some(BrokerIdentity {
+            topics,
+            bridge_role,
+            value,
+        }) = identify(cand.relation, &cand.key, corpus)
+        else {
             continue;
         };
-        let (role, value) = (identity.role, identity.value);
-        let is_provider = matches!(role, Role::Provider);
+        let is_provider = matches!(bridge_role, Role::Provider);
         // The bridge wraps the shared identity into its own match vocabulary
         // HERE, at its own call site — the promotion pass wraps the same answer
         // into a symbol descriptor at its own. One resolution, two renderings
         // ([FR-WS-27] AC1).
-        for key in identity.topics.into_iter().map(PortableKey::broker) {
+        for key in topics.into_iter().map(PortableKey::broker) {
             let dedup_key = (
                 key.clone(),
                 is_provider,
@@ -375,7 +142,7 @@ pub(super) fn broker_edges(
             if !seen.insert(dedup_key) {
                 continue; // a repeat of this exact endpoint on this topic — drop it
             }
-            match role {
+            match bridge_role {
                 Role::Provider => {
                     index_provider(&mut providers, key, cand.endpoint.clone(), value.clone())
                 }
@@ -412,6 +179,13 @@ pub(super) fn broker_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The identity rule itself lives in `crate::resolve::broker_identity` since
+    // [S-424]; these fan-out fixtures assert against it because it is what
+    // `broker_edges` keys on.
+    //
+    // [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+    use crate::resolve::binding::ValueRefusal;
+    use crate::resolve::broker_identity::{topic_identity, TopicIdentity};
     use crate::graph_store::SqliteGraphStore;
     use crate::model::LogosSymbol;
 
@@ -859,41 +633,6 @@ mod tests {
         assert_eq!(with_corpus.len(), 1);
         assert_eq!(with_corpus[0].from_value, Provenance::Literal);
         assert_eq!(with_corpus[0].to_value, Provenance::Literal);
-    }
-
-    /// The classifier maps the arm's relations onto the fan-out `BrokerTopic`
-    /// namespace by its pure descriptors, and refuses a non-broker relation —
-    /// proving it is scoped to this arm and drives the generic namespace, not a
-    /// hardcoded match.
-    #[test]
-    fn classify_maps_broker_relations_and_refuses_others() {
-        let (key, role) = classify(ArtifactRelation::BrokerPublish, "orders").unwrap();
-        assert_eq!(key.relation(), "broker-topic");
-        assert!(matches!(role, Role::Consumer), "a publish is the consumer side");
-
-        let (_, role) = classify(ArtifactRelation::BrokerSubscribe, "orders").unwrap();
-        assert!(matches!(role, Role::Provider), "a subscribe is the provider side");
-
-        assert!(
-            classify(ArtifactRelation::Route, "GET /x").is_none(),
-            "a non-broker relation is not this arm's candidate"
-        );
-
-        // A **keyless** row is the arm's recorded `topic-not-literal` refusal
-        // ([CR-107]), never a topic, so it classifies to nothing. This guard is on
-        // a live path, not defence in depth: `ContractBridge::compute_edges` builds
-        // `broker_candidates` straight from each member's `invocation_refs()` — the
-        // raw ledger, refusal rows included — and hands them here, bypassing
-        // `consumer_portable_key`'s own keyless gate entirely.
-        //
-        // [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
-        for relation in [
-            ArtifactRelation::BrokerPublish,
-            ArtifactRelation::BrokerSubscribe,
-        ] {
-            assert!(classify(relation, "").is_none(), "{}", relation.as_str());
-            assert!(classify(relation, "   ").is_none(), "{}", relation.as_str());
-        }
     }
 
     /// **[CR-107] never-fabricate guard.** Two sites whose topics were *refused*

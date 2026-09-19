@@ -38,6 +38,13 @@
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
+/// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
+/// function the intra-repo promotion pass, the federation bridge and the
+/// coverage read-model all resolve a broker topic operand through, so a `Topic`
+/// node and a bridge edge can never key one captured fact two ways. It lives
+/// here rather than in `federation` because the promotion pass runs on every
+/// single-root index, where federation is absent. See its module docs.
+pub mod broker_identity;
 /// Configuration-bound operand resolution (S-382, CR-121, FR-WS-19, ADR-64): a
 /// placeholder, a value-annotation key or a configuration-bound accessor
 /// resolved against the **committed** configuration corpus, retaining every

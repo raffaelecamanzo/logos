@@ -89,6 +89,7 @@ use serde::Serialize;
 
 use crate::extract::config::corpus::canonical_key;
 use crate::graph_store::ConfigDefinition;
+use crate::model::ArtifactRelation;
 
 /// The opening delimiter of a configuration placeholder (`${key}`).
 const PLACEHOLDER_OPEN: &str = "${";
@@ -899,6 +900,74 @@ pub fn placeholder_keys(template: &str) -> Option<Vec<String>> {
         rest = after;
     }
     (!keys.is_empty()).then_some(keys)
+}
+
+/// One repository's (or workspace member's) committed configuration, as every
+/// tier that resolves an operand reads it: canonical key → every definition of it
+/// (S-382, [FR-WS-19]).
+///
+/// Named `MemberCorpus` for the federation vocabulary it was born in; a
+/// single-root index has exactly one "member" — itself — and reads its own store
+/// through the same type ([S-424]).
+///
+/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+pub type MemberCorpus = BTreeMap<String, Vec<ConfigDefinition>>;
+
+impl ConfigLookup for MemberCorpus {
+    /// `module` is ignored, and the reason is [ADR-64]'s rather than a
+    /// simplification: this map IS one member's own store, so the member is the
+    /// reading scope already. A narrower one would need the build-module
+    /// partition, which a single member's store does not carry — see
+    /// [`ConfigLookup::definitions`]. Every resolver here passes `""` to match.
+    ///
+    /// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+    fn definitions(&self, key: &str, _module: &str) -> Vec<ConfigDefinition> {
+        self.get(key).cloned().unwrap_or_default()
+    }
+}
+
+
+/// The configuration keys a `(relation, target)` names, or [`None`] when it
+/// names none — **the single predicate for "is this a configuration-bound
+/// reference?"** (S-382, [ADR-64], extended to the broker arm by [S-410]).
+///
+/// One helper, every caller: the federation bridge's `member_corpora`, which
+/// decides **which members are opened**; its `identify`, which decides **which
+/// HTTP targets are resolved**; and since [S-424] the intra-repo promotion pass
+/// ([`crate::resolve::topics`]), which decides **whether its own store is read
+/// for a corpus at all**. Those questions used to be asked separately and had
+/// already drifted once: the coverage tier's classification loop tested the arm's
+/// namespace and the corpus read did not, so a member whose only placeholders
+/// were **broker topics** had its store opened to read a corpus that was then
+/// never consulted.
+///
+/// A gate that opens a store and a gate that resolves an operand **must** be one
+/// predicate: were they two, a store could be opened for a target nothing
+/// resolves — or, worse, a target could resolve in a member whose corpus was
+/// never read.
+///
+/// The arm test is on the **relation**, not on its namespace. The guard admits a
+/// site and each caller then classifies it on its own arm, so asking about the
+/// namespace and answering about the relation is one drift away from filing a
+/// second Http-namespace arm under the HTTP arm's discipline. It admits all three
+/// configuration-bound arms; a caller wanting one of them narrows further itself.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+/// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+pub fn config_bound_keys_of(
+    relation: ArtifactRelation,
+    target: &str,
+) -> Option<Vec<String>> {
+    matches!(
+        relation,
+        ArtifactRelation::HttpClientCall
+            | ArtifactRelation::BrokerPublish
+            | ArtifactRelation::BrokerSubscribe
+    )
+    .then(|| placeholder_keys(target))
+    .flatten()
 }
 
 /// Split at the next complete `${…}`: the text before it, its inner text, and

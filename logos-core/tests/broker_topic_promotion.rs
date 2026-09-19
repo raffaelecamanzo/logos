@@ -95,6 +95,33 @@ fn edges_of(rt: &Runtime, kind: EdgeKind) -> Vec<(NodeId, NodeId)> {
     .expect("read runs")
 }
 
+/// Every promoted node's symbol — the three kinds this pass owns, and nothing
+/// else. Sorted by name via [`nodes_of`], so two runs read alike.
+fn promoted_symbols(rt: &Runtime) -> Vec<String> {
+    rt.submit_read(|store| {
+        let mut symbols: Vec<String> = store
+            .all_nodes()?
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Topic | NodeKind::Producer | NodeKind::Consumer
+                )
+            })
+            .map(|n| n.symbol.as_str().to_string())
+            .collect();
+        symbols.sort();
+        Ok(symbols)
+    })
+    .expect("read runs")
+}
+
+/// The target endpoint of every edge of `kind` — the half an assertion about
+/// "which topic does this hang off" actually reads.
+fn targets_of(rt: &Runtime, kind: EdgeKind) -> Vec<NodeId> {
+    edges_of(rt, kind).into_iter().map(|(_, target)| target).collect()
+}
+
 /// node id → kind, for asserting an edge's endpoints are the kinds they claim.
 fn kinds_by_id(rt: &Runtime) -> HashMap<NodeId, NodeKind> {
     rt.submit_read(|store| Ok(store.all_nodes()?.into_iter().map(|n| (n.id, n.kind)).collect()))
@@ -1097,38 +1124,21 @@ fn two_spellings_of_one_committed_property_promote_one_topic_read_from_the_membe
     // The coupling is now representable: the producer and the consumer are joined
     // to the SAME topic node. This is the assertion the counts above cannot make.
     let topic_id = nodes_of(rt, NodeKind::Topic)[0].0;
-    let published: Vec<NodeId> = edges_of(rt, EdgeKind::Publishes)
-        .into_iter()
-        .map(|(_, target)| target)
-        .collect();
-    let subscribed: Vec<NodeId> = edges_of(rt, EdgeKind::Subscribes)
-        .into_iter()
-        .map(|(_, target)| target)
-        .collect();
-    assert_eq!(published, [topic_id], "the Producer publishes to the one topic");
     assert_eq!(
-        subscribed, [topic_id],
+        targets_of(rt, EdgeKind::Publishes),
+        [topic_id],
+        "the Producer publishes to the one topic"
+    );
+    assert_eq!(
+        targets_of(rt, EdgeKind::Subscribes),
+        [topic_id],
         "the Consumer subscribes from the SAME topic — the hop can close"
     );
 
     // No placeholder text survives anywhere in the promoted subgraph, symbols
     // included: a matching `name` with a `${…}` still in the symbol would leave
     // two site nodes that a re-sync reconciles apart.
-    let symbols: Vec<String> = rt
-        .submit_read(|store| {
-            Ok(store
-                .all_nodes()?
-                .into_iter()
-                .filter(|n| {
-                    matches!(
-                        n.kind,
-                        NodeKind::Topic | NodeKind::Producer | NodeKind::Consumer
-                    )
-                })
-                .map(|n| n.symbol.as_str().to_string())
-                .collect::<Vec<_>>())
-        })
-        .expect("read runs");
+    let symbols = promoted_symbols(rt);
     assert_eq!(symbols.len(), 3, "topic + producer + consumer: {symbols:?}");
     for symbol in &symbols {
         assert!(
@@ -1176,12 +1186,19 @@ fn a_store_indexed_before_the_committed_value_rule_converges_on_the_next_sync() 
         "with nothing committed, both operands keep their placeholders — two topics"
     );
 
-    // Now the member commits the property and both files are re-synced.
+    // Now the member commits the property and syncs **only the config file**.
+    //
+    // Deliberately not the Java source. Including it would re-extract the broker
+    // ledger rows and over-determine the result: the test would pass whether the
+    // pass reconciled the whole graph or merely rebuilt the rows it was handed.
+    // The scenario AC5 is actually about is the one where nothing about the
+    // broker source changed — the operator upgraded the binary, the config was
+    // already committed, and some unrelated file synced. Pinning that is what
+    // makes "converges on its next index or sync" a claim about reconciliation
+    // rather than about re-extraction, and it is what would fail if the pass
+    // were ever gated on the dirty set containing a broker-relevant file.
     write(tmp.path(), "src/main/resources/application.yml", ARCHIVE_YML);
-    engine.sync(&[
-        PathBuf::from("src/ArchiveWiring.java"),
-        PathBuf::from("src/main/resources/application.yml"),
-    ]);
+    engine.sync(&[PathBuf::from("src/main/resources/application.yml")]);
 
     assert_eq!(
         names_of(rt, NodeKind::Topic),
@@ -1194,21 +1211,10 @@ fn a_store_indexed_before_the_committed_value_rule_converges_on_the_next_sync() 
     // …and no promoted node anywhere still carries a placeholder: the orphan
     // check, stated over the whole promoted subgraph rather than over the three
     // kinds' names.
-    let orphans: Vec<String> = rt
-        .submit_read(|store| {
-            Ok(store
-                .all_nodes()?
-                .into_iter()
-                .filter(|n| {
-                    matches!(
-                        n.kind,
-                        NodeKind::Topic | NodeKind::Producer | NodeKind::Consumer
-                    ) && n.symbol.as_str().contains("${")
-                })
-                .map(|n| n.symbol.as_str().to_string())
-                .collect::<Vec<_>>())
-        })
-        .expect("read runs");
+    let orphans: Vec<String> = promoted_symbols(rt)
+        .into_iter()
+        .filter(|symbol| symbol.contains("${"))
+        .collect();
     assert!(
         orphans.is_empty(),
         "no orphaned placeholder-keyed node survives the convergence: {orphans:?}"
@@ -1218,18 +1224,6 @@ fn a_store_indexed_before_the_committed_value_rule_converges_on_the_next_sync() 
     // topic. An orphaned edge pointing at a retired topic would not show up in a
     // node-name assertion at all.
     let topic_id = nodes_of(rt, NodeKind::Topic)[0].0;
-    assert_eq!(
-        edges_of(rt, EdgeKind::Publishes)
-            .into_iter()
-            .map(|(_, t)| t)
-            .collect::<Vec<_>>(),
-        [topic_id]
-    );
-    assert_eq!(
-        edges_of(rt, EdgeKind::Subscribes)
-            .into_iter()
-            .map(|(_, t)| t)
-            .collect::<Vec<_>>(),
-        [topic_id]
-    );
+    assert_eq!(targets_of(rt, EdgeKind::Publishes), [topic_id]);
+    assert_eq!(targets_of(rt, EdgeKind::Subscribes), [topic_id]);
 }

@@ -2233,7 +2233,7 @@ fn arm_identity(reference: &super::bridge::InvocationRef, corpus: &MemberCorpus)
         return ArmIdentity::Http(identity);
     }
     if reference.relation.bridge_namespace() == Some(BridgeNamespace::BrokerTopic) {
-        return super::broker::identify(reference.relation, &reference.target, corpus).map_or(
+        return crate::resolve::broker_identity::identify(reference.relation, &reference.target, corpus).map_or(
             ArmIdentity::Broker {
                 keys: Vec::new(),
                 value: Provenance::Literal,

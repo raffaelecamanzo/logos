@@ -57,6 +57,19 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
             {`${e.source}->${e.target}:${e.edge_type}`}
           </span>
         ))}
+      {/* The FLAT broker line, likewise surfaced so its survival can be asserted
+          directly. Without it, "the flat line is still drawn" could only be
+          inferred from a total edge count — and a regression that dropped the
+          line while emitting any other second edge would keep that inference
+          green. Filtered to `broker-topic`, so no fixture without one renders
+          anything new. */}
+      {loaded.edges
+        .filter((e) => e.edge_type === "broker-topic")
+        .map((e) => (
+          <span key={`flat:${e.source}->${e.target}`} data-testid="canvas-flat-broker-edge">
+            {`${e.source}->${e.target}:${e.edge_type}`}
+          </span>
+        ))}
       {Object.values(loaded.nodes).map((n) => (
         <button key={n.id} type="button" onClick={() => onNodeClick(n.id)}>
           {n.label}
@@ -510,7 +523,7 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
   // Both fixtures below read the DOM the user is shown; asserting `map.loaded`
   // would pass for a hop the view never renders.
 
-  it("ACCEPTANCE: a resolved broker coupling renders as publisher → topic → subscriber, not a flat line", async () => {
+  it("renders a resolved broker coupling as publisher → topic → subscriber, not a flat line", async () => {
     // The shape S-424 creates: ONE topic node, named by the committed value, with
     // `api` producing and `web` consuming it — plus the bridge binding for the
     // same coupling. Before S-424 the inventory carried two placeholder-keyed
@@ -531,8 +544,11 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
       "service:api->topic:archive-commands:publishes",
       "topic:archive-commands->service:web:subscribes",
     ]);
-    // …and NOT also as a flat line: two edges on the canvas, both of them hops.
-    expect(screen.getByTestId("canvas-edges")).toHaveTextContent("2");
+    // …and NOT also as a flat line — asserted on the line's own absence, not
+    // inferred from a total. `textContent` compared exactly, because jest-dom's
+    // `toHaveTextContent` is a SUBSTRING match and would accept 12, 20, 21 or 23.
+    expect(screen.queryAllByTestId("canvas-flat-broker-edge")).toHaveLength(0);
+    expect(screen.getByTestId("canvas-edges").textContent).toBe("2");
     // The topic is a node the user can see, labelled by the committed value.
     expect(screen.getByRole("button", { name: "archive-commands" })).toBeInTheDocument();
     // The coupling is still COUNTED — the hop replaces the drawn line, not the fact.
@@ -563,9 +579,13 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     expect(screen.getAllByTestId("canvas-topic-hop").map((n) => n.textContent)).toEqual([
       "service:api->topic:${spring.kafka.topics.archive-commands}:publishes",
     ]);
-    // …plus the flat line, because no hop carries api → web. Two edges, one of
-    // each — which is what distinguishes this from the case above.
-    expect(screen.getByTestId("canvas-edges")).toHaveTextContent("2");
+    // …plus the flat line, NAMED, because no hop carries api → web. That the
+    // surviving edge is this one is the whole claim; a count alone would pass
+    // for any second edge at all.
+    expect(screen.getAllByTestId("canvas-flat-broker-edge").map((n) => n.textContent)).toEqual([
+      "service:api->service:web:broker-topic",
+    ]);
+    expect(screen.getByTestId("canvas-edges").textContent).toBe("2");
   });
 
   it("ACCEPTANCE: a published-but-unconsumed topic is drawn, not reported as empty", async () => {
