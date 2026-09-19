@@ -64,7 +64,7 @@ use logos_core::config::ConfigReadModel;
 use logos_core::federation::{query as fed_query, Backing, ContractBridge, EngineRegistry};
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
-use logos_core::observability::Surface;
+use logos_core::observability::{in_surface, Surface};
 use logos_core::models::navigation::{
     BranchOverlapResult, GraphElements, ImpactIntersectionResult, ImpactResult,
     LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
@@ -614,10 +614,22 @@ fn not_a_workspace() -> Response {
 /// serving single-root. `call` receives the registry and the shared bridge, so a
 /// route-stitching read (`route-providers`/`callers`/`impact`) resolves the bridge
 /// edges inside the blocking closure.
+///
+/// # This is the surface's *second* adapter boundary, and it carries the same rule
+///
+/// A fan reaches `Engine` read-models that emit telemetry through the chokepoint
+/// exactly as [`bridge`]'s do, so it takes the same required `surface` parameter
+/// and installs the same [`in_surface`] scope inside the same `spawn_blocking`
+/// closure. Without it the build-failure rule ([BR-42]) would hold for one half
+/// of this router and not the other — and a workspace route could not declare
+/// itself shell chrome even when it is, because it would have no way to say so.
+///
+/// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
 async fn workspace_fan<T, F>(
     backing: Arc<Backing<Engine>>,
     bridge: Arc<ContractBridge>,
     view: &'static str,
+    surface: Surface,
     call: F,
 ) -> Response
 where
@@ -632,7 +644,7 @@ where
         let registry = backing
             .as_federated()
             .expect("federated backing checked before spawn");
-        call(registry, &bridge)
+        in_surface(surface, || call(registry, &bridge))
     })
     .await
     // The read-models are infallible at the surface (ADR-14); a panic crossing the
@@ -640,7 +652,7 @@ where
     .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
     tracing::info!(
         target: "logos::web",
-        surface = "web",
+        surface = surface.as_str(),
         view,
         duration_ms = started.elapsed().as_millis() as u64,
         "page render",
@@ -661,7 +673,7 @@ pub(crate) async fn workspace_roster(
     State(backing): State<Arc<Backing<Engine>>>,
     State(bridge): State<Arc<ContractBridge>>,
 ) -> Response {
-    workspace_fan(backing, bridge, "api_v1_workspace_roster", |registry, _bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_roster", Surface::Web, |registry, _bridge| {
         fed_query::workspace_roster(registry)
     })
     .await
@@ -758,7 +770,7 @@ pub(crate) async fn workspace_status(
     State(backing): State<Arc<Backing<Engine>>>,
     State(bridge): State<Arc<ContractBridge>>,
 ) -> Response {
-    workspace_fan(backing, bridge, "api_v1_workspace_status", |registry, _bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_status", Surface::Web, |registry, _bridge| {
         fed_query::workspace_status(registry)
     })
     .await
@@ -773,7 +785,7 @@ pub(crate) async fn workspace_route_providers(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_route_providers", move |registry, bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_route_providers", Surface::Web, move |registry, bridge| {
         let edges = fed_query::edges(bridge, registry);
         fed_query::xservice_route_providers(&edges, repo.as_deref())
     })
@@ -797,7 +809,7 @@ pub(crate) async fn workspace_search(
     let kind = q.get("kind").and_then(|k| NodeKind::from_wire(k.trim()));
     let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_search", move |registry, _bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_search", Surface::Web, move |registry, _bridge| {
         fed_query::xservice_search(registry, &term, kind, limit, repo.as_deref())
     })
     .await
@@ -818,7 +830,7 @@ pub(crate) async fn workspace_callers(
     };
     let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_callers", move |registry, bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_callers", Surface::Web, move |registry, bridge| {
         let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
         fed_query::xservice_callers(registry, &edges, &residue, &symbol, limit, repo.as_deref())
     })
@@ -840,7 +852,7 @@ pub(crate) async fn workspace_impact(
     };
     let depth = opt_param(&q, "depth").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_impact", move |registry, bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_impact", Surface::Web, move |registry, bridge| {
         let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
         fed_query::xservice_impact(registry, &edges, &residue, &symbol, depth, repo.as_deref())
     })
