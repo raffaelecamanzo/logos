@@ -685,7 +685,18 @@ fn latest_gate_without_saved_baseline_is_informational_pass() {
 #[test]
 fn latest_health_projects_one_snapshot_into_both_fields() {
     let tmp = indexed_repo();
+    // A graph that actually contains a test function, so the [FR-QM-08]
+    // exclusion count asserted below is a real figure. Over the bare fixture it
+    // is 0 on both sides, and review proved the consequence by running it: a
+    // mutation zeroing the gate side survived the whole suite, because an
+    // equality between two zeroes cannot notice a dropped field.
+    std::fs::write(
+        tmp.path().join("src/c.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn covered() {\n        assert!(true);\n    }\n}\n",
+    )
+    .expect("write a test-bearing source file");
     let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
     engine
         .gate(None, true, true)
         .expect("gate --save persists a snapshot and a baseline");
@@ -709,6 +720,11 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     assert_eq!(
         health.gate.signal, health.scan.signal,
         "the verdict gated on the signal the metric grid renders"
+    );
+    assert!(
+        health.gate.test_function_count > 0,
+        "the fixture carries a test function, so the exclusion count below compares real \
+         figures rather than two zeroes"
     );
     assert_eq!(
         health.gate.test_function_count, health.scan.metrics.test_function_count,
