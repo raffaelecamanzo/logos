@@ -1733,6 +1733,66 @@ mod tests {
             .join("\n")
     }
 
+    /// Is the match at `at` a whole identifier, or the tail of a longer one?
+    /// `latest_gate(` is a substring of `not_latest_gate(`, and a bare substring
+    /// search would book that unrelated call against the accessor it happens to
+    /// end with.
+    fn whole_identifier(code: &str, at: usize) -> bool {
+        code[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+    }
+
+    /// The body of the function whose header begins at the first occurrence of
+    /// `header` — from its opening brace to the matching close, by brace depth.
+    ///
+    /// # Why this and not [`enclosing_fn`]
+    ///
+    /// They answer different questions and only one of them is right for a pin
+    /// on a SINGLE function. `enclosing_fn` attributes an occurrence anywhere in
+    /// the file to the nearest preceding `async fn`, which is what a census of
+    /// every handler needs. It has no notion of where that function *ends*, and
+    /// review demonstrated both consequences on real source: a sync helper
+    /// defined after a handler is booked against that handler (`api_v1.rs`
+    /// already interleaves them — `wants_flag` between `files` and `coverage`),
+    /// so a pin false-fires on correct code; and an `async fn` nested inside a
+    /// handler re-parents everything after it, so a genuine second read inside
+    /// the handler goes undetected. Brace depth has both boundaries.
+    ///
+    /// String literals are skipped, so a brace inside one cannot unbalance the
+    /// walk. An unbalanced walk **panics** rather than returning a short slice:
+    /// a pin that silently scans the wrong region is worse than one that fails
+    /// loudly. Run over comment-stripped code, so a brace in prose cannot reach
+    /// it either.
+    fn fn_body<'a>(code: &'a str, header: &str) -> &'a str {
+        let start = code
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` is not in this source"));
+        let open = start
+            + code[start..]
+                .find('{')
+                .unwrap_or_else(|| panic!("`{header}` has no body"));
+        let bytes = code.as_bytes();
+        let (mut depth, mut i, mut in_str) = (0usize, open, false);
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' if in_str => i += 1,
+                b'"' => in_str = !in_str,
+                b'{' if !in_str => depth += 1,
+                b'}' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &code[open + 1..i];
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("unbalanced braces walking the body of `{header}`");
+    }
+
     /// The name of the `async fn` enclosing `at` — how an occurrence is
     /// attributed to a handler without depending on line layout.
     fn enclosing_fn(code: &str, at: usize) -> &str {
@@ -1837,17 +1897,6 @@ mod tests {
     fn the_health_handler_reads_the_snapshot_once() {
         let code = production_code(include_str!("api_v1.rs"));
 
-        /// Is the match at `at` a whole identifier, or the tail of a longer
-        /// one? `latest_gate(` is a substring of `not_latest_gate(`, and a
-        /// bare substring search would book that unrelated call against the
-        /// accessor it happens to end with.
-        fn whole_identifier(code: &str, at: usize) -> bool {
-            code[..at]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
-        }
-
         // The matcher probed with the near miss it must reject — one character
         // from matching, and the only way to know is to run it.
         let decoy = "async fn health() { e.not_latest_gate(); e.latest_gate(); }";
@@ -1860,34 +1909,42 @@ mod tests {
             "`not_latest_gate(` ends with the accessor's name and is not a call to it"
         );
 
-        // Every accessor that reads the last persisted snapshot, attributed to
-        // the handler it is called from. Located in the whole comment-stripped
-        // source rather than per line, so wrapping the call the way rustfmt
-        // does cannot hide it.
-        let mut snapshot_reads: Vec<&str> = Vec::new();
-        for accessor in ["latest_health", "latest_gate", "latest_scan"] {
-            for (at, _) in code.match_indices(&format!("{accessor}(")) {
-                if whole_identifier(&code, at) && enclosing_fn(&code, at) == "health" {
-                    snapshot_reads.push(accessor);
-                }
+        /// Which snapshot-reading accessors `body` calls. Located in the whole
+        /// comment-stripped body rather than per line, so wrapping the call the
+        /// way rustfmt does cannot hide it; bounded to that body, so neither a
+        /// sibling helper outside it nor a nested `async fn` inside it can move
+        /// an occurrence across the boundary.
+        fn snapshot_reads(body: &str) -> Vec<&str> {
+            let mut found: Vec<&str> = Vec::new();
+            for accessor in ["latest_health", "latest_gate", "latest_scan"] {
+                let hits = body
+                    .match_indices(&format!("{accessor}("))
+                    .filter(|(at, _)| whole_identifier(body, *at))
+                    .count();
+                found.extend(std::iter::repeat_n(accessor, hits));
             }
+            found.sort_unstable();
+            found
         }
-        snapshot_reads.sort_unstable();
 
+        let health = snapshot_reads(fn_body(&code, "async fn health("));
         assert_eq!(
-            snapshot_reads,
+            health,
             ["latest_health"],
             "the Health handler must read the last persisted snapshot exactly once, through \
              the single-read seam. Two reads of the same logical row in one response can \
              describe two generations with nothing in the payload saying so (CR-135 §3.2); \
-             found {snapshot_reads:?}"
+             found {health:?}"
         );
 
-        assert!(
-            code.match_indices("latest_gate(")
-                .any(|(at, _)| enclosing_fn(&code, at) == "overview"),
-            "the Overview handler still reads the standalone verdict — the seam re-points \
-             `latest_gate`/`latest_scan`, it does not remove them (CR-135 §3.2)"
+        // The sibling that still wants the standalone verdict, and the reason
+        // the pin above is scoped to one handler rather than to the file: the
+        // seam re-points `latest_gate`/`latest_scan`, it does not remove them
+        // (CR-135 §3.2). A "fix" that deleted this caller would fail here.
+        assert_eq!(
+            snapshot_reads(fn_body(&code, "async fn overview(")),
+            ["latest_gate"],
+            "the Overview handler still reads the standalone verdict"
         );
     }
 
