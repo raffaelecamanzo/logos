@@ -668,6 +668,264 @@ fn latest_gate_without_saved_baseline_is_informational_pass() {
     );
 }
 
+/// The Health pair's two fields are projections of **one** read of the last
+/// persisted snapshot, and each is byte-identical to what its standalone
+/// accessor returns ([FR-UI-04], [CR-135] §3.2, [ADR-28]).
+///
+/// The equality half is the guard the story's AC names: `latest_gate` and
+/// `latest_scan` keep working for their other callers *by projecting from the
+/// same seam*, not by retaining reads of their own. Three sources of one
+/// verdict is exactly how the three drift; this fails the moment they do.
+///
+/// It does **not** pin the one-read property itself — with no concurrent writer
+/// a two-read bundle answers identically, and racing one is the flaky test
+/// [CR-135] §7 rules out. That property is pinned structurally, at the handler
+/// that composes the bundle (`the_health_handler_reads_the_snapshot_once`, in
+/// the web crate).
+#[test]
+fn latest_health_projects_one_snapshot_into_both_fields() {
+    let tmp = indexed_repo();
+    // A graph that actually contains a test function, so the [FR-QM-08]
+    // exclusion count asserted below is a real figure. Over the bare fixture it
+    // is 0 on both sides, and review proved the consequence by running it: a
+    // mutation zeroing the gate side survived the whole suite, because an
+    // equality between two zeroes cannot notice a dropped field.
+    std::fs::write(
+        tmp.path().join("src/c.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn covered() {\n        assert!(true);\n    }\n}\n",
+    )
+    .expect("write a test-bearing source file");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    engine
+        .gate(None, true, true)
+        .expect("gate --save persists a snapshot and a baseline");
+    let before = metric_snapshot_count(tmp.path());
+
+    let health = engine.latest_health().expect("the Health pair");
+
+    assert_eq!(
+        serde_json::to_string(&health.gate).unwrap(),
+        serde_json::to_string(&engine.latest_gate().unwrap()).unwrap(),
+        "the bundled verdict is the standalone verdict — one seam, one source"
+    );
+    assert_eq!(
+        serde_json::to_string(&health.scan).unwrap(),
+        serde_json::to_string(&engine.latest_scan().unwrap()).unwrap(),
+        "the bundled scan is the standalone scan — one seam, one source"
+    );
+
+    // Internal consistency: both halves describe the same snapshot, so the
+    // figures they share are the same figures ([FR-EH-04]).
+    assert_eq!(
+        health.gate.signal, health.scan.signal,
+        "the verdict gated on the signal the metric grid renders"
+    );
+    assert!(
+        health.gate.test_function_count > 0,
+        "the fixture carries a test function, so the exclusion count below compares real \
+         figures rather than two zeroes"
+    );
+    assert_eq!(
+        health.gate.test_function_count, health.scan.metrics.test_function_count,
+        "and on the same FR-QM-08 production-scope exclusion count"
+    );
+    assert!(
+        !health.scan.metrics.empty,
+        "the fixture scanned a non-empty graph"
+    );
+    assert!(
+        !health.gate.message.contains("no snapshot yet"),
+        "a populated grid cannot sit beside a no-snapshot verdict (CR-135 §2.1): {}",
+        health.gate.message
+    );
+
+    // ADR-28: reading the pair, once or repeatedly, persists nothing.
+    for _ in 0..3 {
+        engine.latest_health().unwrap();
+    }
+    assert_eq!(
+        metric_snapshot_count(tmp.path()),
+        before,
+        "reading the Health pair appended no snapshot"
+    );
+}
+
+/// On a never-`scan`-ned store **both** halves of the Health pair take the
+/// empty branch, because there is one snapshot value and both read it.
+///
+/// This is the reproduced symptom stated as an invariant ([CR-135] §2.1): the
+/// no-signal callout beside a fully populated quality grid is the pairing of a
+/// `None` snapshot on the gate side with a `Some` one on the scan side, and a
+/// single read cannot produce it in either direction.
+#[test]
+fn never_scanned_store_health_pair_is_empty_on_both_sides() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let health = engine.latest_health().expect("the Health pair");
+
+    assert!(
+        health.scan.metrics.empty,
+        "no snapshot → the empty sentinel on the scan side, never zeros (NFR-CC-04)"
+    );
+    assert!(health.scan.signal.is_none(), "no fabricated signal");
+    assert!(
+        health.gate.signal.is_none(),
+        "and none on the verdict side either — one read, one answer"
+    );
+    assert!(health.gate.passed, "no snapshot cannot regress — informational pass");
+    assert!(
+        health.gate.message.contains("no snapshot yet"),
+        "the verdict names the producing command: {}",
+        health.gate.message
+    );
+
+    assert_eq!(
+        metric_snapshot_count(tmp.path()),
+        0,
+        "reading the Health pair created no snapshot"
+    );
+}
+
+// ── the one-read invariant, pinned at the seam (CR-135 §3.2) ─────────────────
+
+/// Production code only — the doc comments in `governance/mod.rs` name these
+/// accessors constantly, and a brace in prose would unbalance the body walk.
+///
+/// A deliberate twin of the helper of the same name in `web/src/lib.rs`'s test
+/// module: the two crates cannot share a test helper without a new dev-only
+/// crate, and a shared crate for eight lines buys less than it costs. Both are
+/// exercised by their own pin on every run, so a drifted copy fails rather than
+/// silently mis-measuring.
+fn production_code(source: &str) -> String {
+    let code = source
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .map_or(source, |(before, _)| before);
+    code.lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The body of the function whose header begins at the first occurrence of
+/// `header` — opening brace to matching close, by brace depth, skipping string
+/// literals so a brace inside one (this file has `format!("… {current} …")`)
+/// cannot unbalance the walk. Panics on an unbalanced walk rather than
+/// returning a short slice: a pin that silently scans the wrong region is worse
+/// than one that fails loudly.
+fn fn_body<'a>(code: &'a str, header: &str) -> &'a str {
+    let start = code
+        .find(header)
+        .unwrap_or_else(|| panic!("`{header}` is not in this source"));
+    let open = start
+        + code[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("`{header}` has no body"));
+    let bytes = code.as_bytes();
+    let (mut depth, mut i, mut in_str) = (0usize, open, false);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_str => i += 1,
+            b'"' => in_str = !in_str,
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return &code[open + 1..i];
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    panic!("unbalanced braces walking the body of `{header}`");
+}
+
+/// The Health path takes **exactly one** read of the last persisted snapshot —
+/// wherever an extra read might be added ([CR-135] §3.2, [FR-UI-04]).
+///
+/// # Why this exists beside the web-side pin
+///
+/// `the_health_handler_reads_the_snapshot_once` (in the `web` crate) proves
+/// which accessor the handler *names*. It says nothing about how many reads
+/// that accessor then takes, and review demonstrated the gap by running it:
+/// two mutations restore the [CR-135] defect — a second `latest_metrics` call
+/// inside `latest_health`, and a re-read inside `scan_from_snapshot` that
+/// ignores the value it was handed — and **both left the whole suite green**.
+/// The comment in `latest_health` saying "do not add a second `latest_metrics`
+/// call here, in either projection or at a caller" was prose with nothing
+/// enforcing it. This is the enforcement.
+///
+/// # Why a source scan and not a counter
+///
+/// Counting the reads at runtime is not available here, and each leg was
+/// checked rather than assumed: `ReaderPool` holds concrete `SqliteGraphStore`
+/// connections, so a counting `GraphStore` cannot be injected through
+/// `submit_read`'s `&dyn GraphStore`; `Runtime` exposes no read counter; and
+/// `observability::traced` wraps only `Engine` methods, so the internal
+/// `governance::latest_metrics` calls emit no telemetry to count. Racing a
+/// concurrent `scan` is ruled out by [CR-135] §7 — against broken code it fails
+/// only *sometimes*, which is the one direction a regression test must not be
+/// unreliable in. A source scan is deterministic and answers exactly the
+/// question asked.
+///
+/// The per-function expectations are stated for **every** function on the path,
+/// not just the seam: an extra read is a defect wherever it lands, and naming
+/// each one is what makes the roster a closed list rather than a spot check.
+#[test]
+fn the_health_path_reads_the_snapshot_exactly_once() {
+    let code = production_code(include_str!("../src/governance/mod.rs"));
+
+    /// How many times `body` reads the last persisted snapshot. Whole-identifier
+    /// only: `latest_metrics(` is a substring of `prior_latest_metrics(`.
+    fn snapshot_reads(body: &str) -> usize {
+        body.match_indices("latest_metrics(")
+            .filter(|(at, _)| {
+                body[..*at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            })
+            .count()
+    }
+
+    for (header, expected, why) in [
+        (
+            "fn latest_health(",
+            1,
+            "the seam is THE read — both Health fields are projections of its one value",
+        ),
+        (
+            "fn scan_from_snapshot(",
+            0,
+            "a projection consumes the snapshot it is handed; re-reading reopens the window \
+             inside the seam",
+        ),
+        (
+            "fn gate_from_snapshot(",
+            0,
+            "likewise on the verdict side — it reads the baseline, never the snapshot again",
+        ),
+        (
+            "fn latest_scan(",
+            1,
+            "the standalone accessor takes its own single read and projects it",
+        ),
+        (
+            "fn latest_gate(",
+            1,
+            "and so does its sibling — one read each, never two",
+        ),
+    ] {
+        assert_eq!(
+            snapshot_reads(fn_body(&code, header)),
+            expected,
+            "`{header}` must read the last persisted snapshot {expected}×: {why} (CR-135 §3.2)"
+        );
+    }
+}
+
 /// CLI/MCP `scan` keeps persisting on every call — the read-only seam is
 /// additive and leaves the evaluate-and-persist path byte-unchanged ([ADR-28]).
 #[test]

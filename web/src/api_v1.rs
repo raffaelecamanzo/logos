@@ -70,8 +70,8 @@ use logos_core::models::navigation::{
     LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
 };
 use logos_core::models::quality::{
-    DsmReport, EvolutionReport, GateResult, LanguagesInfo, RulesReport, ScanResult, StatsInfo,
-    VerifyReport,
+    DsmReport, EvolutionReport, GateResult, LanguagesInfo, LatestHealth, RulesReport, ScanResult,
+    StatsInfo, VerifyReport,
 };
 use logos_core::wiki::{AnchorProvenance, DocCategory, WikiHit, WikiPage, WikiStatus};
 use logos_core::Engine;
@@ -164,6 +164,13 @@ pub(crate) async fn overview(MemberEngine(engine): MemberEngine) -> Response {
 /// The Health bundle ([FR-UI-04]): the read-only gate verdict, the last persisted
 /// scan (metrics + temporal tier), and the snapshot-series evolution — all
 /// **read-only** twins so a load writes no `metric_snapshots` row ([ADR-28]).
+///
+/// `gate` and `scan` are projections of **one** read of the last persisted
+/// snapshot ([CR-135] §3.2), so within a single response they can never describe
+/// two generations. The shape is unchanged by that guarantee: the pair is
+/// destructured at the handler, and the serialized DTO is byte-identical.
+///
+/// [CR-135]: ../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
 #[derive(Debug, Serialize)]
 pub(crate) struct HealthModel {
     status: StatusInfo,
@@ -173,12 +180,32 @@ pub(crate) struct HealthModel {
 }
 
 /// `GET /api/v1/health` — the Health data ([FR-UI-04], [FR-UI-21]).
+///
+/// # One read, two projections ([CR-135] §3.2)
+///
+/// The gate verdict and the scan result come from
+/// [`Engine::latest_health`](logos_core::Engine::latest_health) — a single read
+/// of the last persisted snapshot — and **not** from `latest_gate()` plus
+/// `latest_scan()`. Those two each read that same logical row, so calling both
+/// here opened two reads in two transactions: a `scan` committing between them
+/// left one card describing the older generation and the other the newer, with
+/// nothing in the payload saying so. That was reproduced during [S-406]'s review
+/// as a no-signal callout beside a fully populated quality grid.
+///
+/// `status` and `evolution` are read once each and carry no cross-field
+/// invariant with the snapshot, so they stay separate reads.
+/// `the_health_handler_reads_the_snapshot_once` (in [`crate`]'s test module)
+/// pins the composition.
+///
+/// [S-406]: ../../docs/planning/journal.md#s-406-a-readout-names-a-step-that-can-change-what-it-reports
+/// [CR-135]: ../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
 pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_health", Surface::Web, |e| -> anyhow::Result<HealthModel> {
+        let LatestHealth { gate, scan } = e.latest_health()?;
         Ok(HealthModel {
             status: e.status(),
-            gate: e.latest_gate()?,
-            scan: e.latest_scan()?,
+            gate,
+            scan,
             evolution: e.evolution(None)?,
         })
     })

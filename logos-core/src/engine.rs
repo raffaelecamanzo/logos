@@ -37,8 +37,8 @@ use crate::models::{
     pipeline::{IndexResult, InitResult, SyncResult},
     quality::{
         DocGapsReport, DoctorReport, DsmReport, EvolutionReport, GateResult, HealthInfo,
-        LanguageDescriptor, LanguagesInfo, MetricSnapshot, QualityReadout, RulesReport, ScanResult,
-        SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
+        LanguageDescriptor, LanguagesInfo, LatestHealth, MetricSnapshot, QualityReadout,
+        RulesReport, ScanResult, SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
 use crate::observability::Tool;
@@ -1894,6 +1894,29 @@ impl Engine {
     /// Returns an error only on a transient engine or a store-read failure.
     pub fn latest_gate(&self) -> Result<GateResult> {
         crate::observability::traced(Tool::LatestGate, || crate::governance::latest_gate(self))
+    }
+
+    /// **One** read of the last persisted snapshot, projected into the Health
+    /// bundle's gate verdict *and* its scan result ([FR-UI-04], [CR-135] §3.2).
+    ///
+    /// The pair a caller that wants both fields must use.
+    /// [`latest_gate`](Self::latest_gate) and [`latest_scan`](Self::latest_scan)
+    /// remain for callers that want one, and project from this same seam — but
+    /// calling *both* takes two reads of the same logical row in two
+    /// transactions, and a `scan` committing between them yields a bundle whose
+    /// two halves describe different generations with nothing in the payload
+    /// saying so. This takes the read once, so that window does not exist.
+    ///
+    /// Like its two halves it computes nothing and persists nothing ([ADR-28]).
+    ///
+    /// # Errors
+    /// Returns an error only on a transient engine or a store-read failure.
+    ///
+    /// [FR-UI-04]: ../../../docs/specs/requirements/FR-UI-04.md
+    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+    /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+    pub fn latest_health(&self) -> Result<LatestHealth> {
+        crate::observability::traced(Tool::LatestHealth, || crate::governance::latest_health(self))
     }
 
     /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
