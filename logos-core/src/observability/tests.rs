@@ -1110,11 +1110,11 @@ fn the_self_referential_exclusion_reaches_rollup_rows() {
 #[test]
 fn shell_chrome_is_excluded_by_the_surface_arm_of_the_classification() {
     let mut conn = db::open_in_memory();
-    let event = |surface: &'static str, tool: &str| EventRecord {
+    let event = |surface: &'static str, tool: &str, duration_ms: u64| EventRecord {
         at: NOW - 60,
         surface,
         tool: tool.to_string(),
-        duration_ms: 10,
+        duration_ms,
         ok: true,
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
@@ -1123,11 +1123,11 @@ fn shell_chrome_is_excluded_by_the_surface_arm_of_the_classification() {
         &mut conn,
         &[
             // A graph query the user issued through the SPA — real use.
-            event("web", "search"),
+            event("web", "search", 500),
             // The header's graph-state readout (FR-UI-34), one per navigation.
-            event("shell", "status"),
+            event("shell", "status", 5),
             // Chrome reading the graph itself: the tool arm would count this.
-            event("shell", "search"),
+            event("shell", "search", 5),
         ],
     )
     .unwrap();
@@ -1145,6 +1145,17 @@ fn shell_chrome_is_excluded_by_the_surface_arm_of_the_classification() {
         "only the user's own query counts"
     );
     assert_eq!(info.calls_total, 1, "the shell's two reads count nowhere");
+    // AC5 names four figures; the latency percentile is the one with no other
+    // coverage on this axis, and it is the most leak-prone — a chrome read is
+    // cheap, so a leak *lowers* every percentile and looks like an improvement
+    // rather than a fault. The seeded chrome rows carry a duration two orders
+    // of magnitude off the real one so a leak is unmistakable.
+    assert_eq!(
+        (info.latency_p50_ms, info.latency_p95_ms, info.latency_p99_ms),
+        (500, 500, 500),
+        "every percentile is the user's own call alone, never the chrome reads'"
+    );
+
     // Nothing was destroyed — the rows are still in the raw store, only
     // attributed away from the usage figures ([NFR-CC-04]).
     let stored: i64 = conn
@@ -1258,9 +1269,17 @@ fn every_surface_is_classified_and_sql_safe() {
             Some(*surface),
             "{name} round-trips through the wire vocabulary"
         );
-        // Total by construction (an exhaustive match); this asserts calling it
-        // is infallible for every variant.
-        let _: Option<EventClass> = surface.event_class();
+        // `Option<EventClass>` can represent `Some(EngineQuery)` — "this
+        // surface fixes every event as real usage" — which nothing means and
+        // which `self_referential_surfaces` would silently treat as `None`.
+        // The shape is kept for symmetry with the tool axis, so the state it
+        // admits is excluded here instead.
+        assert!(
+            !matches!(surface.event_class(), Some(EventClass::EngineQuery)),
+            "{surface:?} fixes EngineQuery — a surface either forces the \
+             self-referential class or leaves the class to the tool; it can \
+             never force an event to count"
+        );
     }
 
     assert_eq!(

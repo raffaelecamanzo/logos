@@ -222,6 +222,20 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
 /// call a navigation tool. The test the classification applies is whose
 /// question a request answers, and only the adapter is in a position to know.
 ///
+/// # The assumption this rests on: one route, one caller
+///
+/// Keying the classification to the **route** is a proxy for keying it to the
+/// caller, and the two agree only while this endpoint has exactly one consumer.
+/// It does today — the app header is the sole caller in the SPA — but the
+/// proxy is what would break first. This is the cheapest read-model on the
+/// surface, which makes it the likeliest to be reused, and a second consumer
+/// asking a genuine question would have its reads silently excluded with
+/// nothing failing. If one appears, it needs its own route (or the
+/// classification needs to move to the caller), not a second caller here.
+/// `every_handler_names_its_surface_and_only_status_names_the_shell` guards the
+/// handler side of this; the consumer side is an assumption, stated here
+/// because nothing enforces it.
+///
 /// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
 /// [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
 /// [FR-OB-09]: ../../docs/specs/requirements/FR-OB-09.md
