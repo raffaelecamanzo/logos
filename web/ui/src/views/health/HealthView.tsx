@@ -116,14 +116,19 @@ function GateBand({
     );
   }
   const baseline = gate.baseline_signal === null ? "no baseline" : String(gate.baseline_signal);
-  // A verdict over a graph that no longer exists is history, not a verdict: the
-  // PASS/FAIL tone and the "current … vs baseline" wording both go, the figures
-  // stay, and the band says what they describe (CR-135 §3.2, FR-EH-04).
+  // A verdict over a graph that no longer exists is history, not a verdict. The
+  // pass/fail BADGE and its green/red tone go and the word "current" goes; the
+  // figures stay, PASS/FAIL among them, as plain text beside them. The band is
+  // the signal tone and the chip is red because that is what this design system
+  // calls stale — `Callout` documents "signal — red (GATE/FAIL, STALE, …)" and
+  // `Badge` "red — fail / error / stale", and every other STALE chip in the SPA
+  // (Coverage, hotspot cells, Wiki) is red. Orange is PENDING here, not stale.
+  // (CR-135 §3.2, FR-EH-04.)
   if (stale !== null) {
     return (
-      <Callout label="Gate" tone="warm">
+      <Callout label="Gate" tone="signal">
         <span className={styles.gateBody}>
-          <Badge tone="orange">STALE</Badge>
+          <Badge tone="red">STALE</Badge>
           <span className="mono">
             {gate.passed ? "PASS" : "FAIL"} · signal {gate.signal} vs baseline {baseline}
           </span>
