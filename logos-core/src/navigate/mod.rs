@@ -1833,10 +1833,15 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
 
     // The source/test physical-LOC roll-up (CR-085, FR-IX-12). The total is the
     // ingested-LOC sum; the persisted `test_loc` bucket is the roll-up's presence
-    // marker, so the counts are reported only when BOTH keys are present (a graph
-    // indexed before this feature has `indexed_loc` but no `test_loc`). Source is
-    // derived as `total − test`, never counted independently; an absent roll-up
-    // reports all three as `None`, never a fabricated `0` (NFR-CC-04).
+    // marker, so the counts are reported only when BOTH keys are present. Two
+    // states read absent through that one marker: a graph indexed before this
+    // feature has `indexed_loc` but no `test_loc`, and an index that leaves the
+    // store empty clears both keys (CR-134) — which is why this reader needs no
+    // value filter of its own, unlike the stamp above. A `total > 0` filter here
+    // was considered and rejected: it cannot tell a fabricated `0` from a genuine
+    // one over entirely blank files. Source is derived as `total − test`, never
+    // counted independently; an absent roll-up reports all three as `None`,
+    // never a fabricated `0` (NFR-CC-04).
     let (total_line_count, source_line_count, test_line_count) = match (indexed_loc, test_loc) {
         (Some(total), Some(test)) => {
             // `test ≤ total` within one index generation, so `total = source + test`

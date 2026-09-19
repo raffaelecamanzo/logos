@@ -8,8 +8,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    admits_file, hash_source, is_config_admitted, is_doc_admitted, load_files, relativize,
-    supported_extension, Candidate, LoadedFile, ShadowStore,
+    admits_file, classify_index_persistence, hash_source, is_config_admitted, is_doc_admitted,
+    load_files, relativize, supported_extension, Candidate, IndexPersistence, LoadedFile,
+    ShadowStore,
 };
 use crate::config::Config;
 use crate::plugin::LanguageRegistry;
@@ -801,4 +802,62 @@ fn load_files_on_empty_candidate_set_is_empty_for_any_worker_count() {
         assert!(warnings.is_empty(), "no warnings from an empty candidate set ({threads}w)");
         assert!(failed.is_empty(), "no failures from an empty candidate set ({threads}w)");
     }
+}
+
+// ── CR-134 / FR-IX-12: one classification, and a store probe only when needed ─
+
+#[test]
+fn the_persistence_classifier_probes_the_store_only_when_nothing_persisted() {
+    // CR-134 AC: "the extra `submit_read` occurs only on the zero-persist path".
+    // A run that stored a file has already answered "does a graph exist?", so
+    // asking the store again is pure cost on the hot path every index takes.
+    // `classify_index_persistence` takes the probe as a closure precisely so the
+    // laziness is assertable here rather than reasoned about at the call site.
+    let probes = std::cell::Cell::new(0usize);
+
+    // Persisted: classified without touching the store at all.
+    let persisted = classify_index_persistence(3, || {
+        probes.set(probes.get() + 1);
+        Ok(true)
+    })
+    .expect("classification succeeds");
+    assert_eq!(persisted, IndexPersistence::Persisted);
+    assert_eq!(
+        probes.get(),
+        0,
+        "the persisted-file path performs no additional read (CR-134)"
+    );
+
+    // Zero persisted, a graph still stands: exactly one probe, the leave case.
+    let surviving = classify_index_persistence(0, || {
+        probes.set(probes.get() + 1);
+        Ok(true)
+    })
+    .expect("classification succeeds");
+    assert_eq!(surviving, IndexPersistence::GraphSurvives);
+    assert_eq!(probes.get(), 1, "the zero-persist path pays exactly one read");
+
+    // Zero persisted over an empty store: the clear case, one probe again.
+    let emptied = classify_index_persistence(0, || {
+        probes.set(probes.get() + 1);
+        Ok(false)
+    })
+    .expect("classification succeeds");
+    assert_eq!(emptied, IndexPersistence::ClearedToEmpty);
+    assert_eq!(probes.get(), 2, "one read per zero-persist classification");
+}
+
+#[test]
+fn a_failing_store_probe_fails_the_classification_rather_than_guessing() {
+    // FR-EH-04: the probe is the whole basis of the clear/leave discrimination,
+    // so a store that cannot answer must propagate rather than default. Guessing
+    // "empty" would clear the records of a graph that may well survive; guessing
+    // "survives" would leave a stale roll-up beside `indexed: false`. Neither is
+    // recoverable from the readout, so the index reports the failure instead.
+    let err = classify_index_persistence(0, || anyhow::bail!("store unavailable"))
+        .expect_err("a failing probe fails the classification");
+    assert!(
+        err.to_string().contains("store unavailable"),
+        "the store's own error reaches the caller: {err}"
+    );
 }
