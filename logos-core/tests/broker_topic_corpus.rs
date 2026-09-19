@@ -117,11 +117,12 @@ use logos_core::extract::config::corpus::{canonical_key, source_facts};
 use logos_core::extract::broker::{resolve_forwarded_topics, ForwardingOutcome};
 use logos_core::extract::config::binding::PropertiesIndex;
 use logos_core::extract::{extract, extract_files, FileInput, SymbolContext};
-use logos_core::federation::broker::{topic_identity, TopicIdentity};
+use logos_core::resolve::broker_identity::{topic_identity, TopicIdentity};
 use logos_core::graph_store::ConfigDefinition;
 use logos_core::model::ArtifactRelation;
 use logos_core::plugin::LanguageRegistry;
 use logos_core::resolve::binding::placeholder_keys;
+use tempfile::TempDir;
 
 /// The reference workspace, or `None` when none is configured — the same
 /// `LOGOS_REF_WORKSPACE` contract the S-355/S-365 measurements read.
@@ -1416,6 +1417,23 @@ struct SiteIdentity {
     admitted: bool,
 }
 
+impl SiteIdentity {
+    /// The keys this site is filed under in the column `committed` selects: the
+    /// committed value(s) (`true`) or the stored operand (`false`).
+    ///
+    /// **One home for the axis the whole measurement turns on.** This selection
+    /// was written out at five separate sites across two tests; a BEFORE/AFTER
+    /// measurement whose own definition of before and after exists in five copies
+    /// is one edit away from reporting two different comparisons as one.
+    fn keys(&self, committed: bool) -> &[String] {
+        if committed {
+            &self.topics
+        } else {
+            std::slice::from_ref(&self.operand)
+        }
+    }
+}
+
 /// One cross-member fan-out edge, at the grain `broker_edges` emits.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Edge {
@@ -1681,10 +1699,21 @@ fn report_topic_identities<'a>(
 ///
 /// `Producer`/`Consumer` are counted at the grain the promotion pass promotes
 /// them — one per `(declaration symbol, role, topic)` — and that grain is
-/// **unchanged** by this story, because the promotion pass is per-repo and keys
-/// on the stored operand. They are reported all the same, because the acceptance
-/// criterion asks for them and "unchanged" is a finding a reader should be able
-/// to see rather than take on trust.
+/// **unchanged** by this story. They are reported all the same, because the
+/// acceptance criterion asks for them and "unchanged" is a finding a reader
+/// should be able to see rather than take on trust.
+///
+/// **Amended 2026-09-19 by [S-424].** This paragraph used to give as its reason
+/// that "the promotion pass is per-repo and keys on the stored operand". The
+/// grain is still unchanged, but the reason is retired: the pass keys on the
+/// committed value now, through the same `identify` this finding measures
+/// ([FR-WS-27]). What survives is the narrower true statement — this story moved
+/// the *topic*, not the *grain*. The figures above are S-410's and are not
+/// re-measured here; S-424's own reading is in the finding at the foot of this
+/// file.
+///
+/// [FR-WS-27]: ../../docs/specs/requirements/FR-WS-27.md
+/// [S-424]: ../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 ///
 /// **No floor is asserted on any figure.** The two assertions are a direction and
 /// an anti-fabrication invariant, never a number — the
@@ -2162,4 +2191,818 @@ fn the_reference_workspace_reports_its_two_frame_wrapper_resolutions() {
          here says nothing about the hop",
         root.display(),
     );
+}
+
+// ── S-424 / CR-136 / FR-WS-27: the PROMOTED inventory, before and after ──────
+
+/// One ordered member pair the service map can draw as a
+/// `publisher → topic → subscriber` hop, and the topic that carries it.
+///
+/// This is exactly `serviceMapModel.ts`'s own test, transcribed: `topicLinks`
+/// folds the per-member inventory onto one node per topic identity, and
+/// `drawnThroughATopic(l)` is true for a link when some topic has `l.from` among
+/// its producers and `l.to` among its consumers. A pair with no such topic is
+/// drawn as a flat service→service line instead.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Hop {
+    topic: String,
+    producer: String,
+    consumer: String,
+}
+
+/// One member's promoted node counts at the promotion pass's own grain.
+///
+/// `Topic` is **repo-scoped** (one node per distinct key in the member), while
+/// `Producer`/`Consumer` are **site-scoped** (one per `(declaration, role,
+/// topic)`), so the three are counted three different ways — which is why this
+/// carries them as a struct rather than a triple that invites the wrong reading.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Promoted {
+    topics: usize,
+    producers: usize,
+    consumers: usize,
+}
+
+/// Count what the promotion pass would promote for one member, under the key set
+/// `committed` selects: the **committed value** (`true`, the delivered rule) or
+/// the **stored operand** (`false`, the rule before [S-424]).
+///
+/// [S-424]: ../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+fn promoted_counts(rows: &[SiteIdentity], committed: bool) -> Promoted {
+    let sites = |publish: bool| -> usize {
+        rows.iter()
+            .filter(|s| s.is_publish == publish)
+            .flat_map(|s| {
+                s.keys(committed)
+                    .iter()
+                    .map(move |k| (s.declaration.as_str(), k.as_str()))
+            })
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    Promoted {
+        topics: rows
+            .iter()
+            .flat_map(|s| s.keys(committed))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        producers: sites(true),
+        consumers: sites(false),
+    }
+}
+
+/// Every hop the service map would draw, over the whole workspace's inventory
+/// keyed as `committed` selects.
+fn hops(identities: &BTreeMap<String, Vec<SiteIdentity>>, committed: bool) -> BTreeSet<Hop> {
+    // topic identity → (producing members, consuming members). Keyed by the topic
+    // ALONE, which is what makes a shared identity a coupling (FR-WS-11).
+    let mut by_topic: BTreeMap<String, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
+    for (member, rows) in identities {
+        for site in rows {
+            for key in site.keys(committed) {
+                let entry = by_topic.entry(key.clone()).or_default();
+                if site.is_publish {
+                    entry.0.insert(member.as_str());
+                } else {
+                    entry.1.insert(member.as_str());
+                }
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    for (topic, (producers, consumers)) in by_topic {
+        for p in &producers {
+            for c in &consumers {
+                // A self-coupling is not a CROSS-service edge: the bridge emits
+                // none and `buildServiceMap` drops one. Excluded here for the
+                // same reason, so the figure is comparable with the bridge's.
+                if p != c {
+                    out.insert(Hop {
+                        topic: topic.clone(),
+                        producer: (*p).to_string(),
+                        consumer: (*c).to_string(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// **The [FR-WS-27] AC7 estate measurement.** `Topic`, `Producer` and `Consumer`
+/// node counts and the couplings drawn as hops, reported **before and after, per
+/// member, with denominators**, from one run.
+///
+/// # What "before" and "after" mean here, precisely
+///
+/// The bridge has keyed a broker site on its **committed value** since [S-410].
+/// Only the promotion pass changes in this story, so:
+///
+/// - **BEFORE** = the bridge on committed values × the inventory on **stored
+///   operands**. That is the shipped state [CR-136] was filed on, not a
+///   hypothetical.
+/// - **AFTER** = the bridge on committed values × the inventory on committed
+///   values, which is one identity for both.
+///
+/// The consequence the measurement is for is the hop count: a coupling can be
+/// drawn as `publisher → topic → subscriber` only when ONE topic node carries
+/// both ends, and a split identity gives it two.
+///
+/// # No floor is asserted on any figure ([CR-136] CRA-01)
+///
+/// The assertions are a direction and an anti-fabrication invariant, never a
+/// number — the census-figure-as-acceptance-floor trap [S-397] recorded. The
+/// pre-change reading is a measurement of the state before the change.
+///
+/// # The denominator is 81, not 84
+///
+/// The reference workspace enrols 84 members, three of which
+/// (`official-log-export-reporting-adapter`, `official-log-metrics-adapter`,
+/// `pecserver-reporting-adapter`) are **empty directories** — 0 files of any
+/// kind. 81 is therefore the denominator for any per-member figure, and that is a
+/// property of the estate rather than a defect to chase.
+///
+/// # Recorded finding
+///
+/// This block is the **code-side home** of the figures; the docs-side home is
+/// [CR-136]'s delivery appendix. Every other file that mentions them carries a
+/// dated pointer rather than a copy, because a number kept in five places is a
+/// number that disagrees with itself in four.
+///
+/// ```text
+/// S-424 / CR-136 / FR-WS-27 AC7, measured 2026-09-19 against ~/source/pec-services
+/// on logos 1.4.13.
+///
+///   DENOMINATORS: 84 members enrolled · 81 with any walked file (the other three —
+///   official-log-export-reporting-adapter, official-log-metrics-adapter,
+///   pecserver-reporting-adapter — hold nothing but a `.git` directory) · 22 write a
+///   keyed broker site, which is the per-member table's denominator.
+///
+///   PROMOTED NODES, summed over the 22 members (BEFORE keyed on the stored
+///   operand, AFTER on the committed value):
+///     Topic      57 -> 47
+///     Producer   43 -> 43   ← unchanged, and evidenced rather than asserted
+///     Consumer   23 -> 23   ← likewise
+///
+///   DISTINCT topic identities across the workspace — one service-map node each:
+///     32 -> 19
+///
+///   COUPLINGS DRAWN AS A publisher->topic->subscriber HOP:
+///     13 -> 33, over 13 -> 31 distinct ordered member pairs.
+///     Of the 31 couplings the corrected inventory makes drawable, 13 were
+///     already drawn as a hop before the change and the other 18 fell back to a
+///     flat service->service line. (The AFTER side of that ratio is 31 of 31 BY
+///     CONSTRUCTION — the denominator is the after-column itself — so the
+///     measured figure is the BEFORE one. Named rather than printed as a result.)
+///
+///   COST, on `mailbox-manager` (the member with the most promoted topics),
+///   copied to a temporary directory and indexed there — 177 indexable files, 15
+///   broker sources on the incremental leg, 6 distinct configuration keys:
+///     cold index      1890 ms
+///     incremental     674 ms
+///     the added read  77 us (median of 3) for all 6 keys, one pooled connection
+/// ```
+///
+/// **Two figures CR-136 recorded at filing did not reproduce, and are corrected
+/// here rather than reconciled away.** [CR-136] §2 read the estate as *"32 topic
+/// names for 16 real topics"* and *"zero couplings drawn as the hop"*, with *"all
+/// 43 resolved broker couplings"* falling back to a flat line. Measured:
+///
+/// - **19 distinct committed values, not 16.** The CR's own arithmetic did not
+///   close either — 32 names less 12 duplicate spellings is 20, not 16 — so this
+///   is a correction to a filing-time reading, not a change in behaviour.
+/// - **13 couplings were already drawn as hops, not zero.** A coupling whose two
+///   ends spell the operand *identically* met on one placeholder-keyed topic node
+///   even before this story; only the differently-spelled ones were split. The
+///   figure the CR's sentence describes is the 18 that were **not** drawn as hops.
+/// - **31 resolved cross-member couplings, not 43.** 43 is the estate's `Producer`
+///   node count, which is a count of publish sites rather than of couplings.
+///
+/// [CR-136] CRA-01 states outright that the filing reading is a measurement of
+/// the state before the change and **never an acceptance criterion**, which is why
+/// these three departures cost the delivery nothing. No floor is asserted here
+/// either.
+///
+/// # These are HARNESS figures, and the difference has bitten this arm before
+///
+/// [`promoted_counts`] and [`hops`] model the promotion pass from
+/// [`topic_identity`]; they do **not** call `desired_set`, `broker_refs` or
+/// `identify`. Three product gates are therefore absent from the model: the
+/// enclosing declaration must resolve to a node in the graph (`node_by_symbol`),
+/// the topic and site symbols must encode, and the site grain is
+/// `(declaration, role, topic)` rather than `(declaration, topic)`. So the
+/// `Producer`/`Consumer` columns are an **upper bound** on what the pass
+/// promotes, not a reading of it.
+///
+/// The S-410 finding 600 lines above carries the same warning for the same
+/// reason, and records that the hazard already bit once on this very arm:
+/// S-397's harness proved 79 sites where the product admitted 44. Read these as
+/// what the shipped identity rule implies under a faithful join — and read the
+/// **product-side** assertion in
+/// [`the_reference_workspace_reports_its_promotion_pass_cost_when_one_is_configured`]
+/// for the one figure here that a real `Engine::index` produced.
+///
+/// [CR-136]: ../../docs/requests/CR-136-promoted-topic-identity-is-the-committed-value.md
+/// [FR-WS-27]: ../../docs/specs/requirements/FR-WS-27.md
+/// [S-397]: ../../docs/planning/journal.md#s-397-the-accessor-capture-hop-reaches-the-invocation-arm
+/// [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+#[test]
+fn the_reference_workspace_reports_its_promoted_topic_inventory_before_and_after_when_one_is_configured(
+) {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-424 promoted-inventory corpus measurement."
+        );
+        return;
+    };
+
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let ctx = SymbolContext::default();
+
+    // Java sources grouped by member, and the member roster with its denominators.
+    let mut by_member: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut members_enrolled: BTreeSet<String> = BTreeSet::new();
+    let mut members_with_files: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(&root).expect("the workspace root reads").flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with('.') {
+                members_enrolled.insert(name);
+            }
+        }
+    }
+    for entry in corpus_walker(&root).flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().to_string();
+        let Some(member) = rel.split('/').next().map(str::to_string) else {
+            continue;
+        };
+        members_with_files.insert(member.clone());
+        if path.extension().and_then(|e| e.to_str()) != Some("java") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        by_member.entry(member).or_default().push((rel, source));
+    }
+
+    // Every member's broker sites, de-duplicated at the promotion pass's grain.
+    type Sites = BTreeSet<(bool, String, String)>;
+    let mut sites: BTreeMap<String, Sites> = BTreeMap::new();
+    let mut refused_rows: BTreeMap<String, usize> = BTreeMap::new();
+    for (member, files) in &by_member {
+        let inputs: Vec<FileInput> = files
+            .iter()
+            .map(|(rel, source)| FileInput::new(rel, source))
+            .collect();
+        for facts in extract_files(&inputs, &registry, &ctx) {
+            for reference in facts.refs.iter() {
+                let is_publish = match reference.relation {
+                    Some(ArtifactRelation::BrokerPublish) => true,
+                    Some(ArtifactRelation::BrokerSubscribe) => false,
+                    _ => continue,
+                };
+                if reference.target.trim().is_empty() {
+                    *refused_rows.entry(member.clone()).or_default() += 1;
+                    continue;
+                }
+                sites.entry(member.clone()).or_default().insert((
+                    is_publish,
+                    reference.source.as_str().to_string(),
+                    reference.target.clone(),
+                ));
+            }
+        }
+    }
+
+    // Resolve every site through the SHIPPED rule, once per member, against that
+    // member's own corpus and no other ([ADR-64]'s within-reach rule).
+    let mut identities: BTreeMap<String, Vec<SiteIdentity>> = BTreeMap::new();
+    for (member, member_sites) in &sites {
+        let corpus = member_corpus(&root, member);
+        for (is_publish, symbol, operand) in member_sites {
+            let (topics, admitted) = match topic_identity(operand, &corpus) {
+                TopicIdentity::Committed { topics, .. } => (topics, true),
+                TopicIdentity::Literal | TopicIdentity::Unresolved { .. } => {
+                    (vec![operand.clone()], false)
+                }
+            };
+            identities.entry(member.clone()).or_default().push(SiteIdentity {
+                is_publish: *is_publish,
+                declaration: symbol.clone(),
+                operand: operand.clone(),
+                topics,
+                admitted,
+            });
+        }
+    }
+
+    let hops_before = hops(&identities, false);
+    let hops_after = hops(&identities, true);
+    // The couplings the CORRECTED inventory makes drawable, at member-pair grain.
+    //
+    // Named for what it is. It is `pairs(hops_after)`, so the AFTER column of the
+    // "drawn as a hop" figure below is this set intersected with itself — 100% by
+    // construction, on any estate. That is not a measurement and the report must
+    // not print it as one; the informative half is the BEFORE column, which says
+    // how many of these couplings the placeholder-keyed inventory already carried.
+    //
+    // It is NOT the bridge's own edge set: `broker_edges` is never invoked here.
+    // The two coincide today because both join on the committed value, which is
+    // exactly what this story delivered — but "coincide because one function keys
+    // both" is a claim the unit suite pins, not something this harness observes.
+    let drawable_after: BTreeSet<(String, String)> = pairs(&hops_after);
+    let totals = report_promoted_inventory(
+        &root,
+        &identities,
+        &refused_rows,
+        (&members_enrolled, &members_with_files),
+        (&hops_before, &hops_after),
+        &drawable_after,
+    );
+
+    // (0) The corpus is the one the finding was measured against — a green run
+    //     must not be able to report a measurement that did not happen.
+    assert!(
+        !identities.is_empty(),
+        "the reference workspace at {} produced no keyed broker site at all — this \
+         is not the corpus this measurement is about",
+        root.display(),
+    );
+
+    // (0b) THE CAPABILITY ACTUALLY RAN, as a DIRECTION and never as a number. With
+    //      the committed-value rule switched off (`topic_identity` stubbed to
+    //      `Literal`) every figure below is invariant: after == before, no topic
+    //      collapses and no hop appears. This is the assertion that fails then.
+    assert!(
+        totals.topics_after < totals.topics_before,
+        "no topic identity collapsed ({} -> {}) — on an estate that externalises \
+         its topics this means the committed-value rule did not run",
+        totals.topics_before,
+        totals.topics_after,
+    );
+    assert!(
+        hops_after.len() > hops_before.len(),
+        "no coupling became drawable as a publisher->topic->subscriber hop \
+         ({} -> {}) — which is the consequence [FR-WS-27] exists for",
+        hops_before.len(),
+        hops_after.len(),
+    );
+
+    // (1) NEVER FABRICATE. Every AFTER hop's topic must be a value some member
+    //     actually commits, or the operand as written — never a string this
+    //     measurement composed. Checked against the union of admitted values and
+    //     written operands, which is the whole of what the rule may produce.
+    let admissible: BTreeSet<&str> = identities
+        .values()
+        .flatten()
+        .flat_map(|s| {
+            s.topics
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(s.operand.as_str()))
+        })
+        .collect();
+    for hop in &hops_after {
+        assert!(
+            admissible.contains(hop.topic.as_str()),
+            "hop topic {:?} is neither a committed value nor a written operand — \
+             fabricated",
+            hop.topic
+        );
+    }
+
+    // (2) A hop is never a self-coupling: the bridge emits none and the map draws
+    //     none, so a figure that counted them would not be comparable with either.
+    for hop in hops_before.iter().chain(hops_after.iter()) {
+        assert_ne!(
+            hop.producer, hop.consumer,
+            "a member coupled to itself is not a CROSS-service hop: {hop:?}"
+        );
+    }
+}
+
+/// The per-member table and roll-up for [`the_reference_workspace_reports_its_promoted_topic_inventory_before_and_after_when_one_is_configured`],
+/// returning the totals its assertions then judge.
+///
+/// Split out for the same two reasons the [S-410] reporter is: the test owning it
+/// is subject to `max_fn_lines`, and printing and asserting are different jobs —
+/// keeping the assertions in the test keeps them visible at the end of it rather
+/// than buried in a wall of `eprintln!`.
+///
+/// [S-410]: ../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+fn report_promoted_inventory(
+    root: &std::path::Path,
+    identities: &BTreeMap<String, Vec<SiteIdentity>>,
+    refused_rows: &BTreeMap<String, usize>,
+    roster: (&BTreeSet<String>, &BTreeSet<String>),
+    hops: (&BTreeSet<Hop>, &BTreeSet<Hop>),
+    drawable_after: &BTreeSet<(String, String)>,
+) -> InventoryTotals {
+    let (enrolled_set, with_files_set) = roster;
+    // **Intersected, not counted separately.** The walk keys a file on its first
+    // path segment, so a loose file at the workspace ROOT contributes its own file
+    // name to `with_files_set` and is not a member at all. Taking `.len()` of that
+    // set printed 84-of-84 on an estate where three members are empty — the two
+    // sets were the same size for unrelated reasons, which is exactly the kind of
+    // coincidence a denominator must not be read through.
+    let enrolled = enrolled_set.len();
+    let with_files = enrolled_set.intersection(with_files_set).count();
+    // NAMED, not just counted: "3 members are empty" is a claim a reader cannot
+    // check, and a denominator that silently moves is how a published figure
+    // stops reconciling with the one beside it.
+    let empty: Vec<&str> = enrolled_set
+        .difference(with_files_set)
+        .map(String::as_str)
+        .collect();
+    let (before, after) = hops;
+    eprintln!(
+        "S-424 / CR-136 promoted-inventory measurement: root={}",
+        root.display()
+    );
+    eprintln!(
+        "  DENOMINATORS: {enrolled} members enrolled · {with_files} with any walked \
+         file at all (the other {}: {}) · {} write a keyed broker site, which is \
+         this table's denominator.",
+        empty.len(),
+        if empty.is_empty() {
+            "none".to_string()
+        } else {
+            empty.join(", ")
+        },
+        identities.len(),
+    );
+    eprintln!(
+        "  BEFORE = the inventory keyed on the STORED OPERAND (the state CR-136 was \
+         filed on) · AFTER = keyed on the COMMITTED VALUE. The bridge has been on \
+         committed values since S-410 in both columns; only the inventory moves.\n    \
+         {:<44} {:>11} {:>13} {:>13} {:>7}",
+        "member", "topics b/a", "producers b/a", "consumers b/a", "refused"
+    );
+    let mut totals = InventoryTotals::default();
+    for (member, rows) in identities {
+        let b = promoted_counts(rows, false);
+        let a = promoted_counts(rows, true);
+        totals.topics_before += b.topics;
+        totals.topics_after += a.topics;
+        totals.producers_before += b.producers;
+        totals.producers_after += a.producers;
+        totals.consumers_before += b.consumers;
+        totals.consumers_after += a.consumers;
+        eprintln!(
+            "    {member:<44} {:>5}/{:<5} {:>6}/{:<6} {:>6}/{:<6} {:>7}",
+            b.topics,
+            a.topics,
+            b.producers,
+            a.producers,
+            b.consumers,
+            a.consumers,
+            refused_rows.get(member).copied().unwrap_or(0),
+        );
+    }
+    // The workspace-wide topic node count is NOT the sum of the per-member column:
+    // a topic is repo-scoped, so two members naming one topic are two nodes in the
+    // graph and one node on the service map. Both are reported, named apart.
+    let distinct = |committed: bool| -> usize {
+        identities
+            .values()
+            .flatten()
+            .flat_map(|s| s.keys(committed))
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    totals.distinct_before = distinct(false);
+    totals.distinct_after = distinct(true);
+    eprintln!(
+        "  TOTALS (sum of per-member promoted nodes): topics {} -> {} · producers {} -> {} \
+         · consumers {} -> {}",
+        totals.topics_before,
+        totals.topics_after,
+        totals.producers_before,
+        totals.producers_after,
+        totals.consumers_before,
+        totals.consumers_after,
+    );
+    eprintln!(
+        "  DISTINCT topic identities across the workspace (what the service map \
+         draws one node each for): {} -> {}",
+        totals.distinct_before, totals.distinct_after
+    );
+    eprintln!(
+        "  COUPLINGS DRAWN AS A publisher->topic->subscriber HOP: {} -> {}",
+        before.len(),
+        after.len()
+    );
+    eprintln!(
+        "    …over {} -> {} distinct ordered MEMBER PAIRS (a pair coupled on two \
+         topics is two hops and one line)",
+        pairs(before).len(),
+        pairs(after).len()
+    );
+    // CR-136's question, answered with the denominator it is actually measured
+    // against and with the tautology named rather than dressed up as a result.
+    eprintln!(
+        "  Of the {} couplings the CORRECTED inventory makes drawable, {} were \
+         already drawn as a hop before the change; the other {} fell back to a \
+         flat service->service line. AFTER is {} of {} — equal to its own \
+         denominator BY CONSTRUCTION (the denominator is the after-column), so \
+         the measured figure here is the BEFORE one.",
+        drawable_after.len(),
+        drawable_after.intersection(&pairs(before)).count(),
+        drawable_after.len() - drawable_after.intersection(&pairs(before)).count(),
+        drawable_after.len(),
+        drawable_after.len(),
+    );
+    for hop in after.iter().take(60) {
+        eprintln!(
+            "      {} --[{}]--> {}",
+            hop.producer, hop.topic, hop.consumer
+        );
+    }
+    if after.len() > 60 {
+        eprintln!("      … and {} more", after.len() - 60);
+    }
+    totals
+}
+
+/// A hop set projected onto the ordered member pairs it couples — what the
+/// service map draws one line (or one pair of hops) for.
+fn pairs(set: &BTreeSet<Hop>) -> BTreeSet<(String, String)> {
+    set.iter()
+        .map(|h| (h.producer.clone(), h.consumer.clone()))
+        .collect()
+}
+
+/// The roll-up [`report_promoted_inventory`] hands back.
+#[derive(Debug, Default)]
+struct InventoryTotals {
+    topics_before: usize,
+    topics_after: usize,
+    producers_before: usize,
+    producers_after: usize,
+    consumers_before: usize,
+    consumers_after: usize,
+    distinct_before: usize,
+    distinct_after: usize,
+}
+
+/// The estate member the cost measurement runs over: the one with the most
+/// promoted topics in the table above, so the added read is measured where it has
+/// the most keys to look up rather than on a member that names one.
+const COST_MEMBER: &str = "mailbox-manager";
+
+/// **[FR-WS-27] AC4 / [NFR-PE-02] — the cost of the added committed-configuration
+/// read, on cold index and on incremental sync, with its file-count denominator.**
+///
+/// The member is **copied into a temporary directory** and indexed there. It is
+/// never indexed in place: the reference workspace's own enrolment is held for
+/// other measurements, and writing a `.logos` store into it would disturb them.
+///
+/// # How "before" is obtained, stated rather than implied
+///
+/// AFTER is measured wall clock: a real `Engine::index` and a real
+/// `Engine::sync` of the member's broker sources, with the delivered code.
+///
+/// BEFORE is **AFTER minus the added read**, and the added read is measured too —
+/// not modelled. Everything the promotion pass did before this story it still
+/// does, unchanged and in the same order; the whole of what this story adds to the
+/// pass is one gated `config_definitions` lookup per distinct broker
+/// configuration key, issued on one pooled connection. So the delta is that read,
+/// and this test times exactly it, against the very store the index just built,
+/// over the very key set the ledger names.
+///
+/// That decomposition is reported as a decomposition. The alternative — an
+/// environment escape in `resolve::topics` that suppresses the read so a test can
+/// run the old codepath — would put test scaffolding on a production path to save
+/// one subtraction, and this project does not pay that price.
+///
+/// # No budget is asserted, and why that is the right call here
+///
+/// The figures are **reported**. A wall-clock threshold asserted on a developer
+/// machine is a flaky test, not a performance gate; [NFR-PE-02]'s envelope is
+/// enforced by `tests/perf_envelope.rs` over its own fixtures. What this test owes
+/// is the number, dated and with its denominator.
+///
+/// [FR-WS-27]: ../../docs/specs/requirements/FR-WS-27.md
+/// [NFR-PE-02]: ../../docs/specs/requirements/NFR-PE-02.md
+#[test]
+fn the_reference_workspace_reports_its_promotion_pass_cost_when_one_is_configured() {
+    let Some(root) = corpus_root() else {
+        eprintln!(
+            "SKIPPED: set LOGOS_REF_WORKSPACE=<path to the reference workspace> to run the \
+             S-424 promotion-pass cost measurement."
+        );
+        return;
+    };
+    let member = root.join(COST_MEMBER);
+    assert!(
+        member.is_dir(),
+        "the cost measurement's member {COST_MEMBER} is absent from {} — refusing to \
+         report a green run that measured nothing",
+        root.display(),
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join(COST_MEMBER);
+    copy_tree(&member, &dest);
+    let files = count_files(&dest);
+    let dirty = broker_source_files(&dest);
+
+    let engine = logos_core::Engine::start(&dest).expect("engine starts");
+    let cold_started = std::time::Instant::now();
+    engine.index();
+    let cold_ms = cold_started.elapsed().as_millis();
+
+    let inc_started = std::time::Instant::now();
+    engine.sync(&dirty);
+    let inc_ms = inc_started.elapsed().as_millis();
+
+    let rt = engine.runtime().unwrap();
+    let mut topics: Vec<String> = rt
+        .submit_read(|store| {
+            Ok(store
+                .all_nodes()?
+                .into_iter()
+                .filter(|n| n.kind == logos_core::model::NodeKind::Topic)
+                .map(|n| n.name)
+                .collect::<Vec<_>>())
+        })
+        .expect("read runs");
+    topics.sort();
+
+    // The added read, measured against the store the index just built, over the
+    // key set the ledger names — which is the pass's own gate, re-derived here
+    // from the same `placeholder_keys` the shipped predicate uses so this cannot
+    // measure a key set the pass would not ask for.
+    let keys: Vec<String> = rt
+        .submit_read(|store| {
+            let mut keys: Vec<String> = Vec::new();
+            for row in store.unresolved_refs()? {
+                // Matched through `from_wire` on the ENUM, never against a
+                // hardcoded wire token: a literal here would go stale silently
+                // the day a token is renamed and would then measure zero keys
+                // while reporting a cost.
+                let broker = matches!(
+                    row.payload.as_deref().and_then(ArtifactRelation::from_wire),
+                    Some(ArtifactRelation::BrokerPublish) | Some(ArtifactRelation::BrokerSubscribe)
+                );
+                if !broker {
+                    continue;
+                }
+                for key in placeholder_keys(&row.target).unwrap_or_default() {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+            Ok(keys)
+        })
+        .expect("read runs");
+    // Three passes, and the MEDIAN reported: a single timing of a sub-millisecond
+    // read is noise, and the mean is skewed by the first (cold page cache) run.
+    let mut samples: Vec<u128> = (0..3)
+        .map(|_| {
+            let keys = keys.clone();
+            let started = std::time::Instant::now();
+            rt.submit_read(move |store| {
+                for key in &keys {
+                    let _ = store.config_definitions(key)?;
+                }
+                Ok(())
+            })
+            .expect("read runs");
+            started.elapsed().as_micros()
+        })
+        .collect();
+    samples.sort_unstable();
+    let added_us = samples[1];
+
+    eprintln!(
+        "S-424 / FR-WS-27 promotion-pass cost: member={COST_MEMBER} from {}",
+        root.display()
+    );
+    eprintln!("  DENOMINATOR: {files} indexable files · {} broker sources re-synced on the incremental leg · {} distinct broker configuration keys read", dirty.len(), keys.len());
+    eprintln!("  AFTER  (measured): cold index {cold_ms} ms · incremental sync {inc_ms} ms");
+    eprintln!(
+        "  ADDED (measured): the committed-configuration read costs {added_us} us \
+         (median of 3) for all {} keys, on one pooled connection",
+        keys.len()
+    );
+    // Reported in µs on both sides, because the subtraction is invisible in ms:
+    // an 83 µs read truncates to 0 and the decomposition then prints AFTER twice,
+    // which reads as "the added read is free" rather than "the added read is
+    // three orders of magnitude below the figure it is subtracted from".
+    eprintln!(
+        "  BEFORE (AFTER minus ADDED): cold index {} us · incremental sync {} us",
+        (cold_ms * 1000).saturating_sub(added_us),
+        (inc_ms * 1000).saturating_sub(added_us),
+    );
+    eprintln!("  Promoted topic names: {topics:?}");
+
+    // The measurement is only about cost if the pass actually promoted something
+    // and actually read a corpus — otherwise it is timing a no-op.
+    assert!(
+        !topics.is_empty(),
+        "{COST_MEMBER} promoted no topic at all — this is not the member the cost \
+         measurement is about"
+    );
+    assert!(
+        !keys.is_empty(),
+        "{COST_MEMBER} named no broker configuration key, so the added read never \
+         ran and there is no cost here to report"
+    );
+    // The incremental leg must have had something to sync, or "incremental sync
+    // N ms" is the cost of syncing nothing. The dirty set is selected by a
+    // literal source grep, so a field rename in the estate would silently empty
+    // it and the figure would quietly become a no-op rather than fail.
+    assert!(
+        !dirty.is_empty(),
+        "{COST_MEMBER} yielded no broker source for the incremental leg — the \
+         sync figure above would be the cost of syncing nothing"
+    );
+
+    // **The one product-side assertion in this file.** Everything above is wall
+    // clock, and everything in the sibling inventory harness is modelled from
+    // `topic_identity`. These names came out of a real `Engine::index` over real
+    // estate sources, through `desired_set` and `broker_refs`, so they are the
+    // shipped pass's own output — and on this member every operand is a `${…}`
+    // placeholder that only committed configuration can resolve.
+    //
+    // Revert `broker_refs` to `row.target.trim()` and this is the assertion in
+    // the estate suite that fails; without it, both estate harnesses stay green
+    // while reporting a capability the product no longer has.
+    for name in &topics {
+        assert!(
+            !name.contains("${"),
+            "a promoted topic on {COST_MEMBER} still carries its placeholder: \
+             {name:?} — the committed-value rule did not reach the real pass"
+        );
+    }
+}
+
+/// Copy a directory tree, skipping any `.logos` store and `.git` directory — the
+/// two things a measurement must never carry into its temporary copy.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    for entry in ignore::WalkBuilder::new(from)
+        .hidden(false)
+        .git_ignore(false)
+        .parents(false)
+        .build()
+        .flatten()
+    {
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(from) else {
+            continue;
+        };
+        if rel
+            .components()
+            .any(|c| matches!(c.as_os_str().to_str(), Some(".git") | Some(".logos")))
+        {
+            continue;
+        }
+        let dest = to.join(rel);
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            std::fs::create_dir_all(&dest).unwrap();
+        } else if entry.file_type().is_some_and(|t| t.is_file()) {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            let _ = std::fs::copy(path, &dest);
+        }
+    }
+}
+
+/// The indexable-file denominator: every file the walk admits.
+fn count_files(root: &std::path::Path) -> usize {
+    corpus_walker(root)
+        .flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .count()
+}
+
+/// The dirty set for the incremental leg: every Java source naming a broker
+/// template call or listener, project-relative, as `Engine::sync` takes them.
+fn broker_source_files(root: &std::path::Path) -> Vec<PathBuf> {
+    corpus_walker(root)
+        .flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("java") {
+                return None;
+            }
+            let text = std::fs::read_to_string(path).ok()?;
+            (text.contains("kafkaTemplate") || text.contains("@KafkaListener"))
+                .then(|| path.strip_prefix(root).ok().map(std::path::Path::to_path_buf))
+                .flatten()
+        })
+        .collect()
 }

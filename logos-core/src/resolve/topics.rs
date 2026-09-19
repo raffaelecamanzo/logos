@@ -12,14 +12,20 @@
 //!   node linked to its topic by [`EdgeKind::Subscribes`].
 //!
 //! # The ledger is the input — no second capture
-//! The pass **re-reads nothing from disk**. S-254's `brokers.scm` interpreter
+//! The pass **re-reads no source from disk**. S-254's `brokers.scm` interpreter
 //! ([`crate::extract::broker`]) already normalized every static-topic
 //! publish/subscribe site into an `unresolved_refs` row tagged
 //! [`BrokerPublish`](ArtifactRelation::BrokerPublish) /
 //! [`BrokerSubscribe`](ArtifactRelation::BrokerSubscribe), so promotion is a pure
-//! function of that ledger and the bound graph. A dynamically-composed topic was
-//! already refused at capture ([NFR-RA-05]) and can never reach this pass, so no
-//! topic is ever fabricated here.
+//! function of that ledger, the bound graph and — since [S-424] — the member's
+//! **own committed configuration**, which is the one thing it does read
+//! ([FR-WS-27] AC4). That read is a key lookup in this member's own store, not a
+//! re-extraction and not a reach into another member's: a topic operand that
+//! names `${spring.kafka.topics.orders}` is keyed by the value this repository
+//! commits for it. A dynamically-composed topic was already refused at capture
+//! ([NFR-RA-05]) and can never reach this pass, so no topic is ever fabricated
+//! here — an operand the corpus proves nothing for keeps its placeholder exactly
+//! as written.
 //!
 //! # Identity: a topic is repo-scoped, a producer/consumer is site-scoped
 //! A [`Topic`](NodeKind::Topic) is the *shared* identity two sides meet on, so its
@@ -52,8 +58,27 @@
 //! # The cross-member bind is *not* here
 //! Promotion is per-repo. Binding a producer in one member to a consumer in
 //! another rides the same topic identity through the workspace bridge
-//! ([`crate::federation::broker`]) — see that module. The two are projections of
-//! one captured fact, keyed identically, which is why they cannot disagree.
+//! ([`crate::federation::broker`]) — see that module.
+//!
+//! # One identify function, called from here and from the bridge ([FR-WS-27])
+//! The two tiers are projections of one captured fact and they key it by
+//! **calling one function**, [`crate::federation::broker::identify`]. That is
+//! why they cannot disagree — and it is a stronger statement than the one this
+//! header used to make. From [S-410] until [S-424] it said they were *"keyed
+//! identically, which is why they cannot disagree"* while the bridge resolved
+//! its operand through committed configuration and this pass took
+//! `row.target.trim()` verbatim. They disagreed for every configuration-bound
+//! site, splitting a publisher from its subscriber wherever the two spelled one
+//! property differently and leaving that coupling unrepresentable. Two tiers
+//! stating one rule is what drifted; one function is what does not ([ADR-52],
+//! [FR-WS-27] AC1).
+//!
+//! **No estate figure is recorded here, deliberately.** They live in
+//! `tests/broker_topic_corpus.rs`'s recorded finding and in [CR-136]'s delivery
+//! appendix — one home each. This file is swept by no figure roster, so a number
+//! copied into it is a number that ages silently.
+//!
+//! [CR-136]: ../../../docs/requests/CR-136-promoted-topic-identity-is-the-committed-value.md
 //!
 //! [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
 //! [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
@@ -61,6 +86,10 @@
 //! [ADR-55]: ../../../docs/specs/architecture/decisions/ADR-55.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+//! [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+//! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+//! [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+//! [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -69,7 +98,9 @@ use anyhow::Result;
 
 use crate::extract::symbol::{descriptor_for, SymbolContext};
 use crate::graph_store::{NodeRow, UnresolvedRefRow};
-use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind};
+use crate::model::{ArtifactRelation, BridgeNamespace, EdgeKind, LogosSymbol, NodeId, NodeKind};
+use crate::resolve::binding::{config_bound_keys_of, ConfigLookup, MemberCorpus};
+use crate::resolve::broker_identity;
 use crate::runtime::Runtime;
 
 use super::promote::{self, Promoted, PromotedEdge};
@@ -133,7 +164,8 @@ pub fn run(runtime: &Runtime) -> Result<TopicStats> {
 
     let file_id_by_path: HashMap<&str, i64> =
         files.iter().map(|f| (f.path.as_str(), f.id)).collect();
-    let desired = desired_set(&refs, &nodes, &file_id_by_path);
+    let corpus = member_corpus(runtime, &refs)?;
+    let desired = desired_set(&refs, &nodes, &file_id_by_path, &corpus);
 
     // Belt and braces behind the footprint probe: a ledger that carries a broker row
     // whose enclosing declaration is unknown (so it promotes nothing) leaves an empty
@@ -164,6 +196,119 @@ pub fn run(runtime: &Runtime) -> Result<TopicStats> {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
+}
+
+/// The canonical configuration keys this ledger's **broker** rows name, in
+/// source order and de-duplicated — empty when they name none ([FR-WS-27] AC4).
+///
+/// The gate on whether a corpus is read at all, and it is deliberately the
+/// **same predicate** the workspace bridge opens a member's store on
+/// ([`config_bound_keys_of`]). That function's own doc records why: a gate that
+/// opens a store and a gate that resolves an operand must be one predicate, or a
+/// store is opened for an operand nothing resolves — or, worse, an operand
+/// resolves in a member whose corpus was never read. Asking the question a
+/// second way here would re-create exactly that.
+///
+/// The arm test lives inside `config_bound_keys_of` and is on the **relation**,
+/// so a non-broker row carrying a `${…}` — an HTTP client call's configured
+/// base URL, which this pass promotes nothing for — contributes no key and
+/// costs this member no read.
+///
+/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+fn broker_config_keys(refs: &[UnresolvedRefRow]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for row in refs {
+        let Some(relation) = row.payload.as_deref().and_then(ArtifactRelation::from_wire) else {
+            continue;
+        };
+        // Only the broker arm: `config_bound_keys_of` admits the HTTP arm too,
+        // whose configured targets this pass promotes nothing for.
+        //
+        // Tested on the **namespace**, exactly as `broker_identity::admit` is, and
+        // NOT by re-spelling the relation list. A re-spelled list is a second
+        // predicate: the day a third relation maps to `BrokerTopic`, `admit` would
+        // key the site on its committed value while this gate silently omitted its
+        // key from the corpus — one captured fact, two keys, with one identify
+        // function in place. That is the drift [FR-WS-27] AC1 exists to forbid,
+        // arriving through the corpus rather than through the rule.
+        if relation.bridge_namespace() != Some(BridgeNamespace::BrokerTopic) {
+            continue;
+        }
+        let Some(named) = config_bound_keys_of(relation, &row.target) else {
+            continue;
+        };
+        for key in named {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+/// Read **this member's own** committed configuration for every key its broker
+/// rows name ([FR-WS-27] AC4, [ADR-64]'s within-reach rule).
+///
+/// One read over the whole key set, never one per site, and **no read at all**
+/// when the ledger names no key — which is every repository whose broker
+/// operands are literals, and every repository that indexes no broker coupling.
+/// That is the emptiness test [NFR-PE-10] asks for, and it is why this pass
+/// costs an unconfigured repo nothing.
+///
+/// **No store but the member's own is opened**: `runtime` *is* this member's
+/// store, and the pass holds no registry, no roster and no second runtime with
+/// which it could reach another. Federation stays an overlay ([ADR-52]) — the
+/// value keying a node here is one this repository commits for itself.
+///
+/// # Errors
+/// Propagates a read failure, which aborts the pass rather than promoting nodes
+/// keyed on a corpus that was only partly read.
+///
+/// [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn member_corpus(runtime: &Runtime, refs: &[UnresolvedRefRow]) -> Result<MemberCorpus> {
+    corpus_for(refs, |keys| {
+        runtime.submit_read(move |store| {
+            let mut corpus = MemberCorpus::new();
+            for key in keys {
+                let defs = store.config_definitions(&key)?;
+                // A key no source defines is ABSENT rather than present-and-empty:
+                // the resolver reads an absent key as `missing`, and an empty vec
+                // would say the same thing twice. Mirrors the bridge's own reader.
+                if !defs.is_empty() {
+                    corpus.insert(key, defs);
+                }
+            }
+            Ok(corpus)
+        })
+    })
+}
+
+/// The read **gate** itself, split from the read so it can be asserted rather
+/// than argued ([FR-WS-27] AC4, [NFR-PE-10]).
+///
+/// `read` is invoked **only** when the ledger names at least one broker
+/// configuration key. That is the whole of the emptiness test the criterion asks
+/// for, and separating it is what lets a test observe the thing the criterion
+/// says — *"only members naming a broker key read a corpus"* — instead of
+/// observing the key list and inferring the rest. Before this split the
+/// short-circuit could be deleted with the entire suite staying green.
+///
+/// # Errors
+/// Propagates whatever `read` returns.
+///
+/// [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn corpus_for(
+    refs: &[UnresolvedRefRow],
+    read: impl FnOnce(Vec<String>) -> Result<MemberCorpus>,
+) -> Result<MemberCorpus> {
+    let keys = broker_config_keys(refs);
+    if keys.is_empty() {
+        return Ok(MemberCorpus::new());
+    }
+    read(keys)
 }
 
 /// One node this run wants promoted, keyed in the desired map by its symbol
@@ -197,50 +342,80 @@ enum DesiredEdge {
     Subscribes(String),
 }
 
-/// The topic key, kind, and enclosing declaration one broker ledger row promotes.
+/// The topic identity, kind, and enclosing declaration one broker ledger row
+/// promotes.
 struct BrokerRef<'a> {
     /// `Producer` for a publish, `Consumer` for a subscribe.
     kind: NodeKind,
-    /// The arm-normalized topic key (`orders`, `orders#com.acme.OrderCreated`).
-    topic: &'a str,
+    /// The topic key this row promotes under: the committed value where the
+    /// member's configuration proves one, or the operand exactly as written
+    /// where it does not ([FR-WS-27] AC2/AC3).
+    ///
+    /// Owned rather than borrowed from the row, because a committed value is
+    /// composed rather than a slice of the operand. **One row can yield several
+    /// of these** — see [`broker_refs`], which flattens an overlay disagreement
+    /// into one `BrokerRef` per committed value.
+    topic: String,
     /// The declaration the capture attributed the site to.
     enclosing: &'a NodeRow,
     /// 1-based line of the publish/subscribe site.
     line: Option<i64>,
 }
 
-/// Project the ledger onto the broker rows this pass promotes.
+/// Project the ledger onto the broker rows this pass promotes, keyed by the
+/// **committed-value topic identity** ([FR-WS-27] AC1).
 ///
-/// A row qualifies iff its `payload` names a broker arm relation **and** its
-/// `source_symbol` resolves to a node actually in the graph. A row whose
-/// enclosing declaration is unknown (its file was deleted, or the symbol never
-/// bound) promotes nothing rather than hanging a producer off a fabricated
-/// parent ([NFR-RA-05]).
+/// A row qualifies iff [`broker::identify`] admits it — one function, called
+/// from here and from the federation bridge, so a `Topic` node and a bridge edge
+/// can never key one captured fact two ways ([ADR-52]). Every refusal that
+/// function makes is therefore made here too and in the same words: a non-broker
+/// relation and a **keyless** row (the arm's recorded `topic-not-literal`
+/// refusal, [CR-107]) promote nothing, and no topic is fabricated
+/// ([NFR-RA-05]).
 ///
+/// The relation is matched a second time here, and that is a projection rather
+/// than a duplicated predicate: [`NodeKind::Producer`]/[`NodeKind::Consumer`] is
+/// this pass's own vocabulary, which no other tier names, while the bridge reads
+/// the same relation as a fan-out role with the **opposite** orientation (a
+/// publish is the bridge's *consumer* side). Deriving one from the other would be
+/// a rename that reads as an inversion. **The identity — which is what
+/// [FR-WS-27] is about — is resolved in exactly one place.**
+///
+/// A row whose enclosing declaration is unknown (its file was deleted, or the
+/// symbol never bound) promotes nothing rather than hanging a producer off a
+/// fabricated parent ([NFR-RA-05]).
+///
+/// [CR-107]: ../../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
+/// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn broker_refs<'a>(
     refs: &'a [UnresolvedRefRow],
     node_by_symbol: &'a HashMap<&'a str, &'a NodeRow>,
+    corpus: &dyn ConfigLookup,
 ) -> Vec<BrokerRef<'a>> {
     refs.iter()
         .filter_map(|row| {
-            let kind = match row.payload.as_deref().and_then(ArtifactRelation::from_wire) {
-                Some(ArtifactRelation::BrokerPublish) => NodeKind::Producer,
-                Some(ArtifactRelation::BrokerSubscribe) => NodeKind::Consumer,
+            let relation = row.payload.as_deref().and_then(ArtifactRelation::from_wire)?;
+            let kind = match relation {
+                ArtifactRelation::BrokerPublish => NodeKind::Producer,
+                ArtifactRelation::BrokerSubscribe => NodeKind::Consumer,
                 _ => return None,
             };
-            let topic = row.target.trim();
-            if topic.is_empty() {
-                return None; // a keyless row is not a topic — never fabricate one
-            }
-            let enclosing = node_by_symbol.get(row.source_symbol.as_str())?;
-            Some(BrokerRef {
+            let identity = broker_identity::identify(relation, &row.target, corpus)?;
+            let enclosing = *node_by_symbol.get(row.source_symbol.as_str())?;
+            // **Flattened, one `BrokerRef` per topic identity.** A site whose
+            // member commits its key two ways under two overlays promotes under
+            // each of them, exactly as the bridge fans out under each
+            // ([FR-WS-19] AC2) — never a value chosen between them. The
+            // overwhelming case is one identity and one ref.
+            Some(identity.topics.into_iter().map(move |topic| BrokerRef {
                 kind,
                 topic,
                 enclosing,
                 line: row.line,
-            })
+            }))
         })
+        .flatten()
         .collect()
 }
 
@@ -296,11 +471,20 @@ fn site_symbol(enclosing: &LogosSymbol, kind: NodeKind, key: &str) -> Result<Log
 /// collapses to one node carrying the **first** line — one producer of a topic per
 /// declaration, never a duplicate per call.
 ///
+/// Since [S-424] a single ledger row can contribute **several** entries, because
+/// [`broker_refs`] flattens an overlay disagreement into one ref per committed
+/// value. That does not weaken the determinism above: `identify` returns its
+/// topics sorted and de-duplicated, and the fold is keyed by symbol either way, so
+/// the output is a function of the ledger and the corpus and of nothing else —
+/// ledger order included.
+///
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+/// [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 fn desired_set(
     refs: &[UnresolvedRefRow],
     nodes: &[NodeRow],
     file_id_by_path: &HashMap<&str, i64>,
+    corpus: &dyn ConfigLookup,
 ) -> BTreeMap<String, DesiredNode> {
     let ctx = SymbolContext::default();
     let node_by_symbol: HashMap<&str, &NodeRow> =
@@ -308,11 +492,12 @@ fn desired_set(
 
     let mut desired: BTreeMap<String, DesiredNode> = BTreeMap::new();
 
-    for r in broker_refs(refs, &node_by_symbol) {
-        let Ok(topic) = topic_symbol(&ctx, r.topic) else {
+    for r in broker_refs(refs, &node_by_symbol, corpus) {
+        let topic_key = r.topic.as_str();
+        let Ok(topic) = topic_symbol(&ctx, topic_key) else {
             continue; // a key that cannot be encoded as a symbol is refused, not coerced
         };
-        let Ok(site) = site_symbol(&r.enclosing.symbol, r.kind, r.topic) else {
+        let Ok(site) = site_symbol(&r.enclosing.symbol, r.kind, topic_key) else {
             continue;
         };
 
@@ -323,7 +508,7 @@ fn desired_set(
             .or_insert_with(|| DesiredNode {
                 symbol: topic.clone(),
                 kind: NodeKind::Topic,
-                name: r.topic.to_string(),
+                name: topic_key.to_string(),
                 file_id: None,
                 start_line: None,
                 end_line: None,
@@ -345,7 +530,7 @@ fn desired_set(
             .or_insert_with(|| DesiredNode {
                 symbol: site,
                 kind: r.kind,
-                name: r.topic.to_string(),
+                name: topic_key.to_string(),
                 file_id,
                 start_line: r.line,
                 end_line: r.line,

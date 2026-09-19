@@ -95,6 +95,33 @@ fn edges_of(rt: &Runtime, kind: EdgeKind) -> Vec<(NodeId, NodeId)> {
     .expect("read runs")
 }
 
+/// Every promoted node's symbol — the three kinds this pass owns, and nothing
+/// else. Sorted by name via [`nodes_of`], so two runs read alike.
+fn promoted_symbols(rt: &Runtime) -> Vec<String> {
+    rt.submit_read(|store| {
+        let mut symbols: Vec<String> = store
+            .all_nodes()?
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Topic | NodeKind::Producer | NodeKind::Consumer
+                )
+            })
+            .map(|n| n.symbol.as_str().to_string())
+            .collect();
+        symbols.sort();
+        Ok(symbols)
+    })
+    .expect("read runs")
+}
+
+/// The target endpoint of every edge of `kind` — the half an assertion about
+/// "which topic does this hang off" actually reads.
+fn targets_of(rt: &Runtime, kind: EdgeKind) -> Vec<NodeId> {
+    edges_of(rt, kind).into_iter().map(|(_, target)| target).collect()
+}
+
 /// node id → kind, for asserting an edge's endpoints are the kinds they claim.
 fn kinds_by_id(rt: &Runtime) -> HashMap<NodeId, NodeKind> {
     rt.submit_read(|store| Ok(store.all_nodes()?.into_iter().map(|n| (n.id, n.kind)).collect()))
@@ -198,12 +225,19 @@ fn broker_coupling_is_promoted_to_topic_producer_and_consumer_nodes() {
 /// two `Topic` nodes and two `Consumer` nodes, which the `(declaration, topic)`
 /// counting contract already covers ([FR-WS-11]) — and **not** two producers.
 ///
-/// The topic key is the placeholder text as written. Reducing it to the committed
-/// configured value is [CR-117]'s canonical-identity rule, downstream of this
-/// story's capture path.
+/// The topic key here is the placeholder text as written, and since [S-424] that
+/// is a property of **this fixture** rather than of the pass: the repository
+/// commits nothing for `spring.kafka.topics.orders` or `archive.topic`, so both
+/// operands resolve to nothing and keep their placeholders — [FR-WS-27] AC3's
+/// refusal branch, which is also the pre-[S-424] behaviour this fixture was
+/// written to pin. Add an `application.yml` committing those keys and the topics
+/// are named by the committed values, which
+/// `two_spellings_of_one_committed_property_promote_one_topic_read_from_the_members_own_store`
+/// asserts directly.
 ///
 /// [CR-107]: ../../docs/requests/CR-107-broker-topic-capture-drops-placeholder-and-array-literals.md
-/// [CR-117]: ../../docs/requests/CR-117-broker-publish-capture-and-the-topic-key-namespace.md
+/// [FR-WS-27]: ../../docs/specs/requirements/FR-WS-27.md
+/// [S-424]: ../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 #[test]
 fn placeholder_and_array_listener_topics_are_promoted_to_topic_and_consumer_nodes() {
     const LISTENERS: &str = r#"
@@ -1024,4 +1058,172 @@ class KafkaProducer {
          nothing: {rows:?}"
     );
     assert!(rows[0].contains("send"), "attributed to the sending method: {rows:?}");
+}
+
+// ── S-424 / FR-WS-27: the promoted key is the committed configured value ─────
+
+/// A publisher and a listener whose topic operands are **two different
+/// spellings** of one configured property — the shape the reference estate is
+/// full of, and the shape the promotion pass split into two topics until
+/// [S-424].
+///
+/// `archive-commands` in the annotation, `archivecommands` in the accessor-shaped
+/// spelling: not byte-equal, canonically the same property, and committed once.
+const TWO_SPELLINGS: &str = r#"
+package com.acme;
+class ArchiveWiring {
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    public void emit(String payload) {
+        kafkaTemplate.send("${spring.kafka.topics.archive-commands}", payload);
+    }
+
+    @KafkaListener(topics = "${spring.kafka.topics.archivecommands}")
+    public void onCommand(String msg) {}
+}
+"#;
+
+/// The member's own committed configuration for that property.
+const ARCHIVE_YML: &str = "spring:\n  kafka:\n    topics:\n      archive-commands: archive-commands\n";
+
+/// **[FR-WS-27] AC2 / AC4, end to end through a real `Engine::index`.**
+///
+/// The publish and the subscribe promote **one** `Topic` named by the committed
+/// value, with one `Producer` and one `Consumer` hanging off it — the coupling
+/// the two spellings made unrepresentable.
+///
+/// Asserted through a real index rather than at the `desired_set` seam, because
+/// the seam cannot establish the half this story actually adds: that the pass
+/// **reads the member's own store** for the corpus. The unit fixtures hand
+/// `desired_set` a corpus built in memory and would pass identically if `run`
+/// never issued the read at all. Here nothing but `application.yml` on disk can
+/// produce `archive-commands`, so the name IS the evidence that the read
+/// happened, against the member's own store and no other ([FR-WS-27] AC4).
+///
+/// [FR-WS-27]: ../../docs/specs/requirements/FR-WS-27.md
+/// [S-424]: ../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+#[test]
+fn two_spellings_of_one_committed_property_promote_one_topic_read_from_the_members_own_store() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/ArchiveWiring.java", TWO_SPELLINGS);
+    write(tmp.path(), "src/main/resources/application.yml", ARCHIVE_YML);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    assert_eq!(
+        names_of(rt, NodeKind::Topic),
+        ["archive-commands"],
+        "ONE topic, named by the value the repository commits — not one node per \
+         placeholder spelling, and not the placeholder text"
+    );
+    assert_eq!(names_of(rt, NodeKind::Producer), ["archive-commands"]);
+    assert_eq!(names_of(rt, NodeKind::Consumer), ["archive-commands"]);
+
+    // The coupling is now representable: the producer and the consumer are joined
+    // to the SAME topic node. This is the assertion the counts above cannot make.
+    let topic_id = nodes_of(rt, NodeKind::Topic)[0].0;
+    assert_eq!(
+        targets_of(rt, EdgeKind::Publishes),
+        [topic_id],
+        "the Producer publishes to the one topic"
+    );
+    assert_eq!(
+        targets_of(rt, EdgeKind::Subscribes),
+        [topic_id],
+        "the Consumer subscribes from the SAME topic — the hop can close"
+    );
+
+    // No placeholder text survives anywhere in the promoted subgraph, symbols
+    // included: a matching `name` with a `${…}` still in the symbol would leave
+    // two site nodes that a re-sync reconciles apart.
+    let symbols = promoted_symbols(rt);
+    assert_eq!(symbols.len(), 3, "topic + producer + consumer: {symbols:?}");
+    for symbol in &symbols {
+        assert!(
+            !symbol.contains("${"),
+            "a resolved site keeps no placeholder in its symbol: {symbol}"
+        );
+    }
+}
+
+/// **[FR-WS-27] AC5 — a store indexed before this change converges on its next
+/// sync, with no orphan left behind.** Pinned, not assumed.
+///
+/// The pre-change state is reproduced the only way a test honestly can: index
+/// with **no** `application.yml`, which is exactly the graph the old code
+/// produced for these operands — two placeholder-keyed topics, a producer on one
+/// and a consumer on the other. Then commit the configuration and sync the two
+/// files. The pass reconciles: the two placeholder topics and their placeholder
+/// -keyed sites are **gone**, and one committed-value topic with one producer and
+/// one consumer stands in their place.
+///
+/// The orphan assertion is the point. `Topic` nodes carry no `file_id`, so
+/// re-extracting a file does **not** delete them — they can only leave by the
+/// reconcile's own diff. A pass that inserted the new key without retiring the
+/// old one would leave two dangling `${…}` topics in every existing store, which
+/// is the migration this story claims not to need.
+///
+/// [FR-WS-27]: ../../docs/specs/requirements/FR-WS-27.md
+#[test]
+fn a_store_indexed_before_the_committed_value_rule_converges_on_the_next_sync() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/ArchiveWiring.java", TWO_SPELLINGS);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    // The pre-change graph: two topics, one per spelling, and the coupling split
+    // across them. This is what every store indexed before this story holds.
+    assert_eq!(
+        names_of(rt, NodeKind::Topic),
+        [
+            "${spring.kafka.topics.archive-commands}",
+            "${spring.kafka.topics.archivecommands}"
+        ],
+        "with nothing committed, both operands keep their placeholders — two topics"
+    );
+
+    // Now the member commits the property and syncs **only the config file**.
+    //
+    // Deliberately not the Java source. Including it would re-extract the broker
+    // ledger rows and over-determine the result: the test would pass whether the
+    // pass reconciled the whole graph or merely rebuilt the rows it was handed.
+    // The scenario AC5 is actually about is the one where nothing about the
+    // broker source changed — the operator upgraded the binary, the config was
+    // already committed, and some unrelated file synced. Pinning that is what
+    // makes "converges on its next index or sync" a claim about reconciliation
+    // rather than about re-extraction, and it is what would fail if the pass
+    // were ever gated on the dirty set containing a broker-relevant file.
+    write(tmp.path(), "src/main/resources/application.yml", ARCHIVE_YML);
+    engine.sync(&[PathBuf::from("src/main/resources/application.yml")]);
+
+    assert_eq!(
+        names_of(rt, NodeKind::Topic),
+        ["archive-commands"],
+        "the two placeholder topics are RETIRED, not left beside the new one"
+    );
+    assert_eq!(names_of(rt, NodeKind::Producer), ["archive-commands"]);
+    assert_eq!(names_of(rt, NodeKind::Consumer), ["archive-commands"]);
+
+    // …and no promoted node anywhere still carries a placeholder: the orphan
+    // check, stated over the whole promoted subgraph rather than over the three
+    // kinds' names.
+    let orphans: Vec<String> = promoted_symbols(rt)
+        .into_iter()
+        .filter(|symbol| symbol.contains("${"))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "no orphaned placeholder-keyed node survives the convergence: {orphans:?}"
+    );
+
+    // The edges converge too — one Publishes and one Subscribes, both on the one
+    // topic. An orphaned edge pointing at a retired topic would not show up in a
+    // node-name assertion at all.
+    let topic_id = nodes_of(rt, NodeKind::Topic)[0].0;
+    assert_eq!(targets_of(rt, EdgeKind::Publishes), [topic_id]);
+    assert_eq!(targets_of(rt, EdgeKind::Subscribes), [topic_id]);
 }

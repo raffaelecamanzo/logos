@@ -17,44 +17,53 @@
 //! The cross-member bind is then *implied* by the inventory itself — a topic with
 //! producers in one member and consumers in another **is** the coupling — and is
 //! proven independently by the bridge ([`super::broker`]). The two are projections
-//! of one captured fact.
+//! of one captured fact, keyed by one function since [S-424] (see below).
 //!
-//! # They are no longer keyed on the same topic identity, and CAN disagree ([S-410])
+//! # They are keyed on the same topic identity again ([S-424], [FR-WS-27])
 //!
-//! This paragraph read *"keyed on the same topic identity, so they cannot
-//! disagree"* until 2026-09-16, and it was true when written. [S-410] moved the
-//! **bridge's** topic identity to the committed configured value for an operand
-//! that resolves to one; this inventory's identity did not move, because the
-//! promotion pass it reads is repo-scoped and runs *before* federation, where no
-//! other member's corpus is in scope. [FR-WS-11]'s topic identity is still the
-//! operand as the ledger stored it.
+//! This section has said three different things, and the history is the point.
+//! Until 2026-09-16 it read *"keyed on the same topic identity, so they cannot
+//! disagree"*. [S-410] then moved the **bridge's** identity to the committed
+//! configured value and left this inventory's on the stored operand, so from
+//! 2026-09-16 to 2026-09-19 it read *"they CAN disagree"* — and they did, for
+//! every configuration-bound site. [S-424] closes that: the promotion pass and
+//! the bridge now resolve a broker operand through **one function**,
+//! [`super::broker::identify`], so the two are keyed identically once more — this
+//! time because they call the same code rather than because they happen to
+//! implement the same rule ([FR-WS-27] AC1, [ADR-52]).
 //!
-//! So for a **configuration-bound** site the two genuinely differ, and on the
-//! reference estate they differ for every keyed site (59 of 59, 2026-09-16). The
-//! visible shape: the service map draws one
+//! The shape that used to be visible, now closed: the service map drew one
 //! `reporting-archive-data-downsampler → reporting-archive-data-projector`
-//! coupling on `archive-volume-counters`, while this inventory lists
+//! coupling on `archive-volume-counters` while this inventory listed
 //! `${spring.kafka.topics.archivevolumecounters}` (a producer, no consumer) and
 //! `${spring.kafka.topics.archive-volume-counters}` (a consumer, no producer) as
-//! two uncoupled topics.
+//! two uncoupled topics. Both ends now sit on the one `archive-volume-counters`
+//! node, which is what lets the map draw the coupling as a
+//! `publisher → topic → subscriber` hop at all.
 //!
-//! **Which is authoritative for what.** The bridge is authoritative for *coupling*
-//! — it is the only one of the two that reads committed configuration, so it is
-//! the only one that can tell that those two spellings are one topic. This
-//! inventory stays authoritative for *per-repo visibility*, which is the promise
-//! [FR-WS-11] makes and the reason it reads promoted nodes rather than binds: an
-//! unbound topic must still be drawn. Neither is wrong; they answer different
-//! questions, and a reader reconciling a coupling count against a topic count
-//! needs to know which is which.
+//! **Which is authoritative for what — unchanged, and still worth stating.** The
+//! bridge remains authoritative for *coupling*: it is the tier that matches a
+//! publish against a subscribe across members. This inventory remains
+//! authoritative for *per-repo visibility*, which is [FR-WS-11]'s promise and the
+//! reason it reads promoted nodes rather than binds — an unbound topic must still
+//! be drawn, and no bridge edge exists for it. They answer different questions;
+//! what [S-424] removed is that they answered them in different vocabularies.
 //!
-//! Reconciling the two identities is a change to [FR-WS-11]'s repo-scoped topic
-//! identity — it would rename `Topic`/`Producer`/`Consumer` nodes on every indexed
-//! project — and needs its own acceptance criterion. It is deliberately not
-//! [S-410]'s, and is recorded here rather than left for a reader to discover from
-//! a service map that disagrees with the board beside it ([NFR-CC-04]).
+//! One thing has **not** changed and must not be read as having: the inventory is
+//! still **repo-scoped**, and the configuration behind a key is still read from
+//! the member's own store and no other. Re-keying is not a cross-member reach
+//! ([ADR-52] upheld, [ADR-64]'s within-reach rule).
 //!
-//! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+//! The estate figures for the re-keying live in
+//! `logos-core/tests/broker_topic_corpus.rs`'s recorded finding and in
+//! [CR-136]'s delivery appendix — one home each, not a copy here.
+//!
+//! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+//! [ADR-64]: ../../../docs/specs/architecture/decisions/ADR-64.md
+//! [CR-136]: ../../../docs/requests/CR-136-promoted-topic-identity-is-the-committed-value.md
+//! [FR-WS-27]: ../../../docs/specs/requirements/FR-WS-27.md
 //! [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
+//! [S-424]: ../../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
 //!
 //! # Advisory only ([ADR-53])
 //! Like every workspace read-model, this is reachable only through an

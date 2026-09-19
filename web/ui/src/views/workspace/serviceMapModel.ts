@@ -433,11 +433,16 @@ export function buildServiceMap(
 
      The topic hops are built from the promoted topic INVENTORY, which carries no
      provenance; the provenance lives on the BINDINGS, which the flat line is
-     built from. So a hop is marked from the binding it stands for. Today the
-     inventory and the bridge disagree for every config-bound site, so the flat
-     line is what is actually drawn — but FR-WS-11 aligning them later would move
-     those couplings onto the hop, and an unmarked hop would hide the provenance
-     again the day that lands. */
+     built from. So a hop is marked from the binding it stands for.
+
+     Since S-424 (FR-WS-27) the two sources agree on the key: the promotion pass
+     and the bridge resolve a broker operand through ONE identify function, so a
+     config-bound coupling is keyed the same way in the inventory and in the
+     bindings, `drawnThroughATopic` fires for it, and it is the HOP that is drawn
+     rather than the flat line. That is what makes this marker load-bearing today
+     rather than a provision for later: until S-424 the inventory and the bridge
+     disagreed for every config-bound site, so the flat line was what was
+     actually drawn and an unmarked hop hid nothing. It would now. */
   const admittedBrokerPairs = new Set<string>();
   for (const b of bindings) {
     if (b.relation !== "broker-topic") continue;
@@ -533,13 +538,16 @@ export function buildServiceMap(
    *  flat service→service line be suppressed as a duplicate.
    *
    *  The two data sources are INDEPENDENT: bindings come from the ledger, topics from
-   *  the promoted graph. They can disagree — a member indexed by a pre-S-256 binary and
-   *  not yet re-synced has the ledger rows but no promoted nodes, and a member whose
-   *  topic read degrades is skipped from the inventory entirely. Suppressing the line
-   *  unconditionally would make a RESOLVED coupling vanish from the canvas in exactly
-   *  those cases, while still counting it in the links table — the map would quietly
-   *  under-draw the workspace (NFR-CC-04). So the line is dropped only when a topic hop
-   *  demonstrably replaces it. */
+   *  the promoted graph. Since S-424 (FR-WS-27) they agree on the KEY — one identify
+   *  function resolves the operand for both tiers — but agreeing on the key is not the
+   *  same as both being present. A member indexed by a pre-S-256 binary and not yet
+   *  re-synced has the ledger rows but no promoted nodes; a member last indexed before
+   *  S-424 has its topics keyed on the placeholder until its next sync; and a member
+   *  whose topic read degrades is skipped from the inventory entirely. Suppressing the
+   *  line unconditionally would make a RESOLVED coupling vanish from the canvas in
+   *  exactly those cases, while still counting it in the links table — the map would
+   *  quietly under-draw the workspace (NFR-CC-04). So the line is dropped only when a
+   *  topic hop demonstrably replaces it. */
   const drawnThroughATopic = (l: ServiceLink): boolean =>
     topics.some((t) => t.producers.includes(l.from) && t.consumers.includes(l.to));
 

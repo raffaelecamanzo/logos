@@ -2233,12 +2233,23 @@ fn arm_identity(reference: &super::bridge::InvocationRef, corpus: &MemberCorpus)
         return ArmIdentity::Http(identity);
     }
     if reference.relation.bridge_namespace() == Some(BridgeNamespace::BrokerTopic) {
-        return super::broker::identify(reference.relation, &reference.target, corpus).map_or(
+        return crate::resolve::broker_identity::identify(reference.relation, &reference.target, corpus).map_or(
             ArmIdentity::Broker {
                 keys: Vec::new(),
                 value: Provenance::Literal,
             },
-            |(keys, _role, value)| ArmIdentity::Broker { keys, value },
+            // The coverage tier wraps the shared topic identity into the bridge's
+            // match vocabulary at its OWN call site, exactly as the bridge's
+            // fan-out and the promotion pass each wrap it into theirs. The
+            // resolution itself happened once, inside `identify` ([FR-WS-27] AC1).
+            |identity| ArmIdentity::Broker {
+                keys: identity
+                    .topics
+                    .into_iter()
+                    .map(PortableKey::broker)
+                    .collect(),
+                value: identity.value,
+            },
         );
     }
     ArmIdentity::Verbatim {

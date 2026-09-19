@@ -39,6 +39,37 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
             {`${e.source}->${e.target}:${e.edge_type}`}
           </span>
         ))}
+      {/* The topic HOPS, surfaced as DOM (S-424, FR-WS-27 AC6). Same reason as
+          above — the real canvas strokes them into a <canvas> bitmap with no DOM
+          to assert against — and the same discipline: FILTERED to the two hop
+          types, never mapped over every edge, so a workspace with no topic hop
+          (which is every fixture recorded before this story, the literal-only
+          byte-for-byte snapshot included) renders exactly the DOM it did before.
+
+          What this lets a spec assert is the thing FR-WS-27 AC6 is about: that a
+          resolved broker coupling is drawn as `publisher -> topic -> subscriber`
+          and NOT as a flat service line. Reading `map.loaded` instead would pass
+          for a hop the view never renders. */}
+      {loaded.edges
+        .filter((e) => e.edge_type === "publishes" || e.edge_type === "subscribes")
+        .map((e) => (
+          <span key={`hop:${e.source}->${e.target}`} data-testid="canvas-topic-hop">
+            {`${e.source}->${e.target}:${e.edge_type}`}
+          </span>
+        ))}
+      {/* The FLAT broker line, likewise surfaced so its survival can be asserted
+          directly. Without it, "the flat line is still drawn" could only be
+          inferred from a total edge count — and a regression that dropped the
+          line while emitting any other second edge would keep that inference
+          green. Filtered to `broker-topic`, so no fixture without one renders
+          anything new. */}
+      {loaded.edges
+        .filter((e) => e.edge_type === "broker-topic")
+        .map((e) => (
+          <span key={`flat:${e.source}->${e.target}`} data-testid="canvas-flat-broker-edge">
+            {`${e.source}->${e.target}:${e.edge_type}`}
+          </span>
+        ))}
       {Object.values(loaded.nodes).map((n) => (
         <button key={n.id} type="button" onClick={() => onNodeClick(n.id)}>
           {n.label}
@@ -145,6 +176,18 @@ const BINDING: BridgeEdge = {
   to: { member: "web", symbol: "route" },
   // Both ends observed at the call site — the baseline this file records the
   // unchanged DOM for (CR-132 AC6).
+  from_value: { provenance: "literal" },
+  to_value: { provenance: "literal" },
+};
+
+/** A resolved **broker** coupling: `api` publishes, `web` subscribes, on the arm
+ *  that is drawn through its topic node rather than as a flat line (S-256,
+ *  FR-WS-11). Both ends literal, so the provenance channel stays out of the way
+ *  and the hop assertions below are about the hop and nothing else. */
+const BROKER_BINDING: BridgeEdge = {
+  relation: "broker-topic",
+  from: { member: "api", symbol: "emit" },
+  to: { member: "web", symbol: "onCommand" },
   from_value: { provenance: "literal" },
   to_value: { provenance: "literal" },
 };
@@ -472,6 +515,77 @@ describe("WorkspaceView (S-250, FR-UI-29)", () => {
     // …while clicking a real service still focuses it.
     await userEvent.click(screen.getByRole("button", { name: "web" }));
     expect(scopedMember()).toBe("web");
+  });
+
+  // ── S-424 / FR-WS-27 AC6: the resolved coupling is drawn as a HOP ──────────
+  // The inventory and the bindings key a config-bound broker site the same way
+  // now, so `drawnThroughATopic` fires and the flat service line is replaced.
+  // Both fixtures below read the DOM the user is shown; asserting `map.loaded`
+  // would pass for a hop the view never renders.
+
+  it("renders a resolved broker coupling as publisher → topic → subscriber, not a flat line", async () => {
+    // The shape S-424 creates: ONE topic node, named by the committed value, with
+    // `api` producing and `web` consuming it — plus the bridge binding for the
+    // same coupling. Before S-424 the inventory carried two placeholder-keyed
+    // topics instead, neither of which had both ends, so this rendered as a flat
+    // `broker-topic` line and the hop was drawn for nothing.
+    stubApi({
+      providers: [BROKER_BINDING],
+      topics: [
+        { member: "api", topics: [{ topic: "archive-commands", producers: 1, consumers: 0 }] },
+        { member: "web", topics: [{ topic: "archive-commands", producers: 0, consumers: 1 }] },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    // The hop, both legs, in the direction the message travels.
+    expect(screen.getAllByTestId("canvas-topic-hop").map((n) => n.textContent)).toEqual([
+      "service:api->topic:archive-commands:publishes",
+      "topic:archive-commands->service:web:subscribes",
+    ]);
+    // …and NOT also as a flat line — asserted on the line's own absence, not
+    // inferred from a total. `textContent` compared exactly, because jest-dom's
+    // `toHaveTextContent` is a SUBSTRING match and would accept 12, 20, 21 or 23.
+    expect(screen.queryAllByTestId("canvas-flat-broker-edge")).toHaveLength(0);
+    expect(screen.getByTestId("canvas-edges").textContent).toBe("2");
+    // The topic is a node the user can see, labelled by the committed value.
+    expect(screen.getByRole("button", { name: "archive-commands" })).toBeInTheDocument();
+    // The coupling is still COUNTED — the hop replaces the drawn line, not the fact.
+    expect(
+      screen.getByRole("cell", { name: "Broker (publish ↔ subscribe)" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the flat broker line when no topic hop carries the pair — a coupling is never silently un-drawn", async () => {
+    // The same binding with an inventory that does not carry the pair (a member
+    // last indexed before S-424, whose topics are still placeholder-keyed). The
+    // line must stay, or the map under-draws the workspace (NFR-CC-04).
+    stubApi({
+      providers: [BROKER_BINDING],
+      topics: [
+        {
+          member: "api",
+          topics: [
+            { topic: "${spring.kafka.topics.archive-commands}", producers: 1, consumers: 0 },
+          ],
+        },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+
+    // One publish hop (the topic exists, with a producer and no consumer)…
+    expect(screen.getAllByTestId("canvas-topic-hop").map((n) => n.textContent)).toEqual([
+      "service:api->topic:${spring.kafka.topics.archive-commands}:publishes",
+    ]);
+    // …plus the flat line, NAMED, because no hop carries api → web. That the
+    // surviving edge is this one is the whole claim; a count alone would pass
+    // for any second edge at all.
+    expect(screen.getAllByTestId("canvas-flat-broker-edge").map((n) => n.textContent)).toEqual([
+      "service:api->service:web:broker-topic",
+    ]);
+    expect(screen.getByTestId("canvas-edges").textContent).toBe("2");
   });
 
   it("ACCEPTANCE: a published-but-unconsumed topic is drawn, not reported as empty", async () => {
