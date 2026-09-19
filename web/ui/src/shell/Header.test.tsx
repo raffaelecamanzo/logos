@@ -255,3 +255,96 @@ describe("Header graph-state readout (S-315, FR-UI-34, CR-097)", () => {
     expect(screen.queryByText(readout(api))).toBeNull();
   });
 });
+
+// ── Progressive disclosure (S-317, FR-UI-34, UAT-UI-11) ─────────────────────
+//
+// Two halves, asserted in two places on purpose.
+//
+// The STYLESHEET half — which rung drops the readout, which drops the brand
+// subtitle, and that neither is truncated rather than removed — is asserted in
+// `web/tests/spa_design_system.rs`, where every other stylesheet contract in this
+// SPA already lives and where the `.module.css` files are read from disk. It
+// cannot be asserted here: this suite runs with `css: false` (vitest.config.ts),
+// so CSS Modules are empty objects, jsdom never evaluates a media query, and a
+// `toBeVisible()` would report a safety it has not checked.
+//
+// The MARKUP half is asserted below, and it is what makes the stylesheet half
+// mean anything: the one element the narrow rung hides is the one element EVERY
+// readout state renders into.
+//
+// The rendered/computed proof at 420/768/1024/1600px in both themes is taken
+// against a live `serve --ui` and recorded in the implementation notes, which is
+// where the acceptance criterion puts it.
+
+/** The header's one graph-state slot: its only `<span>` child. The brand lockup
+ *  is an `<a>`, the spacer a `<div>`, the member selector a `<div>` and the theme
+ *  toggle a `<button>`, so the slot is identified structurally rather than by a
+ *  class name this suite cannot see. The narrow tier hides exactly this element,
+ *  so every readout state must render INSIDE it: a badge rendered as its sibling
+ *  would survive the breakpoint and report a fault in the dropped readout's
+ *  place, which is the failure NFR-CC-04 and NFR-RA-05 forbid. */
+function graphStateSlot(): HTMLElement {
+  const header = document.querySelector("header");
+  expect(header).not.toBeNull();
+  const spans = [...header!.children].filter((el): el is HTMLElement => el.tagName === "SPAN");
+  expect(spans).toHaveLength(1);
+  return spans[0];
+}
+
+describe("Header progressive disclosure (S-317, FR-UI-34, UAT-UI-11)", () => {
+  it("renders the figures inside the one element the narrow tier drops", async () => {
+    const status = singleRoot();
+    render(withTheme(<Header />));
+    const figures = await screen.findByText(readout(status));
+
+    expect(graphStateSlot()).toContainElement(figures);
+  });
+
+  it("renders the fault badge inside that SAME element — never beside it", async () => {
+    mockProbe.mockResolvedValue({ mode: "single" });
+    get.mockRejectedValue(new Error("connection refused"));
+    render(withTheme(<Header />));
+    const badge = await screen.findByText("API unavailable");
+
+    // Dropping the readout therefore drops the badge with it: a fault badge left
+    // standing in the readout's place would report an error that did not occur.
+    expect(graphStateSlot()).toContainElement(badge);
+  });
+
+  it("renders the connecting and not-indexed states inside it too", async () => {
+    mockProbe.mockResolvedValue({ mode: "single" });
+    // A read that never settles, so the loading state is observable.
+    get.mockReturnValue(new Promise(() => {}));
+    render(withTheme(<Header />));
+    expect(graphStateSlot()).toContainElement(await screen.findByText("Connecting…"));
+    cleanup();
+
+    singleRoot(indexed({ indexed: false, node_count: 0, edge_count: 0, graph_revision: 0 }));
+    render(withTheme(<Header />));
+    expect(graphStateSlot()).toContainElement(await screen.findByText(/not indexed/i));
+  });
+
+  it("keeps the member selector OUT of the dropped slot in workspace mode", async () => {
+    mockProbe.mockResolvedValue({
+      mode: "workspace",
+      roster: { workspace: "shop", default: "api", members: ["api", "web"] },
+    });
+    const status = indexed();
+    get.mockResolvedValue(status);
+    render(withTheme(<Header />));
+    await screen.findByText(readout(status));
+
+    const selector = screen.getByRole("combobox");
+    expect(graphStateSlot()).not.toContainElement(selector);
+  });
+
+  it("carries no inline style — disclosure is class-driven, the CSP is untouched", async () => {
+    const status = singleRoot();
+    const { container } = render(withTheme(<Header />));
+    await screen.findByText(readout(status));
+
+    // `style="…"` would need `style-src 'unsafe-inline'`; the self-only CSP
+    // (NFR-SE-06) does not grant it, so the header must carry none.
+    expect(container.querySelectorAll("[style]")).toHaveLength(0);
+  });
+});

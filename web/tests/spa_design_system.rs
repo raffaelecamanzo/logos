@@ -676,6 +676,191 @@ fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
     }
 }
 
+// ── The shell header's progressive disclosure (S-317, FR-UI-34, CR-089/CR-092) ──
+
+/// The `max-width` a media query names, in CSS px (`rem` resolved at the 16px
+/// root), or `None` for a query that is not a width rung (`prefers-*`).
+fn max_width_px(query: &str) -> Option<f64> {
+    let at = query.find("max-width:")? + "max-width:".len();
+    let rest = query[at..].trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let n: f64 = digits.parse().ok()?;
+    let unit = rest[digits.len()..].trim_start();
+    if unit.starts_with("rem") {
+        Some(n * 16.0)
+    } else if unit.starts_with("px") {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// Every `(selector, max-width px)` the header stylesheet hides with
+/// `display: none` inside a width rung — the disclosure ladder, read off the
+/// source rather than described in prose.
+fn header_disclosure_ladder() -> Vec<(String, f64)> {
+    let css = strip_comments(&read("src/shell/Header.module.css"));
+    let mut out = Vec::new();
+    for (at_rule, body) in top_level_rules(&css) {
+        if !at_rule.starts_with("@media") {
+            continue;
+        }
+        let Some(px) = max_width_px(&at_rule) else { continue };
+        for (selector, decls) in top_level_rules(&body) {
+            if decls.replace(' ', "").contains("display:none") {
+                out.push((selector, px));
+            }
+        }
+    }
+    out
+}
+
+/// The WIDEST rung at which `selector` is dropped — as the viewport narrows it is
+/// the rung reached first, so it is the one that fixes the disclosure order.
+fn header_drops_at(selector: &str) -> Option<f64> {
+    header_disclosure_ladder()
+        .into_iter()
+        .filter(|(sel, _)| sel == selector)
+        .map(|(_, px)| px)
+        .fold(None, |acc: Option<f64>, px| Some(acc.map_or(px, |a: f64| a.max(px))))
+}
+
+/// The header was a single flex row with NO media queries at all — nothing
+/// wrapped, nothing shrank, nothing hid — which is the whole mechanism behind the
+/// overflow CR-089 recorded and CR-092 deferred a second time (measured at 618px
+/// of content in a 420px viewport). S-315 then added the graph-state readout to
+/// that row.
+#[test]
+fn header_has_width_rungs_at_all() {
+    let css = strip_comments(&read("src/shell/Header.module.css"));
+    let rungs: Vec<f64> = top_level_rules(&css)
+        .iter()
+        .filter(|(sel, _)| sel.starts_with("@media"))
+        .filter_map(|(sel, _)| max_width_px(sel))
+        .collect();
+    assert!(
+        !rungs.is_empty(),
+        "Header.module.css declares no width-responsive media query — the header \
+         overflows the viewport below ~642px without one (FR-UI-34)",
+    );
+}
+
+/// The priority the design contract states (frontend-design §3, re-baselined by
+/// CR-097): the readout gives way FIRST, the brand subtitle SECOND, so the brand
+/// lockup, the member selector and the theme toggle survive to the narrowest
+/// supported viewport. `.status` is the readout's whole slot — every one of its
+/// four states renders into it (`Header.test.tsx` binds that end).
+#[test]
+fn header_drops_the_readout_before_the_brand_subtitle() {
+    let readout = header_drops_at(".status")
+        .expect("the graph-state readout (`.status`) must be dropped at some rung");
+    let subtitle = header_drops_at(".brandSub")
+        .expect("the brand subtitle (`.brandSub`) must be dropped at some rung");
+    assert!(
+        readout > subtitle,
+        "the readout gives way FIRST, so its rung ({readout}px) must be WIDER than the \
+         brand subtitle's ({subtitle}px) — equal rungs drop both at once and state no \
+         order at all (FR-UI-34)",
+    );
+}
+
+/// A dropped readout is ABSENT, not truncated. An ellipsis would present a clipped
+/// `rev 3,9…` as a figure, which is the reporting failure NFR-CC-04 forbids.
+#[test]
+fn header_drops_the_readout_absent_never_truncated() {
+    let css = strip_comments(&read("src/shell/Header.module.css"));
+    assert!(
+        header_drops_at(".status").is_some(),
+        "the readout must be removed (`display: none`), not merely narrowed",
+    );
+    for needle in ["text-overflow", "ellipsis"] {
+        assert!(
+            !css.contains(needle),
+            "Header.module.css declares `{needle}` — a clipped readout presents a \
+             truncation as a measurement (NFR-CC-04, NFR-RA-05)",
+        );
+    }
+}
+
+/// …and nothing ELSE gives way. The brand lockup, the member selector and the
+/// theme toggle survive to the narrowest supported viewport (FR-UI-29): the
+/// selector's presence beside a member's name is a correctness property, not a
+/// decoration. This guards the header's own stylesheet; the selector and the
+/// toggle carry their own modules.
+#[test]
+fn header_hides_nothing_but_the_readout_and_the_brand_subtitle() {
+    let mut hidden: Vec<String> =
+        header_disclosure_ladder().into_iter().map(|(sel, _)| sel).collect();
+    hidden.sort();
+    hidden.dedup();
+    assert_eq!(
+        hidden,
+        vec![".brandSub".to_string(), ".status".to_string()],
+        "only the readout and the brand subtitle give way; anything else here is a \
+         survivor the narrow viewport has lost (FR-UI-29, FR-UI-34)",
+    );
+}
+
+/// The member selector shares the header row with the readout, and a `<select>`
+/// sizes itself to its LONGEST option — on the reference workspace a 42-character
+/// member name, measured at 467px, which overflowed a 420px viewport by 242px even
+/// after the header had dropped both of its own elements. So the selector must be
+/// able to give width back, and must stop giving it back while it is still a
+/// control: with `min-width: 0` alone it was measured at 24px at 1024px, where the
+/// readout is still on the row. Both halves are asserted, because either one alone
+/// is a defect — no floor is a crushed control, no `min-width: 0` is an overflow.
+#[test]
+fn member_selector_gives_width_back_but_stays_a_control() {
+    let css = strip_comments(&read("src/shell/MemberSelector.module.css"));
+    let selector = rule_body(&css, ".selector").replace(' ', "");
+    assert!(
+        selector.contains("min-width:0"),
+        "`.selector` must lift its automatic minimum size, or the longest member \
+         name pins the header row at that width and the viewport overflows (FR-UI-34)",
+    );
+    let select = rule_body(&css, ".select").replace(' ', "");
+    let floor = select
+        .split("min-width:")
+        .nth(1)
+        .map(|v| v.split(';').next().unwrap_or("").to_string())
+        .unwrap_or_else(|| panic!("`.select` declares no `min-width` floor"));
+    assert!(
+        floor != "0" && !floor.is_empty(),
+        "`.select` must keep a non-zero `min-width` floor — a control squeezed to a \
+         sliver is present but not reachable (FR-UI-29); found `{floor}`",
+    );
+}
+
+/// Below tablet the label's WORDS give way so the control keeps a usable width —
+/// but a label removed with `display: none` leaves the select with no accessible
+/// name, which trades a layout defect for an accessibility one. The rule must use
+/// visually-hidden geometry instead.
+#[test]
+fn member_selector_label_is_hidden_visually_never_removed() {
+    let css = strip_comments(&read("src/shell/MemberSelector.module.css"));
+    for (at_rule, body) in top_level_rules(&css) {
+        if !at_rule.starts_with("@media") || max_width_px(&at_rule).is_none() {
+            continue;
+        }
+        for (selector, decls) in top_level_rules(&body) {
+            if selector != ".label" {
+                continue;
+            }
+            let flat = decls.replace(' ', "");
+            assert!(
+                !flat.contains("display:none"),
+                "`{at_rule}` removes `.label` outright — the select would lose its \
+                 accessible name; use visually-hidden geometry (`.sr-only`) instead",
+            );
+            assert!(
+                flat.contains("position:absolute"),
+                "`{at_rule}` must hide `.label` with visually-hidden geometry so it \
+                 stays the select's accessible name",
+            );
+        }
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Every top-level `selector { body }` pair in a stylesheet, selectors normalised
