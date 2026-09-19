@@ -151,10 +151,10 @@ pub(crate) fn stats(root: &Path, window_days: Option<u32>) -> Result<StatsInfo> 
 /// the testable seam.
 pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> Result<StatsInfo> {
     let cutoff = now_unix - i64::from(window_days) * 86_400;
-    // The self-referential exclusion ([FR-OB-09]), derived once from the
-    // exhaustive tool classification and interpolated into every query below —
-    // raw events and rolled-up days alike, so the two sources can never apply
-    // different rules to the same tool.
+    // The self-referential exclusion ([FR-OB-09]), derived once from the two
+    // exhaustive classifications — `Tool`'s and `Surface`'s — and interpolated
+    // into every query below, raw events and rolled-up days alike, so the two
+    // sources can never apply different rules to the same event.
     let engine_query = tool::engine_query_predicate();
 
     // Usage counts: raw events in the window, plus rollup days the window

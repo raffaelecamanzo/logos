@@ -673,10 +673,12 @@ rather than being folded into an arbitrary session (S-307, CR-091). **Self-refer
 from every figure** — totals, per-tool, daily series, origin split, latency, and
 the estimate — because a request whose subject is Logos's own state (`stats`
 reading the telemetry store, the shell's `status` readout) measures the
-measurement, not tool value. The exclusion is per *event*, keyed on the tool, so
-it applies on every surface: a CLI `logos stats` is no less self-referential than
-a dashboard render, while a graph query issued *through* the dashboard counts
-normally.
+measurement, not tool value. The exclusion is per *event* and keyed on two axes — the
+**tool**, so it applies on every surface (a CLI `logos stats` is no less
+self-referential than a dashboard render, while a graph query issued *through*
+the dashboard counts normally), and the **surface**, for a read whose caller is
+the application's own chrome rather than a person (the app header's `status`
+readout, which navigation re-issues and nobody asks for).
 
 **Attribution: which tools, from where, of what kind.** `--json` carries two
 further projections:

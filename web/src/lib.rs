@@ -1547,9 +1547,11 @@ async fn chat_thread_delete(
 /// So the surface is a **parameter, not a default**: a handler added without
 /// one does not compile, which is what makes "an unclassified read is a build
 /// failure, never a silent inclusion" ([BR-42]) true at this boundary and not
-/// merely intended. `agent-core`'s own chat bridges arrived at the same shape
-/// and their doc prescribes it for the next caller — "give the bridges a
-/// surface parameter and let each caller name itself".
+/// merely intended. `agent-core`'s chat bridges hardcode [`Surface::Chat`] —
+/// correctly, since only one agent reaches that module — and their
+/// `in_chat_surface` doc prescribes this shape for the next caller: "give the
+/// bridges a surface parameter and let each caller name itself". This is that
+/// caller.
 ///
 /// The scope is entered **inside** the `spawn_blocking` closure, not around the
 /// `await`: [`in_surface`] scopes per thread, and the blocking pool is where
@@ -1647,8 +1649,8 @@ mod tests {
     /// proves the scope *works*, this proves the web adapter *enters* it. The
     /// probe closure stands in for a real handler body, which is exactly what
     /// `bridge` hands to the engine. Mirrors
-    /// `both_engine_bridges_run_under_the_chat_surface` in `agent-core`, whose
-    /// doc prescribed this shape for the next caller.
+    /// `both_engine_bridges_run_under_the_chat_surface` in `agent-core`; the
+    /// shape itself is prescribed by `in_chat_surface`'s doc, not that test's.
     #[tokio::test]
     async fn the_bridge_runs_the_engine_call_under_the_surface_its_caller_names() {
         let dir = tempfile::tempdir().expect("temp project root");

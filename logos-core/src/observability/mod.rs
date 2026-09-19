@@ -269,7 +269,7 @@ impl Surface {
     ///
     /// This is what bounds the per-event override ([FR-OB-03]): an arbitrary
     /// string cannot invent a surface, only name one this enum already declares.
-    pub(crate) fn from_wire(value: &str) -> Option<Surface> {
+    fn from_wire(value: &str) -> Option<Surface> {
         Surface::ALL.iter().copied().find(|s| s.as_str() == value)
     }
 }
