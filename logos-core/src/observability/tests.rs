@@ -13,7 +13,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use super::layer::{spawn_writer, TelemetryLayer, TelemetrySink};
 use super::stats::{reads_saved_per_call, stats_from};
 use super::tool::{
-    class_of_wire, self_referential_tools, EventClass, Tool, ToolClass, UNREGISTERED_CLASS,
+    class_of_wire, compose_predicate, engine_query_predicate, not_in, self_referential_tools,
+    EventClass, Tool, ToolClass, UNREGISTERED_CLASS,
 };
 use super::{
     db, generate_session_id, in_surface, self_referential_surfaces, telemetry_logos_dir,
@@ -612,6 +613,69 @@ fn every_registered_tool_is_classified_and_sql_safe() {
          corrects an overstatement and must not create an understatement \
          (NFR-CC-04); widening it is a specification decision, not a code one"
     );
+}
+
+/// The predicate's **string** — the one thing every stats query depends on and
+/// nothing asserted.
+///
+/// Six queries interpolate this fragment, and a review showed the gap was real
+/// rather than theoretical: the `"1 = 1"` fallback could be replaced with
+/// `"THIS IS NOT SQL"` and all 2241 tests in the crate still passed. The
+/// composition is covered by behaviour elsewhere (swapping `AND` for `OR` reds
+/// nine tests), but the shape itself — which axes appear, how they join, and
+/// what an empty axis does — was only ever asserted by reading it.
+///
+/// The fallback branches matter precisely because they are unreachable today:
+/// both axes are non-empty, so the only thing standing between a future empty
+/// classification and invalid SQL (`NOT IN ()`, or a dangling `WHERE … AND`) is
+/// code nothing exercises.
+#[test]
+fn the_engine_query_predicate_composes_both_axes() {
+    let predicate = engine_query_predicate();
+    assert_eq!(
+        predicate, "tool NOT IN ('stats', 'status') AND surface NOT IN ('shell')",
+        "the shipped shape: both axes, AND-joined, in registration order"
+    );
+    // No parentheses of its own — the callers compose it with their own `AND`
+    // (`WHERE at >= ?1 AND {engine_query}`), which is only safe while this
+    // fragment is `AND` throughout. The doc says so; this pins it.
+    assert!(
+        !predicate.contains(" OR ") && !predicate.starts_with('('),
+        "no OR, and no grouping parens wrapping the fragment — the parens it \
+         does carry are `NOT IN (…)`'s own: {predicate}"
+    );
+
+    // Each axis on its own, and the empty case, through the helper the
+    // predicate is built from — the branches the live classification cannot
+    // reach.
+    assert_eq!(
+        not_in("tool", vec!["stats", "status"]).as_deref(),
+        Some("tool NOT IN ('stats', 'status')")
+    );
+    assert_eq!(
+        not_in("surface", vec!["shell"]).as_deref(),
+        Some("surface NOT IN ('shell')")
+    );
+    assert_eq!(
+        not_in("surface", vec![]),
+        None,
+        "an axis that excludes nothing contributes no clause — never `NOT IN ()`"
+    );
+
+    // And the both-empty degenerate case — reachable only through the composer,
+    // since the live classification never yields zero clauses — stays valid SQL
+    // in the caller's `AND` composition rather than truncating the `WHERE`.
+    let degenerate = compose_predicate(Vec::new());
+    assert_eq!(degenerate, "1 = 1", "an always-true predicate, not an empty string");
+    let conn = db::open_in_memory();
+    for fragment in [&degenerate, &predicate] {
+        conn.query_row(
+            &format!("SELECT count(*) FROM events WHERE at >= 0 AND {fragment}"),
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or_else(|e| panic!("`{fragment}` composes into valid SQL: {e}"));
+    }
 }
 
 /// **An unclassified tool must fail the build**, on *both* classification axes:
