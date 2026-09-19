@@ -752,6 +752,14 @@ fn the_rollup_and_the_stamp_never_classify_one_run_differently() {
     // closes was precisely the two writers disagreeing about one run, so the
     // property is asserted directly: across all three cases, the roll-up is
     // present exactly when the stamp is.
+    //
+    // Deliberately a CLASSIFICATION check, not a value check: it asks whether the
+    // two writers picked the same case, which is what the acceptance criterion
+    // asks and what a divergence between them would look like. It does NOT catch
+    // a writer that picked the right case and then stored the wrong figures —
+    // `a_re_index_that_persists_nothing_keeps_the_rollup_of_the_graph_that_survives`
+    // is the fixture that pins the values, and it is where a value regression
+    // shows up. Do not read a green here as agreement about contents.
     let presence = |engine: &Engine| {
         let (total, test) = stored_rollup(engine);
         (

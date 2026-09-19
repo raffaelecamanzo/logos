@@ -1178,8 +1178,8 @@ fn counts_show_a_graph(counts: &StoreCounts) -> bool {
 /// an absent roll-up ([NFR-CC-04]).
 ///
 /// The roll-up describes the **graph, not the command**, so it keys on the
-/// [`IndexPersistence`] classification its sibling stamp [`record_full_index_at`]
-/// already used, computed once for both ([CR-134]):
+/// shared [`IndexPersistence`] classification — see that type for why the
+/// classification is computed once rather than per writer ([CR-134]):
 ///
 /// - [`IndexPersistence::Persisted`] — this index built the graph, so both keys
 ///   are written from the line counts it ingested.
@@ -1228,10 +1228,9 @@ fn record_loc_rollup(
 /// [`LAST_FULL_INDEX_AT_KEY`], so `status` can report it from **any** process
 /// ([CR-130], [FR-NV-07]).
 ///
-/// The stamp dates the **graph**, not the command, so it keys on the
-/// [`IndexPersistence`] classification of what this run left in the store —
-/// computed once and shared with [`record_loc_rollup`], which mirrors the same
-/// three cases for the [FR-IX-12] roll-up ([CR-134]):
+/// The stamp dates the **graph**, not the command, so it keys on the shared
+/// [`IndexPersistence`] classification, exactly as the [FR-IX-12] roll-up in
+/// [`record_loc_rollup`] does ([CR-134]):
 ///
 /// - [`IndexPersistence::Persisted`] — this index built a graph, so the row is
 ///   written (unix seconds).
