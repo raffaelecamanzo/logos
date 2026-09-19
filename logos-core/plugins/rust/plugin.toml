@@ -80,11 +80,23 @@ framework_detectors = ["axum", "actix_web"]
 
 # Canonical reference prefixes whose presence in a file's ledger makes the file
 # an outbound **HTTP client-call** candidate (S-341, CR-108, FR-WS-08) — the
-# consumer-side twin of `framework_detectors`, and the gate that stops the broad
-# `<receiver>.<method>(<arg>)` anchor turning an incidental collection `.get("/x")`
-# into a fabricated cross-service edge (NFR-RA-05). Lifted out of
+# consumer-side twin of `framework_detectors`. Lifted out of
 # `resolve::http_client_call` so the shared interpreter carries no per-language
 # branch (NFR-MA-01).
+#
+# This row is a cheap PRE-FILTER, not the whole of FR-WS-08 negative case 1.
+# Since S-423 (CR-128) the decision that separates `headers.get("/x")` from a
+# genuine client call is made on the RECEIVER, in `queries/invocations.scm` —
+# read its "Candidacy" header before changing either. A file-grained gate cannot
+# answer a question about a CALL; the query header carries the measurement that
+# established it (NFR-RA-05).
+#
+# These six names are also the crate vocabulary that query's receiver rule
+# admits at the head of a `::` path. Adding a seventh row here opens the ledger
+# gate for it and does NOT teach the receiver rule its name — extend both, and
+# extend the admitted list in
+# `client_call_gate.rs::the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row`,
+# which enumerates all six so the omission fails rather than under-captures.
 http_client_detectors = ["reqwest", "hyper", "isahc", "ureq", "awc", "surf"]
 
 # Maps a capability to the `.scm` query file (resolved relative to this
