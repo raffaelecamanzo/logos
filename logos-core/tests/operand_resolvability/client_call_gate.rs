@@ -1408,8 +1408,15 @@ fn rust_client_call_rows(source: &str) -> Vec<String> {
 /// Left separate from [`rust_client_call_rows`] for the reason
 /// `go_invocations.rs` states: since S-374 a declined site also writes a
 /// **keyless** row, so a helper that filtered them away would let the refusal
-/// path regress unnoticed. The ceiling below reads both populations, because
-/// the file-grained gate harms both.
+/// path regress unnoticed. Every test below therefore reads BOTH populations —
+/// a receiver the rule refuses must leave no reference *and* no keyless row,
+/// because it is declined at query-match time and never becomes a site at all.
+///
+/// (This sentence used to end "because the file-grained gate harms both". It
+/// was true when written and [S-423] retired it: candidacy is not file-grained
+/// here any more. The reason above is the one that survives the change.)
+///
+/// [S-423]: ../../docs/planning/journal.md#s-423-the-rust-client-call-gate-is-receiver-grained
 fn rust_client_call_targets(source: &str) -> Vec<String> {
     rust_client_call_rows(source).into_iter().filter(|t| !t.is_empty()).collect()
 }
@@ -1476,7 +1483,19 @@ pub async fn authorize(
     );
     // `rust_client_call_targets` would hide this half: a refused receiver must
     // leave NO keyless refusal row either, because those rows are exactly what
-    // inflated the denominator S-404 measured.
+    // inflated the denominator S-404 measured. It is the SOLE catcher for three
+    // of the five shapes — their arguments are not routes, so re-admitting them
+    // moves this count and not the targets above.
+    //
+    // What this number is, stated because it is easy to over-read: a COLLECTIVE
+    // boolean, not a per-shape count. All six statements live in one `fn
+    // authorize`, and `dedup_sort_refs` collapses refusal rows per declaring
+    // declaration — measured under the pre-S-423 query, the four refused shapes
+    // here yield ONE row between them, not four. So the baseline of 0 catches
+    // any single shape regressing (any one moves it to 1) but cannot say which.
+    // The per-shape attribution lives in
+    // `the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row`,
+    // which drives one receiver per file.
     assert_eq!(
         rust_client_call_refusals(SOURCE),
         0,
@@ -1588,25 +1607,54 @@ fn the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row() {
     let admitted = |recv: &str| {
         format!("use reqwest::Client;\n\npub async fn probe() {{ let _ = {recv}.get(\"/users\"); }}\n")
     };
+    // EVERY token the rule spells, in EVERY position it spells it. Not a
+    // representative sample: an under-enumerated admitted list is how four of
+    // the six declared crates came to be deletable from all three alternations
+    // of the first cut with the whole module green. `is_client_named`'s
+    // vocabulary is unaffected by any of this — it is the census harness's
+    // classifier, and the two are deliberately allowed to differ (see the
+    // refused list's crate-named entries).
     for recv in [
         // The two bare words, WHOLE.
         "client",
         "http",
-        // The type-derived token as a prefix, with the optional boundary suffix.
+        // The compound token as a prefix: the bare token, the `_` field prefix,
+        // and both spellings of the boundary suffix (digit, and `_`).
         "http_client",
         "_http_client",
         "http_client2",
         "http_client_v2",
-        // A crate from `http_client_detectors`, as a prefix and as a suffix.
-        "reqwest_client",
-        "surf_client",
-        "orders_reqwest",
-        // The token as a `_`-bounded suffix.
+        // The widest edge of the prefix class, pinned rather than left implicit:
+        // the compound token has already said "HTTP client", so an ordinary noun
+        // after it is admitted — as Java admits `restTemplateCache` and Go
+        // `httpClientCache`. `client_cache` is refused below; the asymmetry is
+        // the whole point of the token being compound.
+        "http_client_cache",
+        "http_client_registry",
+        // The compound token as a `_`-bounded suffix, with and without the
+        // optional leading `_`.
         "api_http_client",
         "users_http_client",
+        "_api_http_client",
         // The FIELD one `.`-level down — the ordinary struct-field shape.
         "self.client",
         "s.http_client",
+        // The bare imported type, both spellings.
+        "Client::new()",
+        "HttpClient::new()",
+        // A `::` path headed by each of the six declared crates. All six, not a
+        // sample: `hyper`, `isahc`, `ureq` and `awc` were pinned by nothing.
+        "reqwest::Client::new()",
+        "hyper::Client::new()",
+        "isahc::HttpClient::new()",
+        "ureq::Agent::new()",
+        "awc::Client::default()",
+        "surf::Client::new()",
+        // A crate-headed path whose later segments name nothing in the
+        // vocabulary — it is the HEAD that admits it, which no other fixture
+        // isolates.
+        "reqwest::blocking::Client::new()",
+        "hyper::client::conn::Builder::new()",
     ] {
         assert_eq!(
             rust_client_call_targets(&admitted(recv)),
@@ -1640,11 +1688,62 @@ fn the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row() {
         "reqwestcache",
         "notareqwest",
         "http2",
-        // A `::` path whose segments name something else, and the bare `Client`
-        // suffix on the path side.
+        // A crate name is `::`-HEAD-ONLY, never part of a `.`-side name. These
+        // are the shapes that made the first cut wrong: `hyper`, `surf`, `awc`
+        // and `ureq` are ordinary short words, so a bounded suffix after them
+        // admits ordinary nouns — and `hyper_headers` (36 occurrences),
+        // `hyper_response` (44) and `hyper_body` (38) are real identifiers in
+        // the corpus this arm was measured over, where a header map is the
+        // LARGEST non-HTTP bucket.
+        "hyper_headers",
+        "hyper_response",
+        "hyper_body",
+        "reqwest_cache",
+        "surf_board",
+        "awc_registry",
+        "ureq_mocks",
+        "isahc_pool",
+        // …and refused as bare names too, since a crate name is not a `.`-side
+        // receiver in any Rust idiom (`reqwest::get` is a free function, a
+        // separate stated ceiling).
+        "hyper",
+        "surf",
+        "reqwest",
+        // The crate-named binding this costs, refused deliberately.
+        "reqwest_client",
+        "surf_client",
+        "orders_reqwest",
+        // A `::` path whose HEAD is not one of the six declared crates. Each
+        // one is a real crate exposing a type literally called `Client`, and
+        // each fabricates precisely the reference the `_client`-suffix refusal
+        // above exists to prevent — the same object, spelled as a type path.
+        "redis::Client::open()",
+        "jobserver::Client::from_env()",
+        "kube::Client::try_default()",
+        "oauth2::Client::new()",
+        "blocking::Client::new()",
         "axum::routing::get(root)",
+        // The bare `Client` suffix on the path side.
         "CacheClient::new()",
-        // The shapes S-404 measured.
+        "HttpClientCache::new()",
+        // The three stated ADR-54 ceilings that were prose and not pins: a
+        // `self` receiver, a SCREAMING_CASE `Lazy<Client>` static, and a
+        // camelCase receiver. Each could have been ADMITTED tomorrow with the
+        // whole module green. `self` is the costliest of the three — S-404
+        // counted 7 such sites and confirmed at least two are genuine calls —
+        // so it is the one that most needs to fail loudly if someone lifts it
+        // without re-reading the header's reasoning.
+        "self",
+        "CLIENT",
+        "httpClient",
+        // The shapes S-404 measured. Kept here as well as in
+        // `the_census_shapes_a_receiver_rule_refuses_are_no_longer_captured`,
+        // and the overlap is deliberate rather than an oversight: that test
+        // pins them inside ONE gate-admitted file with the census's own
+        // argument shapes, which is CR-128 §6's traceability requirement; this
+        // one pins them one-per-file against a control, which is what isolates
+        // the receiver rule from the ledger gate. Different failure, same
+        // fixture text.
         "headers",
         "params",
         "json_body",
@@ -1652,14 +1751,21 @@ fn the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row() {
         "map",
         "metadata.additional_fields",
     ] {
+        // ONE extract pass per fixture, not two. Both assertions read the same
+        // rows, and `rust_client_call_targets`/`rust_client_call_refusals` each
+        // rebuild the whole `LanguageRegistry` — every compiled-in grammar and
+        // every query — so calling both per receiver doubled the cost of a loop
+        // this fix roughly doubled the length of.
+        let rows = rust_client_call_rows(&refused(recv));
+        let targets: Vec<String> = rows.iter().filter(|t| !t.is_empty()).cloned().collect();
         assert_eq!(
-            rust_client_call_targets(&refused(recv)),
+            targets,
             vec!["GET /probe".to_string()],
             "`{recv}` carries no client token at a boundary — only the control \
              must survive, and with no refusal row"
         );
         assert_eq!(
-            rust_client_call_refusals(&refused(recv)),
+            rows.iter().filter(|t| t.is_empty()).count(),
             0,
             "`{recv}` is refused at query-match time, so it leaves no site and \
              therefore no keyless refusal row"

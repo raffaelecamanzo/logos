@@ -336,3 +336,36 @@ word `client` survives the port, so `a_route_shaped_get_outside_a_reqwest_file_
 is_not_captured` still separates the two ledger-gate cases. It now carries its
 own gated half rather than borrowing the neighbouring test's, which is the
 correction `6554e008` made to two Go fixtures for the same reason.
+
+ADDENDUM to the appendix — S-423 review, same day. The receiver rule shipped by
+this story was NARROWED during review and the table above did not move.
+
+Two over-capture classes were reproduced against the production extract pass and
+closed. Both came from putting the six detector CRATE names where only the
+compound token `http_client` belongs:
+
+  * as a bounded prefix/suffix, they admitted `hyper_headers`, `hyper_response`,
+    `hyper_body` and `reqwest_cache` — and those three `hyper_*` names are real
+    identifiers in this very corpus (36, 44 and 38 occurrences), while a header
+    map is the largest non-HTTP bucket this document records. The rule was
+    re-admitting its own subject under a second spelling.
+  * in the `::` path alternative, admitting a path because ANY segment was
+    `Client` admitted `redis::Client::open(…)` and `jobserver::Client::from_env(…)`
+    — the same objects the rule refuses when spelled `redis_client`.
+
+The crate names now appear only at the HEAD of a `::` path. Re-measured through
+this harness a third time, same corpus, same machine, same day: 17367 files, 85
+gated, 175 sites, 0 (0%) non-HTTP-named, 69 references / 60 refusal rows, and the
+same six receivers — every column byte-identical to the "after" row above. The
+narrowing costs ZERO sites here, as S-402's equivalent narrowing did on the
+reference estate.
+
+Neither class was visible to this document's own gate, and that is worth
+recording rather than glossing: `is_client_named(Rust, "hyper_headers")` is TRUE
+via the `hyper` token run, so both classes would have been counted in the
+HTTP-named column and the headline would still have read 0 (0%). The census
+harness's vocabulary is deliberately wider than the shipped rule and has not been
+narrowed to match — narrowing it would move the BEFORE figure and break the
+comparison this document exists to support. The consequence is that "0 (0%)" is
+guaranteed by construction, not discovered; the site count and the two written
+populations are the figures that carry information.

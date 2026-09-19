@@ -71,17 +71,35 @@
 ;
 ;   * the bare word `client` WHOLE, and `http` WHOLE. These are the two
 ;     spellings this arm's own census found dominating the genuine column.
-;   * a name derived from the client TYPE or its crate: one STARTING with a
-;     type-derived token — `http_client`, or one of `reqwest` / `hyper` /
-;     `isahc` / `ureq` / `awc` / `surf` — after an optional `_` field prefix and
-;     before an optional digit/`_`-boundary suffix (`http_client`,
-;     `_http_client`, `http_client2`, `http_client_v2`, `reqwest_client`); or
-;     one ENDING in `_` plus that same token (`api_http_client`,
-;     `orders_http_client`).
+;   * a name derived from the client TYPE: one STARTING with the type-derived
+;     token `http_client`, after an optional `_` field prefix and before an
+;     optional digit/`_`-boundary suffix (`http_client`, `_http_client`,
+;     `http_client2`, `http_client_v2`); or one ENDING in `_http_client`
+;     (`api_http_client`, `orders_http_client`).
 ;     The receiver is read as a bare identifier OR as the FIELD of one
 ;     `.`-level down, so `self.client.get(url)` and `s.http_client.get(url)` are
 ;     both admitted while `metadata.additional_fields.get(k)` is not —
 ;     `additional_fields` carries no client token.
+;   * a CRATE name — `reqwest` / `hyper` / `isahc` / `ureq` / `awc` / `surf`,
+;     the six `plugin.toml` declares — **only at the head of a `::` path**, never
+;     as part of a `.`-side name.
+;
+; That last line is where the first cut of this rule was WRONG, and it is worth
+; the sentence because the mistake is invisible until someone runs the matcher.
+; The crate names were put in the same bounded prefix/suffix classes as
+; `http_client`, on the reading that a crate name identifies its own type the way
+; Java's `axios` does. It does not, because four of the six — `hyper`, `surf`,
+; `awc`, `ureq` — are ordinary short words that prefix ordinary nouns, and the
+; bounded suffix then admitted `hyper_headers`, `hyper_response`, `hyper_body`
+; and `reqwest_cache`. Those are not hypothetical: `hyper_headers` (36),
+; `hyper_response` (44) and `hyper_body` (38) are real identifiers in the very
+; corpus this arm was measured over, and a header map is the census's LARGEST
+; non-HTTP bucket — so the rule was re-admitting, under a second spelling, the
+; exact shape it was written to remove (NFR-RA-05). Java's tokens
+; (`restClient`, `webClient`, `httpClient`) and Go's (`httpClient`) are all
+; COMPOUND for this reason, and Go admits its bare package qualifier `http`
+; WHOLE only. This rule now matches that posture exactly: one compound token
+; takes the prefix/suffix classes, bare qualifiers are whole-or-`::`-headed.
 ;
 ; ── The `::` / `.` distinction, which is Rust's own and is pinned ───────────
 ;
@@ -101,10 +119,23 @@
 ;     `reqwest::Client::new()` IS a client: `reqwest` names it and `Client`
 ;     names it, and `new` is only how it was built. Hence the third branch
 ;     captures the scoped callee's PATH (`reqwest::Client`, or bare `Client`)
-;     and admits it when ANY `::`-bounded segment is a client name. This branch
-;     is what keeps FR-WS-08's Rust row whole: `reqwest::Client::new().get("/p")`
-;     is named in this header as a captured idiom and was 3 of the census's
-;     genuine sites.
+;     and reads it WHOLE. This branch is what keeps FR-WS-08's Rust row whole:
+;     `reqwest::Client::new().get("/p")` is named in this header as a captured
+;     idiom and was 3 of the census's genuine sites.
+;
+;     "Every segment names the same thing" is a statement about ONE path, and it
+;     does not license admitting a path because SOME segment looks like a client.
+;     The first cut of this rule made that slip — it admitted any path with a
+;     `Client` segment anywhere, which admits `redis::Client::open(…)`,
+;     `jobserver::Client::from_env(…)` and `kube::Client::try_default(…)`. Those
+;     fabricate exactly the reference this header spends its longest paragraph
+;     refusing to fabricate from `redis_client` (NFR-RA-05): the crate name is
+;     sitting right there in the matched text saying it is not an HTTP client,
+;     and the rule was not reading it. A path is admitted now only when its HEAD
+;     is one of the six declared crates, or when it is the bare imported type
+;     `Client` / `HttpClient` — which, inside a file the ledger gate admitted for
+;     a `reqwest`-class import, is the same "spelled like a client" residual the
+;     bare word `client` already carries, and no wider.
 ;
 ; The census was bitten by exactly this before it was drawn: its first run took
 ; the receiver's last segment unconditionally, so `reqwest::Client::new()`
@@ -126,10 +157,23 @@
 ; round, which is why the generic word is whole-only.
 ;
 ; It is a BOUNDARY rule, never a substring test: `client_cache`, `clientele`,
-; `reqwestcache` and `notareqwest` are all refused, and so is `HttpClientCache`
-; on the path side. Pinned on both edges by
+; `reqwestcache` and `notareqwest` are all refused, and so are `CacheClient` and
+; `HttpClientCache` on the path side. Pinned on both edges by
 ; `client_call_gate.rs::the_rust_receiver_rule_is_a_boundary_rule_over_the_
-; normative_rust_row`.
+; normative_rust_row`, whose admitted list enumerates EVERY token this rule
+; spells in EVERY position it spells it — so a token cannot be deleted from the
+; regex with a green suite, which is how four of the six crate names sat
+; unpinned in the first cut.
+;
+; The one over-capture the prefix class keeps: `http_client` takes an open
+; digit/`_`-bounded suffix, so `http_client_cache` and `http_client_registry`
+; ARE admitted while `client_cache` and `client_registry` are not. That is not
+; an oversight and not an inconsistency — it is the sibling posture, verbatim.
+; Java admits `restTemplateCache` and Go `httpClientCache` by the identical
+; rule, for the identical reason: the COMPOUND token has already said "HTTP
+; client" before the suffix starts, where the generic word `client` has not.
+; Pinned as an admitted case rather than left implicit, because the widest edge
+; of a rule is the one a reader most needs to see asserted.
 ;
 ; ── What this costs, stated rather than worked around (ADR-54) ──────────────
 ;
@@ -144,18 +188,32 @@
 ;   * A generically-named wrapper (`api_client`, `orders_client`), a
 ;     SCREAMING_CASE static (`CLIENT.get("/p")`, the `Lazy<Client>` idiom), and
 ;     a camelCase receiver (`httpClient`, which is not Rust casing) all stay
-;     uncaptured.
+;     uncaptured. All three are pinned in the refused list, not merely written
+;     here — this header's own standard is that an unpinned ceiling is prose,
+;     and prose cannot fail.
+;   * A crate-NAMED binding (`reqwest_client`, `surf_client`, `hyper_conn`) is
+;     refused, because the crate names are `::`-head-only. Under-capture in
+;     exchange for refusing `hyper_headers`, which is the trade the section
+;     above prices.
+;   * A `::` path whose head is not one of the six declared crates —
+;     `blocking::Client::new()` after `use reqwest::blocking;`, or any
+;     re-exported alias — is refused. Spelling the crate out
+;     (`reqwest::blocking::Client::new()`) is admitted.
 ;   * A chained receiver — a call, an index, a parenthesized expression
 ;     (`s.client().get(url)`, `clients[0].get(url)`) — is refused by the operand
 ;     alternation. `reqwest::Client::builder().build()?.get(url)` is in this
 ;     class too: its receiver is a `.`-call, so the `::` branch never sees it.
 ;   * A non-HTTP collaborator SPELLED like a client (`client.get("/admin/users")`
-;     on a cache) still captures inside a gate-admitted file. That residual is
-;     narrow and named, where the blanket file-grained one was not. It is the
+;     on a cache, or a foreign `Client` type imported into the same file) still
+;     captures inside a gate-admitted file. That residual is narrow and named,
+;     where the blanket file-grained one was not. Pinned by
+;     `a_non_client_receiver_call_inside_a_reqwest_file_is_a_stated_ceiling`,
+;     which is the S-404 ceiling pin re-stated at this boundary. It is ALSO the
 ;     positive control of `a_route_shaped_get_outside_a_reqwest_file_is_not_
 ;     captured`, which is what keeps the FR-FW-04 ledger gate under test after
 ;     this narrowing (CR-128 §4.4: a fixture whose receiver the new rule refuses
-;     stops testing the gate).
+;     stops testing the gate). Two tests, two jobs — the residual's own pin is
+;     the first, not the second.
 ;
 ; ── The count, before and after (a precision correction, CR-110) ────────────
 ;
@@ -191,6 +249,25 @@
 ; ambiguous sites are inside the 118 and at least two of them were genuine —
 ; that is the `self` ceiling above, priced and accepted.
 ;
+; The "after" row was re-measured a THIRD time when review narrowed the crate
+; names out of the prefix/suffix classes and required a `::` path's head to be a
+; declared crate. Every column is byte-identical — 175 sites, 0 (0%), 69/60, the
+; same six receivers — so that narrowing costs ZERO sites on this corpus, the
+; same result S-402's equivalent narrowing recorded on the reference estate. It
+; is reported rather than folded in silently: a correction that changes what the
+; rule accepts and not what it captured is exactly the kind a reader should be
+; able to see was measured rather than assumed.
+;
+; One thing the 0% figure does NOT establish, stated so it is not over-read.
+; The harness that prints it classifies receivers with its own `Arm::Rust`
+; vocabulary, which is deliberately WIDER than this rule (it still runs the six
+; crate names as segment tokens, so it would call `hyper_headers` client-named).
+; Every receiver this query admits is therefore client-named to the harness by
+; construction, and 0% is guaranteed rather than discovered. The figures that
+; are not circular are the SITE count and the two written populations — 293 ->
+; 175 sites, 69 -> 69 references, 130 -> 60 refusal rows — and those are the
+; ones this section's argument rests on.
+;
 ; Like every capability query this file is droppable-on-disk: a copy at
 ; `.logos/plugins/rust/queries/invocations.scm` shadows it without a rebuild
 ; (FR-PL-04, FR-PL-05).
@@ -211,7 +288,7 @@
       (field_expression
         field: (field_identifier) @_recv)
       ; `reqwest::Client::new().get("/p")` — the scoped callee's type PATH,
-      ; read whole, because every `::` segment names the same thing.
+      ; read whole, because every `::` segment of ONE path names the same thing.
       (call_expression
         function: (scoped_identifier
           path: (_) @_recv))
@@ -220,4 +297,10 @@
   arguments: (arguments
     .
     (_) @invoke.http.arg)
-  (#match? @_recv "^client$|^http$|^_?(http_client|reqwest|hyper|isahc|ureq|awc|surf)([0-9_][a-z0-9_]*)?$|^_?[a-z][a-z0-9_]*_(http_client|reqwest|hyper|isahc|ureq|awc|surf)$|(^|::)(Client|HttpClient|reqwest|hyper|isahc|ureq|awc|surf)(::|$)"))
+  ; Five alternatives, in the order the section above introduces them: the two
+  ; bare words WHOLE; the compound token `http_client` as a boundary prefix and
+  ; as a boundary suffix; the bare imported type; and a path HEADED by one of
+  ; the six declared crates. The crate names appear once, in the last
+  ; alternative only — putting them in the prefix/suffix classes is what
+  ; admitted `hyper_headers`.
+  (#match? @_recv "^client$|^http$|^_?http_client([0-9_][a-z0-9_]*)?$|^_?[a-z][a-z0-9_]*_http_client$|^(Client|HttpClient)$|^(reqwest|hyper|isahc|ureq|awc|surf)::"))
