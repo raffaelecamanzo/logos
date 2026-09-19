@@ -103,6 +103,30 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
     let telemetry_db = root.join(".logos").join("telemetry.db");
     assert!(telemetry_db.is_file(), "telemetry.db created ([FR-OB-03])");
 
+    // ── One chrome-issued read of a tool the TOOL arm counts ────────────────
+    //
+    // Without this the test cannot tell the two classification arms apart. The
+    // only chrome route that exists calls `status`, which is independently
+    // excluded as a *tool* — so every assertion below would hold just as well
+    // with the surface arm switched off entirely, and a review proved exactly
+    // that by running the mutation. Seeding a `shell`-surface `search` — a wire
+    // name the tool arm counts — into the store the real emission path just
+    // wrote makes the exclusion below attributable to the surface arm and to
+    // nothing else, while the test stays end-to-end.
+    //
+    // It is written directly because no route can produce it yet, which is the
+    // point: the classification must be right *before* the second chrome read
+    // exists, not after it has already been miscounted.
+    {
+        let conn = Connection::open(&telemetry_db).expect("open telemetry.db read-write");
+        conn.execute(
+            "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
+             VALUES (strftime('%s','now'), 'shell', 'search', 5, 1, 'main', 'probe')",
+            [],
+        )
+        .expect("seed a chrome-issued search");
+    }
+
     // ── Nothing was destroyed: the reads are in the raw store ([NFR-CC-04]) ──
     assert_eq!(
         count_events(&telemetry_db, "surface = 'shell' AND tool = 'status'"),
@@ -133,6 +157,20 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
     assert!(
         !counted.iter().any(|(_, tool)| *tool == "status"),
         "and the status read counts on no surface at all: {counted:?}"
+    );
+    // The surface arm, isolated: `search` is counted by the tool arm, so the
+    // only thing that can keep the chrome-issued one out of this figure is the
+    // classification on `Surface::Shell`.
+    assert_eq!(
+        stats
+            .calls_by_tool
+            .iter()
+            .filter(|u| u.tool == "search")
+            .map(|u| u.calls)
+            .sum::<u64>(),
+        1,
+        "the chrome-issued search is excluded by the SURFACE arm, \
+         leaving only the user's own: {counted:?}"
     );
 
     // The daily series and the origin split each carry their own copy of the
