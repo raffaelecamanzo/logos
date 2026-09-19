@@ -592,7 +592,11 @@ fn run(cli: Cli) -> Result<i32> {
     // breakdown (FR-OB-04): the serve path IS the MCP surface.
     let surface = match &cli.command {
         // A web-only serve session stamps surface=web; any session that owns
-        // stdout for MCP (including the combined one) stamps surface=mcp.
+        // stdout for MCP (including the combined one) stamps surface=mcp. This
+        // is the *process* stamp only: the web adapter names a surface per
+        // request at its route boundary (`web::bridge`, FR-OB-09), so in the
+        // combined session its routes are attributed web — and the header's
+        // own read shell — over this mcp default.
         #[cfg(feature = "ui")]
         Commands::Serve { mcp: false, ui: true, .. } => observability::ProcessSurface::Web,
         Commands::Serve { .. } => observability::ProcessSurface::Mcp,

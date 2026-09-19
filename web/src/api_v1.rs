@@ -64,6 +64,7 @@ use logos_core::config::ConfigReadModel;
 use logos_core::federation::{query as fed_query, Backing, ContractBridge, EngineRegistry};
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
+use logos_core::observability::{in_surface, Surface};
 use logos_core::models::navigation::{
     BranchOverlapResult, GraphElements, ImpactIntersectionResult, ImpactResult,
     LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
@@ -140,7 +141,7 @@ pub(crate) struct OverviewModel {
 
 /// `GET /api/v1/overview` — the Dashboard data ([FR-UI-09], [FR-UI-21]).
 pub(crate) async fn overview(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_overview", |e| -> anyhow::Result<OverviewModel> {
+    let model = bridge(engine, "api_v1_overview", Surface::Web, |e| -> anyhow::Result<OverviewModel> {
         Ok(OverviewModel {
             status: e.status(),
             // The view degrades a composition-read fault to the empty card, never
@@ -173,7 +174,7 @@ pub(crate) struct HealthModel {
 
 /// `GET /api/v1/health` — the Health data ([FR-UI-04], [FR-UI-21]).
 pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_health", |e| -> anyhow::Result<HealthModel> {
+    let model = bridge(engine, "api_v1_health", Surface::Web, |e| -> anyhow::Result<HealthModel> {
         Ok(HealthModel {
             status: e.status(),
             gate: e.latest_gate()?,
@@ -205,8 +206,41 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
 /// un-indexed project is reported honestly as `indexed: false` for the client to
 /// render as a not-indexed state — never dressed up as a measurement ([NFR-CC-04],
 /// [NFR-RA-05]).
+///
+/// # The one handler on this surface that is not [`Surface::Web`]
+///
+/// The app header re-issues this read on **every** client-side navigation
+/// ([FR-UI-34]) — a request the user's own navigation caused incidentally, not
+/// a question the user asked. So it names [`Surface::Shell`] at the `bridge`
+/// and its events never enter a usage figure ([FR-OB-09] widened by [CR-097],
+/// [BR-42]). They are still recorded: the exclusion re-attributes, it does not
+/// destroy ([NFR-CC-04]).
+///
+/// Naming it **here** is the whole point. Classifying the engine's `status`
+/// read instead would take `logos status` — a command a developer typed — down
+/// with it, and would say nothing about the *next* chrome read, which may well
+/// call a navigation tool. The test the classification applies is whose
+/// question a request answers, and only the adapter is in a position to know.
+///
+/// # The assumption this rests on: one route, one caller
+///
+/// Keying the classification to the **route** is a proxy for keying it to the
+/// caller, and the two agree only while this endpoint has exactly one consumer.
+/// It does today — the app header is the sole caller in the SPA — but the
+/// proxy is what would break first. This is the cheapest read-model on the
+/// surface, which makes it the likeliest to be reused, and a second consumer
+/// asking a genuine question would have its reads silently excluded with
+/// nothing failing. If one appears, it needs its own route (or the
+/// classification needs to move to the caller), not a second caller here.
+/// `every_handler_names_its_surface_and_only_status_names_the_shell` guards the
+/// handler side of this; the consumer side is an assumption, stated here
+/// because nothing enforces it.
+///
+/// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
+/// [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
+/// [FR-OB-09]: ../../docs/specs/requirements/FR-OB-09.md
 pub(crate) async fn status(MemberEngine(engine): MemberEngine) -> Response {
-    let info: StatusInfo = bridge(engine, "api_v1_status", |e| e.status()).await;
+    let info: StatusInfo = bridge(engine, "api_v1_status", Surface::Shell, |e| e.status()).await;
     ok(info)
 }
 
@@ -231,7 +265,7 @@ pub(crate) async fn statistics(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let window = q.get("window").and_then(|w| w.trim().parse::<u32>().ok());
-    let info: StatsInfo = bridge(engine, "api_v1_statistics", move |e| e.stats(window)).await;
+    let info: StatsInfo = bridge(engine, "api_v1_statistics", Surface::Web, move |e| e.stats(window)).await;
     ok(info)
 }
 
@@ -247,7 +281,7 @@ pub(crate) struct ArchitectureModel {
 
 /// `GET /api/v1/architecture` — the Architecture / Cycles data ([FR-UI-21]).
 pub(crate) async fn architecture(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_architecture", |e| -> anyhow::Result<ArchitectureModel> {
+    let model = bridge(engine, "api_v1_architecture", Surface::Web, |e| -> anyhow::Result<ArchitectureModel> {
         Ok(ArchitectureModel { status: e.status(), dsm: e.dsm(None, false)? })
     })
     .await;
@@ -266,7 +300,7 @@ pub(crate) struct GapsModel {
 
 /// `GET /api/v1/gaps` — the Rule-findings data ([FR-UI-21]).
 pub(crate) async fn gaps(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_gaps", |e| -> anyhow::Result<GapsModel> {
+    let model = bridge(engine, "api_v1_gaps", Surface::Web, |e| -> anyhow::Result<GapsModel> {
         Ok(GapsModel {
             status: e.status(),
             rules: e.check_rules(None, false)?,
@@ -301,7 +335,7 @@ pub(crate) async fn files(
 ) -> Response {
     let untested = wants_flag(&params, "untested");
     let production_scope = wants_flag(&params, "production_scope");
-    let model = bridge(engine, "api_v1_files", move |e| -> anyhow::Result<FilesModel> {
+    let model = bridge(engine, "api_v1_files", Surface::Web, move |e| -> anyhow::Result<FilesModel> {
         Ok(FilesModel {
             status: e.status(),
             hotspots: e.latest_hotspots(Some(50), untested, production_scope)?,
@@ -332,7 +366,7 @@ pub(crate) struct CoverageModel {
 
 /// `GET /api/v1/coverage` — the Coverage data ([FR-UI-21]).
 pub(crate) async fn coverage(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_coverage", |e| -> anyhow::Result<CoverageModel> {
+    let model = bridge(engine, "api_v1_coverage", Surface::Web, |e| -> anyhow::Result<CoverageModel> {
         Ok(CoverageModel {
             status: e.status(),
             coverage: e.coverage_status()?,
@@ -362,7 +396,7 @@ pub(crate) async fn graph(
     let edge_types = parse_edge_types(&q);
     let granularity = parse_granularity(&q);
     let intent = parse_intent(&q);
-    let elements: GraphElements = bridge(engine, "api_v1_graph", move |e| {
+    let elements: GraphElements = bridge(engine, "api_v1_graph", Surface::Web, move |e| {
         e.graph_elements(seed.as_deref(), cap, layers.as_deref(), edge_types.as_deref(), granularity, intent)
     })
     .await;
@@ -382,7 +416,7 @@ pub(crate) async fn search_query(
     MemberEngine(engine): MemberEngine,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let response: QueryResponse = bridge(engine, "api_v1_query", move |e| query::run(e, &params)).await;
+    let response: QueryResponse = bridge(engine, "api_v1_query", Surface::Web, move |e| query::run(e, &params)).await;
     ok(response)
 }
 
@@ -406,7 +440,7 @@ pub(crate) async fn impact(
     else {
         return ok(ImpactResult::default());
     };
-    let result: ImpactResult = bridge(engine, "api_v1_impact", move |e| e.impact(&seed, None)).await;
+    let result: ImpactResult = bridge(engine, "api_v1_impact", Surface::Web, move |e| e.impact(&seed, None)).await;
     ok(result)
 }
 
@@ -437,7 +471,7 @@ pub(crate) async fn impact_intersection(
         .iter()
         .find(|(key, _)| key == "depth")
         .and_then(|(_, value)| value.parse::<usize>().ok());
-    let result: ImpactIntersectionResult = bridge(engine, "api_v1_impact_intersection", move |e| {
+    let result: ImpactIntersectionResult = bridge(engine, "api_v1_impact_intersection", Surface::Web, move |e| {
         e.impact_intersection(&items, depth)
     })
     .await;
@@ -473,7 +507,7 @@ pub(crate) async fn precedent(
     let target = q.get("target").map(|s| s.trim().to_string()).unwrap_or_default();
     let limit = q.get("limit").and_then(|value| value.parse::<usize>().ok());
     let result: PrecedentResult =
-        bridge(engine, "api_v1_precedent", move |e| e.precedent(&target, limit)).await;
+        bridge(engine, "api_v1_precedent", Surface::Web, move |e| e.precedent(&target, limit)).await;
     ok(result)
 }
 /// `GET /api/v1/branch-overlap?ref=<r>&ref=<r>[&base=<r>][&merge=<r>]` — which
@@ -510,7 +544,7 @@ pub(crate) async fn branch_overlap(
             .map(|(_, value)| value.clone())
     };
     let (base, merge) = (pick("base"), pick("merge"));
-    let result: BranchOverlapResult = bridge(engine, "api_v1_branch_overlap", move |e| {
+    let result: BranchOverlapResult = bridge(engine, "api_v1_branch_overlap", Surface::Web, move |e| {
         e.branch_overlap(&refs, base.as_deref(), merge.as_deref())
     })
     .await;
@@ -534,7 +568,7 @@ pub(crate) async fn node(
             .into_response();
     };
     let include_code = truthy(q.get("code"));
-    let info: NodeInfo = bridge(engine, "api_v1_node", move |e| e.node(&symbol, include_code)).await;
+    let info: NodeInfo = bridge(engine, "api_v1_node", Surface::Web, move |e| e.node(&symbol, include_code)).await;
     ok(info)
 }
 
@@ -555,7 +589,7 @@ pub(crate) async fn search(
     };
     let kind = q.get("kind").and_then(|k| NodeKind::from_wire(k.trim()));
     let limit = q.get("limit").and_then(|n| n.parse::<usize>().ok());
-    let result: SearchResult = bridge(engine, "api_v1_search", move |e| e.search(&term, kind, limit)).await;
+    let result: SearchResult = bridge(engine, "api_v1_search", Surface::Web, move |e| e.search(&term, kind, limit)).await;
     ok(result)
 }
 
@@ -594,10 +628,22 @@ fn not_a_workspace() -> Response {
 /// serving single-root. `call` receives the registry and the shared bridge, so a
 /// route-stitching read (`route-providers`/`callers`/`impact`) resolves the bridge
 /// edges inside the blocking closure.
+///
+/// # This is the surface's *second* adapter boundary, and it carries the same rule
+///
+/// A fan reaches `Engine` read-models that emit telemetry through the chokepoint
+/// exactly as [`bridge`]'s do, so it takes the same required `surface` parameter
+/// and installs the same [`in_surface`] scope inside the same `spawn_blocking`
+/// closure. Without it the build-failure rule ([BR-42]) would hold for one half
+/// of this router and not the other — and a workspace route could not declare
+/// itself shell chrome even when it is, because it would have no way to say so.
+///
+/// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
 async fn workspace_fan<T, F>(
     backing: Arc<Backing<Engine>>,
     bridge: Arc<ContractBridge>,
     view: &'static str,
+    surface: Surface,
     call: F,
 ) -> Response
 where
@@ -612,7 +658,7 @@ where
         let registry = backing
             .as_federated()
             .expect("federated backing checked before spawn");
-        call(registry, &bridge)
+        in_surface(surface, || call(registry, &bridge))
     })
     .await
     // The read-models are infallible at the surface (ADR-14); a panic crossing the
@@ -620,7 +666,7 @@ where
     .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
     tracing::info!(
         target: "logos::web",
-        surface = "web",
+        surface = surface.as_str(),
         view,
         duration_ms = started.elapsed().as_millis() as u64,
         "page render",
@@ -641,7 +687,7 @@ pub(crate) async fn workspace_roster(
     State(backing): State<Arc<Backing<Engine>>>,
     State(bridge): State<Arc<ContractBridge>>,
 ) -> Response {
-    workspace_fan(backing, bridge, "api_v1_workspace_roster", |registry, _bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_roster", Surface::Web, |registry, _bridge| {
         fed_query::workspace_roster(registry)
     })
     .await
@@ -738,7 +784,7 @@ pub(crate) async fn workspace_status(
     State(backing): State<Arc<Backing<Engine>>>,
     State(bridge): State<Arc<ContractBridge>>,
 ) -> Response {
-    workspace_fan(backing, bridge, "api_v1_workspace_status", |registry, _bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_status", Surface::Web, |registry, _bridge| {
         fed_query::workspace_status(registry)
     })
     .await
@@ -753,7 +799,7 @@ pub(crate) async fn workspace_route_providers(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_route_providers", move |registry, bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_route_providers", Surface::Web, move |registry, bridge| {
         let edges = fed_query::edges(bridge, registry);
         fed_query::xservice_route_providers(&edges, repo.as_deref())
     })
@@ -777,7 +823,7 @@ pub(crate) async fn workspace_search(
     let kind = q.get("kind").and_then(|k| NodeKind::from_wire(k.trim()));
     let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_search", move |registry, _bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_search", Surface::Web, move |registry, _bridge| {
         fed_query::xservice_search(registry, &term, kind, limit, repo.as_deref())
     })
     .await
@@ -798,7 +844,7 @@ pub(crate) async fn workspace_callers(
     };
     let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_callers", move |registry, bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_callers", Surface::Web, move |registry, bridge| {
         let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
         fed_query::xservice_callers(registry, &edges, &residue, &symbol, limit, repo.as_deref())
     })
@@ -820,7 +866,7 @@ pub(crate) async fn workspace_impact(
     };
     let depth = opt_param(&q, "depth").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
-    workspace_fan(backing, bridge, "api_v1_workspace_impact", move |registry, bridge| {
+    workspace_fan(backing, bridge, "api_v1_workspace_impact", Surface::Web, move |registry, bridge| {
         let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
         fed_query::xservice_impact(registry, &edges, &residue, &symbol, depth, repo.as_deref())
     })
@@ -834,7 +880,7 @@ pub(crate) async fn workspace_impact(
 /// revision they were computed at. A documented pure read that never prunes
 /// ([ADR-28]).
 pub(crate) async fn wiki_index(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_wiki", |e| -> anyhow::Result<WikiStatus> {
+    let model = bridge(engine, "api_v1_wiki", Surface::Web, |e| -> anyhow::Result<WikiStatus> {
         e.wiki_status()
     })
     .await;
@@ -850,7 +896,7 @@ pub(crate) async fn wiki_search(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let term = q.get("q").cloned().unwrap_or_default().trim().to_string();
-    let model = bridge(engine, "api_v1_wiki_search", move |e| -> anyhow::Result<Vec<WikiHit>> {
+    let model = bridge(engine, "api_v1_wiki_search", Surface::Web, move |e| -> anyhow::Result<Vec<WikiHit>> {
         if term.is_empty() {
             Ok(Vec::new())
         } else {
@@ -910,7 +956,7 @@ pub(crate) async fn wiki_page(
     MemberEngine(engine): MemberEngine,
     Path(slug): Path<String>,
 ) -> Response {
-    let model = bridge(engine, "api_v1_wiki_page", move |e| -> anyhow::Result<WikiPageOutcome> {
+    let model = bridge(engine, "api_v1_wiki_page", Surface::Web, move |e| -> anyhow::Result<WikiPageOutcome> {
         let current_revision = e.status().graph_revision;
         match e.wiki_read(&slug)? {
             Some(page) => {
@@ -1093,7 +1139,7 @@ pub(crate) async fn wiki_asset(
     Path(rel_path): Path<String>,
 ) -> Response {
     let outcome =
-        bridge(engine, "api_v1_wiki_asset", move |e| resolve_doc_asset(e.root(), &rel_path)).await;
+        bridge(engine, "api_v1_wiki_asset", Surface::Web, move |e| resolve_doc_asset(e.root(), &rel_path)).await;
     match outcome {
         AssetOutcome::Image(mime, bytes) => (
             [
@@ -1155,7 +1201,7 @@ pub(crate) async fn wiki_nav(MemberEngine(engine): MemberEngine) -> Response {
         DESIGN_DOCS, GUIDED_TOUR, OVERVIEW_ARCHITECTURE, OVERVIEW_ARCHITECTURE_LABEL, SPECS_DOCS,
         SPECS_SRS, SPECS_SRS_LABEL, USER_GUIDE_TIER_TITLE,
     };
-    let nav = bridge(engine, "api_v1_wiki_nav", |e| {
+    let nav = bridge(engine, "api_v1_wiki_nav", Surface::Web, |e| {
         let item = |slug: &str, label: &str| WikiNavItem { slug: slug.into(), label: label.into() };
         let doc_item = |c: DocCategory| WikiNavItem { slug: c.slug().into(), label: c.title().into() };
 
@@ -1204,7 +1250,7 @@ pub(crate) async fn wiki_nav(MemberEngine(engine): MemberEngine) -> Response {
 /// never serialized; [FR-CF-06], [NFR-SE-07]). A pure filesystem read — it touches
 /// no graph store, so a load mutates nothing ([FR-UI-03], [ADR-28]).
 pub(crate) async fn config(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_config", |e| -> anyhow::Result<ConfigReadModel> {
+    let model = bridge(engine, "api_v1_config", Surface::Web, |e| -> anyhow::Result<ConfigReadModel> {
         e.config_read()
     })
     .await;
@@ -1245,7 +1291,7 @@ pub(crate) async fn config(MemberEngine(engine): MemberEngine) -> Response {
 /// [ADR-46]: ../../docs/specs/architecture/decisions/ADR-46.md
 /// [spa-frontend]: ../../docs/specs/architecture/components/spa-frontend.md
 pub(crate) async fn verify(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_verify", |e| -> anyhow::Result<VerifyReport> {
+    let model = bridge(engine, "api_v1_verify", Surface::Web, |e| -> anyhow::Result<VerifyReport> {
         e.verify()
     })
     .await;
