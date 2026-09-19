@@ -8,11 +8,13 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    admits_file, hash_source, is_config_admitted, is_doc_admitted, load_files, relativize,
-    supported_extension, Candidate, LoadedFile, ShadowStore,
+    admits_file, classify_index_persistence, counts_show_a_graph, hash_source, is_config_admitted,
+    is_doc_admitted, load_files, relativize, supported_extension, Candidate, IndexPersistence,
+    LoadedFile, ShadowStore,
 };
 use crate::config::Config;
 use crate::plugin::LanguageRegistry;
+use crate::graph_store::StoreCounts;
 use crate::runtime::{Runtime, RuntimeConfig};
 
 #[cfg(feature = "lang-rust")]
@@ -801,4 +803,103 @@ fn load_files_on_empty_candidate_set_is_empty_for_any_worker_count() {
         assert!(warnings.is_empty(), "no warnings from an empty candidate set ({threads}w)");
         assert!(failed.is_empty(), "no failures from an empty candidate set ({threads}w)");
     }
+}
+
+// ── CR-134 / FR-IX-12: one classification, and a store probe only when needed ─
+
+#[test]
+fn the_persistence_classifier_probes_the_store_only_when_nothing_persisted() {
+    // CR-134 AC: "the extra `submit_read` occurs only on the zero-persist path".
+    // A run that stored a file has already answered "does a graph exist?", so
+    // asking the store again is pure cost on the hot path every index takes.
+    // `classify_index_persistence` takes the probe as a closure precisely so the
+    // laziness is assertable here rather than reasoned about at the call site.
+    let probes = std::cell::Cell::new(0usize);
+
+    // Persisted: classified without touching the store at all.
+    let persisted = classify_index_persistence(3, || {
+        probes.set(probes.get() + 1);
+        Ok(true)
+    })
+    .expect("classification succeeds");
+    assert_eq!(persisted, IndexPersistence::Persisted);
+    assert_eq!(
+        probes.get(),
+        0,
+        "the persisted-file path performs no additional read (CR-134)"
+    );
+
+    // Zero persisted, a graph still stands: exactly one probe, the leave case.
+    let surviving = classify_index_persistence(0, || {
+        probes.set(probes.get() + 1);
+        Ok(true)
+    })
+    .expect("classification succeeds");
+    assert_eq!(surviving, IndexPersistence::GraphSurvives);
+    assert_eq!(probes.get(), 1, "the zero-persist path pays exactly one read");
+
+    // Zero persisted over an empty store: the clear case, one probe again.
+    let emptied = classify_index_persistence(0, || {
+        probes.set(probes.get() + 1);
+        Ok(false)
+    })
+    .expect("classification succeeds");
+    assert_eq!(emptied, IndexPersistence::ClearedToEmpty);
+    assert_eq!(probes.get(), 2, "one read per zero-persist classification");
+}
+
+#[test]
+fn a_failing_store_probe_fails_the_classification_rather_than_guessing() {
+    // FR-EH-04: the probe is the whole basis of the clear/leave discrimination,
+    // so a store that cannot answer must propagate rather than default. Guessing
+    // "empty" would clear the records of a graph that may well survive; guessing
+    // "survives" would leave a stale roll-up beside `indexed: false`. Neither is
+    // recoverable from the readout, so the index reports the failure instead.
+    let err = classify_index_persistence(0, || anyhow::bail!("store unavailable"))
+        .expect_err("a failing probe fails the classification");
+    assert!(
+        err.to_string().contains("store unavailable"),
+        "the store's own error reaches the caller: {err}"
+    );
+}
+
+#[test]
+fn a_graph_stands_when_either_files_or_nodes_survive() {
+    // Both terms of `counts_show_a_graph`'s disjunction are load-bearing, and the
+    // integration fixtures pin only the first: every end-to-end route to the
+    // surviving-graph case leaves files AND nodes present, so narrowing the
+    // predicate to `counts.files > 0` passes the entire navigation suite (41/41)
+    // and every other pipeline unit test. Verified by mutation, which is why this
+    // test exists — without it the second term can be deleted silently.
+    //
+    // The predicate is also a contract with the reader: it must stay identical to
+    // the one `navigate::status` derives `indexed` from, because CR-134 §10 makes
+    // that agreement the reason the roll-up, the stamp and the readout can never
+    // disagree about whether a graph exists.
+    let counts = |files, nodes| StoreCounts {
+        files,
+        nodes,
+        edges: 0,
+        refs_total: 0,
+        refs_resolved: 0,
+    };
+
+    assert!(
+        !counts_show_a_graph(&counts(0, 0)),
+        "an empty store stands no graph — the clear case"
+    );
+    assert!(
+        counts_show_a_graph(&counts(1, 0)),
+        "a file row alone is a surviving graph"
+    );
+    assert!(
+        counts_show_a_graph(&counts(0, 1)),
+        "a node row alone is a surviving graph — the disjunct a files-only \
+         predicate drops, reachable because a node's file_id is nulled when its \
+         file row is deleted"
+    );
+    assert!(
+        counts_show_a_graph(&counts(1, 1)),
+        "both present is a surviving graph"
+    );
 }

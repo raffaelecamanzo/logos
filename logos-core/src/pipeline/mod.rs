@@ -73,8 +73,8 @@ use rayon::prelude::*;
 use crate::config::{self, BindingPolicy, Config, ConfigGlobs, DocGlobs};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
-    BatchWriter, NewConfigSource, NewNode, NewUnresolvedRef, CONFIG_FINGERPRINT_KEY,
-    LAST_FULL_INDEX_AT_KEY,
+    BatchWriter, NewConfigSource, NewNode, NewUnresolvedRef, StoreCounts,
+    CONFIG_FINGERPRINT_KEY, LAST_FULL_INDEX_AT_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
@@ -249,7 +249,17 @@ pub fn index(
     // FR-IX-12) and, if the repo materially exceeds the performance envelope,
     // surface the one-line advisory on this result (NFR-PE-09) — degradation
     // channel only, never a failure (ADR-14).
-    record_loc_rollup(runtime, indexed_loc, test_loc)?;
+    // CR-134: the roll-up and the last-full-index stamp below both describe the
+    // GRAPH, not this command, so they key on one classification of what this
+    // run left in the store — computed here, once, and handed to both. Deriving
+    // it independently per writer is what let them disagree about a single run:
+    // the stamp modelled the three cases and the roll-up modelled none, so an
+    // index whose every admitted candidate failed to load preserved the stamp
+    // while overwriting the roll-up with 0/0. The store probe is paid only on
+    // the zero-persist path.
+    let persistence = classify_index_persistence(outcome.files, || graph_survives(runtime))?;
+
+    record_loc_rollup(runtime, persistence, indexed_loc, test_loc)?;
     if let Some(advisory) = crate::perf::envelope_advisory(indexed_loc) {
         warnings.push(advisory);
     }
@@ -258,7 +268,7 @@ pub fn index(
     // `project_metadata` row, so a later read-only `status` — which does no
     // indexing and therefore could never set an in-process clock — still reports
     // when the project was last fully indexed.
-    record_full_index_at(runtime, outcome.files)?;
+    record_full_index_at(runtime, persistence)?;
 
     // FR-SY-09 / ADR-32: a completed index always rebuilds the graph, so it
     // always advances the persisted revision — done last (after every pass
@@ -1052,6 +1062,108 @@ fn record_admission_fingerprint(runtime: &Runtime, fingerprint: &str) -> Result<
     runtime.submit_write(move |w| w.set_project_metadata(CONFIG_FINGERPRINT_KEY, &fingerprint))
 }
 
+/// How a completed full index left the graph — the **one** classification every
+/// durable post-index record keys on ([CR-134] §3.2).
+///
+/// [`record_full_index_at`] established these three cases for the last-full-index
+/// stamp ([CR-130]); [`record_loc_rollup`] mirrors them for the [FR-IX-12]
+/// source/test roll-up. They are computed once, at the call site, and handed to
+/// both writers rather than derived independently by each — so the stamp and the
+/// roll-up cannot classify one run differently, which is exactly the defect
+/// [CR-134] closes (a surviving graph reporting a preserved timestamp beside a
+/// fabricated `0`/`0` roll-up).
+///
+/// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
+/// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexPersistence {
+    /// This index loaded and stored at least one file, so it built the graph the
+    /// durable records describe: they are **written**.
+    Persisted,
+    /// Nothing was persisted and the store is empty — the ordinary
+    /// zero-admission case: the walk admitted nothing, the always-purge
+    /// reconcile removed whatever was there, and `status` reports the project
+    /// `indexed: false`. Earlier rows are **removed**, because a record beside
+    /// `indexed: false` describes a graph that does not exist ([NFR-CC-04],
+    /// [FR-EH-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+    ClearedToEmpty,
+    /// Nothing was persisted but a graph survives — every admitted candidate
+    /// failed to load (unreadable or non-UTF-8; see [`load_files`]), so nothing
+    /// was re-stored, but `purge_unadmitted` is keyed on the *discovery* set and
+    /// those files are still admitted, leaving the previous graph intact. The
+    /// rows are left **untouched**: that graph really was built, and really has
+    /// the line counts recorded for it, so overwriting either record would
+    /// describe the surviving graph with figures taken from a run that stored
+    /// nothing.
+    GraphSurvives,
+}
+
+/// Classify a completed full index by what it left in the store.
+///
+/// `persisted` is the number of files this index actually loaded and stored
+/// ([`ExtractOutcome::files`]). `graph_survives` answers "does a graph still
+/// stand?" and is consulted **only** when `persisted == 0`: a run that stored a
+/// file has already answered the question, and the probe costs a `submit_read`
+/// ([CR-134] AC — the extra read is paid on the zero-persist path alone).
+///
+/// It is taken as a closure rather than a `bool` precisely so that laziness is
+/// *assertable* — a `bool` parameter would have to be evaluated before the call,
+/// making "no additional read on the persisted path" a property of the call site
+/// that no test could pin. See `the_persistence_classifier_probes_the_store_only_when_nothing_persisted`.
+///
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
+fn classify_index_persistence(
+    persisted: usize,
+    graph_survives: impl FnOnce() -> Result<bool>,
+) -> Result<IndexPersistence> {
+    if persisted > 0 {
+        return Ok(IndexPersistence::Persisted);
+    }
+    Ok(if graph_survives()? {
+        IndexPersistence::GraphSurvives
+    } else {
+        IndexPersistence::ClearedToEmpty
+    })
+}
+
+/// Does a graph still stand in the store?
+///
+/// The **same** predicate `navigate::status` derives `indexed` from
+/// (`counts.files > 0 || counts.nodes > 0`), asked of the same store — so a
+/// durable index-time record and the readout beside it can never disagree about
+/// whether a graph exists ([CR-134] §10). Costs one `submit_read`, which is why
+/// [`classify_index_persistence`] defers it behind a closure.
+///
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
+fn graph_survives(runtime: &Runtime) -> Result<bool> {
+    let counts = runtime.submit_read(|store| store.counts())?;
+    Ok(counts_show_a_graph(&counts))
+}
+
+/// Does a set of store row counts describe a graph that stands?
+///
+/// Split out of [`graph_survives`] as a pure function of [`StoreCounts`] so that
+/// **both** terms of the disjunction can be pinned by a test. Every fixture that
+/// reaches the surviving-graph case end to end does so with files *and* nodes
+/// present, so dropping `|| counts.nodes > 0` leaves the whole integration suite
+/// green — the second term needs its own pin or it can be deleted silently. A
+/// store with `files == 0` and `nodes > 0` is reachable rather than theoretical:
+/// a node's `file_id` is nulled when its file row is deleted.
+///
+/// This expression is the contract: it must stay character-for-character the
+/// predicate `navigate::status` derives `indexed` from, because [CR-134] §10
+/// makes that agreement the reason the roll-up, the stamp and the readout can
+/// never disagree.
+///
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
+fn counts_show_a_graph(counts: &StoreCounts) -> bool {
+    counts.files > 0 || counts.nodes > 0
+}
+
 /// Record the source/test physical-LOC roll-up ([FR-IX-12]) in
 /// `project_metadata`: the total ingested LOC under
 /// [`crate::perf::INDEXED_LOC_KEY`] (so `status` can emit the [NFR-PE-09]
@@ -1059,15 +1171,51 @@ fn record_admission_fingerprint(runtime: &Runtime, fingerprint: &str) -> Result<
 /// under [`crate::perf::TEST_LOC_KEY`] (so `status` can derive
 /// `source = total − test`).
 ///
-/// Both keys are written in the **same** single-writer batch so a reader never
-/// observes a half-written roll-up: either both are present (the roll-up was
-/// computed) or, on a graph indexed before this feature, only `indexed_loc` is,
-/// which `status` treats as an absent roll-up ([NFR-CC-04]).
+/// Both keys are written — and, on the clearing case below, removed — in the
+/// **same** single-writer batch so a reader never observes a half-written
+/// roll-up: either both are present (the roll-up was computed) or, on a graph
+/// indexed before this feature, only `indexed_loc` is, which `status` treats as
+/// an absent roll-up ([NFR-CC-04]).
+///
+/// The roll-up describes the **graph, not the command**, so it keys on the
+/// shared [`IndexPersistence`] classification — see that type for why the
+/// classification is computed once rather than per writer ([CR-134]):
+///
+/// - [`IndexPersistence::Persisted`] — this index built the graph, so both keys
+///   are written from the line counts it ingested.
+/// - [`IndexPersistence::ClearedToEmpty`] — no graph remains, so both keys are
+///   **removed**. Clearing both is what makes the reader's existing
+///   both-keys-present marker report the roll-up absent, with no reader change:
+///   writing this run's `0`/`0` instead would render a fabricated zero beside
+///   `indexed: false` ([NFR-CC-04], [FR-EH-04]).
+/// - [`IndexPersistence::GraphSurvives`] — every admitted candidate failed to
+///   load but the previous graph stands, so both keys are left **untouched**.
+///   That graph's line counts are still the honest ones; overwriting them with
+///   this run's `0`/`0` is the defect [CR-134] closes, and the reader cannot
+///   compensate — a pair of present zeros is indistinguishable from a genuine
+///   roll-up over entirely blank files.
 ///
 /// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
 /// [NFR-PE-09]: ../../../docs/specs/requirements/NFR-PE-09.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-fn record_loc_rollup(runtime: &Runtime, indexed_loc: u64, test_loc: u64) -> Result<()> {
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
+fn record_loc_rollup(
+    runtime: &Runtime,
+    persistence: IndexPersistence,
+    indexed_loc: u64,
+    test_loc: u64,
+) -> Result<()> {
+    match persistence {
+        IndexPersistence::GraphSurvives => return Ok(()),
+        IndexPersistence::ClearedToEmpty => {
+            return runtime.submit_write(move |w| {
+                w.clear_project_metadata(crate::perf::INDEXED_LOC_KEY)?;
+                w.clear_project_metadata(crate::perf::TEST_LOC_KEY)
+            })
+        }
+        IndexPersistence::Persisted => {}
+    }
     let total = indexed_loc.to_string();
     let test = test_loc.to_string();
     runtime.submit_write(move |w| {
@@ -1080,26 +1228,24 @@ fn record_loc_rollup(runtime: &Runtime, indexed_loc: u64, test_loc: u64) -> Resu
 /// [`LAST_FULL_INDEX_AT_KEY`], so `status` can report it from **any** process
 /// ([CR-130], [FR-NV-07]).
 ///
-/// `persisted` is the number of files this index actually loaded and stored
-/// ([`ExtractOutcome::files`]). The stamp dates the **graph**, not the command,
-/// so the three cases are:
+/// The stamp dates the **graph**, not the command, so it keys on the shared
+/// [`IndexPersistence`] classification, exactly as the [FR-IX-12] roll-up in
+/// [`record_loc_rollup`] does ([CR-134]):
 ///
-/// - `persisted > 0` — this index built a graph, so the row is written (unix
-///   seconds).
-/// - `persisted == 0` **and the store is empty** — the ordinary zero-admission
-///   case: the walk admitted nothing, the always-purge reconcile above removed
+/// - [`IndexPersistence::Persisted`] — this index built a graph, so the row is
+///   written (unix seconds).
+/// - [`IndexPersistence::ClearedToEmpty`] — the ordinary zero-admission case:
+///   the walk admitted nothing, the always-purge reconcile above removed
 ///   whatever was there, and `status` reports the project `indexed: false`. Any
 ///   earlier row is **removed**, because a timestamp beside `indexed: false`
 ///   would date a graph that does not exist — the readout dishonesty [CR-130] is
 ///   removing, not a second instance of it ([NFR-CC-04], [FR-EH-04]). A
 ///   source-less workspace member reports the field absent for this reason.
-/// - `persisted == 0` **but a graph survives** — every admitted candidate failed
-///   to load (unreadable or non-UTF-8; see [`load_files`]), so nothing was
-///   re-stored, but `purge_unadmitted` is keyed on the *discovery* set and those
-///   files are still admitted, leaving the previous graph intact. The row is left
-///   **untouched**: that graph really was built, at the time the row records, and
-///   deleting it would report a populated graph as never indexed — precisely the
-///   [CR-130] symptom. Costs one extra read, and only on this path.
+/// - [`IndexPersistence::GraphSurvives`] — every admitted candidate failed to
+///   load, so nothing was re-stored, but the previous graph is intact. The row is
+///   left **untouched**: that graph really was built, at the time the row
+///   records, and deleting it would report a populated graph as never indexed —
+///   precisely the [CR-130] symptom.
 ///
 /// A clock that cannot be read (a pre-epoch system time) writes nothing rather
 /// than storing `0`: absent is an honest empty state, `0` would be a fabricated
@@ -1110,16 +1256,13 @@ fn record_loc_rollup(runtime: &Runtime, indexed_loc: u64, test_loc: u64) -> Resu
 /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn record_full_index_at(runtime: &Runtime, persisted: usize) -> Result<()> {
-    if persisted == 0 {
-        // Which of the two zero-persist cases is this? Ask the store, using the
-        // same predicate `navigate::status` derives `indexed` from, so the row
-        // and the readout can never disagree.
-        let counts = runtime.submit_read(|store| store.counts())?;
-        if counts.files > 0 || counts.nodes > 0 {
-            return Ok(());
+fn record_full_index_at(runtime: &Runtime, persistence: IndexPersistence) -> Result<()> {
+    match persistence {
+        IndexPersistence::GraphSurvives => return Ok(()),
+        IndexPersistence::ClearedToEmpty => {
+            return runtime.submit_write(move |w| w.clear_project_metadata(LAST_FULL_INDEX_AT_KEY))
         }
-        return runtime.submit_write(move |w| w.clear_project_metadata(LAST_FULL_INDEX_AT_KEY));
+        IndexPersistence::Persisted => {}
     }
     let Some(now) = unix_seconds_now() else {
         tracing::warn!(

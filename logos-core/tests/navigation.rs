@@ -558,6 +558,248 @@ fn a_source_only_repo_reports_a_present_zero_test_bucket() {
     assert!(total > 0, "the source fixture has physical lines");
 }
 
+// ── CR-134 / FR-IX-12: the roll-up is written only when an index persists ─────
+
+/// Read the raw roll-up pair straight from `project_metadata`, so a test can
+/// tell "the read-model reported it absent" from "the pipeline removed the
+/// rows" — the same distinction [`stored_stamp`] draws for the sibling stamp.
+fn stored_rollup(engine: &Engine) -> (Option<String>, Option<String>) {
+    engine
+        .runtime()
+        .expect("runtime present")
+        .submit_read(|s| {
+            Ok((
+                s.project_metadata(logos_core::perf::INDEXED_LOC_KEY)?,
+                s.project_metadata(logos_core::perf::TEST_LOC_KEY)?,
+            ))
+        })
+        .expect("read commits")
+}
+
+#[test]
+fn a_re_index_that_persists_files_overwrites_the_rollup_with_the_new_figures() {
+    // CR-134 case 1 (persist): the roll-up describes the graph the LATEST full
+    // index built, so a run that stores files overwrites both keys rather than
+    // leaving them. Pinned as its own fixture because the other two cases are
+    // "clear" and "leave" — a regression that collapsed the discrimination into
+    // "never write" would leave the sibling zero-persist tests green and only
+    // this one red.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", "pub fn alpha() {}\n");
+    let engine = indexed_engine(&tmp);
+
+    let before = engine.status();
+    assert_eq!(
+        before.total_line_count,
+        Some(1),
+        "the first index counted the one physical line it ingested"
+    );
+
+    // Grow the same admitted file, then re-index: the roll-up must move.
+    fs::write(
+        tmp.path().join("src/lib.rs"),
+        "pub fn alpha() {}\npub fn beta() {}\npub fn gamma() {}\n",
+    )
+    .expect("write source");
+    let result = engine.index();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert!(result.files_indexed > 0, "the re-index persisted a file");
+
+    let after = engine.status();
+    assert_eq!(
+        after.total_line_count,
+        Some(3),
+        "a persisting re-index rewrites the roll-up with its own figures"
+    );
+    assert_eq!(
+        after.source_line_count,
+        Some(3),
+        "source is still derived as total - test"
+    );
+    assert_eq!(after.test_line_count, Some(0), "no test files, an honest zero");
+    let (total, test) = stored_rollup(&engine);
+    assert_eq!(
+        (total.as_deref(), test.as_deref()),
+        (Some("3"), Some("0")),
+        "both keys were written, in one generation"
+    );
+}
+
+#[test]
+fn a_full_index_that_persists_nothing_over_an_empty_store_clears_the_rollup() {
+    // CR-134 case 2 (clear): the roll-up describes a graph, so it must not
+    // outlive one. A re-index whose walk now admits nothing purges the graph
+    // (CR-004 always-purge reconcile); leaving the figures behind would report
+    // `total_line_count: 0` — or worse, the old non-zero figures — beside
+    // `indexed: false`. The rows are REMOVED, so the reader's both-keys-present
+    // marker reports the roll-up absent with no reader change (CR-134 §3.2).
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+    let (total, test) = stored_rollup(&engine);
+    assert!(
+        total.is_some() && test.is_some(),
+        "the first index recorded the roll-up it built"
+    );
+
+    fs::remove_dir_all(tmp.path().join("src")).expect("remove every source file");
+    let result = engine.index();
+    assert_eq!(result.files_indexed, 0, "the re-index admits nothing");
+
+    let status = engine.status();
+    assert!(!status.indexed, "the graph was purged");
+    assert_eq!(
+        status.total_line_count, None,
+        "an emptied graph carries no roll-up — absent, never a fabricated 0"
+    );
+    assert_eq!(status.source_line_count, None);
+    assert_eq!(status.test_line_count, None);
+    assert_eq!(
+        stored_rollup(&engine),
+        (None, None),
+        "the stale rows were removed, not merely hidden by the read-model"
+    );
+
+    // The cold arm: a source-less project whose FIRST index admits nothing has
+    // no roll-up to clear, and clearing an absent key stays the documented
+    // no-op rather than an error (the index must not degrade).
+    let empty = TempDir::new().unwrap();
+    let engine = Engine::start(empty.path()).expect("engine starts");
+    let result = engine.index();
+    assert!(
+        result.warnings.is_empty(),
+        "the index completed; it did not degrade: {:?}",
+        result.warnings
+    );
+    assert_eq!(result.files_indexed, 0, "the walk admitted nothing");
+    assert_eq!(
+        stored_rollup(&engine),
+        (None, None),
+        "absent is absent — nothing was stored to record the absence"
+    );
+    assert_eq!(engine.status().total_line_count, None);
+}
+
+#[test]
+fn a_re_index_that_persists_nothing_keeps_the_rollup_of_the_graph_that_survives() {
+    // CR-134 case 3 (leave) — THE case that fails against current `main`. When
+    // every admitted file fails to LOAD (unreadable or non-UTF-8), nothing is
+    // re-persisted, but `purge_unadmitted` is keyed on the discovery set and
+    // those files are still admitted, so the previous graph stands. Writing this
+    // run's counts there overwrites a correct roll-up with 0/0 and `status`
+    // reports a populated graph carrying `total_line_count: 0` — the fabricated
+    // zero FR-IX-12 AC4 and NFR-CC-04 forbid. The rows are left UNTOUCHED, as
+    // the sibling stamp already is (CR-130).
+    let tmp = TempDir::new().unwrap();
+    let src = "pub fn alpha() {}\npub fn beta() {}\n";
+    let test_src = "#[test]\nfn t() {}\n";
+    write(tmp.path(), "src/lib.rs", src);
+    write(tmp.path(), "tests/it.rs", test_src);
+    let engine = indexed_engine(&tmp);
+
+    let before = stored_rollup(&engine);
+    assert!(
+        before.0.is_some() && before.1.is_some(),
+        "the first index recorded the roll-up describing the graph it built"
+    );
+    let before_status = engine.status();
+    let before_stamp = stored_stamp(&engine).expect("the first index stamped");
+
+    // Same paths, same admission — only the contents are now unreadable.
+    for rel in ["src/lib.rs", "tests/it.rs"] {
+        fs::write(tmp.path().join(rel), [0xffu8, 0xfe, 0xff]).expect("write invalid UTF-8");
+    }
+    let result = engine.index();
+    assert_eq!(
+        result.files_indexed, 0,
+        "every admitted file failed to load, so none was persisted"
+    );
+
+    let status = engine.status();
+    assert!(
+        status.indexed,
+        "the previous graph survives — nothing was purged: {status:?}"
+    );
+    assert_eq!(
+        stored_rollup(&engine),
+        before,
+        "the surviving graph keeps the roll-up that describes it, byte-identical"
+    );
+    assert_eq!(
+        status.total_line_count, before_status.total_line_count,
+        "status keeps reporting the figures of the graph that survives"
+    );
+    assert_eq!(status.source_line_count, before_status.source_line_count);
+    assert_eq!(status.test_line_count, before_status.test_line_count);
+    assert_ne!(
+        status.total_line_count,
+        Some(0),
+        "a populated graph never reports a fabricated zero total (NFR-CC-04)"
+    );
+    // The sibling stamp, on the same run, made the same call — the readout is
+    // internally consistent rather than three honest fields and one fabricated.
+    assert_eq!(
+        stored_stamp(&engine).as_deref(),
+        Some(before_stamp.as_str()),
+        "the stamp is preserved on the same run, as it already was"
+    );
+}
+
+#[test]
+fn the_rollup_and_the_stamp_never_classify_one_run_differently() {
+    // CR-134 §3.2 / §10: the roll-up and the stamp key on ONE classification of
+    // what a run left in the store, derived from the same `store.counts()`
+    // predicate `navigate::status` derives `indexed` from. The defect this story
+    // closes was precisely the two writers disagreeing about one run, so the
+    // property is asserted directly: across all three cases, the roll-up is
+    // present exactly when the stamp is.
+    //
+    // Deliberately a CLASSIFICATION check, not a value check: it asks whether the
+    // two writers picked the same case, which is what the acceptance criterion
+    // asks and what a divergence between them would look like. It does NOT catch
+    // a writer that picked the right case and then stored the wrong figures —
+    // `a_re_index_that_persists_nothing_keeps_the_rollup_of_the_graph_that_survives`
+    // is the fixture that pins the values, and it is where a value regression
+    // shows up. Do not read a green here as agreement about contents.
+    let presence = |engine: &Engine| {
+        let (total, test) = stored_rollup(engine);
+        (
+            total.is_some() && test.is_some(),
+            stored_stamp(engine).is_some(),
+        )
+    };
+
+    // Case 1 — persisted: both written.
+    let tmp = fixture();
+    let engine = indexed_engine(&tmp);
+    assert_eq!(
+        presence(&engine),
+        (true, true),
+        "an index that built a graph records both the roll-up and the stamp"
+    );
+
+    // Case 3 — nothing persisted, a graph survives: both left untouched.
+    for rel in ["src/lib.rs", "src/util.rs"] {
+        fs::write(tmp.path().join(rel), [0xffu8, 0xfe, 0xff]).expect("write invalid UTF-8");
+    }
+    assert_eq!(engine.index().files_indexed, 0, "nothing persisted");
+    assert!(engine.status().indexed, "the graph survives");
+    assert_eq!(
+        presence(&engine),
+        (true, true),
+        "a surviving graph keeps both records — neither writer clears alone"
+    );
+
+    // Case 2 — nothing persisted over an emptied store: both cleared.
+    fs::remove_dir_all(tmp.path().join("src")).expect("remove every source file");
+    assert_eq!(engine.index().files_indexed, 0, "nothing persisted");
+    assert!(!engine.status().indexed, "the graph was purged");
+    assert_eq!(
+        presence(&engine),
+        (false, false),
+        "an emptied graph clears both records — neither writer leaves a stale row"
+    );
+}
+
 // ── CR-130 / FR-NV-07: the durable last-full-index stamp ─────────────────────
 
 /// Read the raw `last_full_index_at` row straight from `project_metadata`, so a

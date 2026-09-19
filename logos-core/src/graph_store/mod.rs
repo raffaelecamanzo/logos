@@ -116,8 +116,10 @@ pub const GRAPH_REVISION_KEY: &str = "graph_revision";
 /// # Presence means "a graph was built", not "`index` ran"
 /// The row is written when a full index persists at least one file, and removed
 /// when a full index leaves the store empty; a full index that persists nothing
-/// over a graph that still stands leaves the row alone (`record_full_index_at` in
-/// [`crate::pipeline`] carries the three cases). Presence therefore agrees with
+/// over a graph that still stands leaves the row alone. The three cases live in
+/// [`crate::pipeline`]'s `IndexPersistence`, classified once per index and shared
+/// with the [FR-IX-12] roll-up, which mirrors them — so the stamp and the roll-up
+/// can never disagree about one run ([CR-134]). Presence therefore agrees with
 /// [`StatusInfo::indexed`](crate::models::navigation::StatusInfo::indexed)
 /// rather than with the bare fact that the command ran: a member whose walk
 /// admits nothing reports an empty graph, and dating an empty graph would be the
@@ -125,6 +127,7 @@ pub const GRAPH_REVISION_KEY: &str = "graph_revision";
 /// Absent is reported as absent — never `0`, never fabricated.
 ///
 /// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
 /// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
 /// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
 /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md

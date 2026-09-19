@@ -52,13 +52,19 @@ pub const INDEXED_LOC_KEY: &str = "indexed_loc";
 /// Only the test bucket is persisted: [`status`](crate::Engine::status) reads the
 /// total from [`INDEXED_LOC_KEY`] and derives `source = total − test`, so the
 /// source figure is never counted independently. This key's **presence** is the
-/// roll-up's presence marker — a graph indexed before this feature carries
-/// `indexed_loc` but no `test_loc`, so `status` reports the counts as absent
-/// rather than a fabricated `0` ([NFR-CC-04]).
+/// roll-up's presence marker, and it reads absent in two ways, both of them
+/// honest empty states rather than a fabricated `0` ([NFR-CC-04]): a graph
+/// indexed before this feature carries `indexed_loc` but no `test_loc`; and a
+/// full index that leaves the store empty **clears both keys**, because a
+/// roll-up beside `indexed: false` would describe a graph that no longer exists
+/// ([CR-134]). A full index that persists nothing while a graph survives leaves
+/// both keys alone, so the figures keep describing the graph they were counted
+/// over — see [`crate::pipeline`]'s `IndexPersistence`.
 ///
 /// [FR-IX-12]: ../../../docs/specs/requirements/FR-IX-12.md
 /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
 pub const TEST_LOC_KEY: &str = "test_loc";
 
 /// The one-line advisory emitted when an indexed repository *materially* exceeds
