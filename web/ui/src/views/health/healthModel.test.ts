@@ -172,4 +172,32 @@ describe("snapshotStaleness", () => {
   it("leaves the date null for a timestamp that is not a representable instant", () => {
     expect(snapshotStaleness(status(false), evolution(point({ created_at: 8.64e15 })))).toEqual({ date: null });
   });
+
+  // `getTime()` is NaN only OUTSIDE the ±8.64e15 ms range. Inside it, a year
+  // outside 0000-9999 makes `toISOString()` emit the expanded `±YYYYYY-MM-DD`
+  // form, and slicing 10 characters off that yields `"+010000-01"` — a garbled
+  // fragment that is neither a date nor null. The boundary is pinned on both
+  // sides so the guard cannot be widened or dropped silently.
+  it("leaves the date null for an instant outside the ordinary 0000-9999 calendar range", () => {
+    // The last second that still formats as an ordinary YYYY-MM-DD.
+    expect(snapshotStaleness(status(false), evolution(point({ created_at: 253_402_300_799 })))).toEqual({
+      date: "9999-12-31",
+    });
+    // One second later: year 10000, expanded form.
+    expect(snapshotStaleness(status(false), evolution(point({ created_at: 253_402_300_800 })))).toEqual({
+      date: null,
+    });
+    // Year 0000 is ordinary and stays a date; the second before it is year -1.
+    expect(snapshotStaleness(status(false), evolution(point({ created_at: -62_167_219_200 })))).toEqual({
+      date: "0000-01-01",
+    });
+    expect(snapshotStaleness(status(false), evolution(point({ created_at: -62_167_219_201 })))).toEqual({
+      date: null,
+    });
+    // The shape this guard exists to prevent must never reach a caller.
+    const all = [253_402_300_800, -62_167_219_201, 1_789_860_888_449].map(
+      (created_at) => snapshotStaleness(status(false), evolution(point({ created_at })))?.date,
+    );
+    expect(all.every((d) => d === null)).toBe(true);
+  });
 });

@@ -101,13 +101,23 @@ export function snapshotStaleness(status: StatusInfo, evolution: EvolutionReport
 }
 
 /** The last recorded snapshot's UTC calendar date, or `null` when the series is
- *  empty or the stored instant is not representable. Module-private: the one
- *  seam onto this fact is `snapshotStaleness`. */
+ *  empty or the stored instant is not a representable calendar date.
+ *  Module-private: the one seam onto this fact is `snapshotStaleness`.
+ *
+ *  Both guards are load-bearing, and the second is not the first. `getTime()`
+ *  is `NaN` only outside the ±8.64e15 ms range; *inside* it, a year outside
+ *  0000–9999 makes `toISOString()` emit ECMAScript's **expanded** form
+ *  (`±YYYYYY-MM-DD…`), and a `slice(0, 10)` written for the ordinary 10-char
+ *  prefix then returns a garbled fragment — `"+010000-01"` — rather than a
+ *  date. That is a fabricated figure, which is exactly what this seam promises
+ *  never to produce ([NFR-CC-04]), so the year is checked before the slice. */
 function snapshotDate(evolution: EvolutionReport): string | null {
   const last = evolution.snapshots[evolution.snapshots.length - 1];
   if (last === undefined) return null;
   const at = new Date(last.created_at * 1000);
   if (Number.isNaN(at.getTime())) return null;
+  const year = at.getUTCFullYear();
+  if (year < 0 || year > 9999) return null;
   return at.toISOString().slice(0, 10);
 }
 
