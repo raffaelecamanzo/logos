@@ -236,7 +236,15 @@ fn render_readout(readout: &QualityReadout) -> String {
     // so — it is deliberately not re-evaluated, because that would be a write.
     // Since [CR-096] it also says *when* that run was and what tree it saw, so
     // the staleness is quantified rather than merely labelled.
-    match (&readout.check, headline_count(readout, readout.check.as_ref())) {
+    // Computed ONCE and reused below. The headline and the "not shown" note
+    // must be two views of ONE number: when they were derived separately — the
+    // headline from `headline_count`, the note from `violation_count` — a
+    // marker recording 9 over a table holding 1 printed "rule violations: 9",
+    // listed one, and added no note at all, hiding 8 findings behind a heading
+    // that named them. That is precisely the silent cap the cap exists to
+    // prevent, reintroduced by splitting the source.
+    let headline = headline_count(readout, readout.check.as_ref());
+    match (&readout.check, headline) {
         (Some(check), _) if is_recorded_clean(readout, check) => out.push_str(&format!(
             "  rule violations: 0 — clean `logos check` {}\n",
             render_provenance(check)
@@ -260,11 +268,11 @@ fn render_readout(readout: &QualityReadout) -> String {
             out.push_str(&format!("    - {message}\n"));
         }
         // Never a silent cap: a reader must not mistake the listed subset for
-        // the whole set.
-        let dropped = readout
-            .violation_count
+        // the whole set. Counted against the headline, so every finding the
+        // heading claims is either listed or explicitly accounted for.
+        let dropped = headline
             .unwrap_or_default()
-            .saturating_sub(messages.len());
+            .saturating_sub(messages.len() as i64);
         if dropped > 0 {
             out.push_str(&format!("    … {dropped} more not shown\n"));
         }
@@ -787,6 +795,13 @@ mod tests {
         assert!(
             context.contains("rule violations: 9 "),
             "the larger, less flattering of the two disagreeing counts leads: {context}"
+        );
+        // And the heading is reconciled with what is listed. A heading claiming
+        // 9 above a single listed finding, with no note, hides 8 of them behind
+        // a number that names them.
+        assert!(
+            context.contains("… 8 more not shown"),
+            "every finding the heading claims is listed or accounted for: {context}"
         );
     }
 
