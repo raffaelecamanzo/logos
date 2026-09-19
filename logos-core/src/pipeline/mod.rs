@@ -73,8 +73,8 @@ use rayon::prelude::*;
 use crate::config::{self, BindingPolicy, Config, ConfigGlobs, DocGlobs};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
-    BatchWriter, NewConfigSource, NewNode, NewUnresolvedRef, CONFIG_FINGERPRINT_KEY,
-    LAST_FULL_INDEX_AT_KEY,
+    BatchWriter, NewConfigSource, NewNode, NewUnresolvedRef, StoreCounts,
+    CONFIG_FINGERPRINT_KEY, LAST_FULL_INDEX_AT_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
@@ -1141,7 +1141,27 @@ fn classify_index_persistence(
 /// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
 fn graph_survives(runtime: &Runtime) -> Result<bool> {
     let counts = runtime.submit_read(|store| store.counts())?;
-    Ok(counts.files > 0 || counts.nodes > 0)
+    Ok(counts_show_a_graph(&counts))
+}
+
+/// Does a set of store row counts describe a graph that stands?
+///
+/// Split out of [`graph_survives`] as a pure function of [`StoreCounts`] so that
+/// **both** terms of the disjunction can be pinned by a test. Every fixture that
+/// reaches the surviving-graph case end to end does so with files *and* nodes
+/// present, so dropping `|| counts.nodes > 0` leaves the whole integration suite
+/// green — the second term needs its own pin or it can be deleted silently. A
+/// store with `files == 0` and `nodes > 0` is reachable rather than theoretical:
+/// a node's `file_id` is nulled when its file row is deleted.
+///
+/// This expression is the contract: it must stay character-for-character the
+/// predicate `navigate::status` derives `indexed` from, because [CR-134] §10
+/// makes that agreement the reason the roll-up, the stamp and the readout can
+/// never disagree.
+///
+/// [CR-134]: ../../../docs/requests/CR-134-a-zero-persist-index-fabricates-a-zero-loc-rollup.md
+fn counts_show_a_graph(counts: &StoreCounts) -> bool {
+    counts.files > 0 || counts.nodes > 0
 }
 
 /// Record the source/test physical-LOC roll-up ([FR-IX-12]) in
