@@ -202,6 +202,44 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.queryByText("logos index")).not.toBeInTheDocument();
   });
 
+  // ── CR-135 §3.2: a populated signal over a de-indexed graph ────────────────
+  // The figures survive a de-index, so without this they render as a confident
+  // CURRENT verdict for a graph that no longer exists (reproduced during S-406's
+  // review as finding #9). They are labelled, not suppressed: genuine history.
+  it("labels both cards as describing a graph no longer indexed, dated, naming `logos index` (CR-135)", async () => {
+    const m = clone();
+    m.status.indexed = false; // de-indexed AFTER the scan that recorded the snapshot
+    m.evolution.snapshots[1].created_at = 1_758_240_000; // 2025-09-19 UTC
+    stub(m);
+    render(<HealthView />);
+    // Both cards carry the same single sentence — one classification, two cards.
+    expect((await screen.findAllByText(/no longer indexed/i)).length).toBe(2);
+    expect(screen.getAllByText(/Describes the snapshot of 2025-09-19/i).length).toBe(2);
+    // …each naming the command that does change what is reported (FR-EH-04).
+    expect(screen.getAllByText("logos index").length).toBe(2);
+    // The figures are still there — labelled, never discarded.
+    expect(screen.getByText("STALE")).toBeInTheDocument();
+    expect(screen.getByText(/PASS · signal 8000 vs baseline 7800/)).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
+    // …but the unqualified current-verdict wording is gone.
+    expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
+  });
+
+  // The other half of the same contract: the staleness branch must not leak into
+  // the ordinary case. Same populated payload, `indexed` true.
+  it("renders both cards exactly as today while the graph is still indexed (CR-135)", async () => {
+    stub(HEALTH); // `status.indexed` is true
+    render(<HealthView />);
+    expect(await screen.findByText("PASS")).toBeInTheDocument();
+    expect(screen.getByText(/current 8000 vs baseline 7800/i)).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
+    // None of the staleness wording reaches an indexed project.
+    expect(screen.queryByText("STALE")).not.toBeInTheDocument();
+    expect(screen.queryByText(/no longer indexed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+  });
+
   it("keeps a distinct state naming `logos index` for a genuinely empty graph (FR-EH-04)", async () => {
     const m = clone();
     m.status.indexed = false;

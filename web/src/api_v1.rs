@@ -197,6 +197,20 @@ pub(crate) struct HealthModel {
 /// `the_health_handler_reads_the_snapshot_once` (in [`crate`]'s test module)
 /// pins the composition.
 ///
+/// # What the staleness label reads ([CR-135] §3.2, §8)
+///
+/// The SPA labels a *populated* verdict as history when `status.indexed` is
+/// false, and dates that label from `evolution.snapshots`' **last** point — the
+/// same `metric_snapshots` row the pair is projected from (the series is emitted
+/// `ORDER BY id` and windowed to its tail; the snapshot is read
+/// `ORDER BY id DESC LIMIT 1`). The CR's §8 assumption — that the timestamp
+/// needed to date the label is already in the payload, with no schema change —
+/// is therefore **discharged as confirmed**, and no field was added here: both
+/// facts the classification needs (`status.indexed` and that date) are already
+/// serialized. The separate reads stay separate: the date qualifies the figures,
+/// it is never an operand of the verdict, so a `scan` landing between them could
+/// move only the date.
+///
 /// [S-406]: ../../docs/planning/journal.md#s-406-a-readout-names-a-step-that-can-change-what-it-reports
 /// [CR-135]: ../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
 pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {

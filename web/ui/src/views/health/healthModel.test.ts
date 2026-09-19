@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import type { MetricSnapshot, MetricValue, ScanResult } from "../../api/types.ts";
+import type {
+  EvolutionPoint,
+  EvolutionReport,
+  MetricSnapshot,
+  MetricValue,
+  ScanResult,
+  StatusInfo,
+} from "../../api/types.ts";
 import {
   aggregateSignal,
   metricRows,
   optDelta,
   optSignal,
   shortSha,
+  snapshotStaleness,
   structuralDetails,
 } from "./healthModel.ts";
 
@@ -46,6 +54,37 @@ function scan(over: Partial<ScanResult> = {}): ScanResult {
     warnings: [],
     ...over,
   };
+}
+
+function status(indexed: boolean): StatusInfo {
+  return {
+    indexed,
+    file_count: 1,
+    node_count: 1,
+    edge_count: 1,
+    db_path: "",
+    db_size_bytes: 0,
+    last_full_index_at: null,
+    last_sync_at: null,
+    graph_revision: 1,
+    refs_total: 0,
+    refs_resolved: 0,
+    refs_unresolved: 0,
+    resolution_coverage: 0,
+    total_line_count: null,
+    source_line_count: null,
+    test_line_count: null,
+    freshness: "",
+    warnings: [],
+  };
+}
+
+function point(over: Partial<EvolutionPoint> = {}): EvolutionPoint {
+  return { snapshot_id: 1, created_at: 1_726_704_000, commit_sha: null, signal: 8000, signal_delta: null, ...over };
+}
+
+function evolution(...points: EvolutionPoint[]): EvolutionReport {
+  return { snapshots: points, warnings: [] };
 }
 
 describe("metricRows", () => {
@@ -101,5 +140,36 @@ describe("formatting helpers", () => {
   it("shortSha abbreviates to 9 chars, dashes an absent commit", () => {
     expect(shortSha("0123456789abcdef")).toBe("012345678");
     expect(shortSha(null)).toBe("—");
+  });
+});
+
+// CR-135 §3.2: `status.indexed` gates the STALENESS of a populated signal, never
+// the CAUSE of an absent one — `signalAbsence` still owns that question and is
+// untouched (§3.3).
+describe("snapshotStaleness", () => {
+  it("is null while the graph is still indexed — the ordinary case cannot reach the branch", () => {
+    expect(snapshotStaleness(status(true), evolution(point()))).toBeNull();
+    expect(snapshotStaleness(status(true), evolution())).toBeNull();
+  });
+
+  it("dates the stale label by the LAST snapshot in the series, not the first", () => {
+    const stale = snapshotStaleness(
+      status(false),
+      // Oldest-first, as `governance::evolution` emits it: the tail is the row
+      // `latest_metric_snapshot` reads (both order by `id`).
+      evolution(
+        point({ snapshot_id: 1, created_at: 1_726_704_000 }),
+        point({ snapshot_id: 2, created_at: 1_758_240_000 }),
+      ),
+    );
+    expect(stale).toEqual({ date: "2025-09-19" });
+  });
+
+  it("leaves the date null rather than fabricating one when the series carries no point", () => {
+    expect(snapshotStaleness(status(false), evolution())).toEqual({ date: null });
+  });
+
+  it("leaves the date null for a timestamp that is not a representable instant", () => {
+    expect(snapshotStaleness(status(false), evolution(point({ created_at: 8.64e15 })))).toEqual({ date: null });
   });
 });

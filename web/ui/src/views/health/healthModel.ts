@@ -55,6 +55,62 @@ export function signalAbsence(status: StatusInfo, evolution: EvolutionReport): S
   return "no-production-scope";
 }
 
+/**
+ * A populated signal that describes a graph which is **no longer indexed**.
+ *
+ * The staleness twin of [`SignalAbsence`](#signalabsence), and deliberately a
+ * *separate* question from it ([CR-135] §3.3): `signalAbsence` classifies why
+ * there is **no** signal and is untouched here; this classifies a signal that
+ * exists but that `status.indexed` says describes a graph that has since been
+ * de-indexed. Conflating the two is the exact error [S-406]'s review caught —
+ * `status.indexed` is a whole-graph fact, and it answers staleness, never cause.
+ *
+ * The figures are **labelled, not suppressed**: they are genuine history, and
+ * hiding them would discard real information while adding a fourth cause to a
+ * three-way absence classification just settled under review ([CR-135] §10).
+ *
+ * [CR-135]: ../../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+ */
+export interface StaleSnapshot {
+  /** The snapshot's UTC calendar date, `YYYY-MM-DD`; `null` when the payload
+   *  carries no dated point to take it from — an undated label, never a
+   *  fabricated date (NFR-CC-04). */
+  date: string | null;
+}
+
+/**
+ * Classify a **populated** signal as describing a graph that is no longer
+ * indexed, or `null` for the ordinary case.
+ *
+ * `null` means "render exactly as before": every caller branches on it, so the
+ * staleness wording cannot reach an indexed project. Derived once for the whole
+ * page, like `signalAbsence`, so the gate band and the quality grid cannot
+ * disagree about whether what they show is current.
+ *
+ * The date comes from the evolution series' **last** point. That is the same
+ * `metric_snapshots` row the gate verdict and the scan result are projected from
+ * — `governance::evolution` emits the series `ORDER BY id` and keeps its tail,
+ * and `latest_metric_snapshot` reads `ORDER BY id DESC LIMIT 1`. It is read
+ * separately from the snapshot (`web/src/api_v1.rs`), so it dates the label
+ * rather than feeding the verdict: a `scan` landing between the two reads could
+ * only move the date, never the figures.
+ */
+export function snapshotStaleness(status: StatusInfo, evolution: EvolutionReport): StaleSnapshot | null {
+  if (status.indexed) return null;
+  return { date: snapshotDate(evolution) };
+}
+
+/** The last recorded snapshot's UTC calendar date, or `null` when the series is
+ *  empty or the stored instant is not representable. Module-private: the one
+ *  seam onto this fact is `snapshotStaleness`. */
+function snapshotDate(evolution: EvolutionReport): string | null {
+  const last = evolution.snapshots[evolution.snapshots.length - 1];
+  if (last === undefined) return null;
+  const at = new Date(last.created_at * 1000);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.toISOString().slice(0, 10);
+}
+
 /** One row of the quality-signal grid: a metric name and its value, or `null` for
  *  an applicability drop-out (Cohesion/Focus with no applicable construct). */
 export interface MetricRow {
