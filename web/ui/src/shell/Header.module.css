@@ -91,8 +91,8 @@
 
 /* Below tablet. The brand subtitle gives way second, leaving the mark and the
    wordmark, which are what make the lockup a recognisable home link; the row also
-   tightens by one spacing step, which is the width that keeps a workspace member
-   selector inside a 420px viewport. */
+   tightens from `--space-6` to `--space-4`, two steps down the ramp, which is the
+   width that keeps a workspace member selector inside a 420px viewport. */
 @media (max-width: 767px) {
   .brandSub {
     display: none;
