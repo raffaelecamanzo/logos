@@ -791,8 +791,8 @@ fn extract_one(
 ///
 /// A language adding such a row owes the compensating scope in its own
 /// `invocations.scm`: **every pattern anchored to a named client**, and it must
-/// **not** ship the broad `<receiver>.<method>(<arg>)` anchor Rust relies on this
-/// gate to bound — with a tautological gate behind it, that anchor reopens the
+/// **not** ship the broad `<receiver>.<method>(<arg>)` anchor with nothing but
+/// this gate behind it — with a tautological gate behind it, that anchor reopens the
 /// CR-110 fabrication class (`formGroup.get("year")`, `cache.get("/cache/key")`)
 /// with nothing standing behind it but the leading-`/` requirement and
 /// `route_key` ([NFR-RA-05]).
@@ -903,8 +903,7 @@ fn extract_one(
 ///   never matched leaves no site for any pass to judge, so it emits no
 ///   reference *and* surfaces no reason. Every stated capture ceiling is in this
 ///   class: Java's verb-suffixed `RestTemplate` methods and `exchange`, OpenFeign
-///   interfaces, a receiver a language's receiver rule declines (Java's S-375
-///   rule, Go's S-402 one), a chained receiver,
+///   interfaces, a receiver a language's own receiver rule declines, a chained receiver,
 ///   a language shipping no `invocations` query at all. These are invisible by
 ///   construction and cannot be made visible by a refusal ledger — only by a
 ///   query that matches them. The narrowing is deliberate: recording a refusal

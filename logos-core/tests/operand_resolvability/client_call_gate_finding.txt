@@ -275,3 +275,97 @@ correction per CR-110, as S-402 did at 37 -> 11.
 sixth criterion — it is the only one of the six arms with no pin at all, and an
 unpinned ceiling is prose, which cannot fail. That pin is in this module and
 does not depend on a corpus.
+
+
+────────────────────────────────────────────────────────────────────────────
+APPENDIX — S-423, 2026-09-19. The rust port landed; what above is now HISTORY.
+
+Appended, never edited: every line above this rule is byte-identical to what
+S-404 committed, because a re-measurement that rewrites its own premise cannot
+be checked against it. What follows is the outcome the note two paragraphs up
+asks the port to record.
+
+S-423 made rust's arm receiver-grained. Re-run through THIS harness, same
+corpus, same machine, same day as the before-run, so the unstable FILE
+denominator did not move between them:
+
+  language  status     files  gated  sites  non-HTTP     refs/refu
+  rust      MEASURED   17367     85    293  118 ( 40%)   69/130    (before)
+  rust      MEASURED   17367     85    175    0 (  0%)   69/ 60    (after)
+
+The gate's own verdict flips from "CLEARS — a receiver-rule port is justified"
+to "CLOSES OUT — every captured site is on a client-named receiver". That is
+not a coincidence and it is worth stating why: the shipped rule's accept-set was
+written to be this module's `Arm::Rust` vocabulary spelled in rust's own casing,
+so the 175 sites that survive are exactly the six receivers the HTTP-named
+column above enumerates — `client` (152), `http` (8), `self.client` (5),
+`self .http_client` (4), `http_client` (3), `reqwest::Client::new()` (3). The
+census did not merely justify the port; it specified it.
+
+TWO READINGS THAT ARE NOT THE SAME, and the table conflates them if read fast:
+
+  * REFERENCES are UNCHANGED at 69. Not one of the 118 removed sites was
+    writing a reference over this corpus. So the fabrication harm this document
+    names — a non-HTTP site whose argument is an absolute-path literal becoming
+    a cross-service REFERENCE — was real in the code and unexercised in the
+    corpus. The pin's `router.get("/config/features")` fixture models it
+    because the mechanism is real, not because this corpus produced it, and
+    saying otherwise would read a corpus's silence as a property of the arm —
+    the exact move the GATE-UNEXERCISED variant exists to forbid.
+  * REFUSAL ROWS fall 130 -> 60. That is the whole of the measured gain: 70
+    keyless rows off the `base-url-runtime` denominator (FR-WS-05). 70 and not
+    118, because a refusal row is deduped per declaring declaration.
+
+The predicted drop was "bounded below by 99 and above by 118". It came in at
+118 — the upper bound, which is where the 19 ambiguous sites went. At least two
+of those were genuine calls (`rmcp-1.7.0/…/streamable_http_client.rs:98`, a
+`self.delete(uri)` inside an `impl … for reqwest::Client`), and refusing them is
+the `self` ceiling the query header now states and prices.
+
+WHAT MOVED IN THIS MODULE. `a_non_client_receiver_call_inside_a_reqwest_file_
+is_a_stated_ceiling` keeps its name and pins a DIFFERENT thing: the residual is
+no longer any receiver inside a client file, but a non-HTTP collaborator spelled
+`client`. Its old fixtures — the header map and the `HashMap` router lookup —
+moved to `the_census_shapes_a_receiver_rule_refuses_are_no_longer_captured`,
+which asserts they now capture nothing at all. So the two-harms-separately
+reading described above under S-402'S TRAP is now split across two tests rather
+than held in one; the shapes and the reasoning are unchanged.
+
+The positive control held, exactly as this document predicted it would: the bare
+word `client` survives the port, so `a_route_shaped_get_outside_a_reqwest_file_
+is_not_captured` still separates the two ledger-gate cases. It now carries its
+own gated half rather than borrowing the neighbouring test's, which is the
+correction `6554e008` made to two Go fixtures for the same reason.
+
+ADDENDUM to the appendix — S-423 review, same day. The receiver rule shipped by
+this story was NARROWED during review and the table above did not move.
+
+Two over-capture classes were reproduced against the production extract pass and
+closed. Both came from putting the six detector CRATE names where only the
+compound token `http_client` belongs:
+
+  * as a bounded prefix/suffix, they admitted `hyper_headers`, `hyper_response`,
+    `hyper_body` and `reqwest_cache` — and those three `hyper_*` names are real
+    identifiers in this very corpus (36, 44 and 38 occurrences), while a header
+    map is the largest non-HTTP bucket this document records. The rule was
+    re-admitting its own subject under a second spelling.
+  * in the `::` path alternative, admitting a path because ANY segment was
+    `Client` admitted `redis::Client::open(…)` and `jobserver::Client::from_env(…)`
+    — the same objects the rule refuses when spelled `redis_client`.
+
+The crate names now appear only at the HEAD of a `::` path. Re-measured through
+this harness a third time, same corpus, same machine, same day: 17367 files, 85
+gated, 175 sites, 0 (0%) non-HTTP-named, 69 references / 60 refusal rows, and the
+same six receivers — every column byte-identical to the "after" row above. The
+narrowing costs ZERO sites here, as S-402's equivalent narrowing did on the
+reference estate.
+
+Neither class was visible to this document's own gate, and that is worth
+recording rather than glossing: `is_client_named(Rust, "hyper_headers")` is TRUE
+via the `hyper` token run, so both classes would have been counted in the
+HTTP-named column and the headline would still have read 0 (0%). The census
+harness's vocabulary is deliberately wider than the shipped rule and has not been
+narrowed to match — narrowing it would move the BEFORE figure and break the
+comparison this document exists to support. The consequence is that "0 (0%)" is
+guaranteed by construction, not discovered; the site count and the two written
+populations are the figures that carry information.
