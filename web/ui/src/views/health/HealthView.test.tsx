@@ -226,6 +226,20 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
   });
 
+  // A stale verdict keeps the figures it recorded, and a FAIL recorded before the
+  // de-index is still a FAIL. Nothing pinned this: hardcoding "PASS" in the stale
+  // band left the whole suite green.
+  it("carries the recorded FAIL verdict, not a PASS, when the stale snapshot failed (CR-135)", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    m.gate.passed = false;
+    m.gate.signal = 7000;
+    stub(m);
+    render(<HealthView />);
+    expect(await screen.findByText(/FAIL · signal 7000 vs baseline 7800/)).toBeInTheDocument();
+    expect(screen.queryByText(/PASS · signal/)).not.toBeInTheDocument();
+  });
+
   // The tone is the contract this view got WRONG on the way in, so it is pinned
   // rather than left to the eye: `Callout` documents "signal — red (GATE/FAIL,
   // STALE, …)", `Badge` documents "red — fail / error / stale", and the SPA's
