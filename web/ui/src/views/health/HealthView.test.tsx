@@ -2,6 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
+import { Badge, Callout } from "../../components/index.ts";
 import { HealthView } from "./HealthView.tsx";
 
 function mv(n: number): MetricValue {
@@ -223,6 +224,40 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
     // …but the unqualified current-verdict wording is gone.
     expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
+  });
+
+  // The tone is the contract this view got WRONG on the way in, so it is pinned
+  // rather than left to the eye: `Callout` documents "signal — red (GATE/FAIL,
+  // STALE, …)", `Badge` documents "red — fail / error / stale", and the SPA's
+  // three other STALE chips are all red. Hash-agnostic, like ScoreBar's tone
+  // test: render a reference chip of the intended tone and compare class names,
+  // never a literal CSS-module hash.
+  it("renders the STALE band and chip in the signal/red tone, not the in-flight orange (CR-135)", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    stub(m);
+    render(<HealthView />);
+    const chip = await screen.findByText("STALE");
+
+    // Reference renders of the intended tones, queried the same way as the
+    // subject so the comparison is class-for-class.
+    const chipClass = (tone: "red" | "orange") => {
+      const { container } = render(<Badge tone={tone}>REF</Badge>);
+      return within(container).getByText("REF").className;
+    };
+    const bandClass = (tone: "signal" | "warm") => {
+      const { container } = render(
+        <Callout label="Gate" tone={tone}>
+          <span>ref</span>
+        </Callout>,
+      );
+      return container.querySelector("section")?.className ?? "";
+    };
+
+    expect(chip.className).toBe(chipClass("red"));
+    expect(chip.className).not.toBe(chipClass("orange"));
+    expect(chip.closest("section")?.className).toBe(bandClass("signal"));
+    expect(chip.closest("section")?.className).not.toBe(bandClass("warm"));
   });
 
   // The other half of the same contract: the staleness branch must not leak into
