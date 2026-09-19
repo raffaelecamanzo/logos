@@ -25,7 +25,6 @@
   color: var(--text-2);
   font-family: var(--font-mono);
   white-space: nowrap;
-  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -45,7 +44,6 @@
   padding: var(--space-1) var(--space-2);
   min-width: 8rem;
   max-width: 18rem;
-  flex: 0 1 auto;
 }
 
 .select:hover {
@@ -56,7 +54,10 @@
    With the label's words still in the row the control was measured at 29px, which
    is present but not usable, and "reachable" is the acceptance criterion. So the
    label's WORDS give way and its function does not: visually-hidden geometry (the
-   `.sr-only` shape from base.css) keeps it in the accessibility tree as the
+   `.sr-only` shape from base.css, copied rather than composed: `composes` is
+   compile-time class concatenation, so a composition under `@media` does not error
+   — it silently loses its condition and hides the label at every width) keeps it in
+   the accessibility tree as the
    select's accessible name. The member name itself stays on screen — it is the
    select's own value — so the figures a wider viewport shows can never be read
    against the wrong name (FR-UI-29). */
@@ -72,4 +73,17 @@
     white-space: nowrap;
     border: 0;
   }
+}
+
+/* The probe-fault badge (the `error` branch) is a DIRECT child of the header row —
+   there is no `.selector` around it — so it gets the row's width concessions here
+   or not at all. `Badge` is `white-space: nowrap` by default, because a status chip
+   is normally three words; this one is four long ones, measured at 254px, which
+   overflowed a 420px viewport by 29px and pushed the theme toggle off-screen. It
+   WRAPS rather than shrinks: an error the reader cannot read is not a reported
+   error (NFR-RA-05), so nothing here truncates it. */
+.fault {
+  min-width: 0;
+  white-space: normal;
+  text-align: center;
 }
