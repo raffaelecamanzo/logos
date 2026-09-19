@@ -276,19 +276,29 @@ describe("Header graph-state readout (S-315, FR-UI-34, CR-097)", () => {
 // against a live `serve --ui` and recorded in the implementation notes, which is
 // where the acceptance criterion puts it.
 
-/** The header's one graph-state slot: its only `<span>` child. The brand lockup
- *  is an `<a>`, the spacer a `<div>`, the member selector a `<div>` and the theme
- *  toggle a `<button>`, so the slot is identified structurally rather than by a
- *  class name this suite cannot see. The narrow tier hides exactly this element,
- *  so every readout state must render INSIDE it: a badge rendered as its sibling
- *  would survive the breakpoint and report a fault in the dropped readout's
- *  place, which is the failure NFR-CC-04 and NFR-RA-05 forbid. */
+/** The header's graph-state slot: its LAST `<span>` child. The brand lockup is an
+ *  `<a>`, the spacer a `<div>`, the member selector a `<div>` and the theme toggle
+ *  a `<button>`, so the slot is identified structurally rather than by a class name
+ *  this suite cannot see.
+ *
+ *  Last, not only: the member selector renders a `Badge` — also a `<span>`, also a
+ *  direct child, and rendered BEFORE the slot — when its workspace probe faults.
+ *  An earlier draft asserted there was exactly one span child and would have picked
+ *  that badge had the assertion been relaxed. `labelledSpanChildren` below pins the
+ *  two apart so this stays a structural fact rather than an ordering accident.
+ *
+ *  The narrow tier hides exactly this element, so every state OF THE READOUT must
+ *  render inside it: a readout badge rendered as its sibling would survive the
+ *  breakpoint and stand in the dropped readout's place, which is the failure
+ *  NFR-CC-04 and NFR-RA-05 forbid. The workspace-probe badge is a different signal
+ *  about a different subject (the member axis, not the graph), reports a fault that
+ *  genuinely occurred, and deliberately does NOT give way — see its own spec. */
 function graphStateSlot(): HTMLElement {
   const header = document.querySelector("header");
   expect(header).not.toBeNull();
   const spans = [...header!.children].filter((el): el is HTMLElement => el.tagName === "SPAN");
-  expect(spans).toHaveLength(1);
-  return spans[0];
+  expect(spans.length).toBeGreaterThan(0);
+  return spans[spans.length - 1];
 }
 
 describe("Header progressive disclosure (S-317, FR-UI-34, UAT-UI-11)", () => {
@@ -311,16 +321,19 @@ describe("Header progressive disclosure (S-317, FR-UI-34, UAT-UI-11)", () => {
     expect(graphStateSlot()).toContainElement(badge);
   });
 
-  it("renders the connecting and not-indexed states inside it too", async () => {
+  it("renders the connecting state inside it too", async () => {
     mockProbe.mockResolvedValue({ mode: "single" });
     // A read that never settles, so the loading state is observable.
     get.mockReturnValue(new Promise(() => {}));
     render(withTheme(<Header />));
-    expect(graphStateSlot()).toContainElement(await screen.findByText("Connecting…"));
-    cleanup();
 
+    expect(graphStateSlot()).toContainElement(await screen.findByText("Connecting…"));
+  });
+
+  it("renders the not-indexed state inside it too", async () => {
     singleRoot(indexed({ indexed: false, node_count: 0, edge_count: 0, graph_revision: 0 }));
     render(withTheme(<Header />));
+
     expect(graphStateSlot()).toContainElement(await screen.findByText(/not indexed/i));
   });
 
@@ -336,6 +349,30 @@ describe("Header progressive disclosure (S-317, FR-UI-34, UAT-UI-11)", () => {
 
     const selector = screen.getByRole("combobox");
     expect(graphStateSlot()).not.toContainElement(selector);
+  });
+
+  it("keeps the workspace-probe fault OUT of the slot — it is a different signal", async () => {
+    // Found in review. `MemberSelector` renders its probe fault as a `Badge` — a
+    // `<span>`, a DIRECT child of the header, sitting before the slot — so the
+    // 1023px rung does not drop it and it stands where the readout was. That is
+    // correct and deliberate: it reports a fault that genuinely occurred, about the
+    // MEMBER AXIS rather than the graph, and a workspace whose roster could not be
+    // read must say so at every width (FR-UI-29, NFR-RA-05). What it must not do is
+    // overflow the row, which it did — measured at 254px and 29px of overflow at
+    // 420px, pushing the theme toggle off-screen — so it now carries its own width
+    // concession. This spec pins the structure the CSS rule depends on.
+    mockProbe.mockRejectedValue(new Error("probe exploded"));
+    get.mockResolvedValue(indexed());
+    const { container } = render(withTheme(<Header />));
+
+    const fault = await screen.findByText("Workspace status unavailable");
+    const header = container.querySelector("header");
+    // A direct child of the header, not inside the graph-state slot…
+    expect(fault.parentElement).toBe(header);
+    expect(graphStateSlot()).not.toContainElement(fault);
+    // …and it precedes the slot, which is why the slot is the LAST span child.
+    const spans = [...header!.children].filter((el) => el.tagName === "SPAN");
+    expect(spans.indexOf(fault)).toBeLessThan(spans.indexOf(graphStateSlot()));
   });
 
   it("carries no inline style — disclosure is class-driven, the CSP is untouched", async () => {
