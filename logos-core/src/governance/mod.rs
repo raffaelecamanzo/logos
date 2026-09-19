@@ -67,10 +67,10 @@ use crate::graph_store::{
 use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
-    DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint, EvolutionReport,
-    GateResult, HealthInfo, MetricDelta, MetricRegression, MetricSnapshot, MetricValue,
-    QualityReadout, RulesReport, ScanResult, SessionInfo, TemporalTier, VerifyCensus, VerifyReport,
-    Violation,
+    CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint,
+    EvolutionReport, GateResult, HealthInfo, MetricDelta, MetricRegression, MetricSnapshot,
+    MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo, TemporalTier, VerifyCensus,
+    VerifyReport, Violation,
 };
 use crate::runtime::Runtime;
 
@@ -2039,12 +2039,17 @@ pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
 ///   path is shared verbatim with [`gate`], so the two can never disagree.
 /// - **Violations read from the persisted table**, not re-evaluated: [FR-GV-02]'s
 ///   evaluator re-materialises the whole derived policy graph on every run
-///   (BR-12), which is a write. `violations: None` means *nothing is recorded*,
-///   which is irreducibly ambiguous — `check_rules` clears and rewrites the
-///   table per run, so a clean check and no check at all leave it identical.
-///   The readout surfaces that ambiguity rather than resolving it by guessing;
-///   asserting "0 violations" would claim a passing check that may never have
-///   happened.
+///   (BR-12), which is a write. The table alone cannot say whether a run
+///   happened — `check_rules` clears and rewrites it, so a clean check and no
+///   check at all leave it identical — so the [FR-GV-21] marker is read
+///   alongside it ([CR-096]). The marker resolves the ambiguity as a recorded
+///   fact rather than a guess: its presence dates and attributes the findings
+///   and licenses stating a *recorded clean* check ([BR-41]); its absence means
+///   no run has happened, which is reported as such and never as a pass.
+///
+/// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+/// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+/// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
 ///
 /// `message_cap` bounds the returned message list; `violation_count` always
 /// carries the true total so a truncated list can say what it dropped.
@@ -2097,22 +2102,73 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         _ => None,
     };
 
-    // The persisted findings of the last `check_rules` run. An empty table is
-    // irreducibly ambiguous — a clean check and no check at all leave it
-    // identical — so it maps to `None` ("nothing recorded") and the rendering
-    // says so, rather than claiming a clean bill of health nobody issued.
-    let rows = runtime.submit_read(|store| store.violations())?;
+    // The persisted findings of the last `check_rules` run, and — since
+    // [CR-096] — the marker recording that the run happened at all. The table
+    // alone is irreducibly ambiguous (`check_rules` clears and rewrites it, so
+    // a clean run and no run leave it identical); the marker is the only place
+    // that distinction lives, which is why both are read here.
+    let (rows, marker) = runtime.submit_read(|store| Ok((store.violations()?, store.check_run()?)))?;
+    let row_count = rows.len();
     let (violations, violation_count) = if rows.is_empty() {
         (None, None)
     } else {
-        let total = rows.len();
         let messages = rows
-            .into_iter()
+            .iter()
             .take(message_cap)
-            .map(|row| row.message)
+            .map(|row| row.message.clone())
             .collect();
-        (Some(messages), Some(total))
+        (Some(messages), Some(row_count))
     };
+
+    // Two sources, deliberately not equally authoritative (see `CheckRun`): the
+    // marker when one exists, otherwise the rows' own `created_at`, which a
+    // store written before the marker migration still carries. The fallback is
+    // what lets such a store date its existing findings immediately, with no
+    // re-index and nothing invented.
+    let now = unix_now();
+    let check = match &marker {
+        Some(row) => Some(CheckRun {
+            ran_at: row.ran_at,
+            age_seconds: now - row.ran_at,
+            commit_sha: row.commit_sha.clone(),
+            head_sha: fresh.head.clone(),
+            // An unresolvable HEAD on either side is never *treated* as a moved
+            // tree — the comparison is omitted, never guessed ([NFR-RA-05]),
+            // mirroring the coverage artifact's staleness rule.
+            tree_moved: match (&row.commit_sha, &fresh.head) {
+                (Some(recorded), Some(head)) => recorded != head,
+                _ => false,
+            },
+            recorded_count: Some(row.violation_count),
+        }),
+        // Every row of one run carries that run's time, so any of them dates
+        // it; the first is taken for determinism. No marker means no recorded
+        // HEAD and no recorded total, so neither a tree comparison nor a clean
+        // assertion can be drawn from this — and `recorded_count: None` is what
+        // says so.
+        None => rows.first().map(|row| CheckRun {
+            ran_at: row.created_at,
+            age_seconds: now - row.created_at,
+            commit_sha: None,
+            head_sha: fresh.head.clone(),
+            tree_moved: false,
+            recorded_count: None,
+        }),
+    };
+
+    // One transaction writes the marker and the rows, so these can only
+    // disagree on a store that has been edited underneath Logos or has lost a
+    // write. Report it rather than resolving it: silently preferring either
+    // figure would let a marker claiming a clean run over a table holding
+    // findings render as "clean" — the precise fabrication [BR-41] forbids.
+    if let Some(recorded) = marker.as_ref().map(|m| m.violation_count) {
+        if recorded != row_count as i64 {
+            warnings.push(format!(
+                "the check-run marker records {recorded} violation(s) but {row_count} row(s) are \
+                 stored — the store disagrees with itself; re-run `logos check`"
+            ));
+        }
+    }
 
     Ok(QualityReadout {
         signal: metrics.aggregate_signal,
@@ -2121,6 +2177,7 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         freshness: fresh.line(),
         violations,
         violation_count,
+        check,
         warnings,
     })
 }

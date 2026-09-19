@@ -1671,13 +1671,61 @@ Two consequences worth knowing:
   blessed baseline reads `no baseline saved`, not a delta against zero. A baseline
   scored under a different metric version or threshold set reads
   `not comparable` with no delta invented.
-- **The violations are as of your last [`check`](#check---rules-file---allow-no-rules)**, and say so. Re-evaluating
-  the rules re-materialises the derived policy graph, which is a write — so the
-  readout reports what was last recorded rather than paying a write to look
-  current. An empty findings table reads `none recorded`, never `0 violations`:
-  a clean check and no check at all leave it identically empty, and the readout
-  will not claim a pass that may never have happened. Run
+- **The violations are as of your last [`check`](#check---rules-file---allow-no-rules)**, and say so — with a
+  date. Re-evaluating the rules re-materialises the derived policy graph, which
+  is a write, so the readout reports what was last recorded rather than paying a
+  write to look current. What it adds is *how stale* that is, so you can tell a
+  live finding from an archaeological one. Run
   [`check`](#check---rules-file---allow-no-rules) when you want current findings.
+
+**The violations line, in full** ([FR-IN-07](../specs/requirements/FR-IN-07.md),
+[CR-096](../requests/CR-096-recorded-check-marker.md)). Every
+[`check`](#check---rules-file---allow-no-rules) records a marker — the run's
+time, the `HEAD` it saw, and how many violations it found — and the readout
+renders one of four lines from it:
+
+```text
+rule violations: 3 (as of `logos check` at HEAD ff657f5, 6 days ago)
+rule violations: 0 — clean `logos check` at HEAD e5eddac, 4 minutes ago
+rule violations: 3 (as of `logos check` at HEAD ff657f5, 6 days ago; measured against a different tree — HEAD is now a1b2c3d)
+rule violations: none recorded (no `logos check` has run)
+```
+
+Four rules govern which one you get, and each exists to stop the readout
+asserting something it cannot establish:
+
+- **A clean check may be stated as clean — but only from the marker.** A run
+  that found nothing records `violation_count = 0`, which is precisely what an
+  empty findings table cannot express: [`check`](#check---rules-file---allow-no-rules)
+  clears and rewrites that table, so a clean run and a project nobody ever
+  checked leave it identically empty. With the marker the distinction is a
+  recorded fact, so the readout states it. Without one it says **no check has
+  run** — never `0 violations`, and never a clean result.
+- **Staleness is a property of the tree, not just the clock.** When the marker's
+  `HEAD` differs from your current `HEAD`, the line says the finding was
+  *measured against a different tree*. With only an age, a check against the
+  code you are looking at and one against code that has since changed render
+  identically. The recorded `HEAD` means "what `HEAD` was when this ran" — it
+  does **not** claim the findings were introduced by that commit.
+- **Nothing absent is defaulted.** A run on a tree with no resolvable `HEAD`
+  (no git, no commits) omits the `at HEAD …` clause and the tree comparison
+  rather than printing a placeholder, and an unresolvable *current* `HEAD` is
+  never treated as a moved tree.
+- **Uncommitted edits are deliberately not consulted.** The readout fires at
+  every session start, resume and `/clear`; shelling out to `git status` on each
+  one is the per-firing cost this command exists to avoid. So a clean check can
+  be current by `HEAD` and yet invalidated by unstaged work — which is why the
+  assertion is never printed bare, always with its age and `HEAD`.
+
+A store written before the marker was introduced has findings but no marker. It
+needs no re-index: those rows carry their own timestamp, so they are dated
+straight away — but with no recorded `HEAD` they are attributed to no tree, and
+no clean check can be claimed from them until the next
+[`check`](#check---rules-file---allow-no-rules).
+
+Reading all of this **writes nothing**: the marker's row count and content are
+as unchanged by a `quality-report` as the snapshot series is. Reading a run is
+not running one.
 
 `--hook-json` renders the same read-model as the agent-host session-start payload
 (`systemMessage` + `hookSpecificOutput.additionalContext`). It exists for the
