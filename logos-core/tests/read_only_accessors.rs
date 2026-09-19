@@ -249,6 +249,20 @@ fn drop_check_run_marker(repo: &Path) {
         .expect("delete the marker");
 }
 
+/// The repo's actual `HEAD`, read independently of the engine — so a test can
+/// assert the readout reports the real sha rather than merely *a* sha. Asserting
+/// `is_some()` let a hardcoded `"deadbeef…"` pass every test in this file.
+fn head_sha(repo: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git is on PATH");
+    assert!(out.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8(out.stdout).expect("utf8").trim().to_string()
+}
+
 /// The readout's own record of the last check, or a panic naming what it said
 /// instead — every assertion below is about this record's content.
 fn check_record(engine: &Engine) -> logos_core::models::quality::CheckRun {
@@ -280,9 +294,15 @@ fn a_recorded_clean_check_is_reported_as_clean_with_its_head() {
         Some(0),
         "a recorded clean run — the state the empty table cannot express (FR-GV-21)"
     );
-    assert!(
-        record.commit_sha.is_some(),
-        "the fixture is a git repo, so the run recorded the HEAD it saw"
+    assert_eq!(
+        record.commit_sha.as_deref(),
+        Some(head_sha(tmp.path()).as_str()),
+        "the run recorded the HEAD it actually saw, not merely some sha"
+    );
+    assert_eq!(
+        record.head_sha.as_deref(),
+        Some(head_sha(tmp.path()).as_str()),
+        "and the readout compares against the real current HEAD"
     );
     assert!(
         !record.tree_moved,
@@ -325,7 +345,11 @@ fn a_breaching_check_records_a_count_that_matches_its_own_output() {
         "a consistent store raises no disagreement warning: {:?}",
         readout.warnings
     );
-    assert!(record.commit_sha.is_some(), "the findings are attributed to a HEAD");
+    assert_eq!(
+        record.commit_sha.as_deref(),
+        Some(head_sha(tmp.path()).as_str()),
+        "the findings are attributed to the HEAD they were measured at"
+    );
 }
 
 /// Committing after a check moves `HEAD` without re-running it. The readout
@@ -338,10 +362,13 @@ fn a_commit_after_the_check_marks_the_finding_as_measured_against_another_tree()
     let engine = Engine::start(tmp.path()).expect("engine starts");
     engine.check_rules(None, true).expect("check runs");
 
+    let checked_at_head = head_sha(tmp.path());
     let before = check_record(&engine);
     assert!(!before.tree_moved, "no commit yet, so the tree has not moved");
 
     commit(tmp.path(), "src/c.rs", "pub fn c() -> i64 { 1 }\n", "add c");
+    let moved_head = head_sha(tmp.path());
+    assert_ne!(moved_head, checked_at_head, "the fixture really did move HEAD");
 
     let after = check_record(&engine);
     assert!(
@@ -352,9 +379,17 @@ fn a_commit_after_the_check_marks_the_finding_as_measured_against_another_tree()
         after.ran_at, before.ran_at,
         "the recorded run itself is untouched — only the tree moved"
     );
-    assert_ne!(
-        after.commit_sha, after.head_sha,
-        "the two shas the comparison is drawn from are both carried, and differ"
+    // Both shas pinned to the real commits, not merely asserted to differ: a
+    // hardcoded constant in either field satisfies `assert_ne!` forever.
+    assert_eq!(
+        after.commit_sha.as_deref(),
+        Some(checked_at_head.as_str()),
+        "the marker still names the commit the check actually ran against"
+    );
+    assert_eq!(
+        after.head_sha.as_deref(),
+        Some(moved_head.as_str()),
+        "and the comparison is against the commit HEAD actually moved to"
     );
 }
 
