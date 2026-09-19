@@ -240,6 +240,22 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.queryByText(/PASS · signal/)).not.toBeInTheDocument();
   });
 
+  // The undated fallback was pinned at the model level but never in rendered DOM,
+  // so its wording could be changed freely with the suite green. It is reachable
+  // whenever the series carries no point to date the label by.
+  it("renders the undated fallback rather than a fabricated date when nothing dates the snapshot", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    m.evolution.snapshots = []; // populated signal, but no point to date it by
+    stub(m);
+    render(<HealthView />);
+    expect((await screen.findAllByText(/Describes the last recorded snapshot/i)).length).toBe(2);
+    // Still labelled, still dateless, still naming the step — never a made-up date.
+    expect(screen.getAllByText(/no longer indexed/i).length).toBe(2);
+    expect(screen.getAllByText("logos index").length).toBe(2);
+    expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
+  });
+
   // The tone is the contract this view got WRONG on the way in, so it is pinned
   // rather than left to the eye: `Callout` documents "signal — red (GATE/FAIL,
   // STALE, …)", `Badge` documents "red — fail / error / stale", and the SPA's
