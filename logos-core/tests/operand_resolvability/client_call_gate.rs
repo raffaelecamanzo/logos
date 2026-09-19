@@ -1284,9 +1284,16 @@ fn the_receiver_reduction_runs_over_each_arms_real_grammar() {
     }
 
     // Rust: a plain receiver, and the `::` path whose LAST segment is `new()`.
+    //
+    // The plain receiver is spelled `client` rather than the single letter `c`
+    // this fixture used before S-423: Rust's arm is receiver-grained now, and a
+    // single-letter receiver is one of the ceilings it states, so `c.get("/a")`
+    // yields no site for the reduction to run over. The fixture is about
+    // `receiver_of`'s handling of a bare identifier, and `client` exercises that
+    // path identically while still being captured.
     assert_eq!(
-        receivers("rs", "use reqwest::Client;\nfn f(c: &Client) { let _ = c.get(\"/a\"); }\n"),
-        vec!["c".to_string()],
+        receivers("rs", "use reqwest::Client;\nfn f(client: &Client) { let _ = client.get(\"/a\"); }\n"),
+        vec!["client".to_string()],
     );
     assert_eq!(
         receivers(
@@ -1354,8 +1361,22 @@ fn the_receiver_reduction_runs_over_each_arms_real_grammar() {
 
     // The shape the reduction declares it does NOT normalise, pinned as the
     // stated limit it is rather than left as prose.
+    //
+    // Driven through RUBY, not Rust. It was a Rust fixture until S-423 made
+    // that arm receiver-grained: a `.`-chained receiver is now refused at
+    // query-match time there, so `s.client().get("/a")` leaves no site and the
+    // reduction never runs. Ruby's first pattern still binds `receiver: (_)`,
+    // so its query still hands `receiver_of` the call receiver this limit is
+    // about — and the limit belongs to `receiver_of`, which every arm shares,
+    // not to any one query.
+    //
+    // It is not redundant with the `reqwest::Client::new()` case above. That one
+    // pins that a call receiver keeps its text; this one pins that a `.`-chain
+    // is NOT reduced to its last segment — the reduction would otherwise read
+    // `s.client()` as `client` and park every `response.headers()` in the
+    // HTTP-named column, which is the census's largest bucket inverted.
     assert_eq!(
-        receivers("rs", "use reqwest::Client;\nfn f(s: &S) { let _ = s.client().get(\"/a\"); }\n"),
+        receivers("rb", "require 'net/http'\nclass A\n  def f; s.client().get(\"/a\"); end\nend\n"),
         vec!["s.client()".to_string()],
         "a receiver that is itself a call reduces to its own text, per the stated limit"
     );
@@ -1398,109 +1419,346 @@ fn rust_client_call_refusals(source: &str) -> usize {
     rust_client_call_rows(source).iter().filter(|t| t.is_empty()).count()
 }
 
-/// **[CR-128] §6's sixth criterion: `rust`'s file-grained over-capture, pinned
-/// as a stated ceiling — regardless of what the measurement above found.**
+
+/// The four shapes [S-404]'s census actually found, refused by the receiver
+/// rule [S-423] ported into `rust/queries/invocations.scm`.
 ///
-/// `rust` is the one arm of the six with no pin at all. The other four state
-/// the over-capture as a ceiling and assert it in a test
-/// (`a_route_shaped_collection_get_inside_a_client_file_is_a_stated_ceiling`
-/// for Kotlin and Ruby, `…_property_get_…` for PHP,
-/// `a_bare_verb_method_call_inside_a_client_file_is_not_captured` for C#);
-/// Rust — the arm the rest were ported FROM — states only its free-function
-/// ceiling, so its silence propagated. An unpinned ceiling is prose, and prose
-/// cannot fail.
+/// Every fixture below is a shape the measurement produced, never a tidy
+/// invented one ([CR-128] §6): a **header map** (`headers` at 13 sites and
+/// `response.headers()` at 18 — together the largest bucket, 54 of the 99
+/// unambiguously non-HTTP sites), a **struct field bag**
+/// (`metadata.additional_fields`, 9 sites), a **`HashMap` router lookup**
+/// (`router`, at `matchit-0.7.3/examples/hyper.rs:38`) and an **axum route
+/// registration** (`get(root).post(create)`, 3 sites, where the receiver is
+/// axum's `MethodRouter` mid-chain).
 ///
-/// What this pins is **today's behaviour**, not desired behaviour: a
-/// `router.get("/config/features")` inside a file importing `reqwest` IS
-/// captured, and that is an [ADR-54] over-capture ceiling recorded rather than
-/// worked around. A port that narrows Rust to a receiver rule must change this
-/// test, and changing it is the point — it is what makes the narrowing visible.
+/// The two harms are asserted separately because they are different sizes. The
+/// router lookup carries an absolute-path literal, so before [S-423] it became a
+/// fabricated cross-service **reference** ([NFR-RA-05]); the other three carry
+/// something else, so they became keyless **refusal rows** inflating the
+/// `base-url-runtime` denominator ([FR-WS-05]). Both populations must go to
+/// zero, and `rust_client_call_targets` alone would hide the second.
 ///
-/// # [S-402]'s trap, and why the positive control is the bare word `client`
+/// [S-404]: ../../docs/planning/journal.md#s-404-measure-the-sibling-client-call-arms-over-capture-per-language
+/// [S-423]: ../../docs/planning/journal.md#s-423-the-rust-client-call-gate-is-receiver-grained
+/// [CR-128]: ../../docs/requests/CR-128-client-call-candidacy-gate-siblings-are-file-grained.md
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+/// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
+#[test]
+fn the_census_shapes_a_receiver_rule_refuses_are_no_longer_captured() {
+    const SOURCE: &str = r#"use reqwest::Client;
+
+pub async fn authorize(
+    headers: &HeaderMap,
+    response: &Response,
+    metadata: &Metadata,
+    router: &Router,
+    client: &Client,
+) {
+    let _ = headers.get("content-type");
+    let _ = response.headers().get("content-type");
+    let _ = metadata.additional_fields.get("trace-id");
+    let _ = router.get("/config/features");
+    let _ = Router::new().route("/users", get(root).post(create));
+    let _ = client.get("/api/orders");
+}
+"#;
+    // `client.get` is the positive control: it proves the file WAS scanned, so
+    // the five shapes above are absent because the RECEIVER rule refused them —
+    // not because the ledger gate quietly closed on the whole fixture, which is
+    // the failure mode CR-128 §4.4 names.
+    assert_eq!(
+        rust_client_call_targets(SOURCE),
+        vec!["GET /api/orders".to_string()],
+        "a header map, a headers() call, a struct field bag, a HashMap router \
+         lookup and an axum route registration are not outbound calls, and the \
+         file was genuinely scanned"
+    );
+    // `rust_client_call_targets` would hide this half: a refused receiver must
+    // leave NO keyless refusal row either, because those rows are exactly what
+    // inflated the denominator S-404 measured.
+    assert_eq!(
+        rust_client_call_refusals(SOURCE),
+        0,
+        "a receiver the rule refuses leaves no site at all, so it can carry no \
+         refusal row — the site is declined at QUERY-MATCH time, the class \
+         `extract::capture_http_client_call_arm` enumerates as invisible by \
+         construction"
+    );
+}
+
+/// The `::` / `.` distinction, pinned **both ways** — the line [S-404]'s census
+/// had to draw before it could count, and the one place Rust's receiver rule is
+/// not a transcription of Go's.
 ///
-/// [CR-128] §4.4: *"a fixture whose receiver the new rule refuses stops testing
-/// the ledger gate, because its positive control becomes unreachable."* The
-/// control below is `client.get(…)` — the bare generic word, WHOLE, which is the
-/// one receiver spelling both shipped receiver rules (Java's [S-375], Go's
-/// [S-402]) accept. So when a port lands, this fixture's control survives it and
-/// the ceiling half is what moves, which is the correct and visible outcome.
+/// * `::` qualifies ONE type path, so EVERY segment names the same thing:
+///   `reqwest::Client::new()` IS a client, and so is a bare `Client::new()`.
+///   The query reads the scoped callee's whole path for exactly this reason.
+/// * `.` accesses a value ON another value, so only the LAST segment names the
+///   receiver: `client.headers()` is a header map, and the `client` in it is
+///   worth nothing.
+///
+/// The census was bitten by the first half before it was drawn — its initial
+/// run reduced `reqwest::Client::new()` to `new()`, parked three genuine
+/// `reqwest` calls in the non-HTTP column and printed 121 (41%) instead of 118
+/// (40%). `the_receiver_reduction_handles_each_arms_spelling` pins the harness
+/// side of that; this pins the shipped query's side.
+///
+/// Both non-client fixtures carry an ABSOLUTE-path literal, so a regression
+/// shows up as a fabricated reference rather than as a silent refusal row.
+///
+/// [S-404]: ../../docs/planning/journal.md#s-404-measure-the-sibling-client-call-arms-over-capture-per-language
+#[test]
+fn the_rust_receiver_rule_reads_a_type_path_whole_and_a_field_chain_last() {
+    // `::` — every segment names the client, including when the path is the
+    // bare type and when the crate is one of the other five detectors.
+    const TYPE_PATH: &str = r#"use reqwest::Client;
+
+pub async fn probe() {
+    let _ = reqwest::Client::new().get("/api/orders");
+    let _ = Client::new().get("/api/health");
+    let _ = hyper::Client::new().get("/api/metrics");
+}
+"#;
+    assert_eq!(
+        rust_client_call_targets(TYPE_PATH),
+        vec![
+            "GET /api/health".to_string(),
+            "GET /api/metrics".to_string(),
+            "GET /api/orders".to_string(),
+        ],
+        "a `::` type path is read WHOLE: `reqwest`, `hyper` and `Client` each \
+         name the same thing, and `new` is only how it was built"
+    );
+
+    // `.` — only the last segment names the receiver, so a client's own header
+    // map is a header map.
+    const FIELD_CHAIN: &str = r#"use reqwest::Client;
+
+pub async fn probe(client: &Client) {
+    let _ = client.headers().get("/api/orders");
+    let _ = client.headers.get("/api/tokens");
+    let _ = client.get("/api/control");
+}
+"#;
+    assert_eq!(
+        rust_client_call_targets(FIELD_CHAIN),
+        vec!["GET /api/control".to_string()],
+        "`client.headers()` and `client.headers` are header maps: under `.` \
+         only the LAST segment names the receiver, so the `client` in them is \
+         worth nothing. The bare `client.get` is the positive control"
+    );
+    assert_eq!(
+        rust_client_call_refusals(FIELD_CHAIN),
+        0,
+        "neither header lookup leaves a site, so neither leaves a refusal row"
+    );
+}
+
+/// The receiver rule is a **boundary** rule over [FR-WS-08]'s normative Rust
+/// row, not a substring test — the same posture, and the same vocabulary
+/// decisions, as Java's
+/// `the_receiver_rule_is_a_boundary_rule_over_the_normative_java_row` and Go's
+/// `the_receiver_rule_is_a_boundary_rule_over_the_normative_go_row`.
+///
+/// Admitted: the bare words `client` and `http` WHOLE; a type-derived token —
+/// `http_client` or one of the six `http_client_detectors` crates — as a
+/// snake_case prefix with an optional digit/`_`-boundary suffix, or as a
+/// `_`-bounded suffix; the FIELD one `.`-level down; and any segment of a `::`
+/// type path.
+///
+/// Refused, and this is the rule's sharpest line: a bare `_client` SUFFIX
+/// (`cache_client`, `redis_client`, `zk_client`) and a `client`-PREFIXED
+/// non-client (`client_cache`, `client_registry`, `client_store`). Each clears
+/// the verb and absolute-path filters in ordinary Rust, so admitting them
+/// reopens [CR-110]'s fabrication class on the consumer side ([NFR-RA-05]) —
+/// the reason `ff257427` removed the suffix from the Java rule and `a08e6c6a`
+/// from the Go one, adopted here.
+///
+/// The refused cases assert `rust_client_call_targets`, never
+/// `rust_client_call_refusals`-filtered output: a refused receiver must leave no
+/// keyless row either, and a helper that filtered them would hide this story's
+/// own subject.
+///
+/// [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
+/// [CR-110]: ../../docs/requests/CR-110-framework-route-false-positives.md
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row() {
+    let admitted = |recv: &str| {
+        format!("use reqwest::Client;\n\npub async fn probe() {{ let _ = {recv}.get(\"/users\"); }}\n")
+    };
+    for recv in [
+        // The two bare words, WHOLE.
+        "client",
+        "http",
+        // The type-derived token as a prefix, with the optional boundary suffix.
+        "http_client",
+        "_http_client",
+        "http_client2",
+        "http_client_v2",
+        // A crate from `http_client_detectors`, as a prefix and as a suffix.
+        "reqwest_client",
+        "surf_client",
+        "orders_reqwest",
+        // The token as a `_`-bounded suffix.
+        "api_http_client",
+        "users_http_client",
+        // The FIELD one `.`-level down — the ordinary struct-field shape.
+        "self.client",
+        "s.http_client",
+    ] {
+        assert_eq!(
+            rust_client_call_targets(&admitted(recv)),
+            vec!["GET /users".to_string()],
+            "`{recv}` names a `reqwest`-class client value and must be admitted"
+        );
+    }
+
+    let refused = |recv: &str| {
+        format!(
+            "use reqwest::Client;\n\npub async fn probe() {{ let _ = {recv}.get(\"/users\"); }}\n\n\
+             pub async fn control(client: &Client) {{ let _ = client.get(\"/probe\"); }}\n"
+        )
+    };
+    for recv in [
+        // The bare `_client` suffix — every client protocol in existence.
+        "cache_client",
+        "redis_client",
+        "zk_client",
+        "kafka_client",
+        "api_client",
+        // The generic word is whole-only: the same objects, the other way round.
+        "client_cache",
+        "client_registry",
+        "client_store",
+        "client2",
+        // Boundary near-misses, one character from matching.
+        "clientele",
+        "clientcache",
+        "httpclient",
+        "reqwestcache",
+        "notareqwest",
+        "http2",
+        // A `::` path whose segments name something else, and the bare `Client`
+        // suffix on the path side.
+        "axum::routing::get(root)",
+        "CacheClient::new()",
+        // The shapes S-404 measured.
+        "headers",
+        "params",
+        "json_body",
+        "router",
+        "map",
+        "metadata.additional_fields",
+    ] {
+        assert_eq!(
+            rust_client_call_targets(&refused(recv)),
+            vec!["GET /probe".to_string()],
+            "`{recv}` carries no client token at a boundary — only the control \
+             must survive, and with no refusal row"
+        );
+        assert_eq!(
+            rust_client_call_refusals(&refused(recv)),
+            0,
+            "`{recv}` is refused at query-match time, so it leaves no site and \
+             therefore no keyless refusal row"
+        );
+    }
+}
+
+/// **[CR-128] §6's sixth criterion, re-stated at the boundary [S-423] moved it
+/// to.** The residual is no longer *any* receiver inside a client file; it is a
+/// non-HTTP collaborator **spelled** like one.
+///
+/// What this test pinned before [S-423] was the blanket file-grained ceiling:
+/// a `router.get("/config/features")` inside a `reqwest` file WAS captured,
+/// because candidacy was decided by the file alone. That is retired — see
+/// `the_census_shapes_a_receiver_rule_refuses_are_no_longer_captured`, which
+/// pins its removal — and what stands in its place is narrow and named: a cache
+/// whose handle happens to be called `client` still clears the receiver rule,
+/// the verb filter and the absolute-path filter. A name rule cannot see that it
+/// is a cache, and under-capture is the safe direction, so the residual is
+/// recorded as an [ADR-54] ceiling rather than worked around ([NFR-RA-05]).
+///
+/// This is the same residual Go accepted in [S-402] and Java in [S-375]; all
+/// three arms now carry it in the same shape, which is [NFR-MA-01]'s reason for
+/// wanting the shape identical.
 ///
 /// [CR-128]: ../../docs/requests/CR-128-client-call-candidacy-gate-siblings-are-file-grained.md
 /// [ADR-54]: ../../docs/specs/architecture/decisions/ADR-54.md
 /// [S-375]: ../../docs/planning/journal.md#s-375-the-client-call-detector-gate-is-receiver-grained-not-file-grained
 /// [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
+/// [S-423]: ../../docs/planning/journal.md#s-423-the-rust-client-call-gate-is-receiver-grained
+/// [NFR-MA-01]: ../../docs/specs/requirements/NFR-MA-01.md
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
 #[test]
 fn a_non_client_receiver_call_inside_a_reqwest_file_is_a_stated_ceiling() {
-    // The shapes are the ones the S-404 census actually found, not tidy
-    // invented ones (CR-128 §6: "fixtures pinning the shapes the measurement
-    // actually found"). `headers.get(…)` is the single largest bucket — 54 of
-    // the 99 unambiguously non-HTTP rust sites — and `router.get(…)` on a
-    // `HashMap` is S-402's `mapping.Get("authorize.claims")` in another
-    // language, found at `matchit-0.7.3/examples/hyper.rs:38`.
+    // A cache, spelled `client`. Nothing in the source says HTTP; the rule
+    // cannot tell it from a `reqwest::Client` handle, and it captures.
     const SOURCE: &str = r#"use reqwest::Client;
 
-pub async fn authorize(headers: &HeaderMap, router: &Router, client: &Client) {
-    let _ = headers.get("content-type");
-    let _ = router.get("/config/features");
-    let _ = client.get("/api/orders");
+pub async fn lookup(client: &MemcacheClient) {
+    let _ = client.get("/config/features");
 }
 "#;
-    let targets = rust_client_call_targets(SOURCE);
-    // `client.get` is the positive control: it proves the file WAS scanned, so
-    // `router.get` appearing beside it is the ledger gate admitting a
-    // non-client receiver — not the whole fixture quietly falling outside the
-    // gate.
     assert_eq!(
-        targets,
-        // `dedup_sort_refs` orders the ledger by target, not by line.
-        vec!["GET /api/orders".to_string(), "GET /config/features".to_string()],
-        "Rust's gate is file-grained today: a `HashMap` lookup inside a \
-         `reqwest` file is promoted to a cross-service REFERENCE alongside the \
-         genuine call, because its argument happens to be an absolute-path \
-         literal. This is the ADR-54 ceiling CR-128 §6 requires pinned. If a \
-         receiver rule has landed for Rust, change this test deliberately and \
-         record the site-count delta as a precision correction — do not delete it."
-    );
-    // The second, larger harm, pinned separately because it is a different
-    // harm: a non-HTTP site whose argument is NOT an absolute path fabricates
-    // no edge, but writes a keyless `base-url-runtime` row that inflates the
-    // denominator every egress figure is computed over (FR-WS-05). The header
-    // lookup is that shape, and it is the census's biggest bucket.
-    assert_eq!(
-        rust_client_call_refusals(SOURCE),
-        1,
-        "`headers.get(\"content-type\")` is not an outbound call and names no \
-         route, so it writes a keyless refusal row rather than a reference — an \
-         inflated denominator rather than a fabricated edge, and still the \
-         file-grained gate's doing"
+        rust_client_call_targets(SOURCE),
+        vec!["GET /config/features".to_string()],
+        "a cache handle spelled `client` still promotes a cross-service \
+         REFERENCE inside a `reqwest` file. This is the ADR-54 residual the \
+         receiver rule leaves behind — narrow and named, where the file-grained \
+         ceiling this test used to pin was blanket. It is deliberate: narrowing \
+         it further would refuse the bare word `client`, which is 152 of the \
+         175 genuine receivers S-404 counted."
     );
 }
 
-/// The other half of the gate-isolating pair: the **same** source with no
-/// client import captures nothing, so the ledger gate is what separates the two
-/// cases and the ceiling above is scoped to a genuine client file.
+/// The other half of the gate-isolating pair: the **same** source with no client
+/// import captures nothing, so the [FR-FW-04] ledger gate is what separates the
+/// two cases.
 ///
-/// Kept beside the ceiling rather than folded into it: [S-402]'s trap is that
-/// these two halves go silent **together** when a receiver rule refuses the
-/// fixture's receiver. Two tests make that visible as one failing and one
-/// passing; one test would hide it.
+/// # Why the fixture's receiver is the bare word `client`
 ///
-/// [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
+/// [CR-128] §4.4: *"a fixture whose receiver the new rule refuses stops testing
+/// the ledger gate, because its positive control becomes unreachable."* Before
+/// [S-423] this fixture carried three receivers and only one of them — `client`
+/// — survives the receiver rule; the other two would now make both halves go
+/// silent together and leave the test passing while testing nothing. It is
+/// re-pointed at `client` alone, which the Rust, Java and Go rules all accept
+/// WHOLE.
+///
+/// The control is asserted **here**, not only in a neighbouring test: an
+/// emptiness-only fixture survives disabling the whole arm, which is the defect
+/// class `6554e008` found in two Go fixtures. Deleting
+/// `capture_http_client_call_arm`'s `is_http_client_file` early return must make
+/// this test fail, and the ungated half is what makes it do so.
+///
+/// [FR-FW-04]: ../../docs/specs/requirements/FR-FW-04.md
+/// [CR-128]: ../../docs/requests/CR-128-client-call-candidacy-gate-siblings-are-file-grained.md
+/// [S-423]: ../../docs/planning/journal.md#s-423-the-rust-client-call-gate-is-receiver-grained
 #[test]
 fn a_route_shaped_get_outside_a_reqwest_file_is_not_captured() {
-    // Byte-for-byte the ceiling fixture's body, minus the one `use` line, so
-    // the ledger gate is provably the ONLY difference between the two cases.
-    const SOURCE: &str = r#"pub async fn authorize(headers: &HeaderMap, router: &Router, client: &Client) {
-    let _ = headers.get("content-type");
-    let _ = router.get("/config/features");
+    const BODY: &str = r#"pub async fn fetch(client: &Client) {
     let _ = client.get("/api/orders");
 }
 "#;
+    // The positive control, in this test rather than beside it: WITH the import
+    // the ledger gate opens and the very same body captures.
+    assert_eq!(
+        rust_client_call_targets(&format!("use reqwest::Client;\n\n{BODY}")),
+        vec!["GET /api/orders".to_string()],
+        "with a `reqwest`-class import the gate opens and the receiver rule \
+         admits the bare word `client` — without this half the assertion below \
+         would pass over a disabled arm"
+    );
+    // Byte-for-byte the same body, minus the one `use` line, so the ledger gate
+    // is provably the ONLY difference between the two cases.
     assert!(
-        rust_client_call_rows(SOURCE).is_empty(),
+        rust_client_call_rows(BODY).is_empty(),
         "with no `reqwest`-class import the ledger gate closes on the whole \
          file and nothing is scanned — neither a reference nor a refusal row, \
          got {:?}",
-        rust_client_call_rows(SOURCE)
+        rust_client_call_rows(BODY)
     );
 }
