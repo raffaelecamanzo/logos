@@ -676,13 +676,328 @@ fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
     }
 }
 
+// ── The shell header's progressive disclosure (S-317, FR-UI-34, CR-089/CR-092) ──
+
+/// The two rungs of the disclosure ladder, in CSS px: the complements of the tiers
+/// frontend-design §7 documents (desktop ≥1024px, tablet ≥768px), and the shell's
+/// existing collapse point (`AppShell.module.css`, `Chat.module.css`).
+///
+/// Pinned as constants because a rung is the one value in this story that can drift
+/// in silence. Every rendered measurement in the S-317 record was taken by hand,
+/// once, against these two numbers; move them to 419px and 400px and both elements
+/// are back on the row at the exact viewport CR-089 measured, with nothing to say so.
+const READOUT_RUNG_PX: f64 = 1023.0;
+const SUBTITLE_RUNG_PX: f64 = 767.0;
+
+/// Every declaration that takes an element off the page. `display: none` is the one
+/// the header uses; the other two are here because an element hidden by any of them
+/// is just as lost to the reader, and a survivor guard that names one spelling
+/// guards exactly one spelling.
+const HIDING_DECLARATIONS: [(&str, &str); 3] =
+    [("display", "none"), ("visibility", "hidden"), ("opacity", "0")];
+
+/// Every `(selector, rung px)` the header stylesheet hides inside a width rung.
+///
+/// A rung whose width cannot be read as a length **panics** rather than being
+/// skipped. The first draft of this walk skipped it, and an `em`-expressed rung — or
+/// a reformatted `max-width :`, which is valid CSS — then carried whatever it hid
+/// past every assertion below without a word.
+fn header_disclosure_ladder() -> Vec<(String, f64)> {
+    let css = strip_comments(&read("src/shell/Header.module.css"));
+    let mut out = Vec::new();
+    for (at_rule, body) in top_level_rules(&css) {
+        if !at_rule.starts_with("@media") || !at_rule.to_ascii_lowercase().contains("max-width") {
+            continue;
+        }
+        let px = max_width_px(&at_rule).unwrap_or_else(|| {
+            panic!(
+                "`{at_rule}` names a max-width this suite cannot read as a length. \
+                 Skipping it would hide whatever the rung hides from every assertion \
+                 in this section — express the rung in px or rem, or teach \
+                 `length_px` the unit",
+            )
+        });
+        for (selector, decls) in top_level_rules(&body) {
+            if hides_element(&decls) {
+                out.push((selector, px));
+            }
+        }
+    }
+    out
+}
+
+/// The WIDEST rung at which `selector` is dropped — as the viewport narrows it is
+/// the rung reached first, so it is the one that fixes the disclosure order.
+fn header_drops_at(selector: &str) -> Option<f64> {
+    header_disclosure_ladder()
+        .into_iter()
+        .filter(|(sel, _)| sel == selector)
+        .map(|(_, px)| px)
+        .reduce(f64::max)
+}
+
+/// The rungs themselves. Everything else asserted about the ladder is relative —
+/// the order test only says one rung is wider than the other — so the whole ladder
+/// could slide off the documented tiers while every other test here stayed green.
+#[test]
+fn header_disclosure_rungs_are_the_documented_tiers() {
+    assert_eq!(
+        header_drops_at(".status"),
+        Some(READOUT_RUNG_PX),
+        "the graph-state readout gives way at the tablet tier the AppShell sidebar \
+         and the Chat rail already collapse at (frontend-design §7)",
+    );
+    assert_eq!(
+        header_drops_at(".brandSub"),
+        Some(SUBTITLE_RUNG_PX),
+        "the brand subtitle gives way below tablet (frontend-design §7)",
+    );
+}
+
+/// Nothing in the header is hidden UNCONDITIONALLY. Every other assertion in this
+/// section looks inside a rung, so a `display: none` at the top level — the readout
+/// gone at 1600px as surely as at 420px — was invisible to all of them, and the SPA
+/// suite cannot see it either (`css: false`, so jsdom evaluates no stylesheet).
+#[test]
+fn header_hides_nothing_unconditionally() {
+    let css = strip_comments(&read("src/shell/Header.module.css"));
+    for (selector, body) in top_level_rules(&css) {
+        if selector.starts_with('@') {
+            continue;
+        }
+        assert!(
+            !hides_element(&body),
+            "`{selector}` is hidden at EVERY width rather than inside a rung — the \
+             readout is required PRESENT at desktop widths (FR-UI-34), and the \
+             acceptance grid records it rendered at 1024px and 1600px",
+        );
+    }
+}
+
+/// The priority the design contract states (frontend-design §3, re-baselined by
+/// CR-097): the readout gives way FIRST, the brand subtitle SECOND, so the brand
+/// lockup, the member selector and the theme toggle survive to the narrowest
+/// supported viewport. `.status` is the readout's whole slot — every one of its four
+/// states renders into it (`Header.test.tsx` binds that end).
+#[test]
+fn header_drops_the_readout_before_the_brand_subtitle() {
+    let readout = header_drops_at(".status")
+        .expect("the graph-state readout (`.status`) must be dropped at some rung");
+    let subtitle = header_drops_at(".brandSub")
+        .expect("the brand subtitle (`.brandSub`) must be dropped at some rung");
+    assert!(
+        readout > subtitle,
+        "the readout gives way FIRST, so its rung ({readout}px) must be WIDER than \
+         the brand subtitle's ({subtitle}px) — equal rungs drop both at once and \
+         state no order at all (FR-UI-34)",
+    );
+}
+
+/// A dropped readout is ABSENT, not truncated. An ellipsis would present a clipped
+/// `rev 3,9…` as a figure, which is the reporting failure NFR-CC-04 forbids.
+///
+/// The clip ban is scoped to the readout's own rules, deliberately. Banning it over
+/// the whole stylesheet also blocks the **project root path** that frontend-design
+/// §3 records as a known-unbuilt header element — a path is the canonical ellipsis
+/// case, and the story that builds it would fail a test whose message talks about
+/// the readout.
+#[test]
+fn header_drops_the_readout_absent_never_truncated() {
+    let css = strip_comments(&read("src/shell/Header.module.css"));
+    assert!(
+        header_drops_at(".status").is_some(),
+        "the readout must be removed, not merely narrowed",
+    );
+    for selector in [".status", ".readout"] {
+        let body = rule_body(&css, selector);
+        for needle in ["text-overflow", "ellipsis"] {
+            assert!(
+                !body.contains(needle),
+                "`{selector}` declares `{needle}` — a clipped readout presents a \
+                 truncation as a measurement (NFR-CC-04, NFR-RA-05)",
+            );
+        }
+    }
+}
+
+/// …and nothing ELSE gives way. The brand lockup, the member selector and the theme
+/// toggle survive to the narrowest supported viewport (FR-UI-29): the selector's
+/// presence beside a member's name is a correctness property, not a decoration.
+///
+/// The ladder counts every mechanism in `HIDING_DECLARATIONS`, not `display` alone —
+/// a `visibility: hidden` on the brand lockup loses the home link just as completely
+/// and once slipped past this assertion. This guards the header's own stylesheet;
+/// the selector and the toggle carry their own modules.
+#[test]
+fn header_hides_nothing_but_the_readout_and_the_brand_subtitle() {
+    let mut hidden: Vec<String> =
+        header_disclosure_ladder().into_iter().map(|(sel, _)| sel).collect();
+    hidden.sort();
+    hidden.dedup();
+    assert_eq!(
+        hidden,
+        vec![".brandSub".to_string(), ".status".to_string()],
+        "only the readout and the brand subtitle give way; anything else here is a \
+         survivor the narrow viewport has lost (FR-UI-29, FR-UI-34)",
+    );
+}
+
+/// The member selector shares the header row with the readout, and a `<select>`
+/// sizes itself to its LONGEST option — on the reference workspace a 42-character
+/// member name, measured at 467px, which overflowed a 420px viewport by 242px even
+/// after the header had dropped both of its own elements. So the selector must be
+/// able to give width back, must stop giving it back while it is still a control,
+/// and must give it back from the LABEL first. All three are asserted, because each
+/// one alone is a defect: no `min-width: 0` is an overflow, no floor is a control
+/// measured at 24px, and no label concession puts the control on that floor early.
+#[test]
+fn member_selector_gives_width_back_but_stays_a_control() {
+    let css = strip_comments(&read("src/shell/MemberSelector.module.css"));
+    let decl = |selector: &str, prop: &str| -> Option<String> {
+        declarations_of(&rule_body(&css, selector))
+            .into_iter()
+            .find(|(name, _)| name == prop)
+            .map(|(_, value)| value)
+    };
+
+    assert_eq!(
+        decl(".selector", "min-width").as_deref(),
+        Some("0"),
+        "`.selector` must lift its automatic minimum size, or the longest member \
+         name pins the header row at that width and the viewport overflows (FR-UI-34)",
+    );
+
+    let floor = decl(".select", "min-width")
+        .unwrap_or_else(|| panic!("`.select` declares no `min-width` floor"));
+    let floor_px = length_px(&floor).unwrap_or_else(|| {
+        panic!(
+            "`.select` min-width is `{floor}`, which is not a length — `auto` and \
+             `min-content` are the intrinsic sizings `.selector {{ min-width: 0 }}` \
+             exists to defeat, so they are not floors",
+        )
+    });
+    assert!(
+        floor_px > 0.0,
+        "`.select` must keep a NON-ZERO `min-width` floor — a control squeezed to a \
+         sliver is present but not reachable (FR-UI-29); found `{floor}`",
+    );
+
+    for (prop, value) in [("min-width", "0"), ("overflow", "hidden"), ("text-overflow", "ellipsis")]
+    {
+        assert_eq!(
+            decl(".label", prop).as_deref(),
+            Some(value),
+            "`.label` must yield BEFORE the control does; without `{prop}: {value}` \
+             the label cannot shrink and puts the select straight onto its floor",
+        );
+    }
+}
+
+/// Below tablet the label's WORDS give way so the control keeps a usable width — but
+/// a label removed with `display: none` leaves the select with no accessible name,
+/// trading a layout defect for an accessibility one.
+///
+/// Every `.label` rule is inspected, wherever it sits. An earlier draft looked only
+/// inside px/rem rungs, so moving the rule to the top level — or re-expressing the
+/// rung in `em` — removed the accessible name at every width and left this test
+/// green over it, having checked nothing. The closing `assert_eq!` on the rungs
+/// found is what makes that impossible: an empty result now fails.
+#[test]
+fn member_selector_label_is_hidden_visually_never_removed() {
+    let css = strip_comments(&read("src/shell/MemberSelector.module.css"));
+    let mut hidden_at: Vec<f64> = Vec::new();
+    for (scope, body) in top_level_rules(&css) {
+        let is_rung = scope.starts_with('@');
+        let rules =
+            if is_rung { top_level_rules(&body) } else { vec![(scope.clone(), body.clone())] };
+        for (selector, decls) in rules {
+            if selector != ".label" {
+                continue;
+            }
+            let declared = declarations_of(&decls);
+            let has = |prop: &str, value: &str| {
+                declared.iter().any(|(n, v)| n == prop && v == value)
+            };
+            assert!(
+                !has("display", "none"),
+                "`{scope}` removes `.label` outright — the select would lose its \
+                 accessible name; use visually-hidden geometry (`.sr-only`) instead",
+            );
+            if is_rung && has("position", "absolute") {
+                hidden_at.push(max_width_px(&scope).unwrap_or_else(|| {
+                    panic!("`{scope}` hides `.label` at a width this suite cannot read")
+                }));
+            }
+        }
+    }
+    assert_eq!(
+        hidden_at,
+        vec![SUBTITLE_RUNG_PX],
+        "the label's words must give way at exactly the rung the header's brand \
+         subtitle does, by visually-hidden geometry — an empty result here means the \
+         rule was moved, renamed or re-expressed and this test checked nothing",
+    );
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// A CSS length in px (`rem` resolved at the 16px root), or `None` when the value is
+/// not a length this suite understands — `auto`, `min-content`, a percentage. Unit
+/// keywords are ASCII case-insensitive in CSS, so the comparison is too.
+fn length_px(value: &str) -> Option<f64> {
+    let v = value.trim().to_ascii_lowercase();
+    let digits: String = v.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let n: f64 = digits.parse().ok()?;
+    match v[digits.len()..].trim() {
+        "px" => Some(n),
+        "rem" => Some(n * 16.0),
+        // A bare `0` is a valid CSS length and needs no unit.
+        "" if n == 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
+/// The `max-width` a media query names, in CSS px, or `None` when it names none.
+/// Lowercased and whitespace-normalised first, so `max-width : 1023PX` — valid CSS,
+/// and what a reformat can produce — is read rather than silently missed.
+fn max_width_px(query: &str) -> Option<f64> {
+    let q = query.to_ascii_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+    let at = q.find("max-width")? + "max-width".len();
+    let rest = q[at..].trim_start().strip_prefix(':')?;
+    length_px(rest.split(')').next()?)
+}
+
+/// The `property: value` declarations of a rule body, property names lowercased and
+/// values whitespace-collapsed. Split per declaration rather than scanned as text,
+/// so a custom property (`--display: none`) is never mistaken for the property it is
+/// named after, and a declaration broken across lines still reads.
+fn declarations_of(body: &str) -> Vec<(String, String)> {
+    body.split(';')
+        .filter_map(|decl| decl.split_once(':'))
+        .map(|(name, value)| {
+            (
+                name.split_whitespace().collect::<String>().to_ascii_lowercase(),
+                value.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase(),
+            )
+        })
+        .collect()
+}
+
+/// Whether a rule body takes its element off the page, by any mechanism in
+/// `HIDING_DECLARATIONS`.
+fn hides_element(body: &str) -> bool {
+    let declared = declarations_of(body);
+    HIDING_DECLARATIONS
+        .iter()
+        .any(|(prop, value)| declared.iter().any(|(n, v)| n == prop && v == value))
+}
 
 /// Every top-level `selector { body }` pair in a stylesheet, selectors normalised
 /// to single-spaced form (`".empty,\n.user"` → `".empty, .user"`). Comments must
 /// already be stripped. At-rule bodies (`@media`, `@keyframes`) are returned under
-/// the at-rule's own "selector" and are not descended into — the rules asserted on
-/// above are all top-level.
+/// the at-rule's own "selector" and are not descended into BY THIS CALL; a caller
+/// that wants the rules inside a rung re-invokes it on the at-rule body, which is
+/// what the header-disclosure section above does.
 fn top_level_rules(css: &str) -> Vec<(String, String)> {
     let bytes = css.as_bytes();
     let mut out = Vec::new();

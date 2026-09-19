@@ -27,7 +27,12 @@ export function MemberSelector() {
   // a broken read must never masquerade as a plain repo, which would silently hide
   // the workspace axis and leave the user reading one member as if it were the
   // whole app (NFR-RA-05, NFR-CC-04).
-  if (error) return <Badge tone="red">Workspace status unavailable</Badge>;
+  if (error)
+    return (
+      <Badge tone="red" className={styles.fault}>
+        Workspace status unavailable
+      </Badge>
+    );
 
   // Single-root (or still probing): no member axis exists — render nothing.
   if (mode !== "workspace" || members.length === 0) return null;
