@@ -1681,31 +1681,119 @@ mod tests {
         );
     }
 
-    /// The status handler is the **only** `/api/v1` handler that is not
-    /// [`Surface::Web`] ([CR-097] §5.2, [BR-42]).
+    /// Every handler on this surface names a surface, exactly one names
+    /// [`Surface::Shell`], and that one is `status` ([CR-097], [BR-42]).
     ///
-    /// A scan rather than a behavioural assertion, and deliberately: the
-    /// failure this guards is a *future* handler quietly copying
-    /// `Surface::Shell` from its neighbour, which no single request can
-    /// observe. The exclusion is total over a surface, so a second handler
-    /// naming it would drop that endpoint's reads out of the usage figures
-    /// with nothing failing — the same closed-list failure mode [CR-091] was
-    /// filed about, one layer up.
+    /// # Why a whitelist and not a search for `Shell`
+    ///
+    /// Three distinct regressions live on this boundary and only a whitelist
+    /// catches all three:
+    ///
+    /// 1. a **second** handler classified as shell chrome — its endpoint's
+    ///    reads would leave the usage figures with nothing failing, the
+    ///    [CR-091] closed-list defect one layer up;
+    /// 2. the shell classification **moving** off `status` to another handler;
+    /// 3. a handler naming some **third** surface — `Surface::Cli` as a typo
+    ///    books a web read against the CLI's adoption figures, which *adds* to
+    ///    a bucket rather than excluding from one, so no exclusion test can
+    ///    ever see it.
+    ///
+    /// The required parameter on [`bridge`] and [`workspace_fan`] makes an
+    /// *unclassified* handler a build failure; it says nothing about a
+    /// *mis*-classified one. This is that other direction.
+    ///
+    /// # Robust to formatting, and it reads both files
+    ///
+    /// An earlier form matched `Surface::Shell` and `bridge(` on **one physical
+    /// line** of `api_v1.rs` alone. Both halves were evadable, and a review
+    /// proved it by running the evasions: wrapping the call across lines the way
+    /// rustfmt does made a second shell handler invisible, and the six `bridge`
+    /// sites in `lib.rs` — three of them `/api/v1` routes — were never read at
+    /// all. So this scans both sources, strips comments, and locates each
+    /// occurrence by the `async fn` that encloses it rather than by its line.
+    ///
+    /// [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
+    /// [CR-091]: ../../docs/requests/CR-091-telemetry-surface-classification-and-usage-attribution.md
+    /// [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
     #[test]
-    fn only_the_status_handler_names_the_shell_surface() {
-        let source = include_str!("api_v1.rs");
-        let shell_sites: Vec<&str> = source
-            .lines()
-            .filter(|line| line.contains("Surface::Shell") && line.contains("bridge("))
-            .collect();
+    fn every_handler_names_its_surface_and_only_status_names_the_shell() {
+        /// Production code only: the test module's own mentions of `Surface::…`
+        /// are not handler classifications, and comments are prose about them.
+        fn production_code(source: &str) -> String {
+            let code = source
+                .split_once("\n#[cfg(test)]\nmod tests {")
+                .map_or(source, |(before, _)| before);
+            code.lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// The name of the `async fn` enclosing `at` — how an occurrence is
+        /// attributed to a handler without depending on line layout.
+        fn enclosing_fn(code: &str, at: usize) -> &str {
+            code[..at]
+                .rfind("async fn ")
+                .map(|start| {
+                    let rest = &code[start + "async fn ".len()..];
+                    let end = rest
+                        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .unwrap_or(rest.len());
+                    &rest[..end]
+                })
+                .unwrap_or("<no enclosing async fn>")
+        }
+
+        // Both files define handlers that cross an adapter boundary: the 23
+        // `bridge` + 6 `workspace_fan` sites in `api_v1.rs`, and the 6 `bridge`
+        // sites in `lib.rs`, three of which are `/api/v1/chat/*` routes.
+        let sources = [
+            ("api_v1.rs", production_code(include_str!("api_v1.rs"))),
+            ("lib.rs", production_code(include_str!("lib.rs"))),
+        ];
+
+        let mut shell_sites: Vec<(&str, &str)> = Vec::new();
+        let mut web_sites = 0usize;
+        for (file, code) in &sources {
+            for (at, marker) in code.match_indices("Surface::") {
+                let rest = &code[at + marker.len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                match &rest[..end] {
+                    "Shell" => shell_sites.push((file, enclosing_fn(code, at))),
+                    "Web" => web_sites += 1,
+                    // The bare `use …::Surface;` import names no variant and
+                    // does not reach here; anything else is a handler claiming
+                    // a surface this adapter must never claim.
+                    "" => {}
+                    other => panic!(
+                        "{file}: {} names Surface::{other} — this adapter serves the web \
+                         surface and its own shell chrome, nothing else. A third surface \
+                         here re-attributes a web read into another surface's figures \
+                         (FR-OB-09, BR-42)",
+                        enclosing_fn(code, at)
+                    ),
+                }
+            }
+        }
+
         assert_eq!(
             shell_sites.len(),
             1,
-            "exactly one handler classifies itself as shell chrome: {shell_sites:?}"
+            "exactly one handler is shell chrome, got {shell_sites:?}"
         );
+        assert_eq!(
+            shell_sites[0],
+            ("api_v1.rs", "status"),
+            "and it is the status handler ([FR-UI-34]), got {shell_sites:?}"
+        );
+        // Every other boundary crossing is the plain web surface. Derived, not
+        // hardcoded: a new handler raises both sides together, and a handler
+        // that named nothing would not compile.
         assert!(
-            shell_sites[0].contains("\"api_v1_status\""),
-            "and it is the status handler: {shell_sites:?}"
+            web_sites >= 34,
+            "the other handlers all name Surface::Web (found {web_sites})"
         );
     }
 
