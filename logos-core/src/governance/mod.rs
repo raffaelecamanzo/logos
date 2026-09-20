@@ -70,8 +70,8 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint,
     EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta, MetricRegression,
-    MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo, TemporalTier,
-    VerifyCensus, VerifyReport, Violation,
+    MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo,
+    SignalAbsence, TemporalTier, VerifyCensus, VerifyReport, Violation,
 };
 use crate::runtime::Runtime;
 
@@ -2247,7 +2247,34 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
     // alone is irreducibly ambiguous (`check_rules` clears and rewrites it, so
     // a clean run and no run leave it identical); the marker is the only place
     // that distinction lives, which is why both are read here.
-    let (rows, marker) = runtime.submit_read(|store| Ok((store.violations()?, store.check_run()?)))?;
+    //
+    // `counts()` rides along as a third query in the *same* pooled read rather
+    // than a second `submit_read`, so the discriminant below costs no extra
+    // round-trip through the read pool. The rest of the cost, stated rather
+    // than hidden ([CR-138] AC3), because the report tier fires at every
+    // session boundary and pays it on every one:
+    //
+    // - Five `COUNT(*)` aggregates returned as one row. They materialise no
+    //   rows, but each is an index *walk*, linear in table size — not the
+    //   constant-time lookup "indexed aggregate" might suggest.
+    // - It is the **second** execution of this query per readout.
+    //   `reconcile_step` above already called `counts()` (see `Freshness`),
+    //   and keeps only the unresolved-ref delta from it. Threading the whole
+    //   `StoreCounts` out of there would make this read genuinely free, but
+    //   `reconcile_step` is shared with the write-side paths that another
+    //   story owns this iteration, so the duplication is recorded here rather
+    //   than removed under a review fix. Measured at well under 1 ms on a
+    //   13k-node store, and dwarfed by the `hydrate` + `all_nodes` reads this
+    //   same function already makes.
+    //
+    // It is also the *same* query `logos status` derives its counts from, so
+    // the two surfaces can never disagree about the **figure** — that
+    // disagreement is what [CR-138] reproduced. They still answer different
+    // *questions* about "indexed" (`status` asks `files > 0 || nodes > 0`,
+    // this asks `files > 0 && nodes > 0`), which `SignalAbsence`'s own doc
+    // sets out; agreeing on the number is not agreeing on the predicate.
+    let (rows, marker, counts) = runtime
+        .submit_read(|store| Ok((store.violations()?, store.check_run()?, store.counts()?)))?;
     let row_count = rows.len();
     let (violations, violation_count) = if rows.is_empty() {
         (None, None)
@@ -2317,6 +2344,11 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
 
     Ok(QualityReadout {
         signal: metrics.aggregate_signal,
+        // Derived from the snapshot that just withheld the signal, never from a
+        // second opinion about what "empty" means — see `SignalAbsence::classify`.
+        // The two fields are set from one expression pair here so a signal and a
+        // cause for its absence can never both be present ([CR-138]).
+        signal_absence: SignalAbsence::classify(&metrics, counts.nodes, counts.files),
         baseline_signal,
         delta,
         freshness: fresh.line(),
