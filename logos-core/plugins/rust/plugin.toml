@@ -95,8 +95,19 @@ framework_detectors = ["axum", "actix_web"]
 # admits at the head of a `::` path. Adding a seventh row here opens the ledger
 # gate for it and does NOT teach the receiver rule its name — extend both, and
 # extend the admitted list in
-# `client_call_gate.rs::the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row`,
-# which enumerates all six so the omission fails rather than under-captures.
+# `client_call_gate.rs::the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row`.
+#
+# That last clause used to promise the omission would FAIL. It does not, and the
+# direction matters: the admitted list enumerates these six, and a list of six
+# cannot notice a seventh. Adding `attohttpc` here alone was run — 229 tests
+# green, the ledger gate admitting its files while the receiver rule refused
+# every receiver in them, so the newly declared crate captured nothing and
+# nothing said so. Deleting a crate IS caught (its `Client::new()` entry reds),
+# which is the direction the port measured.
+#
+# The under-capture direction is the safe one (NFR-RA-05 prefers it to a
+# fabricated edge), so this is a stated limit rather than a defect — but it is
+# stated, not promised away.
 http_client_detectors = ["reqwest", "hyper", "isahc", "ureq", "awc", "surf"]
 
 # Maps a capability to the `.scm` query file (resolved relative to this

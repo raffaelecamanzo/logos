@@ -521,6 +521,17 @@ navigate, which then shows the advanced `graph_revision`. A read fault renders a
 honest not-indexed state — never a zero, never a blank, and never the last-read figures
 presented as current. In workspace mode the figures describe the **selected** member and
 re-read on member switch.
+
+**Below 1024px the readout is dropped whole** — the figures, `Connecting…`, the
+not-indexed state and the "API unavailable" badge alike, because all four render into one
+element and hiding it drops the readout rather than clipping it. Nothing is truncated: a
+clipped `rev 3,9…` presented as a figure, or a fault badge standing in a dropped
+readout's place, would each report something that is not so. The brand lockup, the member
+selector and the theme toggle survive to the narrowest supported viewport; the brand
+subtitle gives way below 768px. Widening the window brings the readout back with the
+figures from the last navigation. The request itself is unaffected — the header still
+reads `/api/v1/status` on navigation at every width, and those reads are classified as
+shell chrome, so they never enter the tool-usage figures.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 

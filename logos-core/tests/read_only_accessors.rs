@@ -700,7 +700,26 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     engine
         .gate(None, true, true)
         .expect("gate --save persists a snapshot and a baseline");
+
+    // Record a real `check` result, so the no-write assertions below compare
+    // populated values rather than two empty tables. Without this the marker is
+    // absent and the violations table empty, and an equality between two
+    // nothings cannot notice a write — the same false green review already hit
+    // on the [FR-QM-08] exclusion count a few lines above.
+    write_breaching_rules(tmp.path());
+    engine.check_rules(None, true).expect("check runs");
+
     let before = metric_snapshot_count(tmp.path());
+    let violations_before = violation_count(tmp.path());
+    let marker_before = check_run_state(tmp.path());
+    assert_eq!(
+        marker_before.0, 1,
+        "the fixture recorded a marker, so 'unchanged' below is a real comparison"
+    );
+    assert!(
+        violations_before > 0,
+        "the fixture recorded findings, so 'unchanged' below is a real comparison"
+    );
 
     let health = engine.latest_health().expect("the Health pair");
 
@@ -741,6 +760,16 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     );
 
     // ADR-28: reading the pair, once or repeatedly, persists nothing.
+    //
+    // "Nothing" is the whole store this module writes, not the snapshot table
+    // alone. [S-314] established `metric_snapshots` + `violations` + marker
+    // *content* as the complete set for the readout path; `latest_health` is a
+    // second read path through the same module, reached by a plain page GET,
+    // and it inherits that contract rather than a third of it. Guarded here
+    // because a snapshot-only assertion let a `persist_violations` call inside
+    // `latest_health` pass the whole suite — every `/api/v1/health` load would
+    // have cleared the last real `check` result and stamped a fabricated
+    // recorded-clean marker over it ([FR-GV-21], [BR-41]).
     for _ in 0..3 {
         engine.latest_health().unwrap();
     }
@@ -748,6 +777,17 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
         metric_snapshot_count(tmp.path()),
         before,
         "reading the Health pair appended no snapshot"
+    );
+    assert_eq!(
+        violation_count(tmp.path()),
+        violations_before,
+        "reading the Health pair neither cleared nor rewrote the violations table"
+    );
+    assert_eq!(
+        check_run_state(tmp.path()),
+        marker_before,
+        "reading a run is not running one — ran_at, commit_sha and violation_count \
+         are all untouched by reading the Health pair (FR-GV-21, ADR-49)"
     );
 }
 
@@ -873,21 +913,83 @@ fn fn_body<'a>(code: &'a str, header: &str) -> &'a str {
 /// The per-function expectations are stated for **every** function on the path,
 /// not just the seam: an extra read is a defect wherever it lands, and naming
 /// each one is what makes the roster a closed list rather than a spot check.
+///
+/// # What this pin does NOT cover, stated so it is not over-read
+///
+/// It scans `governance/mod.rs` only. `latest_metrics` is `pub(crate)`, so a
+/// reader added to a sibling module — `governance/readout.rs` is already a
+/// `pub mod` — and called from `latest_health` would escape both this discovery
+/// and the web-side handler pin. Making `latest_metrics` module-private would
+/// let the compiler enforce the file scope this test assumes; that is a
+/// production visibility change and is left for a story that owns the file.
 #[test]
 fn the_health_path_reads_the_snapshot_exactly_once() {
     let code = production_code(include_str!("../src/governance/mod.rs"));
 
-    /// How many times `body` reads the last persisted snapshot. Whole-identifier
-    /// only: `latest_metrics(` is a substring of `prior_latest_metrics(`.
+    /// How many times `body` reads the last persisted snapshot.
+    ///
+    /// Both spellings count. The invariant is "one read of the store", not "one
+    /// call to one wrapper": `latest_metrics` is a one-line convenience over
+    /// `submit_read(|store| store.latest_metric_snapshot())`, so a function that
+    /// calls the store accessor directly takes exactly the same read, in its own
+    /// transaction. Keying only on the wrapper's name let the [CR-135] defect be
+    /// restored verbatim with this pin green — a helper doing the `submit_read`
+    /// itself, called from `latest_health`, gave one Health response two reads of
+    /// the same row and every expectation below stayed correct.
+    ///
+    /// Whole-identifier only: `latest_metrics(` is a substring of
+    /// `prior_latest_metrics(`. The two accessor names do not overlap each other
+    /// (`latest_metrics(` needs `s(` where `latest_metric_snapshot(` has `_s`),
+    /// so nothing is double-counted.
     fn snapshot_reads(body: &str) -> usize {
-        body.match_indices("latest_metrics(")
-            .filter(|(at, _)| {
-                body[..*at]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+        ["latest_metrics(", "latest_metric_snapshot("]
+            .iter()
+            .map(|accessor| {
+                body.match_indices(accessor)
+                    .filter(|(at, _)| {
+                        body[..*at]
+                            .chars()
+                            .next_back()
+                            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+                    })
+                    .count()
             })
-            .count()
+            .sum()
+    }
+
+    /// Is `line` a module-scope function header, whatever qualifies it?
+    ///
+    /// Column 0 is module scope; everything before `fn` must be a qualifier. A
+    /// whitelist of three visibility spellings is not that, and the difference
+    /// ships a reader: `pub(super) fn` walked straight past the discovery below
+    /// with the suite green. `async fn`, `const fn` and `pub(in …) fn` are the
+    /// same class. Probed with decoys at the end of this test, because a matcher
+    /// nobody ran data through is the recurring defect in this file.
+    fn is_module_fn_header(line: &str) -> bool {
+        const QUALIFIERS: [&str; 6] = ["pub", "async", "const", "unsafe", "extern", "\""];
+        if line.starts_with(char::is_whitespace) {
+            return false;
+        }
+        let Some(fn_at) = line.find("fn ") else {
+            return false;
+        };
+        // Drop parenthesised scopes before tokenising: `pub(in crate::governance)`
+        // carries a space, so a bare `split_whitespace` sees `crate::governance)`
+        // as its own token and refuses a valid header. The decoy list below
+        // caught exactly that on this function's first cut.
+        let mut prefix = String::new();
+        let mut depth = 0usize;
+        for ch in line[..fn_at].chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => prefix.push(ch),
+                _ => {}
+            }
+        }
+        prefix
+            .split_whitespace()
+            .all(|token| QUALIFIERS.iter().any(|q| token.starts_with(q)))
     }
 
     for (header, expected, why) in [
@@ -917,6 +1019,12 @@ fn the_health_path_reads_the_snapshot_exactly_once() {
             1,
             "and so does its sibling — one read each, never two",
         ),
+        (
+            "fn latest_metrics(",
+            1,
+            "the wrapper IS the one store read the three above project from; it holds the \
+             `submit_read`, so a second one here doubles every caller at once",
+        ),
     ] {
         assert_eq!(
             snapshot_reads(fn_body(&code, header)),
@@ -938,7 +1046,7 @@ fn the_health_path_reads_the_snapshot_exactly_once() {
     // ship, which is what "an extra read is a defect wherever it lands" requires.
     let mut readers: Vec<&str> = Vec::new();
     for line in code.lines() {
-        if !(line.starts_with("fn ") || line.starts_with("pub fn ") || line.starts_with("pub(crate) fn ")) {
+        if !is_module_fn_header(line) {
             continue;
         }
         // The parameter list opens AFTER the name — `line.find('(')` would take
@@ -955,12 +1063,49 @@ fn the_health_path_reads_the_snapshot_exactly_once() {
     readers.sort_unstable();
     assert_eq!(
         readers,
-        ["latest_gate", "latest_health", "latest_scan"],
+        [
+            "latest_gate",
+            "latest_health",
+            "latest_metrics",
+            "latest_scan"
+        ],
         "exactly these functions read the last persisted snapshot. A new reader is a \
          new place the Health path can take a second read, so it is classified in the \
          roster above before it ships — not discovered later as a torn readout \
          (CR-135 §3.2); found {readers:?}"
     );
+
+    // The matcher probed with its near misses. A source-scanning pin is only
+    // worth what its predicate is worth, and this file has twice shipped one
+    // that checked nothing until data was run through it — the `pub(crate)`
+    // paren bug noted above, and the three-spelling whitelist this replaces.
+    for accepted in [
+        "fn f(",
+        "pub fn f(",
+        "pub(crate) fn f(",
+        "pub(super) fn f(",
+        "pub(in crate::governance) fn f(",
+        "async fn f(",
+        "pub(crate) async fn f(",
+        "const fn f(",
+        "pub unsafe fn f(",
+    ] {
+        assert!(
+            is_module_fn_header(accepted),
+            "`{accepted}` is a module-scope function header and must be discovered"
+        );
+    }
+    for refused in [
+        "    fn nested(",      // not module scope
+        "        pub fn f(",   // ditto
+        "struct Fn(",          // no `fn ` token
+        "let f = |x| fn_x(x);" // `fn_x` is not `fn `
+    ] {
+        assert!(
+            !is_module_fn_header(refused),
+            "`{refused}` is not a module-scope function header"
+        );
+    }
 }
 
 /// CLI/MCP `scan` keeps persisting on every call — the read-only seam is
