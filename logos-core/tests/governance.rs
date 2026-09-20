@@ -29,7 +29,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use logos_core::graph_store::{CheckRunRow, ViolationRow};
+use logos_core::graph_store::{
+    CheckRunRow, NewCheckRun, ViolationRow, CHECK_RUN_OP_CHECK, CHECK_RUN_OP_SCAN,
+};
 use logos_core::model::NodeKind;
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
@@ -1480,12 +1482,13 @@ fn health_reports_store_integrity_and_counts() {
         health.structural_ok && health.structural_faults.is_empty(),
         "a clean graph is structurally sound (CR-052, NFR-RA-13)"
     );
-    // Migration 20 (S-313, CR-096) added the check_rules run marker, following
-    // migration 19's (S-380, CR-121) member-local configuration-corpus tables.
-    // This assertion tracks the latest applied migration — the store reports 20
+    // Migration 21 (S-437, CR-140) widened the check-run marker with the
+    // evaluated set, following migration 20's (S-313, CR-096) creation of it.
+    // This assertion tracks the latest applied migration — the store reports 21
     // once fully migrated (`federation::broker`'s
-    // `the_broker_arm_introduces_no_schema_migration` pins the same number).
-    assert_eq!(health.schema_version, 20, "migration 20 applied");
+    // `the_broker_arm_introduces_no_schema_migration` and
+    // `graph_store::tests`'s three version pins carry the same number).
+    assert_eq!(health.schema_version, 21, "migration 21 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);
@@ -2480,7 +2483,16 @@ fn an_interrupted_run_leaves_neither_the_marker_nor_the_rows() {
         .runtime()
         .unwrap()
         .submit_write(|w| {
-            w.replace_violations(&[], 999_999, Some("deadbeef"))?;
+            w.replace_violations(
+                &[],
+                NewCheckRun {
+                    ran_at: 999_999,
+                    commit_sha: Some("deadbeef"),
+                    checked_rules: 0,
+                    rules_present: false,
+                    operation: CHECK_RUN_OP_CHECK,
+                },
+            )?;
             Err::<(), _>(anyhow::anyhow!("interrupted mid-run"))
         })
         .expect_err("the job must fail");
@@ -2547,6 +2559,355 @@ fn scan_records_a_marker_describing_its_own_run_not_the_last_check() {
     assert!(
         rows.iter().all(|r| r.created_at == after_scan.ran_at),
         "every row on disk carries the scan's own time, not the check's"
+    );
+}
+
+// ── S-437 / CR-140 / FR-GV-21: the marker records WHAT IT EVALUATED ────────
+//
+// `violation_count` is a numerator. Until migration 21 the marker carried no
+// denominator, so a run that evaluated NO rules recorded 0 and read back
+// indistinguishably from a run that evaluated a contract and found it clean —
+// the reading FR-GV-03 forbids ("'Clean' means a contract was evaluated and
+// held; it never means nothing was evaluated").
+//
+// Everything below asserts against the MARKER ROW, never against a rendered
+// line: T1 must be falsifiable without T2's rendering (sprint-73 §4 risk 4).
+
+/// A `.logos/rules.toml` that exists and authors **no** rules — all commented
+/// out, which is exactly what `logos init`'s default template writes.
+///
+/// This is the fixture for the second vacuous state: the contract is present,
+/// so `rules_present` is true, but nothing was evaluated. Reproduced from the
+/// `notes/sprint-test-72.md` Finding 1a transcript, which reached it via
+/// `logos init` rather than by inventing a shape.
+fn present_contract_authoring_zero_rules() -> TempDir {
+    thresholds_project(
+        "\
+# Everything is optional: an omitted constraint is simply not enforced.
+# [constraints]
+# max_cc = 15
+",
+    )
+}
+
+/// A present contract authoring two real rules that the clean fixture passes —
+/// the `0 of N` state, the only one of the four that is genuinely clean.
+fn present_contract_authoring_two_rules() -> TempDir {
+    thresholds_project("[constraints]\nmax_cc = 100\nmax_fn_lines = 200\n")
+}
+
+/// The fourth state: a run that **breaches**, over a contract whose evaluated
+/// set is deliberately **larger than its violation count**.
+///
+/// `layered_project` cannot serve here. It authors exactly the rules it breaks,
+/// so `checked_rules` and `violations.len()` are both 2 and every assertion
+/// about the denominator is satisfied by the numerator — a marker that sourced
+/// `checked_rules` from the violation count would pass unnoticed. This fixture
+/// adds two constraint keys the graph satisfies, so the two figures cannot
+/// coincide and the breaching state gains the discriminating power the sprint
+/// plan asked it for.
+fn present_contract_breaching_fewer_than_it_evaluates() -> TempDir {
+    let tmp = layered_project();
+    write(
+        tmp.path(),
+        ".logos/rules.toml",
+        "\
+[constraints]
+max_cc       = 100
+max_fn_lines = 200
+
+[[layers]]
+name  = \"domain\"
+paths = [\"src/domain_*.rs\"]
+order = 1
+
+[[layers]]
+name  = \"presentation\"
+paths = [\"src/ui_*.rs\"]
+order = 2
+
+[[boundaries]]
+from   = \"domain\"
+to     = \"presentation\"
+reason = \"the domain must not reach upward into presentation\"
+",
+    );
+    tmp
+}
+
+/// A run over a contract records the rule count it evaluated and the operation
+/// that wrote the marker — the denominator `violation_count` never had.
+///
+/// The count is cross-checked against the report's own `checked_rules` rather
+/// than against a hardcoded number: the two are the same fact about the same
+/// run, and pinning a literal here would let them drift apart silently.
+#[test]
+fn a_check_records_the_rule_count_it_evaluated_and_names_its_operation() {
+    let tmp = layered_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let marker = check_run(&engine).expect("a run records a marker");
+
+    assert!(
+        report.checked_rules > 0,
+        "the layered fixture must genuinely evaluate rules, or this proves nothing"
+    );
+    assert_eq!(
+        marker.checked_rules,
+        Some(i64::from(report.checked_rules)),
+        "the marker records the SAME evaluated set the report reports (CR-140 §3.1)"
+    );
+    assert_eq!(
+        marker.rules_present,
+        Some(true),
+        "a loaded rules.toml records as present"
+    );
+    assert_eq!(
+        marker.operation.as_deref(),
+        Some(CHECK_RUN_OP_CHECK),
+        "a `check` marker names `check` as the run that wrote it"
+    );
+}
+
+/// The fourth state: a run that **breaches** records its full evaluated set,
+/// and the denominator is provably not the numerator.
+///
+/// The sprint plan lists "N > 0 breaching" as a state distinct from "N > 0
+/// clean", and this is what makes it distinct rather than redundant. The
+/// sibling test above runs on `layered_project`, which authors exactly the
+/// rules it breaks — two evaluated, two violated — so every assertion about
+/// `checked_rules` there is equally satisfied by the violation count. A marker
+/// that sourced its denominator from the numerator would pass it.
+///
+/// Here the contract evaluates strictly more rules than the run breaks, so the
+/// two figures cannot coincide, and `checked_rules != violation_count` is
+/// asserted directly. Found in review by mutating `check_rules` to pass
+/// `violations.len()` as `checked_rules`: the breaching tests passed and only
+/// the clean-state ones caught it.
+#[test]
+fn a_breaching_run_records_a_denominator_larger_than_its_violation_count() {
+    let tmp = present_contract_breaching_fewer_than_it_evaluates();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.check_rules(None, true).expect("check_rules runs");
+    assert!(
+        !report.violations.is_empty(),
+        "the fixture must genuinely breach, or this is just the clean case again"
+    );
+
+    let marker = check_run(&engine).expect("a breaching run records a marker");
+    assert!(
+        marker.violation_count > 0,
+        "the breaching state must record a non-zero numerator: {marker:?}"
+    );
+    assert_eq!(
+        marker.checked_rules,
+        Some(i64::from(report.checked_rules)),
+        "the marker records the evaluated set, findings or not"
+    );
+    // The load-bearing assertion, and the reason this fixture exists: the
+    // denominator is a different number from the numerator, so it cannot have
+    // been sourced from it.
+    assert_ne!(
+        marker.checked_rules,
+        Some(marker.violation_count),
+        "the evaluated set must not merely echo the violation count \
+         ({:?} vs {}) — the conflation a same-valued fixture cannot detect",
+        marker.checked_rules,
+        marker.violation_count
+    );
+    assert!(
+        marker.checked_rules > Some(marker.violation_count),
+        "this fixture evaluates strictly more rules than it breaks ({:?} vs {})",
+        marker.checked_rules,
+        marker.violation_count
+    );
+    assert_eq!(marker.rules_present, Some(true));
+    assert_eq!(marker.operation.as_deref(), Some(CHECK_RUN_OP_CHECK));
+}
+
+/// A run with **no contract** records `0` rules AND `rules_present = false`.
+///
+/// This is the `notes/sprint-test-72.md` Finding 1a transcript: `logos check`
+/// exits 4 saying "nothing was evaluated" and leaves a marker. The marker is
+/// now able to say so — `violation_count = 0` alongside `checked_rules = 0` is
+/// a vacuous run, not a clean one.
+#[test]
+fn a_run_with_no_contract_records_an_empty_evaluated_set_and_no_contract() {
+    let tmp = clean_project();
+    assert!(
+        !tmp.path().join(".logos/rules.toml").exists(),
+        "the fixture must genuinely have no contract for this to mean anything"
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check_rules runs");
+
+    let marker = check_run(&engine).expect("even a vacuous run records a marker");
+    assert_eq!(
+        marker.violation_count, 0,
+        "nothing was evaluated, so nothing was found — the misleading half"
+    );
+    assert_eq!(
+        marker.checked_rules,
+        Some(0),
+        "and the marker now records that nothing was evaluated (CR-140 §3.1)"
+    );
+    assert_eq!(
+        marker.rules_present,
+        Some(false),
+        "no contract is recorded as no contract, not merely as zero rules"
+    );
+}
+
+/// The two vacuous states are **distinguishable**, and `checked_rules` alone
+/// cannot tell them apart — which is why `rules_present` is a second field and
+/// not a derivation.
+///
+/// A present contract authoring zero rules is what `logos init` produces by
+/// default, so this is the ordinary state of a freshly initialised project,
+/// not an edge case. Both markers record `checked_rules = 0`; only
+/// `rules_present` separates a configured project from an unconfigured one.
+#[test]
+fn a_present_contract_authoring_zero_rules_is_distinguishable_from_no_contract() {
+    let no_contract = clean_project();
+    let engine = Engine::start(no_contract.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check_rules runs");
+    let absent = check_run(&engine).expect("a marker is recorded");
+
+    let zero_rules = present_contract_authoring_zero_rules();
+    let engine = Engine::start(zero_rules.path()).expect("engine starts");
+    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let present = check_run(&engine).expect("a marker is recorded");
+
+    assert!(
+        report.rules_present,
+        "the fixture must genuinely carry a contract, or the pair below is not a pair"
+    );
+    assert_eq!(
+        (absent.checked_rules, present.checked_rules),
+        (Some(0), Some(0)),
+        "both evaluated nothing — the count cannot separate them"
+    );
+    assert_ne!(
+        absent.rules_present, present.rules_present,
+        "and `rules_present` is what does: {:?} vs {:?} (CR-140 CRA-01/CRA-02)",
+        absent.rules_present, present.rules_present
+    );
+    assert_eq!(
+        (present.rules_present, present.violation_count),
+        (Some(true), 0),
+        "a present contract authoring zero rules: configured, and still vacuous"
+    );
+}
+
+/// A genuinely clean run over N > 0 rules records N — the state that IS clean,
+/// and the one the other three must stay distinguishable from.
+#[test]
+fn a_clean_run_over_n_rules_records_n_as_its_denominator() {
+    let tmp = present_contract_authoring_two_rules();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.check_rules(None, true).expect("check_rules runs");
+    assert!(
+        report.violations.is_empty(),
+        "the fixture must pass its own contract: {:?}",
+        report.violations
+    );
+
+    let marker = check_run(&engine).expect("a clean run records a marker");
+    assert_eq!(
+        (marker.violation_count, marker.checked_rules),
+        (0, Some(2)),
+        "0 violations OVER 2 rules — the numerator finally carries its denominator \
+         (NFR-CC-04)"
+    );
+    assert_eq!(marker.rules_present, Some(true));
+}
+
+/// `scan` records **its own** operation, not the `check` that preceded it.
+///
+/// `scan` shares `persist_violations` with `check_rules` and so writes the
+/// marker too — the reason the rendered readout could name a command the user
+/// never ran (`notes/sprint-test-72.md` Finding 1b, CR-140 §2.2). The marker
+/// now says which run wrote it, so the attribution is a recorded fact rather
+/// than a guess.
+#[test]
+fn scan_records_its_own_operation_not_the_check_that_preceded_it() {
+    let tmp = layered_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    engine.check_rules(None, true).expect("check_rules runs");
+    let after_check = check_run(&engine).expect("the check recorded a marker");
+    assert_eq!(
+        after_check.operation.as_deref(),
+        Some(CHECK_RUN_OP_CHECK),
+        "the check names itself"
+    );
+
+    engine.scan(true).expect("scan runs");
+    let after_scan = check_run(&engine).expect("scan records a marker too");
+    assert_eq!(
+        after_scan.operation.as_deref(),
+        Some(CHECK_RUN_OP_SCAN),
+        "the scan overwrites the attribution with its own — never inheriting the check's"
+    );
+    // `scan` evaluates the same contract `check` does, so it must record the
+    // same evaluated set. A scan that recorded an empty one would reintroduce
+    // the vacuous-clean reading on the report leg alone.
+    assert_eq!(
+        after_scan.checked_rules, after_check.checked_rules,
+        "scan evaluates the same rule set check does, and records it"
+    );
+    assert_eq!(after_scan.rules_present, Some(true));
+}
+
+/// The marker is written **atomically with its rows**, evaluated set included:
+/// an interrupted run leaves no partially-populated marker (CR-140 CRA-07).
+///
+/// The sibling `an_interrupted_run_leaves_neither_the_marker_nor_the_rows`
+/// proves the rollback for the three original fields. This one proves the
+/// added fields ride the SAME write — a marker updated by a second statement
+/// could survive a failure carrying a fresh count and a stale denominator,
+/// which is the partially-populated marker the CR forbids.
+#[test]
+fn an_interrupted_run_leaves_no_partially_populated_evaluated_set() {
+    let tmp = present_contract_authoring_two_rules();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    engine.check_rules(None, true).expect("check_rules runs");
+    let good = check_run(&engine).expect("the good run recorded a marker");
+    assert_eq!(
+        good.checked_rules,
+        Some(2),
+        "the fixture must record a real denominator first, or the rollback proves nothing"
+    );
+
+    // A write job that rewrites the marker with a DIFFERENT evaluated set and
+    // then fails. One transaction, so no field of it survives.
+    let err = engine
+        .runtime()
+        .unwrap()
+        .submit_write(|w| {
+            w.replace_violations(
+                &[],
+                NewCheckRun {
+                    ran_at: 999_999,
+                    commit_sha: Some("deadbeef"),
+                    checked_rules: 0,
+                    rules_present: false,
+                    operation: CHECK_RUN_OP_SCAN,
+                },
+            )?;
+            Err::<(), _>(anyhow::anyhow!("interrupted mid-run"))
+        })
+        .expect_err("the job must fail");
+    assert!(err.to_string().contains("interrupted mid-run"));
+
+    assert_eq!(
+        check_run(&engine),
+        Some(good),
+        "every field of the previous marker survives — no half-written evaluated set"
     );
 }
 

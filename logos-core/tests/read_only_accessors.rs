@@ -104,11 +104,23 @@ fn violation_count(repo: &Path) -> i64 {
         .expect("count violations")
 }
 
-/// The `check_run` marker as `(row count, ran_at, commit_sha, violation_count)`
-/// — content, not just a row count, so "unchanged" means the readout did not
-/// re-stamp a marker over the one the last real run recorded (S-313,
-/// [FR-GV-21]).
-fn check_run_state(repo: &Path) -> (i64, Option<(i64, Option<String>, i64)>) {
+/// The `check_run` marker as `(row count, every column as text)` — content,
+/// not just a row count, so "unchanged" means the readout did not re-stamp a
+/// marker over the one the last real run recorded (S-313, [FR-GV-21]).
+///
+/// `SELECT *` with a generic row reader, deliberately, rather than a column
+/// list. An enumerated projection is the thing that goes stale: this helper
+/// listed `(ran_at, commit_sha, violation_count)` and silently stopped covering
+/// the marker when migration 21 (S-437, [CR-140]) widened it with the evaluated
+/// set — the guard would have kept passing while three new fields went
+/// unwatched. Reading whatever columns the table has keeps it honest as the
+/// marker widens again ([CR-140] CRA-08). The same reasoning, and the same
+/// shape, as `read_table` in `graph_store::migrate`'s tests.
+///
+/// Each value is rendered with its storage class, so a NULL is distinguishable
+/// from the string `"NULL"` — which matters precisely here, since NULL in the
+/// evaluated-set columns means "written before migration 21".
+fn check_run_state(repo: &Path) -> (i64, Option<Vec<(String, String)>>) {
     let conn = Connection::open_with_flags(
         repo.join(".logos/logos.db"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -117,14 +129,68 @@ fn check_run_state(repo: &Path) -> (i64, Option<(i64, Option<String>, i64)>) {
     let rows: i64 = conn
         .query_row("SELECT count(*) FROM check_run", [], |r| r.get(0))
         .expect("count check_run");
-    let marker = conn
-        .query_row(
-            "SELECT ran_at, commit_sha, violation_count FROM check_run WHERE id = 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
+    let mut stmt = conn
+        .prepare("SELECT * FROM check_run WHERE id = 1")
+        .expect("prepare marker read");
+    let columns = stmt.column_count();
+    let names: Vec<String> = stmt
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let marker = stmt
+        .query_row([], |r| {
+            (0..columns)
+                .map(|i| {
+                    let rendered = match r.get_ref(i)? {
+                        rusqlite::types::ValueRef::Null => "NULL".to_string(),
+                        rusqlite::types::ValueRef::Integer(v) => format!("i:{v}"),
+                        rusqlite::types::ValueRef::Real(v) => format!("r:{v}"),
+                        rusqlite::types::ValueRef::Text(v) => {
+                            format!("t:{}", String::from_utf8_lossy(v))
+                        }
+                        rusqlite::types::ValueRef::Blob(v) => format!("b:{v:?}"),
+                    };
+                    Ok((names[i].clone(), rendered))
+                })
+                .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        })
         .ok();
     (rows, marker)
+}
+
+/// The columns `check_run_state` must be watching for the guards above to mean
+/// what they say ([CR-140] CRA-08).
+///
+/// Without this, narrowing the helper's projection would **silently** shrink
+/// what "the marker is unchanged" covers and every guard would keep passing —
+/// the failure mode a widened table invites, and the reason the helper reads
+/// `SELECT *`. This asserts the coverage rather than trusting it.
+const MARKER_COLUMNS_UNDER_GUARD: [&str; 6] = [
+    "ran_at",
+    "commit_sha",
+    "violation_count",
+    "checked_rules",
+    "rules_present",
+    "operation",
+];
+
+/// Assert the captured marker genuinely covers every column the guards claim.
+fn assert_marker_coverage(state: &(i64, Option<Vec<(String, String)>>)) {
+    let captured: Vec<&str> = state
+        .1
+        .as_ref()
+        .expect("the fixture recorded a marker")
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    for column in MARKER_COLUMNS_UNDER_GUARD {
+        assert!(
+            captured.contains(&column),
+            "the write-free guard must watch `{column}` — captured {captured:?} \
+             (CR-140 CRA-08: the guard is extended to the widened marker table)"
+        );
+    }
 }
 
 // ── report tier: quality_readout (CR-095) ────────────────────────────────────
@@ -153,6 +219,7 @@ fn quality_readout_computes_fresh_and_writes_nothing() {
     let marker_before = check_run_state(tmp.path());
     assert!(snapshots_before > 0, "the fixture has a persisted snapshot");
     assert_eq!(marker_before.0, 1, "the check recorded its marker (FR-GV-21)");
+    assert_marker_coverage(&marker_before);
 
     // Several readouts back to back — the shape a /clear-heavy session produces.
     let first = engine.quality_readout().expect("readout");
@@ -506,6 +573,7 @@ fn repeated_readouts_leave_the_marker_unchanged() {
     let violations_before = violation_count(tmp.path());
     let snapshots_before = metric_snapshot_count(tmp.path());
     assert_eq!(marker_before.0, 1, "exactly one marker row, upserted not appended (BR-40)");
+    assert_marker_coverage(&marker_before);
 
     for _ in 0..5 {
         engine.quality_readout().expect("readout");
@@ -515,7 +583,8 @@ fn repeated_readouts_leave_the_marker_unchanged() {
     assert_eq!(
         check_run_state(tmp.path()),
         marker_before,
-        "ran_at, commit_sha and violation_count are all untouched by reading"
+        "every column of the marker — the evaluated set included — is untouched by \
+         reading (FR-GV-21, CR-140 CRA-08)"
     );
     assert_eq!(violation_count(tmp.path()), violations_before);
     assert_eq!(metric_snapshot_count(tmp.path()), snapshots_before);
@@ -716,6 +785,7 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
         marker_before.0, 1,
         "the fixture recorded a marker, so 'unchanged' below is a real comparison"
     );
+    assert_marker_coverage(&marker_before);
     assert!(
         violations_before > 0,
         "the fixture recorded findings, so 'unchanged' below is a real comparison"
@@ -786,8 +856,8 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     assert_eq!(
         check_run_state(tmp.path()),
         marker_before,
-        "reading a run is not running one — ran_at, commit_sha and violation_count \
-         are all untouched by reading the Health pair (FR-GV-21, ADR-49)"
+        "reading a run is not running one — every column of the marker is untouched \
+         by reading the Health pair (FR-GV-21, ADR-49, CR-140 CRA-08)"
     );
 }
 
