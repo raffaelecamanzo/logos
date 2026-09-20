@@ -1698,8 +1698,8 @@ empty graph ([FR-EH-04](../specs/requirements/FR-EH-04.md),
 The readout names the one its own reading established, and the machine-readable
 `signal_absence` object carries the same verdict as the rendered line.
 
-**`empty-graph` — the store holds no node.** There is nothing to score because
-there is nothing there:
+**`empty-graph` — no source was ingested, or none of it yielded a node.** There
+is nothing to score because no graph was built:
 
 ```text
 $ logos quality-report --hook-json    # rendered
@@ -1717,32 +1717,52 @@ code.** The metric signal is computed over the **production scope**
 ([FR-QM-08](../specs/requirements/FR-QM-08.md)): `is_test` vertices, derived
 policy vertices and promoted broker markers are dropped before scoring. A crate
 whose only source is a test module therefore scores an empty graph while being
-plainly indexed — and says so, carrying the two figures that establish it:
+plainly indexed — and says so, carrying the two figures that establish it.
+
+The figures below are a real reading of this exact tree, and they move if the
+tree does — a `Cargo.toml` one key longer indexes one node more — so it is given
+in full rather than described:
+
+```text
+onlytests/
+├── Cargo.toml          [package] name = "onlytests", version = "0.1.0"
+└── tests/
+    └── only_tests.rs   #[test] alpha(), #[test] beta(), and their helper()
+```
 
 ```text
 $ logos status                        # the same store, in the same breath
   "indexed": true,
-  "node_count": 9,
-  "edge_count": 9,
+  "node_count": 8,
+  "edge_count": 8,
 
 $ logos quality-report --hook-json    # rendered
-logos quality report: signal n/a (no production code — 9 node(s) indexed, 3 test function(s) excluded) · no baseline saved · violations none recorded (no check has run)
+logos quality report: signal n/a (no production code — 8 node(s) indexed, 3 test function(s) excluded) · no baseline saved · violations none recorded (no check has run)
 
 $ logos quality-report                # the read-model
   "signal": null,
   "signal_absence": {
     "cause": "no-production-scope",
-    "indexed_nodes": 9,
+    "indexed_nodes": 8,
     "test_functions": 3
   },
 ```
 
 `indexed_nodes` is the store's own node count — the very figure
 [`status`](#status) prints, read from the same query, so the two commands cannot
-contradict each other about whether anything is indexed. `test_functions` is what
-the production filter excluded, and is reported as the count it is: `0` there
-means the scope was emptied by something other than tests, not that no test
-exists.
+contradict each other about that number. `test_functions` is what the production
+filter excluded, and is reported as the count it is: `0` there means the scope
+was emptied by something other than tests, not that no test exists.
+
+The two commands do answer different *questions* about "indexed", deliberately.
+[`status`](#status) reports `indexed: true` when the store holds **any** row
+(`files > 0 || nodes > 0`); this arm requires **both** (`files > 0 && nodes >
+0`), because a node is not by itself evidence that code was indexed. Declaring
+`[[layers]]` in `rules.toml` materialises one derived vertex per declaration
+whether or not a file matches, so a project that has never been indexed can show
+`file_count: 0, node_count: 3`. That reads `empty graph` here — and the step
+really is [`index`](#index), which the other arm would have told you does not
+exist.
 
 Neither line names a next command. For `empty-graph` the step is the obvious
 [`index`](#index); for `no-production-scope` **no command changes the
