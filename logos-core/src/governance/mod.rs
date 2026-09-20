@@ -2183,13 +2183,19 @@ pub(crate) fn latest_health(engine: &Engine) -> Result<LatestHealth> {
 ///   happened — `check_rules` clears and rewrites it, so a clean check and no
 ///   check at all leave it identical — so the [FR-GV-21] marker is read
 ///   alongside it ([CR-096]). The marker resolves the ambiguity as a recorded
-///   fact rather than a guess: its presence dates and attributes the findings
-///   and licenses stating a *recorded clean* check ([BR-41]); its absence means
-///   no run has happened, which is reported as such and never as a pass.
+///   fact rather than a guess: its presence dates and attributes the findings,
+///   and its absence means no run has happened, which is reported as such and
+///   never as a pass. Stating a *recorded clean* check ([BR-41]) needs the
+///   marker **and**, since [CR-140], the **evaluated set** it recorded: a `0`
+///   over a contract that authored no rules — or over a marker written before
+///   the evaluated set was kept — is a vacuous run, not a pass ([FR-GV-03]).
+///   That is what [`EvaluatedSetAbsence::classify`] separates below.
 ///
 /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+/// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
 /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+/// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
 ///
 /// `message_cap` bounds the returned message list; `violation_count` always
 /// carries the true total so a truncated list can say what it dropped.

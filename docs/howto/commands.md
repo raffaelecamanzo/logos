@@ -1683,8 +1683,12 @@ Two consequences worth knowing:
   not `0`. No blessed baseline reads `no baseline saved`, not a delta against
   zero. A baseline scored under a different metric version or threshold set reads
   `not comparable` with no delta invented.
-- **The violations are as of your last [`check`](#check---rules-file---allow-no-rules)**, and say so — with a
-  date. Re-evaluating the rules re-materialises the derived policy graph, which
+- **The violations are as of the last recorded rule check**, and say so — with a
+  date. (The last *recorded* one: [`scan`](#scan) replaces the violation set too,
+  so the run behind the line is not necessarily a
+  [`check`](#check---rules-file---allow-no-rules) you invoked, and the line
+  deliberately names no command — see [the violations line](#the-violations-line-in-full)
+  below.) Re-evaluating the rules re-materialises the derived policy graph, which
   is a write, so the readout reports what was last recorded rather than paying a
   write to look current. What it adds is *how stale* that is, so you can tell a
   live finding from an archaeological one. Run
@@ -1769,11 +1773,13 @@ Neither line names a next command. For `empty-graph` the step is the obvious
 state** — writing production code does — and naming one that cannot would be
 exactly the misdirection [FR-EH-04](../specs/requirements/FR-EH-04.md) forbids.
 
-**The violations line, in full** ([FR-IN-07](../specs/requirements/FR-IN-07.md),
-[CR-096](../requests/CR-096-recorded-check-marker.md),
-[CR-140](../requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md)).
-Every [`check`](#check---rules-file---allow-no-rules) records a marker — the
-run's time, the `HEAD` it saw, how many violations it found, and **what it
+#### The violations line, in full
+
+[FR-IN-07](../specs/requirements/FR-IN-07.md),
+[CR-096](../requests/CR-096-recorded-check-marker.md) and
+[CR-140](../requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md)
+govern this line. Every run that replaces the violation set records a marker —
+its time, the `HEAD` it saw, how many violations it found, and **what it
 evaluated** — and the readout renders one of these lines from it:
 
 ```text

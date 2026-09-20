@@ -889,7 +889,7 @@ mod tests {
             }),
             ..full_readout()
         };
-        let (_, context) = channels(&readout);
+        let (summary, context) = channels(&readout);
         assert!(
             context.contains(
                 "rule violations: 1 recorded, evaluated set unknown \
@@ -897,6 +897,17 @@ mod tests {
             ),
             "the rows date themselves with no marker present, and the denominator \
              they were measured against is named unknown: {context}"
+        );
+        // The summary too, not only the agent-facing channel: this arm —
+        // findings recorded over NO denominator — is the one state whose
+        // wording was pinned on `additionalContext` alone, so a regression in
+        // the line a human reads would have shipped unseen.
+        assert!(
+            summary.contains(
+                "violations 1 recorded, evaluated set unknown \
+                 (this marker predates its recording), 6 days ago"
+            ),
+            "and the user-visible line says the same thing: {summary}"
         );
         assert!(
             !context.contains("at HEAD"),
@@ -1504,6 +1515,62 @@ mod tests {
             EvaluatedSetAbsence::classify(Some(0), Some(true)).1,
             Some(EvaluatedSetAbsence::NoRulesAuthored),
             "a recorded zero over a present contract is a state somebody did record"
+        );
+    }
+
+    /// A `checked_rules` no run could have produced is named unusable, never
+    /// rendered as a state somebody recorded.
+    ///
+    /// Migration 21 put a `CHECK` on `rules_present` and **none** on
+    /// `checked_rules`, so a corrupted or hand-edited row can carry a negative
+    /// count. Falling through to the zero-rules arms would state *"a rules
+    /// contract present, authoring no rules"* — a specific, plausible sentence
+    /// about a row that records nothing usable, which is the same class of
+    /// fabrication this whole line exists to remove. The over-large end is
+    /// clamped for the same reason, and both are asserted here so the two ends
+    /// of one posture cannot drift apart.
+    #[test]
+    fn an_unusable_rule_count_is_named_unknown_not_rendered_as_a_recorded_state() {
+        for corrupt in [-1_i64, -5, i64::MIN] {
+            for rules_present in [Some(true), Some(false), None] {
+                let (figure, absence) = EvaluatedSetAbsence::classify(Some(corrupt), rules_present);
+                assert_eq!(
+                    (figure, absence),
+                    (None, Some(EvaluatedSetAbsence::Unrecorded)),
+                    "a negative count records no evaluated set \
+                     ({corrupt}, {rules_present:?})"
+                );
+            }
+        }
+        // And the rendering says so, rather than naming a contract state.
+        let readout = QualityReadout {
+            violations: None,
+            violation_count: None,
+            check: Some(CheckRun {
+                checked_rules: EvaluatedSetAbsence::classify(Some(-5), Some(true)).0,
+                evaluated_absence: EvaluatedSetAbsence::classify(Some(-5), Some(true)).1,
+                ..marker(0, 60)
+            }),
+            ..full_readout()
+        };
+        let (summary, context) = violation_lines(&readout);
+        for channel in [&summary, &context] {
+            assert!(
+                channel.contains("evaluated set unknown"),
+                "an unusable count renders as unknown: {channel}"
+            );
+            assert!(
+                !channel.contains("authoring no rules") && !channel.contains("clean"),
+                "and never as a contract state or a pass: {channel}"
+            );
+        }
+
+        // The other end of the same posture: a count wider than the producer's
+        // own `u32` saturates rather than wrapping into a small, plausible one.
+        assert_eq!(
+            EvaluatedSetAbsence::classify(Some(i64::from(u32::MAX) + 1), Some(true)),
+            (Some(u32::MAX), None),
+            "an over-large count saturates; it never wraps"
         );
     }
 }

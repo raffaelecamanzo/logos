@@ -1935,7 +1935,7 @@ impl Engine {
     /// its violations are the last recorded run's — see [`QualityReadout`] for
     /// why re-evaluating them read-only is not possible. Those findings are
     /// dated and attributed to the `HEAD` they were measured at from the
-    /// [FR-GV-21] run marker, whose absence is reported as "no check has run"
+    /// [FR-GV-21] run marker, whose absence is reported as "no rule check has run"
     /// and never as a clean bill of health ([CR-096]).
     /// The message list is bounded by the rendering cap
     /// ([`governance::readout`](crate::governance::readout)); the true total

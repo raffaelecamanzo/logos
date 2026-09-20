@@ -32,13 +32,17 @@ use crate::models::pipeline::RelationCoverage;
 ///   current, and the rendering says "last recorded" rather than implying live.
 ///   Since [CR-096] the staleness is **quantified** rather than merely
 ///   labelled: [`check`](crate::Engine::check_rules) records a run marker
-///   ([FR-GV-21]) the readout dates its findings from, and whose mere presence
-///   is what licenses stating a *recorded* clean check ([BR-41]). See
-///   [`CheckRun`].
+///   ([FR-GV-21]) the readout dates its findings from. Its presence is
+///   *necessary* to state a *recorded* clean check ([BR-41]) and, since
+///   [CR-140], no longer sufficient: the marker must also record a **non-empty
+///   evaluated set**, since a `0` over nothing evaluated is not a pass
+///   ([FR-GV-03]). See [`CheckRun`].
 ///
 /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+/// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
 /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+/// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
 ///
 /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
 /// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
@@ -87,7 +91,7 @@ pub struct QualityReadout {
     /// check and no check at all leave it identical. The table is therefore
     /// never the ground for a verdict — [`check`](Self::check) is. A rendering
     /// may say "clean" only from a marker recording a run that found nothing
-    /// ([BR-41]); with no marker it must say "no check has run", never
+    /// ([BR-41]); with no marker it must say "no rule check has run", never
     /// "0 violations", which would assert a pass that may never have happened.
     ///
     /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
@@ -106,7 +110,7 @@ pub struct QualityReadout {
     pub violation_count: Option<usize>,
     /// What is known about the [`check`](crate::Engine::check_rules) run those
     /// violations came from ([CR-096]); `None` = **no run is known of at all**,
-    /// which is what licenses the rendering to say "no check has run".
+    /// which is what licenses the rendering to say "no rule check has run".
     ///
     /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
     pub check: Option<CheckRun>,
@@ -271,9 +275,14 @@ impl SignalAbsence {
 /// it:
 ///
 /// - **The [FR-GV-21] marker** (`recorded_count: Some(_)`). A run demonstrably
-///   happened, at a known time and a known `HEAD`. Only this licenses stating
-///   a *clean* check ([BR-41]) — a clean run records `Some(0)`, which is
-///   precisely the fact an empty `violations` table cannot express.
+///   happened, at a known time and a known `HEAD`. Only this *can* license
+///   stating a *clean* check ([BR-41]) — a clean run records `Some(0)`, which
+///   is precisely the fact an empty `violations` table cannot express. It is
+///   not sufficient on its own: since [CR-140] a clean result also requires a
+///   recorded non-empty evaluated set, so `recorded_count: Some(0)` beside an
+///   absent [`checked_rules`](Self::checked_rules) is a **vacuous** run, not a
+///   pass. The full condition lives in one place, `recorded_clean_over` in
+///   `governance::readout`; this field is one of its three inputs.
 /// - **The violation rows' own `created_at`** (`recorded_count: None`), on a
 ///   store written before the marker migration. The rows date themselves, so
 ///   such a store gets dated findings immediately — but with no marker there
@@ -284,6 +293,7 @@ impl SignalAbsence {
 /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
 /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+/// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct CheckRun {
     /// Unix-seconds the run happened at.
@@ -372,9 +382,21 @@ pub struct CheckRun {
 /// The sibling of [`SignalAbsence`], deliberately: the same readout carries two
 /// figures that can be absent, and [S-434] audits both against **one**
 /// taxonomy, so this follows that type's shape rather than inventing a second
-/// vocabulary. Same derives, same `classify` constructor producing the figure
-/// and its absence together, same rule that an arm carries whatever establishes
-/// it, and the same refusal to name a remediation command.
+/// vocabulary — a `classify` constructor, the rule that an arm carries whatever
+/// establishes it, the same serde tagging (`tag = "cause"`, kebab-case), and
+/// the same refusal to name a remediation command.
+///
+/// Two differences from [`SignalAbsence`], stated rather than glossed as
+/// sameness, because [S-434] has to reconcile them:
+/// - **`classify` returns the figure as well as the absence.** `SignalAbsence`
+///   returns the absence alone and reads its figure from a different source, so
+///   it cannot do this; see [`classify`](Self::classify). This shape is the
+///   stronger one — mutual exclusivity is structural here and test-enforced
+///   there — so the reconciliation worth making is to lift it into
+///   `SignalAbsence`, not to weaken this.
+/// - **This derives `Copy`** and `SignalAbsence` does not, though its fields
+///   would allow it. Incidental rather than meaningful; either type may gain or
+///   drop it without consequence.
 ///
 /// # Why this is a second enum rather than two more [`SignalAbsence`] arms
 ///
@@ -453,6 +475,15 @@ impl EvaluatedSetAbsence {
     /// A recorded `checked_rules > 0` settles the question by itself: a run that
     /// evaluated rules has a denominator whatever else the row says, so the
     /// figure is reported and no absence is claimed.
+    ///
+    /// A **negative** `checked_rules` is neither: migration 21 put a `CHECK` on
+    /// `rules_present` and none on this column, so a corrupted or hand-edited
+    /// row can carry one. It reads as [`Unrecorded`](Self::Unrecorded) rather
+    /// than falling through to the zero-rules arms, which would state *"a
+    /// contract authoring no rules"* — a specific, plausible-looking claim about
+    /// a row that records nothing usable. That is the same posture the
+    /// over-large clamp below takes, and the one `render_age` takes for an
+    /// impossible timestamp: name the value unusable, never render it as fact.
     #[must_use]
     pub fn classify(
         checked_rules: Option<i64>,
@@ -466,6 +497,8 @@ impl EvaluatedSetAbsence {
                 // wrapping it into a small, plausible-looking count.
                 (Some(u32::try_from(checked).unwrap_or(u32::MAX)), None)
             }
+            // A count no run could have produced records no evaluated set.
+            (Some(corrupt), _) if corrupt < 0 => (None, Some(Self::Unrecorded)),
             (None, _) | (_, None) => (None, Some(Self::Unrecorded)),
             (Some(_), Some(true)) => (None, Some(Self::NoRulesAuthored)),
             (Some(_), Some(false)) => (None, Some(Self::NoContract)),

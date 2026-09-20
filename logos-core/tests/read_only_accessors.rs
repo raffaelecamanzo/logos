@@ -637,17 +637,41 @@ fn blank_the_evaluated_set(repo: &Path) {
 /// The `rule violations:` line of the rendered session-start context — the
 /// surface [CR-140] CRA-01 requires these assertions be made against.
 fn rendered_violations_line(engine: &Engine) -> String {
-    let context = engine
-        .quality_report_hook_payload()
-        .expect("payload renders")
-        .hook_specific_output
-        .additional_context;
-    context
+    rendered_violations_both_channels(engine).1
+}
+
+/// The violations statement on **both** rendered channels: the one-line
+/// `systemMessage` a human reads, and the `additionalContext` line the agent
+/// gets.
+///
+/// Both, not just the second. The two channels share one production helper, so
+/// an end-to-end test of `additionalContext` alone is a test of the rendering
+/// *through* the channel that happens to be covered — the summary line, which
+/// is the half a person actually sees at session start, was never exercised
+/// against a real store. Asserting both here means a channel that stopped
+/// carrying the state would fail on a real store and not only on a constructed
+/// read-model.
+fn rendered_violations_both_channels(engine: &Engine) -> (String, String) {
+    let payload = engine.quality_report_hook_payload().expect("payload renders");
+    let summary = payload
+        .system_message
+        .split(" · ")
+        .find(|part| part.starts_with("violations "))
+        .unwrap_or_else(|| {
+            panic!(
+                "the summary carries a violations segment: {}",
+                payload.system_message
+            )
+        })
+        .to_string();
+    let context = payload.hook_specific_output.additional_context;
+    let line = context
         .lines()
         .find(|line| line.trim_start().starts_with("rule violations:"))
         .unwrap_or_else(|| panic!("the readout carries a violations line: {context}"))
         .trim()
-        .to_string()
+        .to_string();
+    (summary, line)
 }
 
 /// **Arm (a), end to end** — `notes/sprint-test-72.md` Finding 1a: a real
@@ -664,20 +688,22 @@ fn a_real_run_with_no_contract_renders_as_that_state_not_as_clean() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     engine.check_rules(None, true).expect("check runs");
 
-    let line = rendered_violations_line(&engine);
-    assert!(
-        line.contains("no rules contract authored"),
-        "the vacuous state is named (CRA-01): {line}"
-    );
-    assert!(
-        !line.contains("clean"),
-        "and the same binary no longer says 'nothing was evaluated' and 'clean' \
-         in one breath (FR-GV-03): {line}"
-    );
-    assert!(
-        !line.contains("rule violations: 0"),
-        "nor renders it as a bare zero (FR-GV-22): {line}"
-    );
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains("no rules contract authored"),
+            "the vacuous state is named on both channels (CRA-01): {channel}"
+        );
+        assert!(
+            !channel.contains("clean"),
+            "and the same binary no longer says 'nothing was evaluated' and 'clean' \
+             in one breath (FR-GV-03): {channel}"
+        );
+        assert!(
+            !channel.contains("violations: 0") && !channel.contains("violations 0"),
+            "nor renders it as a bare zero (FR-GV-22): {channel}"
+        );
+    }
 }
 
 /// **Arm (b), end to end** — a present contract authoring zero rules, the
@@ -697,16 +723,18 @@ fn a_real_run_over_a_contract_authoring_zero_rules_is_its_own_state() {
         "authoring no rules must genuinely evaluate none: {report:?}"
     );
 
-    let line = rendered_violations_line(&engine);
-    assert!(
-        line.contains("a rules contract present, authoring no rules"),
-        "the ordinary state of a fresh project is named (CRA-02): {line}"
-    );
-    assert!(
-        !line.contains("no rules contract authored"),
-        "and never collapsed into the unconfigured state: {line}"
-    );
-    assert!(!line.contains("clean"), "a denominator of zero is no pass: {line}");
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains("a rules contract present, authoring no rules"),
+            "the ordinary state of a fresh project is named (CRA-02): {channel}"
+        );
+        assert!(
+            !channel.contains("no rules contract authored"),
+            "and never collapsed into the unconfigured state: {channel}"
+        );
+        assert!(!channel.contains("clean"), "a denominator of zero is no pass: {channel}");
+    }
 }
 
 /// **Arm (c), end to end** — a real clean run over N > 0 rules states the clean
@@ -724,12 +752,14 @@ fn a_real_clean_run_states_its_denominator() {
         "the contract must genuinely evaluate rules, or this is a vacuous arm"
     );
 
-    let line = rendered_violations_line(&engine);
-    assert!(
-        line.contains(&format!("0 of {} rule(s) evaluated", report.checked_rules)),
-        "the clean figure carries the denominator the run reported: {line}"
-    );
-    assert!(line.contains("clean"), "and this one IS clean: {line}");
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains(&format!("0 of {} rule(s) evaluated", report.checked_rules)),
+            "the clean figure carries the denominator the run reported: {channel}"
+        );
+        assert!(channel.contains("clean"), "and this one IS clean: {channel}");
+    }
 }
 
 /// **Arm (d), end to end** — a marker written **before** migration 21. An
@@ -753,16 +783,18 @@ fn a_pre_migration_marker_renders_as_unknown_never_clean_and_never_zero() {
     );
 
     blank_the_evaluated_set(tmp.path());
-    let line = rendered_violations_line(&engine);
-    assert!(
-        line.contains("evaluated set unknown"),
-        "an unrecorded evaluated set is unknown, not zero (CRA-05): {line}"
-    );
-    assert!(!line.contains("clean"), "and licenses no pass: {line}");
-    assert!(
-        !line.contains("rule violations: 0"),
-        "and is never rendered as a zero: {line}"
-    );
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains("evaluated set unknown"),
+            "an unrecorded evaluated set is unknown, not zero (CRA-05): {channel}"
+        );
+        assert!(!channel.contains("clean"), "and licenses no pass: {channel}");
+        assert!(
+            !channel.contains("violations: 0") && !channel.contains("violations 0"),
+            "and is never rendered as a zero: {channel}"
+        );
+    }
 }
 
 /// The rendered violations line **names no command**, on a real store, in every
@@ -777,13 +809,17 @@ fn the_rendered_violations_line_names_no_command_on_a_real_store() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let mut lines = vec![rendered_violations_line(&engine)];
+    let mut lines = Vec::new();
+    let (summary, context) = rendered_violations_both_channels(&engine);
+    lines.extend([summary, context]);
     engine.check_rules(None, true).expect("check runs");
-    lines.push(rendered_violations_line(&engine));
+    let (summary, context) = rendered_violations_both_channels(&engine);
+    lines.extend([summary, context]);
     write_satisfied_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine restarts with the contract");
     engine.scan(true).expect("scan runs and writes the marker too");
-    lines.push(rendered_violations_line(&engine));
+    let (summary, context) = rendered_violations_both_channels(&engine);
+    lines.extend([summary, context]);
 
     for line in &lines {
         for command in ["logos check", "logos scan", "logos gate", "`logos", "check_rules"] {
