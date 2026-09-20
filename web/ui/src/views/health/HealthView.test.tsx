@@ -71,6 +71,25 @@ function stub(model: HealthModel) {
   );
 }
 
+// The tone matchers both tone pins share. Hash-agnostic: render a reference
+// element of the intended tone and compare class names, never a literal
+// CSS-module hash (the `ScoreBar` tone test's shape). One matcher rather than a
+// hand-mirrored twin per spec, so the stale pin and the ordinary pin cannot
+// drift apart in what they mean by "this tone".
+function chipClass(tone: "red" | "orange" | "green") {
+  const { container } = render(<Badge tone={tone}>REF</Badge>);
+  return within(container).getByText("REF").className;
+}
+
+function bandClass(tone: "signal" | "warm" | "pass") {
+  const { container } = render(
+    <Callout label="Gate" tone={tone}>
+      <span>ref</span>
+    </Callout>,
+  );
+  return container.querySelector("section")?.className ?? "";
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -269,21 +288,6 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     render(<HealthView />);
     const chip = await screen.findByText("STALE");
 
-    // Reference renders of the intended tones, queried the same way as the
-    // subject so the comparison is class-for-class.
-    const chipClass = (tone: "red" | "orange") => {
-      const { container } = render(<Badge tone={tone}>REF</Badge>);
-      return within(container).getByText("REF").className;
-    };
-    const bandClass = (tone: "signal" | "warm") => {
-      const { container } = render(
-        <Callout label="Gate" tone={tone}>
-          <span>ref</span>
-        </Callout>,
-      );
-      return container.querySelector("section")?.className ?? "";
-    };
-
     expect(chip.className).toBe(chipClass("red"));
     expect(chip.className).not.toBe(chipClass("orange"));
     expect(chip.closest("section")?.className).toBe(bandClass("signal"));
@@ -295,9 +299,18 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
   it("renders both cards exactly as today while the graph is still indexed (CR-135)", async () => {
     stub(HEALTH); // `status.indexed` is true
     render(<HealthView />);
-    expect(await screen.findByText("PASS")).toBeInTheDocument();
+    const chip = await screen.findByText("PASS");
+    expect(chip).toBeInTheDocument();
     expect(screen.getByText(/current 8000 vs baseline 7800/i)).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
+    // "Exactly as today" includes the TONE, not only the words. A passing gate
+    // is the green chip in the pass band; hardcoding either to the stale
+    // branch's signal/red left every assertion above green, so the tone the
+    // ordinary case carries is pinned with the same matcher the stale pin uses.
+    expect(chip.className).toBe(chipClass("green"));
+    expect(chip.className).not.toBe(chipClass("red"));
+    expect(chip.closest("section")?.className).toBe(bandClass("pass"));
+    expect(chip.closest("section")?.className).not.toBe(bandClass("signal"));
     // None of the staleness wording reaches an indexed project.
     expect(screen.queryByText("STALE")).not.toBeInTheDocument();
     expect(screen.queryByText(/no longer indexed/i)).not.toBeInTheDocument();

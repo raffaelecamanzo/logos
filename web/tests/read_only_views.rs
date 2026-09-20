@@ -115,9 +115,12 @@ async fn loading_every_view_repeatedly_writes_no_snapshot() {
     let router = web::router(engine);
     // The CR-049 decommission (S-192) removed the server-rendered views; the SPA
     // now reads every dashboard through the `/api/v1/*` read-models, which compose
-    // the SAME read-only accessors the views used (`latest_gate`/`latest_scan`/
+    // the same read-only accessors the views used (`latest_gate`/
     // `coverage_status`/`check_rules`/`latest_hotspots`/`search`/
-    // `node`/`impact`/`graph_elements`/`config_read`/`wiki_read`). The CR-018/ADR-28
+    // `node`/`impact`/`graph_elements`/`config_read`/`wiki_read`) — with one
+    // deliberate exception since CR-135: `/api/v1/health` composes `latest_health`,
+    // the single-read seam, rather than the `latest_gate` + `latest_scan` pair it
+    // used to call. Still write-free, which is what this guard asserts. The CR-018/ADR-28
     // write-free-on-read guard follows them to the surviving routes: the static SPA
     // host (`/`, which touches no store) plus the full `/api/v1/*` read suite —
     // including `/api/v1/search?q=f` (FTS), `/api/v1/node?symbol=f` and
