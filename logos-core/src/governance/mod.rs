@@ -62,7 +62,8 @@ use crate::config::{AdmissionAuthority, Rules};
 use crate::engine::Engine;
 use crate::graph_store::{
     AnnotationNodeRow, EdgeRow, FunctionConstraintRow, FunctionMetricRow, GraphStore,
-    LatestMetricSnapshot, MetricSnapshotRow, NewViolation, NodeRow, StructuralReport,
+    LatestMetricSnapshot, MetricSnapshotRow, NewCheckRun, NewViolation, NodeRow,
+    StructuralReport, CHECK_RUN_OP_CHECK, CHECK_RUN_OP_SCAN,
 };
 use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, NodeId, NodeKind};
@@ -1665,6 +1666,35 @@ fn materialise_and_evaluate(
     Ok(evaluate(&input))
 }
 
+/// What a governance run evaluated, carried from the run to its marker
+/// (S-437, [CR-140] §3.1, [FR-GV-21]).
+///
+/// The two figures are **not** one fact. `checked_rules` is
+/// `violation_count`'s denominator; `rules_present` says whether a contract
+/// was authored at all, which the count alone cannot — a present contract
+/// authoring zero rules is [`logos init`](crate::init)'s default template, and
+/// it is a different state from an unconfigured project even though both
+/// evaluate nothing.
+///
+/// `operation` is which run is writing: [`CHECK_RUN_OP_CHECK`] or
+/// [`CHECK_RUN_OP_SCAN`]. Both call [`persist_violations`], so the marker
+/// could not previously say which one it described.
+///
+/// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+/// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+#[derive(Debug, Clone, Copy)]
+struct EvaluatedSet {
+    /// How many rules the run evaluated.
+    checked_rules: u32,
+    /// Whether a rules contract was authored at all —
+    /// `compiled.hash != ABSENT_RULES_HASH`, the same honest signal the report
+    /// carries on [`RulesReport::rules_present`].
+    rules_present: bool,
+    /// [`CHECK_RUN_OP_CHECK`] or [`CHECK_RUN_OP_SCAN`]; any other spelling is
+    /// refused by migration 21's `CHECK`.
+    operation: &'static str,
+}
+
 /// Persist the violation set and the run marker that describes it
 /// ([FR-GV-02], SRS §5.1: written per run, replaced wholesale — idempotent
 /// like the derived policy graph; [FR-GV-21]).
@@ -1677,6 +1707,13 @@ fn materialise_and_evaluate(
 /// `head` is `HEAD` as the run's freshness step resolved it — `None` outside a
 /// repo, stored as NULL rather than a placeholder ([FR-GV-21]).
 ///
+/// `evaluated` is what the run scored **against** — the denominator the marker
+/// lacked until S-437 ([CR-140] §3.1). Both callers already compute it; this
+/// parameter exists because it was being dropped here, at the persistence
+/// boundary, and a `violation_count` with no denominator read back as a clean
+/// check over an empty evaluated set.
+///
+/// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
 /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
 /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
@@ -1685,6 +1722,7 @@ fn persist_violations(
     snapshot_id: Option<i64>,
     violations: &[Violation],
     head: Option<&str>,
+    evaluated: EvaluatedSet,
 ) -> Result<i64> {
     let owned: Vec<Violation> = violations.to_vec();
     let head_owned: Option<String> = head.map(str::to_owned);
@@ -1702,7 +1740,16 @@ fn persist_violations(
                 severity: &v.severity,
             })
             .collect();
-        w.replace_violations(&rows, ran_at, head_owned.as_deref())
+        w.replace_violations(
+            &rows,
+            NewCheckRun {
+                ran_at,
+                commit_sha: head_owned.as_deref(),
+                checked_rules: evaluated.checked_rules,
+                rules_present: evaluated.rules_present,
+                operation: evaluated.operation,
+            },
+        )
     })?;
     Ok(ran_at)
 }
@@ -1721,15 +1768,32 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     let compiled = load_rules_cached(engine, None)?;
     let runtime = quality_runtime(engine)?;
 
-    // Score on the freshly reconciled + re-materialised graph.
-    let (violations, _checked) = materialise_and_evaluate(engine, &compiled, None)?;
+    // Score on the freshly reconciled + re-materialised graph. The rule count
+    // was discarded here until S-437; it is the marker's denominator (CR-140
+    // §3.1), and `scan` evaluates exactly the same set `check` does.
+    let (violations, checked_rules) = materialise_and_evaluate(engine, &compiled, None)?;
+    let rules_present = compiled.hash != ABSENT_RULES_HASH;
     let view = engine.hydrate(Granularity::ExcludeContains)?;
     // BR-25: the snapshot scores under the effective rules.toml thresholds, so
     // its persisted hash gates the baseline (FR-GV-10) and the budgets agree.
     let thresholds = effective_thresholds(&compiled.rules);
     let (snapshot_id, metrics) =
         crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
-    persist_violations(runtime, Some(snapshot_id), &violations, fresh.head.as_deref())?;
+    persist_violations(
+        runtime,
+        Some(snapshot_id),
+        &violations,
+        fresh.head.as_deref(),
+        EvaluatedSet {
+            checked_rules,
+            rules_present,
+            // `scan` writes the marker because it replaces the violation set
+            // wholesale (FR-GV-09 + FR-GV-02 idempotence). Recording WHICH
+            // operation wrote it is what stops a reader attributing a `scan`'s
+            // marker to a `logos check` that never ran (CR-140 §2.2).
+            operation: CHECK_RUN_OP_SCAN,
+        },
+    )?;
 
     // Per-dimension worst-offender detail (CR-005 §3.2): the top-N offenders per
     // new dimension, deterministically ordered and capped — review-phase
@@ -2278,9 +2342,26 @@ pub(crate) fn check_rules(
     let runtime = quality_runtime(engine)?;
 
     let (mut violations, checked_rules) = materialise_and_evaluate(engine, &compiled, None)?;
+    // Honest "is a contract authored?" signal (NFR-CC-04): the empty contract
+    // that a missing default file compiles to carries the `ABSENT_RULES_HASH`
+    // sentinel; any loaded file hashes to its content. Computed here rather
+    // than at the report, because since S-437 the marker carries it too and
+    // both must be the same fact about the same run.
+    let rules_present = compiled.hash != ABSENT_RULES_HASH;
     // FR-GV-21: the marker records HEAD at write time, which is the HEAD the
-    // freshness step already resolved for this run.
-    let ran_at = persist_violations(runtime, None, &violations, fresh.head.as_deref())?;
+    // freshness step already resolved for this run — and, since S-437, the
+    // evaluated set the run scored against (CR-140 §3.1).
+    let ran_at = persist_violations(
+        runtime,
+        None,
+        &violations,
+        fresh.head.as_deref(),
+        EvaluatedSet {
+            checked_rules,
+            rules_present,
+            operation: CHECK_RUN_OP_CHECK,
+        },
+    )?;
 
     // CR-052 / FR-GV-18: fold the fast structural-integrity verdict in as an
     // error-severity finding, so a drifted graph fails `check_rules` (exit 1)
@@ -2313,10 +2394,6 @@ pub(crate) fn check_rules(
         });
     }
 
-    // Honest "is a contract authored?" signal (NFR-CC-04): the empty contract
-    // that a missing default file compiles to carries the `ABSENT_RULES_HASH`
-    // sentinel; any loaded file hashes to its content.
-    let rules_present = compiled.hash != ABSENT_RULES_HASH;
     let has_error = violations.iter().any(|v| v.severity == SEVERITY_ERROR);
     // FR-GV-22 / NFR-CC-04: a verdict over an empty evaluated set is not a
     // verdict. `rules_present` alone would misreport "nothing was evaluated"

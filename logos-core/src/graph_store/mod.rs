@@ -1042,6 +1042,99 @@ pub struct CheckRunRow {
     /// How many `violations` rows the same transaction wrote. `0` with no rows
     /// is a **recorded clean run** — the case the empty table cannot express.
     pub violation_count: i64,
+    /// How many rules the run evaluated — [`violation_count`]'s **denominator**
+    /// (S-437, [CR-140] §3.1, [NFR-CC-04]).
+    ///
+    /// `Some(0)` is a run that evaluated nothing, which is not a clean result
+    /// however few violations it found ([FR-GV-03]: *"'Clean' means a contract
+    /// was evaluated and held; it never means nothing was evaluated"*).
+    ///
+    /// `None` means the marker was written **before** migration 21 and records
+    /// no evaluated set — *unknown*, never zero. A consumer renders the
+    /// distinction rather than collapsing it, which is the misreading this
+    /// field exists to remove.
+    ///
+    /// [`violation_count`]: CheckRunRow::violation_count
+    /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    /// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub checked_rules: Option<i64>,
+    /// Whether a rules contract was authored at all when the run happened
+    /// (S-437, [CR-140] §3.1).
+    ///
+    /// Not derivable from [`checked_rules`]: a **present** contract authoring
+    /// **zero** rules is what [`logos init`](crate::init)'s default template
+    /// produces, and it is a different state from no contract at all — the
+    /// first is a configured project, the second an unconfigured one. Both
+    /// record `checked_rules = Some(0)`.
+    ///
+    /// `None` means the marker predates migration 21, as for [`checked_rules`].
+    ///
+    /// [`checked_rules`]: CheckRunRow::checked_rules
+    /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    pub rules_present: Option<bool>,
+    /// Which operation wrote this marker: [`CHECK_RUN_OP_CHECK`] or
+    /// [`CHECK_RUN_OP_SCAN`] (S-437, [CR-140] §3.1).
+    ///
+    /// [`scan`](crate::Engine::scan) shares the write site with
+    /// [`check_rules`](crate::Engine::check_rules) — it replaces the violation
+    /// set wholesale too — so the marker alone could not say which run it
+    /// describes, and a consumer that attributed it to one of them was
+    /// guessing.
+    ///
+    /// `None` means the marker predates migration 21, as for [`checked_rules`].
+    ///
+    /// [`checked_rules`]: CheckRunRow::checked_rules
+    /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    pub operation: Option<String>,
+}
+
+/// [`CheckRunRow::operation`] for a [`check_rules`](crate::Engine::check_rules)
+/// run — the enforce leg ([FR-GV-02]).
+///
+/// The spelling is pinned by migration 21's `CHECK (operation IN
+/// ('check','scan'))`, so a value outside this pair fails the write rather
+/// than storing something no reader knows.
+///
+/// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
+pub const CHECK_RUN_OP_CHECK: &str = "check";
+
+/// [`CheckRunRow::operation`] for a [`scan`](crate::Engine::scan) run — the
+/// report leg, which replaces the violation set wholesale and so writes the
+/// marker too ([FR-GV-09]).
+///
+/// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
+pub const CHECK_RUN_OP_SCAN: &str = "scan";
+
+/// The marker fields one [`replace_violations`] call records — the run, not
+/// its findings ([FR-GV-21], S-437, [CR-140] §3.1).
+///
+/// Grouped into a struct rather than passed as five positional arguments for
+/// the reason [`NewViolation`] is: `commit_sha` and `operation` are both
+/// string-shaped and `ran_at` and `checked_rules` are both integer-shaped, so
+/// a transposed pair would type-check. Every field describes **one** run,
+/// which is what makes them one parameter.
+///
+/// [`replace_violations`]: BatchWriter::replace_violations
+/// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+/// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
+#[derive(Debug, Clone, Copy)]
+pub struct NewCheckRun<'a> {
+    /// Unix-seconds timestamp of the run, stamped on every violation row it
+    /// writes as that row's `created_at` ([FR-GV-21]: one run, one time).
+    pub ran_at: i64,
+    /// `HEAD` at write time, or `None` when it does not resolve. See
+    /// [`CheckRunRow::commit_sha`] for what this does and does not mean.
+    pub commit_sha: Option<&'a str>,
+    /// How many rules the run evaluated — the denominator of the violation
+    /// count. See [`CheckRunRow::checked_rules`].
+    pub checked_rules: u32,
+    /// Whether a rules contract was authored at all. See
+    /// [`CheckRunRow::rules_present`].
+    pub rules_present: bool,
+    /// [`CHECK_RUN_OP_CHECK`] or [`CHECK_RUN_OP_SCAN`]. Any other value is
+    /// refused by migration 21's `CHECK`.
+    pub operation: &'a str,
 }
 
 /// The fields needed to insert a `violations` row (S-020, [FR-GV-02]).
@@ -2883,14 +2976,21 @@ impl GraphStore for SqliteGraphStore {
     }
 
     fn check_run(&self) -> Result<Option<CheckRunRow>> {
+        // The three evaluated-set columns are read as Option: NULL is a marker
+        // written before migration 21, and it stays distinguishable from a
+        // recorded zero all the way to the surface (S-437, CR-140 CRA-05).
         let mut stmt = self.conn.prepare_cached(
-            "SELECT ran_at, commit_sha, violation_count FROM check_run WHERE id = 1",
+            "SELECT ran_at, commit_sha, violation_count, checked_rules, rules_present, operation \
+             FROM check_run WHERE id = 1",
         )?;
         stmt.query_row([], |row| {
             Ok(CheckRunRow {
                 ran_at: row.get(0)?,
                 commit_sha: row.get(1)?,
                 violation_count: row.get(2)?,
+                checked_rules: row.get(3)?,
+                rules_present: row.get(4)?,
+                operation: row.get(5)?,
             })
         })
         .optional()
@@ -3811,22 +3911,35 @@ impl BatchWriter<'_> {
     /// leaves neither a marker without its rows nor rows without a marker
     /// ([NFR-RA-07]).
     ///
-    /// `commit_sha` is `HEAD` **at write time** — it answers "has the tree
+    /// `run.commit_sha` is `HEAD` **at write time** — it answers "has the tree
     /// moved since", not "which commit introduced these findings". `None` when
     /// `HEAD` does not resolve; a placeholder would be a lie a consumer cannot
     /// detect. See [`CheckRunRow::commit_sha`].
     ///
-    /// # Errors
-    /// Returns an error on a constraint violation or I/O failure.
+    /// Since S-437 ([CR-140] §3.1) the marker also carries the **evaluated
+    /// set** — how many rules ran, whether a contract was authored, and which
+    /// operation wrote the row. Those fields ride the same single upsert as
+    /// the count rather than a follow-up `UPDATE`, and [`NewCheckRun`] makes
+    /// them mandatory: there is no way to record a run without recording what
+    /// it evaluated, which is the partially-populated marker [CR-140] CRA-07
+    /// forbids. (The rollback half of CRA-07 is the enclosing write job's —
+    /// one job is one transaction, [NFR-RA-07] — and holds for any number of
+    /// statements; what one statement plus a mandatory parameter adds is that
+    /// no code path can populate the marker by halves in the first place.)
     ///
+    /// # Errors
+    /// Returns an error on a constraint violation or I/O failure. A
+    /// `run.operation` outside [`CHECK_RUN_OP_CHECK`] / [`CHECK_RUN_OP_SCAN`]
+    /// is one such constraint violation, refused by migration 21's `CHECK`.
+    ///
+    /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
     /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
     /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
     /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
     pub fn replace_violations(
         &self,
         violations: &[NewViolation<'_>],
-        ran_at: i64,
-        commit_sha: Option<&str>,
+        run: NewCheckRun<'_>,
     ) -> Result<()> {
         self.conn
             .execute("DELETE FROM violations", [])
@@ -3846,7 +3959,7 @@ impl BatchWriter<'_> {
                 v.file,
                 v.message,
                 v.severity,
-                ran_at,
+                run.ran_at,
             ])
             .context("inserting a violation row")?;
             written += 1;
@@ -3854,12 +3967,26 @@ impl BatchWriter<'_> {
         // Upserted, never appended (BR-40): the singleton records the last run.
         // `CHECK (id = 1)` in migration 20 makes that structural — this ON
         // CONFLICT is how the row is kept current, not how it is kept single.
+        //
+        // One statement, six values. The evaluated set (S-437) is written here
+        // rather than by a follow-up UPDATE precisely so there is no window in
+        // which the row carries a count without its denominator (CR-140
+        // CRA-07); every field of the marker arrives or none of it does.
         self.conn
             .execute(
-                "INSERT INTO check_run (id, ran_at, commit_sha, violation_count) \
-                 VALUES (1, ?1, ?2, ?3) \
-                 ON CONFLICT(id) DO UPDATE SET ran_at = ?1, commit_sha = ?2, violation_count = ?3",
-                rusqlite::params![ran_at, commit_sha, written],
+                "INSERT INTO check_run \
+                 (id, ran_at, commit_sha, violation_count, checked_rules, rules_present, operation) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(id) DO UPDATE SET ran_at = ?1, commit_sha = ?2, violation_count = ?3, \
+                                               checked_rules = ?4, rules_present = ?5, operation = ?6",
+                rusqlite::params![
+                    run.ran_at,
+                    run.commit_sha,
+                    written,
+                    run.checked_rules,
+                    run.rules_present,
+                    run.operation,
+                ],
             )
             .context("recording the check-run marker")?;
         Ok(())

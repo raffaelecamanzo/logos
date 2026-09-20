@@ -2167,6 +2167,170 @@ mod tests {
         );
     }
 
+    /// Migration 21 widens the `check_run` marker with the evaluated set
+    /// (S-437, [CR-140] §3.1, [FR-GV-21], [FR-DB-04]): the rule count that is
+    /// `violation_count`'s denominator, whether a contract was present at all,
+    /// and which operation wrote the row.
+    ///
+    /// The migration-20 claims, re-run because [CR-140] CRA-06 requires them
+    /// re-run: the version advances by exactly **one**; a populated graph and
+    /// its governance rows cross the boundary byte-for-byte, so the upgrade
+    /// needs no re-index.
+    ///
+    /// The claim this migration adds, and the one worth doubting hardest: the
+    /// marker a store **already has** keeps its three original fields and reads
+    /// NULL — *evaluated set unknown* — for the three new ones. Rendering that
+    /// absence as a zero is the exact misreading [CR-140] exists to remove, so
+    /// reintroducing it here would be the fix restoring its own defect.
+    ///
+    /// [CR-140]: ../../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    /// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+    /// [FR-GV-21]: ../../../../docs/specs/requirements/FR-GV-21.md
+    #[test]
+    fn migration_21_widens_the_check_run_marker_preserving_the_graph_byte_for_byte() {
+        let mut conn = contract_conn();
+
+        // Stop at v20 and populate the graph, the governance rows, and the
+        // marker a store that has already been checked carries — the common
+        // case this migration upgrades, not a fresh database.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..20]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path) VALUES (1, 'a.rs');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, is_test, body) VALUES
+                 (10, 1, 7, 'caller', 1, 1, 3, 0, 'the body prose');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111);
+             INSERT INTO violations
+                 (id, snapshot_id, rule_type, rule_key, node_id, file, message, severity, created_at)
+             VALUES (1, NULL, 'constraint', 'max_cc', 10, 'a.rs', 'too complex', 'error', 1700000000);
+             INSERT INTO check_run (id, ran_at, commit_sha, violation_count)
+             VALUES (1, 1700000000, 'abc1234', 1);",
+        )
+        .unwrap();
+
+        let graph_before = read_graph(&conn);
+        let violations_before = read_table(&conn, "violations", "id");
+
+        // The evaluated set does not exist yet — the omission CR-140 closes.
+        assert!(
+            conn.query_row("SELECT checked_rules FROM check_run WHERE id = 1", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .is_err(),
+            "the evaluated-set columns do not exist before migration 21"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..21]).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            21,
+            "PRAGMA user_version advances by exactly one (20 → 21)"
+        );
+
+        assert_eq!(
+            read_graph(&conn),
+            graph_before,
+            "nodes, edges and shingles are byte-for-byte unchanged across migration 21"
+        );
+        assert_eq!(
+            read_table(&conn, "violations", "id"),
+            violations_before,
+            "the violations already recorded are unchanged, created_at included"
+        );
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (nodes never touched by migration 21, NFR-RA-09)");
+
+        // The load-bearing claim. The existing marker keeps every field it had
+        // and reads NULL — *unknown* — for every field it never recorded.
+        // A 0 here would be the fabricated denominator CR-140 exists to remove.
+        // Read in two halves — what migration 20 wrote, then what 21 added —
+        // rather than one wide tuple. The split is what the assertions are
+        // about anyway: the first must be verbatim, the second must be absent.
+        let (rows, ran_at, sha, count): (i64, i64, Option<String>, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM check_run), ran_at, commit_sha, violation_count \
+                 FROM check_run",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (rows, ran_at, sha.as_deref(), count),
+            (1, 1700000000, Some("abc1234"), 1),
+            "the pre-migration marker survives the upgrade verbatim"
+        );
+
+        let evaluated_set: (Option<i64>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT checked_rules, rules_present, operation FROM check_run",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            evaluated_set,
+            (None, None, None),
+            "a marker written before migration 21 records NULL for the evaluated set — \
+             *unknown*, never zero and never 'no contract' (CR-140 CRA-05)"
+        );
+
+        // The singleton is still structural: migration 21 adds columns, it does
+        // not rebuild the table, so `CHECK (id = 1)` is still enforcing.
+        let second_row = conn.execute(
+            "INSERT INTO check_run (id, ran_at, commit_sha, violation_count) VALUES (2, 200, NULL, 7)",
+            [],
+        );
+        assert!(
+            second_row.is_err(),
+            "CHECK (id = 1) must still reject a second marker row after the widening"
+        );
+
+        // The widened upsert round-trips: one row, carrying the LAST run's
+        // count AND the evaluated set that run scored against.
+        conn.execute(
+            "INSERT INTO check_run (id, ran_at, commit_sha, violation_count, checked_rules, \
+                                    rules_present, operation) \
+             VALUES (1, 200, 'def', 7, 9, 1, 'check') \
+             ON CONFLICT(id) DO UPDATE SET ran_at = 200, commit_sha = 'def', violation_count = 7, \
+                                           checked_rules = 9, rules_present = 1, operation = 'check'",
+            [],
+        )
+        .unwrap();
+        let widened: (i64, i64, Option<i64>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM check_run), violation_count, checked_rules, \
+                        rules_present, operation FROM check_run",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            widened,
+            (1, 7, Some(9), Some(1), Some("check".to_string())),
+            "the upsert still leaves one row, now carrying its denominator"
+        );
+
+        // The vocabulary is the schema's job, not a caller's convention: an
+        // operation no reader knows is refused at the write.
+        assert!(
+            conn.execute("UPDATE check_run SET operation = 'gate' WHERE id = 1", [])
+                .is_err(),
+            "operation must be constrained to the two operations that write the marker"
+        );
+        assert!(
+            conn.execute("UPDATE check_run SET rules_present = 2 WHERE id = 1", [])
+                .is_err(),
+            "rules_present is a 0/1 flag, enforced by the schema"
+        );
+
+        assert_eq!(
+            foreign_key_violations(&conn),
+            0,
+            "no FK violations after migration 21"
+        );
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

@@ -53,6 +53,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (18, MIGRATION_18),
     (19, MIGRATION_19),
     (20, MIGRATION_20),
+    (21, MIGRATION_21),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2017,12 +2018,81 @@ CREATE TABLE check_run (
 ) STRICT;
 ";
 
+/// Migration 21 — the `check_run` marker records **what it evaluated**
+/// (S-437, [CR-140] §3.1, [FR-GV-21], [FR-GV-02]).
+///
+/// Migration 20 gave the marker a numerator — `violation_count` — and no
+/// denominator. A run that evaluated **no rules at all** therefore recorded
+/// `0` and read back as a clean check: the [FR-GV-03] definition of "clean"
+/// ("a contract was evaluated and held; it never means nothing was
+/// evaluated") could not be honoured by a reader, because the fact it turns
+/// on was never written down. [`check_rules`](crate::Engine::check_rules)
+/// already computes both figures this adds; they were dropped at the
+/// persistence boundary.
+///
+/// Three columns, all **nullable**, and the nullability is load-bearing
+/// rather than lax: a marker written before this migration recorded none of
+/// them, so it must read as *evaluated set unknown* — never as zero, which is
+/// the very misreading this closes ([CR-140] CRA-05). A `NOT NULL` column
+/// with a default would forge the fact for every store already on disk. This
+/// is the migration-12 convention exactly (`cohesion_applicable` is NULL on a
+/// pre-v3 snapshot, distinct from a real `0` — [NFR-CC-04]).
+///
+/// `checked_rules` and `rules_present` are two facts, not one: a **present**
+/// contract authoring **zero** rules is what [`logos init`](crate::init)'s
+/// default template produces, and a reader must be able to tell it from an
+/// absent contract. `operation` names which run wrote the marker, since
+/// [`scan`](crate::Engine::scan) shares the write site with
+/// [`check_rules`](crate::Engine::check_rules) and the two are not
+/// interchangeable to a reader.
+///
+/// Additive only — three `ALTER TABLE ... ADD COLUMN`s, the migration-12
+/// shape. No table is dropped, rebuilt or copied, so `nodes`, `edges`,
+/// `shingles` and the external-content `nodes_fts` index are byte-for-byte
+/// unaffected and an existing store upgrades in place with no re-index
+/// ([FR-DB-04], [NFR-MA-06]), asserted on a populated store by
+/// `migration_21_widens_the_check_run_marker_preserving_the_graph_byte_for_byte`
+/// in [`super::migrate`].
+///
+/// [CR-140]: ../../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [FR-GV-02]: ../../../../docs/specs/requirements/FR-GV-02.md
+/// [FR-GV-03]: ../../../../docs/specs/requirements/FR-GV-03.md
+/// [FR-GV-21]: ../../../../docs/specs/requirements/FR-GV-21.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_21: &str = "\
+-- check_run gains the EVALUATED SET the run scored against (CR-140 §3.1,
+-- FR-GV-21). violation_count is a numerator whose denominator the marker never
+-- recorded, so a run that evaluated nothing recorded 0 and read as clean.
+--
+-- All three columns are NULLABLE on purpose. NULL means 'this marker predates
+-- migration 21', which a reader must render as *unknown* rather than as zero.
+-- A mandatory column would need a fallback value, and that value would forge an
+-- evaluated set for every store already on disk (the migration-12 convention:
+-- NULL is not a real 0, NFR-CC-04).
+--
+-- checked_rules is violation_count's denominator: how many rules the run
+-- evaluated. rules_present is whether a contract was authored at all, which
+-- checked_rules alone cannot say — a PRESENT contract authoring ZERO rules is
+-- `logos init`'s default template, and it must be distinguishable from an
+-- absent one.
+--
+-- operation is which run wrote the marker: 'check' or 'scan', the two
+-- operations that call replace_violations. The CHECK pins the vocabulary in
+-- the schema, so a mis-spelled operation fails the write rather than storing
+-- a value no reader knows.
+ALTER TABLE check_run ADD COLUMN checked_rules INTEGER;
+ALTER TABLE check_run ADD COLUMN rules_present INTEGER CHECK (rules_present IN (0,1));
+ALTER TABLE check_run ADD COLUMN operation     TEXT CHECK (operation IN ('check','scan'));
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
-        MIGRATION_20, MIGRATION_3, MIGRATION_4, MIGRATION_8,
+        MIGRATION_20, MIGRATION_21, MIGRATION_3, MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, RefForm};
 
@@ -3027,5 +3097,86 @@ mod tests {
             1,
             "check_run is STRICT like every table since migration 1 (FR-DB-01)"
         );
+    }
+
+    /// Migration 21 widens the `check_run` marker with the evaluated set
+    /// (S-437, [CR-140] §3.1, [FR-GV-21]): the rule count that is
+    /// `violation_count`'s denominator, whether a contract was present at all,
+    /// and which operation wrote the row.
+    ///
+    /// The three claims worth doubting, in order: every added column is an
+    /// in-place `ADD COLUMN` (the migration-12 shape) rather than a rebuild;
+    /// **none** of them is `NOT NULL`, because a marker written before this
+    /// migration recorded none of them and must read back as *unknown* rather
+    /// than as a real zero ([NFR-CC-04]); and the two enumerated columns pin
+    /// their vocabulary in the schema, so a mis-spelled operation fails the
+    /// write instead of storing a value no reader knows.
+    ///
+    /// The runtime half — that a *populated* store crosses the boundary
+    /// byte-for-byte and its existing marker keeps reading — is
+    /// `migration_21_widens_the_check_run_marker_preserving_the_graph_byte_for_byte`
+    /// in `super::migrate`. This half guards the SQL text, so a later edit
+    /// reaching for a rebuild or a defaulted `NOT NULL` fails here before it
+    /// can reach a database.
+    ///
+    /// [CR-140]: ../../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    /// [FR-GV-21]: ../../../../docs/specs/requirements/FR-GV-21.md
+    /// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn migration_21_widens_the_check_run_marker_with_the_evaluated_set_additively() {
+        for column in ["checked_rules", "rules_present", "operation"] {
+            assert!(
+                MIGRATION_21.contains(&format!("ADD COLUMN {column}")),
+                "migration 21 must add the {column} column (CR-140 §3.1, FR-GV-21)"
+            );
+        }
+        assert_eq!(
+            MIGRATION_21.matches("ALTER TABLE check_run ADD COLUMN").count(),
+            3,
+            "migration 21 adds exactly the three evaluated-set columns and nothing else"
+        );
+        // NULL is the pre-migration marker's honest reading (CRA-05): a
+        // mandatory column would need a fallback value, and that value would be
+        // a fabricated evaluated set on every store already on disk. Checked on
+        // the column DEFINITIONS, not on the whole blob — the SQL comments are
+        // free to discuss nullability, and an earlier draft of this assertion
+        // failed on its own explanatory comment.
+        for stmt in MIGRATION_21
+            .lines()
+            .filter(|line| line.starts_with("ALTER TABLE"))
+        {
+            assert!(
+                !stmt.contains("NOT NULL") && !stmt.contains("DEFAULT"),
+                "added column must be nullable with no default — NULL is 'written before \
+                 migration 21', never a real zero (CR-140 CRA-05, NFR-CC-04): {stmt}"
+            );
+        }
+        // The enumerated columns pin their vocabulary in the schema, the way
+        // migration 12's applicability flags do.
+        assert!(
+            MIGRATION_21.contains("rules_present IN (0,1)"),
+            "rules_present must carry a 0/1 CHECK (the migration-12 flag shape)"
+        );
+        assert!(
+            MIGRATION_21.contains("operation IN ('check','scan')"),
+            "operation must pin its vocabulary in the schema — the two operations that \
+             call replace_violations"
+        );
+        // Additive only: no rebuild, so an existing store upgrades in place
+        // with no re-index (FR-DB-04, NFR-MA-06).
+        for forbidden in ["DROP TABLE", "DROP INDEX", "DROP TRIGGER", "CREATE TABLE"] {
+            assert!(
+                !MIGRATION_21.contains(forbidden),
+                "migration 21 must be purely additive — found `{forbidden}` (NFR-MA-06)"
+            );
+        }
+        // The graph tables are not so much as mentioned — the argument for
+        // byte-for-byte preservation across the boundary.
+        for untouched in ["nodes", "edges", "shingles", "nodes_fts", "unresolved_refs"] {
+            assert!(
+                !MIGRATION_21.contains(untouched),
+                "migration 21 must not mention `{untouched}` (additive upgrade in place)"
+            );
+        }
     }
 }
