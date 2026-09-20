@@ -700,7 +700,26 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     engine
         .gate(None, true, true)
         .expect("gate --save persists a snapshot and a baseline");
+
+    // Record a real `check` result, so the no-write assertions below compare
+    // populated values rather than two empty tables. Without this the marker is
+    // absent and the violations table empty, and an equality between two
+    // nothings cannot notice a write — the same false green review already hit
+    // on the [FR-QM-08] exclusion count a few lines above.
+    write_breaching_rules(tmp.path());
+    engine.check_rules(None, true).expect("check runs");
+
     let before = metric_snapshot_count(tmp.path());
+    let violations_before = violation_count(tmp.path());
+    let marker_before = check_run_state(tmp.path());
+    assert_eq!(
+        marker_before.0, 1,
+        "the fixture recorded a marker, so 'unchanged' below is a real comparison"
+    );
+    assert!(
+        violations_before > 0,
+        "the fixture recorded findings, so 'unchanged' below is a real comparison"
+    );
 
     let health = engine.latest_health().expect("the Health pair");
 
@@ -741,6 +760,16 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     );
 
     // ADR-28: reading the pair, once or repeatedly, persists nothing.
+    //
+    // "Nothing" is the whole store this module writes, not the snapshot table
+    // alone. [S-314] established `metric_snapshots` + `violations` + marker
+    // *content* as the complete set for the readout path; `latest_health` is a
+    // second read path through the same module, reached by a plain page GET,
+    // and it inherits that contract rather than a third of it. Guarded here
+    // because a snapshot-only assertion let a `persist_violations` call inside
+    // `latest_health` pass the whole suite — every `/api/v1/health` load would
+    // have cleared the last real `check` result and stamped a fabricated
+    // recorded-clean marker over it ([FR-GV-21], [BR-41]).
     for _ in 0..3 {
         engine.latest_health().unwrap();
     }
@@ -748,6 +777,17 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
         metric_snapshot_count(tmp.path()),
         before,
         "reading the Health pair appended no snapshot"
+    );
+    assert_eq!(
+        violation_count(tmp.path()),
+        violations_before,
+        "reading the Health pair neither cleared nor rewrote the violations table"
+    );
+    assert_eq!(
+        check_run_state(tmp.path()),
+        marker_before,
+        "reading a run is not running one — ran_at, commit_sha and violation_count \
+         are all untouched by reading the Health pair (FR-GV-21, ADR-49)"
     );
 }
 
