@@ -2596,6 +2596,45 @@ fn present_contract_authoring_two_rules() -> TempDir {
     thresholds_project("[constraints]\nmax_cc = 100\nmax_fn_lines = 200\n")
 }
 
+/// The fourth state: a run that **breaches**, over a contract whose evaluated
+/// set is deliberately **larger than its violation count**.
+///
+/// `layered_project` cannot serve here. It authors exactly the rules it breaks,
+/// so `checked_rules` and `violations.len()` are both 2 and every assertion
+/// about the denominator is satisfied by the numerator — a marker that sourced
+/// `checked_rules` from the violation count would pass unnoticed. This fixture
+/// adds two constraint keys the graph satisfies, so the two figures cannot
+/// coincide and the breaching state gains the discriminating power the sprint
+/// plan asked it for.
+fn present_contract_breaching_fewer_than_it_evaluates() -> TempDir {
+    let tmp = layered_project();
+    write(
+        tmp.path(),
+        ".logos/rules.toml",
+        "\
+[constraints]
+max_cc       = 100
+max_fn_lines = 200
+
+[[layers]]
+name  = \"domain\"
+paths = [\"src/domain_*.rs\"]
+order = 1
+
+[[layers]]
+name  = \"presentation\"
+paths = [\"src/ui_*.rs\"]
+order = 2
+
+[[boundaries]]
+from   = \"domain\"
+to     = \"presentation\"
+reason = \"the domain must not reach upward into presentation\"
+",
+    );
+    tmp
+}
+
 /// A run over a contract records the rule count it evaluated and the operation
 /// that wrote the marker — the denominator `violation_count` never had.
 ///
@@ -2629,6 +2668,63 @@ fn a_check_records_the_rule_count_it_evaluated_and_names_its_operation() {
         Some(CHECK_RUN_OP_CHECK),
         "a `check` marker names `check` as the run that wrote it"
     );
+}
+
+/// The fourth state: a run that **breaches** records its full evaluated set,
+/// and the denominator is provably not the numerator.
+///
+/// The sprint plan lists "N > 0 breaching" as a state distinct from "N > 0
+/// clean", and this is what makes it distinct rather than redundant. The
+/// sibling test above runs on `layered_project`, which authors exactly the
+/// rules it breaks — two evaluated, two violated — so every assertion about
+/// `checked_rules` there is equally satisfied by the violation count. A marker
+/// that sourced its denominator from the numerator would pass it.
+///
+/// Here the contract evaluates strictly more rules than the run breaks, so the
+/// two figures cannot coincide, and `checked_rules != violation_count` is
+/// asserted directly. Found in review by mutating `check_rules` to pass
+/// `violations.len()` as `checked_rules`: the breaching tests passed and only
+/// the clean-state ones caught it.
+#[test]
+fn a_breaching_run_records_a_denominator_larger_than_its_violation_count() {
+    let tmp = present_contract_breaching_fewer_than_it_evaluates();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let report = engine.check_rules(None, true).expect("check_rules runs");
+    assert!(
+        !report.violations.is_empty(),
+        "the fixture must genuinely breach, or this is just the clean case again"
+    );
+
+    let marker = check_run(&engine).expect("a breaching run records a marker");
+    assert!(
+        marker.violation_count > 0,
+        "the breaching state must record a non-zero numerator: {marker:?}"
+    );
+    assert_eq!(
+        marker.checked_rules,
+        Some(i64::from(report.checked_rules)),
+        "the marker records the evaluated set, findings or not"
+    );
+    // The load-bearing assertion, and the reason this fixture exists: the
+    // denominator is a different number from the numerator, so it cannot have
+    // been sourced from it.
+    assert_ne!(
+        marker.checked_rules,
+        Some(marker.violation_count),
+        "the evaluated set must not merely echo the violation count \
+         ({:?} vs {}) — the conflation a same-valued fixture cannot detect",
+        marker.checked_rules,
+        marker.violation_count
+    );
+    assert!(
+        marker.checked_rules > Some(marker.violation_count),
+        "this fixture evaluates strictly more rules than it breaks ({:?} vs {})",
+        marker.checked_rules,
+        marker.violation_count
+    );
+    assert_eq!(marker.rules_present, Some(true));
+    assert_eq!(marker.operation.as_deref(), Some(CHECK_RUN_OP_CHECK));
 }
 
 /// A run with **no contract** records `0` rules AND `rules_present = false`.
