@@ -2020,7 +2020,58 @@ mod tests {
                     .replace('\\', "/");
                 walked.push(rel.clone());
                 if SCANNED.contains(&rel.as_str()) {
-                    seen_scanned.push(rel);
+                    seen_scanned.push(rel.clone());
+                    // NOT a blanket skip. The census reads these three through
+                    // `production_code`, which truncates at the first
+                    // `#[cfg(test)] mod tests {` — so the census covers a
+                    // SCANNED file's production half and NOTHING after it,
+                    // while this walk used to cover the whole file. Skipping
+                    // outright therefore leaves each SCANNED file's own test
+                    // module read by NEITHER guard.
+                    //
+                    // That is not hypothetical and it is not inherited: adding
+                    // `wikigen/configured.rs` to SCANNED (S-435, CR-139) opened
+                    // exactly that hole in a file that HAS a test module, and a
+                    // `Surface::Cli` planted there passed the entire `web`
+                    // suite. It is the Sprint 72 appendix 5.9 false-green shape
+                    // recreated by the commit that cites it. So the tail — the
+                    // region the census provably cannot see — is scanned here.
+                    // One file is exempt, and the reason is not "it was
+                    // noisy": `lib.rs` is where this scanner LIVES, so its test
+                    // module necessarily writes down the very markers the
+                    // scanner searches for — `MARKERS`, the census's
+                    // `match_indices("Surface::")`, the panic strings. Those
+                    // are the needle, not a classification site. Scanning them
+                    // reported 12 offenders that classify nothing, which is
+                    // how this exemption was found rather than assumed. Every
+                    // OTHER scanned file's test module has no business naming a
+                    // surface, and is checked below.
+                    if rel == "lib.rs" {
+                        continue;
+                    }
+                    let source = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                    let Some((_, tail)) = source.split_once("\n#[cfg(test)]\nmod tests {") else {
+                        // No test module ⇒ `production_code` truncates nothing
+                        // and the census genuinely read the whole file.
+                        continue;
+                    };
+                    let tail = tail
+                        .lines()
+                        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    for marker in MARKERS {
+                        for (at, _) in tail.match_indices(marker) {
+                            if whole_identifier(&tail, at) {
+                                offenders.push(format!(
+                                    "{rel}: `{marker}` in its own test module, past the \
+                                     point `production_code` truncates — read by neither \
+                                     guard"
+                                ));
+                            }
+                        }
+                    }
                     continue;
                 }
                 let source = std::fs::read_to_string(&path)
