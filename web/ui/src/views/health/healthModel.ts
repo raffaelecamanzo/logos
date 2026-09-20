@@ -166,9 +166,9 @@ const INDETERMINATE = {
  * just the same — so it **over-reports**. That is the safe direction
  * ([NFR-RA-05] prefers it to false assurance) and it is why the rendered
  * wording claims only that the graph has moved past the snapshot, never that
- * the figures are proven stale. `snapshot_the_graph_moved_past_over_reports_a_reindex_that_changed_nothing`
- * pins the over-report so the label cannot later be read as precision it does
- * not have.
+ * the figures are proven stale. The test *"over-reports a re-index that changed
+ * nothing — a KNOWN over-report, never a staleness proof"* pins the
+ * over-report, so the label cannot later be read as precision it does not have.
  *
  * An **implausibly old** index stamp — [S-433]'s other degradation — is
  * deliberately *not* a fourth arm. It is not among the conditions this story
@@ -190,6 +190,7 @@ const INDETERMINATE = {
  *
  * [FR-QM-08]: ../../../../docs/specs/requirements/FR-QM-08.md
  * [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+ * [S-433]: ../dashboard/dashboardModel.ts
  */
 export function snapshotStaleness(
   status: StatusInfo,
@@ -207,6 +208,8 @@ export function snapshotStaleness(
   return null;
 }
 
+type IndexBasis = { readonly at: number } | { readonly at: null; readonly detail: string };
+
 /**
  * The instant to compare the snapshot against — the **later** of the last full
  * index and the last incremental sync — or the indeterminate sentence saying
@@ -222,8 +225,6 @@ export function snapshotStaleness(
  * stamp cannot be trusted for its sibling either, and the alternative is to
  * pick whichever reading happens to be reassuring.
  */
-type IndexBasis = { readonly at: number } | { readonly at: null; readonly detail: string };
-
 function indexBasis(status: StatusInfo, nowUnix: number): IndexBasis {
   let latest: number | null = null;
   for (const field of [status.last_full_index_at, status.last_sync_at]) {

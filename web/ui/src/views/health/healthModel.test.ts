@@ -248,8 +248,14 @@ describe("snapshotStaleness", () => {
   it("is the ordinary case when the index and the snapshot are simultaneous — strictly after, never equal", () => {
     const same = { last_full_index_at: String(DEFAULT_SNAPSHOT_AT) };
     expect(snapshotStaleness(status(true, same), evolution(point()), NOW)).toBeNull();
+    // Asserted as the VALUE, not merely as non-null: a boundary that starts
+    // classifying one second's difference as indeterminate rather than
+    // moved-past would satisfy `not.toBeNull()` while being wrong.
     const oneLater = { last_full_index_at: String(DEFAULT_SNAPSHOT_AT + 1) };
-    expect(snapshotStaleness(status(true, oneLater), evolution(point()), NOW)).not.toBeNull();
+    expect(snapshotStaleness(status(true, oneLater), evolution(point()), NOW)).toEqual({
+      date: "2024-09-19",
+      cause: "moved-past",
+    });
   });
 
   it("dates the moved-past label by the LAST snapshot in the series, not the first", () => {

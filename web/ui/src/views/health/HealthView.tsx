@@ -10,8 +10,11 @@
  * non-gated pointer to Files & Risk, then the signal-evolution trend — and its
  * honest states (a gate and a metric grid with nothing to show name the step that
  * would produce it — `logos scan` on a populated graph, `logos index` on an empty
- * one, FR-EH-04/CR-130; a signal that survived a de-index is labelled as history
- * and dated rather than shown as a current verdict, FR-EH-04/CR-135; an ADR-21
+ * one, FR-EH-04/CR-130; a populated signal the graph no longer matches is
+ * labelled rather than shown as a current verdict, in one band whose sentence
+ * names which of three facts establishes that — the graph was de-indexed, or it
+ * was indexed/synced after the snapshot, or the comparison could not be made at
+ * all, which is the one arm that carries no date, FR-EH-04/CR-135/S-436; an ADR-21
  * metric drop-out is a muted `n/a`, never a zero; no snapshots is an honest empty
  * state). Every read is GET-only — loading the
  * view mutates no store (ADR-28); sorting the tables is client-side over the full

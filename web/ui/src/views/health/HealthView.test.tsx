@@ -406,6 +406,33 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.getAllByText(/no index or sync time is recorded/i).length).toBe(2);
   });
 
+  // The third indeterminate sentence. The other two are pinned in rendered DOM
+  // above; without this one, `INDETERMINATE.undatedSnapshot`'s wording could be
+  // changed — or its cause special-cased away in `StaleNote` — with the suite
+  // green. That gap has already bitten this file once, for the undated de-index
+  // fallback, which is why every arm is now pinned where it is RENDERED.
+  it("renders the undated-snapshot indeterminate sentence, the third arm, in the DOM (S-436)", async () => {
+    const m = clone();
+    m.status.indexed = true;
+    m.status.last_full_index_at = "150"; // usable, and after the snapshots it has none of
+    m.evolution.snapshots = []; // a populated signal with no point to date it by
+    stub(m);
+    render(<HealthView />);
+    const notes = await screen.findAllByText(/the last snapshot carries no date to compare against/i);
+    expect(notes.length).toBe(2);
+    expect(screen.getByText("UNVERIFIED")).toBeInTheDocument();
+    // Neither `current` nor a date, and no command — the arm's whole contract.
+    expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
+    // "Names no command" is asserted of the NOTE, not of the page: with no
+    // snapshots the evolution card legitimately names `logos scan` for its own,
+    // different absence, and a page-wide matcher would read that as this arm's.
+    for (const note of notes) expect(note.querySelector("code")).toBeNull();
+    // …and the other two indeterminate sentences are NOT the one rendered.
+    expect(screen.queryByText(/no index or sync time is recorded/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/recorded ahead of now/i)).not.toBeInTheDocument();
+  });
+
   it("keeps a distinct state naming `logos index` for a genuinely empty graph (FR-EH-04)", async () => {
     const m = clone();
     m.status.indexed = false;
