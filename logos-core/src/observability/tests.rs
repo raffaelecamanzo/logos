@@ -1798,6 +1798,114 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
     assert_eq!(info.calls_total, 3, "agent-issued navigation is real usage");
 }
 
+/// [FR-OB-13]: Logos's own wiki generation pass is stored under
+/// `surface = "wikigen"`, separable from `web` (the process it runs inside),
+/// from `mcp`, and from `chat` (the *other* in-process agent) — and it counts
+/// as an engine query, because its subject is the indexed code.
+///
+/// The sibling of [`chat_agent_calls_are_separable_from_web_and_mcp`], pointed
+/// at a third in-process caller, and the unit half of the pair
+/// `web/tests/wikigen_surface.rs` asserts end to end through the real route.
+///
+/// # Why this one is not `#[cfg(feature = "agents")]`
+///
+/// `Chat` is gated with the agent substrate it describes. The materialize pass
+/// this names is deterministic and offline ([FR-WK-20], [NFR-SE-01]), so there
+/// is no egress substrate to gate it with — it joins `Watcher` and `Shell` as an
+/// ungated override-only variant. The `chat` arm of the separability claim is
+/// the only part that needs the feature, and only that part carries the gate.
+///
+/// [FR-OB-13]: ../../../docs/specs/requirements/FR-OB-13.md
+/// [FR-WK-20]: ../../../docs/specs/requirements/FR-WK-20.md
+/// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
+#[test]
+fn wiki_generation_calls_are_separable_from_the_surfaces_they_would_be_summed_with() {
+    assert_eq!(Surface::WikiGen.as_str(), "wikigen", "the FR-OB-13 wire value");
+
+    let (sink, rx) = TelemetrySink::with_capacity(8);
+    let subscriber = tracing_subscriber::registry()
+        // The generation pass runs *inside* `serve --ui`, whose process surface
+        // is web.
+        .with(TelemetryLayer::new(Surface::Web, "main".to_string(), "test-session".to_string(), sink));
+    tracing::subscriber::with_default(subscriber, || {
+        in_surface(Surface::WikiGen, || {
+            traced(Tool::WikiMaterialize, || Ok::<_, anyhow::Error>(())).unwrap();
+        });
+        traced(Tool::Search, || Ok::<_, anyhow::Error>(())).unwrap();
+    });
+
+    let records: Vec<EventRecord> = rx.try_iter().collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].surface, "wikigen", "the generator's own pass");
+    assert_eq!(records[1].surface, "web", "a human browsing the dashboard");
+
+    // And it survives into the read-model as its own group, counted. The three
+    // surfaces it must not be folded into are named separately, because they are
+    // three separate claims: `web` is the process it runs inside, `mcp` the other
+    // agent-facing surface, `chat` the other in-process agent — the one reuse
+    // CR-139 decision 1 rejected, since collapsing them would recreate one
+    // conflation while removing another.
+    let mut conn = db::open_in_memory();
+    let mut rows: Vec<EventRecord> = records
+        .into_iter()
+        .map(|r| EventRecord { at: NOW - 60, ..r })
+        .collect();
+    let mut expected_surfaces = vec!["wikigen", "web", "mcp"];
+    rows.push(EventRecord {
+        at: NOW - 60,
+        surface: "mcp",
+        tool: "wiki_materialize".to_string(),
+        duration_ms: 3,
+        ok: true,
+        origin: "main".to_string(),
+        session_id: "test-session".to_string(),
+    });
+    #[cfg(feature = "agents")]
+    {
+        expected_surfaces.push(Surface::Chat.as_str());
+        rows.push(EventRecord {
+            at: NOW - 60,
+            surface: Surface::Chat.as_str(),
+            tool: "wiki_materialize".to_string(),
+            duration_ms: 3,
+            ok: true,
+            origin: "main".to_string(),
+            session_id: "test-session".to_string(),
+        });
+    }
+    db::write_batch(&mut conn, &rows).unwrap();
+    let info = stats_from(&conn, 7, NOW).unwrap();
+    let seen: Vec<(&str, &str)> = info
+        .calls_by_tool
+        .iter()
+        .map(|u| (u.surface.as_str(), u.tool.as_str()))
+        .collect();
+    for expected in &expected_surfaces {
+        assert!(
+            seen.iter().any(|(surface, _)| surface == expected),
+            "`{expected}` is its own group, not folded into another: {seen:?}"
+        );
+    }
+    assert_eq!(
+        seen.iter().filter(|(_, tool)| *tool == "wiki_materialize").count(),
+        expected_surfaces.len() - 1,
+        "one `wiki_materialize` row per surface — the generator's pass is never \
+         summed with mcp's or the chat agent's: {seen:?}"
+    );
+    assert!(
+        seen.contains(&("wikigen", "wiki_materialize")),
+        "the generation pass's subject is the indexed code, so it is real engine \
+         work and stays counted — this variant separates it from a developer's \
+         browsing, it does not exclude it: {seen:?}"
+    );
+    assert_eq!(
+        self_referential_surfaces(),
+        vec!["shell"],
+        "and adding it left the self-referential set alone: the shell is still \
+         the only surface whose every event is self-referential by construction"
+    );
+}
+
 /// Events outside the window are excluded from counts, percentiles, **and every
 /// additive projection** — the S-233 daily series and origin split, and the
 /// [FR-OB-11] cross-tab and class breakdown. Each carries its own

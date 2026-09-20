@@ -143,6 +143,46 @@ pub enum Surface {
     /// [FR-UI-34]: ../../../docs/specs/requirements/FR-UI-34.md
     /// [BR-42]: ../../../docs/specs/software-spec.md#316-observability--telemetry
     Shell,
+    /// Logos's own **wiki generation pass** ([FR-OB-13], [CR-139]).
+    /// Override-only: it runs inside the `serve --ui` process, whose process
+    /// surface is [`Surface::Web`], and without this every engine call the pass
+    /// makes is indistinguishable from a developer browsing the dashboard.
+    ///
+    /// The same argument `Surface::Chat` makes, pointed at a different
+    /// caller — and the reason it is a *distinct* variant rather than a reuse
+    /// of `Chat`: *"the chat agent answered a question"* and *"the wiki
+    /// generator materialized pages"* are different claims, and collapsing
+    /// them would recreate one conflation while removing another ([CR-139]
+    /// §3.1, decision 1).
+    ///
+    /// # Counted, not excluded
+    ///
+    /// [`Surface::event_class`] answers `None` here, as it does for
+    /// [`Surface::Watcher`]: the pass's subject is the indexed code, so its
+    /// calls are real engine work and the *tool* decides their class. What this
+    /// variant buys is **separability** — the work is attributable to Logos's
+    /// own generator instead of being summed into the `web` bucket ([FR-OB-13]
+    /// AC 1, [NFR-CC-04]). Only [`Surface::Shell`] forces the self-referential
+    /// class, and it stays the only one.
+    ///
+    /// # Not feature-gated, unlike `Surface::Chat`
+    ///
+    /// `Chat` is gated with the `agents` substrate because it *is* that
+    /// substrate — a build without egress has no chat agent to attribute
+    /// ([NFR-SE-01]). The pass this names is the opposite: the materialize half
+    /// is a pure local-filesystem read plus a `wiki.db` write, deterministic and
+    /// offline ([FR-WK-20], [NFR-SE-01]), so there is no egress substrate to
+    /// gate it with. It therefore joins [`Surface::Watcher`] and
+    /// [`Surface::Shell`] as an ungated override-only variant, present in
+    /// [`Surface::ALL`] — and so in the read-model's vocabulary — in every
+    /// feature configuration.
+    ///
+    /// [CR-139]: ../../../docs/requests/CR-139-the-wiki-generation-pass-names-its-own-surface.md
+    /// [FR-OB-13]: ../../../docs/specs/requirements/FR-OB-13.md
+    /// [FR-WK-20]: ../../../docs/specs/requirements/FR-WK-20.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
+    WikiGen,
     /// The in-process chat agent ([FR-OB-10]). Override-only: it reaches the
     /// engine through the web adapter, so without this it is indistinguishable
     /// from a human browsing the dashboard — and *"Logos's own agent navigated
@@ -209,6 +249,7 @@ impl Surface {
             Surface::Web => "web",
             Surface::Watcher => "watcher",
             Surface::Shell => "shell",
+            Surface::WikiGen => "wikigen",
             #[cfg(feature = "agents")]
             Surface::Chat => "chat",
         }
@@ -245,8 +286,13 @@ impl Surface {
             // Shell chrome: the subject is Logos's own state, and nobody asked.
             Surface::Shell => Some(EventClass::ReadModelRequest),
 
-            // Everything else carries both kinds; the tool decides.
-            Surface::Cli | Surface::Mcp | Surface::Web | Surface::Watcher => None,
+            // Everything else carries both kinds; the tool decides. The wiki
+            // generator is here and not above: its subject is the indexed code,
+            // so its calls are real engine work — this variant separates them
+            // from a developer's, it does not exclude them ([FR-OB-13]).
+            Surface::Cli | Surface::Mcp | Surface::Web | Surface::Watcher | Surface::WikiGen => {
+                None
+            }
             #[cfg(feature = "agents")]
             Surface::Chat => None,
         }
@@ -260,6 +306,7 @@ impl Surface {
         Surface::Web,
         Surface::Watcher,
         Surface::Shell,
+        Surface::WikiGen,
         #[cfg(feature = "agents")]
         Surface::Chat,
     ];

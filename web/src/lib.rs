@@ -1793,6 +1793,33 @@ mod tests {
         panic!("unbalanced braces walking the body of `{header}`");
     }
 
+    /// The name of **any** `fn` enclosing `at` — `fn`, `async fn` and `pub fn`
+    /// alike.
+    ///
+    /// A deliberate sibling of [`enclosing_fn`] rather than a widening of it.
+    /// The census's whitelist and the [`fn_body`] pins are tuned to `async fn`
+    /// because the handlers they attribute are handlers; the wiki-generation
+    /// site is a `WikiRunService::start_run` impl, a plain `fn`, and would
+    /// otherwise be whitelisted as `<no enclosing async fn>` — a name that
+    /// would still move if the site moved, but would say nothing about where
+    /// it moved to.
+    fn enclosing_any_fn(code: &str, at: usize) -> &str {
+        let mut cursor = &code[..at];
+        loop {
+            let Some(start) = cursor.rfind("fn ") else {
+                return "<no enclosing fn>";
+            };
+            if whole_identifier(cursor, start) {
+                let rest = &code[start + "fn ".len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                return &rest[..end];
+            }
+            cursor = &cursor[..start];
+        }
+    }
+
     /// The name of the `async fn` enclosing `at` — how an occurrence is
     /// attributed to a handler without depending on line layout.
     fn enclosing_fn(code: &str, at: usize) -> &str {
@@ -1810,15 +1837,22 @@ mod tests {
 
     #[test]
     fn every_handler_names_its_surface_and_only_status_names_the_shell() {
-        // Both files define handlers that cross an adapter boundary: the 23
-        // `bridge` + 6 `workspace_fan` sites in `api_v1.rs`, and the 6 `bridge`
-        // sites in `lib.rs`, three of which are `/api/v1/chat/*` routes.
+        // Three files reach the engine across an adapter boundary: the 23
+        // `bridge` + 6 `workspace_fan` sites in `api_v1.rs`, the 6 `bridge`
+        // sites in `lib.rs` (three of them `/api/v1/chat/*` routes), and the
+        // wiki-generation pass in `wikigen/configured.rs`, which crosses on a
+        // bare `spawn_blocking` and so names its surface directly ([CR-139]).
         let sources = [
             ("api_v1.rs", production_code(include_str!("api_v1.rs"))),
             ("lib.rs", production_code(include_str!("lib.rs"))),
+            (
+                "wikigen/configured.rs",
+                production_code(include_str!("wikigen/configured.rs")),
+            ),
         ];
 
         let mut shell_sites: Vec<(&str, &str)> = Vec::new();
+        let mut wikigen_sites: Vec<(&str, &str)> = Vec::new();
         let mut web_sites = 0usize;
         for (file, code) in &sources {
             for (at, marker) in code.match_indices("Surface::") {
@@ -1828,6 +1862,10 @@ mod tests {
                     .unwrap_or(rest.len());
                 match &rest[..end] {
                     "Shell" => shell_sites.push((file, enclosing_fn(code, at))),
+                    // Attributed by ANY enclosing `fn`: the site is a
+                    // `WikiRunService::start_run` impl, not an `async fn`
+                    // handler.
+                    "WikiGen" => wikigen_sites.push((file, enclosing_any_fn(code, at))),
                     "Web" => web_sites += 1,
                     // The bare `use …::Surface;` import names no variant and
                     // does not reach here; anything else is a handler claiming
@@ -1853,6 +1891,22 @@ mod tests {
             shell_sites[0],
             ("api_v1.rs", "status"),
             "and it is the status handler ([FR-UI-34]), got {shell_sites:?}"
+        );
+        // The same whitelist shape, for the same three regressions, on the
+        // CR-139 surface: a SECOND site claiming to be Logos's own generator
+        // would put a developer's reads into the generator's figures, and the
+        // classification MOVING off the materialize call would put the
+        // generator's back into the developer's.
+        assert_eq!(
+            wikigen_sites.len(),
+            1,
+            "exactly one site is the wiki generation pass, got {wikigen_sites:?}"
+        );
+        assert_eq!(
+            wikigen_sites[0],
+            ("wikigen/configured.rs", "start_run"),
+            "and it is the run the generation trigger spawns ([FR-OB-13], \
+             [CR-139]), got {wikigen_sites:?}"
         );
         // Every other boundary crossing is the plain web surface.
         //
@@ -1911,16 +1965,26 @@ mod tests {
     ///
     /// # What it cannot see
     ///
-    /// An unclassified engine call that carries **no marker at all**.
-    /// `web/src/wikigen/configured.rs` is that shape: it reaches the engine
-    /// inside a bare `spawn_blocking`, naming no `Surface` and calling neither
-    /// helper. It is [CR-139]'s subject, not this guard's, and it is named here
-    /// so the next audit starts from a stated reach rather than an assumption.
+    /// An unclassified engine call that carries **no marker at all** — one that
+    /// reaches the engine inside a bare `spawn_blocking`, naming no `Surface`
+    /// and calling neither helper.
+    ///
+    /// `web/src/wikigen/configured.rs` was that shape, and [CR-139] closed it:
+    /// the pass now names [`Surface::WikiGen`], so the file is in `SCANNED`
+    /// above and its site is whitelisted by the census. The *class* is not
+    /// closed, only that instance. What covers `web/src/wikigen/` now is a
+    /// second, differently-shaped census — `web/tests/wikigen_enumeration.rs`
+    /// enumerates every engine-reaching site in that module from a directory
+    /// walk and compares it against a declared, classified table, so a marker
+    /// is not what makes a site visible there. This guard's reach is still
+    /// exactly "a `Surface`/`bridge`/`workspace_fan` marker in a file the
+    /// census does not read", and it is stated here so the next audit starts
+    /// from that rather than from an assumption.
     ///
     /// [CR-139]: ../../docs/requests/CR-139-the-wiki-generation-pass-names-its-own-surface.md
     #[test]
     fn no_other_source_under_web_src_carries_a_surface_marker() {
-        const SCANNED: [&str; 2] = ["api_v1.rs", "lib.rs"];
+        const SCANNED: [&str; 3] = ["api_v1.rs", "lib.rs", "wikigen/configured.rs"];
         const MARKERS: [&str; 3] = ["Surface::", "bridge(", "workspace_fan("];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
