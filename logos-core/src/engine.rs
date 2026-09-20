@@ -3368,14 +3368,36 @@ fn degraded_sync(err: &anyhow::Error) -> SyncResult {
 mod tests {
     use super::*;
 
-    /// Verify that all engine method signatures compile and that the return
-    /// types implement `serde::Serialize` — the core contract for adapter
-    /// surfaces (ADR-01, NFR-MA-02).
+    /// A **hand-maintained roster** of engine return types that satisfy the
+    /// `serde::Serialize` adapter contract (ADR-01, NFR-MA-02). It is
+    /// documentation, and it says so because it was read as a gate and is not
+    /// one.
     ///
-    /// This test uses generic bounds rather than calling `todo!()` at runtime
-    /// so it passes without panicking.
+    /// # What it does not do
+    ///
+    /// There is no completeness check, and nothing ties this list to `impl
+    /// Engine`. Sprint 72's review proved the consequence rather than asserting
+    /// it: adding a public `Engine` method returning a newly serialized quality
+    /// shape left **2261 tests green**. `LatestHealth`, `QualityReadout`,
+    /// `MetricSnapshot`, `VerifyReport` and roughly twenty more return types
+    /// are absent below and have shipped that way for many sprints.
+    ///
+    /// # Why it stays documentation
+    ///
+    /// The bound is already enforced where it is actually needed: every adapter
+    /// that serializes one of these types fails to compile without it, so a
+    /// return type that is genuinely not `Serialize` is caught by the surface
+    /// that serializes it. Deriving the roster from `impl Engine`'s return
+    /// types would make the list complete and would catch nothing the adapters
+    /// do not — work that manufactures a gate rather than closing a hole. The
+    /// group counts below are descriptive labels on that reading, kept correct
+    /// because a wrong count is what made this list look like a census.
+    ///
+    /// Sprint 72 sprint review, deferred item 5.10; decided 2026-09-20. The
+    /// generic bound is used rather than a runtime `todo!()` so the test passes
+    /// without panicking.
     #[test]
-    fn engine_return_types_are_serialize() {
+    fn rostered_engine_return_types_are_serialize() {
         fn assert_serialize<T: serde::Serialize>() {}
 
         // Navigation (8)
@@ -3396,7 +3418,7 @@ mod tests {
         assert_serialize::<SyncResult>();
         assert_serialize::<InitResult>();
 
-        // Quality / governance (10)
+        // Quality / governance (8)
         assert_serialize::<ScanResult>();
         assert_serialize::<GateResult>();
         assert_serialize::<RulesReport>();

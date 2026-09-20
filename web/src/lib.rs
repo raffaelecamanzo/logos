@@ -1873,6 +1873,131 @@ mod tests {
         );
     }
 
+    /// The census above names its two sources literally; this asserts that
+    /// naming them is still enough — **no other `.rs` file under `web/src/`
+    /// carries a surface marker.**
+    ///
+    /// # Why a filesystem walk and not a third `include_str!`
+    ///
+    /// `include_str!` cannot glob, so
+    /// [`every_handler_names_its_surface_and_only_status_names_the_shell`]
+    /// embeds `api_v1.rs` and `lib.rs` by name — while `bridge` is
+    /// `pub(crate)` across a crate with ten other source files. A new module
+    /// naming `Surface::Cli`, or crossing the adapter boundary through `bridge`
+    /// or `workspace_fan`, would be classified by nothing and that census would
+    /// not notice: its whitelist is exact about the files it reads and silent
+    /// about the files it does not.
+    ///
+    /// Sprint 72's review found this **latent, not live** — no such site
+    /// existed when it was recorded, which is exactly when the guard is cheap.
+    /// Sprint 72 sprint review, deferred item 5.9; decided 2026-09-20.
+    ///
+    /// # Comments stripped, test modules deliberately NOT
+    ///
+    /// It does not reuse [`production_code`], and the first draft of this guard
+    /// did. That helper truncates at the first `#[cfg(test)] mod tests {` and
+    /// keeps nothing after it — exact for the two sources it was written for,
+    /// since both end with their test module, and false for an arbitrary file.
+    /// **Proven rather than reasoned:** a `Surface::Cli` const appended to
+    /// `query.rs`, whose test module starts at line 365 of 437, sat after the
+    /// truncation point and this test passed. A guard that reports clean by
+    /// construction is the failure class the whole census exists to prevent, so
+    /// this strips comments only and reads every line.
+    ///
+    /// The cost is the other direction: a *test* outside these two files that
+    /// names a surface would red this. That is accepted — today no such site
+    /// exists, and a test that needs the vocabulary is itself a file the census
+    /// does not read.
+    ///
+    /// # What it cannot see
+    ///
+    /// An unclassified engine call that carries **no marker at all**.
+    /// `web/src/wikigen/configured.rs` is that shape: it reaches the engine
+    /// inside a bare `spawn_blocking`, naming no `Surface` and calling neither
+    /// helper. It is [CR-139]'s subject, not this guard's, and it is named here
+    /// so the next audit starts from a stated reach rather than an assumption.
+    ///
+    /// [CR-139]: ../../docs/requests/CR-139-the-wiki-generation-pass-names-its-own-surface.md
+    #[test]
+    fn no_other_source_under_web_src_carries_a_surface_marker() {
+        const SCANNED: [&str; 2] = ["api_v1.rs", "lib.rs"];
+        const MARKERS: [&str; 3] = ["Surface::", "bridge(", "workspace_fan("];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut seen_scanned: Vec<String> = Vec::new();
+        let mut walked: Vec<String> = Vec::new();
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .expect("walked from the root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                walked.push(rel.clone());
+                if SCANNED.contains(&rel.as_str()) {
+                    seen_scanned.push(rel);
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                // Comments only — prose *about* a marker is not a marker — and
+                // every line of the file, test module included. See the header:
+                // truncating at the test module made this guard false-green.
+                let code = source
+                    .lines()
+                    .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for marker in MARKERS {
+                    for (at, _) in code.match_indices(marker) {
+                        if whole_identifier(&code, at) {
+                            offenders
+                                .push(format!("{rel}: `{marker}` in {}", enclosing_fn(&code, at)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Anti-vacuity, the same shape as the census's own `web_sites` floor: a
+        // walk rooted at the wrong directory, or one that matched no `.rs` file,
+        // reports zero offenders and means nothing.
+        seen_scanned.sort_unstable();
+        let mut expected: Vec<String> = SCANNED.iter().map(|s| (*s).to_string()).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            seen_scanned,
+            expected,
+            "the walk did not find both census sources under {}; it saw {walked:?}",
+            root.display()
+        );
+        assert!(
+            walked.len() > SCANNED.len(),
+            "the walk found only the census sources ({walked:?}) — `web/src` has more"
+        );
+
+        assert!(
+            offenders.is_empty(),
+            "these sources carry a surface marker that \
+             `every_handler_names_its_surface_and_only_status_names_the_shell` never reads, \
+             so whatever they classify is classified by nothing (FR-OB-09, BR-42). \
+             Classify the site AND add its file to that census's `sources` list: {offenders:?}"
+        );
+    }
+
+
     /// The Health handler reads the last persisted snapshot **once**, through
     /// the single-read seam, and never as a `latest_gate` + `latest_scan` pair
     /// ([FR-UI-04], [CR-135] §3.2).

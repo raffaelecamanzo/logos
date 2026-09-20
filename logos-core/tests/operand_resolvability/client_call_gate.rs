@@ -1781,6 +1781,132 @@ fn the_rust_receiver_rule_is_a_boundary_rule_over_the_normative_rust_row() {
     }
 }
 
+/// **The descriptor and the receiver rule name the same crates, and the rule
+/// actually admits each of them.** The structural fix for finding 9b, and the
+/// inversion of the limit `plugins/rust/plugin.toml` states in prose.
+///
+/// # The direction this closes
+///
+/// That descriptor comment records the measurement: adding `attohttpc` to
+/// `http_client_detectors` **alone** left 229 tests green — the ledger gate
+/// admitted its files while the receiver rule, which had never heard of it,
+/// refused every receiver in them. The newly declared crate captured nothing
+/// and nothing said so. Deleting a crate *is* caught, because its
+/// `Client::new()` fixture reds; adding one was not, because a list of six
+/// cannot notice a seventh.
+///
+/// The list lives in three hand-maintained places — the descriptor's
+/// `http_client_detectors`, the `#match?` alternation in
+/// `rust/queries/invocations.scm`, and this module's own [`Arm::Rust`]
+/// vocabulary — and prose asking three copies to agree is not a mechanism.
+/// This reads the descriptor at test time and holds the query to it.
+///
+/// Sprint 72 sprint review, deferred item 5.8; decided 2026-09-20.
+///
+/// # Two assertions, because they fail differently
+///
+/// The **behavioural** half runs the real grammar, the real `.scm` and the real
+/// extract pass over one file per declared crate: a crate the rule does not
+/// admit captures nothing, which is the `attohttpc` shape. The **structural**
+/// half reads the alternation back out of the `.scm` and compares it to the
+/// descriptor as a set, which catches the reverse too — an alternative naming a
+/// crate the descriptor no longer declares sits in files the ledger gate never
+/// admits, so no fixture can red it.
+///
+/// # Stated limits
+///
+/// The fixtures are deliberately uniform (`<crate>::Client::new()`), because
+/// what is under test is descriptor-versus-rule agreement and not each crate's
+/// real API: `isahc` spells it `HttpClient` and `ureq` spells it `Agent`, and
+/// the rule matches the crate at the head of a `::` path either way. A crate
+/// whose client is reachable only as a free function (`ureq::get("/p")`)
+/// therefore passes here while capturing nothing in real code — that is
+/// [ADR-54]'s documented free-function ceiling, unchanged and not re-litigated
+/// here.
+///
+/// [ADR-54]: ../../docs/specs/architecture/decisions/ADR-54.md
+/// [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
+/// [CR-128]: ../../docs/requests/CR-128-client-call-candidacy-gate-siblings-are-file-grained.md
+#[test]
+fn every_declared_rust_detector_crate_is_admitted_by_the_receiver_rule() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+    let plugin = registry.for_extension("rs").expect("rust grammar");
+    let declared: std::collections::BTreeSet<String> =
+        plugin.semantics().http_client_detectors.iter().cloned().collect();
+    assert!(
+        !declared.is_empty(),
+        "the rust descriptor declares no `http_client_detectors`, so every assertion \
+         below would be vacuous — the `logos check` over zero rules shape"
+    );
+
+    // Behavioural: one real extract pass per declared crate.
+    for krate in &declared {
+        let source = format!(
+            "use {krate}::Client;\n\npub async fn probe() {{ \
+             let _ = {krate}::Client::new().get(\"/users\"); }}\n"
+        );
+        assert_eq!(
+            rust_client_call_targets(&source),
+            vec!["GET /users".to_string()],
+            "`{krate}` is declared in `http_client_detectors`, so the ledger gate admits \
+             its files — but the receiver rule in `rust/queries/invocations.scm` does not \
+             admit a `{krate}::` receiver, so the crate captures nothing and no other \
+             test says so. Add it to the `::`-anchored alternation ([FR-WS-08], [CR-128])"
+        );
+    }
+
+    // Structural: the query's own `::`-anchored alternation, as a set.
+    assert_eq!(
+        scm_crate_alternation(include_str!("../../plugins/rust/queries/invocations.scm")),
+        declared,
+        "`rust/queries/invocations.scm`'s `::`-anchored alternation and \
+         `rust/plugin.toml`'s `http_client_detectors` must name the same crates"
+    );
+}
+
+/// The crates named in the `::`-anchored alternation of `invocations.scm`'s
+/// receiver `#match?`, read out of the query source itself.
+///
+/// `;` comment lines are dropped first: that header discusses the six crates in
+/// prose at length, and prose about a crate is not a rule that admits it. The
+/// alternation is then located by its `)::` anchor and read back to the
+/// matching `(`, so reformatting the pattern cannot quietly empty this — and an
+/// empty read **panics** rather than comparing equal to an empty expectation.
+fn scm_crate_alternation(scm: &str) -> std::collections::BTreeSet<String> {
+    let code = scm
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(';'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = std::collections::BTreeSet::new();
+    let mut from = 0usize;
+    while let Some(rel) = code[from..].find(")::") {
+        let end = from + rel;
+        from = end + 1;
+        let Some(open) = code[..end].rfind('(') else { continue };
+        let inner = &code[open + 1..end];
+        if !inner.contains('|') {
+            continue;
+        }
+        let parts: Vec<&str> = inner.split('|').collect();
+        let plain = |p: &&str| {
+            !p.is_empty()
+                && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        };
+        if parts.iter().all(plain) {
+            out.extend(parts.into_iter().map(str::to_string));
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "no `::`-anchored crate alternation found in the rust invocations query; this \
+         helper read nothing, and a comparison against nothing proves nothing"
+    );
+    out
+}
+
+
 /// **[CR-128] §6's sixth criterion, re-stated at the boundary [S-423] moved it
 /// to.** The residual is no longer *any* receiver inside a client file; it is a
 /// non-HTTP collaborator **spelled** like one.
