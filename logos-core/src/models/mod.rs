@@ -3,6 +3,14 @@
 //! All types implement [`serde::Serialize`] so adapter surfaces can
 //! serialise them to JSON without touching the core (ADR-01).
 //!
+//! One member is not a type: [`quality::absence`] states the cross-surface
+//! absence taxonomy — the vocabulary and the rules every surface keeps when it
+//! reports a figure it does not have ([S-434]). It declares no type and
+//! serialises nothing; it is here because the two classifiers it governs,
+//! [`quality::SignalAbsence`] and [`quality::EvaluatedSetAbsence`], are.
+//!
+//! [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
+//!
 //! Re-export everything so callers can `use logos_core::models::*`.
 
 pub mod navigation;
