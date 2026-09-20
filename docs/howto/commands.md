@@ -661,12 +661,32 @@ change to that symbol may oblige updating. The inverse of
 logos stats [--window <DAYS>]                           # default 7
 ```
 
-Aggregated local telemetry: calls per tool split by surface (`cli`/`mcp`/`web`/
-`chat`/`watcher`), ok-rates, latency p50/p95/p99, and reads/tokens-saved
+Aggregated local telemetry: calls per tool split by surface, ok-rates, latency
+p50/p95/p99, and reads/tokens-saved
 estimates. `--json` also carries `activity_by_day` (a per-UTC-day activity series
 over the window, oldest-first) and `calls_by_origin` (a per-`origin` usage
 breakdown, where `origin` is a worktree's branch name or `"main"`). Reads only
 `telemetry.db` — works without an index.
+
+**The surfaces.** Four are **process** surfaces — the kind of process the call ran
+in — and three are **override-only**, naming an in-process caller that would
+otherwise be indistinguishable from the person using the surface it runs inside:
+
+| Surface | Kind | What it means |
+|---------|------|---------------|
+| `cli` | process | The `logos` binary |
+| `mcp` | process | The `serve --mcp` stdio server |
+| `web` | process | The `serve --ui` dashboard — a query a person issued through the SPA |
+| `chat` | process | The chat agent's own tool calls |
+| `watcher` | override | The debounced filesystem watcher, which runs inside the `serve --mcp` process |
+| `shell` | override | The dashboard's own chrome — the app header re-reads the graph-state readout on every client-side navigation, so its events are requests your navigation caused incidentally rather than asked for |
+| `wikigen` | override | Logos's own wiki generation pass, which runs inside the `serve --ui` process |
+
+The override-only distinction is the point: without it, `"Logos's own agent
+navigated the graph N times"` and `"a developer did"` sum into one figure that
+answers neither question. `wikigen` was added in **1.4.15** — before it, a
+`POST /wiki/generate` run inherited the process surface and the wiki generator
+was counted as somebody browsing the dashboard.
 
 Since logos 1.4.13 every event also carries an opaque **per-process
 `session_id`**, recorded independently of `surface` and `origin` and computed

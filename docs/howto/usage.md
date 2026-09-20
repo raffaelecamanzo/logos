@@ -587,7 +587,43 @@ neither hidden nor restyled away — they simply stop being presented as a curre
 verdict, and the unqualified current-verdict wording is absent. While the graph
 *is* indexed the cards render exactly as before. An **absent** signal keeps its
 own three-way distinction (never checked / checked-and-empty / unavailable),
-which this change deliberately leaves alone. The **Architecture / Cycles**
+which this change deliberately leaves alone.
+
+Since logos 1.4.15 that staleness branch has a **second** condition beside the
+de-indexed one. A snapshot persisted before the graph was last re-indexed is a
+snapshot the graph has **moved past**, even though the store is still indexed and
+the old page called it `current`: the band now drops the word `current` and
+carries the snapshot's own date instead. The comparison is the snapshot's
+`created_at` against the last index or sync — *not* a comparison of node counts,
+which cannot work, because the snapshot counts a production-scoped graph with
+test vertices dropped while the status counts the whole graph, so the two differ
+on every project that has tests.
+
+Read what this claims precisely: it detects **disagreement, never currency**. A
+re-index that changed nothing still trips it, so it over-reports rather than
+under-reports — the safe direction for a readout, and the wording claims only
+what the comparison establishes. Where the ordering cannot be established at all
+— an absent or future-dated sync stamp, or an undated snapshot — the page renders
+**neither** `current` nor a stale date. The de-indexed branch is unchanged and
+takes precedence, and no fourth state was added.
+
+**The same release stops the dashboard inventing an age it cannot establish.**
+Every relative age the SPA renders (`just now`, `5m ago`, `6d ago`) is derived
+from a unix stamp, and one of its inputs — `status.last_sync_at` — is a **file
+mtime**, so a stamp *ahead of now* is routine on copied trees, NFS mounts and
+restored backups rather than theoretical. Before 1.4.15 such a stamp was clamped
+to zero and rendered `just now`: the most reassuring reading of a fact the page
+could not establish. It now names the condition instead, in the CLI readout's own
+words, so one product says one thing about one condition:
+
+```
+at an unknown age (recorded ahead of now — check the clock)
+at an unknown age (the recorded time is implausibly old — check the store)
+```
+
+Ordinary past ages render exactly as before. These are the same two strings the
+Health page's indeterminate branch above reuses — imported, not restated, so a
+future rewording changes both surfaces or neither. The **Architecture / Cycles**
 view (`/architecture`) leads with the dependency-cycle list, then the DSM matrix;
 its cycle participants deep-link into `/graph?seed=<module>`.
 
