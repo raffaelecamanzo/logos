@@ -7,17 +7,28 @@
 //!
 //! # The result, with its denominator and its date
 //!
-//! **2026-09-20 — 3 non-conformant occurrences, in 1 file, of 68 production
-//! occurrences enumerated over 32 production rows across 3 surfaces** (plus 83
-//! occurrences inside test scope, enumerated and separated, never truncated
-//! away). The three are in [`CORRECTIONS`] and were corrected; every other row
-//! was already conformant.
+//! **2026-09-20 — 3 non-conformant renderings, in 1 file, found while
+//! enumerating 85 production sentinel occurrences over 38 production rows
+//! across 3 surfaces.** All three are in [`CORRECTIONS`] and were corrected;
+//! every other row was already conformant.
+//!
+//! The numerator and the denominator describe **one** population — the tree as
+//! it stood before the correction. An earlier draft of this paragraph mixed
+//! them, quoting the 3 against the *post*-correction census, so a reader
+//! reconciling "3 in 1 file" against that file's row could not make the figures
+//! meet. Correcting the three renderings removes one row and four sentinel
+//! occurrences (each rendering carried both an `n/a` and an `empty graph`, and
+//! the duplicated pair collapsed into one constant), which leaves the census
+//! recorded below at **81 production occurrences over 37 production rows**,
+//! beside 105 occurrences inside test scope — enumerated and separated, never
+//! truncated away. [`the_audit_reports_its_count_with_its_denominator`] pins
+//! both populations and the arithmetic between them.
 //!
 //! **No floor is asserted anywhere in this file** ([CR-138] CRA-05). The
 //! assertions below are equalities against a dated record of what was found,
 //! not thresholds a future audit must clear. A later audit that enumerates more
 //! sites and finds none non-conformant is a delivered result; so was most of
-//! this one — five stories had already made 31 of the 32 production rows
+//! this one — five stories had already made 36 of the 37 production rows
 //! conformant before the audit ran, and manufacturing corrections to improve
 //! that figure would defeat its purpose.
 //!
@@ -81,19 +92,55 @@ const AUDITED_ON: &str = "2026-09-20";
 
 /// The three surfaces that report an absence, as workspace-relative roots.
 ///
-/// `logos-core/src/governance` is the readout and the gate — the half of the
-/// governance engine a user reads. `cli/src` is the CLI's own printing.
-/// `web/ui/src` is the SPA, in full rather than only its Health view: a site
-/// nobody named must not be able to hide in a tab nobody audited.
+/// `logos-core/src` is where the words are **written** — the readout, the gate,
+/// and every other read-model that renders a figure it does not have. `cli/src`
+/// is the CLI's own printing. `web/ui/src` is the SPA, in full rather than only
+/// its Health view: a site nobody named must not be able to hide in a tab
+/// nobody audited.
 ///
-/// The API facade (`web/src/api_v1.rs`) is deliberately **not** here. It serves
-/// the read-model as JSON and renders no absence text of its own; the SPA is
-/// the surface that turns those `null`s into words, and it is scanned.
+/// # This root was `logos-core/src/governance` first, and that was too narrow
+///
+/// Review enumerated the class mechanically instead of trusting the boundary,
+/// and found live absence renderings the walk could not see: `logos status`'s
+/// *"unindexed: run `logos index` …"* (`navigate/mod.rs`), which names both a
+/// cause and a command and is R1/R3's own subject matter — and is the very
+/// command [CR-138] §2 reproduced its contradiction against; `FRESHNESS_NA`
+/// (`history/coverage/mod.rs`), whose TypeScript **mirror** was already a
+/// census row while its source of truth was not; and the doc-symlink notice in
+/// `config/discovery.rs`. Worse, review reintroduced the exact wording this
+/// audit removed into `logos-core/src/metrics/mod.rs` and the suite stayed
+/// green: `the_corrected_wording_is_gone_from_every_surface` is bounded by
+/// these roots, so its claim to close "the sibling call site nobody edited"
+/// held only inside them.
+///
+/// A narrower root is a hand-listed boundary, and a hand-listed boundary is the
+/// one input on which "a site nobody named cannot be missed" rests.
+///
+/// # The two exclusions, both stated rather than silent
+///
+/// `logos-core/src/models/quality.rs` holds [`absence::SENTINELS`], so walking
+/// it would report the lexicon as sixteen sites — the self-reference [S-435]'s
+/// sibling harness records hitting. It is checked separately, and more
+/// strictly, by [`the_taxonomy_module_is_not_a_reporting_site`].
+///
+/// The API facade (`web/src/api_v1.rs`) serves the read-model as JSON and
+/// renders no absence text of its own; the SPA is the surface that turns those
+/// `null`s into words, and it is scanned. `mcp/src` states the `n/a` contract
+/// in tool *descriptions* rather than rendering a figure, and is likewise out.
+///
+/// [S-435]: ../../docs/planning/journal.md#s-435-the-wiki-generation-pass-names-its-own-surface
+/// [CR-138]: ../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
 const SURFACES: [(&str, &str); 3] = [
-    ("governance", "logos-core/src/governance"),
+    ("core", "logos-core/src"),
     ("cli", "cli/src"),
     ("spa", "web/ui/src"),
 ];
+
+/// The one file inside a surface the walk does not read, and why.
+///
+/// Held as a named constant rather than inlined so the exclusion is a value the
+/// census can point at, and so there is exactly one of it.
+const LEXICON_HOME: &str = "logos-core/src/models/quality.rs";
 
 /// What the audit corrected: `(file, before, after, why)`.
 ///
@@ -202,9 +249,25 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 66] = [
     (
-        "governance",
+        "core",
+        "logos-core/src/config/discovery.rs",
+        "unindexed",
+        7,
+        4,
+        "NOT A SITE — six are identifiers (`UnindexedDocSymlink`, `unindexed_doc_symlinks`) and one is the FR-IX-11 diagnostic \"documentation directory-symlink … exists but is unindexed\", which reports a CONFIGURATION fault rather than a figure the surface would otherwise have. The matcher over-captures identifiers deliberately: a census may be wrong only in the loud direction",
+    ),
+    (
+        "core",
+        "logos-core/src/federation/query.rs",
+        "empty graph",
+        0,
+        2,
+        "NO PRODUCTION SITE — 2 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
         "logos-core/src/governance/mod.rs",
         "n/a",
         2,
@@ -212,7 +275,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CORRECTED — the gate's two absent-signal verdicts. Both read \"n/a (empty graph)\" over a condition (`aggregate_signal == None` on either side) that has the two causes `SignalAbsence` separates, so both stated a cause the condition never established (R1, FR-EH-04 AC2). See CORRECTIONS",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/mod.rs",
         "no baseline",
         2,
@@ -220,7 +283,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — the gate's no-baseline informational pass, in its two paths. R3: `gate --save` is exactly the command this condition identifies. R4: an informational pass, never a silent zero",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "at an unknown age",
         2,
@@ -228,7 +291,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — `render_age`'s two degradations, a negative and an implausible stamp. R4: the age is named unusable, never rendered as a plausible phrase. The cross-surface twin of `dashboardModel.ts`, pinned byte-identical below",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "empty graph",
         1,
@@ -236,7 +299,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — `SignalAbsence::EmptyGraph`'s clause, and the one honest use of the phrase on this surface: the readout reads the store's own counts, so its condition does establish the cause (R1)",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "evaluated set unknown",
         2,
@@ -244,7 +307,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — `EvaluatedSetAbsence::Unrecorded`, plus the `(None, None)` arm that names the set unknown and attributes no cause. R1 in its strictest form: an unestablished cause is reported absent, not guessed",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "n/a",
         5,
@@ -252,7 +315,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — the signal cell's three arms (no cause, empty graph, no production scope) and the baseline/delta clauses. R1 throughout; the `NoProductionScope` arm carries its two figures (R2)",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "no baseline",
         1,
@@ -260,7 +323,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — the summary channel's baseline clause. The full channel renders a different sentence naming `gate --save`, and `render_signal` records why that fork is deliberately not consolidated — R5's stated carve-out, recorded at the site",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "no pass is stated",
         1,
@@ -268,7 +331,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — R4 at its sharpest: a run that evaluated nothing and found nothing is that state, never \"clean\" and never a bare 0 (FR-GV-03)",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "no rules contract",
         1,
@@ -276,7 +339,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — `EvaluatedSetAbsence::NoContract`. R3: names no command, because the marker is written by `replace_violations`, which `scan` calls too",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "none recorded",
         1,
@@ -284,7 +347,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — no marker is absence of knowledge, and R4 forbids reading it as a pass (BR-41). \"rule check\" is the activity, not a command (R3)",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/readout.rs",
         "not comparable",
         2,
@@ -292,8 +355,112 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 51] = [
         "CONFORMANT — the baseline and delta clauses in both channels. R4: an incomparable baseline is named, never rendered as a delta of 0",
     ),
     (
-        "governance",
+        "core",
         "logos-core/src/governance/tests.rs",
+        "unindexed",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/graph_store/schema.rs",
+        "n/a",
+        1,
+        0,
+        "NOT A SITE — a SQL comment inside the DDL string literal, documenting that a NULL signal column is the ADR-12 sentinel. It renders nothing to a user; the stripper cannot see into a second comment language nested in a Rust string, and reporting it is the safe direction",
+    ),
+    (
+        "core",
+        "logos-core/src/graph_store/tests.rs",
+        "empty graph",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/history/coverage/mod.rs",
+        "n/a",
+        1,
+        0,
+        "CONFORMANT — `FRESHNESS_NA`, the never-covered-file sentinel (FR-CV-05), and the SOURCE OF TRUTH whose TypeScript mirror (`api/types.ts`'s `Freshness`) this census already carried. Enumerating the mirror and not its origin is what the narrower root cost, and R4 holds at both ends: never a shifted number, never a guessed 0",
+    ),
+    (
+        "core",
+        "logos-core/src/history/hotspot.rs",
+        "n/a",
+        0,
+        4,
+        "NO PRODUCTION SITE — 4 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/history/temporal.rs",
+        "n/a",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/history/tests.rs",
+        "n/a",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/hydrate/tests.rs",
+        "empty graph",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/metrics/tests.rs",
+        "empty graph",
+        0,
+        4,
+        "NO PRODUCTION SITE — 4 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/metrics/tests.rs",
+        "n/a",
+        0,
+        2,
+        "NO PRODUCTION SITE — 2 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/navigate/branch.rs",
+        "unindexed",
+        1,
+        0,
+        "NOT A SITE — coverage prose (\"an unindexed language, an excluded path …\") stating what the graph does not reach. Adjacent to the taxonomy and not an instance of it: the taxonomy governs a figure the surface does not have, and this qualifies a figure it does",
+    ),
+    (
+        "core",
+        "logos-core/src/navigate/mod.rs",
+        "unindexed",
+        3,
+        0,
+        "CONFORMANT, and the row is mixed — the verdict adjudicates all three. One is a site: `logos status`'s \"unindexed: run `logos index` …\", which R1 satisfies (the condition is exactly \"nothing is indexed\") and R3 permits to name a command for the same reason HealthView's `unindexed` arm may. It is also the readout `CR-138` §2 reproduced its contradiction against. The other two are the coverage prose recorded on `navigate/branch.rs`",
+    ),
+    (
+        "core",
+        "logos-core/src/pipeline/tests.rs",
+        "empty graph",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/resolve/tests.rs",
         "unindexed",
         0,
         1,
@@ -814,6 +981,60 @@ fn strip_comments(source: &str, rust: bool) -> Stripped {
     out
 }
 
+/// The byte just past each `#[cfg(...)]` attribute whose predicate gates on
+/// **`test`**, in a comment-stripped Rust source.
+///
+/// Matching the literal string `#[cfg(test)]` is not enough, and the audit's
+/// own scope extension is what proved it: `logos-core/src/pipeline/mod.rs`
+/// declares its test module as `#[cfg(all(test, feature = "lang-rust"))]`, so a
+/// literal match missed it and every assertion in `pipeline/tests.rs` entered
+/// the census as a **production** absence site. Compound predicates are
+/// ordinary Rust and this walks any of them.
+///
+/// The `test` token is required to be a whole token **outside a string**, so
+/// `feature = "test-utils"` does not gate a module on `test` and is not read as
+/// if it did.
+fn cfg_test_attributes(stripped: &Stripped) -> Vec<usize> {
+    const OPEN: &str = "#[cfg(";
+    let code = &stripped.code;
+    let mut ends = Vec::new();
+    for (at, _) in code.match_indices(OPEN) {
+        let predicate_start = at + OPEN.len();
+        let mut depth = 1usize;
+        let mut close = None;
+        for (offset, c) in code[predicate_start..].char_indices() {
+            if stripped.in_string[predicate_start + offset] {
+                continue;
+            }
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(predicate_start + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { continue };
+        if code[close..].chars().nth(1) != Some(']') {
+            continue;
+        }
+        let gates_on_test = code[predicate_start..close]
+            .match_indices("test")
+            .any(|(offset, _)| {
+                !stripped.in_string[predicate_start + offset]
+                    && whole_token(code, predicate_start + offset, predicate_start + offset + 4)
+            });
+        if gates_on_test {
+            ends.push(close + 2);
+        }
+    }
+    ends
+}
+
 /// Byte spans of the `#[cfg(test)] mod … { … }` blocks in a comment-stripped
 /// Rust source, brace-matched **outside string literals**.
 ///
@@ -847,11 +1068,9 @@ fn strip_comments(source: &str, rust: bool) -> Stripped {
 /// `"tests;"` as a name, so the two conditions were one, and the spare was a
 /// dead conjunct of exactly the kind `recorded_clean_over` records shipping.
 fn rust_test_spans(stripped: &Stripped) -> Vec<(usize, usize)> {
-    const ATTR: &str = "#[cfg(test)]";
     let code = &stripped.code;
     let mut spans = Vec::new();
-    for (at, _) in code.match_indices(ATTR) {
-        let after = at + ATTR.len();
+    for after in cfg_test_attributes(stripped) {
         let tail = &code[after..];
         let Some(offset) = tail
             .char_indices()
@@ -922,7 +1141,6 @@ fn rust_test_spans(stripped: &Stripped) -> Vec<(usize, usize)> {
 /// if it happened to declare a module of the same name the production file
 /// vanished from the census silently.
 fn rust_file_is_test_only(path: &Path) -> bool {
-    const ATTR: &str = "#[cfg(test)]";
     let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
         return false;
     };
@@ -940,9 +1158,10 @@ fn rust_file_is_test_only(path: &Path) -> bool {
         let Ok(source) = std::fs::read_to_string(&declarer) else {
             continue;
         };
-        let code = strip_comments(&source, true).code;
-        for (at, _) in code.match_indices(ATTR) {
-            let tail = &code[at + ATTR.len()..];
+        let stripped = strip_comments(&source, true);
+        let code = &stripped.code;
+        for after in cfg_test_attributes(&stripped) {
+            let tail = &code[after..];
             // Whichever comes first ends the candidate: a `;` makes it the
             // declaration this looks for, a `{` makes it an inline module.
             let Some(end) = tail.find(';') else { continue };
@@ -1143,6 +1362,9 @@ fn walk() -> Vec<(String, String, String, usize, usize)> {
                 .expect("under the workspace root")
                 .to_string_lossy()
                 .replace('\\', "/");
+            if relative == LEXICON_HOME {
+                continue;
+            }
             let mut per_sentinel: Vec<(&str, usize, usize)> = Vec::new();
             for (sentinel, in_test) in occurrences(&path) {
                 match per_sentinel.iter_mut().find(|(s, _, _)| *s == sentinel) {
@@ -1623,9 +1845,15 @@ fn every_absence_reporting_site_is_enumerated_and_recorded() {
             assert!(
                 verdict.starts_with("CONFORMANT")
                     || verdict.starts_with("CORRECTED")
+                    || verdict.starts_with("NOT A SITE")
                     || verdict.starts_with("NO PRODUCTION SITE"),
                 "{file} / {sentinel} carries no adjudication: {verdict}"
             );
+            // `NOT A SITE` is an adjudication, not an omission: the matcher
+            // over-captures on purpose — an identifier, a `case` label or a SQL
+            // comment nested in a Rust string can spell a sentinel — and a
+            // census may be wrong only in the loud direction. What it may never
+            // do is leave a capture unjudged.
             assert_eq!(
                 *production == 0,
                 verdict.starts_with("NO PRODUCTION SITE"),
@@ -1686,6 +1914,16 @@ fn every_absence_reporting_site_is_enumerated_and_recorded() {
 /// delivered result.
 ///
 /// [CR-138]: ../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
+/// How the correction changed the census: `(rows removed, production
+/// occurrences removed)`.
+///
+/// Stated so the pre-correction denominator and the post-correction one are
+/// tied by arithmetic rather than by two independent hand counts. Each of the
+/// three corrected renderings carried an `n/a` **and** an `empty graph`, and
+/// the two byte-identical ones collapsed into a single constant, so six
+/// occurrences became two and the `empty graph` row left the file entirely.
+const CORRECTION_DELTA: (usize, usize) = (1, 4);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows = CENSUS.iter().filter(|r| r.3 > 0).count();
@@ -1704,12 +1942,24 @@ fn the_audit_reports_its_count_with_its_denominator() {
             SURFACES.len(),
             AUDITED_ON,
         ),
-        (3, 1, 68, 32, 83, 3, "2026-09-20"),
-        "the module header states: on 2026-09-20, 3 non-conformant occurrences \
-         in 1 file, of 68 production occurrences over 32 production rows across \
-         3 surfaces, beside 83 test-scope occurrences. Change the header and \
-         this tuple together — a count without its denominator says nothing, \
-         and an undated one is read as a standing property"
+        (3, 1, 81, 37, 105, 3, "2026-09-20"),
+        "the census as it now stands: 81 production occurrences over 37 \
+         production rows across 3 surfaces, beside 105 test-scope occurrences, \
+         read on 2026-09-20. Change the header and this tuple together — a \
+         count without its denominator says nothing, and an undated one is \
+         read as a standing property"
+    );
+
+    // The numerator's own population: the 3 were counted on the tree BEFORE the
+    // correction, so the denominator they are quoted against is that tree's.
+    assert_eq!(
+        (
+            production_rows + CORRECTION_DELTA.0,
+            production_occurrences + CORRECTION_DELTA.1,
+        ),
+        (38, 85),
+        "3 non-conformant renderings of 85 production occurrences over 38 \
+         production rows — one population, which is what makes it a ratio"
     );
 
     for (file, before, after, why) in CORRECTIONS {
@@ -1767,8 +2017,10 @@ fn the_corrected_wording_is_gone_from_every_surface() {
 fn the_three_surfaces_reference_the_one_taxonomy() {
     let root = workspace_root();
     let mut cited = 0usize;
-    for (surface, file, _, production, _, _) in CENSUS {
-        if production == 0 {
+    for (surface, file, _, production, _, verdict) in CENSUS {
+        // A file whose only captures are identifiers or nested prose reports no
+        // absence, so it has no taxonomy to reference.
+        if production == 0 || verdict.starts_with("NOT A SITE") {
             continue;
         }
         let source = std::fs::read_to_string(root.join(file))
@@ -1782,9 +2034,20 @@ fn the_three_surfaces_reference_the_one_taxonomy() {
         cited += 1;
     }
     assert_eq!(
-        cited, 32,
-        "one check per production row — a denominator, so a census that \
-         silently stopped producing rows cannot pass this by checking nothing"
+        cited,
+        CENSUS
+            .iter()
+            .filter(|(_, _, _, production, _, verdict)| *production > 0
+                && !verdict.starts_with("NOT A SITE"))
+            .count(),
+        "one check per adjudicated production row — a denominator, so a census \
+         that silently stopped producing rows cannot pass this by checking \
+         nothing. Derived rather than hardcoded: the figure is pinned once, in \
+         the dated tuple, which is this file's own discipline"
+    );
+    assert!(
+        cited > 0,
+        "…and the loop ran at all — an empty census would satisfy any equality"
     );
 }
 
