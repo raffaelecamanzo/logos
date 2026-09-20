@@ -59,11 +59,34 @@ function parseSecs(field: string | null): number | null {
 }
 
 /**
+ * A century. Past this the recorded timestamp is wrong rather than merely old:
+ * no index or sync of a project predates the tool by decades. Mirrors
+ * `IMPLAUSIBLE_AGE_SECS` in `logos-core/src/governance/readout.rs`.
+ */
+const IMPLAUSIBLE_AGE_SECS = 100 * 365 * 24 * 60 * 60;
+
+/**
  * Humanise the age between `now` and `then` (both unix seconds) into a coarse
- * relative phrase. A future timestamp (clock skew) saturates to "just now".
+ * relative phrase — `just now`, `5m ago`, `6d ago`.
+ *
+ * An age that cannot be established is **named, not rendered** (FR-EH-04,
+ * NFR-RA-05). The two cases are the ones the CLI readout already names, in its
+ * words (S-314, `37909c9c`), so one product says one thing about one condition:
+ * - **Ahead of now** — `then` is stamped after `now`. `status.last_sync_at` is a
+ *   file mtime, and a future mtime is routine on a copied tree, an NFS mount or
+ *   a restored backup; clamping the interval to zero and saying "just now"
+ *   would invent the most reassuring reading of a fact the SPA cannot
+ *   establish.
+ * - **Implausibly old** — an age past {@link IMPLAUSIBLE_AGE_SECS} arrives from
+ *   a corrupted or hand-edited field, and "36500d ago" is a fabricated
+ *   precision, not a fact.
  */
 export function humanizeAge(now: number, then: number): string {
-  const secs = Math.max(0, now - then);
+  const secs = now - then;
+  if (secs < 0) return "at an unknown age (recorded ahead of now — check the clock)";
+  if (secs > IMPLAUSIBLE_AGE_SECS) {
+    return "at an unknown age (the recorded time is implausibly old — check the store)";
+  }
   if (secs < 60) return "just now";
   if (secs < 3_600) return `${Math.floor(secs / 60)}m ago`;
   if (secs < 86_400) return `${Math.floor(secs / 3_600)}h ago`;
