@@ -1180,12 +1180,14 @@ fn rust_file_is_test_only(path: &Path) -> bool {
         let code = &stripped.code;
         for after in cfg_test_attributes(&stripped) {
             let tail = &code[after..];
-            // Whichever comes first ends the candidate: a `;` makes it the
-            // declaration this looks for, a `{` makes it an inline module.
+            // An inline `mod x { … }` needs no guard of its own: its first `;`
+            // lies inside the block, so the slice up to it carries a `{` and
+            // cannot equal `mod <stem>`. A separate brace check stood here and
+            // review proved it dead over the whole tree and over seven
+            // adversarial tails — the same spare-conjunct shape the sweep had
+            // already removed from `rust_test_spans`, left standing in its
+            // sibling sixty lines below.
             let Some(end) = tail.find(';') else { continue };
-            if tail.find('{').is_some_and(|brace| brace < end) {
-                continue;
-            }
             let declaration = tail[..end].trim();
             let declaration = declaration
                 .strip_prefix("pub(crate)")
@@ -1570,10 +1572,17 @@ fn a_test_module_is_recognised_by_its_declaration_not_its_name() {
     std::fs::create_dir_all(root.join("a")).expect("mkdir");
     std::fs::write(
         root.join("a/mod.rs"),
-        "#[cfg(test)]\npub mod helpers;\n\n#[cfg(test)]\nmod tests;\n\npub mod live;\n",
+        // `live_helper` is the near miss: a test-only module whose name has
+        // `live` as a PREFIX. The comparison must be an equality, not a
+        // containment — relaxing it to `contains` classified the production
+        // `live.rs` as test scope and every site in it left the census in
+        // silence. A deletion-only sweep cannot find that: it is about what the
+        // matcher wrongly ADMITS.
+        "#[cfg(test)]\npub mod helpers;\n\n#[cfg(test)]\nmod tests;\n\n\
+         #[cfg(test)]\nmod live_helper;\n\npub mod live;\n",
     )
     .expect("write");
-    for leaf in ["helpers", "tests", "live"] {
+    for leaf in ["helpers", "tests", "live", "live_helper"] {
         std::fs::write(root.join(format!("a/{leaf}.rs")), "// fixture\n").expect("write");
     }
 
@@ -1591,7 +1600,8 @@ fn a_test_module_is_recognised_by_its_declaration_not_its_name() {
         ],
         [true, true, false, false],
         "a `pub mod` declaration is still a test-only declaration; a production \
-         module is not one; and `b.v2/inner.rs` is not declared by `b.rs`"
+         module is not one even when a test-only sibling's name extends its \
+         own; and `b.v2/inner.rs` is not declared by `b.rs`"
     );
 }
 
