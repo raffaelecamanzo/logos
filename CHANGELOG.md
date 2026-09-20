@@ -9,6 +9,51 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.15] — 2026-09-21
+
+Sprint 73 — every readout carries the denominator that makes it checkable, and
+the absence vocabulary is stated once.
+
+### Fixed
+
+- **The session-start readout no longer calls a vacuous run a clean check.** The
+  `check_run` marker recorded a violation count and nothing about what produced
+  it, so a run that evaluated **zero rules** — no contract (exit `4`), or `logos
+  init`'s default contract authoring none (exit `0`, the ordinary state of a
+  fresh project) — rendered as ``clean `logos check` ``. Migration 21 widens the
+  marker with the evaluated set (`checked_rules`, `rules_present`) and the
+  operation that wrote it; the readout now names four distinct states, states a
+  clean result only beside its denominator (`0 of 12 rule(s) evaluated — clean`),
+  renders a pre-migration marker as *evaluated set unknown*, and names no
+  command. Additive, in-place, no re-index (S-437, CR-140).
+- **`quality-report` no longer reports a populated graph as empty.** A store
+  whose every function is a test computes a legitimately empty *production*
+  scope; it was reported as `signal n/a (empty graph)` while `logos status` said
+  `indexed: true` in the same breath. The readout now distinguishes the two and
+  carries the figure that establishes it (S-432, CR-138).
+- **The dashboard no longer renders an age it cannot establish.** A timestamp
+  ahead of now was clamped and shown as `just now`; since `status.last_sync_at`
+  is a file mtime, that is routine on copied trees and restored backups. Both
+  degradations now use the CLI readout's own wording (S-433, CR-138).
+- **The Health page no longer labels a superseded snapshot `current`.** A
+  snapshot persisted before the graph was last re-indexed now drops the word and
+  carries its own date. Detects disagreement, not currency — it over-reports by
+  design, and an indeterminate ordering renders neither (S-436, CR-135 §3.2).
+- **Logos's own wiki generation is no longer counted as a developer browsing the
+  dashboard.** `POST /wiki/generate` inherited the `serve --ui` process surface;
+  it now has a distinct override-only `wikigen` telemetry surface, separable from
+  `web`, `mcp` and `chat` (S-435, CR-139, FR-OB-13).
+
+### Changed
+
+- **One absence taxonomy across the CLI, governance and SPA surfaces**, stated
+  once in code and referenced rather than restated. Audited from source: 3
+  non-conformant occurrences of 68, in 1 file, at 2026-09-20 — the other 65 were
+  already conformant (S-434, CR-138).
+- `logos stats`'s surface vocabulary is documented in full: four process
+  surfaces (`cli`, `mcp`, `web`, `chat`) and three override-only ones
+  (`watcher`, `shell`, `wikigen`).
+
 ## [1.4.14] — 2026-09-20
 
 ### Added
