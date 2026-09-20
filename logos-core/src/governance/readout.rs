@@ -42,6 +42,12 @@
 //! [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
 //! [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
 //! [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+//!
+//! Absence wording on this surface follows the one taxonomy rather than
+//! restating it: [`models::quality::absence`] ([S-434]).
+//!
+//! [`models::quality::absence`]: crate::models::quality::absence
+//! [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 
 use crate::models::quality::{CheckRun, EvaluatedSetAbsence, QualityReadout, SignalAbsence};
 

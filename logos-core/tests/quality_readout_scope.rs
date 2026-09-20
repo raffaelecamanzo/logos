@@ -375,3 +375,73 @@ fn the_discriminant_gates_on_the_production_scope_not_a_lookalike() {
         "derived policy vertices are not evidence that any code was indexed"
     );
 }
+
+// ── the same claim, one renderer over ───────────────────────────────────────
+
+/// **The gate verdict names no cause it cannot establish** ([S-434]'s audit,
+/// [CR-138], [FR-EH-04] AC2, `models::quality::absence` R1).
+///
+/// `governance::gate` renders the absent signal on the *same* CLI surface as the
+/// readout and reached it by a different path, so [S-432] left it behind: both
+/// gate messages read *"n/a (empty graph)"* for a condition
+/// (`aggregate_signal == None` on either side) that has the two causes
+/// [`SignalAbsence`] separates. On the [CR-138] §2 reproduction store that is
+/// the false attribution, word for word, one renderer over.
+///
+/// The gate cannot classify it — [`SignalAbsence`] needs the store counts the
+/// gate does not read, and R2 forbids naming a cause without the figures that
+/// establish it — so the correction drops the attribution rather than inventing
+/// a read. The contrast below is the whole point: the readout, which *can*
+/// establish the cause, still names it on a genuinely empty store.
+///
+/// [S-432]: ../../docs/planning/journal.md#s-432-the-quality-readout-names-the-scope-its-signal-was-computed-over
+/// [S-434]: ../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
+#[test]
+fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
+    for (name, tmp) in [
+        ("test-only store", test_only_store()),
+        ("empty store", empty_store()),
+    ] {
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+
+        // The threshold floor: `aggregate_signal == None` cannot satisfy one.
+        let floored = engine.gate(Some(10_000), false, true).expect("gate runs");
+        assert!(
+            !floored.passed && floored.message.contains("cannot satisfy threshold"),
+            "{name}: an absent signal cannot satisfy a floor: {}",
+            floored.message
+        );
+        assert!(
+            floored.message.contains("signal is n/a"),
+            "{name}: the absence is named: {}",
+            floored.message
+        );
+        assert!(
+            !floored.message.contains("empty graph"),
+            "{name}: the floor message states a cause this condition does not \
+             establish (FR-EH-04 AC2): {}",
+            floored.message
+        );
+
+        // The comparison verdict: a baseline exists and one side has no signal.
+        engine.gate(None, true, true).expect("gate --save runs");
+        let compared = engine.gate(None, false, true).expect("gate runs");
+        assert_eq!(
+            compared.message, "signal or baseline is n/a — informational pass",
+            "{name}: one spelling, no cause — and the two gate paths share the \
+             constant that holds it"
+        );
+    }
+
+    // The contrast, and the reason this is a narrowing rather than a retirement:
+    // the readout reads the store counts, so on a genuinely empty store it
+    // *does* establish the cause and still names it.
+    let tmp = empty_store();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let readout = engine.quality_readout().expect("readout");
+    assert_eq!(
+        readout.signal_absence,
+        Some(SignalAbsence::EmptyGraph),
+        "the surface that can establish the cause is untouched by this correction"
+    );
+}

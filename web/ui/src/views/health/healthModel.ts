@@ -6,6 +6,12 @@
  * structural drill-down dimensions joined to their worst offenders, and the
  * evolution-row formatting (signed deltas, abbreviated sha, empty-graph `n/a`). No
  * DOM, no React — every figure is a projection of a read-model field (NFR-RA-05).
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the five rules every absence-reporting
+ * site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import type {

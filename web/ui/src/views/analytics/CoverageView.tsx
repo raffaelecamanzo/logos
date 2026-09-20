@@ -8,6 +8,12 @@
  * stale file a STALE label (never a shifted number), a never-covered file `n/a`
  * ([FR-CV-05]). The <meter> drives its fill from its `value` attribute, so no inline
  * style is needed — the self-only CSP stays intact. Every read is GET-only (ADR-28).
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the five rules every absence-reporting
+ * site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import { AsyncResource, fetchCoverage, useApiResource } from "../../api/index.ts";

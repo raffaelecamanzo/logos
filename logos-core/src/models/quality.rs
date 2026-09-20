@@ -119,6 +119,151 @@ pub struct QualityReadout {
     pub warnings: Vec<String>,
 }
 
+/// **The absence taxonomy** — stated once, here, for every surface that reports
+/// a figure it does not have ([S-434], [CR-138], [CR-135] §3.3, [NFR-CC-04]).
+///
+/// Three surfaces report an absence — the governance/CLI readout
+/// (`governance::readout`, `governance::gate`), the CLI itself (`cli/src`), and
+/// the SPA (`web/ui/src`) — and before Sprint 73 they did it three ways. This
+/// module is the statement they share. It adds no state and classifies nothing
+/// itself: the classifiers are [`SignalAbsence`], [`EvaluatedSetAbsence`], and
+/// the SPA's own `signalAbsence` / `snapshotStaleness`. What lives here is the
+/// contract all of them already keep, written down so the *next* surface adopts
+/// it rather than guessing at a precedent.
+///
+/// Conformance is audited from source by
+/// `logos-core/tests/absence_taxonomy_audit.rs`, which enumerates every site
+/// rather than trusting this prose.
+///
+/// # R0 — One classifier per question
+///
+/// An absence classifier answers exactly **one** question about exactly **one**
+/// figure. A second question gets a second classifier, never more arms on the
+/// first — otherwise every match carries arms that cannot arise for it.
+///
+/// This is why there are four vocabularies and not one, and each is a different
+/// question rather than a different dialect:
+///
+/// | Classifier | The question it answers |
+/// |---|---|
+/// | [`SignalAbsence`] | why the 0–10000 metric signal is missing — a fact about the **graph** |
+/// | [`EvaluatedSetAbsence`] | why the rule check has no denominator — a fact about the **contract** |
+/// | `healthModel.ts` `signalAbsence` | why the Health page has no signal to show — a fact about a **persisted snapshot**, so it has a middle arm (`unscanned`) the computing readout cannot reach |
+/// | `healthModel.ts` `snapshotStaleness` | why a signal that **exists** is not asserted current — not an absence at all, and deliberately separate ([CR-135] §3.3) |
+///
+/// `signalAbsence` is the **reference model** the Rust vocabulary follows, not
+/// a defect: its three-way classification was settled by [CR-135] §3.3 and
+/// re-confirmed unchanged under [S-422]'s story review.
+///
+/// # R1 — Name only the cause the gating condition establishes
+///
+/// A readout attributing an absence to a cause its own condition has not
+/// established is [FR-EH-04] AC2's failure, and it is what [CR-138] reproduced:
+/// one binary reporting `indexed: true, node_count: 9` and `signal n/a (empty
+/// graph)` in the same breath. When nothing establishes a cause, **name none** —
+/// a bare `n/a` — rather than the most familiar one.
+///
+/// # R2 — The arm carries what establishes it
+///
+/// The figures that rule the other arms out ride with the cause, carried from
+/// the source that established them rather than recomputed at the rendering, so
+/// a reader can check the claim without a second command.
+///
+/// # R3 — No command the record cannot attribute
+///
+/// An arm names a remediation command only where the classifying condition
+/// identifies one. `unindexed` names `logos index` because that condition is
+/// exactly "nothing is indexed"; [`SignalAbsence::EmptyGraph`] names none
+/// because the one-line readout has no room and the freshness line already
+/// carries it; [`EvaluatedSetAbsence`] names none because the marker it reads
+/// is written by `replace_violations`, which both `check` and `scan` call
+/// ([FR-IN-07]).
+///
+/// # R4 — Never the favourable reading
+///
+/// An absent figure is never rendered as a zero, a pass, a date or an age the
+/// surface cannot establish. A negative or implausible age is **named**, not
+/// rendered; a `0` over no evaluated set is *"no pass is stated"*, never
+/// *"clean"* ([FR-GV-03], [BR-41]).
+///
+/// # R5 — One condition, one spelling, derived once per surface
+///
+/// Two channels of one surface do not each build the sentence: a pair that can
+/// drift, does. The summary and the full readout share
+/// `render_signal_absence`, `render_evaluated_set` and `headline_count` for
+/// exactly this reason. Where two channels must genuinely differ — the baseline
+/// fork, where only the full readout has room to name `gate --save` — the
+/// divergence is **recorded at the site** rather than left to look accidental.
+///
+/// R5 binds within a surface. Across the language boundary the same sentence is
+/// necessarily two literals ([`readout::render_age`]'s two degradations and
+/// `dashboardModel.ts`'s `UNKNOWN_AGE_AHEAD_OF_NOW` are one condition in two
+/// languages); the audit pins them byte-identical instead.
+///
+/// [`readout::render_age`]: crate::governance::readout
+/// [S-422]: ../../../docs/planning/journal.md#s-422-the-health-readout-is-internally-consistent-and-never-stale
+/// [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
+/// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+/// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
+/// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
+/// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
+pub mod absence {
+    /// The token every absence-reporting source file cites to point here.
+    ///
+    /// One spelling, held in one place, so "the three surfaces reference the
+    /// taxonomy" is a fact the audit checks rather than a convention reviewers
+    /// remember. A TypeScript file cannot link a Rust item, so the citation is
+    /// this literal path in a comment; a Rust file uses it in an intra-doc
+    /// link, which contains the same token.
+    pub const TAXONOMY_REFERENCE: &str = "models::quality::absence";
+
+    /// The product's **closed** absence vocabulary — the words that mean
+    /// "this figure is not here" on any surface.
+    ///
+    /// A new surface uses one of these spellings rather than inventing a
+    /// fifth; that is the contract, and it is also what makes the audit's
+    /// enumeration possible at all. `logos-core/tests/absence_taxonomy_audit.rs`
+    /// walks the three surfaces for exactly these, matched case-insensitively
+    /// on a whole-token boundary, and compares what it finds against a dated
+    /// census.
+    ///
+    /// # What this list can and cannot catch
+    ///
+    /// It catches every site that *uses* the vocabulary, which is every
+    /// conformant site and every site conformant except in its reasoning. It
+    /// cannot catch a site that reports an absence in words nobody has used
+    /// before — no lexical census can — so the enumeration is stated as being
+    /// over this lexicon rather than over "all absences", and the lexicon is
+    /// here, in the open, rather than buried in the test.
+    ///
+    /// Matching is deliberately **not** restricted to string literals: a
+    /// sentinel in a type alias, a `case` label or a JSX text node is a site
+    /// too, and an identifier that merely happens to spell one is a false
+    /// positive the census adjudicates by hand. A census may be wrong in the
+    /// loud direction only.
+    pub const SENTINELS: &[&str] = &[
+        "at an unknown age",
+        "de-indexed",
+        "empty graph",
+        "evaluated set unknown",
+        "indeterminate",
+        "moved-past",
+        "n/a",
+        "no baseline",
+        "no pass is stated",
+        "no rules contract",
+        "no-production-scope",
+        "none recorded",
+        "not comparable",
+        "nothing was evaluated",
+        "unindexed",
+        "unscanned",
+    ];
+}
+
 /// Why a [`QualityReadout`] has no signal to report ([CR-138], [FR-EH-04]).
 ///
 /// An absent signal has **two** causes on this surface and only one of them is
