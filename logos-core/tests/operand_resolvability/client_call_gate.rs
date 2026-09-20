@@ -5,8 +5,9 @@
 //!
 //! [S-402]'s audit found that **six** of the ten arms declaring
 //! `http_client_detectors` decide client-call candidacy on the enclosing FILE's
-//! import ledger, with no constraint on the receiver. `go` is corrected; five
-//! siblings remain — `rust`, `kotlin`, `ruby`, `php`, `c-sharp`. [CR-128] §6
+//! import ledger, with no constraint on the receiver. `go` is corrected, and
+//! `rust` is corrected by [S-423] below; four siblings remain — `kotlin`,
+//! `ruby`, `php`, `c-sharp`. [CR-128] §6
 //! makes measurement a **blocking gate** on porting Go's receiver rule to any
 //! of them, on the explicit ground that Go's 26-of-37 came from an HTTP
 //! *gateway* — the member shape that maximises the defect — and does not
@@ -64,7 +65,8 @@
 //!
 //! Rust's own pin below is written against that trap: its positive control is
 //! the bare word `client`, the one receiver name every shipped receiver rule
-//! (Java's, Go's) accepts WHOLE, so the pin keeps working after a port lands.
+//! (Java's, Go's and now Rust's) accepts WHOLE — which is why the pin survived
+//! Rust's own port instead of going dark at it.
 //!
 //! # What is asserted, and what is only reported
 //!
@@ -80,6 +82,7 @@
 //! how a measurement becomes a thing to be made green.
 //!
 //! [S-402]: ../../docs/planning/journal.md#s-402-the-go-client-call-gate-is-receiver-grained
+//! [S-423]: ../../docs/planning/journal.md#s-423-the-rust-client-call-gate-is-receiver-grained
 //! [CR-128]: ../../docs/requests/CR-128-client-call-candidacy-gate-siblings-are-file-grained.md
 //! [FR-WS-08]: ../../docs/specs/requirements/FR-WS-08.md
 //! [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
@@ -105,9 +108,14 @@ const RECORDED_GATE_FINDING: &str = include_str!("client_call_gate_finding.txt")
 
 // ── The five arms ───────────────────────────────────────────────────────────
 
-/// One of [CR-128]'s five remaining file-grained arms.
+/// One of the five arms [CR-128] audited.
+///
+/// `Rust` is no longer file-grained ([S-423]); it stays in this roster because
+/// the before/after census runs through it, and removing it would move the
+/// BEFORE figure the comparison rests on.
 ///
 /// [CR-128]: ../../docs/requests/CR-128-client-call-candidacy-gate-siblings-are-file-grained.md
+/// [S-423]: ../../docs/planning/journal.md#s-423-the-rust-client-call-gate-is-receiver-grained
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Arm {
     Rust,
@@ -834,7 +842,7 @@ fn measure_the_sibling_client_call_gates() {
         return;
     }
 
-    println!("\nS-404 — the five file-grained client-call arms, per language");
+    println!("\nS-404 — the five arms CR-128 audited (rust receiver-grained since S-423)");
     println!("  grain: one captured client-call SITE (the arm's own verb gate and");
     println!("         one-row-per-call containment rule), inside a ledger-gated file\n");
     println!(
