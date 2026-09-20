@@ -49,4 +49,32 @@ describe("Dashboard card enumeration (S-438 audit, CR-141)", () => {
     const added = after.find((c) => c.component === "ExtraCard");
     expect(added?.title).toBe("Extra");
   });
+
+  it("scopes each component's body to the next declaration, so a card-less function reports no title rather than borrowing the next one's", () => {
+    // A mutation that widens every body slice to run to end-of-source (instead of
+    // stopping at the next `...Card` declaration) would still pass the two tests
+    // above, since both real cards there own the first `<Card` in their slice.
+    // This fixture pins the boundary itself: `EmptyCard` renders no `<Card>` at
+    // all, so an unbounded slice would wrongly borrow `FollowingCard`'s title.
+    const fixture = [
+      "function EmptyCard() {",
+      "  return <div>no card here</div>;",
+      "}",
+      "",
+      "function FollowingCard() {",
+      "  return (",
+      '    <Card title="Following">',
+      "      <p>content</p>",
+      "    </Card>",
+      "  );",
+      "}",
+      "",
+    ].join("\n");
+
+    const cards = enumerateDashboardCards(fixture);
+    expect(cards).toEqual([
+      { component: "EmptyCard", title: undefined },
+      { component: "FollowingCard", title: "Following" },
+    ]);
+  });
 });
