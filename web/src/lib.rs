@@ -1854,9 +1854,19 @@ mod tests {
             ("api_v1.rs", "status"),
             "and it is the status handler ([FR-UI-34]), got {shell_sites:?}"
         );
-        // Every other boundary crossing is the plain web surface. Derived, not
-        // hardcoded: a new handler raises both sides together, and a handler
-        // that named nothing would not compile.
+        // Every other boundary crossing is the plain web surface.
+        //
+        // This is a FLOOR, not a census, and the distinction matters because the
+        // comment here used to claim the opposite ("derived, not hardcoded: a new
+        // handler raises both sides together"). 34 is hardcoded and a new handler
+        // raises only the left side — adding one takes `web_sites` to 35 and this
+        // assertion does not move. What it actually buys is anti-vacuity: it
+        // proves `production_code` returned real source rather than an empty
+        // strip, the same false-green shape as a `logos check` over zero rules.
+        //
+        // The exact assertions are the two above, on the Shell side; the
+        // unclassified case is a compile error, since `bridge` and
+        // `workspace_fan` both take `surface` as a required parameter.
         assert!(
             web_sites >= 34,
             "the other handlers all name Surface::Web (found {web_sites})"
