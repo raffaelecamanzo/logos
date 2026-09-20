@@ -17,6 +17,22 @@
 //! starts no run ([`run_configured`](wiki_agent::run_configured) returns
 //! `Ran(None)`), emitting no progress.
 //!
+//! # The pass names its own surface ([FR-OB-13], [CR-139])
+//! The materialize call below runs inside the `serve --ui` process, so without a
+//! scope it inherits that process's surface and Logos's own generator is counted
+//! as a developer browsing the dashboard. [`in_surface`] installs
+//! [`Surface::WikiGen`] inside the `spawn_blocking`, where the engine — and so
+//! the telemetry event — actually runs.
+//!
+//! **What the scope reaches, and what it does not.** It is thread-scoped, so it
+//! covers exactly the engine call in the closure it wraps. The LLM half of the
+//! run, [`run_configured`](wiki_agent::run_configured), owns its own
+//! `spawn_blocking` hops inside `wiki-agent` (`wiki-agent/src/agent.rs` —
+//! `wiki_generate`, `wiki_read`, and the per-page grounding/write calls), and
+//! those threads carry no scope from here. `web/tests/wikigen_enumeration.rs`
+//! records that boundary as a declared, classified site rather than leaving it
+//! assumed.
+//!
 //! # Blocking setup is offloaded ([ADR-03])
 //! Reading `config.toml`/`secrets.toml` are synchronous filesystem operations; like
 //! every other engine touch on the surface (and the chat service's `build_setup`,
@@ -32,6 +48,9 @@
 //! [FR-UI-18]: ../../../docs/specs/requirements/FR-UI-18.md
 //! [FR-CF-07]: ../../../docs/specs/requirements/FR-CF-07.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+//! [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
+//! [FR-OB-13]: ../../../docs/specs/requirements/FR-OB-13.md
+//! [CR-139]: ../../../docs/requests/CR-139-the-wiki-generation-pass-names-its-own-surface.md
 //! [`[wiki].model`]: ../../../docs/specs/requirements/FR-CF-07.md
 //! [`wiki-agent`]: ../../../docs/specs/architecture/components/wiki-agent.md
 //! [`agent-core`]: ../../../docs/specs/architecture/components/agent-core.md
@@ -40,6 +59,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use logos_core::config::{load_config_from_root, load_secrets_from_root, EffectiveWikiModel};
+use logos_core::observability::{in_surface, Surface};
 use logos_core::Engine;
 use wiki_agent::{run_configured, ConfiguredRun, DEFAULT_RUN_BUDGET};
 
@@ -94,7 +114,18 @@ impl WikiRunService for ConfiguredWikiRunService {
             // local-FS read + `wiki.db` write, no LLM/network ([NFR-SE-01]).
             {
                 let engine = Arc::clone(&engine);
-                match tokio::task::spawn_blocking(move || engine.wiki_materialize()).await {
+                // The pass names its own surface ([FR-OB-13], [CR-139]). Entered
+                // INSIDE the `spawn_blocking` closure, not around the `await`:
+                // `in_surface` scopes per thread and the blocking pool is where
+                // the engine — and so the telemetry event — actually runs. Same
+                // shape as `crate::bridge` and `agent-core`'s `in_chat_surface`,
+                // and for the same reason: resolution happens once at this
+                // adapter boundary, never per engine call ([NFR-OO-02]).
+                match tokio::task::spawn_blocking(move || {
+                    in_surface(Surface::WikiGen, || engine.wiki_materialize())
+                })
+                .await
+                {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
                         sink.error(format!("wiki materialize failed: {e}"));

@@ -1793,6 +1793,42 @@ mod tests {
         panic!("unbalanced braces walking the body of `{header}`");
     }
 
+    /// The name of **any** `fn` enclosing `at` — `fn`, `async fn` and `pub fn`
+    /// alike.
+    ///
+    /// A deliberate sibling of [`enclosing_fn`] rather than a widening of it —
+    /// and **not** because widening would disturb today's attribution. Review
+    /// measured that claim and it is false: over the 36 `Surface::` sites the
+    /// census reads, the two walkers agree on 35 and differ on exactly one —
+    /// the wiki-generation site, where `enclosing_fn` yields the sentinel
+    /// `<no enclosing async fn>`. Substituting this function throughout would
+    /// be a no-op on every pre-existing site.
+    ///
+    /// They are kept apart for what each whitelist is *about*. The handler
+    /// census asks "which **handler** is classified how", and there
+    /// `<no enclosing async fn>` is the more useful answer than a helper's
+    /// name: it says the marker is not inside a handler at all. The
+    /// wiki-generation site genuinely is not — it is a `WikiRunService::
+    /// start_run` impl, a plain `fn` — so it is attributed by this function
+    /// instead, and its whitelist entry names the `fn` a reader can go and
+    /// find.
+    fn enclosing_any_fn(code: &str, at: usize) -> &str {
+        let mut cursor = &code[..at];
+        loop {
+            let Some(start) = cursor.rfind("fn ") else {
+                return "<no enclosing fn>";
+            };
+            if whole_identifier(cursor, start) {
+                let rest = &code[start + "fn ".len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                return &rest[..end];
+            }
+            cursor = &cursor[..start];
+        }
+    }
+
     /// The name of the `async fn` enclosing `at` — how an occurrence is
     /// attributed to a handler without depending on line layout.
     fn enclosing_fn(code: &str, at: usize) -> &str {
@@ -1810,15 +1846,22 @@ mod tests {
 
     #[test]
     fn every_handler_names_its_surface_and_only_status_names_the_shell() {
-        // Both files define handlers that cross an adapter boundary: the 23
-        // `bridge` + 6 `workspace_fan` sites in `api_v1.rs`, and the 6 `bridge`
-        // sites in `lib.rs`, three of which are `/api/v1/chat/*` routes.
+        // Three files reach the engine across an adapter boundary: the 23
+        // `bridge` + 6 `workspace_fan` sites in `api_v1.rs`, the 6 `bridge`
+        // sites in `lib.rs` (three of them `/api/v1/chat/*` routes), and the
+        // wiki-generation pass in `wikigen/configured.rs`, which crosses on a
+        // bare `spawn_blocking` and so names its surface directly ([CR-139]).
         let sources = [
             ("api_v1.rs", production_code(include_str!("api_v1.rs"))),
             ("lib.rs", production_code(include_str!("lib.rs"))),
+            (
+                "wikigen/configured.rs",
+                production_code(include_str!("wikigen/configured.rs")),
+            ),
         ];
 
         let mut shell_sites: Vec<(&str, &str)> = Vec::new();
+        let mut wikigen_sites: Vec<(&str, &str)> = Vec::new();
         let mut web_sites = 0usize;
         for (file, code) in &sources {
             for (at, marker) in code.match_indices("Surface::") {
@@ -1828,6 +1871,10 @@ mod tests {
                     .unwrap_or(rest.len());
                 match &rest[..end] {
                     "Shell" => shell_sites.push((file, enclosing_fn(code, at))),
+                    // Attributed by ANY enclosing `fn`: the site is a
+                    // `WikiRunService::start_run` impl, not an `async fn`
+                    // handler.
+                    "WikiGen" => wikigen_sites.push((file, enclosing_any_fn(code, at))),
                     "Web" => web_sites += 1,
                     // The bare `use …::Surface;` import names no variant and
                     // does not reach here; anything else is a handler claiming
@@ -1853,6 +1900,39 @@ mod tests {
             shell_sites[0],
             ("api_v1.rs", "status"),
             "and it is the status handler ([FR-UI-34]), got {shell_sites:?}"
+        );
+        // The same whitelist shape, for the same three regressions, on the
+        // CR-139 surface: a SECOND site claiming to be Logos's own generator
+        // would put a developer's reads into the generator's figures, and the
+        // classification MOVING off the materialize call would put the
+        // generator's back into the developer's.
+        //
+        // Deliberately `== 1`, not the `web_sites >= 34` floor a few lines
+        // below, and the asymmetry is the point: a floor is right for the
+        // ORDINARY surface, where a new handler is routine, and wrong for a
+        // surface that claims to be somebody specific. This mirrors
+        // `shell_sites.len() == 1` directly above. Review raised `>= 1` as an
+        // alternative; it was rejected because it discards regression (1) —
+        // the second claimant — which is the whole reason a non-web surface
+        // gets a whitelist rather than a count.
+        //
+        // The cost is real and is recorded rather than removed: a legitimate
+        // second WikiGen site means editing TWO files, this whitelist and
+        // `web/tests/wikigen_enumeration.rs`'s `DECLARED_SITES`. That is
+        // intended — the two guards answer different questions (is the
+        // classification where we think it is / is every engine path declared)
+        // — but a maintainer meeting it for the first time should not have to
+        // rediscover why.
+        assert_eq!(
+            wikigen_sites.len(),
+            1,
+            "exactly one site is the wiki generation pass, got {wikigen_sites:?}"
+        );
+        assert_eq!(
+            wikigen_sites[0],
+            ("wikigen/configured.rs", "start_run"),
+            "and it is the run the generation trigger spawns ([FR-OB-13], \
+             [CR-139]), got {wikigen_sites:?}"
         );
         // Every other boundary crossing is the plain web surface.
         //
@@ -1911,16 +1991,26 @@ mod tests {
     ///
     /// # What it cannot see
     ///
-    /// An unclassified engine call that carries **no marker at all**.
-    /// `web/src/wikigen/configured.rs` is that shape: it reaches the engine
-    /// inside a bare `spawn_blocking`, naming no `Surface` and calling neither
-    /// helper. It is [CR-139]'s subject, not this guard's, and it is named here
-    /// so the next audit starts from a stated reach rather than an assumption.
+    /// An unclassified engine call that carries **no marker at all** — one that
+    /// reaches the engine inside a bare `spawn_blocking`, naming no `Surface`
+    /// and calling neither helper.
+    ///
+    /// `web/src/wikigen/configured.rs` was that shape, and [CR-139] closed it:
+    /// the pass now names [`Surface::WikiGen`], so the file is in `SCANNED`
+    /// above and its site is whitelisted by the census. The *class* is not
+    /// closed, only that instance. What covers `web/src/wikigen/` now is a
+    /// second, differently-shaped census — `web/tests/wikigen_enumeration.rs`
+    /// enumerates every engine-reaching site in that module from a directory
+    /// walk and compares it against a declared, classified table, so a marker
+    /// is not what makes a site visible there. This guard's reach is still
+    /// exactly "a `Surface`/`bridge`/`workspace_fan` marker in a file the
+    /// census does not read", and it is stated here so the next audit starts
+    /// from that rather than from an assumption.
     ///
     /// [CR-139]: ../../docs/requests/CR-139-the-wiki-generation-pass-names-its-own-surface.md
     #[test]
     fn no_other_source_under_web_src_carries_a_surface_marker() {
-        const SCANNED: [&str; 2] = ["api_v1.rs", "lib.rs"];
+        const SCANNED: [&str; 3] = ["api_v1.rs", "lib.rs", "wikigen/configured.rs"];
         const MARKERS: [&str; 3] = ["Surface::", "bridge(", "workspace_fan("];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1947,7 +2037,58 @@ mod tests {
                     .replace('\\', "/");
                 walked.push(rel.clone());
                 if SCANNED.contains(&rel.as_str()) {
-                    seen_scanned.push(rel);
+                    seen_scanned.push(rel.clone());
+                    // NOT a blanket skip. The census reads these three through
+                    // `production_code`, which truncates at the first
+                    // `#[cfg(test)] mod tests {` — so the census covers a
+                    // SCANNED file's production half and NOTHING after it,
+                    // while this walk used to cover the whole file. Skipping
+                    // outright therefore leaves each SCANNED file's own test
+                    // module read by NEITHER guard.
+                    //
+                    // That is not hypothetical and it is not inherited: adding
+                    // `wikigen/configured.rs` to SCANNED (S-435, CR-139) opened
+                    // exactly that hole in a file that HAS a test module, and a
+                    // `Surface::Cli` planted there passed the entire `web`
+                    // suite. It is the Sprint 72 appendix 5.9 false-green shape
+                    // recreated by the commit that cites it. So the tail — the
+                    // region the census provably cannot see — is scanned here.
+                    // One file is exempt, and the reason is not "it was
+                    // noisy": `lib.rs` is where this scanner LIVES, so its test
+                    // module necessarily writes down the very markers the
+                    // scanner searches for — `MARKERS`, the census's
+                    // `match_indices("Surface::")`, the panic strings. Those
+                    // are the needle, not a classification site. Scanning them
+                    // reported 12 offenders that classify nothing, which is
+                    // how this exemption was found rather than assumed. Every
+                    // OTHER scanned file's test module has no business naming a
+                    // surface, and is checked below.
+                    if rel == "lib.rs" {
+                        continue;
+                    }
+                    let source = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                    let Some((_, tail)) = source.split_once("\n#[cfg(test)]\nmod tests {") else {
+                        // No test module ⇒ `production_code` truncates nothing
+                        // and the census genuinely read the whole file.
+                        continue;
+                    };
+                    let tail = tail
+                        .lines()
+                        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    for marker in MARKERS {
+                        for (at, _) in tail.match_indices(marker) {
+                            if whole_identifier(&tail, at) {
+                                offenders.push(format!(
+                                    "{rel}: `{marker}` in its own test module, past the \
+                                     point `production_code` truncates — read by neither \
+                                     guard"
+                                ));
+                            }
+                        }
+                    }
                     continue;
                 }
                 let source = std::fs::read_to_string(&path)
