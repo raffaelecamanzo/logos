@@ -62,7 +62,7 @@
 //!
 //! # One identify function, called from here and from the bridge ([FR-WS-27])
 //! The two tiers are projections of one captured fact and they key it by
-//! **calling one function**, [`crate::federation::broker::identify`]. That is
+//! **calling one function**, [`crate::resolve::broker_identity::identify`]. That is
 //! why they cannot disagree — and it is a stronger statement than the one this
 //! header used to make. From [S-410] until [S-424] it said they were *"keyed
 //! identically, which is why they cannot disagree"* while the bridge resolved
@@ -365,7 +365,7 @@ struct BrokerRef<'a> {
 /// Project the ledger onto the broker rows this pass promotes, keyed by the
 /// **committed-value topic identity** ([FR-WS-27] AC1).
 ///
-/// A row qualifies iff [`broker::identify`] admits it — one function, called
+/// A row qualifies iff [`broker_identity::identify`] admits it — one function, called
 /// from here and from the federation bridge, so a `Topic` node and a bridge edge
 /// can never key one captured fact two ways ([ADR-52]). Every refusal that
 /// function makes is therefore made here too and in the same words: a non-broker

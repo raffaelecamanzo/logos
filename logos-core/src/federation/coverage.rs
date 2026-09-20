@@ -2279,7 +2279,7 @@ fn arm_identity(reference: &super::bridge::InvocationRef, corpus: &MemberCorpus)
 /// 2. **Nothing-keyed is the arm's own word, not a composed-template verdict.**
 ///    A composed topic is a topic; there is no `route_key` for it to fail. The
 ///    branch survives only for a keyless row — the arm's recorded
-///    `topic-not-literal` refusal ([CR-107]) — which [`super::broker::classify`]
+///    `topic-not-literal` refusal ([CR-107]) — which [`crate::resolve::broker_identity::admit`]
 ///    declines before any resolution happens.
 /// 3. **Several keys mean several overlays, not several templates.** A key whose
 ///    overlays commit different values yields one identity per overlay and the
@@ -2313,7 +2313,7 @@ fn record_broker(
         // ([CR-107]). Reported under the arm's own word, with `Literal`
         // provenance because no configuration was read for it — there was no key
         // to read one with. An empty key list is exactly [`arm_identity`]'s
-        // rendering of [`super::broker::identify`] answering `None`.
+        // rendering of [`crate::resolve::broker_identity::identify`] answering `None`.
         tally.record(
             relation,
             from,

@@ -92,7 +92,7 @@ use crate::plugin::LanguagePlugin;
 /// admitted here: an empty target is no external form, so the gate above passes
 /// it. Every consumer downstream then refuses it —
 /// `federation::bridge::consumer_portable_key` for every namespace,
-/// `resolve::topics::broker_refs`, `federation::broker::classify`,
+/// `resolve::topics::broker_refs`, `resolve::broker_identity::admit`,
 /// `resolve::binder`'s empty-name guard, and `route_key` on an empty
 /// `"METHOD /template"`. So it reaches the [FR-WS-05] coverage payload as a
 /// reason and can never become an edge, a `Topic`, or any other promoted node.

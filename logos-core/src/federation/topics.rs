@@ -28,7 +28,7 @@
 //! 2026-09-16 to 2026-09-19 it read *"they CAN disagree"* — and they did, for
 //! every configuration-bound site. [S-424] closes that: the promotion pass and
 //! the bridge now resolve a broker operand through **one function**,
-//! [`super::broker::identify`], so the two are keyed identically once more — this
+//! [`crate::resolve::broker_identity::identify`], so the two are keyed identically once more — this
 //! time because they call the same code rather than because they happen to
 //! implement the same rule ([FR-WS-27] AC1, [ADR-52]).
 //!

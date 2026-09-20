@@ -904,7 +904,7 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
         BridgeNamespace::Grpc => Some(PortableKey::grpc(target.to_string())),
         // A broker publish's target is the arm-normalized topic key (a topic name,
         // optionally `#`-guarded by a message-schema FQN) the broker normalizer
-        // wrote (S-254, [FR-WS-10]) — the same string [`super::broker::classify`]
+        // wrote (S-254, [FR-WS-10]) — the same string [`crate::resolve::broker_identity::admit`]
         // builds its [`PortableKey::broker`] from, so a publish keys identically
         // whichever intake it arrives through.
         //
@@ -949,7 +949,7 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
 /// member whose corpus was never read, and resolve against nothing. Hence the
 /// `(relation, target)` form below, which the HTTP classifier calls directly. The
 /// broker arm reaches the same answer through
-/// [`super::broker::topic_identity`]'s own `placeholder_keys` call, which is a
+/// [`crate::resolve::broker_identity::topic_identity`]'s own `placeholder_keys` call, which is a
 /// narrower test — it has already established its own relation — and is left
 /// where it is rather than routed through here for a relation it knows.
 ///
@@ -968,7 +968,7 @@ pub(super) fn consumer_portable_key(relation: ArtifactRelation, target: &str) ->
 /// [FR-WS-10]'s re-proposed criterion, which [S-410] delivers. What the broker
 /// arm does with the keys is **not** the HTTP arm's rule, though, and the
 /// difference is load-bearing: a broker operand the corpus refuses keeps its
-/// placeholder-as-written key ([`super::broker::TopicIdentity::Unresolved`]),
+/// placeholder-as-written key ([`crate::resolve::broker_identity::TopicIdentity::Unresolved`]),
 /// where an HTTP one is reported unbound. This predicate answers *"does it name
 /// a key"*; it does not decide what happens next.
 ///
@@ -982,7 +982,7 @@ pub(super) fn config_bound_keys(reference: &InvocationRef) -> Option<Vec<String>
 
 /// What committed configuration proves about one **HTTP invocation site's
 /// target**, and every portable key the site therefore meets a provider on —
-/// the HTTP twin of [`super::broker::identify`] (S-420, [CR-133]).
+/// the HTTP twin of [`crate::resolve::broker_identity::identify`] (S-420, [CR-133]).
 ///
 /// Built only by [`identify`], which is the single place the HTTP arm's
 /// committed-value rule is applied: the bridge's consumer arm
@@ -1099,7 +1099,7 @@ pub(super) fn identify(
         // so `resolve_template` cannot answer `None` here. Mapped to the literal
         // rule rather than unwrapped: a panic in a read-model is never the right
         // answer to a disagreement between two scans — the same choice
-        // `super::broker::topic_identity` makes for the identical impossibility.
+        // `crate::resolve::broker_identity::topic_identity` makes for the identical impossibility.
         None => Some(HttpIdentity {
             named_keys,
             keyed: verbatim(),
