@@ -860,11 +860,73 @@ fn unclassified_surface_fails_the_build() {
             .collect()
     }
 
+    /// The variants declared *without* a `#[cfg(…)]` gate, so they are present in
+    /// every feature configuration and must therefore be in `Surface::ALL`.
+    fn unconditional_variants_in(source: &str) -> std::collections::BTreeSet<String> {
+        let body = source
+            .split_once("pub enum Surface {")
+            .expect("the Surface enum is where this test believes it is")
+            .1
+            .split_once("\n}\n")
+            .expect("the Surface enum is brace-delimited")
+            .0;
+        let mut out = std::collections::BTreeSet::new();
+        let mut gated = false;
+        for line in strip_comments(body).lines().map(str::trim) {
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with("#[cfg(") {
+                gated = true;
+                continue;
+            }
+            if let Some(ident) = line.strip_suffix(',') {
+                if ident.starts_with(|c: char| c.is_ascii_uppercase())
+                    && ident.chars().all(|c| c.is_alphanumeric() || c == '_')
+                {
+                    if !gated {
+                        out.insert(ident.to_string());
+                    }
+                    gated = false;
+                }
+            }
+        }
+        out
+    }
+
     let source = include_str!("mod.rs");
     let vocabulary = variants_declared_in(source);
     assert!(
         vocabulary.contains("Shell"),
         "the CR-097 shell-chrome surface is declared: {vocabulary:?}"
+    );
+
+    // `Surface::ALL` is hand-maintained, and until now nothing tied it to the
+    // declaration. The exhaustive matches below are enforced by rustc, so a new
+    // variant must be classified — but `ALL` is a plain slice literal, and
+    // `self_referential_surfaces()` and `from_wire()` are both derived from it.
+    //
+    // A variant declared AND classified self-referential, but simply left out of
+    // `ALL`, therefore ships with every guard in this module green: it is absent
+    // from the `surface NOT IN (…)` exclusion, so every event it emits is counted
+    // as real usage — the exact misattribution BR-42 forbids and S-316 exists to
+    // close — and `from_wire` refuses its wire name, so a per-event override
+    // naming it falls back to the process surface without a word. Proven by
+    // adding one: 62 observability tests stayed green.
+    let rostered: std::collections::BTreeSet<String> =
+        Surface::ALL.iter().map(|s| format!("{s:?}")).collect();
+    let unconditional = unconditional_variants_in(source);
+    assert!(
+        unconditional.is_subset(&rostered),
+        "every ungated Surface variant must be in Surface::ALL, or it is silently \
+         absent from the self-referential exclusion and from `from_wire` \
+         (FR-OB-03, FR-OB-09, BR-42). Declared but unrostered: {:?}",
+        &unconditional - &rostered
+    );
+    assert!(
+        rostered.is_subset(&vocabulary),
+        "Surface::ALL names only declared variants; stale entries: {:?}",
+        &rostered - &vocabulary
     );
     let signature = "pub(crate) const fn event_class(self) -> Option<EventClass> {";
     let body = source
