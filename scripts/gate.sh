@@ -575,12 +575,46 @@ gate_ui() { # gate_name npm_script
     record "$gate" "$verdict"
 }
 
+# ------------------------------------------------- what this branch changed, and from where
+#
+# The fast tier scopes its test and UI legs to the packages that changed. The
+# question is "changed since WHEN", and the answer used to be `HEAD` — i.e. the
+# UNCOMMITTED set.
+#
+# Under the handoff contract every session commits and THEN gates, so that set is
+# always empty: the test leg ran over zero packages, recorded `"verdict": "pass"`
+# over `"units": []` with a 0-byte log, and the UI legs never ran at all. Four of
+# eight sessions in Sprint 72 reported this upward independently, and the
+# evidence marker's `tests=0/0` is what made it visible from the outside.
+#
+# The set that actually matters is what this BRANCH changed: everything since it
+# diverged from the integration branch. On the integration branch itself there is
+# no such divergence, so the honest answer there is the uncommitted set — and the
+# `full` tier, which tests every package via `pkg_names`, is what runs there.
+#
+# GATE_BASE overrides the detection for a caller that knows better.
+gate_base() {
+    if [ -n "${GATE_BASE:-}" ]; then printf '%s\n' "$GATE_BASE"; return 0; fi
+    local integ base head
+    head="$(git rev-parse HEAD 2>/dev/null)" || { printf '%s\n' HEAD; return 0; }
+    for integ in main master; do
+        git rev-parse --verify --quiet "$integ" >/dev/null 2>&1 || continue
+        base="$(git merge-base HEAD "$integ" 2>/dev/null || true)"
+        # Empty on unrelated histories; equal to HEAD when we ARE the integration
+        # branch (or strictly behind it) — in both cases there is no branch delta
+        # to scope to, so fall back to the uncommitted set rather than to nothing.
+        if [ -n "$base" ] && [ "$base" != "$head" ]; then printf '%s\n' "$base"; return 0; fi
+        break
+    done
+    printf '%s\n' HEAD
+}
+
 # ------------------------------------------------------- which packages changed
 touched_packages() {
     local changed p dir
     changed="$(
         {
-            git diff --name-only HEAD 2>/dev/null
+            git diff --name-only "$(gate_base)" 2>/dev/null
             git ls-files --others --exclude-standard 2>/dev/null
         } | sort -u
     )"
@@ -596,6 +630,10 @@ touched_packages() {
 echo "gate.sh $TIER"
 echo "  tree_id  $TREE_ID"
 echo "  evidence $EVID"
+# The fast tier's legs are change-scoped, so the base they scope against is part
+# of reading the result: "0 packages changed" means something different against a
+# merge-base than against HEAD.
+[ "$TIER" = fast ] && echo "  base     $(gate_base)"
 echo
 
 case "$TIER" in
@@ -613,7 +651,7 @@ case "$TIER" in
             record test pass
         fi
         gate_arch
-        if git diff --name-only HEAD 2>/dev/null | grep -q '^web/ui/'; then
+        if git diff --name-only "$(gate_base)" 2>/dev/null | grep -q '^web/ui/'; then
             gate_ui ui-typecheck typecheck
             gate_ui ui-test test
         fi
