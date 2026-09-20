@@ -572,7 +572,22 @@ cells (e.g. churn/age for a file with no history) right-align to their numeric
 columns (CR-042). On **Health** (`/health`) the Quality-signal table carries a
 **Score** column rendering each metric's normalized value as a CSP-safe `<meter>`
 bar — the same widget the Dashboard roll-ups use; applicability drop-outs
-(Cohesion/Focus) show a muted, right-aligned `n/a` with no bar (CR-042). The **Architecture / Cycles**
+(Cohesion/Focus) show a muted, right-aligned `n/a` with no bar (CR-042).
+
+Since logos 1.4.14 the Health page's two cards — the gate band and the quality
+grid — are built from **one** read of the last persisted snapshot rather than two
+independent ones, so a `logos scan` landing while the page loads can no longer
+render two cards describing different generations of the same figures. The
+interleaving window does not exist rather than being narrowed. The same change
+adds a **stated-stale** branch: when a signal is present but the graph is *no
+longer indexed*, both cards still show their figures, but labelled as describing
+a graph that is no longer indexed, carrying the snapshot's date and naming
+`logos index` as the way to refresh. The figures are genuine history, so they are
+neither hidden nor restyled away — they simply stop being presented as a current
+verdict, and the unqualified current-verdict wording is absent. While the graph
+*is* indexed the cards render exactly as before. An **absent** signal keeps its
+own three-way distinction (never checked / checked-and-empty / unavailable),
+which this change deliberately leaves alone. The **Architecture / Cycles**
 view (`/architecture`) leads with the dependency-cycle list, then the DSM matrix;
 its cycle participants deep-link into `/graph?seed=<module>`.
 

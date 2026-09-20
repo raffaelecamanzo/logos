@@ -355,7 +355,16 @@ The read-model also carries a source/test **lines-of-code roll-up**:
 `total == source + test`). Like `indexed_loc`, the roll-up is computed at
 **full-`index`** time and may lag after an incremental `sync` until the next
 full index; when it has not been computed the three fields are `null` (never a
-fabricated `0`). The same three fields ride the MCP `status` tool and the web
+fabricated `0`). Since logos 1.4.14 the roll-up distinguishes **three** cases
+rather than writing unconditionally, matching the last-full-index stamp beside
+it: an index that persists at least one file **writes** the figures; one that
+persists nothing over an empty store **clears** them, so the fields read absent
+beside `indexed: false`; and one that persists nothing **while a previous graph
+survives leaves them untouched**, so `status` keeps reporting the figures that
+describe the graph you still have. Before this, an index in which every
+candidate failed to load overwrote the roll-up with `0`/`0`, and `status`
+reported a populated graph carrying `total_line_count: 0` beside a correct file
+count and a correct timestamp. The same three fields ride the MCP `status` tool and the web
 `/api/v1/overview` bundle, and surface on the Dashboard Graph card (see
 [Dashboard](usage.md)).
 
@@ -1718,6 +1727,13 @@ asserting something it cannot establish:
   one is the per-firing cost this command exists to avoid. So a clean check can
   be current by `HEAD` and yet invalidated by unstaged work — which is why the
   assertion is never printed bare, always with its age and `HEAD`.
+- **An age it cannot compute is said, not smoothed.** Two clock readings are
+  possible and neither is rendered as a number. A marker stamped **ahead of
+  now** — a copied tree, a restored backup, a skewed clock — reads `at an
+  unknown age (recorded ahead of now — check the clock)`, and an implausibly old
+  one reads its own caveat rather than an age. The rejected alternative was
+  clamping a negative age to zero and printing `just now`, which invents the
+  most reassuring reading of a fact the readout cannot establish.
 
 A store written before the marker was introduced has findings but no marker. It
 needs no re-index: those rows carry their own timestamp, so they are dated
