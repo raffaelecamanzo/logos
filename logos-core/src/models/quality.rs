@@ -334,6 +334,143 @@ pub struct CheckRun {
     /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
     /// [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
     pub recorded_count: Option<i64>,
+    /// How many rules the run evaluated — [`recorded_count`](Self::recorded_count)'s
+    /// **denominator** ([CR-140] §3.2, [NFR-CC-04]), and `Some` only when that
+    /// denominator is non-empty.
+    ///
+    /// A recorded clean run may be stated as clean **only** from this: [FR-GV-03]
+    /// defines clean as *"a contract was evaluated and held"*, so a count of `0`
+    /// over an evaluated set of nothing is a vacuous run, not a pass. Why the set
+    /// is empty or unknown is [`evaluated_absence`](Self::evaluated_absence);
+    /// this field never carries the cause, so the two can never state it two ways
+    /// — the pairing [`signal`](QualityReadout::signal) /
+    /// [`signal_absence`](QualityReadout::signal_absence) already uses, and the
+    /// reason both are produced by one call to
+    /// [`EvaluatedSetAbsence::classify`].
+    ///
+    /// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    pub checked_rules: Option<u32>,
+    /// Why there is no [`checked_rules`](Self::checked_rules) denominator to
+    /// state ([CR-140] §3.2); `None` exactly when there is one.
+    ///
+    /// A `None` here beside a `None` `checked_rules` is a record assembled
+    /// without the discriminant (a bare [`Default`], in practice): the rendering
+    /// then names the set **unknown** without attributing a cause, rather than
+    /// falling back to the most reassuring one. That is
+    /// [`QualityReadout::signal_absence`]'s rule, applied to the second figure on
+    /// the same readout.
+    ///
+    /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    pub evaluated_absence: Option<EvaluatedSetAbsence>,
+}
+
+/// Why a [`CheckRun`] has no evaluated-set denominator to report ([CR-140]
+/// §3.2, [FR-IN-07], [FR-GV-03]).
+///
+/// The sibling of [`SignalAbsence`], deliberately: the same readout carries two
+/// figures that can be absent, and [S-434] audits both against **one**
+/// taxonomy, so this follows that type's shape rather than inventing a second
+/// vocabulary. Same derives, same `classify` constructor producing the figure
+/// and its absence together, same rule that an arm carries whatever establishes
+/// it, and the same refusal to name a remediation command.
+///
+/// # Why this is a second enum rather than two more [`SignalAbsence`] arms
+///
+/// They answer different questions about different figures: [`SignalAbsence`]
+/// says why the 0–10000 metric signal is missing, which is a fact about the
+/// **graph**; this says why the rule check has no denominator, which is a fact
+/// about the **contract**. Folding them together would make every match on
+/// either figure carry arms that cannot arise for it — and would put
+/// `EmptyGraph` in the position of explaining an absent rule count, which no
+/// gating condition here establishes ([FR-EH-04] AC2's failure, one figure
+/// over).
+///
+/// # No arm names a command
+///
+/// [FR-IN-07]'s appended criterion is that the rendered line **names no
+/// command**, and the reason is recorded here rather than only at the
+/// rendering: the marker is written by `replace_violations`, which both
+/// [`check_rules`](crate::Engine::check_rules) and [`scan`](crate::Engine::scan)
+/// call, so any command name in the sentence is an attribution the record
+/// cannot support. [`NoContract`](Self::NoContract) is the one arm with an
+/// obvious remediation, and it does not name it either — for the reason
+/// [`SignalAbsence::EmptyGraph`] does not name `logos index`.
+///
+/// [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+/// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
+/// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+/// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum EvaluatedSetAbsence {
+    /// No rules contract was authored at all — what `logos check` exits `4` on
+    /// ([FR-GV-22]) while printing *"nothing was evaluated"*.
+    ///
+    /// Its own state, not a flavour of [`NoRulesAuthored`](Self::NoRulesAuthored):
+    /// an unconfigured project and a configured one that enforces nothing are
+    /// different situations, and `checked_rules = 0` is recorded by both.
+    ///
+    /// [FR-GV-22]: ../../../docs/specs/requirements/FR-GV-22.md
+    NoContract,
+    /// A rules contract is present and authors **no rules** — the state
+    /// [`logos init`](crate::init)'s default template produces, so the ordinary
+    /// state of a freshly initialised project rather than an edge case.
+    NoRulesAuthored,
+    /// No evaluated set was recorded at all — *unknown*, never zero.
+    ///
+    /// Two stores reach this, and neither may be rendered favourably:
+    /// - a marker written **before** migration 21, which has the three
+    ///   evaluated-set columns as `NULL` ([CR-140] CRA-05). An existing install
+    ///   is the common case, which is why this arm exists rather than a default;
+    /// - a record recovered from the violation **rows** of a store written
+    ///   before the marker existed at all ([CR-096]), which never recorded an
+    ///   evaluated set either.
+    ///
+    /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+    /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
+    Unrecorded,
+}
+
+impl EvaluatedSetAbsence {
+    /// Split what a marker recorded about its evaluated set into **the figure
+    /// and the absence**, exactly one of which is `Some`.
+    ///
+    /// Returning the pair — rather than the absence alone, as
+    /// [`SignalAbsence::classify`] does — is what makes "a denominator and a
+    /// reason it is missing can never both be present" structural instead of a
+    /// comment at the call site. [`SignalAbsence`] takes its figure from a
+    /// different source (the metric snapshot) and so cannot do this; both of
+    /// these come from the same marker row.
+    ///
+    /// Both arguments are the marker's columns as stored: `None` is `NULL`,
+    /// which means the row predates migration 21. The columns are written by one
+    /// statement, so in practice they are `NULL` together; either being `NULL`
+    /// is treated as [`Unrecorded`](Self::Unrecorded) rather than half-believed.
+    ///
+    /// A recorded `checked_rules > 0` settles the question by itself: a run that
+    /// evaluated rules has a denominator whatever else the row says, so the
+    /// figure is reported and no absence is claimed.
+    #[must_use]
+    pub fn classify(
+        checked_rules: Option<i64>,
+        rules_present: Option<bool>,
+    ) -> (Option<u32>, Option<Self>) {
+        match (checked_rules, rules_present) {
+            (Some(checked), _) if checked > 0 => {
+                // Clamped rather than truncated: the producer's own figure is a
+                // `u32` (`governance::evaluate`), so a wider value is a corrupted
+                // or hand-edited row, and saturating keeps it large rather than
+                // wrapping it into a small, plausible-looking count.
+                (Some(u32::try_from(checked).unwrap_or(u32::MAX)), None)
+            }
+            (None, _) | (_, None) => (None, Some(Self::Unrecorded)),
+            (Some(_), Some(true)) => (None, Some(Self::NoRulesAuthored)),
+            (Some(_), Some(false)) => (None, Some(Self::NoContract)),
+        }
+    }
 }
 
 /// Full architecture-quality scan result (FR-QM-01..06, S-020).

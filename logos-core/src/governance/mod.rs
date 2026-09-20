@@ -68,10 +68,10 @@ use crate::graph_store::{
 use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
-    CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint,
-    EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta, MetricRegression,
-    MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo,
-    SignalAbsence, TemporalTier, VerifyCensus, VerifyReport, Violation,
+    CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvaluatedSetAbsence,
+    EvolutionPoint, EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta,
+    MetricRegression, MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult,
+    SessionInfo, SignalAbsence, TemporalTier, VerifyCensus, VerifyReport, Violation,
 };
 use crate::runtime::Runtime;
 
@@ -2294,25 +2294,36 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
     // re-index and nothing invented.
     let now = unix_now();
     let check = match &marker {
-        Some(row) => Some(CheckRun {
-            ran_at: row.ran_at,
-            // Saturating, never raw: a corrupted or hand-edited `ran_at` would
-            // otherwise overflow and PANIC in a debug build — a crash on read,
-            // in the one tier whose whole contract is that it reports and never
-            // blocks ([FR-GV-05]). An implausible result is named by the
-            // rendering rather than crashed on.
-            age_seconds: now.saturating_sub(row.ran_at),
-            commit_sha: row.commit_sha.clone(),
-            head_sha: fresh.head.clone(),
-            // An unresolvable HEAD on either side is never *treated* as a moved
-            // tree — the comparison is omitted, never guessed ([NFR-RA-05]),
-            // mirroring the coverage artifact's staleness rule.
-            tree_moved: match (&row.commit_sha, &fresh.head) {
-                (Some(recorded), Some(head)) => recorded != head,
-                _ => false,
-            },
-            recorded_count: Some(row.violation_count),
-        }),
+        Some(row) => {
+            // The denominator and the reason it is missing, from ONE call, so a
+            // recorded rule count and a cause for its absence can never both be
+            // present ([CR-140] §3.2) — the treatment `signal` /
+            // `signal_absence` already gets two fields up.
+            let (checked_rules, evaluated_absence) =
+                EvaluatedSetAbsence::classify(row.checked_rules, row.rules_present);
+            Some(CheckRun {
+                ran_at: row.ran_at,
+                // Saturating, never raw: a corrupted or hand-edited `ran_at`
+                // would otherwise overflow and PANIC in a debug build — a crash
+                // on read, in the one tier whose whole contract is that it
+                // reports and never blocks ([FR-GV-05]). An implausible result
+                // is named by the rendering rather than crashed on.
+                age_seconds: now.saturating_sub(row.ran_at),
+                commit_sha: row.commit_sha.clone(),
+                head_sha: fresh.head.clone(),
+                // An unresolvable HEAD on either side is never *treated* as a
+                // moved tree — the comparison is omitted, never guessed
+                // ([NFR-RA-05]), mirroring the coverage artifact's staleness
+                // rule.
+                tree_moved: match (&row.commit_sha, &fresh.head) {
+                    (Some(recorded), Some(head)) => recorded != head,
+                    _ => false,
+                },
+                recorded_count: Some(row.violation_count),
+                checked_rules,
+                evaluated_absence,
+            })
+        }
         // Every row of one run carries that run's time, so any of them dates
         // it; the first is taken for determinism. No marker means no recorded
         // HEAD and no recorded total, so neither a tree comparison nor a clean
@@ -2325,6 +2336,12 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
             head_sha: fresh.head.clone(),
             tree_moved: false,
             recorded_count: None,
+            // No marker at all, so nothing recorded an evaluated set either —
+            // the same *unknown* a pre-migration-21 marker carries, and for the
+            // same reason ([CR-140] CRA-05). Rendering it as zero would be the
+            // favourable reading of an absent fact this story removes.
+            checked_rules: None,
+            evaluated_absence: Some(EvaluatedSetAbsence::Unrecorded),
         }),
     };
 
