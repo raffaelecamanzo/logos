@@ -2186,13 +2186,29 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
     //
     // `counts()` rides along as a third query in the *same* pooled read rather
     // than a second `submit_read`, so the discriminant below costs no extra
-    // round-trip through the read pool — it adds five indexed `COUNT(*)`
-    // aggregates returned as one row, materialising no rows of its own. Stated
-    // rather than hidden ([CR-138] AC3): the report tier fires at every session
-    // boundary, so an unremarked read here is a cost paid on every one of them.
-    // It is also the *same* query `logos status` derives `node_count` from,
-    // which is what makes the two surfaces agree by construction about whether
-    // anything is indexed — their disagreeing is what [CR-138] reproduced.
+    // round-trip through the read pool. The rest of the cost, stated rather
+    // than hidden ([CR-138] AC3), because the report tier fires at every
+    // session boundary and pays it on every one:
+    //
+    // - Five `COUNT(*)` aggregates returned as one row. They materialise no
+    //   rows, but each is an index *walk*, linear in table size — not the
+    //   constant-time lookup "indexed aggregate" might suggest.
+    // - It is the **second** execution of this query per readout.
+    //   `reconcile_step` above already called `counts()` (see `Freshness`),
+    //   and keeps only the unresolved-ref delta from it. Threading the whole
+    //   `StoreCounts` out of there would make this read genuinely free, but
+    //   `reconcile_step` is shared with the write-side paths that another
+    //   story owns this iteration, so the duplication is recorded here rather
+    //   than removed under a review fix. Measured at well under 1 ms on a
+    //   13k-node store, and dwarfed by the `hydrate` + `all_nodes` reads this
+    //   same function already makes.
+    //
+    // It is also the *same* query `logos status` derives its counts from, so
+    // the two surfaces can never disagree about the **figure** — that
+    // disagreement is what [CR-138] reproduced. They still answer different
+    // *questions* about "indexed" (`status` asks `files > 0 || nodes > 0`,
+    // this asks `files > 0 && nodes > 0`), which `SignalAbsence`'s own doc
+    // sets out; agreeing on the number is not agreeing on the predicate.
     let (rows, marker, counts) = runtime
         .submit_read(|store| Ok((store.violations()?, store.check_run()?, store.counts()?)))?;
     let row_count = rows.len();
@@ -2268,7 +2284,7 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         // second opinion about what "empty" means — see `SignalAbsence::classify`.
         // The two fields are set from one expression pair here so a signal and a
         // cause for its absence can never both be present ([CR-138]).
-        signal_absence: SignalAbsence::classify(&metrics, counts.nodes),
+        signal_absence: SignalAbsence::classify(&metrics, counts.nodes, counts.files),
         baseline_signal,
         delta,
         freshness: fresh.line(),

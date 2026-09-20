@@ -3,11 +3,18 @@
 //!
 //! `quality-report` rendered `signal n/a (empty graph)` for **both** reasons a
 //! signal can be absent. A crate whose only source is `tests/only_tests.rs` was
-//! told its graph was empty while `logos status` reported `indexed: true,
-//! node_count: 9, edge_count: 9` — the reproduction in [CR-138] §2, and exactly
-//! the attribution [FR-EH-04] AC2 forbids. These tests pin both arms and, above
-//! all, pin that the discriminant and the metric computation classify one store
-//! the same way.
+//! told its graph was empty while `logos status` reported it populated in the
+//! same breath — the reproduction in [CR-138] §2, and exactly the attribution
+//! [FR-EH-04] AC2 forbids. These tests pin both arms and, above all, pin that
+//! the discriminant and the metric computation classify one store the same way.
+//!
+//! **No exact node count is quoted here on purpose.** [CR-138] §5.1 recorded
+//! `node_count: 8, edge_count: 7` from the reporter's own crate and the manual
+//! quotes `9/9` from a fixture whose `Cargo.toml` carries one key more; this
+//! file's fixture yields its own figure again. All are real readings of
+//! different trees, so `a_test_only_crate_…` asserts `node_count > 0` and
+//! compares against whatever `status` reports, rather than pinning a number
+//! that is only true of one of them.
 //!
 //! # A new file rather than an addition to `read_only_accessors.rs`
 //!
@@ -87,6 +94,17 @@ fn production_store() -> TempDir {
         "src/a.rs",
         "pub fn a(x: i64) -> i64 { if x > 0 { b() } else { 0 } }\npub fn b() -> i64 { 1 }\n",
     )])
+}
+
+/// Production **types** and no production function: `function_count == 0` while
+/// the graph is not empty and does score.
+///
+/// The one real-store shape on which the `function_count` lookalike diverges
+/// from `empty`. Without it the agreement test below cannot tell the two apart
+/// on any live store — the constructed-snapshot test pins the predicate, this
+/// pins that a real store reaches the divergent shape at all.
+fn types_only_store() -> TempDir {
+    repo_of(&[("src/t.rs", "pub struct A;\npub struct B;\npub struct C;\n")])
 }
 
 // ── the two arms ────────────────────────────────────────────────────────────
@@ -187,20 +205,30 @@ fn a_test_only_crate_names_its_empty_production_scope_and_carries_the_figure() {
 ///
 /// This is the test the story exists for. A discriminant that merely *happens*
 /// to agree with the production scope today is the defect class being closed, so
-/// agreement is asserted rather than inspected, over the three stores that span
-/// the three outcomes: a signal, an empty graph, and an empty production scope.
+/// agreement is asserted rather than inspected, over four stores spanning the
+/// three outcomes — a signal, an empty graph, an empty production scope — plus
+/// the types-only shape on which the `function_count` lookalike diverges.
 ///
-/// It fails if either side is changed alone. `scan` is the persisting path and
-/// `quality_readout` the non-persisting one, and they reach the production scope
-/// through different code — so this compares the readout's rendered verdict with
-/// one derived directly from the metric snapshot `scan` produced over the same
-/// store.
+/// `scan` is the persisting path and `quality_readout` the non-persisting one,
+/// and they reach the production scope through different code — so this compares
+/// the readout's verdict with one derived from the metric snapshot `scan`
+/// produced over the same store, and catches **wiring** drift between them
+/// (a caller passing the wrong count, the two paths disagreeing about a store).
+///
+/// **What it deliberately does not do**, stated because an earlier draft of
+/// these notes claimed it did: the second assertion calls `classify` on both
+/// sides, so it compares `classify` against itself and is structurally blind to
+/// any change *inside* it — a review sweep proved this by swapping the two arms
+/// and watching this test stay green while three others failed. The predicate
+/// itself is pinned by `the_discriminant_gates_on_the_production_scope_not_a_lookalike`
+/// below, which is why both tests exist and neither subsumes the other.
 #[test]
 fn the_discriminant_agrees_with_the_metrics_own_production_scope() {
     for (name, tmp) in [
         ("empty store", empty_store()),
         ("test-only store", test_only_store()),
         ("production store", production_store()),
+        ("types-only store", types_only_store()),
     ] {
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let scan = engine.scan(true).expect("scan");
@@ -214,7 +242,7 @@ fn the_discriminant_agrees_with_the_metrics_own_production_scope() {
         );
         assert_eq!(
             readout.signal_absence,
-            SignalAbsence::classify(&scan.metrics, status.node_count),
+            SignalAbsence::classify(&scan.metrics, status.node_count, status.file_count),
             "{name}: the readout's discriminant and the metric snapshot's own production \
              scope classify this store differently"
         );
@@ -229,10 +257,20 @@ fn the_discriminant_agrees_with_the_metrics_own_production_scope() {
 /// The discriminant gates on the metric snapshot's **own** emptiness predicate,
 /// not on a lookalike that happens to agree on ordinary stores.
 ///
-/// Three lookalikes were available and all three are wrong. Each fixture below
-/// is a store shape on which one of them diverges from `empty`, so an
-/// implementation reaching for it fails here rather than three iterations later
-/// on someone's repo.
+/// Four lookalikes were available and all four are wrong: the snapshot's
+/// `function_count`, its `test_function_count`, its post-filter `node_count`,
+/// and — the subtlest, because it is welded to `empty` for every snapshot
+/// `compute` produces — the presence of `aggregate_signal` itself. Each
+/// assertion below is a snapshot shape on which one of them diverges from
+/// `empty`, so an implementation reaching for it fails here rather than three
+/// iterations later on someone's repo.
+///
+/// The last two are why this test builds `MetricSnapshot` values by hand
+/// instead of indexing another fixture repo: `classify` is `pub` over an
+/// arbitrary snapshot, including one rehydrated from a persisted row, so the
+/// contract has to hold for shapes `compute` would never emit. A review sweep
+/// confirmed the cost of omitting them — gating on `aggregate_signal.is_some()`
+/// or on `node_count` passed every one of the other 23 tests.
 #[test]
 fn the_discriminant_gates_on_the_production_scope_not_a_lookalike() {
     // `function_count == 0`: a graph of production *types* with no production
@@ -245,31 +283,63 @@ fn the_discriminant_gates_on_the_production_scope_not_a_lookalike() {
         ..MetricSnapshot::default()
     };
     assert_eq!(
-        SignalAbsence::classify(&types_only, 5),
+        SignalAbsence::classify(&types_only, 5, 1),
         None,
         "a scored graph has no absence to explain, whatever its function count"
     );
 
     // `test_function_count > 0`: an empty production scope is an empty production
-    // scope even when nothing was excluded as a test — a graph of nothing but
-    // derived policy vertices reaches this, and must not be reported as an empty
-    // graph just because no test was counted.
-    let derived_only = MetricSnapshot {
+    // scope even when nothing was excluded as a test. A tree of files none of
+    // which parsed reaches this — the scope was emptied by something other than
+    // tests, and the arm must still say so rather than claiming every symbol was
+    // a test.
+    let no_tests_counted = MetricSnapshot {
         empty: true,
         aggregate_signal: None,
         test_function_count: 0,
         ..MetricSnapshot::default()
     };
     assert_eq!(
-        SignalAbsence::classify(&derived_only, 4),
+        SignalAbsence::classify(&no_tests_counted, 4, 2),
         Some(SignalAbsence::NoProductionScope {
             indexed_nodes: 4,
             test_functions: 0,
         }),
-        "4 nodes in the store rules out an empty graph regardless of why the scope is empty"
+        "nodes built from ingested files rule out an empty graph regardless of \
+         why the scope is empty"
     );
 
-    // The store's own count is the *only* thing separating the two arms; the
+    // `aggregate_signal`'s presence: welded to `empty` for every snapshot
+    // `compute` emits, which is exactly what makes it the lookalike inspection
+    // cannot separate. `classify` is public over hand-built and rehydrated
+    // snapshots, so the two are pulled apart here deliberately.
+    let signal_without_scope = MetricSnapshot {
+        empty: true,
+        aggregate_signal: Some(8000),
+        node_count: 5,
+        ..MetricSnapshot::default()
+    };
+    assert_eq!(
+        SignalAbsence::classify(&signal_without_scope, 7, 1),
+        Some(SignalAbsence::NoProductionScope {
+            indexed_nodes: 7,
+            test_functions: 0,
+        }),
+        "the gate is `empty`, not the presence of a signal"
+    );
+    let scope_without_signal = MetricSnapshot {
+        empty: false,
+        aggregate_signal: None,
+        node_count: 0,
+        ..MetricSnapshot::default()
+    };
+    assert_eq!(
+        SignalAbsence::classify(&scope_without_signal, 7, 1),
+        None,
+        "the gate is `empty`, not a missing signal and not the snapshot's own node_count"
+    );
+
+    // The store's own counts are the *only* thing separating the two arms; the
     // snapshot's `node_count` is the post-filter figure and reads zero on both.
     let scope_empty = MetricSnapshot {
         empty: true,
@@ -279,16 +349,29 @@ fn the_discriminant_gates_on_the_production_scope_not_a_lookalike() {
         ..MetricSnapshot::default()
     };
     assert_eq!(
-        SignalAbsence::classify(&scope_empty, 0),
+        SignalAbsence::classify(&scope_empty, 0, 1),
         Some(SignalAbsence::EmptyGraph),
         "no node in the store: an empty graph"
     );
     assert_eq!(
-        SignalAbsence::classify(&scope_empty, 9),
+        SignalAbsence::classify(&scope_empty, 9, 1),
         Some(SignalAbsence::NoProductionScope {
             indexed_nodes: 9,
             test_functions: 3,
         }),
         "the same snapshot over a populated store is the other arm entirely"
+    );
+
+    // No ingested file: whatever nodes the store holds, Logos manufactured them.
+    // Reproduced against a project that declares two layers and a boundary and
+    // has never been indexed — `file_count: 0, node_count: 3`, every one a
+    // derived `Layer`/`Boundary` vertex. Calling that "3 node(s) indexed" states
+    // a value about indexing that nothing established (FR-EH-04 AC3), and routes
+    // the reader to the arm that deliberately names no command, when `logos
+    // index` is the step they need.
+    assert_eq!(
+        SignalAbsence::classify(&scope_empty, 3, 0),
+        Some(SignalAbsence::EmptyGraph),
+        "derived policy vertices are not evidence that any code was indexed"
     );
 }

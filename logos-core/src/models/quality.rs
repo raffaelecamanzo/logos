@@ -138,14 +138,26 @@ pub struct QualityReadout {
 /// # Why the first arm is `EmptyGraph` and not `unindexed`
 ///
 /// Deliberately not the Health page's spelling, because it is not the Health
-/// page's fact. There `unindexed` means `files > 0 || nodes > 0` is false —
-/// an *index-state* question. Here the established fact is narrower and
-/// stronger: the store holds **no node**, so there is nothing for the metric
-/// graph to have dropped. A store that indexed files but extracted no node from
-/// any of them (unsupported syntax throughout) is `EmptyGraph` here and is not
-/// `unindexed` there, and both are correct about what they can establish —
-/// which is the whole of [FR-EH-04]. Naming the narrower fact is what keeps
-/// this readout from asserting an index state it never read.
+/// page's fact, and the two predicates are duals rather than copies:
+///
+/// - Health's `unindexed` is `files > 0 || nodes > 0` being false — "is there
+///   **anything** at all?", an index-state question over the whole store.
+/// - `EmptyGraph` here is `files > 0 && nodes > 0` being false — "is there a
+///   graph **built from ingested source**?".
+///
+/// The conjunction is load-bearing and was found by reproduction, not by
+/// reasoning. `nodes > 0` alone is **not** evidence that any code was indexed:
+/// the annotation pass materialises one derived `Layer`/`Boundary` vertex per
+/// `rules.toml` declaration unconditionally, whether or not a file matches. A
+/// project that declares two layers and a boundary and has never been indexed
+/// therefore reports `file_count: 0, node_count: 3` — three vertices Logos
+/// manufactured itself. Classifying that as [`NoProductionScope`] would state
+/// "3 node(s) indexed" about a store where nothing was indexed (the value
+/// [FR-EH-04] AC3 forbids), and would route the reader to the arm that
+/// deliberately names **no** command — when `logos index` is exactly what they
+/// need. Requiring an ingested file rules it out with a figure already in hand.
+///
+/// [`NoProductionScope`]: Self::NoProductionScope
 ///
 /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
 /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
@@ -162,9 +174,9 @@ pub enum SignalAbsence {
     /// full one already carries the freshness line. Naming a command here would
     /// bring it under [FR-EH-04]'s first AC; naming none does not.
     EmptyGraph,
-    /// The store holds a graph, but its **production scope** ([FR-QM-08]) is
-    /// empty — every vertex was dropped before scoring, as `is_test`, as a
-    /// derived policy vertex, or as a promoted broker marker.
+    /// Source was ingested and a graph was built from it, but its **production
+    /// scope** ([FR-QM-08]) is empty — every vertex was dropped before scoring,
+    /// as `is_test`, as a derived policy vertex, or as a promoted broker marker.
     ///
     /// Both figures are what *establishes* the arm rather than decoration, and
     /// they are carried rather than recomputed at the rendering:
@@ -183,8 +195,13 @@ pub enum SignalAbsence {
     NoProductionScope {
         /// Nodes the store holds, from [`StoreCounts::nodes`] — the same figure
         /// `logos status` reports as `node_count`, read from the same query, so
-        /// the two surfaces cannot contradict each other about whether anything
-        /// is indexed. That contradiction is [CR-138]'s reproduction.
+        /// the two surfaces cannot contradict each other about **that figure**.
+        /// Their contradicting is [CR-138]'s reproduction.
+        ///
+        /// They still answer different *questions* about "indexed" (see the
+        /// type doc), so this is agreement on the number, not on the predicate.
+        /// Reaching this arm at all means a file was ingested, so every node
+        /// counted here belongs to a graph built from source.
         ///
         /// [`StoreCounts::nodes`]: crate::graph_store::StoreCounts::nodes
         indexed_nodes: u64,
@@ -214,18 +231,28 @@ impl SignalAbsence {
     /// agreement is pinned by test rather than left to inspection —
     /// `logos-core/tests/quality_readout_scope.rs`.
     ///
-    /// `indexed_nodes` is the **store's** node count, the one fact the snapshot
-    /// cannot supply: it describes the graph after the production filter, so on
-    /// both arms it reads zero. Its caller reads it from
+    /// `indexed_nodes` and `indexed_files` are the **store's** counts, the two
+    /// facts the snapshot cannot supply: it describes the graph *after* the
+    /// production filter, so its own `node_count` reads zero on both arms and
+    /// can never separate them. Their caller reads both from one
     /// [`GraphStore::counts`](crate::graph_store::GraphStore::counts).
+    ///
+    /// Both are required for [`NoProductionScope`](Self::NoProductionScope),
+    /// and `indexed_files` is not redundant: derived `Layer`/`Boundary`
+    /// vertices exist without any file, so `indexed_nodes > 0` alone does not
+    /// establish that code was ever indexed. See the type doc.
     ///
     /// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
     #[must_use]
-    pub fn classify(metrics: &MetricSnapshot, indexed_nodes: u64) -> Option<Self> {
+    pub fn classify(
+        metrics: &MetricSnapshot,
+        indexed_nodes: u64,
+        indexed_files: u64,
+    ) -> Option<Self> {
         if !metrics.empty {
             return None;
         }
-        if indexed_nodes == 0 {
+        if indexed_nodes == 0 || indexed_files == 0 {
             return Some(Self::EmptyGraph);
         }
         Some(Self::NoProductionScope {
