@@ -337,18 +337,28 @@ fn a_new_site_is_detected_even_after_a_test_module() {
          {sites:?}"
     );
 
-    // The comparison, not just the extractor: an undeclared site must survive
-    // into the diff the real assertion makes.
-    let declared: Vec<(String, String)> = DECLARED_SITES
-        .iter()
-        .flat_map(|(_, enclosing, marker, count, _)| {
-            std::iter::repeat_n(((*enclosing).to_string(), (*marker).to_string()), *count)
-        })
-        .collect();
+    // The comparison, not just the extractor.
+    //
+    // This block used to compare `sites` against the REAL `DECLARED_SITES`
+    // table — which is about `configured.rs`/`start_run` and shares no file or
+    // function name with this fixture. Review showed it therefore held whether
+    // the extractor was correct, truncated at the test module, or returned
+    // nothing at all: it could not tell the three apart, while its comment
+    // claimed it did the discriminating work.
+    //
+    // The like-for-like baseline is what the fixture's table would say if only
+    // its FIRST function were declared. The added path must break equality
+    // against THAT — and if the extractor ever regains the truncation defect,
+    // `sites` collapses to exactly this baseline and the assertion fires.
+    let fixture_declared_before_the_second_path: Vec<(String, String)> = vec![
+        ("already_declared".to_string(), "engine.wiki_materialize".to_string()),
+        ("already_declared".to_string(), "spawn_blocking".to_string()),
+    ];
     assert_ne!(
-        sites, declared,
-        "the declared table must not accept a module carrying an unclassified \
-         second path to the engine"
+        sites, fixture_declared_before_the_second_path,
+        "a module carrying an unclassified second path to the engine must not \
+         compare equal to the table that declares only the first — if it does, \
+         the scan stopped at the test module"
     );
 }
 
@@ -399,6 +409,27 @@ fn every_engine_call_in_the_wikigen_module_is_enumerated_and_classified() {
         "the walk found no engine-reaching site in {} — it cannot have read the \
          module",
         dir.display()
+    );
+
+    // The site -> REASON mapping, not just the site set.
+    //
+    // Review proved the prose carried no test weight at all: setting a
+    // classification to "x", or swapping two rows' classifications, left this
+    // file 3/3 green. The acceptance criterion is "every engine call listed
+    // AND classified", and only the listing half was load-bearing. So the one
+    // disposition that matters — which site is the one actually carrying the
+    // surface scope — is pinned to the row it belongs to.
+    let classified: Vec<&str> = DECLARED_SITES
+        .iter()
+        .filter(|(_, _, _, _, classification)| classification.starts_with("CLASSIFIED"))
+        .map(|(_, _, marker, _, _)| *marker)
+        .collect();
+    assert_eq!(
+        classified,
+        vec!["engine.wiki_materialize"],
+        "exactly one declared site is the one carrying `Surface::WikiGen`, and \
+         it is the materialize call (FR-OB-13, CR-139). A swapped or reworded \
+         classification moves this"
     );
 
     let mut declared: Vec<(String, String, String)> = Vec::new();
