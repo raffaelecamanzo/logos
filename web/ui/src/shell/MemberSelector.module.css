@@ -2,38 +2,22 @@
    Reuses the design-system tokens verbatim (FR-UI-23): no new colour, no new
    spacing step, so a theme remains a token remap. Rendered in workspace mode only. */
 
-/* The selector shares the shell header's row (S-317, FR-UI-29, FR-UI-34). A
-   `<select>` sizes itself to its LONGEST option — on the reference workspace a
-   42-character member name, measured at 467px, which overflowed a 420px viewport
-   by 242px even after the header had dropped its readout and its brand subtitle.
-   `min-width: 0` lifts the automatic minimum size that pins a flex item at that
-   intrinsic width, so the row can take width back. What it takes it back FROM is
-   ordered below: the label first, the control last. */
-.selector {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
+/* The selector renders as a BARE `<select>` on the sidebar's Service-section
+   header row (S-425, FR-UI-35, frontend-design §3) — no wrapper, no label element:
+   the section heading beside it is its accessible name, and a second word for the
+   same thing would not fit the 232px column. The row's width ordering therefore
+   lives in `Sidebar.module.css` (`.sectionHeader`, `.sectionLabel`); what lives
+   here is the floor the control never goes below. */
 
-/* The label yields BEFORE the control does. A workspace name shortened to
-   `pec-serv…` is plainly incomplete and costs nothing — the member itself is the
-   select's own value, and the `for`/`id` association keeps the full text as the
-   control's accessible name. */
-.label {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* …and the control stops yielding at a size that is still a control. Without the
-   floor it was measured at 24px at 1024px in workspace mode, where the readout is
-   still on the row: present, but not reachable in the sense the acceptance
-   criterion means. The cap above it is unchanged. */
+/* The control stops yielding at a size that is still a control. Without a floor it
+   was measured at 24px at 1024px in workspace mode, when it shared the header row
+   with the readout: present, but not reachable in the sense the acceptance
+   criterion means. A `<select>` sizes itself to its LONGEST option — on the
+   reference workspace a 42-character member name, measured at 467px — so the cap
+   is the container rather than the former fixed 18rem, which exceeded the sidebar
+   column outright. Between floor and cap the member name ellipsises, which is the
+   browser's own `<select>` behaviour and costs nothing: the selected member is
+   also the section's subject, named by every view under it. */
 .select {
   font: inherit;
   font-size: var(--text-sm);
@@ -43,45 +27,31 @@
   border-radius: var(--radius-1);
   padding: var(--space-1) var(--space-2);
   min-width: 8rem;
-  max-width: 18rem;
+  max-width: 100%;
 }
 
 .select:hover {
   border-color: var(--border-strong, var(--border-subtle));
 }
 
-/* Below tablet — the same rung the header's brand subtitle gives way on (S-317).
-   With the label's words still in the row the control was measured at 29px, which
-   is present but not usable, and "reachable" is the acceptance criterion. So the
-   label's WORDS give way and its function does not: visually-hidden geometry (the
-   `.sr-only` shape from base.css, copied rather than composed: `composes` is
-   compile-time class concatenation, so a composition under `@media` does not error
-   — it silently loses its condition and hides the label at every width) keeps it in
-   the accessibility tree as the
-   select's accessible name. The member name itself stays on screen — it is the
-   select's own value — so the figures a wider viewport shows can never be read
-   against the wrong name (FR-UI-29). */
-@media (max-width: 767px) {
-  .label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-}
+/* ── The workspace-probe fault badge ──────────────────────────────────────────
+   Rendered by `WorkspaceFault.tsx`, not by the selector: a faulted probe settles
+   the mode to `single`, where the Service section holding the selector does not
+   exist, so the badge is stated from the app header instead (NFR-RA-05).
 
-/* The probe-fault badge (the `error` branch) is a DIRECT child of the header row —
-   there is no `.selector` around it — so it gets the row's width concessions here
-   or not at all. `Badge` is `white-space: nowrap` by default, because a status chip
-   is normally three words; this one is four long ones, measured at 254px, which
-   overflowed a 420px viewport by 29px and pushed the theme toggle off-screen. It
-   WRAPS rather than shrinks: an error the reader cannot read is not a reported
-   error (NFR-RA-05), so nothing here truncates it. */
+   Its rule stays in THIS file although its component moved out, because a
+   CSS-module class name is generated from the stylesheet's path: moving the rule
+   to `WorkspaceFault.module.css` renames the class in the served single-root
+   header (`_fault_fab455` → `_fault_41911d`, measured), and ADR-52's byte-for-byte
+   guarantee covers that header. Do not "tidy" it into its own module.
+
+   The badge is a DIRECT child of the header row, with no wrapper of its own, so it
+   gets the row's width concessions here or not at all. `Badge` is
+   `white-space: nowrap` by default, because a status chip is normally three words;
+   this one is four long ones, measured at 254px, which overflowed a 420px viewport
+   by 29px and pushed the theme toggle off-screen. It WRAPS rather than shrinks: an
+   error the reader cannot read is not a reported error (NFR-RA-05), so nothing
+   here truncates it. */
 .fault {
   min-width: 0;
   white-space: normal;

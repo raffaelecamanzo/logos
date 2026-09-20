@@ -1,7 +1,8 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StatsInfo } from "../api/types.ts";
+import { NAV_GROUPS, NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 
@@ -70,30 +71,30 @@ describe("Sidebar — Statistics nav (S-235, FR-UI-27)", () => {
 
 // ── S-250 / FR-UI-29 AC4: the workspace tab is workspace-mode ONLY ────────────
 
-describe("Sidebar workspace gating (S-250)", () => {
-  /** Render the sidebar inside a provider whose roster probe answers `probeStatus`. */
-  function mountWithMode(probeStatus: number) {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((url: string) => {
-        const isProbe = url.startsWith("/api/v1/workspace/roster");
-        return Promise.resolve({
-          ok: !isProbe || probeStatus === 200,
-          status: isProbe ? probeStatus : 200,
-          json: () =>
-            Promise.resolve(
-              isProbe ? { workspace: "shop", default: "api", members: ["api", "web"] } : stats(1),
-            ),
-        } as Response);
-      }),
-    );
-    return render(
-      <WorkspaceProvider>
-        <Sidebar pathname="/" />
-      </WorkspaceProvider>,
-    );
-  }
+/** Render the sidebar inside a provider whose roster probe answers `probeStatus`. */
+function mountWithMode(probeStatus: number) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string) => {
+      const isProbe = url.startsWith("/api/v1/workspace/roster");
+      return Promise.resolve({
+        ok: !isProbe || probeStatus === 200,
+        status: isProbe ? probeStatus : 200,
+        json: () =>
+          Promise.resolve(
+            isProbe ? { workspace: "shop", default: "api", members: ["api", "web"] } : stats(1),
+          ),
+      } as Response);
+    }),
+  );
+  return render(
+    <WorkspaceProvider>
+      <Sidebar pathname="/" />
+    </WorkspaceProvider>,
+  );
+}
 
+describe("Sidebar workspace gating (S-250)", () => {
   it("renders NO Workspace item in a single-root serve — the sidebar is unchanged", async () => {
     mountWithMode(404);
     // Wait for the probe to SETTLE before asserting absence; otherwise this passes
@@ -108,5 +109,123 @@ describe("Sidebar workspace gating (S-250)", () => {
       "href",
       "/workspace",
     );
+  });
+});
+
+// ── S-425 / FR-UI-35 / ADR-66: the sidebar renders the declared scope ─────────
+//
+// Every assertion below reads the RENDERED DOM — roles, accessible names, element
+// containment — and never component state. The CR-040-era regressions this suite
+// exists after were all cases where the state was right and what reached the page
+// was not.
+
+/** The section for a scope, by its accessible name. A `<section>` with an
+ *  accessible name is an ARIA `region`, so this is the rendered heading talking,
+ *  not a class name (which `css: false` would hide from this suite anyway). */
+const region = (name: string) => screen.getByRole("region", { name });
+
+describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
+  it("renders a Workspace section and a Service section, in that order", async () => {
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /Workspace/ });
+
+    const regions = screen.getAllByRole("region");
+    expect(regions.map((r) => r.querySelector("h2")?.textContent)).toEqual([
+      "Workspace",
+      "Service",
+    ]);
+  });
+
+  it("files each view under the section its own scope declares", async () => {
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /Workspace/ });
+
+    const names = (scope: string) =>
+      within(region(scope))
+        .getAllByRole("link")
+        .map((a) => a.textContent);
+
+    // The app-scoped tab, alone, above the boundary the selector governs…
+    expect(names("Workspace")).toEqual(["Workspace"]);
+    // …and every member-scoped tab below it. Same list, same order as the
+    // single-root sidebar: the CR-042 A/B/C groups survive INSIDE the section
+    // rather than being re-ordered by it.
+    expect(names("Service")).toEqual(NAV_ITEMS.map((i) => i.label));
+  });
+
+  it("renders the member selector in the Service section header and NOWHERE else", async () => {
+    mountWithMode(200);
+    const select = await screen.findByRole("combobox");
+
+    // Exactly one in the whole tree — not one per section, not a second copy left
+    // behind in the app header (asserted from the header's own suite too).
+    expect(screen.getAllByRole("combobox")).toHaveLength(1);
+    expect(region("Service")).toContainElement(select);
+    expect(region("Workspace")).not.toContainElement(select);
+
+    // The heading beside it is its accessible name — the control carries no label of
+    // its own, so the section label is load-bearing twice over (FR-UI-35).
+    expect(select).toHaveAccessibleName("Service");
+
+    // In the HEADER, structurally: outside every nav list, and before the first one.
+    expect(select.closest("ul")).toBeNull();
+    const section = region("Service");
+    const firstList = section.querySelector("ul");
+    expect(firstList).not.toBeNull();
+    expect(section.compareDocumentPosition(firstList as Node)).toBeDefined();
+    expect(
+      select.compareDocumentPosition(firstList as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("names the scope in words, so the section is never colour or position alone", async () => {
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /Workspace/ });
+
+    // Rendered text, in a heading element — the label a 420px viewport still shows
+    // and a screen reader still announces (NFR-CC-04). The stylesheet half (that
+    // no width rung hides it) is asserted in `web/tests/spa_design_system.rs`.
+    const headings = screen.getAllByRole("heading", { level: 2 });
+    expect(headings.map((h) => h.textContent)).toEqual(["Workspace", "Service"]);
+    for (const h of headings) expect(h).toBeVisible();
+  });
+
+  it("renders NO section, no header and no selector in single-root mode", async () => {
+    mountWithMode(404);
+    await waitFor(() => expect(screen.getByRole("link", { name: /Dashboard/ })).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("link", { name: /^Workspace$/ })).toBeNull());
+
+    // Absent, not hidden and not empty: a plain repository has one scope, so a
+    // section label there would assert an axis that does not exist (ADR-66 §5).
+    expect(screen.queryAllByRole("region")).toEqual([]);
+    expect(screen.queryAllByRole("heading")).toEqual([]);
+    expect(screen.queryByText("Service")).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("renders the single-root sidebar as the exact markup it rendered before S-425", async () => {
+    // The byte-for-byte guard (ADR-52, FR-UI-29 AC4). It is a RENDERED snapshot —
+    // the form that catches a leak a state-level assertion misses — and it was
+    // taken by diffing this tree against the pre-S-425 component, not written from
+    // the post-change output (see the implementation notes' baseline diff).
+    // CSS-module class names are empty under `css: false`, so what is pinned here
+    // is the element structure, the labels, the hrefs and the icons.
+    const { container } = mountWithMode(404);
+    await waitFor(() => expect(screen.getByRole("link", { name: /Dashboard/ })).toBeInTheDocument());
+
+    const nav = container.querySelector("nav") as HTMLElement;
+    expect(nav.getAttribute("aria-label")).toBe("Views");
+    // Three group lists, direct children of the nav, and nothing else in it.
+    expect([...nav.children].map((c) => c.tagName)).toEqual(NAV_GROUPS.map(() => "UL"));
+    // Derived from the registry, not pinned as 6/3/2: a count written out here goes
+    // stale the first time a view is added and then asserts the wrong thing quietly.
+    expect([...nav.children].map((c) => c.children.length)).toEqual(
+      NAV_GROUPS.map((g) => NAV_ITEMS.filter((i) => i.group === g).length),
+    );
+    expect(
+      [...nav.querySelectorAll("a")].map((a) => [a.getAttribute("href"), a.textContent]),
+    ).toEqual(NAV_ITEMS.map((i) => [i.path, i.label]));
+    // Every item still carries its inline-SVG icon (CR-042).
+    expect(nav.querySelectorAll("li > a > span:first-child > svg")).toHaveLength(NAV_ITEMS.length);
   });
 });

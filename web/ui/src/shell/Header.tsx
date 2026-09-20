@@ -32,7 +32,7 @@ import { fetchStatus } from "../api/client.ts";
 import type { StatusInfo } from "../api/types.ts";
 import { navigate, usePathname } from "../router.tsx";
 import { useWorkspace } from "../workspace/WorkspaceContext.tsx";
-import { MemberSelector } from "./MemberSelector.tsx";
+import { WorkspaceFault } from "./WorkspaceFault.tsx";
 import styles from "./Header.module.css";
 
 /** The header's read, as an honest three-state machine. `ready` carries the
@@ -131,9 +131,12 @@ export function Header() {
         <span className={styles.brandSub}>code intelligence</span>
       </a>
       <div className={styles.spacer} />
-      {/* Workspace mode only — in a single-root serve this renders nothing and the
-          header is byte-for-byte unchanged (FR-UI-29). */}
-      <MemberSelector />
+      {/* A FAULTED workspace probe only — in a single-root serve, and in a healthy
+          workspace serve alike, this renders nothing and the header is byte-for-byte
+          unchanged (FR-UI-29, NFR-RA-05). The member SELECTOR is not here: S-425
+          moved it into the sidebar's Service-section header, inside the boundary it
+          governs (FR-UI-35, ADR-66). */}
+      <WorkspaceFault />
       <span className={styles.status}>
         {readout.kind === "loading" && <Badge tone="muted">Connecting…</Badge>}
         {readout.kind === "error" && (

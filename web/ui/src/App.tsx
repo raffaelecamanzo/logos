@@ -41,11 +41,16 @@ function Shell() {
   const pathname = rawPathname === "/overview" ? "/" : rawPathname;
   const View = viewForPath(pathname);
 
-  // The Workspace tab is APP-level: its reads are the unscoped `workspace/*` fan-out,
-  // identical for every member. Re-keying it on the member would tear the ECharts
-  // canvas down and re-run the whole fan-out every time the user clicks a service in
-  // the map (which selects that member) — losing the open tab and the typed impact
-  // query to no purpose.
+  // An APP-scoped view reads the unscoped `workspace/*` fan-out, identical for every
+  // member. Re-keying it on the member would tear the ECharts canvas down and re-run
+  // the whole fan-out every time the user clicks a service in the map (which selects
+  // that member) — losing the open tab and the typed impact query to no purpose.
+  //
+  // Which views those are is READ, not decided here: `isAppLevelPath` is a lookup
+  // over the `scope` field the navigation entry declares (S-425, FR-UI-35, ADR-66 §3),
+  // the same field the sidebar sections itself by. This shell holds no list of its
+  // own, so a view registered tomorrow cannot be keyed one way here and rendered
+  // under the other section there.
   const viewKey = isAppLevelPath(pathname) ? "app" : cacheKey;
 
   return (

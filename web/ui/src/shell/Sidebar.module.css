@@ -19,6 +19,52 @@
   padding-top: var(--space-3);
 }
 
+/* ── Scope sections (S-425, FR-UI-35, ADR-66) ─────────────────────────────────
+   Workspace mode only. A single-root sidebar renders none of these classes at
+   all — the markup is absent, not hidden — so ADR-52's byte-for-byte guarantee
+   is kept by the component, not by a media query that could be relaxed later. */
+.section + .section {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+}
+
+/* The label and the selector share ONE row (frontend-design §3:
+   `SERVICE [ orders ▾ ]`). The column is 232px at desktop width, so the row takes
+   width back from the LABEL first and from the control never — the control has a
+   floor in `MemberSelector.module.css`, and a control squeezed to a sliver is
+   present but not reachable (FR-UI-29). */
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-3);
+  min-width: 0;
+}
+
+/* The eyebrow treatment the design system already uses for a labelled region
+   (`DataTable.module.css .caption`): the label is TEXT, at every width. It is the
+   only thing distinguishing two views registered under the same name in different
+   scopes, so it is never dropped at a breakpoint and never replaced by colour or
+   position alone (NFR-CC-04, FR-UI-35). Nothing below width-rungs it — see
+   `web/tests/spa_design_system.rs`. */
+.sectionLabel {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+  /* Yields before the control does, and by ELLIPSIS rather than by removal: it is
+     the selector's accessible name as well as the section's, so taking it off the
+     page would leave a `<select>` with no name at all. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .item {
   margin: 1px 0;
 }
