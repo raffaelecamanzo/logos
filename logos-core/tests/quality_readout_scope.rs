@@ -424,11 +424,23 @@ fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
         );
 
         // The comparison verdict: a baseline exists and one side has no signal.
+        //
+        // BOTH renderers, because the correction's whole R5 claim is that they
+        // share one constant. The persisting `gate` was pinned here first and
+        // the read-only `latest_gate` was not, so a mutation replacing
+        // `gate_from_snapshot`'s arm with an entirely different sentence passed
+        // 43 of 43 tests — the "call site you never edited" blind spot, inside
+        // the one pair this correction exists to hold together.
         engine.gate(None, true, true).expect("gate --save runs");
-        let compared = engine.gate(None, false, true).expect("gate runs");
+        let persisting = engine.gate(None, false, true).expect("gate runs");
+        let read_only = engine.latest_gate().expect("latest_gate runs");
         assert_eq!(
-            compared.message, "signal or baseline is n/a — informational pass",
-            "{name}: one spelling, no cause — and the two gate paths share the \
+            (persisting.message.as_str(), read_only.message.as_str()),
+            (
+                "signal or baseline is n/a — informational pass",
+                "signal or baseline is n/a — informational pass"
+            ),
+            "{name}: one spelling, no cause, and BOTH gate paths render the \
              constant that holds it"
         );
     }
