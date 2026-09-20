@@ -29,7 +29,9 @@
 //! helpers. Parsing string literals out would work and is what `lib.rs`'s
 //! `fn_body` does for braces, but raw strings and escapes make that a second
 //! thing to get right; keeping the scanner outside the scanned tree removes the
-//! self-reference by construction instead.
+//! self-reference by construction instead. ([`strip_comments`] does now track
+//! quotes, but for a different defect review found: a `//` inside a string
+//! literal was truncating real markers away.)
 //!
 //! [BR-42]: ../../docs/specs/software-spec.md#316-observability--telemetry
 //! [CR-139]: ../../docs/requests/CR-139-the-wiki-generation-pass-names-its-own-surface.md
@@ -157,13 +159,45 @@ fn whole_identifier(code: &str, at: usize) -> bool {
 /// [`a_new_site_is_detected_even_after_a_test_module`] proves this scan does not
 /// have that defect rather than asserting it.
 ///
-/// String literals are **not** parsed out. A marker written inside one would be
-/// reported as a site — a loud false positive, never a silent miss, which is the
-/// direction a census is allowed to be wrong in.
+/// # `//` is only a comment outside a string literal
+///
+/// The obvious one-liner — `line.split_once("//")` — is **quote-blind**, and
+/// review reproduced what that costs: a line carrying a URL in a string,
+/// `let u = "https://example.com"; spawn_blocking(move || engine.foo());`,
+/// truncates at the URL's own `//` and the two markers after it vanish. That is
+/// a **silent miss**, and an earlier version of this very doc claimed the
+/// opposite — "a loud false positive, never a silent miss". It was wrong, and
+/// the direction it was wrong in is the one a census must never be wrong in:
+/// the whole point of this file is that an unclassified site fails loudly.
+///
+/// So the scan tracks whether it is inside a `"…"` (honouring `\` escapes) and
+/// treats `//` as a comment start only outside one. A marker written inside a
+/// string literal is still reported as a site — that false positive is kept
+/// deliberately, since it fails loudly, and a census is allowed to be wrong
+/// only in that direction.
+///
+/// Every line is kept, test module included — deliberately not the
+/// `production_code` shape used elsewhere in this crate, which truncates at the
+/// first `#[cfg(test)] mod tests {`. Sprint 72 appendix 5.9 records what that
+/// costs, and [`a_new_site_is_detected_even_after_a_test_module`] proves this
+/// scan does not have that defect rather than asserting it.
 fn strip_comments(source: &str) -> String {
     source
         .lines()
-        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .map(|line| {
+            let bytes = line.as_bytes();
+            let (mut in_str, mut i) = (false, 0usize);
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' if in_str => i += 1,
+                    b'"' => in_str = !in_str,
+                    b'/' if !in_str && bytes.get(i + 1) == Some(&b'/') => return &line[..i],
+                    _ => {}
+                }
+                i += 1;
+            }
+            line
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -236,6 +270,26 @@ fn the_matcher_rejects_its_near_misses() {
         vec![("f".to_string(), "engine.root".to_string())],
         "`my_engine.` ends with the token this scan looks for and is not it; \
          `engine.root` without parentheses is a field read and cannot emit"
+    );
+
+    // A `//` INSIDE a string literal is not a comment start. Quote-blind
+    // stripping truncates the line there and drops both markers after it — a
+    // silent miss, the one direction this census must never fail in.
+    // Reproduced by review before it was fixed; pinned here so it cannot return.
+    let url_line = "fn h() {\n    let u = \"https://example.com\"; tokio::task::spawn_blocking(move || engine.wiki_materialize());\n}";
+    assert_eq!(
+        engine_sites(&strip_comments(url_line)),
+        vec![
+            ("h".to_string(), "engine.wiki_materialize".to_string()),
+            ("h".to_string(), "spawn_blocking".to_string()),
+        ],
+        "a URL's `//` inside a string literal must not truncate the line and \
+         hide the markers after it"
+    );
+    assert!(
+        engine_sites(&strip_comments("fn i() { } // engine.wiki_read( named in a comment"))
+            .is_empty(),
+        "…while a genuine trailing comment is still prose, not a site"
     );
 
     let wrapped = "fn g() {\n    tokio::task::spawn_blocking(\n        move || engine.wiki_read(&slug),\n    );\n}";
