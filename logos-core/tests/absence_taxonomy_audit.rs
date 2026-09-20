@@ -633,6 +633,33 @@ fn workspace_root() -> PathBuf {
     root
 }
 
+/// One source, comment-blanked, with a per-byte map of what sits inside a
+/// string literal.
+///
+/// Two consumers need two different views of the same bytes and they must agree
+/// on offsets, so one pass produces both:
+/// - `code` — comments blanked, **string bodies intact**, every line kept. The
+///   text a user reads lives in string literals and JSX text nodes, so the
+///   sentinel scan needs them.
+/// - `in_string` — one entry per **byte** of `code`. The brace walk needs the
+///   opposite view: a `{` inside a string literal is text, not a block.
+///
+/// Keeping them the same length is the whole point. An earlier version returned
+/// only `code`, lower-cased it for matching, and compared the resulting offsets
+/// against spans computed on the un-lowered string — two coordinate systems that
+/// agree only while every character folds to its own byte length.
+struct Stripped {
+    code: String,
+    in_string: Vec<bool>,
+}
+
+impl Stripped {
+    fn push(&mut self, c: char, in_string: bool) {
+        self.code.push(c);
+        self.in_string.resize(self.code.len(), in_string);
+    }
+}
+
 /// Comments blanked, **every line kept**, and string literals left intact.
 ///
 /// Prose *about* an absence is not an absence site, so comments go; the text a
@@ -640,7 +667,7 @@ fn workspace_root() -> PathBuf {
 /// stay. Nothing is truncated: the test module is blanked nowhere, and
 /// [`rust_test_spans`] classifies it instead.
 ///
-/// # Two things this gets right that the obvious version does not
+/// # Four things this gets right that the obvious version does not
 ///
 /// **`//` is only a comment outside a string.** `line.split_once("//")` is
 /// quote-blind, and a line carrying a URL — `let u = "https://x"; f("n/a")` —
@@ -653,109 +680,205 @@ fn workspace_root() -> PathBuf {
 /// which every `//` on the rest of the file is kept and doc prose is reported
 /// as a site. The first draft of this scanner did exactly that and booked a
 /// rustdoc line in `models/quality.rs` as a rendering. So the delimiter set is
-/// per language, and `the_matcher_rejects_its_near_misses` pins both halves.
+/// per language.
 ///
-/// State is per line for the quote, and carried across lines for a `/* */`
-/// block — TypeScript's JSDoc spans lines and Rust's `///` does not.
+/// **A backtick template literal legally spans lines; `"` and `'` do not.** So
+/// quote state resets at each newline for the per-line delimiters — which is
+/// what bounds the damage of an unbalanced apostrophe in JSX prose to one line —
+/// and is carried across lines for a backtick and for a `/* */` block. Review
+/// reproduced the miss: a template literal whose second line carried a URL was
+/// truncated at that URL and the sentinel after it vanished.
+///
+/// **A Rust raw string is not a `"`-delimited string.** `r#"a "quote here"#`
+/// contains an odd number of `"`, so a `"`-counting scanner leaves the rest of
+/// the line marked as string — which now also corrupts `in_string` and can move
+/// a brace out of the block walk. Raw strings are matched by their hash count,
+/// and they may span lines.
 ///
 /// [S-435]: ../../docs/planning/journal.md#s-435-the-wiki-generation-pass-names-its-own-surface
-fn strip_comments(source: &str, rust: bool) -> String {
-    let delims: &[char] = if rust { &['"'] } else { &['"', '\'', '`'] };
-    let mut out = String::with_capacity(source.len());
-    let mut in_block = false;
+fn strip_comments(source: &str, rust: bool) -> Stripped {
+    /// What the scanner is in the middle of, between characters.
+    enum State {
+        Code,
+        /// A `"`/`'` string, which ends at its delimiter or at the newline.
+        Line(char),
+        /// A backtick template literal, which survives newlines.
+        Template,
+        /// A Rust raw string, closed by `"` followed by this many `#`.
+        Raw(usize),
+        Block,
+    }
+    let per_line: &[char] = if rust { &['"'] } else { &['"', '\''] };
+    let mut out = Stripped {
+        code: String::with_capacity(source.len()),
+        in_string: Vec::with_capacity(source.len()),
+    };
+    let mut state = State::Code;
     for (n, line) in source.lines().enumerate() {
         if n > 0 {
-            out.push('\n');
+            out.push('\n', false);
+        }
+        // A `"`/`'` string cannot cross a newline in either language; a template
+        // literal and a block comment can.
+        if matches!(state, State::Line(_)) {
+            state = State::Code;
         }
         let mut chars = line.chars().peekable();
-        let mut quote: Option<char> = None;
         while let Some(c) = chars.next() {
-            if in_block {
-                if c == '*' && chars.peek() == Some(&'/') {
-                    chars.next();
-                    in_block = false;
-                    out.push_str("  ");
-                } else {
-                    out.push(' ');
-                }
-                continue;
-            }
-            if let Some(q) = quote {
-                out.push(c);
-                if c == '\\' {
-                    if let Some(escaped) = chars.next() {
-                        out.push(escaped);
+            match state {
+                State::Block => {
+                    if c == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        state = State::Code;
+                        out.push(' ', false);
+                        out.push(' ', false);
+                    } else {
+                        out.push(' ', false);
                     }
-                } else if c == q {
-                    quote = None;
                 }
-                continue;
+                State::Raw(hashes) => {
+                    out.push(c, true);
+                    if c == '"' {
+                        let mut seen = 0;
+                        while seen < hashes && chars.peek() == Some(&'#') {
+                            chars.next();
+                            out.push('#', true);
+                            seen += 1;
+                        }
+                        if seen == hashes {
+                            state = State::Code;
+                        }
+                    }
+                }
+                State::Line(delimiter) => {
+                    out.push(c, true);
+                    if c == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped, true);
+                        }
+                    } else if c == delimiter {
+                        state = State::Code;
+                    }
+                }
+                State::Template => {
+                    out.push(c, true);
+                    if c == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped, true);
+                        }
+                    } else if c == '`' {
+                        state = State::Code;
+                    }
+                }
+                State::Code => {
+                    // A raw string opener, before `r` could be read as a letter.
+                    if rust && c == 'r' && matches!(chars.peek(), Some('"' | '#')) {
+                        let mut lookahead = chars.clone();
+                        let mut hashes = 0usize;
+                        while lookahead.peek() == Some(&'#') {
+                            lookahead.next();
+                            hashes += 1;
+                        }
+                        if lookahead.peek() == Some(&'"') {
+                            out.push(c, false);
+                            for _ in 0..hashes {
+                                chars.next();
+                                out.push('#', false);
+                            }
+                            chars.next();
+                            out.push('"', false);
+                            state = State::Raw(hashes);
+                            continue;
+                        }
+                    }
+                    if per_line.contains(&c) {
+                        state = State::Line(c);
+                        out.push(c, false);
+                    } else if !rust && c == '`' {
+                        state = State::Template;
+                        out.push(c, false);
+                    } else if c == '/' && chars.peek() == Some(&'/') {
+                        break;
+                    } else if c == '/' && chars.peek() == Some(&'*') {
+                        chars.next();
+                        state = State::Block;
+                        out.push(' ', false);
+                        out.push(' ', false);
+                    } else {
+                        out.push(c, false);
+                    }
+                }
             }
-            if delims.contains(&c) {
-                quote = Some(c);
-                out.push(c);
-                continue;
-            }
-            if c == '/' && chars.peek() == Some(&'/') {
-                break;
-            }
-            if c == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                in_block = true;
-                out.push_str("  ");
-                continue;
-            }
-            out.push(c);
         }
     }
     out
 }
 
 /// Byte spans of the `#[cfg(test)] mod … { … }` blocks in a comment-stripped
-/// Rust source, brace-matched.
+/// Rust source, brace-matched **outside string literals**.
 ///
 /// **Spans, never a truncation point.** Matching the closing brace is what
 /// makes a site *after* a test module production code again;
 /// [`a_new_site_is_detected_even_after_a_test_module`] proves it on a fixture
 /// shaped exactly like the Sprint 72 defect.
 ///
-/// A `#[cfg(test)] mod tests;` **declaration** carries no block, and reading
-/// the next `{` in the file as its body would classify hundreds of lines of
+/// **Braces inside string literals are text.** [`strip_comments`] deliberately
+/// keeps string bodies — the rendered text lives there — so a walk that counted
+/// every `{` would take `assert_eq!("{", "{")` for an opened block. Review
+/// reproduced all three consequences on the real tree: a lone `{` in a test
+/// module made the walk run off the end and abort the whole audit with an
+/// "unbalanced braces" panic that blamed a perfectly balanced file; a lone `}`
+/// ended the span early and re-reported thirty test assertions in `readout.rs`
+/// as production sites; and a `{` in one test module beside a `}` in the next
+/// **silently** swallowed the production code between them. That last is the
+/// Sprint 72 §5.9 failure class arriving by a different door. So the walk reads
+/// `in_string` and skips those bytes.
+///
+/// A `#[cfg(test)] mod tests;` **declaration** carries no block, and reading the
+/// next `{` in the file as its body would classify hundreds of lines of
 /// production code as test scope. The first draft of this function did that to
 /// `governance/mod.rs` and hid a real site. The guard is that what sits between
 /// the attribute and the `{` must be exactly `mod <identifier>`, which a
-/// declaration never is — its `;` falls inside that span, and so does every
-/// line between it and whatever brace comes next.
+/// declaration never is — its `;` falls inside that span, and so does every line
+/// between it and whatever brace comes next.
 ///
 /// A separate `;`-before-`{` check stood here first. The falsifiability sweep
 /// removed it and every test stayed green: the head check already rejects
 /// `"tests;"` as a name, so the two conditions were one, and the spare was a
 /// dead conjunct of exactly the kind `recorded_clean_over` records shipping.
-fn rust_test_spans(code: &str) -> Vec<(usize, usize)> {
+fn rust_test_spans(stripped: &Stripped) -> Vec<(usize, usize)> {
     const ATTR: &str = "#[cfg(test)]";
+    let code = &stripped.code;
     let mut spans = Vec::new();
     for (at, _) in code.match_indices(ATTR) {
-        let tail = &code[at + ATTR.len()..];
-        let brace = match tail.find('{') {
-            Some(b) => b,
-            None => continue,
+        let after = at + ATTR.len();
+        let tail = &code[after..];
+        let Some(offset) = tail
+            .char_indices()
+            .find(|&(i, c)| c == '{' && !stripped.in_string[after + i])
+            .map(|(i, _)| i)
+        else {
+            continue;
         };
-        let head = tail[..brace].trim();
+        let head = tail[..offset].trim();
         let Some(name) = head.strip_prefix("mod ") else {
             continue;
         };
-        if name.trim().is_empty()
-            || !name
-                .trim()
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_')
-        {
+        let name = name.trim();
+        // `head` is trimmed, so a successful `mod ` strip always leaves a
+        // non-empty remainder — an emptiness check here would be a dead
+        // conjunct, which review confirmed by removing it over the whole tree
+        // and over thirteen adversarial heads with no change in outcome.
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             continue;
         }
-        let open = at + ATTR.len() + brace;
+        let open = after + offset;
         let mut depth = 0usize;
         let mut end = open;
         for (offset, c) in code[open..].char_indices() {
+            if stripped.in_string[open + offset] {
+                continue;
+            }
             match c {
                 '{' => depth += 1,
                 '}' => {
@@ -768,7 +891,13 @@ fn rust_test_spans(code: &str) -> Vec<(usize, usize)> {
                 _ => {}
             }
         }
-        assert!(end > open, "unbalanced braces from {open} — refusing to guess");
+        assert!(
+            end > open,
+            "the scanner could not brace-match the `#[cfg(test)] mod` block at \
+             byte {open}: the walk reached the end of the file with {depth} \
+             brace(s) still open. This is a scanner limitation, not a claim \
+             about the source — report it rather than reformatting the file"
+        );
         spans.push((open, end));
     }
     spans
@@ -780,6 +909,18 @@ fn rust_test_spans(code: &str) -> Vec<(usize, usize)> {
 /// Read from the declaration rather than from the filename, so `tests.rs` is
 /// test scope because the module tree says so and not because of what it is
 /// called. The occurrences are still enumerated; only their column changes.
+///
+/// The declaration may carry a visibility (`pub mod helpers;` is an ordinary
+/// test-only helper module), so one is stripped before the comparison; matching
+/// `mod <stem>` exactly missed those and put a test module's occurrences in the
+/// production census, where the citation check would then demand a taxonomy
+/// reference from it.
+///
+/// The sibling-file candidate is built by **appending** `.rs` to the directory
+/// name rather than by `Path::with_extension`, which replaces the last
+/// dot-suffix: for `b.v2/inner.rs` that produced `b.rs`, an unrelated file, and
+/// if it happened to declare a module of the same name the production file
+/// vanished from the census silently.
 fn rust_file_is_test_only(path: &Path) -> bool {
     const ATTR: &str = "#[cfg(test)]";
     let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -788,26 +929,33 @@ fn rust_file_is_test_only(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
-    let declaration = format!("mod {stem}");
-    for declarer in [parent.join("mod.rs"), parent.with_extension("rs")] {
+    let mut candidates = vec![parent.join("mod.rs")];
+    if let Some(directory) = parent.file_name().and_then(|n| n.to_str()) {
+        candidates.push(parent.with_file_name(format!("{directory}.rs")));
+    }
+    for declarer in candidates {
         if declarer == path || !declarer.is_file() {
             continue;
         }
         let Ok(source) = std::fs::read_to_string(&declarer) else {
             continue;
         };
-        let code = strip_comments(&source, true);
+        let code = strip_comments(&source, true).code;
         for (at, _) in code.match_indices(ATTR) {
             let tail = &code[at + ATTR.len()..];
             // Whichever comes first ends the candidate: a `;` makes it the
             // declaration this looks for, a `{` makes it an inline module.
-            let semi = tail.find(';');
-            let brace = tail.find('{');
-            let Some(end) = semi else { continue };
-            if brace.is_some_and(|b| b < end) {
+            let Some(end) = tail.find(';') else { continue };
+            if tail.find('{').is_some_and(|brace| brace < end) {
                 continue;
             }
-            if tail[..end].trim() == declaration {
+            let declaration = tail[..end].trim();
+            let declaration = declaration
+                .strip_prefix("pub(crate)")
+                .or_else(|| declaration.strip_prefix("pub"))
+                .unwrap_or(declaration)
+                .trim_start();
+            if declaration == format!("mod {stem}") {
                 return true;
             }
         }
@@ -815,15 +963,86 @@ fn rust_file_is_test_only(path: &Path) -> bool {
     false
 }
 
-/// Is the match at `at` a whole token, or part of a longer word?
+/// Is the span `start..end` a whole token, or part of a longer word?
 ///
 /// `n/a` inside `en/africa` is not the sentinel, and `unindexed` inside
 /// `reunindexed` is not either. `-` and `/` are deliberately **not** word
 /// characters: `no-production-scope` and `n/a` contain them, so treating them
 /// as boundaries is what lets the sentinels match at all.
-fn whole_token(code: &str, at: usize, len: usize) -> bool {
+fn whole_token(code: &str, start: usize, end: usize) -> bool {
     let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-    !word(code[..at].chars().next_back()) && !word(code[at + len..].chars().next())
+    !word(code[..start].chars().next_back()) && !word(code[end..].chars().next())
+}
+
+/// Match `sentinel` at `at`, tolerating any run of whitespace where it has a
+/// single space; the end offset, or `None`.
+///
+/// Nine of the sixteen sentinels contain a space, and both languages on these
+/// surfaces routinely split a rendered sentence across source lines — Rust with
+/// a `\` continuation inside a `format!`, TSX with a formatter wrapping a JSX
+/// text node. `readout.rs` and `governance/mod.rs` are written almost entirely
+/// in continued strings. A plain substring match requires exactly one space and
+/// so **loses the site**, which is the silent direction; review reproduced it on
+/// `"violations none \` + newline + `recorded (…)"`, a string rustc renders with
+/// one space.
+///
+/// A `\` is consumed as whitespace for the same reason: it is the continuation
+/// marker, and what it joins is one rendered sentence.
+fn match_sentinel_at(code: &str, at: usize, sentinel: &str) -> Option<usize> {
+    let mut cursor = at;
+    for want in sentinel.chars() {
+        if want == ' ' {
+            let consumed: usize = code[cursor..]
+                .chars()
+                .take_while(|c| c.is_whitespace() || *c == '\\')
+                .map(char::len_utf8)
+                .sum();
+            if consumed == 0 {
+                return None;
+            }
+            cursor += consumed;
+            continue;
+        }
+        let got = code[cursor..].chars().next()?;
+        if got != want {
+            return None;
+        }
+        cursor += got.len_utf8();
+    }
+    Some(cursor)
+}
+
+/// Every sentinel occurrence in one comment-stripped source, as
+/// `(start, end, sentinel)`, in `SENTINELS` order.
+///
+/// **One matcher, and it is the one the audit runs.** This body used to be
+/// written out five times — once in `occurrences`, twice in the near-miss probe,
+/// once in the fixture test and once in the taxonomy-module check. The probe
+/// therefore exercised its own copy, so a change made here was covered by no
+/// near-miss case at all while the test's doc claimed it probed "the matcher".
+///
+/// Folding is `to_ascii_lowercase`, never `to_lowercase`. The lexicon is pure
+/// ASCII so nothing is lost, and ASCII folding is **length-preserving** — which
+/// is what keeps these offsets in the same coordinate system as
+/// [`rust_test_spans`]'s. `to_lowercase` is not: a Kelvin sign folds 3 bytes to
+/// 1 and a dotted capital I folds 2 to 3, and review reproduced both directions
+/// moving a site across a span boundary.
+fn sentinel_hits(code: &str) -> Vec<(usize, usize, &'static str)> {
+    let lower = code.to_ascii_lowercase();
+    debug_assert_eq!(lower.len(), code.len(), "ASCII folding preserves length");
+    let mut hits = Vec::new();
+    for sentinel in absence::SENTINELS {
+        let first = sentinel.split(' ').next().expect("a non-empty sentinel");
+        for (at, _) in lower.match_indices(first) {
+            let Some(end) = match_sentinel_at(&lower, at, sentinel) else {
+                continue;
+            };
+            if whole_token(&lower, at, end) {
+                hits.push((at, end, *sentinel));
+            }
+        }
+    }
+    hits
 }
 
 /// Every sentinel occurrence in one file, as `(sentinel, in test scope)`.
@@ -831,8 +1050,7 @@ fn occurrences(path: &Path) -> Vec<(&'static str, bool)> {
     let source = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     let rust = path.extension().and_then(|e| e.to_str()) == Some("rs");
-    let code = strip_comments(&source, rust);
-    let lower = code.to_lowercase();
+    let stripped = strip_comments(&source, rust);
     let whole_file_is_test = if rust {
         rust_file_is_test_only(path)
     } else {
@@ -843,23 +1061,39 @@ fn occurrences(path: &Path) -> Vec<(&'static str, bool)> {
     let spans = if whole_file_is_test || !rust {
         Vec::new()
     } else {
-        rust_test_spans(&code)
+        rust_test_spans(&stripped)
     };
-    let mut found = Vec::new();
-    for sentinel in absence::SENTINELS {
-        for (at, _) in lower.match_indices(sentinel) {
-            if !whole_token(&lower, at, sentinel.len()) {
-                continue;
-            }
+    sentinel_hits(&stripped.code)
+        .into_iter()
+        .map(|(at, _, sentinel)| {
             let in_test =
                 whole_file_is_test || spans.iter().any(|&(start, end)| at >= start && at < end);
-            found.push((*sentinel, in_test));
-        }
-    }
-    found
+            (sentinel, in_test)
+        })
+        .collect()
 }
 
-/// Every `.rs`/`.ts`/`.tsx` file under `dir`, recursively and in sorted order.
+/// Source extensions the walk reads. Every other extension under a surface is
+/// **refused**, never skipped — see [`sources`].
+const WALKED: [&str; 3] = ["rs", "ts", "tsx"];
+
+/// Extensions a bundler on these surfaces would happily build, and which the
+/// walk does not read.
+///
+/// Encountering one is a hard failure rather than a silent skip. Review proved
+/// why: a `.mts` file placed under `web/ui/src/views/health/` carrying three
+/// unadjudicated sentinels — including a verbatim reintroduction of the wording
+/// this audit removed — left the whole suite green. Vite resolves `.mts`,
+/// `.mjs`, `.jsx` and `.cjs` by default, so such a file ships. Refusing is what
+/// turns "the walk did not look there" into a decision someone has to make.
+const REFUSED: [&str; 8] = ["mts", "cts", "mjs", "cjs", "js", "jsx", "svelte", "vue"];
+
+/// Every walked source under `dir`, recursively and in sorted order.
+///
+/// Symlinked directories are not followed. `docs/` in this repository is a
+/// directory symlink, so the pattern is in the house style, and a cycle would
+/// make this loop forever with no panic and no timeout — a hang is the least
+/// diagnosable failure a census can have.
 fn sources(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -867,13 +1101,29 @@ fn sources(dir: &Path) -> Vec<PathBuf> {
         let entries = std::fs::read_dir(&next)
             .unwrap_or_else(|e| panic!("reading {}: {e}", next.display()));
         for entry in entries {
-            let path = entry.expect("a readable directory entry").path();
-            if path.is_dir() {
+            let path = entry
+                .unwrap_or_else(|e| panic!("reading an entry of {}: {e}", next.display()))
+                .path();
+            let kind = std::fs::symlink_metadata(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            if kind.file_type().is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
                 stack.push(path);
-            } else if matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("rs" | "ts" | "tsx")
-            ) {
+                continue;
+            }
+            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            assert!(
+                !REFUSED.contains(&extension),
+                "{} is a source file on an audited surface that the walk does \
+                 not read. Add its extension to WALKED and adjudicate its \
+                 sites, or say in SURFACES why the surface excludes it — a \
+                 file the census cannot see is the one place an absence can \
+                 hide",
+                path.display()
+            );
+            if WALKED.contains(&extension) {
                 out.push(path);
             }
         }
@@ -935,28 +1185,18 @@ fn walk() -> Vec<(String, String, String, usize, usize)> {
 /// nothing a sweep removes makes a wrongly-admitted case start failing.
 #[test]
 fn the_matcher_rejects_its_near_misses() {
-    let rust_sites = |src: &str| -> Vec<&'static str> {
-        let code = strip_comments(src, true).to_lowercase();
-        absence::SENTINELS
-            .iter()
-            .flat_map(|s| {
-                code.match_indices(s)
-                    .filter(|(at, _)| whole_token(&code, *at, s.len()))
-                    .map(move |_| *s)
-            })
+    // `sentinel_hits` is the function `occurrences` runs, not a copy of it.
+    // The earlier version of this test re-implemented the scan inline and so
+    // probed its own duplicate: a change to the real matcher was covered by no
+    // near-miss case, while this doc claimed it probed "the matcher".
+    let sites = |src: &str, rust: bool| -> Vec<&'static str> {
+        sentinel_hits(&strip_comments(src, rust).code)
+            .into_iter()
+            .map(|(_, _, sentinel)| sentinel)
             .collect()
     };
-    let ts_sites = |src: &str| -> Vec<&'static str> {
-        let code = strip_comments(src, false).to_lowercase();
-        absence::SENTINELS
-            .iter()
-            .flat_map(|s| {
-                code.match_indices(s)
-                    .filter(|(at, _)| whole_token(&code, *at, s.len()))
-                    .map(move |_| *s)
-            })
-            .collect()
-    };
+    let rust_sites = |src: &str| sites(src, true);
+    let ts_sites = |src: &str| sites(src, false);
 
     // ADMIT: a rendered sentinel, in a string literal and in a JSX text node.
     assert_eq!(rust_sites(r#"fn f() { "n/a (empty graph)" }"#).len(), 2);
@@ -1003,6 +1243,24 @@ fn the_matcher_rejects_its_near_misses() {
         "a URL's `//` inside a string must not truncate the line"
     );
 
+    // ADMIT, and this one review found: a backtick template literal legally
+    // spans lines, so per-line quote state truncated the continuation at the
+    // URL's own slashes and lost the sentinel after it — a silent miss.
+    assert_eq!(
+        ts_sites("const msg = `see\nhttps://x.example and n/a`;"),
+        ["n/a"],
+        "a template literal carries its string state across the newline"
+    );
+
+    // REFUSE, and this one too: a Rust raw string holds an odd number of `\"`,
+    // so a quote-counting scanner leaves the rest of the line marked as string
+    // — which both admits comment prose and, since the mask feeds the brace
+    // walk, can move a brace out of a test block.
+    assert!(
+        rust_sites("const S: &str = r#\"a \"quote here\"#; // renders n/a").is_empty(),
+        "a raw string is closed by its hash count, not by its next quote"
+    );
+
     // ADMIT, and this one this scanner got wrong: `'` is a lifetime in Rust,
     // not a quote. Treating it as one opens a string that never closes, after
     // which no `//` is stripped and doc prose is reported as a rendering.
@@ -1022,6 +1280,229 @@ fn the_matcher_rejects_its_near_misses() {
         ts_sites(r#"const u = 'https://example.com'; const v = 'n/a';"#),
         ["n/a"],
         "single quotes delimit strings in TypeScript"
+    );
+}
+
+/// **A source file the walk does not read is refused, never skipped.**
+///
+/// Review placed a `.mts` file under `web/ui/src/views/health/` carrying three
+/// unadjudicated sentinels — one of them a verbatim reintroduction of the
+/// wording this audit removed — and the whole suite stayed green. Vite resolves
+/// `.mts`, `.mjs`, `.jsx` and `.cjs` by default, so such a file ships. A file
+/// the census cannot see is the one place an absence can hide, so the walk
+/// refuses rather than skips.
+#[test]
+fn a_source_extension_the_walk_does_not_read_is_refused() {
+    let tmp = tempfile::TempDir::new().expect("temp root");
+    std::fs::write(tmp.path().join("kept.ts"), "export const A = \"n/a\";\n").expect("write");
+    assert_eq!(
+        sources(tmp.path())
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .collect::<Vec<_>>(),
+        ["kept.ts"],
+        "a walked extension is read, and a stylesheet beside it is not a source"
+    );
+
+    std::fs::write(tmp.path().join("hidden.mts"), "export const B = \"n/a\";\n").expect("write");
+    let refused = std::panic::catch_unwind(|| sources(tmp.path()));
+    assert!(
+        refused.is_err(),
+        "a `.mts` file on an audited surface must fail the walk loudly, not \
+         drop out of the census in silence"
+    );
+}
+
+/// **A test-only module keeps its scope when the declaration carries a
+/// visibility, and a dotted directory name does not borrow another file's.**
+///
+/// `rust_file_is_test_only` reads the module tree rather than the filename.
+/// Matching `mod <stem>` exactly missed `pub mod helpers;` and put a test
+/// module's occurrences into the *production* census, where the citation check
+/// would then demand a taxonomy reference from it. And `with_extension` turned
+/// `b.v2/inner.rs` into a lookup of `b.rs` — an unrelated file, whose unrelated
+/// declaration made a production file vanish from the census silently.
+#[test]
+fn a_test_module_is_recognised_by_its_declaration_not_its_name() {
+    let tmp = tempfile::TempDir::new().expect("temp root");
+    let root = tmp.path();
+
+    std::fs::create_dir_all(root.join("a")).expect("mkdir");
+    std::fs::write(
+        root.join("a/mod.rs"),
+        "#[cfg(test)]\npub mod helpers;\n\n#[cfg(test)]\nmod tests;\n\npub mod live;\n",
+    )
+    .expect("write");
+    for leaf in ["helpers", "tests", "live"] {
+        std::fs::write(root.join(format!("a/{leaf}.rs")), "// fixture\n").expect("write");
+    }
+
+    // A dotted directory beside an unrelated `b.rs` that declares `inner`.
+    std::fs::create_dir_all(root.join("b.v2")).expect("mkdir");
+    std::fs::write(root.join("b.v2/inner.rs"), "// fixture\n").expect("write");
+    std::fs::write(root.join("b.rs"), "#[cfg(test)]\nmod inner;\n").expect("write");
+
+    assert_eq!(
+        [
+            rust_file_is_test_only(&root.join("a/helpers.rs")),
+            rust_file_is_test_only(&root.join("a/tests.rs")),
+            rust_file_is_test_only(&root.join("a/live.rs")),
+            rust_file_is_test_only(&root.join("b.v2/inner.rs")),
+        ],
+        [true, true, false, false],
+        "a `pub mod` declaration is still a test-only declaration; a production \
+         module is not one; and `b.v2/inner.rs` is not declared by `b.rs`"
+    );
+}
+
+/// **A brace inside a string literal is text, not a block.**
+///
+/// [`strip_comments`] keeps string bodies because the rendered text lives
+/// there, so the brace walk has to be told which braces are code. Review
+/// reproduced all three consequences of not telling it, and every one of them
+/// arrives from ordinary Rust that carries no sentinel at all.
+#[test]
+fn a_brace_in_a_string_literal_is_not_a_block() {
+    // (1) The loud one: a lone `{` in a test module made the walk run off the
+    // end of the file and abort the audit with a panic that blamed a perfectly
+    // balanced source.
+    let unbalanced_looking = strip_comments(
+        "#[cfg(test)]\nmod tests {\n    fn t() { assert_eq!(\"{\", \"{\"); }\n}\n",
+        true,
+    );
+    assert_eq!(
+        rust_test_spans(&unbalanced_looking).len(),
+        1,
+        "the braces in this source are balanced; only the ones in the string \
+         literal are not, and they are text"
+    );
+
+    // (2) The silent one, and it is the Sprint 72 §5.9 failure class arriving
+    // by a different door: a stray `{` in one test module beside a stray `}` in
+    // the next swallowed the production site between them.
+    let swallowing = strip_comments(
+        "#[cfg(test)]\nmod a {\n    fn t() { let s = \"{\"; }\n}\n\n\
+         fn prod() -> &'static str { \"unscanned\" }\n\n\
+         #[cfg(test)]\nmod b {\n    fn u() { let s = \"}\"; }\n}\n",
+        true,
+    );
+    let spans = rust_test_spans(&swallowing);
+    let production: Vec<&str> = sentinel_hits(&swallowing.code)
+        .into_iter()
+        .filter(|(at, _, _)| !spans.iter().any(|&(start, end)| *at >= start && *at < end))
+        .map(|(_, _, sentinel)| sentinel)
+        .collect();
+    assert_eq!(
+        production,
+        ["unscanned"],
+        "the production site between two test modules must stay production — \
+         it disappearing is a silent miss, which is the one direction a census \
+         may never fail in"
+    );
+
+    // (3) The mis-classifying one: a stray `}` ended the span early and
+    // re-reported every later test occurrence as production.
+    let early_close = strip_comments(
+        "#[cfg(test)]\nmod tests {\n    fn t() { let s = \"}\"; }\n    \
+         fn u() -> &'static str { \"none recorded\" }\n}\n",
+        true,
+    );
+    let spans = rust_test_spans(&early_close);
+    assert!(
+        sentinel_hits(&early_close.code)
+            .into_iter()
+            .all(|(at, _, _)| spans.iter().any(|&(start, end)| at >= start && at < end)),
+        "every occurrence inside the module stays inside its span"
+    );
+}
+
+/// **ASCII folding keeps the sentinel offsets and the span offsets in one
+/// coordinate system.**
+///
+/// `to_lowercase` is not length-preserving: U+212A KELVIN SIGN folds 3 bytes to
+/// 1, and U+0130 folds 2 bytes to 3. The sentinel offsets came from the folded
+/// string and the spans from the unfolded one, so once enough of either
+/// character sits before a site, the two coordinate systems disagree by more
+/// than the distance to the nearest span boundary and the site crosses it.
+/// Review reproduced both directions. No file on the three surfaces contains
+/// such a character today — which is exactly why this is a fixture rather than
+/// a live failure, and why it would have shipped.
+///
+/// The runs are long on purpose: the defect is a *drift* between two offset
+/// systems, so a fixture whose drift is smaller than the gap it has to cross
+/// passes under the broken code and proves nothing. The first draft of this
+/// test used three characters and survived the mutation.
+#[test]
+fn a_character_that_folds_to_a_different_length_does_not_move_a_site() {
+    // Shrinking fold: the production site's folded offset slides *back* into
+    // the test span, and a real site drops out of the production census.
+    let shrinking = "\u{212A}".repeat(40);
+    let source =
+        format!("#[cfg(test)]\nmod t {{ fn x() {{ let _ = \"{shrinking}\"; }} }}\nfn p() -> &'static str {{ \"unscanned\" }}\n");
+    let stripped = strip_comments(&source, true);
+    let spans = rust_test_spans(&stripped);
+    let production: Vec<&str> = sentinel_hits(&stripped.code)
+        .into_iter()
+        .filter(|(at, _, _)| !spans.iter().any(|&(start, end)| *at >= start && *at < end))
+        .map(|(_, _, sentinel)| sentinel)
+        .collect();
+    assert_eq!(
+        production,
+        ["unscanned"],
+        "a production site after a test module full of shrinking characters \
+         must stay production"
+    );
+
+    // Growing fold: a test occurrence's folded offset slides *past* the span's
+    // end and is reported as a production site nobody wrote.
+    let growing = "\u{0130}".repeat(40);
+    let source =
+        format!("#[cfg(test)]\nmod t {{ fn x() {{ let _ = \"{growing}\"; let _ = \"unscanned\"; }} }}\n");
+    let stripped = strip_comments(&source, true);
+    let spans = rust_test_spans(&stripped);
+    assert!(
+        sentinel_hits(&stripped.code)
+            .into_iter()
+            .all(|(at, _, _)| spans.iter().any(|&(start, end)| at >= start && at < end)),
+        "an occurrence inside a test module full of growing characters must \
+         stay inside its span"
+    );
+}
+
+/// **A sentinel the formatter wrapped is still one site.**
+///
+/// Nine of the sixteen sentinels contain a space, and `readout.rs` and
+/// `governance/mod.rs` are written almost entirely in `\`-continued `format!`
+/// strings. A plain substring match needs exactly one space, so a reflow of the
+/// wrong line makes a conformant site invisible — under-capture, the silent
+/// direction. No live site is split today; one edit would do it.
+#[test]
+fn a_sentinel_split_across_lines_is_still_one_site() {
+    let continued = strip_comments(
+        "fn m() -> String { format!(\"violations none \\\n        recorded (no rule \
+         check has run)\") }",
+        true,
+    );
+    assert_eq!(
+        sentinel_hits(&continued.code)
+            .into_iter()
+            .map(|(_, _, sentinel)| sentinel)
+            .collect::<Vec<_>>(),
+        ["none recorded"],
+        "a Rust backslash-continuation joins one rendered sentence; rustc \
+         renders exactly one space there. (`no rule check` is not in the \
+         lexicon — the rendered line says `none recorded (no rule check has \
+         run)` and `none recorded` is the sentinel it uses.)"
+    );
+
+    let wrapped = strip_comments("const t = <p>violations none\n  recorded here</p>;", false);
+    assert_eq!(
+        sentinel_hits(&wrapped.code)
+            .into_iter()
+            .map(|(_, _, sentinel)| sentinel)
+            .collect::<Vec<_>>(),
+        ["none recorded"],
+        "…and a JSX text node the formatter wrapped renders the same sentence"
     );
 }
 
@@ -1081,21 +1562,17 @@ fn a_module_declaration_is_not_a_test_block() {
 /// site vanishes, the fixture collapses onto that baseline, and this fires.
 #[test]
 fn a_new_site_is_detected_even_after_a_test_module() {
-    let code = strip_comments(FIXTURE_WITH_A_SITE_AFTER_THE_TEST_MODULE, true);
-    let spans = rust_test_spans(&code);
-    let lower = code.to_lowercase();
-    let mut found: Vec<(&str, bool)> = Vec::new();
-    for sentinel in absence::SENTINELS {
-        for (at, _) in lower.match_indices(sentinel) {
-            if !whole_token(&lower, at, sentinel.len()) {
-                continue;
-            }
-            found.push((
-                *sentinel,
+    let stripped = strip_comments(FIXTURE_WITH_A_SITE_AFTER_THE_TEST_MODULE, true);
+    let spans = rust_test_spans(&stripped);
+    let found: Vec<(&str, bool)> = sentinel_hits(&stripped.code)
+        .into_iter()
+        .map(|(at, _, sentinel)| {
+            (
+                sentinel,
                 spans.iter().any(|&(start, end)| at >= start && at < end),
-            ));
-        }
-    }
+            )
+        })
+        .collect();
 
     assert!(
         found.contains(&("none recorded", false)),
@@ -1235,7 +1712,7 @@ fn the_corrected_wording_is_gone_from_every_surface() {
         for path in sources(&root.join(dir)) {
             let source = std::fs::read_to_string(&path).expect("a readable source");
             let rust = path.extension().and_then(|e| e.to_str()) == Some("rs");
-            let code = strip_comments(&source, rust);
+            let code = strip_comments(&source, rust).code;
             for (_, before, _, _) in CORRECTIONS {
                 assert!(
                     !code.contains(before),
@@ -1415,26 +1892,22 @@ fn one_condition_has_one_wording_across_the_language_boundary() {
 fn the_taxonomy_module_is_not_a_reporting_site() {
     let source = std::fs::read_to_string(workspace_root().join("logos-core/src/models/quality.rs"))
         .expect("the quality read-model");
-    let code = strip_comments(&source, true).to_lowercase();
-    let declaration = code
+    let code = strip_comments(&source, true).code;
+    let lower = code.to_ascii_lowercase();
+    let declaration = lower
         .find("pub const sentinels")
         .expect("the lexicon is declared here");
-    let end = code[declaration..]
+    let end = lower[declaration..]
         .find("];")
         .expect("a terminated declaration")
         + declaration;
 
-    for sentinel in absence::SENTINELS {
-        for (at, _) in code.match_indices(sentinel) {
-            if !whole_token(&code, at, sentinel.len()) {
-                continue;
-            }
-            assert!(
-                at >= declaration && at < end,
-                "models/quality.rs carries {sentinel:?} outside the SENTINELS \
-                 declaration — it has become a rendering surface and must be \
-                 added to SURFACES rather than left unwalked"
-            );
-        }
+    for (at, _, sentinel) in sentinel_hits(&code) {
+        assert!(
+            at >= declaration && at < end,
+            "models/quality.rs carries {sentinel:?} outside the SENTINELS \
+             declaration — it has become a rendering surface and must be \
+             added to SURFACES rather than left unwalked"
+        );
     }
 }
