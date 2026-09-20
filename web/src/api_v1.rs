@@ -192,8 +192,12 @@ pub(crate) struct HealthModel {
 /// nothing in the payload saying so. That was reproduced during [S-406]'s review
 /// as a no-signal callout beside a fully populated quality grid.
 ///
-/// `status` and `evolution` are read once each and carry no cross-field
-/// invariant with the snapshot, so they stay separate reads.
+/// `status` and `evolution` are read once each and stay separate reads: neither
+/// is an operand of the verdict, so joining them to the snapshot would buy no
+/// atomicity, only a wider read. They are no longer entirely unrelated to it,
+/// though — the staleness label below takes `status.indexed` as its discriminant
+/// and its date from `evolution` — so what that costs is stated there rather
+/// than left to be rediscovered.
 /// `the_health_handler_reads_the_snapshot_once` (in [`crate`]'s test module)
 /// pins the composition.
 ///
@@ -208,9 +212,23 @@ pub(crate) struct HealthModel {
 /// is therefore **discharged as confirmed**, and no field was added here: both
 /// facts the classification needs (`status.indexed` and that date) are already
 /// serialized. The separate reads stay separate: the date qualifies the figures,
-/// it is never an operand of the verdict, so a `scan` landing between them could
-/// move only the date.
+/// it is never an operand of the verdict, so a concurrent `scan` can move the
+/// date and never the figures or the verdict.
 ///
+/// The window is worth naming precisely rather than waving at, because it is
+/// wider than "before the snapshot is read": this handler takes **three** reads
+/// in source order — snapshot, `status`, `evolution` — so a `scan` can land in
+/// either gap, and `scan` reconciles before it scores ([ADR-11]). One landing
+/// between the `status` read and the `evolution` read can therefore re-index the
+/// graph *and* persist a newer row, leaving this one response labelled stale on
+/// the older `status` while dated from the newer row. Bounded (the date only),
+/// self-correcting on the next load, and the accepted price of [CR-135] §3.3
+/// leaving `status`/`evolution` outside the single-read seam. The named remedy,
+/// if that is ever judged too high, is a computed `snapshot_at` on
+/// [`HealthModel`] derived from the evolution report this handler already holds
+/// — no extra read, no change to the seam.
+///
+/// [ADR-11]: ../../docs/specs/architecture/decisions/ADR-11.md
 /// [S-406]: ../../docs/planning/journal.md#s-406-a-readout-names-a-step-that-can-change-what-it-reports
 /// [CR-135]: ../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
 pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
