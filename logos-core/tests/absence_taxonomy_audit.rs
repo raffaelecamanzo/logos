@@ -53,7 +53,16 @@
 //!
 //! It also over-captures deliberately: a sentinel in a type alias, a `case`
 //! label, a JSX text node or a plain identifier is reported, and the census
-//! adjudicates it. A census may be wrong only in the loud direction.
+//! adjudicates it as `NOT A SITE` with the reason. A census may be wrong only
+//! in the loud direction.
+//!
+//! One more limit, and it is about *enforcement* rather than about the scan.
+//! `scripts/gate.sh fast` scopes its test leg to the cargo packages a branch
+//! touched, so this test runs on the session gate only when `logos-core` is in
+//! that set. A branch that edits only `web/ui/src` or only `cli/src` — the
+//! branches most likely to add an absence site — is covered by `gate.sh full`
+//! and by CI's workspace run instead. No placement fixes that under a
+//! package-scoped fast tier, so it is recorded rather than worked around.
 //!
 //! # Why the scanner is not inside a scanned surface
 //!
@@ -67,8 +76,10 @@
 //! # `signalAbsence` is the reference model, not a finding
 //!
 //! Its classification was settled by [CR-135] §3.3 and re-confirmed unchanged
-//! under [S-422]'s story review. [`the_reference_model_is_unchanged`] pins its
-//! source byte-for-byte, and its own suite was run unmodified.
+//! under [S-422]'s story review. [`the_reference_model_is_unchanged`] pins the
+//! whole declaration, reasoning included, as a substring of the file — which is
+//! a statement about its *text*, not about whether the page still calls it. Its
+//! behaviour is defended by its own suite, which was run unmodified.
 //!
 //! [`models::quality::absence`]: logos_core::models::quality::absence
 //! [`absence::SENTINELS`]: logos_core::models::quality::absence::SENTINELS
@@ -187,12 +198,19 @@ const CORRECTIONS: [(&str, &str, &str, &str); 3] = [
     ),
 ];
 
-/// `healthModel.ts`'s reference model, pinned byte-for-byte.
+/// `healthModel.ts`'s reference model, pinned as source text.
 ///
 /// Not a paraphrase and not a behavioural echo: the acceptance criterion is
 /// that this code is **unchanged**, so the check is the source itself. A
 /// re-worded doc comment moves this, which is the intended sensitivity — the
 /// claim being made is about the whole declaration, reasoning included.
+///
+/// What it does **not** claim, because a `contains` cannot: that the page still
+/// calls it. Review bypassed the classifier at its call site
+/// (`signalAbsence({ ...status, indexed: true }, …)`) with this test green; the
+/// SPA's own suite caught that, which is the division of labour intended here —
+/// this guards the reviewed decision's text, `HealthView.test.tsx` guards its
+/// use.
 const SIGNAL_ABSENCE_REFERENCE_MODEL: &str = r#"export type SignalAbsence = "unindexed" | "unscanned" | "no-production-scope";
 
 /**
@@ -752,7 +770,7 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 66] = [
         "no-production-scope",
         2,
         0,
-        "CONFORMANT — THE REFERENCE MODEL, asserted unchanged. Settled by CR-135 §3.3, re-confirmed under S-422's story review, and pinned byte-for-byte by `the_reference_model_is_unchanged`",
+        "CONFORMANT — THE REFERENCE MODEL, asserted unchanged. Settled by CR-135 §3.3, re-confirmed under S-422's story review, and pinned as source text by `the_reference_model_is_unchanged`, its behaviour by its own unmodified suite",
     ),
     (
         "spa",

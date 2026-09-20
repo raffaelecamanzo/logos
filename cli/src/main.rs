@@ -784,12 +784,13 @@ impl Output {
     /// "nothing was evaluated" is not the same claim as a clean evaluation
     /// (NFR-CC-04).
     ///
-    /// The CLI's one absence-reporting site, and it follows the one taxonomy
-    /// rather than restating it — `models::quality::absence` in
-    /// `logos-core/src/models/quality.rs`: it names the cause its own condition
-    /// establishes (R1), names no command the record cannot attribute (R3), and
-    /// never renders the absence as the favourable reading (R4). Enumerated by
-    /// `logos-core/tests/absence_taxonomy_audit.rs`.
+    /// The CLI's one absence-reporting site. It follows the one taxonomy rather
+    /// than restating it — `models::quality::absence` in
+    /// `logos-core/src/models/quality.rs` — and which rules it keeps is
+    /// recorded beside its occurrence counts in
+    /// `logos-core/tests/absence_taxonomy_audit.rs`, so there is one statement
+    /// of the rules and one adjudication of this site, not a third copy here
+    /// that can drift from either.
     pub(crate) fn report_check(
         &self,
         root: &Path,

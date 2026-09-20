@@ -11,8 +11,8 @@
  *
  * Absence wording here follows the one taxonomy rather than restating it:
  * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
- * the closed sentinel vocabulary and the five rules every absence-reporting
- * site keeps. Enumerated from source by
+ * the closed sentinel vocabulary and the rules (R0-R5) every absence-
+ * reporting site keeps. Enumerated from source by
  * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
