@@ -1632,6 +1632,28 @@ fn every_absence_reporting_site_is_enumerated_and_recorded() {
                 "{file} / {sentinel}: the verdict and the production count must \
                  agree about whether there is a site to adjudicate"
             );
+            // The verdict against CORRECTIONS, so the classification is a
+            // checked fact rather than free prose. Without this, relabelling
+            // the one CORRECTED row "CONFORMANT — nothing was ever wrong here"
+            // left the suite green while CORRECTIONS still listed three
+            // corrections in that same file: the table contradicted itself and
+            // the audit reported clean. That is S-435's review finding — "the
+            // classification prose carried no test weight" — recurring in the
+            // story written to learn from it.
+            // Keyed on the SENTINEL, not just the file: `governance/mod.rs`
+            // carries a corrected `n/a` row beside a conformant `no baseline`
+            // row, so "this file has a correction" is too coarse to
+            // adjudicate either.
+            assert_eq!(
+                verdict.starts_with("CORRECTED"),
+                CORRECTIONS
+                    .iter()
+                    .any(|(corrected, _, after, _)| corrected == file
+                        && after.contains(sentinel)),
+                "{file} / {sentinel}: a CORRECTED verdict needs a CORRECTIONS \
+                 entry whose corrected wording carries this sentinel, and a \
+                 row the corrections reach cannot be recorded conformant"
+            );
             (
                 (*surface).to_string(),
                 (*file).to_string(),
@@ -1849,6 +1871,32 @@ fn no_new_absence_state_on_any_surface() {
         "the Health page classifies an absent signal three ways and a \
          non-current one three ways, and adds no fourth to either (CR-135 §7)"
     );
+
+    // `SnapshotCurrency`'s three arms are named interfaces discriminated by a
+    // `cause` field, so a fourth state can be added INSIDE an arm without the
+    // alias line moving. Review did exactly that — `cause: "moved-past" |
+    // "drifted"` — and the pipe count stayed 3 while the Health page began
+    // classifying a non-current snapshot four ways, which is what CR-135 §7
+    // forbids and what this test claims to prevent. So the discriminants are
+    // counted where they are declared.
+    let mut causes: Vec<&str> = model
+        .match_indices("readonly cause:")
+        .map(|(at, marker)| {
+            let tail = &model[at + marker.len()..];
+            &tail[..tail.find(';').expect("a terminated field")]
+        })
+        .flat_map(|declaration| declaration.split('|'))
+        .map(|arm| arm.trim().trim_matches('"'))
+        .filter(|arm| *arm != "undefined")
+        .collect();
+    causes.sort_unstable();
+    assert_eq!(
+        causes,
+        ["indeterminate", "moved-past"],
+        "exactly two tagged causes, plus the untagged de-index arm whose \
+         absent `cause` is its discriminant (CR-135 §3.2). A third tag is a \
+         fourth Health state however it is spelled"
+    );
 }
 
 /// **One condition, one wording — including across the language boundary.**
@@ -1862,10 +1910,25 @@ fn no_new_absence_state_on_any_surface() {
 #[test]
 fn one_condition_has_one_wording_across_the_language_boundary() {
     let root = workspace_root();
-    let cli = std::fs::read_to_string(root.join("logos-core/src/governance/readout.rs"))
-        .expect("the readout source");
-    let spa = std::fs::read_to_string(root.join("web/ui/src/views/dashboard/dashboardModel.ts"))
-        .expect("the Dashboard model");
+    // Comment-stripped, like every other file-reading check in this module.
+    // Reading raw source made this satisfiable by a COMMENT: review reworded
+    // `render_age`'s literal, left the old sentence behind as a `//` line, and
+    // the two surfaces genuinely drifted with this test — the only defender of
+    // the cross-boundary property — still green. The Rust side has no other
+    // defender: `readout.rs` and `read_only_accessors.rs` both assert only
+    // `contains("implausibly old")`, which survives the rewording.
+    let cli = strip_comments(
+        &std::fs::read_to_string(root.join("logos-core/src/governance/readout.rs"))
+            .expect("the readout source"),
+        true,
+    )
+    .code;
+    let spa = strip_comments(
+        &std::fs::read_to_string(root.join("web/ui/src/views/dashboard/dashboardModel.ts"))
+            .expect("the Dashboard model"),
+        false,
+    )
+    .code;
     for phrase in [
         "at an unknown age (recorded ahead of now — check the clock)",
         "at an unknown age (the recorded time is implausibly old — check the store)",
@@ -1873,7 +1936,8 @@ fn one_condition_has_one_wording_across_the_language_boundary() {
         assert!(
             cli.contains(phrase) && spa.contains(phrase),
             "{phrase:?} is one condition's wording and must be byte-identical \
-             on both surfaces (S-433)"
+             on both surfaces, as a rendered literal and not as prose about \
+             one (S-433)"
         );
     }
 }
