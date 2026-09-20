@@ -702,8 +702,20 @@ const HIDING_DECLARATIONS: [(&str, &str); 3] =
 /// skipped. The first draft of this walk skipped it, and an `em`-expressed rung — or
 /// a reformatted `max-width :`, which is valid CSS — then carried whatever it hid
 /// past every assertion below without a word.
-fn header_disclosure_ladder() -> Vec<(String, f64)> {
-    let css = strip_comments(&read("src/shell/Header.module.css"));
+/// Every stylesheet whose classes render into the header row.
+///
+/// The survivor guard below is a claim about what the reader can still SEE in
+/// that row, and the row is not one file: S-317 gave the member selector its own
+/// width concessions in its own module, in the same commit that wrote the guard.
+/// A survivor's stylesheet has to be inside the walk, not exempted by a sentence
+/// next to it.
+const HEADER_ROW_STYLESHEETS: [&str; 2] = [
+    "src/shell/Header.module.css",
+    "src/shell/MemberSelector.module.css",
+];
+
+fn header_disclosure_ladder(stylesheet: &str) -> Vec<(String, f64)> {
+    let css = strip_comments(&read(stylesheet));
     let mut out = Vec::new();
     for (at_rule, body) in top_level_rules(&css) {
         if !at_rule.starts_with("@media") || !at_rule.to_ascii_lowercase().contains("max-width") {
@@ -729,8 +741,9 @@ fn header_disclosure_ladder() -> Vec<(String, f64)> {
 /// The WIDEST rung at which `selector` is dropped — as the viewport narrows it is
 /// the rung reached first, so it is the one that fixes the disclosure order.
 fn header_drops_at(selector: &str) -> Option<f64> {
-    header_disclosure_ladder()
-        .into_iter()
+    HEADER_ROW_STYLESHEETS
+        .iter()
+        .flat_map(|sheet| header_disclosure_ladder(sheet))
         .filter(|(sel, _)| sel == selector)
         .map(|(_, px)| px)
         .reduce(f64::max)
@@ -826,19 +839,60 @@ fn header_drops_the_readout_absent_never_truncated() {
 ///
 /// The ladder counts every mechanism in `HIDING_DECLARATIONS`, not `display` alone —
 /// a `visibility: hidden` on the brand lockup loses the home link just as completely
-/// and once slipped past this assertion. This guards the header's own stylesheet;
-/// the selector and the toggle carry their own modules.
+/// and once slipped past this assertion.
+///
+/// It walks every stylesheet in `HEADER_ROW_STYLESHEETS`, not the header's own.
+/// This guard previously read `Header.module.css` alone while its own message
+/// named the member selector as the survivor that matters — and the selector's
+/// rules live in `MemberSelector.module.css`, a file the same story created width
+/// concessions in. Appending
+///
+/// ```css
+/// @media (max-width: 420px) { .select { display: none } }
+/// ```
+///
+/// to that module removed the selector at the narrowest supported viewport and
+/// left this suite green at 25/25. A survivor guarded by a sentence is not
+/// guarded.
 #[test]
 fn header_hides_nothing_but_the_readout_and_the_brand_subtitle() {
-    let mut hidden: Vec<String> =
-        header_disclosure_ladder().into_iter().map(|(sel, _)| sel).collect();
+    let mut hidden: Vec<String> = HEADER_ROW_STYLESHEETS
+        .iter()
+        .flat_map(|sheet| header_disclosure_ladder(sheet))
+        .map(|(sel, _)| sel)
+        .collect();
     hidden.sort();
     hidden.dedup();
     assert_eq!(
         hidden,
         vec![".brandSub".to_string(), ".status".to_string()],
-        "only the readout and the brand subtitle give way; anything else here is a \
-         survivor the narrow viewport has lost (FR-UI-29, FR-UI-34)",
+        "only the readout and the brand subtitle give way, across every stylesheet \
+         that renders into the header row; anything else here is a survivor the \
+         narrow viewport has lost (FR-UI-29, FR-UI-34)",
+    );
+}
+
+/// The theme toggle is a `Button`, so its module is the third way off the row —
+/// and it is a SHARED component module, where a width rung would be an app-wide
+/// change rather than a header disclosure. Asserted separately, and precisely:
+/// the toggle cannot be dropped from there because nothing there is width-rung'd
+/// at all. If that ever changes, this fails with its own message rather than
+/// surfacing as a confusing failure in the header ladder above.
+#[test]
+fn the_theme_toggles_module_declares_no_width_rung() {
+    let css = strip_comments(&read("src/components/Button.module.css"));
+    let rungs: Vec<String> = top_level_rules(&css)
+        .into_iter()
+        .map(|(at_rule, _)| at_rule)
+        .filter(|at_rule| {
+            at_rule.starts_with("@media") && at_rule.to_ascii_lowercase().contains("width")
+        })
+        .collect();
+    assert!(
+        rungs.is_empty(),
+        "the theme toggle survives to the narrowest supported viewport (FR-UI-29); \
+         `Button.module.css` now declares a width rung, so check whether the toggle \
+         can be dropped from it: {rungs:?}",
     );
 }
 
