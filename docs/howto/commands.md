@@ -1683,8 +1683,12 @@ Two consequences worth knowing:
   not `0`. No blessed baseline reads `no baseline saved`, not a delta against
   zero. A baseline scored under a different metric version or threshold set reads
   `not comparable` with no delta invented.
-- **The violations are as of your last [`check`](#check---rules-file---allow-no-rules)**, and say so — with a
-  date. Re-evaluating the rules re-materialises the derived policy graph, which
+- **The violations are as of the last recorded rule check**, and say so — with a
+  date. (The last *recorded* one: [`scan`](#scan) replaces the violation set too,
+  so the run behind the line is not necessarily a
+  [`check`](#check---rules-file---allow-no-rules) you invoked, and the line
+  deliberately names no command — see [the violations line](#the-violations-line-in-full)
+  below.) Re-evaluating the rules re-materialises the derived policy graph, which
   is a write, so the readout reports what was last recorded rather than paying a
   write to look current. What it adds is *how stale* that is, so you can tell a
   live finding from an archaeological one. Run
@@ -1703,7 +1707,7 @@ is nothing to score because no graph was built:
 
 ```text
 $ logos quality-report --hook-json    # rendered
-logos quality report: signal n/a (empty graph) · no baseline saved · violations none recorded (no check has run)
+logos quality report: signal n/a (empty graph) · no baseline saved · violations none recorded (no rule check has run)
 
 $ logos quality-report                # the read-model
   "signal": null,
@@ -1737,7 +1741,7 @@ $ logos status                        # the same store, in the same breath
   "edge_count": 8,
 
 $ logos quality-report --hook-json    # rendered
-logos quality report: signal n/a (no production code — 8 node(s) indexed, 3 test function(s) excluded) · no baseline saved · violations none recorded (no check has run)
+logos quality report: signal n/a (no production code — 8 node(s) indexed, 3 test function(s) excluded) · no baseline saved · violations none recorded (no rule check has run)
 
 $ logos quality-report                # the read-model
   "signal": null,
@@ -1769,29 +1773,60 @@ Neither line names a next command. For `empty-graph` the step is the obvious
 state** — writing production code does — and naming one that cannot would be
 exactly the misdirection [FR-EH-04](../specs/requirements/FR-EH-04.md) forbids.
 
-**The violations line, in full** ([FR-IN-07](../specs/requirements/FR-IN-07.md),
-[CR-096](../requests/CR-096-recorded-check-marker.md)). Every
-[`check`](#check---rules-file---allow-no-rules) records a marker — the run's
-time, the `HEAD` it saw, and how many violations it found — and the readout
-renders one of four lines from it:
+#### The violations line, in full
+
+[FR-IN-07](../specs/requirements/FR-IN-07.md),
+[CR-096](../requests/CR-096-recorded-check-marker.md) and
+[CR-140](../requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md)
+govern this line. Every run that replaces the violation set records a marker —
+its time, the `HEAD` it saw, how many violations it found, and **what it
+evaluated** — and the readout renders one of these lines from it:
 
 ```text
-rule violations: 3 (as of `logos check` at HEAD ff657f5, 6 days ago)
-rule violations: 0 — clean `logos check` at HEAD e5eddac, 4 minutes ago
-rule violations: 3 (as of `logos check` at HEAD ff657f5, 6 days ago; measured against a different tree — HEAD is now a1b2c3d)
-rule violations: none recorded (no `logos check` has run)
+rule violations: 0 of 12 rule(s) evaluated — clean, at HEAD e5eddac, 4 minutes ago
+rule violations: 3 of 12 rule(s) evaluated, at HEAD ff657f5, 6 days ago
+rule violations: 3 of 12 rule(s) evaluated, at HEAD ff657f5, 6 days ago; measured against a different tree — HEAD is now a1b2c3d
+rule violations: no rules contract authored — no pass is stated, at HEAD e5eddac, just now
+rule violations: a rules contract present, authoring no rules — no pass is stated, at HEAD e5eddac, just now
+rule violations: evaluated set unknown (this marker predates its recording) — no pass is stated, at HEAD e5eddac, just now
+rule violations: none recorded (no rule check has run)
 ```
 
-Four rules govern which one you get, and each exists to stop the readout
-asserting something it cannot establish:
+Rules govern which one you get, and each exists to stop the readout asserting
+something it cannot establish:
 
-- **A clean check may be stated as clean — but only from the marker.** A run
-  that found nothing records `violation_count = 0`, which is precisely what an
-  empty findings table cannot express: [`check`](#check---rules-file---allow-no-rules)
-  clears and rewrites that table, so a clean run and a project nobody ever
-  checked leave it identically empty. With the marker the distinction is a
-  recorded fact, so the readout states it. Without one it says **no check has
-  run** — never `0 violations`, and never a clean result.
+- **A clean check may be stated as clean — but only from the marker, and only
+  with its denominator.** A run that found nothing records
+  `violation_count = 0`, which is precisely what an empty findings table cannot
+  express: [`check`](#check---rules-file---allow-no-rules) clears and rewrites
+  that table, so a clean run and a project nobody ever checked leave it
+  identically empty. With the marker the distinction is a recorded fact, so the
+  readout states it. Without one it says **no rule check has run** — never
+  `0 violations`, and never a clean result.
+- **A count without its denominator is not a result.** `0` is only a pass over
+  a contract that authored rules to evaluate
+  ([FR-GV-03](../specs/requirements/FR-GV-03.md): *"clean means a contract was
+  evaluated and held; it never means nothing was evaluated"*), so the line
+  carries the rule count it was measured over. Three states have no denominator
+  to carry, and each is named rather than rendered as a zero:
+  - **no rules contract authored** — the state
+    [`check`](#check---rules-file---allow-no-rules) exits `4` on, printing
+    *"nothing was evaluated"*. The readout now agrees with it instead of calling
+    the same run clean.
+  - **a rules contract present, authoring no rules** — what [`init`](#init--i---hooks---workspace---yes---exclude-glob)
+    writes by default, so the ordinary state of a freshly initialised project.
+    It is a *configured* project that enforces nothing, which is not the same
+    situation as an unconfigured one, and the two are never collapsed.
+  - **evaluated set unknown** — a marker written before the evaluated set was
+    recorded, which is what every store upgraded in place carries until its next
+    run. Unknown is rendered as unknown: never clean, and never zero.
+- **The line names no command.** The marker is written by whichever run last
+  replaced the violation set, and [`scan`](#scan) does that as well as
+  [`check`](#check---rules-file---allow-no-rules) — so a command name in the
+  sentence would attribute the run to something you may never have invoked
+  (`init` → `index` → `scan`, with no `check` at any point, produced exactly
+  that). The `HEAD`, the age and the denominator are what you can act on, and
+  they are what the line carries.
 - **Staleness is a property of the tree, not just the clock.** When the marker's
   `HEAD` differs from your current `HEAD`, the line says the finding was
   *measured against a different tree*. With only an age, a check against the
@@ -1817,9 +1852,12 @@ asserting something it cannot establish:
 
 A store written before the marker was introduced has findings but no marker. It
 needs no re-index: those rows carry their own timestamp, so they are dated
-straight away — but with no recorded `HEAD` they are attributed to no tree, and
-no clean check can be claimed from them until the next
-[`check`](#check---rules-file---allow-no-rules).
+straight away — but with no recorded `HEAD` they are attributed to no tree, no
+evaluated set is known for them, and no clean check can be claimed from them
+until the next [`check`](#check---rules-file---allow-no-rules). The same holds,
+one migration later, for a store whose marker predates the evaluated set: it
+upgrades in place, reads *evaluated set unknown*, and starts carrying a
+denominator from its next run onwards.
 
 Reading all of this **writes nothing**: the marker's row count and content are
 as unchanged by a `quality-report` as the snapshot series is. Reading a run is

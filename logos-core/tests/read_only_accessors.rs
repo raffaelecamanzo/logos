@@ -590,6 +590,311 @@ fn repeated_readouts_leave_the_marker_unchanged() {
     assert_eq!(metric_snapshot_count(tmp.path()), snapshots_before);
 }
 
+// ── the rendered evaluated set ([CR-140] §3.2, [FR-IN-07], S-437 T2) ────────
+//
+// The four states end to end, through a REAL store and the REAL rendering —
+// `readout.rs`'s unit tests pin the wording against constructed read-models,
+// and these pin that a genuine `check_rules` run over each fixture reaches the
+// arm it should. Asserted against the rendered `additionalContext`, never
+// against the marker row, which is T1's own falsifiability surface.
+
+/// A `.logos/rules.toml` that exists and authors **no** rules — every example
+/// commented out, which is exactly what `logos init`'s default template writes.
+/// The `notes/sprint-test-72.md` Finding 1a second transcript reached this
+/// state through `logos init` rather than by inventing a shape.
+fn write_contract_authoring_zero_rules(repo: &Path) {
+    std::fs::write(
+        repo.join(".logos/rules.toml"),
+        "# Everything is optional: an omitted constraint is simply not enforced.\n\
+         # [constraints]\n\
+         # max_cc = 15\n",
+    )
+    .expect("write rules.toml");
+}
+
+/// A contract authoring rules the fixture **satisfies** — the only genuinely
+/// clean state, and the one that must carry its denominator.
+fn write_satisfied_rules(repo: &Path) {
+    std::fs::write(
+        repo.join(".logos/rules.toml"),
+        "[constraints]\nmax_cc = 100\nmax_fn_lines = 200\n",
+    )
+    .expect("write rules.toml");
+}
+
+/// Blank the three evaluated-set columns, leaving the rest of the marker — the
+/// exact read-side shape of a store whose marker was written **before**
+/// migration 21, which is what every existing install has.
+fn blank_the_evaluated_set(repo: &Path) {
+    let conn = Connection::open(repo.join(".logos/logos.db")).expect("open logos.db");
+    conn.execute(
+        "UPDATE check_run SET checked_rules = NULL, rules_present = NULL, operation = NULL",
+        [],
+    )
+    .expect("blank the evaluated set");
+}
+
+/// The `rule violations:` line of the rendered session-start context — the
+/// surface [CR-140] CRA-01 requires these assertions be made against.
+fn rendered_violations_line(engine: &Engine) -> String {
+    rendered_violations_both_channels(engine).1
+}
+
+/// The violations statement on **both** rendered channels: the one-line
+/// `systemMessage` a human reads, and the `additionalContext` line the agent
+/// gets.
+///
+/// Both, not just the second. The two channels share one production helper, so
+/// an end-to-end test of `additionalContext` alone is a test of the rendering
+/// *through* the channel that happens to be covered — the summary line, which
+/// is the half a person actually sees at session start, was never exercised
+/// against a real store. Asserting both here means a channel that stopped
+/// carrying the state would fail on a real store and not only on a constructed
+/// read-model.
+fn rendered_violations_both_channels(engine: &Engine) -> (String, String) {
+    let payload = engine.quality_report_hook_payload().expect("payload renders");
+    let summary = payload
+        .system_message
+        .split(" · ")
+        .find(|part| part.starts_with("violations "))
+        .unwrap_or_else(|| {
+            panic!(
+                "the summary carries a violations segment: {}",
+                payload.system_message
+            )
+        })
+        .to_string();
+    let context = payload.hook_specific_output.additional_context;
+    let line = context
+        .lines()
+        .find(|line| line.trim_start().starts_with("rule violations:"))
+        .unwrap_or_else(|| panic!("the readout carries a violations line: {context}"))
+        .trim()
+        .to_string();
+    (summary, line)
+}
+
+/// **Arm (a), end to end** — `notes/sprint-test-72.md` Finding 1a: a real
+/// `check_rules` run against a store with no contract exits `4` printing
+/// *"nothing was evaluated"*, leaves a marker, and used to render that marker
+/// as ``0 — clean `logos check```. It now names the state.
+#[test]
+fn a_real_run_with_no_contract_renders_as_that_state_not_as_clean() {
+    let tmp = indexed_repo();
+    assert!(
+        !tmp.path().join(".logos/rules.toml").exists(),
+        "the fixture must genuinely have no contract, or this proves nothing"
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains("no rules contract authored"),
+            "the vacuous state is named on both channels (CRA-01): {channel}"
+        );
+        assert!(
+            !channel.contains("clean"),
+            "and the same binary no longer says 'nothing was evaluated' and 'clean' \
+             in one breath (FR-GV-03): {channel}"
+        );
+        assert!(
+            !channel.contains("violations: 0") && !channel.contains("violations 0"),
+            "nor renders it as a bare zero (FR-GV-22): {channel}"
+        );
+    }
+}
+
+/// **Arm (b), end to end** — a present contract authoring zero rules, the
+/// `logos init` default. Exit `0`, and still not a pass.
+#[test]
+fn a_real_run_over_a_contract_authoring_zero_rules_is_its_own_state() {
+    let tmp = indexed_repo();
+    write_contract_authoring_zero_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let report = engine.check_rules(None, true).expect("check runs");
+    assert!(
+        report.rules_present,
+        "the fixture must genuinely carry a contract, or this is arm (a) again"
+    );
+    assert_eq!(
+        report.checked_rules, 0,
+        "authoring no rules must genuinely evaluate none: {report:?}"
+    );
+
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains("a rules contract present, authoring no rules"),
+            "the ordinary state of a fresh project is named (CRA-02): {channel}"
+        );
+        assert!(
+            !channel.contains("no rules contract authored"),
+            "and never collapsed into the unconfigured state: {channel}"
+        );
+        assert!(!channel.contains("clean"), "a denominator of zero is no pass: {channel}");
+    }
+}
+
+/// **Arm (c), end to end** — a real clean run over N > 0 rules states the clean
+/// result **with N**, read from the report rather than hardcoded so the two
+/// cannot drift ([NFR-CC-04], CRA-03).
+#[test]
+fn a_real_clean_run_states_its_denominator() {
+    let tmp = indexed_repo();
+    write_satisfied_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let report = engine.check_rules(None, true).expect("check runs");
+    assert!(report.violations.is_empty(), "the fixture passes its own contract");
+    assert!(
+        report.checked_rules > 0,
+        "the contract must genuinely evaluate rules, or this is a vacuous arm"
+    );
+
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains(&format!("0 of {} rule(s) evaluated", report.checked_rules)),
+            "the clean figure carries the denominator the run reported: {channel}"
+        );
+        assert!(channel.contains("clean"), "and this one IS clean: {channel}");
+    }
+}
+
+/// **Arm (d), end to end** — a marker written **before** migration 21. An
+/// existing install is the common case, and rendering its absent evaluated set
+/// favourably is this story's own subject ([CR-140] CRA-05).
+///
+/// Built by blanking the three columns on a store whose run was genuinely
+/// clean over a real contract — so the store is exactly one that WOULD render
+/// as clean if the rendering fell back to zero, which is the mutation this
+/// pins.
+#[test]
+fn a_pre_migration_marker_renders_as_unknown_never_clean_and_never_zero() {
+    let tmp = indexed_repo();
+    write_satisfied_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+    assert!(
+        rendered_violations_line(&engine).contains("clean"),
+        "the store must read as clean BEFORE the columns are blanked, or the \
+         assertion below is about nothing"
+    );
+
+    blank_the_evaluated_set(tmp.path());
+    let (summary, line) = rendered_violations_both_channels(&engine);
+    for channel in [&summary, &line] {
+        assert!(
+            channel.contains("evaluated set unknown"),
+            "an unrecorded evaluated set is unknown, not zero (CRA-05): {channel}"
+        );
+        assert!(!channel.contains("clean"), "and licenses no pass: {channel}");
+        assert!(
+            !channel.contains("violations: 0") && !channel.contains("violations 0"),
+            "and is never rendered as a zero: {channel}"
+        );
+    }
+}
+
+/// The rendered violations line **names no command**, on a real store, in every
+/// state ([FR-IN-07], CRA-04).
+///
+/// The end-to-end half of the unit test of the same name. `scan` is run last on
+/// purpose: it writes the marker too (`notes/sprint-test-72.md` Finding 1b),
+/// which is exactly how a readout came to name a ``logos check`` that was never
+/// invoked.
+#[test]
+fn the_rendered_violations_line_names_no_command_on_a_real_store() {
+    let tmp = indexed_repo();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+
+    let mut lines = Vec::new();
+    let (summary, context) = rendered_violations_both_channels(&engine);
+    lines.extend([summary, context]);
+    engine.check_rules(None, true).expect("check runs");
+    let (summary, context) = rendered_violations_both_channels(&engine);
+    lines.extend([summary, context]);
+    write_satisfied_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine restarts with the contract");
+    engine.scan(true).expect("scan runs and writes the marker too");
+    let (summary, context) = rendered_violations_both_channels(&engine);
+    lines.extend([summary, context]);
+
+    for line in &lines {
+        for command in ["logos check", "logos scan", "logos gate", "`logos", "check_rules"] {
+            assert!(
+                !line.contains(command),
+                "the violations line names no command, and named `{command}`: {line}"
+            );
+        }
+    }
+}
+
+/// [CR-140] CRA-08, end to end: rendering every one of the four states leaves
+/// the widened marker **byte-identical**, column for column.
+///
+/// `repeated_readouts_leave_the_marker_unchanged` proves it for one state; this
+/// proves the arms added by T2 did not smuggle a write into any of the others.
+#[test]
+fn rendering_every_evaluated_set_state_persists_nothing() {
+    for prepare in [
+        // arm (a): no contract at all
+        (|_: &Path| {}) as fn(&Path),
+        // arm (b): a contract authoring nothing
+        write_contract_authoring_zero_rules,
+        // arm (c): a contract the fixture satisfies
+        write_satisfied_rules,
+        // arm (d): a marker with no evaluated set — blanked after the run below
+        write_satisfied_rules,
+    ] {
+        let tmp = indexed_repo();
+        prepare(tmp.path());
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        engine.check_rules(None, true).expect("check runs");
+
+        let marker_before = check_run_state(tmp.path());
+        assert_eq!(marker_before.0, 1, "every one of these states records a marker");
+        assert_marker_coverage(&marker_before);
+        let violations_before = violation_count(tmp.path());
+        let snapshots_before = metric_snapshot_count(tmp.path());
+
+        for _ in 0..3 {
+            engine.quality_readout().expect("readout");
+            engine.quality_report_hook_payload().expect("hook payload");
+        }
+
+        assert_eq!(
+            check_run_state(tmp.path()),
+            marker_before,
+            "reading a state is not running one — every marker column is untouched \
+             (FR-GV-21, CR-140 CRA-08)"
+        );
+        assert_eq!(violation_count(tmp.path()), violations_before);
+        assert_eq!(metric_snapshot_count(tmp.path()), snapshots_before);
+    }
+
+    // The pre-migration arm separately: its fixture is defined by a write that
+    // happens AFTER the run, so it cannot share the loop's shape above.
+    let tmp = indexed_repo();
+    write_satisfied_rules(tmp.path());
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.check_rules(None, true).expect("check runs");
+    blank_the_evaluated_set(tmp.path());
+    let marker_before = check_run_state(tmp.path());
+    assert_marker_coverage(&marker_before);
+
+    for _ in 0..3 {
+        engine.quality_report_hook_payload().expect("hook payload");
+    }
+    assert_eq!(
+        check_run_state(tmp.path()),
+        marker_before,
+        "a pre-migration marker is not re-stamped by being read (CR-140 CRA-08)"
+    );
+}
+
+
 // ── metric side: latest_metrics / latest_scan / latest_gate ──────────────────
 
 /// On a never-`scan`-ned store the read-only accessors honestly report "no
