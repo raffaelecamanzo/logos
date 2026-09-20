@@ -1850,6 +1850,7 @@ fn wiki_generation_calls_are_separable_from_the_surfaces_they_would_be_summed_wi
         .into_iter()
         .map(|r| EventRecord { at: NOW - 60, ..r })
         .collect();
+    #[cfg_attr(not(feature = "agents"), allow(unused_mut))]
     let mut expected_surfaces = vec!["wikigen", "web", "mcp"];
     rows.push(EventRecord {
         at: NOW - 60,
