@@ -16,6 +16,7 @@ import type {
   ScanResult,
   StatusInfo,
 } from "../../api/types.ts";
+import { UNKNOWN_AGE_AHEAD_OF_NOW, parseSecs } from "../dashboard/dashboardModel.ts";
 
 /**
  * Which absence a null gate signal / empty metric grid actually is.
@@ -56,36 +57,123 @@ export function signalAbsence(status: StatusInfo, evolution: EvolutionReport): S
 }
 
 /**
- * A populated signal that describes a graph which is **no longer indexed**.
+ * Why a **populated** signal is not asserted to be a current reading.
  *
  * The staleness twin of [`SignalAbsence`](#signalabsence), and deliberately a
  * *separate* question from it ([CR-135] §3.3): `signalAbsence` classifies why
  * there is **no** signal and is untouched here; this classifies a signal that
- * exists but that `status.indexed` says describes a graph that has since been
- * de-indexed. Conflating the two is the exact error [S-406]'s review caught —
- * `status.indexed` is a whole-graph fact, and it answers staleness, never cause.
+ * exists but that the payload says does not describe the graph as it now
+ * stands. Conflating the two is the exact error [S-406]'s review caught.
  *
  * The figures are **labelled, not suppressed**: they are genuine history, and
  * hiding them would discard real information while adding a fourth cause to a
  * three-way absence classification just settled under review ([CR-135] §10).
+ * Every arm below renders the *same* band — chip, figures, note — so no fourth
+ * Health state is added either ([CR-135] §7): only the chip and the sentence
+ * differ.
+ *
+ * - `de-indexed` — `status.indexed` is false: the graph these figures describe
+ *   is gone (S-422, [CR-135] §3.2). **Unchanged by S-436**, and evaluated
+ *   first, so a de-indexed graph still reports de-indexed rather than the
+ *   wording below.
+ * - `moved-past` — the graph was indexed or synced **after** the snapshot was
+ *   recorded. See {@link snapshotStaleness} for what that does and does not
+ *   establish.
+ * - `indeterminate` — the comparison cannot be made at all. Neither `current`
+ *   nor a date is rendered; `detail` says which fact is missing.
+ *
+ * Every arm carries `date`, and the indeterminate arm's is `null` **by type**:
+ * "renders no date" is then a fact the compiler holds rather than a rule the
+ * renderer is trusted to follow.
  *
  * [CR-135]: ../../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
  */
-export interface StaleSnapshot {
-  /** The snapshot's UTC calendar date, `YYYY-MM-DD`; `null` when the payload
-   *  carries no dated point to take it from — an undated label, never a
-   *  fabricated date (NFR-CC-04). */
-  date: string | null;
-}
+export type SnapshotCurrency = DeIndexed | MovedPast | Indeterminate;
 
 /**
- * Classify a **populated** signal as describing a graph that is no longer
- * indexed, or `null` for the ordinary case.
+ * `status.indexed` is false: the graph these figures describe is gone (S-422,
+ * [CR-135] §3.2).
  *
- * `null` means "render exactly as before": every caller branches on it, so the
- * staleness wording cannot reach an indexed project. Derived once for the whole
- * page, like `signalAbsence`, so the gate band and the quality grid cannot
- * disagree about whether what they show is current.
+ * **Unchanged by S-436 down to the value** — it carries a date and nothing
+ * else, which is exactly what S-422's tests pin with `toEqual({ date })`. That
+ * is deliberate: it makes this story's claim to have left the de-index branch
+ * alone a fact the existing suite checks rather than one the notes assert. The
+ * absent `cause` is therefore this arm's discriminant; adding a tag would have
+ * meant editing the very tests that guard the claim.
+ */
+export interface DeIndexed {
+  readonly date: string | null;
+  readonly cause?: undefined;
+  readonly detail?: undefined;
+}
+
+/** An index or sync ran **after** the snapshot was recorded (S-436). Always
+ *  dated: an undated snapshot cannot be compared and is `Indeterminate`. */
+export interface MovedPast {
+  readonly date: string;
+  readonly cause: "moved-past";
+  /** Never set: only the indeterminate arm has a fact to report as missing.
+   *  Declared so `cause` and `detail` both read across the union without a
+   *  narrowing dance at every call site. */
+  readonly detail?: undefined;
+}
+
+/** The comparison cannot be made at all (S-436). `date` is `null` by type, so
+ *  no date can reach the renderer; `detail` names the fact that is missing. */
+export interface Indeterminate {
+  readonly date: null;
+  readonly cause: "indeterminate";
+  readonly detail: string;
+}
+
+/** The indeterminate arm's three sentences — the missing fact, never a guess at
+ *  what it would have been (NFR-CC-04).
+ *
+ *  The clock case borrows [S-433]'s shipped phrase verbatim by importing it
+ *  rather than restating it: `last_sync_at` is a file **mtime**, a stamp ahead
+ *  of now is routine on a copied tree or a restored backup, and that is the
+ *  same condition S-433 already named for the Dashboard's freshness line. One
+ *  product, one wording for one condition.
+ *
+ *  [S-433]: ../dashboard/dashboardModel.ts */
+const INDETERMINATE = {
+  clock: `the last index or sync is ${UNKNOWN_AGE_AHEAD_OF_NOW}`,
+  noIndexTime: "no index or sync time is recorded",
+  undatedSnapshot: "the last snapshot carries no date to compare against",
+} as const;
+
+/**
+ * Classify a **populated** signal as not-current, or `null` for the ordinary
+ * case.
+ *
+ * `null` means "render exactly as before": every caller branches on it, so none
+ * of the wording below can reach a project whose snapshot the graph has not
+ * moved past. Derived once for the whole page, like `signalAbsence`, so the
+ * gate band and the quality grid cannot disagree about whether what they show
+ * is current.
+ *
+ * **The discriminant is the timestamp pair, not the counts.** Comparing
+ * `MetricSnapshot.node_count` against `StatusInfo.node_count` was proposed in
+ * Sprint 72's review and is **rejected**, recorded here so it is not
+ * re-proposed: the snapshot's count is the **production-scoped** metric graph
+ * with `is_test` vertices dropped ([FR-QM-08], pinned by
+ * `logos-core/src/metrics/tests.rs`), while `StatusInfo.node_count` is the
+ * **whole** graph. They differ on every project that has tests, so that
+ * comparison fires everywhere and measures nothing.
+ *
+ * **It detects disagreement, never currency.** An index or sync that ran after
+ * the snapshot may have changed nothing at all, and this reports `moved-past`
+ * just the same — so it **over-reports**. That is the safe direction
+ * ([NFR-RA-05] prefers it to false assurance) and it is why the rendered
+ * wording claims only that the graph has moved past the snapshot, never that
+ * the figures are proven stale. The test *"over-reports a re-index that changed
+ * nothing — a KNOWN over-report, never a staleness proof"* pins the
+ * over-report, so the label cannot later be read as precision it does not have.
+ *
+ * An **implausibly old** index stamp — [S-433]'s other degradation — is
+ * deliberately *not* a fourth arm. It is not among the conditions this story
+ * scopes, and `last_full_index_at` is written by Logos itself from the system
+ * clock, so unlike the future-dated mtime it is not a shape real trees produce.
  *
  * The date comes from the evolution series' **last** point. That is the same
  * `metric_snapshots` row the gate verdict and the scan result are projected from
@@ -94,15 +182,64 @@ export interface StaleSnapshot {
  * separately from the snapshot (`web/src/api_v1.rs`), so it dates the label
  * rather than feeding the verdict: a `scan` landing between the two reads could
  * only move the date, never the figures.
+ *
+ * `nowUnix` is defaulted rather than required so that the de-index arm — which
+ * returns before any clock is consulted — keeps its two-argument call shape.
+ * Callers that reach the arms below pass it, as `DashboardView` does for
+ * `freshnessStatement`.
+ *
+ * [FR-QM-08]: ../../../../docs/specs/requirements/FR-QM-08.md
+ * [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+ * [S-433]: ../dashboard/dashboardModel.ts
  */
-export function snapshotStaleness(status: StatusInfo, evolution: EvolutionReport): StaleSnapshot | null {
-  if (status.indexed) return null;
-  return { date: snapshotDate(evolution) };
+export function snapshotStaleness(
+  status: StatusInfo,
+  evolution: EvolutionReport,
+  nowUnix: number = Math.floor(Date.now() / 1000),
+): SnapshotCurrency | null {
+  // S-422's condition, unchanged and evaluated FIRST: the two conditions
+  // compose, and a de-indexed graph reports de-indexed ([CR-135] §3.2).
+  if (!status.indexed) return { date: snapshotDate(evolution) };
+  const snapshot = lastSnapshot(evolution);
+  if (snapshot === null) return { date: null, cause: "indeterminate", detail: INDETERMINATE.undatedSnapshot };
+  const basis = indexBasis(status, nowUnix);
+  if (basis.at === null) return { date: null, cause: "indeterminate", detail: basis.detail };
+  if (basis.at > snapshot.secs) return { date: snapshot.date, cause: "moved-past" };
+  return null;
 }
 
-/** The last recorded snapshot's UTC calendar date, or `null` when the series is
- *  empty or the stored instant is not a representable calendar date.
- *  Module-private: the one seam onto this fact is `snapshotStaleness`.
+type IndexBasis = { readonly at: number } | { readonly at: null; readonly detail: string };
+
+/**
+ * The instant to compare the snapshot against — the **later** of the last full
+ * index and the last incremental sync — or the indeterminate sentence saying
+ * why there is none.
+ *
+ * The later of the two, because either one running after the snapshot moves the
+ * graph past it. A field present but not unix seconds is treated as absent,
+ * which is `parseSecs`'s own contract and what `freshnessStatement` already
+ * does with it — not a second reading of the same field.
+ *
+ * A stamp ahead of `nowUnix` makes the whole comparison indeterminate rather
+ * than falling back to the other field: a clock that cannot be trusted for one
+ * stamp cannot be trusted for its sibling either, and the alternative is to
+ * pick whichever reading happens to be reassuring.
+ */
+function indexBasis(status: StatusInfo, nowUnix: number): IndexBasis {
+  let latest: number | null = null;
+  for (const field of [status.last_full_index_at, status.last_sync_at]) {
+    const secs = parseSecs(field);
+    if (secs === null) continue;
+    if (secs > nowUnix) return { at: null, detail: INDETERMINATE.clock };
+    if (latest === null || secs > latest) latest = secs;
+  }
+  return latest === null ? { at: null, detail: INDETERMINATE.noIndexTime } : { at: latest };
+}
+
+/** The last recorded snapshot's instant and its UTC calendar date, or `null`
+ *  when the series is empty or the stored instant is not a representable
+ *  calendar date. Module-private: the seams onto this fact are
+ *  `snapshotStaleness` and `snapshotDate`.
  *
  *  Both guards are load-bearing, and the second is not the first. `getTime()`
  *  is `NaN` only outside the ±8.64e15 ms range; *inside* it, a year outside
@@ -111,14 +248,22 @@ export function snapshotStaleness(status: StatusInfo, evolution: EvolutionReport
  *  prefix then returns a garbled fragment — `"+010000-01"` — rather than a
  *  date. That is a fabricated figure, which is exactly what this seam promises
  *  never to produce ([NFR-CC-04]), so the year is checked before the slice. */
-function snapshotDate(evolution: EvolutionReport): string | null {
+function lastSnapshot(evolution: EvolutionReport): { secs: number; date: string } | null {
   const last = evolution.snapshots[evolution.snapshots.length - 1];
   if (last === undefined) return null;
   const at = new Date(last.created_at * 1000);
   if (Number.isNaN(at.getTime())) return null;
   const year = at.getUTCFullYear();
   if (year < 0 || year > 9999) return null;
-  return at.toISOString().slice(0, 10);
+  return { secs: last.created_at, date: at.toISOString().slice(0, 10) };
+}
+
+/** The last recorded snapshot's UTC calendar date, or `null` when there is no
+ *  point to take one from — an undated label, never a fabricated date. One
+ *  projection of {@link lastSnapshot}, so the de-index arm's date and the
+ *  moved-past arm's date cannot be derived two different ways. */
+function snapshotDate(evolution: EvolutionReport): string | null {
+  return lastSnapshot(evolution)?.date ?? null;
 }
 
 /** One row of the quality-signal grid: a metric name and its value, or `null` for

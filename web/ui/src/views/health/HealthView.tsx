@@ -10,8 +10,11 @@
  * non-gated pointer to Files & Risk, then the signal-evolution trend — and its
  * honest states (a gate and a metric grid with nothing to show name the step that
  * would produce it — `logos scan` on a populated graph, `logos index` on an empty
- * one, FR-EH-04/CR-130; a signal that survived a de-index is labelled as history
- * and dated rather than shown as a current verdict, FR-EH-04/CR-135; an ADR-21
+ * one, FR-EH-04/CR-130; a populated signal the graph no longer matches is
+ * labelled rather than shown as a current verdict, in one band whose sentence
+ * names which of three facts establishes that — the graph was de-indexed, or it
+ * was indexed/synced after the snapshot, or the comparison could not be made at
+ * all, which is the one arm that carries no date, FR-EH-04/CR-135/S-436; an ADR-21
  * metric drop-out is a muted `n/a`, never a zero; no snapshots is an honest empty
  * state). Every read is GET-only — loading the
  * view mutates no store (ADR-28); sorting the tables is client-side over the full
@@ -28,7 +31,9 @@ import type {
 } from "../../api/types.ts";
 import {
   Badge,
+  type BadgeTone,
   Callout,
+  type CalloutTone,
   Card,
   DataTable,
   DEFAULT_TABLE_PAGE_SIZE,
@@ -48,7 +53,7 @@ import {
   type MetricDetail,
   type MetricRow,
   type SignalAbsence,
-  type StaleSnapshot,
+  type SnapshotCurrency,
 } from "./healthModel.ts";
 import styles from "./Health.module.css";
 
@@ -71,14 +76,17 @@ function Health({ data }: { data: HealthModel }) {
   // on different fields (`gate.signal` vs `scan.metrics.empty`) and must not offer
   // two different explanations for the same absence (FR-EH-04, CR-130).
   const absence = signalAbsence(data.status, data.evolution);
-  // The other half of the same discipline, on the POPULATED branch: a signal
-  // survives a de-index, so `status.indexed` decides whether what both cards show
-  // is a current reading or history (CR-135 §3.2). `null` = the ordinary case.
-  const stale = snapshotStaleness(data.status, data.evolution);
+  // The other half of the same discipline, on the POPULATED branch: figures
+  // survive both a de-index and a re-index, so one derivation decides whether
+  // what both cards show is a current reading (CR-135 §3.2, S-436). `null` =
+  // the ordinary case. The clock is read here, in the view, and passed in — the
+  // shape `DashboardView` uses for `freshnessStatement`, so the model stays a
+  // projection of its arguments.
+  const currency = snapshotStaleness(data.status, data.evolution, Math.floor(Date.now() / 1000));
   return (
     <div className={styles.view}>
-      <GateBand gate={data.gate} absence={absence} stale={stale} />
-      <MetricsCard scan={data.scan} absence={absence} stale={stale} />
+      <GateBand gate={data.gate} absence={absence} currency={currency} />
+      <MetricsCard scan={data.scan} absence={absence} currency={currency} />
       <Callout label="Non-gated tier" tone="muted">
         <span>
           Per-file commit/churn/risk detail now lives in <a href="/files">Files &amp; Risk</a>.
@@ -96,19 +104,21 @@ function Health({ data }: { data: HealthModel }) {
  *  whichever of the three absences `signalAbsence` establishes, each naming only a
  *  step that changes it, and the unscorable case naming none.
  *
- *  A signal that survives a de-index is neither of those: the figures are real,
- *  but the graph they describe is gone. That band keeps every figure — PASS/FAIL
- *  among them, as plain text — and drops only what asserts they are CURRENT: the
- *  pass/fail badge with its green/red tone, and the word "current" before the
- *  signal (CR-135 §3.2). The third branch below. */
+ *  A signal the graph has moved on from is neither of those: the figures are
+ *  real, but they do not describe the graph as it now stands. That band keeps
+ *  every figure — PASS/FAIL among them, as plain text — and drops only what
+ *  asserts they are CURRENT: the pass/fail badge with its green/red tone, and
+ *  the word "current" before the signal (CR-135 §3.2, S-436). The third branch
+ *  below, one band for all three causes — the chip and the sentence differ, the
+ *  structure does not, so no fourth Health state is added (CR-135 §7). */
 function GateBand({
   gate,
   absence,
-  stale,
+  currency,
 }: {
   gate: GateResult;
   absence: SignalAbsence;
-  stale: StaleSnapshot | null;
+  currency: SnapshotCurrency | null;
 }) {
   if (gate.signal === null) {
     return (
@@ -126,15 +136,16 @@ function GateBand({
   // `Badge` "red — fail / error / stale", and every other STALE chip in the SPA
   // (Coverage, hotspot cells, Wiki) is red. Orange is PENDING here, not stale.
   // (CR-135 §3.2, FR-EH-04.)
-  if (stale !== null) {
+  if (currency !== null) {
+    const chip = currencyChip(currency);
     return (
-      <Callout label="Gate" tone="signal">
+      <Callout label="Gate" tone={chip.band}>
         <span className={styles.gateBody}>
-          <Badge tone="red">STALE</Badge>
+          <Badge tone={chip.tone}>{chip.label}</Badge>
           <span className="mono">
             {gate.passed ? "PASS" : "FAIL"} · signal {gate.signal} vs baseline {baseline}
           </span>
-          <StaleNote stale={stale} />
+          <StaleNote currency={currency} />
         </span>
       </Callout>
     );
@@ -174,18 +185,67 @@ function gateAbsence(absence: SignalAbsence) {
   }
 }
 
-/** The one stale sentence both cards render, so the gate band and the quality grid
- *  cannot describe the same snapshot two ways. Undated rather than fabricated when
- *  the payload carries no point to date it by (NFR-CC-04), and it names
- *  `logos index` — the step that changes what is reported (FR-EH-04). */
-function StaleNote({ stale }: { stale: StaleSnapshot }) {
-  const subject = stale.date === null ? "the last recorded snapshot" : `the snapshot of ${stale.date}`;
+/** The one not-current sentence both cards render, so the gate band and the quality
+ *  grid cannot describe the same snapshot two ways. Undated rather than fabricated
+ *  when the payload carries no point to date it by (NFR-CC-04), and each arm names
+ *  only the step that changes what IT reports (FR-EH-04).
+ *
+ *  Each sentence claims exactly what its own condition establishes and no more:
+ *  `de-indexed` knows the graph is gone; `moved-past` knows only that the graph
+ *  was indexed since — never that the figures have actually changed, which is why
+ *  it says so out loud rather than calling them stale; `indeterminate` knows
+ *  nothing about currency, so it renders neither the word "current" nor a date,
+ *  and names no command because none of the three missing facts is fixed by one. */
+function StaleNote({ currency }: { currency: SnapshotCurrency }) {
+  if (currency.cause === "indeterminate") {
+    return (
+      <span className="muted">
+        Describes the last recorded snapshot — {currency.detail}, so whether these figures are
+        current cannot be established
+      </span>
+    );
+  }
+  if (currency.cause === "moved-past") {
+    return (
+      <span className="muted">
+        Describes the snapshot of {currency.date} — the graph has been indexed or synced since, so
+        these figures are not established as a current reading (an index that changed nothing would
+        read the same way); run <code>logos scan</code>
+      </span>
+    );
+  }
+  const subject =
+    currency.date === null ? "the last recorded snapshot" : `the snapshot of ${currency.date}`;
   return (
     <span className="muted">
       Describes {subject} — the graph is no longer indexed, so these figures are not a current
       reading; run <code>logos index</code>
     </span>
   );
+}
+
+/** The chip and band tone for each not-current cause — the only thing that varies
+ *  between them, so the three share one rendered structure (CR-135 §7).
+ *
+ *  `de-indexed` keeps S-422's signal/red STALE chip verbatim: `Callout` documents
+ *  "signal — red (GATE/FAIL, STALE, …)", `Badge` "red — fail / error / stale", and
+ *  every other STALE chip in the SPA is red. `moved-past` is the same tone for the
+ *  same reason — do not read these figures as current — under a chip that states
+ *  the fact rather than claiming a staleness proof. `indeterminate` is the muted
+ *  tone the absence branch already uses ("n/a / info"): nothing is established, so
+ *  a red chip would overclaim in the other direction. No new tone, no new
+ *  component, no fourth state. */
+function currencyChip(currency: SnapshotCurrency): { band: CalloutTone; tone: BadgeTone; label: string } {
+  switch (currency.cause) {
+    // The de-index arm is the untagged one — see `DeIndexed`, whose value shape
+    // S-422's tests pin — so `undefined` is its case, not a default.
+    case undefined:
+      return { band: "signal", tone: "red", label: "STALE" };
+    case "moved-past":
+      return { band: "signal", tone: "red", label: "MOVED PAST" };
+    case "indeterminate":
+      return { band: "muted", tone: "muted", label: "UNVERIFIED" };
+  }
 }
 
 /** The quality grid's honest empty state, one per absence — the same classification
@@ -206,16 +266,16 @@ function metricsAbsence(absence: SignalAbsence) {
 /** The per-metric grid + aggregate, then the folded structural drill-downs. With no
  *  metrics to show, the honest empty state for whichever absence this is — the
  *  metrics are what `scan` persists, not what `index` builds (FR-EH-04, CR-130).
- *  With metrics over a de-indexed graph, the same grid under the gate band's own
- *  stale label, so the two cards cannot disagree about what they describe. */
+ *  With metrics the graph has moved on from, the same grid under the gate band's
+ *  own label, so the two cards cannot disagree about what they describe. */
 function MetricsCard({
   scan,
   absence,
-  stale,
+  currency,
 }: {
   scan: ScanResult;
   absence: SignalAbsence;
-  stale: StaleSnapshot | null;
+  currency: SnapshotCurrency | null;
 }) {
   if (scan.metrics.empty) {
     return <Card title="Quality signal">{metricsAbsence(absence)}</Card>;
@@ -256,9 +316,9 @@ function MetricsCard({
   return (
     <>
       <Card title="Quality signal">
-        {stale !== null && (
+        {currency !== null && (
           <p className={styles.staleNote}>
-            <StaleNote stale={stale} />
+            <StaleNote currency={currency} />
           </p>
         )}
         <p className={styles.aggregate}>

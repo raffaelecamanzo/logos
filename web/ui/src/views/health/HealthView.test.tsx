@@ -2,7 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
-import { Badge, Callout } from "../../components/index.ts";
+import { Badge, type BadgeTone, Callout, type CalloutTone } from "../../components/index.ts";
 import { HealthView } from "./HealthView.tsx";
 
 function mv(n: number): MetricValue {
@@ -33,7 +33,7 @@ function metrics(over: Partial<MetricSnapshot> = {}): MetricSnapshot {
 }
 
 const HEALTH: HealthModel = {
-  status: { indexed: true, file_count: 1, node_count: 1, edge_count: 1, db_path: "", db_size_bytes: 0, last_full_index_at: null, last_sync_at: null, graph_revision: 1, refs_total: 0, refs_resolved: 0, refs_unresolved: 0, resolution_coverage: 0, total_line_count: null, source_line_count: null, test_line_count: null, freshness: "", warnings: [] },
+  status: { indexed: true, file_count: 1, node_count: 1, edge_count: 1, db_path: "", db_size_bytes: 0, last_full_index_at: "50", last_sync_at: null, graph_revision: 1, refs_total: 0, refs_resolved: 0, refs_unresolved: 0, resolution_coverage: 0, total_line_count: null, source_line_count: null, test_line_count: null, freshness: "", warnings: [] },
   gate: { passed: true, saved: false, signal: 8000, baseline_signal: 7800, test_function_count: 12, threshold: null, epsilon: 0, freshness: "", message: "", warnings: [] },
   scan: {
     signal: 8000,
@@ -76,12 +76,12 @@ function stub(model: HealthModel) {
 // CSS-module hash (the `ScoreBar` tone test's shape). One matcher rather than a
 // hand-mirrored twin per spec, so the stale pin and the ordinary pin cannot
 // drift apart in what they mean by "this tone".
-function chipClass(tone: "red" | "orange" | "green") {
+function chipClass(tone: BadgeTone) {
   const { container } = render(<Badge tone={tone}>REF</Badge>);
   return within(container).getByText("REF").className;
 }
 
-function bandClass(tone: "signal" | "warm" | "pass") {
+function bandClass(tone: CalloutTone) {
   const { container } = render(
     <Callout label="Gate" tone={tone}>
       <span>ref</span>
@@ -316,6 +316,121 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.queryByText(/no longer indexed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
     expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+  });
+
+  // ── S-436: a snapshot the graph has MOVED PAST ────────────────────────────
+  // The question CR-135 §3.2 left open. `status.indexed` is TRUE here, so before
+  // S-436 this rendered a green PASS and the literal words "current 8000 vs
+  // baseline 7800" over figures describing a graph the store no longer holds.
+  it("labels both cards as a snapshot the graph has moved past, dated, naming `logos scan` (S-436)", async () => {
+    const m = clone();
+    m.status.indexed = true; // still indexed — this is NOT the de-index branch
+    m.evolution.snapshots[1].created_at = 1_758_240_000; // 2025-09-19 UTC
+    m.status.last_full_index_at = String(1_758_240_000 + 86_400); // indexed a day later
+    stub(m);
+    render(<HealthView />);
+    // One classification, two cards — the same discipline the de-index arm has.
+    expect((await screen.findAllByText(/the graph has been indexed or synced since/i)).length).toBe(2);
+    expect(screen.getAllByText(/Describes the snapshot of 2025-09-19/i).length).toBe(2);
+    // …naming the step that changes what IS reported: a new snapshot, not a new index.
+    expect(screen.getAllByText("logos scan").length).toBe(2);
+    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    // The figures stay — labelled, never discarded.
+    expect(screen.getByText("MOVED PAST")).toBeInTheDocument();
+    expect(screen.getByText(/PASS · signal 8000 vs baseline 7800/)).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Quality metrics" })).toBeInTheDocument();
+    // …but the unqualified current-verdict wording is gone. This is the exact
+    // string the defect rendered.
+    expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
+    // It claims what the comparison establishes and no more: the graph moved on.
+    // It does not claim the figures are stale, and it says the over-report out loud.
+    expect(screen.queryByText("STALE")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/an index that changed nothing would read the same way/i).length).toBe(2);
+  });
+
+  // The de-index branch is UNCHANGED and the two conditions COMPOSE: a graph
+  // that is both de-indexed and indexed-since still reports de-indexed.
+  it("still reports de-indexed, not moved past, when both conditions hold (S-436 / CR-135 §3.2)", async () => {
+    const m = clone();
+    m.status.indexed = false;
+    m.status.last_full_index_at = String(1_000_000_000_000); // long after the snapshot
+    stub(m);
+    render(<HealthView />);
+    expect((await screen.findAllByText(/no longer indexed/i)).length).toBe(2);
+    expect(screen.getByText("STALE")).toBeInTheDocument();
+    expect(screen.queryByText("MOVED PAST")).not.toBeInTheDocument();
+    expect(screen.queryByText(/has been indexed or synced since/i)).not.toBeInTheDocument();
+  });
+
+  // ── S-436: the indeterminate arm ──────────────────────────────────────────
+  // `last_sync_at` is a FILE MTIME, so a stamp ahead of now is routine on a
+  // copied tree or a restored backup — the real shape, not a contrived one.
+  it("renders neither `current` nor a date when a future-dated last_sync_at makes the comparison indeterminate (S-436)", async () => {
+    const m = clone();
+    m.status.indexed = true;
+    m.status.last_sync_at = String(Math.floor(Date.now() / 1000) + 86_400);
+    stub(m);
+    render(<HealthView />);
+    // S-433's wording for this condition, reused rather than restated.
+    expect(
+      (await screen.findAllByText(/at an unknown age \(recorded ahead of now — check the clock\)/i)).length,
+    ).toBe(2);
+    expect(screen.getByText("UNVERIFIED")).toBeInTheDocument();
+    // Neither `current`…
+    expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
+    // …nor a stale date, of either arm's wording.
+    expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("STALE")).not.toBeInTheDocument();
+    expect(screen.queryByText("MOVED PAST")).not.toBeInTheDocument();
+    // No command: none of the three missing facts is fixed by running one.
+    expect(screen.queryByText("logos scan")).not.toBeInTheDocument();
+    expect(screen.queryByText("logos index")).not.toBeInTheDocument();
+    // The figures are still there.
+    expect(screen.getByText(/PASS · signal 8000 vs baseline 7800/)).toBeInTheDocument();
+  });
+
+  it("renders the indeterminate band muted, not the signal/red the two established causes carry (S-436)", async () => {
+    const m = clone();
+    m.status.last_full_index_at = null;
+    m.status.last_sync_at = null;
+    stub(m);
+    render(<HealthView />);
+    const chip = await screen.findByText("UNVERIFIED");
+    // Nothing is established, so a red chip would overclaim in the other
+    // direction — muted is the tone the absence branch already uses. Same
+    // hash-agnostic matcher the two established causes are pinned with.
+    expect(chip.className).toBe(chipClass("muted"));
+    expect(chip.className).not.toBe(chipClass("red"));
+    expect(chip.closest("section")?.className).toBe(bandClass("muted"));
+    expect(chip.closest("section")?.className).not.toBe(bandClass("pass"));
+    expect(screen.getAllByText(/no index or sync time is recorded/i).length).toBe(2);
+  });
+
+  // The third indeterminate sentence. The other two are pinned in rendered DOM
+  // above; without this one, `INDETERMINATE.undatedSnapshot`'s wording could be
+  // changed — or its cause special-cased away in `StaleNote` — with the suite
+  // green. That gap has already bitten this file once, for the undated de-index
+  // fallback, which is why every arm is now pinned where it is RENDERED.
+  it("renders the undated-snapshot indeterminate sentence, the third arm, in the DOM (S-436)", async () => {
+    const m = clone();
+    m.status.indexed = true;
+    m.status.last_full_index_at = "150"; // usable, and after the snapshots it has none of
+    m.evolution.snapshots = []; // a populated signal with no point to date it by
+    stub(m);
+    render(<HealthView />);
+    const notes = await screen.findAllByText(/the last snapshot carries no date to compare against/i);
+    expect(notes.length).toBe(2);
+    expect(screen.getByText("UNVERIFIED")).toBeInTheDocument();
+    // Neither `current` nor a date, and no command — the arm's whole contract.
+    expect(screen.queryByText(/current 8000 vs baseline/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Describes the snapshot of/i)).not.toBeInTheDocument();
+    // "Names no command" is asserted of the NOTE, not of the page: with no
+    // snapshots the evolution card legitimately names `logos scan` for its own,
+    // different absence, and a page-wide matcher would read that as this arm's.
+    for (const note of notes) expect(note.querySelector("code")).toBeNull();
+    // …and the other two indeterminate sentences are NOT the one rendered.
+    expect(screen.queryByText(/no index or sync time is recorded/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/recorded ahead of now/i)).not.toBeInTheDocument();
   });
 
   it("keeps a distinct state naming `logos index` for a genuinely empty graph (FR-EH-04)", async () => {
