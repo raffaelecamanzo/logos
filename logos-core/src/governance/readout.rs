@@ -211,6 +211,24 @@ fn render_signal_absence(absence: Option<&SignalAbsence>) -> String {
     }
 }
 
+/// The signal cell — the figure, or the clause naming its absence.
+///
+/// One spelling for both channels, for the same reason
+/// [`render_signal_absence`] consolidates the clause and `headline_count`
+/// computes its number once: two channels that derive one cell separately are a
+/// pair that can drift, and on the violations line that drift shipped.
+///
+/// The *baseline* fork below is deliberately not consolidated this way — there
+/// the two channels render genuinely different text (`no baseline saved` versus
+/// a full sentence naming `gate --save`), so a shared helper would have to
+/// re-introduce the split it was meant to remove.
+fn render_signal(readout: &QualityReadout) -> String {
+    match readout.signal {
+        Some(signal) => signal.to_string(),
+        None => render_signal_absence(readout.signal_absence.as_ref()),
+    }
+}
+
 /// Render the one-line, user-visible summary of a readout ([CR-095]).
 ///
 /// Every absent value is named rather than defaulted: an absent signal reads
@@ -220,10 +238,7 @@ fn render_signal_absence(absence: Option<&SignalAbsence>) -> String {
 /// nothing is stated as clean — with its age, and never bare ([CR-096],
 /// [BR-41]).
 fn render_summary(readout: &QualityReadout) -> String {
-    let mut parts = vec![match readout.signal {
-        Some(signal) => format!("signal {signal}"),
-        None => format!("signal {}", render_signal_absence(readout.signal_absence.as_ref())),
-    }];
+    let mut parts = vec![format!("signal {}", render_signal(readout))];
     match (readout.baseline_signal, readout.delta) {
         (Some(baseline), Some(delta)) => {
             parts.push(format!("baseline {baseline}"));
@@ -260,13 +275,7 @@ fn render_summary(readout: &QualityReadout) -> String {
 /// Render the full multi-line readout handed to the agent ([CR-095]).
 fn render_readout(readout: &QualityReadout) -> String {
     let mut out = String::from("logos quality report (session start)\n");
-    match readout.signal {
-        Some(signal) => out.push_str(&format!("  signal:   {signal}\n")),
-        None => out.push_str(&format!(
-            "  signal:   {}\n",
-            render_signal_absence(readout.signal_absence.as_ref())
-        )),
-    }
+    out.push_str(&format!("  signal:   {}\n", render_signal(readout)));
     match readout.baseline_signal {
         Some(baseline) => {
             out.push_str(&format!("  baseline: {baseline}\n"));
