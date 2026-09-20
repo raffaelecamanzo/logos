@@ -481,7 +481,10 @@ mod tests {
         let summary = payload["systemMessage"].as_str().unwrap();
         let context = payload["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
 
-        assert!(summary.contains("signal n/a"), "an empty graph is n/a: {summary}");
+        assert!(
+            summary.contains("signal n/a"),
+            "an unclassified absence is n/a: {summary}"
+        );
         assert!(summary.contains("no baseline saved"), "{summary}");
         assert!(summary.contains("violations none recorded"), "{summary}");
         assert!(
