@@ -9,6 +9,54 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.14] — 2026-09-20
+
+### Added
+- **The governance readout dates its violations and can state a recorded clean check**
+  (S-314, CR-096, FR-IN-07). `quality-report` reports the check run's age and `HEAD`, says
+  when a finding was measured against a *different* tree, and states a clean check only
+  from the recorded marker — absent a marker it says **no check has run**, never
+  "0 violations". Two unusable clock readings degrade explicitly rather than being
+  smoothed into "just now".
+- **The Health page states staleness instead of implying currency** (S-422, CR-135,
+  FR-UI-04). Its gate verdict and quality grid are built from **one** read of the last
+  persisted snapshot, so a concurrent `scan` can no longer render two cards describing
+  different generations. With a signal present over a graph that is no longer indexed,
+  both cards render their figures **labelled**, dated and naming `logos index`.
+- **The app header survives a narrow viewport** (S-317, CR-097, FR-UI-34). `Header.module.css`
+  gains its first media queries and a progressive-disclosure order: the graph-state readout
+  is dropped **whole** before the brand subtitle, never truncated, and the brand lockup,
+  member selector and theme toggle survive to the narrowest supported width.
+
+### Changed
+- **The LOC roll-up distinguishes three cases instead of writing unconditionally**
+  (S-421, CR-134, FR-IX-12). Write on persist, clear over an empty store, and **leave
+  untouched while a previous graph survives** — so an index in which every candidate fails
+  to load no longer reports `total_line_count: 0` beside a correct file count.
+- **The shell's own status read is classified as non-usage telemetry** (S-316, CR-097,
+  FR-OB-09). The app header's `status` request is registered as a self-referential
+  read-model request at the adapter boundary, so rendering chrome stops counting as
+  someone using the tool. `surface` is now required on both `spawn_blocking` hops, making
+  an unclassified handler a build failure.
+- **The promoted topic inventory keys on the committed configured value** (S-424, CR-136,
+  FR-WS-27), closing the last tier of the ADR-52 one-classifier drift: one identify
+  function is now called from both the intra-repo promotion pass and the federation
+  bridge, so a publisher and a subscriber that spell one property differently meet on one
+  topic and the coupling draws as a `publisher → topic → subscriber` hop.
+- **The rust client-call candidacy gate is receiver-grained** (S-423, CR-128, FR-WS-08),
+  following Java's and Go's rule shape: a verb-named call on a non-client receiver no
+  longer promotes a reference merely because its file imports a client crate. Six of the
+  ten arms declaring `http_client_detectors` now scope their receivers.
+
+### Fixed
+- **Reading the Health page could have destroyed the last recorded `check` result.** The
+  write-free contract was guarded per-path — S-314's path on the violations table and
+  marker, S-422's on `metric_snapshots` — and neither covered the union, which is the
+  actual contract. Found at sprint review by restoring the defect: an inserted write left
+  the suite green while every page load would have truncated `violations` and stamped a
+  fabricated recorded-clean marker over it.
+
+
 ### Changed — BREAKING (exit code)
 - **`logos workspace status` / `reachability` / `check` now exit 1 when a member
   could not be opened (CR-100, S-326, FR-WS-16, FR-CL-01).** These commands
