@@ -924,6 +924,43 @@ fn the_health_path_reads_the_snapshot_exactly_once() {
             "`{header}` must read the last persisted snapshot {expected}×: {why} (CR-135 §3.2)"
         );
     }
+
+    // The roster above is a closed list over the functions it NAMES, which is not
+    // the same as a closed list over the module — and the difference is the whole
+    // property. Story review proved it: a one-line helper calling `latest_metrics`
+    // once, called from `latest_health`, leaves every expectation above exactly
+    // correct and the suite green at 21/21, while a Health response takes **two**
+    // reads of the snapshot. The web-side pin cannot see it either — the handler
+    // still names only `latest_health`.
+    //
+    // So the readers are DISCOVERED rather than named, and the roster is asserted
+    // to be all of them. A fourth reader must now be classified here before it can
+    // ship, which is what "an extra read is a defect wherever it lands" requires.
+    let mut readers: Vec<&str> = Vec::new();
+    for line in code.lines() {
+        if !(line.starts_with("fn ") || line.starts_with("pub fn ") || line.starts_with("pub(crate) fn ")) {
+            continue;
+        }
+        // The parameter list opens AFTER the name — `line.find('(')` would take
+        // the one inside `pub(crate)` and slice a header that matches the wrong
+        // function entirely (it did, on the first cut of this assertion).
+        let Some(name_at) = line.find("fn ").map(|at| at + 3) else { continue };
+        let Some(paren) = line[name_at..].find('(').map(|at| name_at + at) else {
+            continue;
+        };
+        if snapshot_reads(fn_body(&code, &line[..=paren])) > 0 {
+            readers.push(line[name_at..paren].trim());
+        }
+    }
+    readers.sort_unstable();
+    assert_eq!(
+        readers,
+        ["latest_gate", "latest_health", "latest_scan"],
+        "exactly these functions read the last persisted snapshot. A new reader is a \
+         new place the Health path can take a second read, so it is classified in the \
+         roster above before it ships — not discovered later as a torn readout \
+         (CR-135 §3.2); found {readers:?}"
+    );
 }
 
 /// CLI/MCP `scan` keeps persisting on every call — the read-only seam is
