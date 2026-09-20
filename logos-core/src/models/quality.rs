@@ -47,9 +47,27 @@ use crate::models::pipeline::RelationCoverage;
 /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
 #[derive(Debug, Default, Serialize)]
 pub struct QualityReadout {
-    /// The freshly computed 0–10000 signal; `None` = "n/a" (empty graph,
-    /// ADR-12) — reported as such, never as a zero.
+    /// The freshly computed 0–10000 signal; `None` = "n/a" ([ADR-12]) —
+    /// reported as such, never as a zero. **Which** absence it is, is
+    /// [`signal_absence`](Self::signal_absence); this field never carries the
+    /// cause, so the two can never state it two ways.
+    ///
+    /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
     pub signal: Option<u32>,
+    /// Why [`signal`](Self::signal) is absent ([CR-138], [FR-EH-04]); `None`
+    /// exactly when a signal is present.
+    ///
+    /// Populated by [`SignalAbsence::classify`] from the very snapshot whose
+    /// `aggregate_signal` is missing, so the cause reported is the one the
+    /// metric computation's own gating condition established. A `None` here
+    /// beside an absent `signal` is a readout assembled without the
+    /// discriminant (a bare [`Default`], in practice): the rendering then names
+    /// **no** cause rather than falling back to the most familiar one, which is
+    /// the defect [CR-138] exists to remove.
+    ///
+    /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+    /// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
+    pub signal_absence: Option<SignalAbsence>,
     /// The blessed baseline signal ([FR-GV-05]); `None` when none is saved.
     ///
     /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
@@ -95,6 +113,126 @@ pub struct QualityReadout {
     /// Degradations (an unreadable store, an absent graph) — never an error:
     /// the report tier reports, it never blocks ([FR-GV-05]).
     pub warnings: Vec<String>,
+}
+
+/// Why a [`QualityReadout`] has no signal to report ([CR-138], [FR-EH-04]).
+///
+/// An absent signal has **two** causes on this surface and only one of them is
+/// an empty graph. Reporting both as "empty graph" is what [FR-EH-04] AC2
+/// forbids — a readout attributing an absence to a cause its own gating
+/// condition has not established — and it is what shipped: a crate whose only
+/// source is `tests/only_tests.rs` reports `indexed: true, node_count: 9` from
+/// `logos status` and `signal n/a (empty graph)` from `quality-report`, in the
+/// same breath ([CR-138] §2).
+///
+/// # Two arms, not three
+///
+/// The Health page classifies the same absence **three** ways
+/// (`unindexed` / `unscanned` / `no-production-scope`, `web/ui/src/views/health/
+/// healthModel.ts`) and is the reference model this vocabulary follows. Its
+/// middle arm cannot arise here: that page reads a *persisted* snapshot, so
+/// "indexed but never scanned" is a state it can be in, while this readout
+/// **computes** its signal on every call ([FR-IN-07] — the non-persisting
+/// report tier) and therefore always has one snapshot's worth of answer.
+///
+/// # Why the first arm is `EmptyGraph` and not `unindexed`
+///
+/// Deliberately not the Health page's spelling, because it is not the Health
+/// page's fact. There `unindexed` means `files > 0 || nodes > 0` is false —
+/// an *index-state* question. Here the established fact is narrower and
+/// stronger: the store holds **no node**, so there is nothing for the metric
+/// graph to have dropped. A store that indexed files but extracted no node from
+/// any of them (unsupported syntax throughout) is `EmptyGraph` here and is not
+/// `unindexed` there, and both are correct about what they can establish —
+/// which is the whole of [FR-EH-04]. Naming the narrower fact is what keeps
+/// this readout from asserting an index state it never read.
+///
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+/// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+/// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum SignalAbsence {
+    /// The store holds **no node**: there is no graph to score, so the metric
+    /// graph's emptiness says nothing beyond the store's own.
+    ///
+    /// `logos index` is the step that changes this, and the rendering names it
+    /// nowhere — the one-line readout has no room for a remediation and the
+    /// full one already carries the freshness line. Naming a command here would
+    /// bring it under [FR-EH-04]'s first AC; naming none does not.
+    EmptyGraph,
+    /// The store holds a graph, but its **production scope** ([FR-QM-08]) is
+    /// empty — every vertex was dropped before scoring, as `is_test`, as a
+    /// derived policy vertex, or as a promoted broker marker.
+    ///
+    /// Both figures are what *establishes* the arm rather than decoration, and
+    /// they are carried rather than recomputed at the rendering:
+    /// `indexed_nodes > 0` is exactly what rules out [`EmptyGraph`](Self::EmptyGraph),
+    /// and `test_functions` is the production filter's own count of what it
+    /// excluded ([FR-QM-07]) — the usual reason the scope came out empty, and
+    /// reported as the count it is even when it is `0` (a graph of nothing but
+    /// derived vertices), never inflated into a claim that every node was a
+    /// test.
+    ///
+    /// **No command changes this state**, so no rendering of it names one — the
+    /// same conclusion the Health page reached for its `no-production-scope`
+    /// arm.
+    ///
+    /// [FR-QM-07]: ../../../docs/specs/requirements/FR-QM-07.md
+    NoProductionScope {
+        /// Nodes the store holds, from [`StoreCounts::nodes`] — the same figure
+        /// `logos status` reports as `node_count`, read from the same query, so
+        /// the two surfaces cannot contradict each other about whether anything
+        /// is indexed. That contradiction is [CR-138]'s reproduction.
+        ///
+        /// [`StoreCounts::nodes`]: crate::graph_store::StoreCounts::nodes
+        indexed_nodes: u64,
+        /// Function/method nodes the production filter excluded as `is_test`
+        /// ([FR-QM-08]) — [`MetricSnapshot::test_function_count`], carried
+        /// verbatim.
+        test_functions: u64,
+    },
+}
+
+impl SignalAbsence {
+    /// Classify the absence behind a snapshot that produced no signal, or
+    /// `None` when it produced one.
+    ///
+    /// # The predicate is the metric's own
+    ///
+    /// The gate is [`MetricSnapshot::empty`] — the *same* field
+    /// [`crate::metrics::compute`] tests to decide whether to emit an
+    /// `aggregate_signal` at all, set from the production metric graph's vertex
+    /// count. It is deliberately not a second opinion computed from
+    /// [`function_count`](MetricSnapshot::function_count),
+    /// [`node_count`](MetricSnapshot::node_count) or a re-read of the store:
+    /// each of those *happens* to agree on today's fixtures and is a different
+    /// question (a graph of production types with no production functions has
+    /// `function_count == 0` and is not empty), and a discriminant that merely
+    /// happens to agree is the defect class [CR-138] exists to close. The
+    /// agreement is pinned by test rather than left to inspection —
+    /// `logos-core/tests/quality_readout_scope.rs`.
+    ///
+    /// `indexed_nodes` is the **store's** node count, the one fact the snapshot
+    /// cannot supply: it describes the graph after the production filter, so on
+    /// both arms it reads zero. Its caller reads it from
+    /// [`GraphStore::counts`](crate::graph_store::GraphStore::counts).
+    ///
+    /// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
+    #[must_use]
+    pub fn classify(metrics: &MetricSnapshot, indexed_nodes: u64) -> Option<Self> {
+        if !metrics.empty {
+            return None;
+        }
+        if indexed_nodes == 0 {
+            return Some(Self::EmptyGraph);
+        }
+        Some(Self::NoProductionScope {
+            indexed_nodes,
+            test_functions: metrics.test_function_count,
+        })
+    }
 }
 
 /// What the readout knows about the [`check`](crate::Engine::check_rules) run
@@ -380,11 +518,30 @@ pub struct MetricSnapshot {
     /// (FR-QM-08): the "N test functions excluded from metrics" count, surfaced
     /// for transparency and persisted on the snapshot (FR-QM-07, NFR-CC-04).
     pub test_function_count: u64,
-    /// The empty-graph honesty flag (`node_count == 0`, ADR-12).
+    /// The empty-scope honesty flag ([ADR-12]): this snapshot's
+    /// [`node_count`](Self::node_count) — the **production** metric graph's, not
+    /// the store's — is zero.
+    ///
+    /// Named carefully, because the distinction is the whole of [CR-138]: a
+    /// populated store whose every vertex is test scope sets this too, and is
+    /// not an empty graph. [`SignalAbsence::classify`] reads *this* field and
+    /// nothing else to decide that a signal is absent, then separates the two
+    /// causes with the store's own node count.
+    ///
+    /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+    /// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
     pub empty: bool,
-    /// The rounded 0–10000 signal (ADR-08); `None` serialises as `null` — the
-    /// "n/a" sentinel for an empty graph, never a misleading ~8033 (ADR-12,
-    /// NFR-CC-04). `Some(0)` is the real zero short-circuit.
+    /// The rounded 0–10000 signal ([ADR-08]); `None` serialises as `null` — the
+    /// "n/a" sentinel emitted exactly when [`empty`](Self::empty) is set, never
+    /// a misleading ~8033 ([ADR-12], [NFR-CC-04]). `Some(0)` is the real zero
+    /// short-circuit.
+    ///
+    /// The two are welded here on purpose: a reader of this field learns *that*
+    /// there is no signal, and [`SignalAbsence`] is the only place that says
+    /// **why**, so the cause has one spelling rather than one per surface.
+    ///
+    /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub aggregate_signal: Option<u32>,
 }
 

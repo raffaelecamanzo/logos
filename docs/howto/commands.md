@@ -1678,9 +1678,10 @@ stays a record of deliberate movements.
 
 Two consequences worth knowing:
 
-- **Nothing absent is defaulted.** An empty graph reads `signal n/a`, not `0`. No
-  blessed baseline reads `no baseline saved`, not a delta against zero. A baseline
-  scored under a different metric version or threshold set reads
+- **Nothing absent is defaulted.** An absent signal reads `signal n/a` with the
+  cause that produced it (see [the signal line](#the-signal-line-in-full) below),
+  not `0`. No blessed baseline reads `no baseline saved`, not a delta against
+  zero. A baseline scored under a different metric version or threshold set reads
   `not comparable` with no delta invented.
 - **The violations are as of your last [`check`](#check---rules-file---allow-no-rules)**, and say so — with a
   date. Re-evaluating the rules re-materialises the derived policy graph, which
@@ -1688,6 +1689,65 @@ Two consequences worth knowing:
   write to look current. What it adds is *how stale* that is, so you can tell a
   live finding from an archaeological one. Run
   [`check`](#check---rules-file---allow-no-rules) when you want current findings.
+
+#### The signal line, in full
+
+There are **two** reasons the signal can be absent, and only one of them is an
+empty graph ([FR-EH-04](../specs/requirements/FR-EH-04.md),
+[CR-138](../requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md)).
+The readout names the one its own reading established, and the machine-readable
+`signal_absence` object carries the same verdict as the rendered line.
+
+**`empty-graph` — the store holds no node.** There is nothing to score because
+there is nothing there:
+
+```text
+$ logos quality-report --hook-json    # rendered
+logos quality report: signal n/a (empty graph) · no baseline saved · violations none recorded (no check has run)
+
+$ logos quality-report                # the read-model
+  "signal": null,
+  "signal_absence": {
+    "cause": "empty-graph"
+  },
+```
+
+**`no-production-scope` — the store holds a graph, but none of it is production
+code.** The metric signal is computed over the **production scope**
+([FR-QM-08](../specs/requirements/FR-QM-08.md)): `is_test` vertices, derived
+policy vertices and promoted broker markers are dropped before scoring. A crate
+whose only source is a test module therefore scores an empty graph while being
+plainly indexed — and says so, carrying the two figures that establish it:
+
+```text
+$ logos status                        # the same store, in the same breath
+  "indexed": true,
+  "node_count": 9,
+  "edge_count": 9,
+
+$ logos quality-report --hook-json    # rendered
+logos quality report: signal n/a (no production code — 9 node(s) indexed, 3 test function(s) excluded) · no baseline saved · violations none recorded (no check has run)
+
+$ logos quality-report                # the read-model
+  "signal": null,
+  "signal_absence": {
+    "cause": "no-production-scope",
+    "indexed_nodes": 9,
+    "test_functions": 3
+  },
+```
+
+`indexed_nodes` is the store's own node count — the very figure
+[`status`](#status) prints, read from the same query, so the two commands cannot
+contradict each other about whether anything is indexed. `test_functions` is what
+the production filter excluded, and is reported as the count it is: `0` there
+means the scope was emptied by something other than tests, not that no test
+exists.
+
+Neither line names a next command. For `empty-graph` the step is the obvious
+[`index`](#index); for `no-production-scope` **no command changes the
+state** — writing production code does — and naming one that cannot would be
+exactly the misdirection [FR-EH-04](../specs/requirements/FR-EH-04.md) forbids.
 
 **The violations line, in full** ([FR-IN-07](../specs/requirements/FR-IN-07.md),
 [CR-096](../requests/CR-096-recorded-check-marker.md)). Every

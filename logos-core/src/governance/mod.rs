@@ -69,8 +69,8 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvolutionPoint,
     EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta, MetricRegression,
-    MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo, TemporalTier,
-    VerifyCensus, VerifyReport, Violation,
+    MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult, SessionInfo,
+    SignalAbsence, TemporalTier, VerifyCensus, VerifyReport, Violation,
 };
 use crate::runtime::Runtime;
 
@@ -2183,7 +2183,18 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
     // alone is irreducibly ambiguous (`check_rules` clears and rewrites it, so
     // a clean run and no run leave it identical); the marker is the only place
     // that distinction lives, which is why both are read here.
-    let (rows, marker) = runtime.submit_read(|store| Ok((store.violations()?, store.check_run()?)))?;
+    //
+    // `counts()` rides along as a third query in the *same* pooled read rather
+    // than a second `submit_read`, so the discriminant below costs no extra
+    // round-trip through the read pool — it adds five indexed `COUNT(*)`
+    // aggregates returned as one row, materialising no rows of its own. Stated
+    // rather than hidden ([CR-138] AC3): the report tier fires at every session
+    // boundary, so an unremarked read here is a cost paid on every one of them.
+    // It is also the *same* query `logos status` derives `node_count` from,
+    // which is what makes the two surfaces agree by construction about whether
+    // anything is indexed — their disagreeing is what [CR-138] reproduced.
+    let (rows, marker, counts) = runtime
+        .submit_read(|store| Ok((store.violations()?, store.check_run()?, store.counts()?)))?;
     let row_count = rows.len();
     let (violations, violation_count) = if rows.is_empty() {
         (None, None)
@@ -2253,6 +2264,11 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
 
     Ok(QualityReadout {
         signal: metrics.aggregate_signal,
+        // Derived from the snapshot that just withheld the signal, never from a
+        // second opinion about what "empty" means — see `SignalAbsence::classify`.
+        // The two fields are set from one expression pair here so a signal and a
+        // cause for its absence can never both be present ([CR-138]).
+        signal_absence: SignalAbsence::classify(&metrics, counts.nodes),
         baseline_signal,
         delta,
         freshness: fresh.line(),

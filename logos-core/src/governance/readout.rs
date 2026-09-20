@@ -20,12 +20,19 @@
 //! those is rendered from the read-model alone — no clock is read and no
 //! subprocess is spawned here — so each case is a constructible fixture.
 //!
+//! Since [CR-138] the **signal** half names its own absence the same way: an
+//! absent signal reads the cause the readout's discriminant established
+//! ([`SignalAbsence`]) rather than the one cause it used to assume, and carries
+//! the figure establishing it. The classification is not made here — it arrives
+//! on the read-model, so this stays a pure function of it.
+//!
 //! [FR-GV-21]: ../../../docs/specs/requirements/FR-GV-21.md
 //! [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
 //! [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
 //! [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
+//! [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
 
-use crate::models::quality::{CheckRun, QualityReadout};
+use crate::models::quality::{CheckRun, QualityReadout, SignalAbsence};
 
 /// How many violation messages the readout lists before truncating. The total is
 /// always reported alongside, and a truncated list says what it dropped — a
@@ -169,17 +176,53 @@ fn headline_count(readout: &QualityReadout, check: Option<&CheckRun>) -> Option<
     }
 }
 
+/// The `n/a` clause for an absent signal, naming the cause the readout's own
+/// discriminant established and carrying the figure that establishes it
+/// ([CR-138], [FR-EH-04]).
+///
+/// One helper for both channels, and for the same reason `headline_count` is
+/// computed once below: a summary and a full readout that derive the same
+/// sentence separately are a pair that can drift, and this one is the sentence
+/// a user reads to decide whether their project is indexed at all.
+///
+/// The `None` case names **no** cause. It is reachable only from a readout
+/// assembled without the discriminant, and defaulting it to the familiar
+/// "empty graph" is precisely what this change removes — an unestablished cause
+/// is reported as absent, not as the most likely one ([NFR-CC-04]).
+///
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
+fn render_signal_absence(absence: Option<&SignalAbsence>) -> String {
+    match absence {
+        None => "n/a".to_string(),
+        Some(SignalAbsence::EmptyGraph) => "n/a (empty graph)".to_string(),
+        // The figures ride with the cause on the same line, never a bare
+        // "no production code": `indexed_nodes` is what rules out an empty
+        // graph, so a reader can check the claim against `logos status`
+        // without a second command.
+        Some(SignalAbsence::NoProductionScope {
+            indexed_nodes,
+            test_functions,
+        }) => format!(
+            "n/a (no production code — {indexed_nodes} node(s) indexed, \
+             {test_functions} test function(s) excluded)"
+        ),
+    }
+}
+
 /// Render the one-line, user-visible summary of a readout ([CR-095]).
 ///
-/// Every absent value is named rather than defaulted: an empty graph reads
-/// `signal n/a`, not `signal 0`; a check nobody ran reads `violations none
-/// recorded (no check has run)`, not `0 violations`. A check that demonstrably
-/// ran and found nothing is stated as clean — with its age, and never bare
-/// ([CR-096], [BR-41]).
+/// Every absent value is named rather than defaulted: an absent signal reads
+/// `signal n/a` with the cause the readout established ([`render_signal_absence`]),
+/// not `signal 0`; a check nobody ran reads `violations none recorded (no check
+/// has run)`, not `0 violations`. A check that demonstrably ran and found
+/// nothing is stated as clean — with its age, and never bare ([CR-096],
+/// [BR-41]).
 fn render_summary(readout: &QualityReadout) -> String {
     let mut parts = vec![match readout.signal {
         Some(signal) => format!("signal {signal}"),
-        None => "signal n/a (empty graph)".to_string(),
+        None => format!("signal {}", render_signal_absence(readout.signal_absence.as_ref())),
     }];
     match (readout.baseline_signal, readout.delta) {
         (Some(baseline), Some(delta)) => {
@@ -219,7 +262,10 @@ fn render_readout(readout: &QualityReadout) -> String {
     let mut out = String::from("logos quality report (session start)\n");
     match readout.signal {
         Some(signal) => out.push_str(&format!("  signal:   {signal}\n")),
-        None => out.push_str("  signal:   n/a (empty graph)\n"),
+        None => out.push_str(&format!(
+            "  signal:   {}\n",
+            render_signal_absence(readout.signal_absence.as_ref())
+        )),
     }
     match readout.baseline_signal {
         Some(baseline) => {
@@ -325,6 +371,9 @@ mod tests {
     fn full_readout() -> QualityReadout {
         QualityReadout {
             signal: Some(8234),
+            // A present signal has no absence to explain; the pair is set
+            // together here exactly as `quality_readout` sets it.
+            signal_absence: None,
             baseline_signal: Some(8100),
             delta: Some(134),
             freshness: "assumed-fresh (no reconcile)".to_string(),
@@ -417,10 +466,14 @@ mod tests {
         }
     }
 
-    /// Nothing absent is ever defaulted: an empty graph reads `n/a`, not `0`; no
-    /// baseline reads "none saved", not a delta against zero; and an unrecorded
-    /// check reads "none recorded", never a truthful-looking "0 violations" —
-    /// which would assert a passing check that may never have run.
+    /// Nothing absent is ever defaulted: an absent signal reads `n/a`, not `0`;
+    /// no baseline reads "none saved", not a delta against zero; and an
+    /// unrecorded check reads "none recorded", never a truthful-looking "0
+    /// violations" — which would assert a passing check that may never have run.
+    ///
+    /// The readout here is a bare `Default`, so it carries no absence
+    /// discriminant either; that the signal line then names no *cause* is
+    /// `an_unclassified_absence_names_no_cause`'s assertion, not this one's.
     #[test]
     fn payload_never_fabricates_an_absent_value() {
         let empty = QualityReadout::default();
@@ -814,5 +867,123 @@ mod tests {
         assert_eq!(short_sha("ff657f5aaaa"), "ff657f5");
         // Char-wise, not byte-wise: a byte slice would panic mid-codepoint.
         assert_eq!(short_sha("ééééééééé"), "ééééééé");
+    }
+
+    // ── The [CR-138] two-arm absence ([FR-EH-04], S-432) ────────────────────
+
+    /// An absent signal with no cause established names **no** cause.
+    ///
+    /// Reachable only from a readout assembled without the discriminant — a
+    /// bare `Default`, which is what the fabrication test above builds. It must
+    /// not fall back to "empty graph": that is the defect this change removes,
+    /// in its purest form, since the fallback would be asserting a store fact
+    /// nothing here ever read.
+    #[test]
+    fn an_unclassified_absence_names_no_cause() {
+        let (summary, context) = channels(&QualityReadout::default());
+        assert!(summary.contains("signal n/a ·"), "unqualified, not guessed: {summary}");
+        assert!(context.contains("signal:   n/a\n"), "and the same in full: {context}");
+        for channel in [&summary, &context] {
+            assert!(
+                !channel.contains("empty graph") && !channel.contains("production"),
+                "a cause nothing established is not invented: {channel}"
+            );
+        }
+    }
+
+    /// The empty-graph arm renders the phrase the readout has always used —
+    /// the one case in which it was always true.
+    #[test]
+    fn the_empty_graph_arm_is_unchanged() {
+        let readout = QualityReadout {
+            signal: None,
+            signal_absence: Some(SignalAbsence::EmptyGraph),
+            ..full_readout()
+        };
+        let (summary, context) = channels(&readout);
+        assert!(summary.contains("signal n/a (empty graph)"), "{summary}");
+        assert!(context.contains("signal:   n/a (empty graph)"), "{context}");
+    }
+
+    /// The production-scope arm names that scope and carries **both** figures
+    /// into **both** channels. The [CR-138] reproduction is the fixture shape:
+    /// nine nodes indexed, three of them test functions, no production code.
+    #[test]
+    fn the_production_scope_arm_names_the_scope_and_carries_its_figures() {
+        let readout = QualityReadout {
+            signal: None,
+            signal_absence: Some(SignalAbsence::NoProductionScope {
+                indexed_nodes: 9,
+                test_functions: 3,
+            }),
+            ..full_readout()
+        };
+        let (summary, context) = channels(&readout);
+        for channel in [&summary, &context] {
+            assert!(
+                !channel.contains("empty graph"),
+                "a populated store is never an empty graph (FR-EH-04 AC2): {channel}"
+            );
+            assert!(
+                channel.contains("no production code — 9 node(s) indexed, 3 test function(s) \
+                                  excluded"),
+                "the cause and both establishing figures, on one line: {channel}"
+            );
+        }
+        // The summary stays one line: the figures ride with the cause, they do
+        // not wrap it onto a second.
+        assert!(!summary.contains('\n'), "still one line: {summary:?}");
+    }
+
+    /// Zero excluded test functions is reported as the count it is. An empty
+    /// production scope over a graph of nothing but derived vertices excludes no
+    /// test, and rendering "every symbol is a test" there would be a fabricated
+    /// explanation of a real absence ([NFR-CC-04]).
+    #[test]
+    fn a_production_scope_emptied_without_tests_still_reports_its_counts() {
+        let readout = QualityReadout {
+            signal: None,
+            signal_absence: Some(SignalAbsence::NoProductionScope {
+                indexed_nodes: 4,
+                test_functions: 0,
+            }),
+            ..full_readout()
+        };
+        let (summary, _) = channels(&readout);
+        assert!(
+            summary.contains("4 node(s) indexed, 0 test function(s) excluded"),
+            "the counts are the counts: {summary}"
+        );
+    }
+
+    /// Both channels render the absence through one helper, so they cannot
+    /// drift into describing one absence two ways — the failure `headline_count`
+    /// already exists to prevent for the violations line.
+    #[test]
+    fn both_channels_render_one_absence_identically() {
+        for absence in [
+            None,
+            Some(SignalAbsence::EmptyGraph),
+            Some(SignalAbsence::NoProductionScope {
+                indexed_nodes: 9,
+                test_functions: 3,
+            }),
+        ] {
+            let readout = QualityReadout {
+                signal: None,
+                signal_absence: absence.clone(),
+                ..full_readout()
+            };
+            let (summary, context) = channels(&readout);
+            let clause = render_signal_absence(absence.as_ref());
+            assert!(
+                summary.contains(&format!("signal {clause}")),
+                "summary carries the one clause: {summary}"
+            );
+            assert!(
+                context.contains(&format!("signal:   {clause}")),
+                "and so does the full readout: {context}"
+            );
+        }
     }
 }
