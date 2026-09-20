@@ -1864,6 +1864,11 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
          never reconciles per call (FR-RC-05); evaluation tools reconcile-then-score"
             .to_string()
     } else {
+        // The taxonomy this wording follows is stated once, in
+        // `models::quality::absence` (S-434): R1 — the condition here is
+        // exactly "nothing is indexed", so naming that cause is established;
+        // R3 — and it is one of the few conditions that does identify a
+        // command, so naming `logos index` is permitted rather than assumed.
         "unindexed: run `logos index` (or any navigation tool, which auto-indexes first, \
          FR-IX-07) to build the graph"
             .to_string()

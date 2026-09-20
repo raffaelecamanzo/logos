@@ -19,6 +19,12 @@
  *
  * Every read here is a GET (ADR-28). In single-root mode this view is unreachable —
  * no nav item is rendered — and it says so honestly if navigated to by hand.
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the rules (R0-R5) every absence-
+ * reporting site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import { useState } from "react";

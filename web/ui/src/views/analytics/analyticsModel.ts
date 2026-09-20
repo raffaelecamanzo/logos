@@ -5,6 +5,12 @@
  * views consume these; nothing here fabricates a figure — an absent value is `n/a`,
  * never a `0` (NFR-RA-05). Read-only by construction (ADR-28). CR-079 removed the
  * reachability×coverage-cross helpers along with the retired scatter view.
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the rules (R0-R5) every absence-
+ * reporting site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import type {

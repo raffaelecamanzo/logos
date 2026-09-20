@@ -19,6 +19,12 @@
  * (FR-CF-06, NFR-SE-07) edited in its own section — never echoed onto this surface.
  *
  * Renders exclusively through the S-193 design system; every read is GET-only.
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the rules (R0-R5) every absence-
+ * reporting site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import { useState } from "react";

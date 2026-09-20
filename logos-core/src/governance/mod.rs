@@ -89,6 +89,40 @@ mod tests;
 /// DL-04): fail iff `current < baseline − EPSILON`.
 const EPSILON: f64 = 1.0;
 
+/// The gate verdict when the signal, the baseline's signal, or both are absent
+/// — the one spelling, for the two gate paths that reach it
+/// ([`models::quality::absence`] R1, R5).
+///
+/// **It names no cause**, and that is the correction [S-434]'s audit made
+/// rather than a wording preference. The condition here is `aggregate_signal`
+/// being `None` on either side, which is [`SignalAbsence`]'s gate and has
+/// **two** causes ([CR-138], [FR-EH-04] AC2): an empty graph, and a populated
+/// graph whose production scope is empty. This message read *"n/a (empty
+/// graph)"* for both — the same claim, one figure over, that [CR-138] filed
+/// against `quality-report`, reproduced here on a store whose only source is a
+/// test module.
+///
+/// Classifying it properly is possible and was **not** done: [`SignalAbsence`]
+/// needs the store's own node and file counts, which the gate does not read and
+/// which this sentence has no room to carry (R2 requires an arm to carry what
+/// establishes it, so a named cause here would have to bring its figures). The
+/// readout already publishes the classified form. Removing an unestablished
+/// attribution loses nothing true; adding a store read to the gate to keep a
+/// word is not what an audit is for.
+///
+/// Held as one constant because two gate paths render it — the read-only
+/// verdict [`gate_from_snapshot`] (reached from [`Engine::latest_gate`]) and
+/// the persisting [`gate`]. They carried byte-identical literals, which is a
+/// pair that can drift and the exact shape R5 exists to stop.
+///
+/// [`models::quality::absence`]: crate::models::quality::absence
+/// [`SignalAbsence`]: crate::models::quality::SignalAbsence
+/// [`Engine::latest_gate`]: crate::Engine::latest_gate
+/// [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
+/// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
+/// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
+const SIGNAL_OR_BASELINE_ABSENT: &str = "signal or baseline is n/a — informational pass";
+
 /// Per-metric noise floor for regression *detail* reporting ([FR-GV-05]):
 /// movements smaller than this are float residue, not regressions.
 ///
@@ -2112,8 +2146,7 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&MetricSnapshot>) -> Res
                     };
                 }
                 _ => {
-                    result.message =
-                        "signal or baseline is n/a (empty graph) — informational pass".to_string();
+                    result.message = SIGNAL_OR_BASELINE_ABSENT.to_string();
                 }
             }
         }
@@ -2582,8 +2615,7 @@ pub(crate) fn gate(
                 _ => {
                     // An "n/a" on either side cannot regress — honesty over
                     // a fabricated comparison (ADR-12 posture).
-                    result.message =
-                        "signal or baseline is n/a (empty graph) — informational pass".to_string();
+                    result.message = SIGNAL_OR_BASELINE_ABSENT.to_string();
                 }
             }
         }
@@ -2604,8 +2636,12 @@ pub(crate) fn gate(
             }
             None => {
                 result.passed = false;
+                // Names no cause, for the reason recorded on
+                // `SIGNAL_OR_BASELINE_ABSENT`: `aggregate_signal == None` has two
+                // causes and this condition separates neither ([CR-138],
+                // `models::quality::absence` R1).
                 result.message = format!(
-                    "{}{}signal is n/a (empty graph) — cannot satisfy threshold {floor}",
+                    "{}{}signal is n/a — cannot satisfy threshold {floor}",
                     result.message,
                     if result.message.is_empty() { "" } else { "; " }
                 );

@@ -783,6 +783,14 @@ impl Output {
     /// state instead of rendering it as a zero violation count, since
     /// "nothing was evaluated" is not the same claim as a clean evaluation
     /// (NFR-CC-04).
+    ///
+    /// The CLI's one absence-reporting site. It follows the one taxonomy rather
+    /// than restating it — `models::quality::absence` in
+    /// `logos-core/src/models/quality.rs` — and which rules it keeps is
+    /// recorded beside its occurrence counts in
+    /// `logos-core/tests/absence_taxonomy_audit.rs`, so there is one statement
+    /// of the rules and one adjudication of this site, not a third copy here
+    /// that can drift from either.
     pub(crate) fn report_check(
         &self,
         root: &Path,

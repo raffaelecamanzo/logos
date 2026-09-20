@@ -279,8 +279,14 @@ pub const FRESHNESS_FRESH: &str = "fresh";
 /// A covered file is **stale**: its content moved since ingest — the label is
 /// shown, the (shifted) line data never is ([FR-CV-05], [NFR-RA-05]).
 pub const FRESHNESS_STALE: &str = "stale";
+/// Absence wording on this surface follows the one taxonomy rather than
+/// restating it: [`models::quality::absence`] ([S-434]).
+///
+/// [`models::quality::absence`]: crate::models::quality::absence
+/// [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 /// A file the snapshot never covered — `n/a` on a read surface ([FR-CV-05]).
 pub const FRESHNESS_NA: &str = "n/a";
+
 
 /// The one-line notice both surfaces render when no coverage has been ingested
 /// ([FR-CV-06]): `n/a`, exit 0, never an error.
