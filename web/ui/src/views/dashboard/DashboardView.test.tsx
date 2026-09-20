@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OverviewModel } from "../../api/types.ts";
@@ -245,5 +245,49 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(await screen.findByText("FAIL")).toBeInTheDocument();
     expect(screen.getByText(/1 rule finding\(s\) across 0 checked rule\(s\)/i)).toBeInTheDocument();
     expect(screen.queryByText(/No architecture rules yet/i)).not.toBeInTheDocument();
+  });
+
+  it("Rule findings widget — a contract authoring zero rules renders no PASS badge, reusing the onboarding empty state (S-438, CR-141)", async () => {
+    // `logos init`'s default: a contract exists (`rules_present: true`) but
+    // authors nothing to check. Before S-438 this fell through the final `else`
+    // and rendered a green PASS over "No findings — 0 rule(s) checked" — a
+    // check over an empty evaluated set is not a pass.
+    const m = clone();
+    m.rules = { passed: true, checked_rules: 0, rules_present: true, violations: [], freshness: "fresh", warnings: [] };
+    stub(m);
+    render(<DashboardView />);
+    const heading = await screen.findByText("Rule findings");
+    const card = heading.closest("section") as HTMLElement;
+    // Reuses the existing onboarding copy verbatim — no new string, no fourth state.
+    expect(within(card).getByText(/No architecture rules yet/i)).toBeInTheDocument();
+    expect(within(card).getByText("logos check")).toBeInTheDocument();
+    expect(within(card).queryByText("PASS")).not.toBeInTheDocument();
+    expect(within(card).queryByText(/No findings/i)).not.toBeInTheDocument();
+  });
+
+  it("Rule findings widget — violations on a zero-rule contract still render FAIL, proving findings are checked before the widened onboarding condition (S-354)", async () => {
+    // Same vacuous contract as above (`checked_rules: 0`, `rules_present: true`),
+    // but with a violation present. If the widened onboarding condition
+    // (`!rules_present || checked_rules === 0`) were evaluated before the
+    // findings check, this would wrongly render the onboarding prompt instead
+    // of the failure.
+    const m = clone();
+    m.rules = {
+      passed: false,
+      checked_rules: 0,
+      rules_present: true,
+      violations: [
+        { rule: "graph-structural-integrity", rule_type: "constraint", severity: "error", file: "", node_id: null, message: "orphan shingle" },
+      ],
+      freshness: "fresh",
+      warnings: [],
+    };
+    stub(m);
+    render(<DashboardView />);
+    const heading = await screen.findByText("Rule findings");
+    const card = heading.closest("section") as HTMLElement;
+    expect(within(card).getByText("FAIL")).toBeInTheDocument();
+    expect(within(card).getByText(/1 rule finding\(s\) across 0 checked rule\(s\)/i)).toBeInTheDocument();
+    expect(within(card).queryByText(/No architecture rules yet/i)).not.toBeInTheDocument();
   });
 });
