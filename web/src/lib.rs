@@ -1796,13 +1796,22 @@ mod tests {
     /// The name of **any** `fn` enclosing `at` — `fn`, `async fn` and `pub fn`
     /// alike.
     ///
-    /// A deliberate sibling of [`enclosing_fn`] rather than a widening of it.
-    /// The census's whitelist and the [`fn_body`] pins are tuned to `async fn`
-    /// because the handlers they attribute are handlers; the wiki-generation
-    /// site is a `WikiRunService::start_run` impl, a plain `fn`, and would
-    /// otherwise be whitelisted as `<no enclosing async fn>` — a name that
-    /// would still move if the site moved, but would say nothing about where
-    /// it moved to.
+    /// A deliberate sibling of [`enclosing_fn`] rather than a widening of it —
+    /// and **not** because widening would disturb today's attribution. Review
+    /// measured that claim and it is false: over the 36 `Surface::` sites the
+    /// census reads, the two walkers agree on 35 and differ on exactly one —
+    /// the wiki-generation site, where `enclosing_fn` yields the sentinel
+    /// `<no enclosing async fn>`. Substituting this function throughout would
+    /// be a no-op on every pre-existing site.
+    ///
+    /// They are kept apart for what each whitelist is *about*. The handler
+    /// census asks "which **handler** is classified how", and there
+    /// `<no enclosing async fn>` is the more useful answer than a helper's
+    /// name: it says the marker is not inside a handler at all. The
+    /// wiki-generation site genuinely is not — it is a `WikiRunService::
+    /// start_run` impl, a plain `fn` — so it is attributed by this function
+    /// instead, and its whitelist entry names the `fn` a reader can go and
+    /// find.
     fn enclosing_any_fn(code: &str, at: usize) -> &str {
         let mut cursor = &code[..at];
         loop {
