@@ -777,6 +777,16 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/workspace/search", get(api_v1::workspace_search))
         .route("/api/v1/workspace/callers", get(api_v1::workspace_callers))
         .route("/api/v1/workspace/impact", get(api_v1::workspace_impact))
+        // ── The two federation read-models that shipped CLI-only (S-427,
+        // [FR-WS-28], [ADR-01]): `federation::reach` and
+        // `federation::governance`, joining the fan-out above as thin
+        // serialisations of the very same read-models `logos workspace
+        // reachability` / `logos workspace check` print. No new core query, and
+        // no CLI change — the CLI already had these. GETs, so the read-only
+        // carve-out stack (method/host/CSP) covers them unchanged, and the
+        // single-root `404` above applies to them as it does to the rest.
+        .route("/api/v1/workspace/reachability", get(api_v1::workspace_reachability))
+        .route("/api/v1/workspace/check", get(api_v1::workspace_check))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof

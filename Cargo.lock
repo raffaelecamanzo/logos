@@ -1540,12 +1540,16 @@ name = "logos"
 version = "1.4.15"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "http-body-util",
  "logos-core",
  "mcp",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tower",
  "web",
 ]
 

@@ -92,3 +92,17 @@ tempfile   = { workspace = true }
 # tests/init_workspace.rs (S-246, FR-WS-02): parses the JSON report and
 # `.mcp.json` to assert on structured fields — dev-only.
 serde_json = { workspace = true }
+# The S-427 CLI↔HTTP agreement test (tests/xservice_surface.rs, [FR-WS-28]):
+# `federation::reach` and `federation::governance` now answer on BOTH surfaces,
+# and [ADR-01] is satisfied only if the two renderings of one read-model agree
+# field-for-field. Asserting that needs one test that drives the real `logos`
+# binary AND the real axum router over the SAME workspace — and this is the only
+# crate where both are reachable: `CARGO_BIN_EXE_logos` exists only in this
+# package's tests, and `web` is already a dependency here (behind the default
+# `ui` feature). These four are the in-process router harness the `web` crate's
+# own tests use; all four are dev-only, so none enters the shipped binary graph
+# the no-network fitness function scans (NFR-SE-01).
+axum           = "0.7"
+tower          = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio          = { workspace = true, features = ["rt", "macros"] }

@@ -61,7 +61,11 @@ use axum::{
 use serde::Serialize;
 
 use logos_core::config::ConfigReadModel;
-use logos_core::federation::{query as fed_query, Backing, ContractBridge, EngineRegistry};
+use logos_core::federation::{
+    app_wide_reachability, open_state, query as fed_query, workspace_governance, Backing,
+    BoundedReachability, ContractBridge, DegradedRollup, EngineRegistry, ReachabilityScope,
+    WorkspaceGovernance,
+};
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::observability::{in_surface, Surface};
@@ -709,9 +713,59 @@ where
     F: FnOnce(&EngineRegistry<Engine>, &ContractBridge) -> T + Send + 'static,
     T: Serialize + Send + 'static,
 {
-    if backing.as_federated().is_none() {
-        return not_a_workspace();
+    match workspace_read(backing, bridge, view, surface, call).await {
+        Some(model) => ok(model),
+        None => not_a_workspace(),
     }
+}
+
+/// The **fallible** twin of [`workspace_fan`], for the one workspace read-model
+/// whose core entry point returns a `Result`: [`workspace_governance`] fails when
+/// the manifest declares a rule whose symbol glob will not compile.
+///
+/// Identical in every other respect — same `404` guard, same blocking hop, same
+/// surface scope, same render log — because both are the same function
+/// [`workspace_read`] with a different success arm. It is written that way rather
+/// than copied so the two can never drift: a hand-mirrored second copy of the
+/// fan-out is precisely the divergence [ADR-01] is about.
+///
+/// The failure is surfaced as the honest `500` [`respond`] renders everywhere
+/// else on this surface ([NFR-RA-05]) — never a fabricated empty report, which on
+/// this route would read as "no rules declared" ([NFR-CC-04]).
+async fn workspace_fan_try<T, F>(
+    backing: Arc<Backing<Engine>>,
+    bridge: Arc<ContractBridge>,
+    view: &'static str,
+    surface: Surface,
+    call: F,
+) -> Response
+where
+    F: FnOnce(&EngineRegistry<Engine>, &ContractBridge) -> anyhow::Result<T> + Send + 'static,
+    T: Serialize + Send + 'static,
+{
+    match workspace_read(backing, bridge, view, surface, call).await {
+        Some(model) => respond(model),
+        None => not_a_workspace(),
+    }
+}
+
+/// The shared body of both fan-out adapters: the single-root guard, the [ADR-03]
+/// `spawn_blocking` hop, the [`in_surface`] telemetry scope and the render-timing
+/// log. `None` means the backing is not federated — the one condition on which
+/// both adapters answer [`not_a_workspace`], kept here so neither can answer it on
+/// a different test.
+async fn workspace_read<T, F>(
+    backing: Arc<Backing<Engine>>,
+    bridge: Arc<ContractBridge>,
+    view: &'static str,
+    surface: Surface,
+    call: F,
+) -> Option<T>
+where
+    F: FnOnce(&EngineRegistry<Engine>, &ContractBridge) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    backing.as_federated()?;
     let started = std::time::Instant::now();
     let out = tokio::task::spawn_blocking(move || {
         let registry = backing
@@ -730,7 +784,7 @@ where
         duration_ms = started.elapsed().as_millis() as u64,
         "page render",
     );
-    ok(out)
+    Some(out)
 }
 
 /// `GET /api/v1/workspace/roster` — the manifest-only roster (workspace name,
@@ -929,6 +983,192 @@ pub(crate) async fn workspace_impact(
         let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
         fed_query::xservice_impact(registry, &edges, &residue, &symbol, depth, repo.as_deref())
     })
+    .await
+}
+
+// ── The two CLI-only federation read-models, joined to the fan-out (S-427,
+// [FR-WS-28], [ADR-01]) ──────────────────────────────────────────────────────
+//
+// `federation::reach` ([FR-WS-12]) and `federation::governance` ([FR-WS-13]) both
+// shipped with a CLI rendering and no other. These two GETs add the missing half
+// and nothing else: each runs the **same call sequence** `cli/src/xservice.rs`
+// runs — `edges` then the read-model — and serialises the result. No new core
+// query, no second computation, no figure the read-model does not already carry
+// ([ADR-01], [NFR-MA-02]). `cli/tests/xservice_surface.rs` compares the two
+// renderings field-for-field over one workspace, which is the guard that makes
+// "the same read-model" a checked fact rather than a claim.
+
+/// Whether a workspace fan-out answer covers every member it is an answer about
+/// ([FR-WS-16], [NFR-CC-04]).
+///
+/// # Why these two routes need it and the rest of the fan-out does not
+/// The CLI states incompleteness in its **exit code** and a stderr notice
+/// ([`DegradedRollup::notice`]); `workspace/status` states it *inside* its payload,
+/// folded into a member table it already has. Reachability and governance have
+/// neither: an HTTP `200` has no exit code, and neither read-model carries a member
+/// table. Without this rider a partial fan-out would reach the SPA as a complete
+/// one, which is exactly what [FR-WS-16] forbids.
+///
+/// # It rides *beside* the read-model, never inside it
+/// The payload is `{ <read-model key>: …, complete, degraded_rollup }`, so the
+/// read-model under its own key stays byte-identical to what the CLI prints —
+/// including `check`'s bare `null`, the honest empty [NFR-CC-04] gave it, which
+/// wrapping would have destroyed. That is what lets the parity test compare the
+/// two renderings field-for-field.
+#[derive(Debug, Serialize)]
+pub(crate) struct AnswerCompleteness {
+    /// `false` when a declared member was attempted and could not be **opened**:
+    /// the fan-out behind this answer is partial, and says so rather than letting
+    /// a `200` present it as whole ([FR-WS-16]).
+    ///
+    /// This is [`DegradedRollup::all_opened`] — the predicate the CLI derives its
+    /// exit code from — and deliberately **not**
+    /// [`covers_all_members`](DegradedRollup::covers_all_members), which is also
+    /// `false` for a member laziness never attempted. That is a coverage fact, not
+    /// a failure, and reporting a healthy scoped answer as incomplete would be its
+    /// own untruth ([BR-45]).
+    ///
+    /// [BR-45]: ../../docs/specs/software-spec.md#327-workspace-federation
+    complete: bool,
+    /// The open-state roll-up, **naming** each member that could not be opened —
+    /// the identical [`DegradedRollup`] `workspace/status` already publishes, so
+    /// the SPA reads one shape across all three routes rather than a third
+    /// per-route vocabulary ([FR-WS-16]).
+    degraded_rollup: DegradedRollup,
+}
+
+impl AnswerCompleteness {
+    /// Read the registry's open-state ledger and roll it up.
+    ///
+    /// **Call this after the read-model has run, never before.** The ledger is
+    /// complete only once the answer's own walks have happened, which is why
+    /// `run_workspace` reads it last too — the ordering is the contract, and
+    /// hoisting this call would report every member `not-attempted`.
+    ///
+    /// The once-per-answer open-failure discipline is inherited whole from
+    /// [CR-105]: the read-model mints its own [`AnswerScope`] internally, so a
+    /// broken member is attempted once per request and re-attempted on the next
+    /// one. Nothing here re-implements it.
+    ///
+    /// [AnswerScope]: logos_core::federation::registry::AnswerScope
+    /// [CR-105]: ../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
+    fn after_reading(registry: &EngineRegistry<Engine>) -> Self {
+        let rollup = open_state::rollup(&registry.open_states());
+        Self {
+            complete: rollup.all_opened(),
+            degraded_rollup: rollup,
+        }
+    }
+}
+
+/// The `GET /api/v1/workspace/reachability` payload ([FR-WS-28]).
+///
+/// The contract [S-428](../../docs/planning/sprints/sprint-74.md) consumes: the
+/// bounded union view under `reachability`, byte-identical to
+/// `logos workspace reachability --json`, plus the completeness rider.
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceReachabilityAnswer {
+    /// The [`BoundedReachability`] projection — `view`, `advisory`, the applied
+    /// `scope`, the `coverage` rider, per-member tallies, `skipped_members`, the
+    /// promotions, and `dead` (`null` under the promotions-only default).
+    reachability: BoundedReachability,
+    #[serde(flatten)]
+    completeness: AnswerCompleteness,
+}
+
+/// The `GET /api/v1/workspace/check` payload ([FR-WS-28]).
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceGovernanceAnswer {
+    /// The [`WorkspaceGovernance`] report, byte-identical to
+    /// `logos workspace check --json` — **`null` when the workspace declares no
+    /// rules**. That is the honest empty: no output at all, never a fabricated
+    /// zero-violation report that would read as a passing one ([ADR-56],
+    /// [NFR-CC-04]).
+    governance: Option<WorkspaceGovernance>,
+    #[serde(flatten)]
+    completeness: AnswerCompleteness,
+}
+
+/// `GET /api/v1/workspace/reachability[?repo=<member>][&all]` — the app-wide
+/// cross-service reachability union view ([FR-WS-12], [FR-WS-28]), the HTTP twin
+/// of `logos workspace reachability`.
+///
+/// # Bounded by default, and it says so ([S-294], [CR-084], [NFR-CC-04])
+/// Without `?all` the payload carries only the cross-service **promotions** and
+/// `reachability.dead` is `null` — *suppressed*, which is deliberately distinct
+/// from `[]` ("computed, and genuinely empty"). Every applied bound is echoed in
+/// `reachability.scope`, so a bounded reply can never be read as the complete dead
+/// set. `?repo=<member>` scopes the tallies and claims to one member; a degraded
+/// member is still named workspace-wide, because a scope must not hide it.
+///
+/// `reachability.advisory` is always `true` and `reachability.coverage` rides every
+/// claim: this view is never a gate input ([ADR-56]), and no claim on it is
+/// readable without the coverage it rests on.
+///
+/// [CR-084]: ../../docs/requests/CR-084-reachability-payload-filter.md
+/// [FR-WS-12]: ../../docs/specs/requirements/FR-WS-12.md
+/// [FR-WS-28]: ../../docs/specs/requirements/FR-WS-28.md
+/// [ADR-56]: ../../docs/specs/architecture/decisions/ADR-56.md
+pub(crate) async fn workspace_reachability(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let repo = opt_param(&q, "repo");
+    // The `--all` escape hatch as a bare toggle, through the shared `?key`/`?key=1`
+    // reader — the inversion to `promotions_only` stays in `ReachabilityScope::new`
+    // where the CLI leaves it, so this handler parses params and nothing else
+    // ([NFR-MA-02]).
+    let all = wants_flag(&q, "all");
+    workspace_fan(
+        backing,
+        bridge,
+        "api_v1_workspace_reachability",
+        Surface::Web,
+        move |registry, bridge| {
+            let edges = fed_query::edges(bridge, registry);
+            let reachability =
+                app_wide_reachability(registry, &edges).bound(ReachabilityScope::new(repo, all));
+            WorkspaceReachabilityAnswer {
+                reachability,
+                completeness: AnswerCompleteness::after_reading(registry),
+            }
+        },
+    )
+    .await
+}
+
+/// `GET /api/v1/workspace/check` — the workspace governance report ([FR-WS-13],
+/// [FR-WS-28]), the HTTP twin of `logos workspace check`.
+///
+/// # Advisory, and structurally incapable of gating ([ADR-56])
+/// A violation moves no member's gated signal and no exit code — there is no exit
+/// code here to move, and the response is `200` whether the rules hold or not. The
+/// report is published; what to do about it is the reader's call.
+///
+/// # The honest empty is `null`
+/// A workspace declaring no rules produces **no report at all**, not a passing one:
+/// `governance` is `null`, exactly as the CLI prints it ([NFR-CC-04]).
+///
+/// [FR-WS-13]: ../../docs/specs/requirements/FR-WS-13.md
+pub(crate) async fn workspace_check(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_fan_try(
+        backing,
+        bridge,
+        "api_v1_workspace_check",
+        Surface::Web,
+        move |registry, bridge| {
+            let edges = fed_query::edges(bridge, registry);
+            let governance = workspace_governance(registry.federation(), &edges)?;
+            Ok(WorkspaceGovernanceAnswer {
+                governance,
+                completeness: AnswerCompleteness::after_reading(registry),
+            })
+        },
+    )
     .await
 }
 

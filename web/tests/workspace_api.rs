@@ -20,6 +20,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use logos_core::federation::{discover, Backing, EngineRegistry};
+use rusqlite::{Connection, OpenFlags};
 use logos_core::Engine;
 use web::{IntentToken, INTENT_HEADER};
 use tempfile::TempDir;
@@ -155,6 +156,12 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     "/api/v1/workspace/search?q=user",
     "/api/v1/workspace/callers?symbol=get_user",
     "/api/v1/workspace/impact?symbol=get_user",
+    // S-427 / [FR-WS-28]: the two read-models that shipped CLI-only. They are
+    // ENUMERATED here rather than asserted ad hoc, because this list is what the
+    // `200`+CSP loop, the single-root `404` loop and the write-free loop all walk
+    // — a route absent from it is silently unguarded on all three.
+    "/api/v1/workspace/reachability",
+    "/api/v1/workspace/check",
 ];
 
 fn ws_router(tmp: &TempDir) -> axum::Router {
@@ -915,4 +922,435 @@ async fn an_unknown_repo_404s_a_write_rather_than_writing_the_default() {
     assert!(body.contains("no workspace member `nope`"), "{body}");
     assert!(!tmp.path().join("api/.logos/rules.toml").exists(), "nothing was written anywhere");
     assert!(!tmp.path().join("web/.logos/rules.toml").exists(), "nothing was written anywhere");
+}
+
+// ── S-427 / FR-WS-28: reachability and governance over the HTTP read surface ──
+//
+// Two GETs serialising the `federation::reach` and `federation::governance`
+// read-models that shipped CLI-only. The field-for-field CLI/HTTP agreement — the
+// story's spine — is asserted in `cli/tests/xservice_surface.rs`, which is the one
+// crate that can drive the real `logos` binary AND this router over the SAME
+// workspace. What follows is the rest of the contract: the bound the default
+// states, the honest empty, the named incomplete fan-out, and the surface hygiene.
+
+/// The `[governance]` rule family the CLI suite declares, verbatim: `edge` (api)
+/// must not call `core` (web), which the fixture's one bridge binding breaches.
+/// Kept byte-identical to `cli/tests/xservice_surface.rs`'s `GOVERNANCE` so both
+/// surfaces are asserted over the same declared policy.
+const GOVERNANCE_RULES: &str = "
+[[governance.service_layers]]
+name = \"edge\"
+members = [\"api\"]
+
+[[governance.service_layers]]
+name = \"core\"
+members = [\"web\"]
+
+[[governance.boundaries]]
+from = \"edge\"
+to = \"core\"
+reason = \"edge services must not call core services directly\"
+";
+
+/// Append a `[governance]` section to the fixture's workspace manifest.
+fn declare_rules(root: &Path, rules: &str) {
+    let manifest = root.join("logos.workspace.toml");
+    let existing = std::fs::read_to_string(&manifest).expect("the fixture wrote a manifest");
+    std::fs::write(&manifest, format!("{existing}{rules}")).expect("append governance");
+}
+
+/// Break a member the way the CLI suite does: a **directory** where its store file
+/// must be, which no open can succeed against.
+fn obstruct_store(root: &Path, member: &str) {
+    let db = root.join(member).join(".logos").join("logos.db");
+    std::fs::remove_file(&db).expect("clear the store file");
+    std::fs::create_dir_all(&db).expect("a directory where the store must be");
+}
+
+async fn json_body(router: &axum::Router, path: &str) -> serde_json::Value {
+    let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{path} answers 200: {body}");
+    serde_json::from_str(&body).unwrap_or_else(|e| panic!("{path} is JSON: {e}\n{body}"))
+}
+
+/// **The bounded default, stated** ([FR-WS-12], [S-294]/[CR-084], [NFR-CC-04]).
+///
+/// Unbounded, this payload is the union of every member's per-repo dead set. The
+/// HTTP default carries only the cross-service promotions and says so: `dead` is
+/// `null` — *suppressed* — and never `[]`, which would read as a complete and
+/// genuinely empty dead set. The view is labelled advisory and every claim rides
+/// its coverage rider, so nothing here can be mistaken for a gate input.
+#[tokio::test]
+async fn reachability_default_is_promotions_only_states_its_bound_and_is_advisory() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/reachability").await;
+    let view = &v["reachability"];
+
+    assert_eq!(view["view"], "cross-service-union", "the labelled union view: {v}");
+    assert_eq!(view["advisory"], true, "never a gate input (ADR-56): {v}");
+    assert_eq!(view["scope"]["promotions_only"], true, "the default states its bound: {v}");
+    assert!(view["scope"]["repo"].is_null(), "no member scope by default: {v}");
+    assert!(
+        view["dead"].is_null(),
+        "the per-repo-dead set is SUPPRESSED to null, not emitted as [] that would read \
+         as a complete, empty dead set (NFR-CC-04): {}",
+        view["dead"]
+    );
+    assert!(
+        view["live_via_cross_service"].as_array().is_some(),
+        "the promotions bucket is always carried, never suppressed: {v}"
+    );
+
+    // The coverage rider, with real numbers: this fixture binds its one OpenAPI GET
+    // to the axum route across the member boundary. Asserted on values that are
+    // non-zero AND on the per-member tally below, so a field swap in
+    // `CoverageRider::new` cannot pass as zero-vs-zero.
+    let rider = &view["coverage"];
+    assert_eq!(rider["bound"], 1, "the GET operation bound its cross-member route: {v}");
+    assert_eq!(rider["ambiguous"], 0, "{v}");
+    assert_eq!(rider["unbound"], 0, "{v}");
+    assert_eq!(rider["spec_conformance_ratio"], 1.0, "{v}");
+    assert_eq!(
+        rider["spec_conformance_measured"], 1,
+        "the ratio never travels without the denominator it was computed over (CR-111): {v}"
+    );
+    assert_eq!(rider["members_read"], 2, "{v}");
+    assert_eq!(rider["members_total"], 2, "{v}");
+    assert!(view["skipped_members"].as_array().unwrap().is_empty(), "{v}");
+
+    // The promotion base is real: `web`'s `app` is dead in its own graph, so the
+    // suppressed `dead` set above is suppressing something rather than nothing.
+    let web_tally = view["members"]
+        .as_array()
+        .expect("members array")
+        .iter()
+        .find(|m| m["member"] == "web")
+        .unwrap_or_else(|| panic!("web has a tally: {v}"));
+    assert_eq!(web_tally["dead_per_repo"], 1, "web really does own a dead callable: {v}");
+    assert_eq!(web_tally["dead_app_wide"], 1, "which this view leaves dead: {v}");
+
+    // A complete fan-out says so, with the denominator beside it.
+    assert_eq!(v["complete"], true, "every member opened: {v}");
+    assert_eq!(v["degraded_rollup"]["members"], 2, "{v}");
+    assert_eq!(v["degraded_rollup"]["opened"], 2, "{v}");
+    assert!(
+        v["degraded_rollup"]["degraded_members"].as_array().unwrap().is_empty(),
+        "nothing degraded: {v}"
+    );
+}
+
+/// `?all` lifts the promotions-only bound and `?repo=` scopes the view to one
+/// member — both stated in `scope`, so the payload always names the filter it
+/// applied ([CR-084]). `web` owns the dead `orphan`; an `api` scope filters it out.
+#[tokio::test]
+async fn reachability_all_and_repo_are_applied_and_echoed_in_the_scope() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+
+    let all = json_body(&router, "/api/v1/workspace/reachability?all").await;
+    assert_eq!(all["reachability"]["scope"]["promotions_only"], false, "?all lifts it: {all}");
+    let dead = all["reachability"]["dead"].as_array().expect("?all populates the dead set");
+    // `app` is registered by nobody in this fixture, so web's own graph verdicts it
+    // dead and no cross-service edge reaches it — dead app-wide too.
+    assert!(
+        dead.iter().any(|c| c["name"] == "app" && c["member"] == "web"),
+        "web's unreferenced `app` is claimed dead app-wide: {dead:?}"
+    );
+    // Every claim carries the rider it rests on — it cannot be separated from it.
+    let claim = dead.iter().find(|c| c["name"] == "app").expect("the app claim");
+    assert_eq!(claim["verdict"], "dead", "{claim}");
+    assert_eq!(&claim["coverage"], &all["reachability"]["coverage"], "{claim}");
+
+    let scoped = json_body(&router, "/api/v1/workspace/reachability?all&repo=api").await;
+    assert_eq!(scoped["reachability"]["scope"]["repo"], "api", "the scope is stated: {scoped}");
+    for tally in scoped["reachability"]["members"].as_array().expect("members array") {
+        assert_eq!(tally["member"], "api", "only the scoped member's tally: {scoped}");
+    }
+    assert!(
+        !scoped["reachability"]["dead"]
+            .as_array()
+            .expect("?all populates the dead set")
+            .iter()
+            .any(|c| c["name"] == "app"),
+        "`app` belongs to web, so an api scope filters it out: {scoped}"
+    );
+    // …and the scope is a FILTER, not a cap: scoping to the member that owns it
+    // keeps it.
+    let web_scoped = json_body(&router, "/api/v1/workspace/reachability?all&repo=web").await;
+    assert!(
+        web_scoped["reachability"]["dead"]
+            .as_array()
+            .expect("?all populates the dead set")
+            .iter()
+            .any(|c| c["name"] == "app" && c["member"] == "web"),
+        "a web scope keeps web's own dead callable: {web_scoped}"
+    );
+    // A degraded member is workspace-wide context a scope must never hide.
+    assert!(
+        web_scoped["reachability"]["skipped_members"].as_array().is_some(),
+        "the skipped-member list is always carried: {web_scoped}"
+    );
+}
+
+/// **The honest empty** ([FR-WS-13], [ADR-56], [NFR-CC-04]): a workspace declaring
+/// no rules produces no governance output at all — `null`, never a fabricated
+/// zero-violation report that would read as a passing one.
+#[tokio::test]
+async fn governance_over_a_workspace_with_no_rules_is_null_not_a_passing_report() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/check").await;
+    assert!(
+        v["governance"].is_null(),
+        "no declared rules ⇒ no report: {v}"
+    );
+    // And specifically NOT the shape a passing report would have.
+    assert!(v["governance"].get("violations").is_none(), "{v}");
+    assert!(v["governance"].get("rules_checked").is_none(), "{v}");
+    assert_eq!(v["complete"], true, "the answer is still complete: {v}");
+}
+
+/// A declared rule evaluates over the bridge bindings and its breach is
+/// **reported** — at `200`, with the member's own gated signal untouched. The
+/// workspace tier is advisory: there is no exit code here to move, and no
+/// member's `check` verdict moves either ([ADR-56]).
+#[tokio::test]
+async fn a_governance_violation_is_reported_at_200_and_moves_no_member_gate() {
+    let tmp = workspace();
+    // Give `web` a per-repo contract that genuinely FAILS, so "the member's gated
+    // signal is unchanged" is a comparison of something rather than of two
+    // nothings: every function has cyclomatic complexity >= 1, so `max_cc = 0`
+    // always fires.
+    std::fs::create_dir_all(tmp.path().join("web/.logos")).unwrap();
+    std::fs::write(tmp.path().join("web/.logos/rules.toml"), "[constraints]\nmax_cc = 0\n").unwrap();
+
+    let member_verdict = |tmp: &TempDir| {
+        let engine = Engine::start(tmp.path().join("web")).expect("member engine");
+        let report = engine.check_rules(None, false).expect("the member evaluates its contract");
+        (report.rules_present, report.passed, report.violations.len())
+    };
+    let before = member_verdict(&tmp);
+    assert!(before.0, "the member loaded its own rules.toml");
+    assert_eq!(before.1, Some(false), "and its gated verdict is a real FAIL, not an absent one");
+    assert!(before.2 > 0, "with real violations");
+
+    declare_rules(tmp.path(), GOVERNANCE_RULES);
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/check").await;
+
+    let report = &v["governance"];
+    assert_eq!(report["workspace"], "shop", "{v}");
+    assert_eq!(report["rules_checked"], 1, "{v}");
+    assert_eq!(report["bindings_checked"], 1, "quantified over the one binding: {v}");
+    let violations = report["violations"].as_array().expect("violations array");
+    assert_eq!(violations.len(), 1, "the edge→core binding breaches the rule: {v}");
+    assert_eq!(violations[0]["rule"], "workspace-boundary:edge->core", "{v}");
+    assert_eq!(violations[0]["severity"], "error", "{v}");
+    assert_eq!(violations[0]["from"]["member"], "api", "{v}");
+    assert_eq!(violations[0]["to"]["member"], "web", "{v}");
+
+    // The invariant: the member's real, failing gated signal is byte-identical.
+    assert_eq!(member_verdict(&tmp), before, "no member's gated signal moved (ADR-56)");
+}
+
+/// **A partial fan-out never presents itself as complete** ([FR-WS-16],
+/// [NFR-CC-04]). The CLI states this in its exit code and a stderr notice; an HTTP
+/// `200` has neither channel, so both payloads carry it — and they **name** the
+/// member, because `covers_all_members < 1` says that the workspace degraded, not
+/// where.
+#[tokio::test]
+async fn an_unopenable_member_renders_both_answers_incomplete_and_names_it() {
+    let tmp = workspace();
+    declare_rules(tmp.path(), GOVERNANCE_RULES);
+    obstruct_store(tmp.path(), "web");
+    let router = ws_router(&tmp);
+
+    for path in ["/api/v1/workspace/reachability", "/api/v1/workspace/check"] {
+        let v = json_body(&router, path).await;
+        assert_eq!(v["complete"], false, "{path} declares the answer incomplete: {v}");
+        assert_eq!(
+            v["degraded_rollup"]["degraded_members"].as_array().unwrap(),
+            &vec![serde_json::Value::from("web")],
+            "{path} NAMES the member it could not open: {v}"
+        );
+        assert_eq!(v["degraded_rollup"]["members"], 2, "{path} states the denominator: {v}");
+        assert_eq!(v["degraded_rollup"]["covers_all_members"], false, "{path}: {v}");
+    }
+}
+
+/// Under a **single-root** backing both routes answer the honest `404` the rest of
+/// the fan-out answers, and the registry is never allocated — a plain repo pays
+/// nothing for them ([ADR-52]).
+///
+/// The `404` itself is covered for the whole enumerated set by
+/// [`single_root_workspace_endpoints_are_404`]; what this adds is the
+/// **non-allocation**, asserted on the resolved backing rather than inferred from
+/// the status code.
+#[tokio::test]
+async fn single_root_answers_404_for_both_routes_without_allocating_a_registry() {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path(), "src/lib.rs", "pub fn f() {}\n");
+
+    let backing = web::resolve_serve_backing(tmp.path(), false).expect("resolves");
+    assert!(!backing.is_federated(), "a plain repo resolves the single-root backing");
+    assert!(
+        backing.as_federated().is_none(),
+        "no member registry is allocated for a plain repo (ADR-52)"
+    );
+
+    let router = web::router_for_backing(Arc::new(backing)).expect("the router builds");
+    for path in ["/api/v1/workspace/reachability", "/api/v1/workspace/check"] {
+        let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+        let (status, body, headers) = body_string(resp).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path} is 404 in single-root mode: {body}");
+        assert!(body.contains("not a workspace"), "{path} explains why: {body}");
+        assert_self_only_csp(&headers, path);
+    }
+}
+
+/// Row counts for the tables a write-on-read fault would grow, per member store.
+fn store_counts(db: &Path) -> Vec<(&'static str, i64)> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open the member store read-only");
+    ["nodes", "edges", "metric_snapshots"]
+        .into_iter()
+        .map(|t| {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap_or_else(|e| panic!("count {t}: {e}"));
+            (t, n)
+        })
+        .collect()
+}
+
+/// **Write-free on read** ([FR-UI-03], [ADR-28]): loading every enumerated
+/// workspace endpoint — once **and** repeatedly — leaves every member store's
+/// contents unchanged.
+///
+/// Driven off [`WORKSPACE_ENDPOINTS`] rather than an ad-hoc list, so a route added
+/// to the fan-out without being added here cannot exist. The `nodes` denominator
+/// is non-zero (both members are indexed), which is what separates "nothing was
+/// written" from "nothing was there".
+#[tokio::test]
+async fn loading_every_workspace_endpoint_repeatedly_leaves_every_store_unchanged() {
+    let tmp = workspace();
+    declare_rules(tmp.path(), GOVERNANCE_RULES);
+    let members = ["api", "web"];
+    let db = |m: &str| tmp.path().join(m).join(".logos").join("logos.db");
+
+    let before: Vec<Vec<(&str, i64)>> = members.iter().map(|m| store_counts(&db(m))).collect();
+    for counts in &before {
+        assert!(
+            counts.iter().any(|(t, n)| *t == "nodes" && *n > 0),
+            "the fixture indexed a non-empty graph, so the denominator is real: {counts:?}"
+        );
+    }
+
+    let router = ws_router(&tmp);
+    for path in WORKSPACE_ENDPOINTS {
+        for _ in 0..2 {
+            let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+            let (status, body, _h) = body_string(resp).await;
+            assert_eq!(status, StatusCode::OK, "{path} answers 200: {body}");
+        }
+    }
+
+    let after: Vec<Vec<(&str, i64)>> = members.iter().map(|m| store_counts(&db(m))).collect();
+    assert_eq!(
+        after, before,
+        "no GET on the workspace fan-out changed any member store (ADR-28, FR-UI-03)"
+    );
+}
+
+/// **No widening of the resident-engine ceiling** ([NFR-PE-10]).
+///
+/// The quantity is the **connection count** — residents × the per-member read pool,
+/// the unit [NFR-PE-11]'s budget is written in — read off the registry the router
+/// is actually serving from. Each route is measured on its **own fresh registry**,
+/// warm on the default member only: measuring them in sequence on one registry
+/// would compare each new route against a ceiling the earlier ones had already
+/// raised, which is a comparison that cannot fail.
+///
+/// # What this bounds, and what it does not
+/// The fixture has two members and `workspace/status` fans over both, so the
+/// existing fan-out's ceiling is the whole roster and nothing can exceed it *within
+/// the registry*. What the assertion does catch is a handler that pays more than
+/// the fan-out it joined — a second registry, an eagerly-warmed roster, a member
+/// opened outside the budget — because all of those move this readout above the
+/// route it is compared against. It is deliberately an inequality against a
+/// measured baseline rather than a hardcoded number, so it stays honest when the
+/// roster changes.
+#[tokio::test]
+async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fan_out() {
+    let tmp = workspace();
+    declare_rules(tmp.path(), GOVERNANCE_RULES);
+
+    /// Serve `path` on a registry warm on the default member only, and return the
+    /// live read-connection count it leaves behind.
+    async fn connections_after(tmp: &TempDir, path: &str) -> usize {
+        let federation = discover(tmp.path()).expect("discovery").expect("a workspace");
+        let backing = Arc::new(Backing::Federated(Box::new(
+            EngineRegistry::<Engine>::new_serve_default(federation),
+        )));
+        let router = web::router_for_backing(Arc::clone(&backing)).expect("the router builds");
+        let resp = router.oneshot(get(path)).await.expect("route responds");
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        backing.as_federated().expect("the federated registry").live_read_connections()
+    }
+
+    // The baseline: what the widest route of the EXISTING fan-out already pays.
+    let status = connections_after(&tmp, "/api/v1/workspace/status").await;
+    assert!(status > 0, "the existing fan-out really does hold read connections");
+
+    for path in ["/api/v1/workspace/reachability", "/api/v1/workspace/check"] {
+        let paid = connections_after(&tmp, path).await;
+        assert!(
+            paid <= status,
+            "{path} holds {paid} read connections where the existing fan-out pays \
+             {status} — the resident-engine ceiling widened (NFR-PE-10)"
+        );
+    }
+}
+
+/// **The enumeration is itself guarded** ([FR-UI-21] AC, [FR-UI-03]).
+///
+/// [`WORKSPACE_ENDPOINTS`] is what the `200`+CSP loop, the single-root `404` loop
+/// and the write-free loop all walk, so a route missing from it is unguarded on all
+/// three — and silently, which is the failure mode an enumerated list has instead of
+/// a wildcard. This asserts the list and the router's own route table name exactly
+/// the same set, read out of `src/lib.rs` at compile time. Set equality in both
+/// directions, so it needs no count to keep up to date and cannot pass vacuously on
+/// a parse that found nothing.
+#[test]
+fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
+    const ROUTER_SOURCE: &str = include_str!("../src/lib.rs");
+
+    let mut declared: Vec<&str> = ROUTER_SOURCE
+        .lines()
+        .filter_map(|line| line.split(".route(\"").nth(1))
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|path| path.starts_with("/api/v1/workspace/"))
+        .collect();
+    declared.sort_unstable();
+    declared.dedup();
+
+    let mut enumerated: Vec<&str> = WORKSPACE_ENDPOINTS
+        .iter()
+        .map(|e| e.split('?').next().expect("a path before any query string"))
+        .collect();
+    enumerated.sort_unstable();
+    enumerated.dedup();
+
+    assert!(
+        !declared.is_empty(),
+        "the route-table scan found nothing — it stopped matching src/lib.rs"
+    );
+    assert_eq!(
+        enumerated, declared,
+        "WORKSPACE_ENDPOINTS and the router's /api/v1/workspace/* route table have \
+         drifted: a route in the table but not the list is unguarded by every loop \
+         that walks the list"
+    );
 }
