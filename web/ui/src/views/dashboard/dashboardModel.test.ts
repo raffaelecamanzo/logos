@@ -91,6 +91,13 @@ describe("humanizeAge", () => {
     expect(humanizeAge(1000 + 86_399, 1000)).toBe("23h ago");
     expect(humanizeAge(1000 + 86_400, 1000)).toBe("1d ago");
     expect(humanizeAge(1000 + 90_000, 1000)).toBe("1d ago");
+    // One second under two days. The days bucket is the only one whose other
+    // probes all sit far from an integer boundary, so without this the branch
+    // survives both `Math.floor` -> `Math.round` and a `86_400` -> `86_399`
+    // divisor slip: at 1.04 and at exactly 36500 days, every one of those
+    // spellings floors to the same answer.
+    expect(humanizeAge(1000 + 172_799, 1000)).toBe("1d ago");
+    expect(humanizeAge(1000 + 172_800, 1000)).toBe("2d ago");
   });
 
   it("names a timestamp ahead of now instead of clamping the interval to zero", () => {
