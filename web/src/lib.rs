@@ -1906,6 +1906,23 @@ mod tests {
         // would put a developer's reads into the generator's figures, and the
         // classification MOVING off the materialize call would put the
         // generator's back into the developer's.
+        //
+        // Deliberately `== 1`, not the `web_sites >= 34` floor a few lines
+        // below, and the asymmetry is the point: a floor is right for the
+        // ORDINARY surface, where a new handler is routine, and wrong for a
+        // surface that claims to be somebody specific. This mirrors
+        // `shell_sites.len() == 1` directly above. Review raised `>= 1` as an
+        // alternative; it was rejected because it discards regression (1) —
+        // the second claimant — which is the whole reason a non-web surface
+        // gets a whitelist rather than a count.
+        //
+        // The cost is real and is recorded rather than removed: a legitimate
+        // second WikiGen site means editing TWO files, this whitelist and
+        // `web/tests/wikigen_enumeration.rs`'s `DECLARED_SITES`. That is
+        // intended — the two guards answer different questions (is the
+        // classification where we think it is / is every engine path declared)
+        // — but a maintainer meeting it for the first time should not have to
+        // rediscover why.
         assert_eq!(
             wikigen_sites.len(),
             1,
