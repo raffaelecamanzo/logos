@@ -50,8 +50,10 @@ export function pctBp(bp: number): string {
 
 // ── Freshness statement (frontend-design §4.1 verdict element) ───────────────
 
-/** Parse an optional unix-seconds string field into a number of seconds. */
-function parseSecs(field: string | null): number | null {
+/** Parse an optional unix-seconds string field into a number of seconds.
+ *  Exported because `healthModel`'s snapshot/index comparison reads the same two
+ *  `StatusInfo` fields and must read them the same way (S-436). */
+export function parseSecs(field: string | null): number | null {
   if (field === null) return null;
   // Only an all-digits string is a valid unix-seconds field (parseInt is too lax).
   if (!/^\d+$/.test(field)) return null;
@@ -64,6 +66,18 @@ function parseSecs(field: string | null): number | null {
  * `IMPLAUSIBLE_AGE_SECS` in `logos-core/src/governance/readout.rs`.
  */
 const IMPLAUSIBLE_AGE_SECS = 100 * 365 * 24 * 60 * 60;
+
+/**
+ * The two degradations, as the exact phrases every surface renders for them.
+ *
+ * Named constants rather than literals because a second surface now reuses this
+ * vocabulary instead of inventing a parallel one for the same condition (S-436,
+ * `healthModel::snapshotStaleness`): one product says one thing about one
+ * condition, and a future rewording changes both surfaces or neither.
+ */
+export const UNKNOWN_AGE_AHEAD_OF_NOW = "at an unknown age (recorded ahead of now — check the clock)";
+export const UNKNOWN_AGE_IMPLAUSIBLY_OLD =
+  "at an unknown age (the recorded time is implausibly old — check the store)";
 
 /**
  * Humanise the age between `now` and `then` (both unix seconds) into a coarse
@@ -83,10 +97,8 @@ const IMPLAUSIBLE_AGE_SECS = 100 * 365 * 24 * 60 * 60;
  */
 export function humanizeAge(now: number, then: number): string {
   const secs = now - then;
-  if (secs < 0) return "at an unknown age (recorded ahead of now — check the clock)";
-  if (secs > IMPLAUSIBLE_AGE_SECS) {
-    return "at an unknown age (the recorded time is implausibly old — check the store)";
-  }
+  if (secs < 0) return UNKNOWN_AGE_AHEAD_OF_NOW;
+  if (secs > IMPLAUSIBLE_AGE_SECS) return UNKNOWN_AGE_IMPLAUSIBLY_OLD;
   if (secs < 60) return "just now";
   if (secs < 3_600) return `${Math.floor(secs / 60)}m ago`;
   if (secs < 86_400) return `${Math.floor(secs / 3_600)}h ago`;
