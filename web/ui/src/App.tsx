@@ -39,9 +39,17 @@ function Shell() {
   const { cacheKey, mode, unknownMember } = useWorkspace();
 
   // Silently migrate the retired /overview bookmark to / without adding a
-  // back-stack entry.
+  // back-stack entry. Only the PATH is retired, so the query and fragment are
+  // carried across verbatim: this effect fires on mount, before the workspace probe
+  // has answered, so `redirect` has no member scope to re-apply yet (S-426). A bare
+  // `redirect("/")` therefore discarded the whole query — and with it a deep-linked
+  // `?repo=`, which then resolved to the manifest default and painted ITS figures
+  // for a URL that named another member, or bypassed the unknown-member refusal
+  // outright (NFR-RA-05).
   useEffect(() => {
-    if (rawPathname === "/overview") redirect("/");
+    if (rawPathname === "/overview") {
+      redirect(`/${window.location.search}${window.location.hash}`);
+    }
   }, [rawPathname]);
 
   // Canonical path: resolve the redirect synchronously so the Dashboard view

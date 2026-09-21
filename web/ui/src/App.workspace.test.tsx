@@ -15,6 +15,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
+import { redirect } from "./router.tsx";
 import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 import { scopedMember, setScopedMember } from "./workspace/scope.ts";
 import { ROSTER, stubApi } from "./workspace/testFixtures.ts";
@@ -184,6 +185,49 @@ describe("a member switch remounts the member-scoped views and no app-scoped one
 function openAt(url: string) {
   window.history.replaceState(null, "", url);
 }
+
+describe("the /overview migration keeps the member (S-426, S-194)", () => {
+  // `redirect` is stubbed for the specs above, which is precisely why this was
+  // invisible: the one suite that drives the real shell with a roster never ran the
+  // real migration. These use the real one.
+  const realRouter = async () => await vi.importActual<typeof import("./router.tsx")>("./router.tsx");
+
+  it("carries a deep-linked ?repo= across /overview → /", async () => {
+    const { redirect: realRedirect } = await realRouter();
+    pathname.current = "/overview";
+    openAt("/overview?repo=web");
+    const calls = stubApi();
+    vi.mocked(redirect).mockImplementation((path: string) => {
+      realRedirect(path);
+      pathname.current = "/";
+    });
+    render(app());
+
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    // The migration rewrites the PATH. Dropping the query with it would open the
+    // manifest default and paint ITS figures for a URL that asked for `web`.
+    expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=web"]);
+    expect(scopedMember()).toBe("web");
+  });
+
+  it("carries an UNKNOWN ?repo= across it too, so the refusal is not bypassed", async () => {
+    const { redirect: realRedirect } = await realRouter();
+    pathname.current = "/overview";
+    openAt("/overview?repo=ghost");
+    const calls = stubApi();
+    vi.mocked(redirect).mockImplementation((path: string) => {
+      realRedirect(path);
+      pathname.current = "/";
+    });
+    render(app());
+
+    // Losing the member here would resolve `ghost` to the default member with
+    // nothing on screen admitting it — the 200-shaped page NFR-RA-05 forbids.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
+    expect(screen.queryByTestId("view")).toBeNull();
+    expect(viewCalls(calls())).toEqual([]);
+  });
+});
 
 describe("a deep-linked member scopes the FIRST read (S-426, FR-UI-35)", () => {
   it("issues exactly ONE read, already scoped to the URL's member", async () => {
