@@ -915,6 +915,23 @@ async fn workspace_statistics_states_its_denominator_and_names_every_unread_memb
             "percentiles must not be summed across members: {v}"
         );
     }
+
+    // `?window=` is a documented part of this route's contract, pinned here
+    // because without it the handler could ignore the query map entirely and
+    // everything above would still pass. `window_days` is echoed even when
+    // `members_read == 0`, so neither assertion needs a seeded store.
+    let scoped = json_body(&router, "/api/v1/workspace/statistics?window=30").await;
+    assert_eq!(scoped["window_days"], 30, "?window= scopes the trailing window: {scoped}");
+    assert_eq!(
+        scoped["attribution_coverage"]["requested_window_days"], 30,
+        "and the coverage block echoes the window actually requested"
+    );
+    let lenient = json_body(&router, "/api/v1/workspace/statistics?window=banana").await;
+    assert_eq!(
+        lenient["window_days"], 7,
+        "an unparseable window falls back to the FR-OB-04 default, the same lenient \
+         query contract the other endpoints use: {lenient}"
+    );
 }
 
 /// A member whose `telemetry.db` exists and is not a database is named
@@ -945,26 +962,54 @@ async fn an_unreadable_member_store_is_named_apart_from_an_absent_one() {
 }
 
 /// **The binding criterion at the HTTP surface** ([FR-UI-37], [NFR-PE-10]):
-/// loading the aggregate leaves the resident-engine set exactly where startup
-/// left it. The N = 72 connection-count form of the same claim lives in
+/// serving the aggregate leaves the resident-engine set exactly where startup
+/// left it. The 16-member connection-count form of the same claim lives in
 /// `logos-core/tests/workspace_statistics_engine_free.rs`; this one proves the
-/// route the SPA actually calls reaches the engine-free read and not
+/// route **the SPA actually calls** reaches the engine-free read and not
 /// `Engine::stats`.
+///
+/// It therefore drives the real router. An earlier version called
+/// `federation::workspace_statistics` directly off a registry while claiming this
+/// in its doc comment — which re-tested the core function the other binary
+/// already covers and asserted nothing whatever about the handler, leaving the
+/// route free to fan out through engines behind a green test.
 #[tokio::test]
 async fn the_statistics_aggregate_warms_no_member() {
     let tmp = workspace();
     let federation = discover(tmp.path()).expect("discovery").expect("a workspace");
-    let registry = EngineRegistry::<Engine>::new_serve_default(federation);
-    assert_eq!(registry.resident_members(), ["api"], "only the default member is warm at startup");
+    let backing = Arc::new(Backing::Federated(Box::new(
+        EngineRegistry::<Engine>::new_serve_default(federation),
+    )));
+    let router = web::router_for_backing(Arc::clone(&backing)).expect("the router builds");
+    let before = {
+        let registry = backing.as_federated().expect("the federated registry");
+        assert_eq!(
+            registry.resident_members(),
+            ["api"],
+            "only the default member is warm at startup"
+        );
+        (registry.engine_starts(), registry.live_read_connections())
+    };
 
-    // Read the aggregate straight off the registry the router serves it from.
-    let agg = logos_core::federation::workspace_statistics(&registry, None);
-    assert_eq!(agg.members_total, 2);
+    let resp = router
+        .oneshot(get("/api/v1/workspace/statistics"))
+        .await
+        .expect("route responds");
+    let (status, body, _headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["members_total"], 2, "the request really answered: {body}");
 
+    let registry = backing.as_federated().expect("the federated registry");
     assert_eq!(
         registry.resident_members(),
         ["api"],
-        "the telemetry aggregate must not construct any member engine (NFR-PE-10)"
+        "serving the aggregate must not construct any member engine (NFR-PE-10)"
+    );
+    assert_eq!(
+        (registry.engine_starts(), registry.live_read_connections()),
+        before,
+        "and must move neither the construction counter nor the connection count"
     );
 }
 
@@ -1382,6 +1427,9 @@ async fn an_unopenable_member_renders_both_answers_incomplete_and_names_it() {
     obstruct_store(tmp.path(), "web");
     let router = ws_router(&tmp);
 
+    // This pair, not WORKSPACE_ENDPOINTS: `complete` and `degraded_rollup` are the
+    // AnswerCompleteness rider, which only the two read-models that carry it can
+    // answer. A genuine semantic subset rather than a frozen list.
     for path in ["/api/v1/workspace/reachability", "/api/v1/workspace/check"] {
         let v = json_body(&router, path).await;
         assert_eq!(v["complete"], false, "{path} declares the answer incomplete: {v}");
@@ -1620,7 +1668,14 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
     assert!(status_conns > 0, "the existing fan-out really does hold read connections");
     assert!(status_starts > 0, "and really does construct member engines");
 
-    for path in ["/api/v1/workspace/reachability", "/api/v1/workspace/check"] {
+    // Driven off WORKSPACE_ENDPOINTS rather than a frozen pair. The list this loop
+    // used to carry was written when those were the two newest routes; a route
+    // added later then sits silently outside the one test named for the ceiling it
+    // is meant to hold. `status` is the baseline itself and `roster` has its own
+    // dedicated test, but neither needs excluding — both trivially satisfy
+    // `<= status`, and excluding them would reintroduce exactly the
+    // hand-maintained list this replaces.
+    for path in WORKSPACE_ENDPOINTS {
         let (conns, starts) = cost_of(&tmp, path).await;
         assert!(
             conns <= status_conns,
