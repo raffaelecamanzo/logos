@@ -1094,6 +1094,41 @@ async fn reachability_all_and_repo_are_applied_and_echoed_in_the_scope() {
     );
 }
 
+/// **`?all` fails closed through the real route** ([NFR-CC-04], [CR-084]).
+///
+/// The bound this flag lifts is a size bound on a payload the CLI deliberately
+/// suppresses by default, so every spelling of "no" must leave it in place. The
+/// unit tests pin the reader; this pins the **handler** — that it reads `?all`
+/// through the fail-closed reader and not through `wants_flag`, whose only
+/// off-token is the literal `0`.
+#[tokio::test]
+async fn an_all_parameter_spelling_no_leaves_the_promotions_only_bound_in_place() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+
+    for off in ["?all=0", "?all=false", "?all=no", "?all=off", "?all=FALSE", "?all=nope"] {
+        let v = json_body(&router, &format!("/api/v1/workspace/reachability{off}")).await;
+        assert_eq!(
+            v["reachability"]["scope"]["promotions_only"], true,
+            "{off} must NOT lift the bound: {v}"
+        );
+        assert!(
+            v["reachability"]["dead"].is_null(),
+            "{off} must leave the dead set suppressed: {v}"
+        );
+    }
+
+    // …and the opt-in still works, so this is a discrimination and not a disabling.
+    for on in ["?all", "?all=1", "?all=true", "?all=yes"] {
+        let v = json_body(&router, &format!("/api/v1/workspace/reachability{on}")).await;
+        assert_eq!(
+            v["reachability"]["scope"]["promotions_only"], false,
+            "{on} must lift the bound: {v}"
+        );
+        assert!(v["reachability"]["dead"].as_array().is_some(), "{on}: {v}");
+    }
+}
+
 /// **The honest empty** ([FR-WS-13], [ADR-56], [NFR-CC-04]): a workspace declaring
 /// no rules produces no governance output at all — `null`, never a fabricated
 /// zero-violation report that would read as a passing one.

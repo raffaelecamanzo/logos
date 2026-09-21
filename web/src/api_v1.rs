@@ -1101,6 +1101,11 @@ pub(crate) struct WorkspaceGovernanceAnswer {
 /// set. `?repo=<member>` scopes the tallies and claims to one member; a degraded
 /// member is still named workspace-wide, because a scope must not hide it.
 ///
+/// `?all` lifts the bound only on an explicit opt-in — bare `?all`, or
+/// `?all=1|true|on|yes`. `?all=0|false|no|off`, and any value the reader does not
+/// recognise, leave the promotions-only default in place: a flag that unbounds a
+/// payload must fail closed, not guess.
+///
 /// `reachability.advisory` is always `true` and `reachability.coverage` rides every
 /// claim: this view is never a gate input ([ADR-56]), and no claim on it is
 /// readable without the coverage it rests on.
@@ -1115,11 +1120,12 @@ pub(crate) async fn workspace_reachability(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let repo = opt_param(&q, "repo");
-    // The `--all` escape hatch as a bare toggle, through the shared `?key`/`?key=1`
-    // reader — the inversion to `promotions_only` stays in `ReachabilityScope::new`
-    // where the CLI leaves it, so this handler parses params and nothing else
-    // ([NFR-MA-02]).
-    let all = wants_flag(&q, "all");
+    // The `--all` escape hatch, read fail-closed: bare `?all` or a canonical truthy
+    // token lifts the bound, and anything else — `0`, `false`, `no`, `off` — leaves
+    // it in place (see [`wants_optin_flag`]). The inversion to `promotions_only`
+    // stays in `ReachabilityScope::new` where the CLI leaves it, so this handler
+    // parses params and nothing else ([NFR-MA-02]).
+    let all = wants_optin_flag(&q, "all");
     workspace_fan(
         backing,
         bridge,
@@ -1605,6 +1611,29 @@ pub(crate) fn truthy(raw: Option<&String>) -> bool {
     raw.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
 }
 
+/// `true` only on an **explicit opt-in**: bare `?key`, or `?key=` with a canonical
+/// truthy token. Anything else — `0`, `false`, `no`, `off`, or a value nobody
+/// recognises — is `false`.
+///
+/// # Why this is not [`wants_flag`]
+/// [`wants_flag`] treats the literal `"0"` as its *only* off-token, so `?key=false`
+/// reads as **on**. That is tolerable for a display toggle like `?untested`, where
+/// the wrong branch shows the wrong rows. It is not tolerable for a flag that
+/// **lifts a payload bound**: `?all=false` would then emit the very per-repo dead
+/// set the caller just asked to keep suppressed — the ~500 KB payload class
+/// [CR-084] bounded, delivered on a request that spelled its refusal in a way the
+/// reader did not know ([NFR-CC-04]).
+///
+/// So this reader fails *closed*: an unrecognised value leaves the bound in place.
+/// It composes [`truthy`] rather than inventing a third vocabulary for the surface.
+///
+/// [CR-084]: ../../docs/requests/CR-084-reachability-payload-filter.md
+fn wants_optin_flag(params: &HashMap<String, String>, key: &str) -> bool {
+    params
+        .get(key)
+        .is_some_and(|v| v.trim().is_empty() || truthy(Some(v)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1627,6 +1656,39 @@ mod tests {
         let off = HashMap::from([("production_scope".to_string(), "0".to_string())]);
         assert!(wants_flag(&on, "production_scope"), "bare ?production_scope is on");
         assert!(!wants_flag(&off, "production_scope"), "?production_scope=0 is off");
+    }
+
+    /// The near misses that made `wants_flag` the wrong reader for a bound-lifting
+    /// flag: every one of these spells "no", and `wants_flag` reads four of them as
+    /// "yes".
+    #[test]
+    fn wants_optin_flag_fails_closed_on_every_spelling_of_no() {
+        for off in ["0", "false", "FALSE", "no", "off", "nope", "-1"] {
+            let q = HashMap::from([("all".to_string(), off.to_string())]);
+            assert!(!wants_optin_flag(&q, "all"), "?all={off} must NOT lift the bound");
+        }
+        assert!(!wants_optin_flag(&HashMap::new(), "all"), "absent is off");
+    }
+
+    /// …and it still honours the opt-in the CLI's `--all` corresponds to.
+    #[test]
+    fn wants_optin_flag_accepts_bare_presence_and_the_canonical_yes_tokens() {
+        for on in ["", "1", "true", "TRUE", "on", "yes", "  yes  "] {
+            let q = HashMap::from([("all".to_string(), on.to_string())]);
+            assert!(wants_optin_flag(&q, "all"), "?all={on:?} must lift the bound");
+        }
+    }
+
+    /// The divergence is the point: `wants_flag` and `wants_optin_flag` disagree on
+    /// exactly the spellings that made this a defect. Pinned so a future tidy-up
+    /// cannot quietly collapse the two readers back into one.
+    #[test]
+    fn the_two_flag_readers_disagree_on_the_written_out_negatives() {
+        for off in ["false", "no", "off"] {
+            let q = HashMap::from([("all".to_string(), off.to_string())]);
+            assert!(wants_flag(&q, "all"), "wants_flag reads ?all={off} as ON (its only off-token is \"0\")");
+            assert!(!wants_optin_flag(&q, "all"), "wants_optin_flag reads ?all={off} as OFF");
+        }
     }
 
     #[test]
