@@ -22,6 +22,12 @@
  * member rows beside it, so the two can never disagree (ADR-01, NFR-MA-02). In
  * particular there is no aggregate of per-member quality signals anywhere on it
  * (BR-56) — the member table reports each member's own figure, named.
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the rules (R0-R5) every absence-
+ * reporting site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import { AsyncResource, useApiResource } from "../../api/index.ts";
