@@ -153,6 +153,55 @@ const SOURCES: Record<string, string> = Object.fromEntries(
     .map(([path, source]) => [path.replace(/^\.\//, ""), source as string]),
 );
 
+/**
+ * `source` with its comments removed, so the guards below read CODE and not prose.
+ *
+ * A character scanner rather than a regex, because the two are not separable by one:
+ * a `//` inside a string literal is not a comment, and a `/* … *\/` inside a template
+ * literal is not either. Widening the route probe to be quote-agnostic immediately
+ * produced a false positive on a backticked `/workspace` inside an explanatory
+ * comment in `views/workspace/WorkspaceView.tsx` — a guard that fires on prose gets
+ * switched off by the next person who trips it.
+ */
+function codeOf(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const two = source.slice(i, i + 2);
+    if (two === "//") {
+      while (i < source.length && source[i] !== "\n") i += 1;
+      continue;
+    }
+    if (two === "/*") {
+      i += 2;
+      while (i < source.length && source.slice(i, i + 2) !== "*/") i += 1;
+      i += 2;
+      continue;
+    }
+    const ch = source[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const quote = ch;
+      out += ch;
+      i += 1;
+      while (i < source.length && source[i] !== quote) {
+        if (source[i] === "\\") {
+          out += source.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i += 1;
+      }
+      out += quote;
+      i += 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 describe("no second list of app-level paths exists in the tree (ADR-66 §1)", () => {
   // The defect this replaces was a hard-coded path list consulted in one place. The
   // hazard it leaves behind is a SECOND one: a `startsWith("/workspace")` in a view,
@@ -162,19 +211,47 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
   // happens to agree with the registry today.
   const modules = Object.keys(SOURCES);
 
-  it("reads a source tree at all — an empty walk would pass every assertion below", () => {
-    // The denominator. A walker that resolved to the wrong directory returns [], and
-    // "no file mentions the path" is then true and worthless.
-    expect(modules.length).toBeGreaterThan(30);
+  it("reads the WHOLE source tree — a partial walk would pass every assertion below", () => {
+    // The denominator, and it pins the walk's SHAPE rather than a floor a subset
+    // clears. Found in review: `> 30` with two `.ts` sentinels passed over a walk
+    // that had lost every `.tsx` file — 37 `.ts` modules clear 30, and both
+    // sentinels are `.ts`. The whole component tree, including `App.tsx` where the
+    // defect this guard exists for actually lived, dropped out in silence and a
+    // planted second list went undetected. So both extensions are counted
+    // separately and a `.tsx` sentinel is named.
+    const tsx = modules.filter((m) => m.endsWith(".tsx"));
+    const ts = modules.filter((m) => m.endsWith(".ts"));
+    expect(ts.length).toBeGreaterThan(30);
+    expect(tsx.length).toBeGreaterThan(30);
     expect(modules).toContain("nav.ts");
     expect(modules).toContain("views/index.ts");
+    expect(modules).toContain("App.tsx");
+    expect(modules).toContain("shell/Sidebar.tsx");
   });
 
-  it.each(WORKSPACE_NAV_ITEMS.filter((i) => i.scope === "app").map((i) => i.path))(
+  // Every app-scoped route, from EITHER registry. Nothing stops an `app` entry being
+  // registered in `NAV_ITEMS` — that is how a promoted tab would land — and keying
+  // this off `WORKSPACE_NAV_ITEMS` alone would exempt it from the grep half.
+  const appPaths = ALL_ITEMS.filter((i) => i.scope === "app").map((i) => i.path);
+
+  it("has app-scoped routes to check at all", () => {
+    // `it.each([])` registers ZERO tests and raises nothing, so without this floor
+    // the assertion AC1 names by name would VANISH rather than fail the moment no
+    // entry declared `app` — a guard that disables itself exactly when the field it
+    // guards is what broke. Found in review.
+    expect(appPaths.length).toBeGreaterThan(0);
+  });
+
+  it.each(appPaths)(
     "spells the app-scoped route %s in the two registries and nowhere else",
     (path) => {
-      const literal = `"${path}"`;
-      const mentions = modules.filter((m) => SOURCES[m].includes(literal));
+      // Quote-agnostic, and matched as a PREFIX. An exact `"${path}"` search was
+      // evaded three ways, all reproduced in review: `"/workspace/"` (a trailing
+      // slash — the natural spelling of `startsWith`) does not contain the substring
+      // `"/workspace"`; and `web/ui` configures neither ESLint nor Prettier, so
+      // single quotes and template literals are not hypothetical.
+      const probe = new RegExp(`["'\`]${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+      const mentions = modules.filter((m) => probe.test(codeOf(SOURCES[m])));
       // `nav.ts` — the navigation registry that DECLARES the scope. `views/index.ts` —
       // the component registry that maps the same path to the React view it mounts;
       // it is keyed by path by construction and holds no scope. Any third file is
@@ -184,8 +261,13 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
   );
 
   it("keeps the app-level predicate itself in one module", () => {
+    // `function` is not the only way to declare one. An arrow const is the dominant
+    // style for small helpers in this tree, and `export const scopeForPath = (p) =>
+    // p.split("/")[1] === "workspace" ? "app" : "member"` evaded BOTH this guard and
+    // the route-literal one above — no `function` keyword, no route literal.
+    // Reproduced in review; both matchers were widened.
     const definers = modules.filter((m) =>
-      /(export\s+)?function\s+(isAppLevelPath|scopeForPath)\b/.test(SOURCES[m]),
+      /\b(function|const|let|var)\s+(isAppLevelPath|scopeForPath)\b/.test(codeOf(SOURCES[m])),
     );
     expect(definers).toEqual(["nav.ts"]);
   });

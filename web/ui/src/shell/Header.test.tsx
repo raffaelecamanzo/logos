@@ -366,9 +366,11 @@ describe("Header progressive disclosure (S-317, FR-UI-34, UAT-UI-11)", () => {
 
     const selector = screen.getByRole("combobox");
     const header = container.querySelector("header") as HTMLElement;
+    // The header-wide claim, which strictly implies the old slot-level one — the
+    // slot is by construction a child of this same `<header>`. The second line is
+    // not a restatement: it catches a DIFFERENT `<select>` appearing in the header.
     expect(header).not.toContainElement(selector);
     expect(header.querySelectorAll("select")).toHaveLength(0);
-    expect(graphStateSlot()).not.toContainElement(selector);
   });
 
   it("keeps the workspace-probe fault OUT of the slot — it is a different signal", async () => {

@@ -126,8 +126,18 @@ const region = (name: string) => screen.getByRole("region", { name });
 
 describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
   it("renders a Workspace section and a Service section, in that order", async () => {
-    mountWithMode(200);
+    const { container } = mountWithMode(200);
     await screen.findByRole("link", { name: /Workspace/ });
+
+    // The nav landmark keeps its name in THIS mode too. The single-root branch is
+    // pinned below, and the two branches each write the `<nav>` themselves, so a
+    // label or class changed on one of them would otherwise ship green (found in
+    // review).
+    expect(screen.getByRole("navigation", { name: "Views" })).toBeInTheDocument();
+    // Disclosure is class-driven; an inline style on the NEW markup would need
+    // `style-src 'unsafe-inline'` and no other spec covers this surface
+    // (NFR-SE-06, found in review).
+    expect(container.querySelectorAll("[style]")).toHaveLength(0);
 
     const regions = screen.getAllByRole("region");
     expect(regions.map((r) => r.querySelector("h2")?.textContent)).toEqual([
@@ -172,10 +182,16 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     const section = region("Service");
     const firstList = section.querySelector("ul");
     expect(firstList).not.toBeNull();
-    expect(section.compareDocumentPosition(firstList as Node)).toBeDefined();
-    expect(
-      select.compareDocumentPosition(firstList as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    // Exact, not a truthy mask: the list must be CONTAINED BY the section and
+    // FOLLOW the select. `toBeTruthy()` on an AND stops discriminating the moment
+    // someone widens the mask, and a bare `toBeDefined()` here asserted nothing at
+    // all — `compareDocumentPosition` always returns a number (found in review).
+    expect(section.compareDocumentPosition(firstList as Node)).toBe(
+      Node.DOCUMENT_POSITION_CONTAINED_BY | Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(select.compareDocumentPosition(firstList as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
   });
 
   it("names the scope in words, so the section is never colour or position alone", async () => {

@@ -19,8 +19,9 @@ import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 import { scopedMember, setScopedMember } from "./workspace/scope.ts";
 import { stubApi } from "./workspace/testFixtures.ts";
 
-/** The real shell is rendered (the selector lives in the Header), so it needs the
- *  theme context `main.tsx` provides in production. */
+/** The real shell is rendered — sidebar included, which is where S-425 put the
+ *  member selector — so it needs the theme context `main.tsx` provides in
+ *  production. */
 const app = () => (
   <ThemeProvider>
     <App />

@@ -3,11 +3,26 @@ import { describe, expect, it } from "vitest";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
+import { NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { viewForPath, VIEW_REGISTRY } from "./index.ts";
 
 describe("VIEW_REGISTRY", () => {
   it("registers the dashboard at the root route", () => {
     expect(VIEW_REGISTRY["/"]).toBe(DashboardView);
+  });
+
+  it("registers no view the navigation registry has not scoped (S-425, ADR-66 §2)", () => {
+    // The shell mounts `viewForPath(pathname)` while keying the mount on
+    // `isAppLevelPath(pathname)` — two registries, read by one component. A route
+    // present HERE but absent from `nav.ts` resolves to a real view and to
+    // `scopeForPath`'s unregistered-path fallback of "member": the silent wrong
+    // default ADR-66 §2 exists to make impossible, displaced one level. Found in
+    // review, while the two registries still agreed by coincidence; three later
+    // stories add entries to both by hand, which is when a coincidence stops
+    // holding.
+    const scoped = new Set([...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS].map((i) => i.path));
+    expect(Object.keys(VIEW_REGISTRY).length).toBeGreaterThan(0);
+    expect(Object.keys(VIEW_REGISTRY).filter((path) => !scoped.has(path))).toEqual([]);
   });
 
   it("registers the Statistics view at /statistics (S-235)", () => {

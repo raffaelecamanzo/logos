@@ -23,14 +23,7 @@
 
 import { Badge } from "../components/index.ts";
 import { useWorkspace } from "../workspace/WorkspaceContext.tsx";
-// Its one rule stays in `MemberSelector.module.css` rather than moving to a module
-// of this component's own. A CSS-module class name is derived from the stylesheet's
-// PATH, so relocating the rule renames `.fault` in the served single-root header —
-// measured, not assumed: `_fault_fab455` became `_fault_41911d`. A degraded
-// workspace settles the mode to `single`, so that header IS a single-root header,
-// and ADR-52's byte-for-byte guarantee is the binding constraint on this story. The
-// rule is documented in that file, next to the row it concedes width to.
-import styles from "./MemberSelector.module.css";
+import styles from "./WorkspaceFault.module.css";
 
 export function WorkspaceFault() {
   const { error } = useWorkspace();

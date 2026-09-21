@@ -711,17 +711,16 @@ const HIDING_DECLARATIONS: [(&str, &str); 3] =
 /// next to it.
 ///
 /// S-425 moved the member SELECTOR off this row into the sidebar's Service-section
-/// header. `MemberSelector.module.css` STAYS in the walk regardless, because the
-/// workspace-probe fault badge — `WorkspaceFault.tsx`, still a direct child of this
-/// row — takes its `.fault` rule from that file, and must keep taking it: the class
-/// name a CSS module generates comes from the stylesheet's path, so moving the rule
-/// renames the class in the served single-root header that ADR-52 pins byte-for-byte.
-/// Dropping the module here on the grounds that "the selector left" would leave this
-/// walk reading the header's own file alone while a survivor's rules sat outside it —
-/// the exact shape the doc comment above records as having been wrong once.
+/// header, and `MemberSelector.module.css` left the walk with it. What stayed on the
+/// row is the workspace-probe fault badge, whose rules moved to
+/// `WorkspaceFault.module.css` in the same change — so the row still has two
+/// stylesheets and the guard still covers every survivor on it. Dropping the
+/// selector's module WITHOUT adding the badge's would have left this walk reading the
+/// header's own file alone, which is the exact shape the doc comment above records as
+/// having been wrong once.
 const HEADER_ROW_STYLESHEETS: [&str; 2] = [
     "src/shell/Header.module.css",
-    "src/shell/MemberSelector.module.css",
+    "src/shell/WorkspaceFault.module.css",
 ];
 
 fn header_disclosure_ladder(stylesheet: &str) -> Vec<(String, f64)> {
@@ -799,9 +798,11 @@ fn header_hides_nothing_unconditionally() {
 
 /// The priority the design contract states (frontend-design §3, re-baselined by
 /// CR-097): the readout gives way FIRST, the brand subtitle SECOND, so the brand
-/// lockup, the member selector and the theme toggle survive to the narrowest
-/// supported viewport. `.status` is the readout's whole slot — every one of its four
-/// states renders into it (`Header.test.tsx` binds that end).
+/// lockup, the workspace-probe fault badge and the theme toggle survive to the
+/// narrowest supported viewport. (The member selector was on this row until S-425
+/// moved it into the sidebar's Service-section header.) `.status` is the readout's
+/// whole slot — every one of its four states renders into it (`Header.test.tsx`
+/// binds that end).
 #[test]
 fn header_drops_the_readout_before_the_brand_subtitle() {
     let readout = header_drops_at(".status")
@@ -843,9 +844,9 @@ fn header_drops_the_readout_absent_never_truncated() {
     }
 }
 
-/// …and nothing ELSE gives way. The brand lockup, the member selector and the theme
-/// toggle survive to the narrowest supported viewport (FR-UI-29): the selector's
-/// presence beside a member's name is a correctness property, not a decoration.
+/// …and nothing ELSE gives way. The brand lockup, the workspace-probe fault badge and
+/// the theme toggle survive to the narrowest supported viewport (FR-UI-29,
+/// NFR-RA-05): a workspace whose roster could not be read must say so at every width.
 ///
 /// The ladder counts every mechanism in `HIDING_DECLARATIONS`, not `display` alone —
 /// a `visibility: hidden` on the brand lockup loses the home link just as completely
@@ -853,9 +854,12 @@ fn header_drops_the_readout_absent_never_truncated() {
 ///
 /// It walks every stylesheet in `HEADER_ROW_STYLESHEETS`, not the header's own.
 /// This guard previously read `Header.module.css` alone while its own message
-/// named the member selector as the survivor that matters — and the selector's
-/// rules live in `MemberSelector.module.css`, a file the same story created width
-/// concessions in. Appending
+/// named the member selector as the survivor that mattered — and that selector's
+/// rules lived in a module of their own, which the same story had created width
+/// concessions in. (S-425 moved the selector off this row; the survivor whose rules
+/// sit outside the header's file is now the fault badge, in
+/// `WorkspaceFault.module.css`. The lesson is unchanged, and so is the walk.)
+/// Appending
 ///
 /// ```css
 /// @media (max-width: 420px) { .select { display: none } }

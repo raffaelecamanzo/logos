@@ -45,6 +45,10 @@ export function MemberSelector({ labelledBy }: { labelledBy: string }) {
 
   return (
     <select
+      // Nothing in-tree reads this id — the label that used it is gone and the
+      // tests query by role. It is kept as the control's stable handle for manual
+      // testing and out-of-tree automation; naming it is cheaper than a rename
+      // later.
       id="workspace-member"
       className={styles.select}
       aria-labelledby={labelledBy}

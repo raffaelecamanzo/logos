@@ -33,27 +33,3 @@
 .select:hover {
   border-color: var(--border-strong, var(--border-subtle));
 }
-
-/* ── The workspace-probe fault badge ──────────────────────────────────────────
-   Rendered by `WorkspaceFault.tsx`, not by the selector: a faulted probe settles
-   the mode to `single`, where the Service section holding the selector does not
-   exist, so the badge is stated from the app header instead (NFR-RA-05).
-
-   Its rule stays in THIS file although its component moved out, because a
-   CSS-module class name is generated from the stylesheet's path: moving the rule
-   to `WorkspaceFault.module.css` renames the class in the served single-root
-   header (`_fault_fab455` → `_fault_41911d`, measured), and ADR-52's byte-for-byte
-   guarantee covers that header. Do not "tidy" it into its own module.
-
-   The badge is a DIRECT child of the header row, with no wrapper of its own, so it
-   gets the row's width concessions here or not at all. `Badge` is
-   `white-space: nowrap` by default, because a status chip is normally three words;
-   this one is four long ones, measured at 254px, which overflowed a 420px viewport
-   by 29px and pushed the theme toggle off-screen. It WRAPS rather than shrinks: an
-   error the reader cannot read is not a reported error (NFR-RA-05), so nothing
-   here truncates it. */
-.fault {
-  min-width: 0;
-  white-space: normal;
-  text-align: center;
-}
