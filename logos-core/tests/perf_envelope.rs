@@ -54,7 +54,7 @@
 //! and skipping it would cost coverage for nothing.
 //!
 //! Two env knobs keep the budgets honest without editing them:
-//! - `LOGOS_PERF_TOLERANCE` (f64 ≥ 1.0, default 1.0) widens every wall-clock band
+//! - `LOGOS_PERF_TOLERANCE` (f64 ≥ 1.0, default 1.15 since 2026-09-21) widens every wall-clock band
 //!   for a slow/loaded CI host — the tolerance-banding the sprint mandates;
 //! - `LOGOS_PERF_LOC` (u64, default [`ENVELOPE_LOC`]) shrinks the fixture for a
 //!   fast harness smoke-test; the *budgets are unchanged*, so a reduced run only
@@ -94,14 +94,16 @@ use logos_core::{Engine, Granularity};
 // ── Tolerance & sizing knobs ────────────────────────────────────────────────
 
 /// Multiplier applied to every wall-clock budget so a loaded CI host can widen
-/// the bands without editing the budget. Defaults to `1.0`; values below `1.0`
-/// are ignored (a budget is never tightened by accident).
+/// the bands without editing the budget. Defaults to `1.15` since 2026-09-21
+/// (Sprint 74 human review — see `runtime_concurrency.rs` for the measurement);
+/// values below `1.0` are ignored (a budget is never tightened by accident).
+/// Set `LOGOS_PERF_TOLERANCE=1.0` to measure against the raw budgets.
 fn tolerance() -> f64 {
     std::env::var("LOGOS_PERF_TOLERANCE")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| *v >= 1.0)
-        .unwrap_or(1.0)
+        .unwrap_or(1.15)
 }
 
 /// The target LOC for the in-envelope fixture: [`logos_core::perf::ENVELOPE_LOC`]

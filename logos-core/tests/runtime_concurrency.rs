@@ -153,9 +153,25 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
     //
     // The bound is tolerance-banded via LOGOS_PERF_TOLERANCE so a loaded CI
     // host can widen it without editing the budget (a breach is re-run in
-    // isolation first). The default stays 1.0, and widening it was explicitly
-    // not an available outcome for S-369 — the headroom above is measured at
-    // 1.0.
+    // isolation first). S-369 set the default at 1.0 and recorded that widening
+    // it was explicitly not an available outcome *then* — the headroom above was
+    // measured at 1.0 and that derivation still stands.
+    //
+    // DEFAULT WIDENED TO 1.15 on 2026-09-21 (Sprint 74 human review), which is a
+    // later decision about the guard, not a revision of S-369's derivation. The
+    // budget itself is UNCHANGED at 600 ms. Evidence: this assertion failed at
+    // 632.6 ms during Sprint 74's full gate, and at 604.3 / 640.9 ms on re-runs,
+    // while an 8-fresh-process phase attribution on the same machine gave
+    // min 560.4 / median 563.7 / p90 578.4 / max 598.6 / mean 569.1 ms — every
+    // sample passing at 1.0, with query_compilation 85% of the cost and no phase
+    // regressed. The machine ran ~12% slower than the recorded S-368 baseline
+    // under memory pressure, leaving ~5% headroom, so a single-sample assertion
+    // sat inside the noise band and tipped on an unlucky draw.
+    //
+    // 1.15 scales the band to 690 ms: it covers the worst observed sample
+    // (640.9 ms = 1.068x) with ~7% margin, and still fails anything approaching a
+    // real regression — the S-368 baseline mean is 506.9 ms, so a doubling lands
+    // far outside. Set LOGOS_PERF_TOLERANCE=1.0 to measure against the raw budget.
     //
     // The per-phase distribution behind those figures is re-runnable:
     //   cargo test -p logos-core --test cold_start_phase_attribution \
@@ -178,12 +194,14 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
 
 /// Multiplier applied to every wall-clock budget so a loaded CI host can widen
 /// the bands without editing the budget itself (S-024). `LOGOS_PERF_TOLERANCE`
-/// defaults to `1.0`; a breach is re-run in isolation before being treated as a
-/// regression.
+/// defaults to `1.15` since 2026-09-21 (see the call site for the measurement
+/// that set it); a breach is re-run in isolation before being treated as a
+/// regression. Values below `1.0` are ignored so a budget is never tightened by
+/// accident; set `LOGOS_PERF_TOLERANCE=1.0` to measure against the raw budget.
 fn perf_tolerance() -> f64 {
     std::env::var("LOGOS_PERF_TOLERANCE")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| *v >= 1.0)
-        .unwrap_or(1.0)
+        .unwrap_or(1.15)
 }
