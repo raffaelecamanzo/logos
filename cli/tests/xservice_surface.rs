@@ -1980,3 +1980,178 @@ fn the_route_providers_help_does_not_promise_one_provider_per_consumer_endpoint(
         "the help must state the broker-topic fan-out:\n{text}"
     );
 }
+
+// ── S-427 / FR-WS-28: the CLI and HTTP renderings are ONE read-model ──────────
+//
+// `federation::reach` ([FR-WS-12]) and `federation::governance` ([FR-WS-13]) had
+// a CLI rendering and an MCP one (`mcp::server::workspace_reachability` /
+// `workspace_check`); S-427 added `GET /api/v1/workspace/reachability` and `GET
+// /api/v1/workspace/check` as the third. Under [ADR-01] those are renderings of
+// ONE read-model, and the only way to keep them so is to compare them — two
+// independently-maintained expectation fixtures drift silently, and a divergence
+// over one read-model is exactly what ADR-01 exists to prevent.
+//
+// This test pins the CLI↔HTTP pair. The MCP arm has its own guard in
+// `mcp/tests/reachability_bound.rs`; there is deliberately no three-way
+// comparison, because each pair is pinned where both its surfaces are reachable.
+//
+// That is what decides where this test lives: `CARGO_BIN_EXE_logos` exists only in
+// this package's tests, and `web` is already a dependency here behind the default
+// `ui` feature, so this is the one crate that reaches both. It reuses the fixture
+// beside it (`workspace()`, `declare_rules`, `GOVERNANCE`) rather than building a
+// second one here. (`web/tests/workspace_api.rs` does keep its own copy of the
+// governance fixture — the two crates cannot share a test module, and nothing
+// enforces that the copies stay identical; the parity assertion is what must live
+// here, not the fixture.)
+
+/// Drive the real workspace router in-process (no socket) and return the parsed
+/// `200` JSON body, over the SAME workspace directory the CLI was just run on.
+#[cfg(feature = "ui")]
+async fn http_json(root: &Path, path: &str) -> Value {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use logos_core::federation::{discover, EngineRegistry};
+    use logos_core::Engine;
+    use tower::ServiceExt;
+
+    let federation = discover(root).expect("discovery succeeds").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new_serve_default(federation);
+    let router = web::workspace_router(registry).expect("the workspace router builds");
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(header::HOST, "127.0.0.1:4983")
+        .body(Body::empty())
+        .expect("a well-formed request");
+    let resp = router.oneshot(request).await.expect("route responds");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).expect("utf8 body");
+    assert_eq!(status, StatusCode::OK, "{path} answers 200: {body}");
+    serde_json::from_str(&body).unwrap_or_else(|e| panic!("{path} is JSON: {e}\n{body}"))
+}
+
+/// **The story's spine** ([FR-WS-28], [ADR-01]): over ONE workspace, the HTTP
+/// payloads and the CLI's `--json` stdout are the same read-model, field for
+/// field.
+///
+/// Both surfaces are actually driven — the real `logos` binary and the real axum
+/// router, over the same temp workspace — and the comparison is `serde_json::Value`
+/// equality, which is structural: a field added, dropped, renamed, reordered
+/// within an object, or given a different value on either side fails it. Neither
+/// side's shape is written down anywhere in this test, which is the point: an
+/// expectation fixture would have to be maintained twice and would drift.
+///
+/// **Five** comparisons, chosen because each exercises a different branch of the
+/// projection rather than repeating one:
+/// 1. reachability, bounded default — `dead` suppressed to `null`;
+/// 2. reachability, `--all` / `?all` — `dead` populated;
+/// 3. reachability, `--repo web` / `?repo=web` — the member scope applied (this is
+///    the one that catches a handler dropping `repo` before `ReachabilityScope`);
+/// 4. governance, the honest empty — `null == null`, which proves little alone;
+/// 5. governance, a DECLARED rule with a real violation — the case that carries the
+///    weight, since 4 would pass over two equally broken surfaces.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn the_http_and_cli_renderings_of_one_workspace_agree_field_for_field() {
+    let tmp = workspace();
+    let root = tmp.path();
+
+    // ── reachability, bounded default (promotions only, `dead` suppressed)
+    let cli = logos_json(root, &["workspace", "reachability"]);
+    let http = http_json(root, "/api/v1/workspace/reachability").await;
+    assert!(cli["dead"].is_null(), "anti-vacuity: the default really is bounded: {cli}");
+    assert_eq!(
+        http["reachability"], cli,
+        "the bounded reachability rendering differs between the surfaces (ADR-01)\n\
+         http: {}\n cli: {cli}",
+        http["reachability"]
+    );
+
+    // ── reachability, `--all` / `?all` (the dead set populated)
+    let cli_all = logos_json(root, &["workspace", "reachability", "--all"]);
+    let http_all = http_json(root, "/api/v1/workspace/reachability?all").await;
+    assert!(
+        cli_all["dead"]
+            .as_array()
+            .is_some_and(|d| d.iter().any(|c| c["name"] == "orphan")),
+        "anti-vacuity: `--all` really does carry a dead claim: {cli_all}"
+    );
+    assert_eq!(
+        http_all["reachability"], cli_all,
+        "the `--all` reachability rendering differs between the surfaces (ADR-01)\n\
+         http: {}\n cli: {cli_all}",
+        http_all["reachability"]
+    );
+
+    // ── reachability, `--repo` / `?repo=` (the member scope)
+    let cli_repo = logos_json(root, &["workspace", "reachability", "--all", "--repo", "web"]);
+    let http_repo = http_json(root, "/api/v1/workspace/reachability?all&repo=web").await;
+    assert_eq!(cli_repo["scope"]["repo"], "web", "anti-vacuity: the scope applied: {cli_repo}");
+    assert_eq!(
+        http_repo["reachability"], cli_repo,
+        "the member-scoped reachability rendering differs between the surfaces (ADR-01)\n\
+         http: {}\n cli: {cli_repo}",
+        http_repo["reachability"]
+    );
+
+    // ── governance, the honest empty (no rules declared yet)
+    let cli_empty = logos_json(root, &["workspace", "check"]);
+    let http_empty = http_json(root, "/api/v1/workspace/check").await;
+    assert!(cli_empty.is_null(), "no rules ⇒ the CLI prints null: {cli_empty}");
+    assert_eq!(
+        http_empty["governance"], cli_empty,
+        "the honest empty differs between the surfaces: {http_empty}"
+    );
+
+    // ── governance, a DECLARED rule with a real violation — the case that carries
+    //    the weight, since `null == null` would pass over two broken surfaces.
+    declare_rules(root, GOVERNANCE);
+    let cli_rules = logos_json(root, &["workspace", "check"]);
+    let http_rules = http_json(root, "/api/v1/workspace/check").await;
+    assert_eq!(
+        cli_rules["violations"].as_array().map(Vec::len),
+        Some(1),
+        "anti-vacuity: the declared rule really is breached: {cli_rules}"
+    );
+    assert_eq!(
+        http_rules["governance"], cli_rules,
+        "the governance rendering differs between the surfaces (ADR-01)\n\
+         http: {}\n cli: {cli_rules}",
+        http_rules["governance"]
+    );
+}
+
+/// [NFR-MA-02] / S-427: the HTTP twins added **no command and no CLI adapter
+/// line**.
+///
+/// Asserted on the enumerated subcommand set rather than on a substring sweep: the
+/// `workspace` group must still offer exactly `status`, `reachability` and `check`
+/// (plus clap's own `help`). A new HTTP-shaped subcommand, or a CLI twin of a route
+/// that already has a CLI twin, would be a third rendering of one figure — the
+/// third place for it to drift.
+#[test]
+fn the_http_twins_added_no_workspace_subcommand() {
+    let tmp = workspace();
+    let out = logos(tmp.path(), &["workspace", "--help"]);
+    assert!(out.status.success(), "workspace --help runs");
+    let text = String::from_utf8(out.stdout).expect("utf8 help");
+
+    // The `Commands:` block, up to the blank line that ends it. Each entry's first
+    // token is the subcommand name.
+    let commands: Vec<String> = text
+        .split("Commands:\n")
+        .nth(1)
+        .unwrap_or_else(|| panic!("`workspace --help` lists a Commands block:\n{text}"))
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect();
+
+    assert_eq!(
+        commands,
+        ["status", "reachability", "check", "help"],
+        "the workspace group grew or lost a subcommand (NFR-MA-02):\n{text}"
+    );
+}

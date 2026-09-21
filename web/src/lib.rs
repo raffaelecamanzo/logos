@@ -777,6 +777,15 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/workspace/search", get(api_v1::workspace_search))
         .route("/api/v1/workspace/callers", get(api_v1::workspace_callers))
         .route("/api/v1/workspace/impact", get(api_v1::workspace_impact))
+        // ── `federation::reach` and `federation::governance` (S-427,
+        // [FR-WS-28], [ADR-01]): both already answered on the CLI and over MCP
+        // (`mcp::server::workspace_reachability` / `workspace_check`); this is
+        // the web surface they never had. Thin serialisations of the very same
+        // read-models, so no new core query and no CLI change. Everything the
+        // group comment above says — GET, carve-out stack, single-root `404` —
+        // governs these two as it does the six.
+        .route("/api/v1/workspace/reachability", get(api_v1::workspace_reachability))
+        .route("/api/v1/workspace/check", get(api_v1::workspace_check))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof

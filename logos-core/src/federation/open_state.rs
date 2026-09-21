@@ -474,12 +474,21 @@ impl DegradedRollup {
     ///
     /// Takes the rows rather than reading the roll-up's names, because the cause
     /// lives on the row. That matters most where there is nothing else: this is
-    /// the **only** degraded channel `workspace check` and `workspace
-    /// reachability` have — neither payload carries a member table (`check`
-    /// serialises a bare `Option`, and wrapping it would destroy the
-    /// honest-`null` contract [NFR-CC-04] gave it). Naming members without their
-    /// cause would leave those two commands exiting 1 with no diagnosis, which is
-    /// the misdiagnosis [FR-WS-16] exists to remove, merely made silent.
+    /// the only degraded channel the **CLI** rendering of `workspace check` and
+    /// `workspace reachability` has — neither payload carries a member table, and
+    /// `check` serialises a bare `Option` that must keep serialising as `null`
+    /// ([NFR-CC-04]). Naming members without their cause would leave those two
+    /// commands exiting 1 with no diagnosis, which is the misdiagnosis
+    /// [FR-WS-16] exists to remove, merely made silent.
+    ///
+    /// # The HTTP twins carry it in the payload instead (S-427, [FR-WS-28])
+    /// A `200` has neither an exit code nor a stderr channel, so
+    /// `GET /api/v1/workspace/{check,reachability}` publish the
+    /// [`DegradedRollup`] structurally beside the read-model. That does **not**
+    /// contradict the honest-`null` contract: the envelope keeps the read-model
+    /// under its own key, so `check`'s `Option` still serialises as a bare `null`
+    /// there. What would destroy the contract is wrapping the `Option` *in
+    /// place* — replacing `null` with an object — and no surface does that.
     ///
     /// # Grouped by cause, one copy of each
     /// Each distinct reason is printed **once**, as a heading over the members it
