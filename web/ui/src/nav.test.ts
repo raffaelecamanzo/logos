@@ -106,7 +106,14 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     expect(app.group).toBe(member.group);
     // …and the three cross-service tabs are NOT in that group, which is what makes
     // the grouping visible in the rendered section at all.
-    const crossService = WORKSPACE_NAV_ITEMS.filter((i) => i.id !== "workspace-statistics");
+    //
+    // Keyed on the ids that ARE the cross-service surfaces, not on "everything except
+    // workspace-statistics". The exclusion spelling is the same false obligation this
+    // file fixes 25 lines above — it would fail the day a second group-C app entry is
+    // registered, with nothing wrong.
+    const crossService = WORKSPACE_NAV_ITEMS.filter((i) =>
+      ["workspace-dashboard", "workspace-health", "workspace"].includes(i.id),
+    );
     expect(crossService.length).toBeGreaterThan(0);
     for (const item of crossService) {
       expect(item.group).not.toBe(app.group);
