@@ -17,10 +17,24 @@
  *
  * S-426 (FR-UI-35, NFR-RA-05) adds one more gate beside the probe gate: while the
  * URL names a member this workspace does not have, NO view is mounted at all. The
- * refusal takes the content slot instead. A view mounted there would read unscoped
- * and paint the DEFAULT member's figures under the requested member's name — a
- * `200`-shaped page that is wrong about its own subject, which is precisely what
- * the server refuses with a `404` and what this shell must not undo.
+ * refusal takes the content slot instead.
+ *
+ * For a MEMBER-scoped view the reason is direct: mounted there it would read
+ * unscoped and paint the DEFAULT member's figures under the requested member's name
+ * — a `200`-shaped page that is wrong about its own subject, which is what the
+ * server refuses with a `404` and what this shell must not undo.
+ *
+ * The gate is deliberately NOT narrowed to those views, and the reason above is not
+ * the reason why. An app-level view reads the `workspace/*` fan-out, which
+ * `api/client.ts` never scopes to a member, so it would render correct figures — it
+ * cannot commit that substitution. It is refused because the refusal is about the
+ * URL, not about what the view happens to read: `?repo=ghost` is a claim this
+ * workspace cannot honour, and a page that answered it in full while the address bar
+ * named a member that does not exist would invite exactly the reading the refusal
+ * exists to prevent. One invalid URL, one page state.
+ *
+ * This reads no scope and adds no second notion of one (ADR-66): it does not consult
+ * the path at all. `viewKey` below remains the only consumer of the declared field.
  */
 
 import { useEffect } from "react";
@@ -79,9 +93,9 @@ function Shell() {
       {mode === "loading" ? (
         <LoadingState label="Starting…" />
       ) : unknownMember !== null ? (
-        /* INSTEAD of the view, never beside it: there is no member to answer for,
-           and the transport is unscoped, so nothing on screen can be one member's
-           figures wearing another member's name (NFR-RA-05). */
+        /* INSTEAD of the view, never beside it — for EVERY path, app-level ones
+           included; see the header for why that is the URL's claim and not the
+           view's reads (NFR-RA-05). */
         <UnknownMember />
       ) : (
         View && <View key={viewKey} />

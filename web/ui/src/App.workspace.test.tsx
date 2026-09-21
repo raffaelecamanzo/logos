@@ -273,6 +273,21 @@ describe("an unknown ?repo= renders a refusal and NO view (NFR-RA-05)", () => {
     expect(calls().some((u) => u.startsWith("/api/v1/status"))).toBe(false);
   });
 
+  it("refuses an APP-level path too — the claim is the URL's, not the view's reads", async () => {
+    // `/workspace` is app-scoped (ADR-66): its fan-out is never member-scoped, so it
+    // could render correct figures here. It is refused anyway, and this pins that
+    // decision — without it, narrowing the gate to member-scoped views would be a
+    // silent behaviour change that no spec noticed.
+    pathname.current = "/workspace";
+    openAt("/workspace?repo=ghost");
+    const calls = stubApi();
+    render(app());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
+    expect(screen.queryByTestId("view")).toBeNull();
+    expect(appViewCalls(calls())).toEqual([]);
+  });
+
   it("recovers: picking a named member mounts the view, scoped to THAT member", async () => {
     openAt("/?repo=ghost");
     const calls = stubApi();
