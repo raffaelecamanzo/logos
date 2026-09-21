@@ -10,7 +10,7 @@
  * thing that fails if that line is deleted.
  */
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -263,14 +263,73 @@ describe("an unknown ?repo= renders a refusal and NO view (NFR-RA-05)", () => {
     }
     // No view is mounted at all…
     expect(screen.queryByTestId("view")).toBeNull();
-    // …so no member's figures were even fetched, under `ghost`'s name or any other.
-    expect(viewCalls(calls())).toEqual([]);
     expect(scopedMember()).toBeNull();
-    // Nor the header badge, which sits OUTSIDE the view subtree and reads
-    // `/api/v1/status`: unscoped, that answers from the default member and would put
-    // its counts inches from the name the user asked for.
+    // …and NOTHING was read but the boot probe itself. Asserted as the COMPLEMENT,
+    // not as a whitelist of endpoints: "no /api/v1/overview and no /api/v1/status"
+    // would pass while a third endpoint was being fetched unscoped, which is the
+    // same default-member substitution wearing a different URL (NFR-RA-05).
+    expect(calls().filter((u) => !u.startsWith("/api/v1/workspace/roster"))).toEqual([]);
+    // The header badge in particular sits OUTSIDE the view subtree, so it is the one
+    // thing that could still be counting.
     expect(screen.getByText("Connecting…")).toBeInTheDocument();
-    expect(calls().some((u) => u.startsWith("/api/v1/status"))).toBe(false);
+  });
+
+  it("names the roster it READ, not a list of its own", async () => {
+    // A roster that differs from the fixture's, so a hardcoded `["api","web"]` or a
+    // hardcoded `ghost` cannot pass: the failure this guards is a refusal panel that
+    // looks right against one workspace and names the wrong members in every other.
+    openAt("/?repo=nosuch");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve(
+              url.startsWith("/api/v1/workspace/roster")
+                ? { workspace: "acme", default: "alpha", members: ["alpha", "beta"] }
+                : {},
+            ),
+        } as Response),
+      ),
+    );
+    render(app());
+
+    const panel = await screen.findByRole("alert");
+    expect(panel).toHaveTextContent(/nosuch/);
+    expect(panel).toHaveTextContent(/acme/);
+    expect(screen.getByRole("button", { name: "alpha" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "beta" })).toBeInTheDocument();
+    // The fixture's own members must NOT appear — that is what a hardcode would show.
+    expect(screen.queryByRole("button", { name: "api" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "web" })).toBeNull();
+  });
+
+  it("drops a valid member's figures when the URL turns unknown under it", async () => {
+    // Every other spec enters the refusal as the FIRST state, where the header badge
+    // is already "Connecting…" and a reset is invisible. This is the transition: the
+    // badge must go back, or a real member's counts stay on screen beside a name the
+    // workspace does not have.
+    openAt("/?repo=web");
+    const calls = stubApi();
+    render(app());
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(calls().some((u) => u.startsWith("/api/v1/status?repo=web"))).toBe(true),
+    );
+    const readsBefore = calls().length;
+
+    await act(async () => {
+      window.history.replaceState(null, "", "/?repo=ghost");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
+    expect(screen.queryByTestId("view")).toBeNull();
+    expect(screen.getByText("Connecting…")).toBeInTheDocument();
+    // …and the transition issued no new read of any kind.
+    expect(calls().length).toBe(readsBefore);
   });
 
   it("refuses an APP-level path too — the claim is the URL's, not the view's reads", async () => {
