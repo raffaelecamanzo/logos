@@ -61,7 +61,7 @@ import {
 import type { WorkspaceRoster } from "../api/types.ts";
 import { probeWorkspace } from "../api/workspaceClient.ts";
 import { currentUrl, replaceUrl } from "../router.tsx";
-import { memberFromSearch, setScopedMember, urlWithMember } from "./scope.ts";
+import { memberFromSearch, normaliseMember, setScopedMember, urlWithMember } from "./scope.ts";
 
 /** Which serve this SPA is talking to. `loading` is the pre-probe frame: the UI is
  *  rendered as it always was until the probe answers, so a plain repo never flashes
@@ -135,9 +135,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const roster = useRef<WorkspaceRoster | null>(null);
 
   /**
-   * Resolve `requested` (the URL's `?repo=`, already normalised) against the roster
-   * and commit it — the ONE place the member, the transport scope and the
-   * unknown-member refusal move, so they can never disagree.
+   * Resolve `requested` (a normalised member name, or `null` for unscoped) against
+   * the roster and commit it — the ONE place the member, the transport scope and the
+   * unknown-member refusal move, so they can never disagree. Both callers go through
+   * it: the boot/`popstate` URL read, and {@link selectMember}.
    *
    * Unscoped opens on the manifest's DEFAULT member: the one an unscoped request
    * would have answered from anyway. Falling back to the first roster entry would
@@ -214,15 +215,28 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("popstate", onPop);
   }, [mode, resolveMember]);
 
-  const selectMember = useCallback((name: string) => {
-    setScopedMember(name);
-    setMember(name);
-    setUnknownMember(null);
-    // Write the selection through history so the URL names what is on screen and can
-    // be bookmarked or shared. `replaceUrl`, not `navigate`: this is the same view
-    // with a different member, so it must not cost a back-stack entry.
-    replaceUrl(urlWithMember(currentUrl(), name));
-  }, []);
+  const selectMember = useCallback(
+    (name: string) => {
+      // Through `resolveMember`, not beside it. Committing the three pieces of scope
+      // state here as well would be a second spelling of the same invariant fifty
+      // lines from the first, and the next piece of scope state would be added to
+      // one of them — so a selection is resolved against the roster exactly as a
+      // URL's member is, and only the history write is this callback's own.
+      const requested = normaliseMember(name);
+      // "Select nothing" is not an operation this offers: the selector's options are
+      // roster names, and being unscoped is what an ABSENT `?repo=` means, not what
+      // a blank selection does.
+      if (requested === null) return;
+      resolveMember(requested);
+      // Write the selection through history so the URL names what is on screen and
+      // can be bookmarked or shared. `replaceUrl`, not `navigate`: this is the same
+      // view with a different member, so it must not cost a back-stack entry. The
+      // URL names what was ASKED for, so a name the roster refuses survives a
+      // refresh as the same refusal rather than silently becoming the default.
+      replaceUrl(urlWithMember(currentUrl(), requested));
+    },
+    [resolveMember],
+  );
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({

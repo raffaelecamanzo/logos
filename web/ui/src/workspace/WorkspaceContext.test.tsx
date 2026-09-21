@@ -28,6 +28,10 @@ function Probe() {
       <button data-testid="select" onClick={() => selectMember(OTHER_MEMBER)}>
         select
       </button>
+      {/* The same selection, padded — one rule, applied wherever a name enters. */}
+      <button data-testid="select-padded" onClick={() => selectMember(`  ${OTHER_MEMBER}  `)}>
+        select padded
+      </button>
     </div>
   );
 }
@@ -209,6 +213,23 @@ describe("the URL names the member (S-426, FR-UI-35)", () => {
     expect(window.location.search).toBe("?repo=web");
     // A same-view member switch must not cost a press of Back.
     expect(pushSpy).not.toHaveBeenCalled();
+  });
+
+  it("normalises a selected name everywhere, not only in the transport", async () => {
+    // The transport scope, the React state (and so the cache key) and the URL are
+    // three sites one name reaches. Normalising only the first would scope reads to
+    // `web` while the URL said `%20%20web%20%20` and the view subtree was keyed on a
+    // third spelling — one member wearing three names.
+    stubApi();
+    mount();
+    await waitFor(() => expect(screen.getByTestId("member")).toHaveTextContent("api"));
+
+    act(() => screen.getByTestId("select-padded").click());
+
+    expect(screen.getByTestId("member")).toHaveTextContent("web");
+    expect(screen.getByTestId("key")).toHaveTextContent("member:web");
+    expect(scopedMember()).toBe("web");
+    expect(window.location.search).toBe("?repo=web");
   });
 
   it("keeps the rest of the URL — path, other params and fragment — across a switch", async () => {
