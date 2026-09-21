@@ -41,7 +41,7 @@ vi.mock("./echarts.ts", () => ({
   }),
 }));
 
-import { isStatsEmpty, topTools, type UsageProjections } from "./statsModel.ts";
+import { isStatsEmpty, type UsageProjections } from "./statsModel.ts";
 import { WorkspaceStatisticsView } from "./WorkspaceStatisticsView.tsx";
 
 /** A three-member roster, local rather than shared, and both existing alternatives
@@ -275,6 +275,18 @@ function CaptureSwitch() {
   return null;
 }
 
+/** The container holding every surface of the view body — the element whose direct
+ *  children ARE the surfaces. Reached from a node every branch renders, because CSS
+ *  Modules resolve to `{}` under `css: false` so there is no class to select on. */
+function surfacesContainer(): HTMLElement {
+  // `Callout` renders `<section role="status"><span>label</span><div>body</div></section>`,
+  // so the surfaces container is the callout's PARENT, not the body's.
+  const anchor = screen.getByText(/this view answers for the whole workspace/i);
+  const container = anchor.closest("section")?.parentElement;
+  expect(container).not.toBeNull();
+  return container as HTMLElement;
+}
+
 /** The `<section>` a design-system `Card` renders for `title`. */
 function card(title: RegExp): HTMLElement {
   const section = screen.getByRole("heading", { name: title }).closest("section");
@@ -287,8 +299,13 @@ function card(title: RegExp): HTMLElement {
 describe("the aggregate's four projections are rendered (AC1)", () => {
   it("renders the value estimate, labeled an estimate rather than a measurement", async () => {
     await mount();
-    expect(screen.getByText("12,345")).toBeInTheDocument();
-    expect(screen.getByText("88")).toBeInTheDocument();
+    // The figure→LABEL binding, not the presence of two numbers. Asserting
+    // `getByText("12,345")` and `getByText("88")` separately passed with the two
+    // transposed — the page read "88 tokens and 12,345 ad-hoc file reads" and nothing
+    // failed. The fixture gives them distinguishable values; this uses that.
+    const lead = screen.getByText(/tokens and/i);
+    const sentence = (lead.textContent ?? "").replace(/\s+/g, " ");
+    expect(sentence).toMatch(/12,345 tokens and 88 ad-hoc file reads/);
     // The word carries the honesty (NFR-CC-04); a figure alone reads as measured.
     // Matched on the sentence rather than on "an estimate", which the `<em>` splits
     // across two nodes — and on the disclaimer, so a view that drops the word but
@@ -297,12 +314,31 @@ describe("the aggregate's four projections are rendered (AC1)", () => {
     expect(screen.getByText("estimate")).toBeInTheDocument();
   });
 
+  it("renders the window's total calls, the figure every other surface is a part of", async () => {
+    await mount();
+    // Unasserted until a review agent replaced it with `fmtInt(0)` and the suite
+    // stayed green. Read through the `<dt>`'s own `<dd>` so the figure is pinned to
+    // its label rather than to being somewhere on the page.
+    // Scoped to the `<dt>`: "Calls" is also a data-table column header.
+    const dt = screen.getAllByText("Calls").find((el) => el.tagName === "DT");
+    expect(dt).toBeDefined();
+    expect(dt?.nextElementSibling?.textContent).toBe("42");
+  });
+
   it("renders usage over time as a chart AND its accessible table twin", async () => {
     await mount();
     const activity = card(/^Usage over time$/);
     expect(within(activity).getByRole("img")).toBeInTheDocument();
-    // The twin is the accessible surface: a canvas is never the only channel.
-    expect(within(activity).getByRole("row", { name: /2026-09-20/ })).toBeInTheDocument();
+    // The twin is the accessible surface: a canvas is never the only channel, and
+    // the view's own docstring calls the table the accessible truth. So assert its
+    // cells IN ORDER — locating the row by a partial regex matched whatever numbers
+    // the cells held, and swapping the Calls and OK accessors stayed green.
+    const row = within(activity).getByRole("row", { name: /2026-09-20/ });
+    expect(within(row).getAllByRole("cell").map((c) => c.textContent)).toEqual([
+      "2026-09-20",
+      "22",
+      "21",
+    ]);
   });
 
   it("renders top tools ranked, with the same twin duty", async () => {
@@ -311,15 +347,24 @@ describe("the aggregate's four projections are rendered (AC1)", () => {
     expect(within(tools).getByRole("img")).toBeInTheDocument();
     const row = within(tools).getByRole("row", { name: /context/ });
     // 107 = 100 + the default 7-day window: the aggregate's own figure, not a
-    // re-derived one.
-    expect(within(row).getByText("107")).toBeInTheDocument();
+    // re-derived one. Cells in order, for the reason the activity twin gives.
+    expect(within(row).getAllByRole("cell").map((c) => c.textContent)).toEqual([
+      "context",
+      "107",
+    ]);
   });
 
   it("renders the dev-vs-main split, and says it can sum to less than total calls", async () => {
     await mount();
     const origin = card(/^Dev vs main$/);
+    // `main` carries 30 calls of which 29 are OK — distinguishable values, so a
+    // transposed pair of columns fails here. (`dev` is 12/12 and could not show it.)
+    expect(
+      within(within(origin).getByRole("row", { name: /^main/ }))
+        .getAllByRole("cell")
+        .map((c) => c.textContent),
+    ).toEqual(["main", "30", "29"]);
     expect(within(origin).getByRole("row", { name: /^dev/ })).toBeInTheDocument();
-    expect(within(origin).getByRole("row", { name: /^main/ })).toBeInTheDocument();
     expect(
       within(origin).getByText(/rolled-up days carry no origin/i),
     ).toBeInTheDocument();
@@ -327,34 +372,35 @@ describe("the aggregate's four projections are rendered (AC1)", () => {
 });
 
 describe("every total states the member denominator it is a sum over (AC1, NFR-CC-04)", () => {
-  it("states it inside EVERY figure surface on the page, not once at the top", async () => {
-    const { container } = await mount();
-    // Derived from the RENDERED tree, not from a list of card titles written here.
-    // A hardcoded roster of three cards (or a bare count of five notes) passes
-    // unchanged the day a fourth figure surface is added without a note — which is
-    // exactly how this project has previously shipped a selector list that a later
-    // story extended past. So: walk every card, and require the note in each one
-    // that carries a figure.
-    const cards = [...container.querySelectorAll("section")].filter((el) =>
-      el.querySelector("h3"),
-    );
-    // The denominator of the walk itself: a selector that matched nothing would make
-    // every assertion below vacuously true.
-    expect(cards.length).toBeGreaterThanOrEqual(3);
-    for (const el of cards) {
-      const title = el.querySelector("h3")?.textContent ?? "";
-      // The unread table is the one card that carries no total — it carries the
-      // names. Its own header badge states the same population.
-      if (/Members not summed/i.test(title)) {
-        expect(el.textContent).toMatch(/of\s*3\s*contributed nothing/i);
+  it("states it inside EVERY surface on the page, not once at the top", async () => {
+    await mount();
+    // ENUMERATE the surfaces and require each to be CLASSIFIED — rather than
+    // filtering to the ones this spec expects to find. Two earlier forms of this
+    // assertion were both bypassable: a bare count of five notes, and then a walk
+    // restricted to `section`s carrying an `<h3>`, which enforced the duty only for
+    // titled design-system Cards. A review agent added an UNTITLED paragraph
+    // rendering the workspace total with no note, and the suite stayed green.
+    //
+    // Every direct child of the surfaces container is now either a surface that
+    // states its denominator, or one of the two named exceptions below. A surface
+    // added in any shape fails until it is one or the other.
+    const surfaces = surfacesContainer();
+    expect(surfaces.children.length).toBeGreaterThanOrEqual(5);
+    let withNote = 0;
+    for (const child of [...surfaces.children] as HTMLElement[]) {
+      const heading = child.querySelector("h3")?.textContent ?? "";
+      // Exception 1: the unread table carries names, not a total — and states the
+      // same population in its own header badge.
+      if (/Members not summed/i.test(heading)) {
+        expect(child.textContent).toMatch(/of\s*3\s*contributed nothing/i);
         continue;
       }
-      expect(within(el as HTMLElement).getByText(/Summed over/i)).toBeInTheDocument();
+      expect(within(child).getByText(/Summed over/i)).toBeInTheDocument();
+      withNote += 1;
     }
-    // …and the two callouts above the cards carry it too: the population statement
-    // and the value estimate, which is itself a total.
-    const notes = screen.getAllByText(/Summed over/i);
-    expect(notes.length).toBe(cards.length + 2);
+    // The population callout, the value estimate and the three charted surfaces.
+    expect(withNote).toBe(5);
+    expect(screen.getAllByText(/Summed over/i)).toHaveLength(5);
   });
 
   it("pluralises the denominator against the roster size, not against a guess", async () => {
@@ -472,6 +518,28 @@ describe("a read FAILURE and an absent store are never conflated (AC1/AC2, NFR-C
     expect(screen.queryByText(/no recorded usage is missing/i)).toBeNull();
   });
 
+  it("classifies by EXACT equality — a token that CONTAINS `absent` is still a failure", async () => {
+    // `splitUnread`'s docstring commits to exact equality, "never a substring". The
+    // probe above cannot tell the two apart, because "quarantined" contains no known
+    // arm — and replacing the comparison with `u.reason.includes("absent")` left all
+    // 827 specs green. `absent_pruned` is the realistic shape of a new server arm and
+    // is the case that sentence is actually about.
+    await mount((d) =>
+      aggregate(d, {
+        members_read: 2,
+        covers_all_members: false,
+        unread: [
+          { member: "billing", reason: "absent_pruned" as UnreadMember["reason"], detail: "d" },
+        ],
+      }),
+    );
+    for (const note of screen.getAllByText(/Summed over/i)) {
+      expect(note.textContent).toMatch(/lower bound/i);
+    }
+    expect(screen.queryByText(/no recorded usage is missing/i)).toBeNull();
+    expect(screen.queryByText(/ordinary state of a new service/i)).toBeNull();
+  });
+
   it("words a single unread member in the singular throughout", async () => {
     await mount(partial);
     // One member, one row. "the members named below" / "They are named below" for a
@@ -486,6 +554,28 @@ describe("a read FAILURE and an absent store are never conflated (AC1/AC2, NFR-C
 });
 
 // ── AC2: every unread member named, with its reason, apart ─────────────────────
+
+describe("the denominator is the SERVER's figure, not one derived here (NFR-CC-04)", () => {
+  it("prints members_read even when it disagrees with members_total minus unread", async () => {
+    // Every other fixture in this file satisfies
+    // `members_read === members_total - unread.length`, which makes the server's
+    // stated figure indistinguishable from one the client derives from the unread
+    // list — and a review agent replaced it with exactly that derivation, with all
+    // 827 specs green. NFR-CC-04's "states its own population" is about reporting the
+    // population the SERVER summed over, so one fixture has to break the coincidence.
+    //
+    // The shape is legitimate: a roster that grew between the manifest read and the
+    // fan-out leaves a member in neither bucket.
+    await mount((d) =>
+      aggregate(d, { members_total: 4, members_read: 2, covers_all_members: false, unread: [UNREADABLE] }),
+    );
+    for (const note of screen.getAllByText(/Summed over/i)) {
+      // The derived spelling would print "3 of 4" here.
+      expect(note.textContent).toMatch(/2\s*of\s*4\s*workspace members/i);
+      expect(note.textContent).not.toMatch(/3\s*of\s*4/);
+    }
+  });
+});
 
 describe("every unread member is NAMED with its reason (AC2, NFR-RA-05)", () => {
   it("gives it a row carrying its name, its reason token and the reason in words", async () => {
@@ -577,7 +667,7 @@ describe("every unread member is NAMED with its reason (AC2, NFR-RA-05)", () => 
 
 describe("a workspace with no telemetry awaits data rather than reporting zeros (AC4)", () => {
   it("renders the awaiting-data state and NO zeroed figure surface", async () => {
-    await mount(nothingRecorded);
+    const { container } = await mount(nothingRecorded);
     expect(screen.getByText(/No member recorded any telemetry in this window/i)).toBeInTheDocument();
     // Not one of the four figure surfaces is drawn: a zero here reads as a measured
     // "nobody uses Logos", which an empty store does not say (NFR-CC-04).
@@ -585,6 +675,19 @@ describe("a workspace with no telemetry awaits data rather than reporting zeros 
       expect(screen.queryByRole("heading", { name: surface })).toBeNull();
     }
     expect(screen.queryByText(/tokens and/i)).toBeNull();
+
+    // …and the duty is enforced POSITIVELY as well, because every check above is
+    // DELETE-shaped: they say three headings are absent, which cannot see a zero
+    // ADDED beside the empty state. A review agent added
+    // `<p className="mono num">Calls 0 · Tokens saved 0 · …</p>` here and all 827
+    // specs stayed green. Three structural assertions close that:
+    //   - the surfaces container has exactly the population callout, the empty state
+    //     and the unread table as children — a fourth is a failure whatever it is;
+    expect(surfacesContainer().children).toHaveLength(3);
+    //   - no chart is mounted;
+    expect(screen.queryAllByRole("img")).toEqual([]);
+    //   - and nothing carries the formatted-figure class this view marks totals with.
+    expect(container.querySelectorAll('[class~="num"]')).toHaveLength(0);
   });
 
   it("STILL states the denominator and STILL names every unread member", async () => {
@@ -618,6 +721,10 @@ describe("a workspace with no telemetry awaits data rather than reporting zeros 
     // …and it is not reported as a partial read: every member answered.
     expect(screen.queryByText(/lower bound/i)).toBeNull();
     expect(screen.queryByRole("heading", { name: /^Members not summed$/ })).toBeNull();
+    // Positively: the population callout and the empty state, and nothing else —
+    // there is no unread table in this shape, so the child count is two.
+    expect(surfacesContainer().children).toHaveLength(2);
+    expect(screen.queryAllByRole("img")).toEqual([]);
   });
 
   it("does NOT claim nothing was recorded when a member could not be READ", async () => {
@@ -803,21 +910,47 @@ describe("a failed aggregate read is reported, never imputed (NFR-RA-05)", () =>
 // same reason that file already owns every other stylesheet contract in this project.
 
 describe("the guard this view owes because it SHARES rather than copies", () => {
-  it("answers identically to the member-scoped view over identical projections", () => {
-    // The consistency BETWEEN two behaviours, which neither view's own specs can see.
-    // Both assignments are plain (no cast), so `tsc -b` fails if either wire shape
-    // drifts out of the contract `statsModel.ts` documents — that claim was prose
-    // until now. The runtime half is the one that matters: the two scopes must not be
-    // able to rank the same tools differently, which is exactly what a second copy of
-    // the arithmetic would eventually do.
+  it("satisfies the shared model's input contract at the TYPE level (tsc is the check)", () => {
+    // Plain assignments, no cast: `tsc -b` fails if either wire shape drifts out of
+    // the contract `statsModel.ts` documents in prose. `tsc` is the WHOLE enforcement
+    // here, and that is now stated rather than dressed up.
+    //
+    // This spec used to compare `topTools(fromAggregate)` with `topTools(fromMember)`
+    // and claim it proved the two scopes cannot rank tools differently. A review agent
+    // showed it is a tautology: `memberStats()` is built FROM `aggregate(7)` and both
+    // sides go through the SAME function, so it is `f(x) === f(x)` — green even with
+    // the ranking inverted. No runtime assertion can observe "these two share one
+    // implementation"; that is what the type pins and the single call site are for,
+    // and the arithmetic itself is covered by `statsModel.test.ts`.
     const fromAggregate: UsageProjections = aggregate(7);
     const fromMember: UsageProjections = memberStats();
-    expect(topTools(fromAggregate).rows).toEqual(topTools(fromMember).rows);
-    expect(isStatsEmpty(fromAggregate)).toBe(isStatsEmpty(fromMember));
-    // …and the shared predicate really is shared: the member-scoped view's sidebar
-    // probe keys on this same function, so a divergence here would desynchronise the
-    // nav muting from the tab's own empty state.
+    // What IS falsifiable: the shared predicate's own boundary, which the member-
+    // scoped sidebar probe also keys on — so a divergence would desynchronise the nav
+    // muting from the tab's empty state.
     expect(isStatsEmpty({ calls_total: 0 })).toBe(true);
     expect(isStatsEmpty({ calls_total: 1 })).toBe(false);
+    expect(isStatsEmpty(fromAggregate)).toBe(false);
+    expect(isStatsEmpty({ ...fromMember, calls_total: 0 })).toBe(true);
+  });
+
+  it("renders tools in the order the shared model RANKS them, adding no second ranking", async () => {
+    // The falsifiable half of the cross-scope claim, at the level it is observable:
+    // the view must render the model's ranking rather than the payload order or a
+    // ranking of its own. The fixture is ordered so the two disagree — `aaa` first in
+    // the payload, `zzz` first by calls — which is also what makes this catch an
+    // inverted `sort` inside `topTools`, the mutation the tautology above missed.
+    await mount((d) =>
+      aggregate(d, {
+        calls_by_tool: [
+          { surface: "cli", tool: "aaa", calls: 1, ok_calls: 1 },
+          { surface: "cli", tool: "zzz", calls: 9, ok_calls: 9 },
+        ],
+      }),
+    );
+    const rows = within(card(/^Top tools$/)).getAllByRole("row").slice(1);
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual([
+      "zzz",
+      "aaa",
+    ]);
   });
 });
