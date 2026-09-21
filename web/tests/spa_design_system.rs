@@ -709,9 +709,18 @@ const HIDING_DECLARATIONS: [(&str, &str); 3] =
 /// width concessions in its own module, in the same commit that wrote the guard.
 /// A survivor's stylesheet has to be inside the walk, not exempted by a sentence
 /// next to it.
+///
+/// S-425 moved the member SELECTOR off this row into the sidebar's Service-section
+/// header, and `MemberSelector.module.css` left the walk with it. What stayed on the
+/// row is the workspace-probe fault badge, whose rules moved to
+/// `WorkspaceFault.module.css` in the same change — so the row still has two
+/// stylesheets and the guard still covers every survivor on it. Dropping the
+/// selector's module WITHOUT adding the badge's would have left this walk reading the
+/// header's own file alone, which is the exact shape the doc comment above records as
+/// having been wrong once.
 const HEADER_ROW_STYLESHEETS: [&str; 2] = [
     "src/shell/Header.module.css",
-    "src/shell/MemberSelector.module.css",
+    "src/shell/WorkspaceFault.module.css",
 ];
 
 fn header_disclosure_ladder(stylesheet: &str) -> Vec<(String, f64)> {
@@ -789,9 +798,11 @@ fn header_hides_nothing_unconditionally() {
 
 /// The priority the design contract states (frontend-design §3, re-baselined by
 /// CR-097): the readout gives way FIRST, the brand subtitle SECOND, so the brand
-/// lockup, the member selector and the theme toggle survive to the narrowest
-/// supported viewport. `.status` is the readout's whole slot — every one of its four
-/// states renders into it (`Header.test.tsx` binds that end).
+/// lockup, the workspace-probe fault badge and the theme toggle survive to the
+/// narrowest supported viewport. (The member selector was on this row until S-425
+/// moved it into the sidebar's Service-section header.) `.status` is the readout's
+/// whole slot — every one of its four states renders into it (`Header.test.tsx`
+/// binds that end).
 #[test]
 fn header_drops_the_readout_before_the_brand_subtitle() {
     let readout = header_drops_at(".status")
@@ -833,9 +844,9 @@ fn header_drops_the_readout_absent_never_truncated() {
     }
 }
 
-/// …and nothing ELSE gives way. The brand lockup, the member selector and the theme
-/// toggle survive to the narrowest supported viewport (FR-UI-29): the selector's
-/// presence beside a member's name is a correctness property, not a decoration.
+/// …and nothing ELSE gives way. The brand lockup, the workspace-probe fault badge and
+/// the theme toggle survive to the narrowest supported viewport (FR-UI-29,
+/// NFR-RA-05): a workspace whose roster could not be read must say so at every width.
 ///
 /// The ladder counts every mechanism in `HIDING_DECLARATIONS`, not `display` alone —
 /// a `visibility: hidden` on the brand lockup loses the home link just as completely
@@ -843,9 +854,12 @@ fn header_drops_the_readout_absent_never_truncated() {
 ///
 /// It walks every stylesheet in `HEADER_ROW_STYLESHEETS`, not the header's own.
 /// This guard previously read `Header.module.css` alone while its own message
-/// named the member selector as the survivor that matters — and the selector's
-/// rules live in `MemberSelector.module.css`, a file the same story created width
-/// concessions in. Appending
+/// named the member selector as the survivor that mattered — and that selector's
+/// rules lived in a module of their own, which the same story had created width
+/// concessions in. (S-425 moved the selector off this row; the survivor whose rules
+/// sit outside the header's file is now the fault badge, in
+/// `WorkspaceFault.module.css`. The lesson is unchanged, and so is the walk.)
+/// Appending
 ///
 /// ```css
 /// @media (max-width: 420px) { .select { display: none } }
@@ -896,38 +910,114 @@ fn the_theme_toggles_module_declares_no_width_rung() {
     );
 }
 
-/// The member selector shares the header row with the readout, and a `<select>`
+/// The sidebar's scope labels — "Workspace" and "Service" — are what tell two views
+/// registered under the same name apart (ADR-66), so they must be readable at every
+/// supported width, 420px included ([FR-UI-35], [NFR-CC-04]). The markup half (that
+/// they are text, in a heading, in the rendered DOM) is asserted in
+/// `web/ui/src/shell/Sidebar.test.tsx`; this is the stylesheet half, which that
+/// suite cannot see because it runs with `css: false`.
+///
+/// Asserted as "this module declares no width rung at all", the same shape as the
+/// theme toggle's guard above and for the same reason: it is a fact about the file
+/// rather than about one spelling of hiding, so a rung that hid the label with
+/// `visibility`, `opacity`, `content-visibility` or a negative `text-indent` fails
+/// here too. A rung added for some unrelated sidebar tweak fails this with its own
+/// message, which is the moment to check whether the labels survive it.
+#[test]
+fn sidebar_scope_label_survives_every_breakpoint() {
+    let css = strip_comments(&read("src/shell/Sidebar.module.css"));
+
+    // The label rule exists and is the text treatment, not a decoration: if it is
+    // gone, an empty rung list below would otherwise report success over nothing.
+    let label = rule_body(&css, ".sectionLabel");
+    assert!(
+        !label.trim().is_empty(),
+        "`.sectionLabel` is the scope label's only styling hook; this suite's rung \
+         assertion is worthless if the rule has been renamed or removed",
+    );
+    for (prop, value) in HIDING_DECLARATIONS {
+        assert!(
+            !declarations_of(&label).iter().any(|(n, v)| n == prop && v == value),
+            "`.sectionLabel` declares `{prop}: {value}` — the scope label is the only \
+             thing distinguishing two same-named views (ADR-66), so it is never taken \
+             off the page",
+        );
+    }
+
+    let rungs: Vec<String> = top_level_rules(&css)
+        .into_iter()
+        .map(|(at_rule, _)| at_rule)
+        .filter(|at_rule| {
+            at_rule.starts_with("@media") && at_rule.to_ascii_lowercase().contains("width")
+        })
+        .collect();
+    assert!(
+        rungs.is_empty(),
+        "the sidebar's scope labels survive to the narrowest supported viewport \
+         (FR-UI-35, NFR-CC-04); `Sidebar.module.css` now declares a width rung, so \
+         check whether the labels can be dropped from it: {rungs:?}",
+    );
+}
+
+/// The member selector sits on the sidebar's Service-section header row (S-425,
+/// frontend-design §3: `SERVICE [ orders ▾ ]`); it shared the app header's row with
+/// the graph-state readout until then. That row is a 232px column, and a `<select>`
 /// sizes itself to its LONGEST option — on the reference workspace a 42-character
 /// member name, measured at 467px, which overflowed a 420px viewport by 242px even
-/// after the header had dropped both of its own elements. So the selector must be
-/// able to give width back, must stop giving it back while it is still a control,
-/// and must give it back from the LABEL first. All three are asserted, because each
-/// one alone is a defect: no `min-width: 0` is an overflow, no floor is a control
-/// measured at 24px, and no label concession puts the control on that floor early.
+/// after the header had dropped both of its own elements, and which overflows the
+/// narrower column by more. So the row must be able to give width back, must give it
+/// back from the LABEL first, and must stop giving it back while the control is
+/// still a control. All three are asserted, because each one alone is a defect: no
+/// `min-width: 0` on the label is an overflow, no floor on the control is one
+/// measured at 24px, and no ellipsis on the label puts the control on that floor
+/// early.
+///
+/// It reads TWO stylesheets, because the row is two components: the header row and
+/// its label belong to the sidebar, the control to its own module. An earlier
+/// version of this test read the selector's module alone, back when that module
+/// owned a `.selector` wrapper and a `.label`; both were deleted in S-425 when the
+/// section heading became the control's label, and a test that had kept reading them
+/// would have failed on absence rather than on the property.
 #[test]
-fn member_selector_gives_width_back_but_stays_a_control() {
-    let css = strip_comments(&read("src/shell/MemberSelector.module.css"));
-    let decl = |selector: &str, prop: &str| -> Option<String> {
-        declarations_of(&rule_body(&css, selector))
+fn the_service_section_header_gives_width_back_but_stays_a_control() {
+    let sidebar = strip_comments(&read("src/shell/Sidebar.module.css"));
+    let selector = strip_comments(&read("src/shell/MemberSelector.module.css"));
+    let decl = |css: &str, sel: &str, prop: &str| -> Option<String> {
+        declarations_of(&rule_body(css, sel))
             .into_iter()
             .find(|(name, _)| name == prop)
             .map(|(_, value)| value)
     };
 
     assert_eq!(
-        decl(".selector", "min-width").as_deref(),
+        decl(&sidebar, ".sectionHeader", "min-width").as_deref(),
         Some("0"),
-        "`.selector` must lift its automatic minimum size, or the longest member \
-         name pins the header row at that width and the viewport overflows (FR-UI-34)",
+        "`.sectionHeader` must lift its automatic minimum size, or the longest \
+         member name pins the row at that width and the column overflows (FR-UI-34)",
     );
 
-    let floor = decl(".select", "min-width")
+    // The label yields BEFORE the control — and by ellipsis, never by removal: it is
+    // the `<select>`'s accessible name as well as the section's (ADR-66), so taking
+    // it off the page trades a layout defect for an accessibility one. That it is
+    // never width-rung'd away is asserted in `sidebar_scope_label_survives_every_breakpoint`.
+    for (prop, value) in [("min-width", "0"), ("overflow", "hidden"), ("text-overflow", "ellipsis")]
+    {
+        assert_eq!(
+            decl(&sidebar, ".sectionLabel", prop).as_deref(),
+            Some(value),
+            "`.sectionLabel` must yield BEFORE the control does; without `{prop}: \
+             {value}` the label cannot shrink and puts the select straight onto its \
+             floor",
+        );
+    }
+
+    let floor = decl(&selector, ".select", "min-width")
         .unwrap_or_else(|| panic!("`.select` declares no `min-width` floor"));
     let floor_px = length_px(&floor).unwrap_or_else(|| {
         panic!(
             "`.select` min-width is `{floor}`, which is not a length — `auto` and \
-             `min-content` are the intrinsic sizings `.selector {{ min-width: 0 }}` \
-             exists to defeat, so they are not floors",
+             `min-content` are the intrinsic sizings `min-width: 0` on the row exists \
+             to defeat, so they are not floors",
         )
     });
     assert!(
@@ -936,61 +1026,29 @@ fn member_selector_gives_width_back_but_stays_a_control() {
          sliver is present but not reachable (FR-UI-29); found `{floor}`",
     );
 
-    for (prop, value) in [("min-width", "0"), ("overflow", "hidden"), ("text-overflow", "ellipsis")]
-    {
-        assert_eq!(
-            decl(".label", prop).as_deref(),
-            Some(value),
-            "`.label` must yield BEFORE the control does; without `{prop}: {value}` \
-             the label cannot shrink and puts the select straight onto its floor",
+    // And the cap must be the container, not a fixed length wider than it: 18rem
+    // (288px) exceeded the 232px column outright, which is what the former header
+    // row could afford and this one cannot.
+    assert_eq!(
+        decl(&selector, ".select", "max-width").as_deref(),
+        Some("100%"),
+        "`.select`'s cap must be its container — a fixed cap wider than the 232px \
+         sidebar column overflows it at every viewport width",
+    );
+
+    // The deleted rules stay deleted: a `.selector` wrapper or a `.label` reappearing
+    // here means the control has grown a second name beside the section heading, and
+    // the assertions above would then be guarding the wrong element.
+    let declared: Vec<String> =
+        top_level_rules(&selector).into_iter().map(|(sel, _)| sel).collect();
+    for gone in [".selector", ".label"] {
+        assert!(
+            !declared.iter().any(|sel| sel == gone),
+            "`{gone}` is back in `MemberSelector.module.css`; S-425 made the section \
+             heading the control's label, so a second label element is a duplicate \
+             name on the row (FR-UI-35, NFR-CC-04). Declared: {declared:?}",
         );
     }
-}
-
-/// Below tablet the label's WORDS give way so the control keeps a usable width — but
-/// a label removed with `display: none` leaves the select with no accessible name,
-/// trading a layout defect for an accessibility one.
-///
-/// Every `.label` rule is inspected, wherever it sits. An earlier draft looked only
-/// inside px/rem rungs, so moving the rule to the top level — or re-expressing the
-/// rung in `em` — removed the accessible name at every width and left this test
-/// green over it, having checked nothing. The closing `assert_eq!` on the rungs
-/// found is what makes that impossible: an empty result now fails.
-#[test]
-fn member_selector_label_is_hidden_visually_never_removed() {
-    let css = strip_comments(&read("src/shell/MemberSelector.module.css"));
-    let mut hidden_at: Vec<f64> = Vec::new();
-    for (scope, body) in top_level_rules(&css) {
-        let is_rung = scope.starts_with('@');
-        let rules =
-            if is_rung { top_level_rules(&body) } else { vec![(scope.clone(), body.clone())] };
-        for (selector, decls) in rules {
-            if selector != ".label" {
-                continue;
-            }
-            let declared = declarations_of(&decls);
-            let has = |prop: &str, value: &str| {
-                declared.iter().any(|(n, v)| n == prop && v == value)
-            };
-            assert!(
-                !has("display", "none"),
-                "`{scope}` removes `.label` outright — the select would lose its \
-                 accessible name; use visually-hidden geometry (`.sr-only`) instead",
-            );
-            if is_rung && has("position", "absolute") {
-                hidden_at.push(max_width_px(&scope).unwrap_or_else(|| {
-                    panic!("`{scope}` hides `.label` at a width this suite cannot read")
-                }));
-            }
-        }
-    }
-    assert_eq!(
-        hidden_at,
-        vec![SUBTITLE_RUNG_PX],
-        "the label's words must give way at exactly the rung the header's brand \
-         subtitle does, by visually-hidden geometry — an empty result here means the \
-         rule was moved, renamed or re-expressed and this test checked nothing",
-    );
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

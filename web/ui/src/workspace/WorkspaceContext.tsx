@@ -125,7 +125,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         // A genuine fault (a 500, a transport failure) is NOT a plain repo. There is
         // no roster to render, so the shell falls back to the unscoped single-root
         // layout — but it records the fault, and the header states it
-        // (MemberSelector) rather than passing the degradation off as "this is not a
+        // (WorkspaceFault) rather than passing the degradation off as "this is not a
         // workspace" (NFR-RA-05, NFR-CC-04).
         setError(err instanceof Error ? err : new Error(String(err)));
         setMode("single");

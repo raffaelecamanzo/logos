@@ -15,11 +15,16 @@ function Mode() {
   return <span data-testid="mode">{useWorkspace().mode}</span>;
 }
 
+/** The Service-section heading the sidebar renders beside the control, standing in
+ *  for it here: the control has no label of its own, so a suite that omitted the
+ *  heading would assert against a `<select>` with no accessible name — a world the
+ *  shell never renders. */
 function mount() {
   return render(
     <WorkspaceProvider>
       <Mode />
-      <MemberSelector />
+      <h2 id="nav-scope-member">Service</h2>
+      <MemberSelector labelledBy="nav-scope-member" />
     </WorkspaceProvider>,
   );
 }
@@ -59,9 +64,26 @@ describe("MemberSelector (S-250, FR-UI-29)", () => {
     expect(calls().at(-1)).toBe("/api/v1/health?repo=web");
   });
 
-  it("states an unavailable workspace status rather than pretending it is a plain repo", async () => {
+  it("takes its accessible name from the section heading, and renders no label of its own", async () => {
+    // The row is `SERVICE [ orders ▾ ]` (frontend-design §3). A label element here
+    // would put a second word for the same thing on a 232px row — and the heading is
+    // the better name, because it is the one the sidebar guarantees at every
+    // breakpoint (S-425, FR-UI-35, NFR-CC-04).
+    stubApi();
+    const { container } = mount();
+    const select = await screen.findByRole("combobox");
+    expect(select).toHaveAccessibleName("Service");
+    expect(container.querySelectorAll("label")).toHaveLength(0);
+  });
+
+  it("reports NOTHING about a faulted probe — that badge is `WorkspaceFault`'s", async () => {
+    // A fault settles the mode to `single`, and the Service section this control
+    // renders in does not exist there. A fault reported from here would be a fault
+    // reported nowhere (NFR-RA-05); `WorkspaceFault.test.tsx` pins where it goes.
     stubApi({ probeStatus: 500 });
     mount();
-    expect(await screen.findByText(/workspace status unavailable/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("mode")).toHaveTextContent("single"));
+    expect(screen.queryByText(/workspace status unavailable/i)).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
 });

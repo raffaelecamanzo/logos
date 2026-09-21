@@ -10,6 +10,7 @@ import { ThemeContext } from "../theme/theme.ts";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../workspace/scope.ts";
 import { Header } from "./Header.tsx";
+import { MemberSelector } from "./MemberSelector.tsx";
 
 // The header reads `/api/v1/status` on mount and on navigation (S-315, FR-UI-34).
 // Stub the same-origin fetch seam rather than `api/client.ts`, so the URL the header
@@ -82,9 +83,19 @@ function urls(): string[] {
 function withTheme(node: ReactNode) {
   return (
     <ThemeContext.Provider value={{ theme: "dark", setTheme: () => {}, toggleTheme: () => {} }}>
-      {/* The header reads the workspace mode (it hosts the member selector, and its own
-          read is member-scoped), so it needs the provider App gives it in production. */}
-      <WorkspaceProvider>{node}</WorkspaceProvider>
+      {/* The header's own read is member-scoped, so it needs the provider App gives
+          it in production. The member selector is rendered ALONGSIDE it rather than
+          inside it — S-425 moved the control into the sidebar's Service-section
+          header — so a member switch here is still driven by the real control and
+          not by a test-only stand-in. What the header must no longer contain is
+          asserted below. */}
+      <WorkspaceProvider>
+        {node}
+        {/* The sidebar's Service-section heading and its control, stood up beside
+            the header rather than inside it — which is the point being asserted. */}
+        <h2 id="nav-scope-member">Service</h2>
+        <MemberSelector labelledBy="nav-scope-member" />
+      </WorkspaceProvider>
     </ThemeContext.Provider>
   );
 }
@@ -277,12 +288,11 @@ describe("Header graph-state readout (S-315, FR-UI-34, CR-097)", () => {
 // where the acceptance criterion puts it.
 
 /** The header's graph-state slot: its LAST `<span>` child. The brand lockup is an
- *  `<a>`, the spacer a `<div>`, the member selector a `<div>` and the theme toggle
- *  a `<button>`, so the slot is identified structurally rather than by a class name
- *  this suite cannot see.
+ *  `<a>`, the spacer a `<div>` and the theme toggle a `<button>`, so the slot is
+ *  identified structurally rather than by a class name this suite cannot see.
  *
- *  Last, not only: the member selector renders a `Badge` — also a `<span>`, also a
- *  direct child, and rendered BEFORE the slot — when its workspace probe faults.
+ *  Last, not only: `WorkspaceFault` renders a `Badge` — also a `<span>`, also a
+ *  direct child, and rendered BEFORE the slot — when the workspace probe faults.
  *  An earlier draft asserted there was exactly one span child and would have picked
  *  that badge had the assertion been relaxed. `labelledSpanChildren` below pins the
  *  two apart so this stays a structural fact rather than an ordering accident.
@@ -337,22 +347,36 @@ describe("Header progressive disclosure (S-317, FR-UI-34, UAT-UI-11)", () => {
     expect(graphStateSlot()).toContainElement(await screen.findByText(/not indexed/i));
   });
 
-  it("keeps the member selector OUT of the dropped slot in workspace mode", async () => {
+  it("renders NO member selector, in workspace mode or any other (S-425, FR-UI-35)", async () => {
+    // Until S-425 the selector sat on this row and the assertion here was that the
+    // narrow rung did not drop it. It now lives in the sidebar's Service-section
+    // header — inside the boundary it governs — and the header's claim is the
+    // stronger one: the control is not in this element at all, so there is no
+    // second copy of it anywhere in the tree (ADR-66 §4). The selector rendered
+    // beside the header by `withTheme` is what makes this a real absence check
+    // rather than a world with no selector in it.
     mockProbe.mockResolvedValue({
       mode: "workspace",
       roster: { workspace: "shop", default: "api", members: ["api", "web"] },
     });
     const status = indexed();
     get.mockResolvedValue(status);
-    render(withTheme(<Header />));
+    const { container } = render(withTheme(<Header />));
     await screen.findByText(readout(status));
 
     const selector = screen.getByRole("combobox");
-    expect(graphStateSlot()).not.toContainElement(selector);
+    const header = container.querySelector("header") as HTMLElement;
+    // The header-wide claim, which strictly implies the old slot-level one — the
+    // slot is by construction a child of this same `<header>`. The second line is
+    // not a restatement: it catches a DIFFERENT `<select>` appearing in the header.
+    expect(header).not.toContainElement(selector);
+    expect(header.querySelectorAll("select")).toHaveLength(0);
   });
 
   it("keeps the workspace-probe fault OUT of the slot — it is a different signal", async () => {
-    // Found in review. `MemberSelector` renders its probe fault as a `Badge` — a
+    // Found in review (of S-317; the component was split out of `MemberSelector` in
+    // S-425, and the badge stayed on this row for the reason the next sentence
+    // gives). `WorkspaceFault` renders the probe fault as a `Badge` — a
     // `<span>`, a DIRECT child of the header, sitting before the slot — so the
     // 1023px rung does not drop it and it stands where the readout was. That is
     // correct and deliberate: it reports a fault that genuinely occurred, about the
