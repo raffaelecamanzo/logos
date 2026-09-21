@@ -1190,6 +1190,70 @@ async fn a_governance_violation_is_reported_at_200_and_moves_no_member_gate() {
     assert_eq!(member_verdict(&tmp), before, "no member's gated signal moved (ADR-56)");
 }
 
+/// **A malformed rule is a `500`, never a `null`** ([NFR-RA-05], [NFR-CC-04]).
+///
+/// This is the only behaviour that distinguishes `workspace_fan_try` from
+/// `workspace_fan`, and it was the one path with no test: review agent 4 swallowed
+/// the error (`.unwrap_or(None)`) and all 29 tests stayed green while a *failed*
+/// check rendered as `governance: null`. That is the fourth-surface untruth this
+/// sprint is removing elsewhere — to a consumer, `null` means "no policy declared"
+/// (consumer assumption 3), so a workspace whose rules did not compile would read
+/// as a workspace that declared none.
+///
+/// Both compile failures are asserted: an undeclared layer reference and a symbol
+/// glob that will not parse. The self-only CSP is asserted on the `500` too — it is
+/// the only `500` covered anywhere on this surface, and the outer layer's stamping
+/// is otherwise only ever checked on `200`s and `404`s.
+#[tokio::test]
+async fn a_governance_rule_that_will_not_compile_is_a_500_and_never_an_honest_empty() {
+    // Each of these fails `CompiledWorkspaceRules::compile` for a different reason.
+    let cases = [
+        (
+            "an undeclared layer reference",
+            "
+[[governance.service_layers]]
+name = \"edge\"
+members = [\"api\"]
+
+[[governance.boundaries]]
+from = \"edge\"
+to = \"ghost\"
+",
+            "undeclared service layer",
+        ),
+        (
+            "a symbol glob that will not parse",
+            "
+[[governance.no_cross_service_callers]]
+symbol = \"[\"
+",
+            "unclosed character class",
+        ),
+    ];
+
+    for (what, rules, expected) in cases {
+        let tmp = workspace();
+        declare_rules(tmp.path(), rules);
+        let router = ws_router(&tmp);
+        let resp = router.oneshot(get("/api/v1/workspace/check")).await.expect("route responds");
+        let (status, body, headers) = body_string(resp).await;
+
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{what} must fail loud, not render as an honest empty: {body}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).expect("the 500 body is JSON");
+        assert!(
+            v["error"].as_str().is_some_and(|e| e.contains(expected)),
+            "{what}: the error chain names the cause: {body}"
+        );
+        // The decisive negative: it must not have taken the null branch.
+        assert!(v.get("governance").is_none(), "{what} is not a governance answer: {body}");
+        assert_self_only_csp(&headers, "/api/v1/workspace/check (500)");
+    }
+}
+
 /// **A partial fan-out never presents itself as complete** ([FR-WS-16],
 /// [NFR-CC-04]). The CLI states this in its exit code and a stderr notice; an HTTP
 /// `200` has neither channel, so both payloads carry it — and they **name** the
