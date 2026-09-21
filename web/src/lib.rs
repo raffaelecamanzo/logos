@@ -777,14 +777,13 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/workspace/search", get(api_v1::workspace_search))
         .route("/api/v1/workspace/callers", get(api_v1::workspace_callers))
         .route("/api/v1/workspace/impact", get(api_v1::workspace_impact))
-        // ── The two federation read-models that shipped CLI-only (S-427,
-        // [FR-WS-28], [ADR-01]): `federation::reach` and
-        // `federation::governance`, joining the fan-out above as thin
-        // serialisations of the very same read-models `logos workspace
-        // reachability` / `logos workspace check` print. No new core query, and
-        // no CLI change — the CLI already had these. GETs, so the read-only
-        // carve-out stack (method/host/CSP) covers them unchanged, and the
-        // single-root `404` above applies to them as it does to the rest.
+        // ── `federation::reach` and `federation::governance` (S-427,
+        // [FR-WS-28], [ADR-01]): both already answered on the CLI and over MCP
+        // (`mcp::server::workspace_reachability` / `workspace_check`); this is
+        // the web surface they never had. Thin serialisations of the very same
+        // read-models, so no new core query and no CLI change. Everything the
+        // group comment above says — GET, carve-out stack, single-root `404` —
+        // governs these two as it does the six.
         .route("/api/v1/workspace/reachability", get(api_v1::workspace_reachability))
         .route("/api/v1/workspace/check", get(api_v1::workspace_check))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the

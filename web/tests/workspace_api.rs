@@ -1257,8 +1257,8 @@ symbol = \"[\"
 /// **A partial fan-out never presents itself as complete** ([FR-WS-16],
 /// [NFR-CC-04]). The CLI states this in its exit code and a stderr notice; an HTTP
 /// `200` has neither channel, so both payloads carry it — and they **name** the
-/// member, because `covers_all_members < 1` says that the workspace degraded, not
-/// where.
+/// member, because `covers_all_members == false` says *that* the workspace
+/// degraded, not *where*.
 #[tokio::test]
 async fn an_unopenable_member_renders_both_answers_incomplete_and_names_it() {
     let tmp = workspace();

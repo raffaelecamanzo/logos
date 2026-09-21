@@ -774,8 +774,10 @@ where
         in_surface(surface, || call(registry, &bridge))
     })
     .await
-    // The read-models are infallible at the surface (ADR-14); a panic crossing the
-    // pool is a core bug — re-raise rather than mask it, mirroring `bridge`.
+    // A panic crossing the pool is a core bug — re-raise rather than mask it,
+    // mirroring `bridge`. (This says nothing about read-model *errors*: where a
+    // read-model has them they ride inside `T` and `workspace_fan_try` renders
+    // them. Only the `JoinError` is handled here.)
     .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
     tracing::info!(
         target: "logos::web",
@@ -986,17 +988,21 @@ pub(crate) async fn workspace_impact(
     .await
 }
 
-// ── The two CLI-only federation read-models, joined to the fan-out (S-427,
+// ── `federation::reach` and `federation::governance` join the fan-out (S-427,
 // [FR-WS-28], [ADR-01]) ──────────────────────────────────────────────────────
 //
-// `federation::reach` ([FR-WS-12]) and `federation::governance` ([FR-WS-13]) both
-// shipped with a CLI rendering and no other. These two GETs add the missing half
-// and nothing else: each runs the **same call sequence** `cli/src/xservice.rs`
-// runs — `edges` then the read-model — and serialises the result. No new core
-// query, no second computation, no figure the read-model does not already carry
-// ([ADR-01], [NFR-MA-02]). `cli/tests/xservice_surface.rs` compares the two
-// renderings field-for-field over one workspace, which is the guard that makes
-// "the same read-model" a checked fact rather than a claim.
+// Both read-models ([FR-WS-12], [FR-WS-13]) already answered on **two** surfaces —
+// the CLI (`logos workspace reachability` / `check`) and MCP
+// (`mcp::server::workspace_reachability` / `workspace_check`) — and on neither web
+// route. These two GETs add the third rendering and nothing else: each runs the
+// **same call sequence** `cli/src/xservice.rs` runs — `edges` then the read-model —
+// and serialises the result. No new core query, no second computation, no figure
+// the read-model does not already carry ([ADR-01], [NFR-MA-02]).
+//
+// Three renderings is three places for one figure to drift, so each pair is pinned
+// by a test rather than by intent: CLI↔HTTP field-for-field in
+// `cli/tests/xservice_surface.rs` (the story's spine), and the MCP bounded-default
+// contract in `mcp/tests/reachability_bound.rs`.
 
 /// Whether a workspace fan-out answer covers every member it is an answer about
 /// ([FR-WS-16], [NFR-CC-04]).
@@ -1042,15 +1048,20 @@ impl AnswerCompleteness {
     ///
     /// **Call this after the read-model has run, never before.** The ledger is
     /// complete only once the answer's own walks have happened, which is why
-    /// `run_workspace` reads it last too — the ordering is the contract, and
-    /// hoisting this call would report every member `not-attempted`.
+    /// `run_workspace` reads it last too — the ordering is the contract.
+    ///
+    /// What hoisting the call actually reports depends on the surface, and neither
+    /// answer is this one: on the CLI the registry is a fresh per-command object, so
+    /// every member reads `not-attempted`; on this serve surface the registry
+    /// outlives the request, so it reads the **previous** answer's fan-out. Both are
+    /// a different question than the one the payload claims to answer.
     ///
     /// The once-per-answer open-failure discipline is inherited whole from
     /// [CR-105]: the read-model mints its own [`AnswerScope`] internally, so a
     /// broken member is attempted once per request and re-attempted on the next
     /// one. Nothing here re-implements it.
     ///
-    /// [AnswerScope]: logos_core::federation::registry::AnswerScope
+    /// [`AnswerScope`]: logos_core::federation::registry::AnswerScope
     /// [CR-105]: ../../docs/requests/CR-105-report-a-failed-member-open-once-per-answer.md
     fn after_reading(registry: &EngineRegistry<Engine>) -> Self {
         let rollup = open_state::rollup(&registry.open_states());

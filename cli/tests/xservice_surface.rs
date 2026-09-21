@@ -1983,20 +1983,26 @@ fn the_route_providers_help_does_not_promise_one_provider_per_consumer_endpoint(
 
 // ── S-427 / FR-WS-28: the CLI and HTTP renderings are ONE read-model ──────────
 //
-// `federation::reach` ([FR-WS-12]) and `federation::governance` ([FR-WS-13])
-// shipped with a CLI rendering and no other; S-427 added `GET
-// /api/v1/workspace/reachability` and `GET /api/v1/workspace/check` beside them.
-// Under [ADR-01] those are two renderings of ONE read-model, and the only way to
-// keep them so is to compare them — two independently-maintained expectation
-// fixtures drift silently, and a CLI/HTTP divergence over one read-model is
-// exactly what ADR-01 exists to prevent.
+// `federation::reach` ([FR-WS-12]) and `federation::governance` ([FR-WS-13]) had
+// a CLI rendering and an MCP one (`mcp::server::workspace_reachability` /
+// `workspace_check`); S-427 added `GET /api/v1/workspace/reachability` and `GET
+// /api/v1/workspace/check` as the third. Under [ADR-01] those are renderings of
+// ONE read-model, and the only way to keep them so is to compare them — two
+// independently-maintained expectation fixtures drift silently, and a divergence
+// over one read-model is exactly what ADR-01 exists to prevent.
 //
-// This is the only crate where both surfaces are reachable over one workspace:
-// `CARGO_BIN_EXE_logos` exists only in this package's tests, and `web` is already
-// a dependency here behind the default `ui` feature. The test therefore lives
-// beside the CLI fixture it shares (`workspace()`, `declare_rules`, `GOVERNANCE`)
-// rather than re-creating it somewhere else — a duplicated fixture would
-// reintroduce the very drift being guarded against.
+// This test pins the CLI↔HTTP pair. The MCP arm has its own guard in
+// `mcp/tests/reachability_bound.rs`; there is deliberately no three-way
+// comparison, because each pair is pinned where both its surfaces are reachable.
+//
+// That is what decides where this test lives: `CARGO_BIN_EXE_logos` exists only in
+// this package's tests, and `web` is already a dependency here behind the default
+// `ui` feature, so this is the one crate that reaches both. It reuses the fixture
+// beside it (`workspace()`, `declare_rules`, `GOVERNANCE`) rather than building a
+// second one here. (`web/tests/workspace_api.rs` does keep its own copy of the
+// governance fixture — the two crates cannot share a test module, and nothing
+// enforces that the copies stay identical; the parity assertion is what must live
+// here, not the fixture.)
 
 /// Drive the real workspace router in-process (no socket) and return the parsed
 /// `200` JSON body, over the SAME workspace directory the CLI was just run on.
@@ -2037,11 +2043,15 @@ async fn http_json(root: &Path, path: &str) -> Value {
 /// side's shape is written down anywhere in this test, which is the point: an
 /// expectation fixture would have to be maintained twice and would drift.
 ///
-/// Three renderings are compared rather than one, because they exercise different
-/// branches of the projection: the bounded default (`dead: null`), the `--all`/`?all`
-/// escape hatch (`dead` populated), and a governance report over a DECLARED rule
-/// with a real violation — the honest-empty `null` is compared too, but `null ==
-/// null` proves little on its own, so the declared-rule case carries the weight.
+/// **Five** comparisons, chosen because each exercises a different branch of the
+/// projection rather than repeating one:
+/// 1. reachability, bounded default — `dead` suppressed to `null`;
+/// 2. reachability, `--all` / `?all` — `dead` populated;
+/// 3. reachability, `--repo web` / `?repo=web` — the member scope applied (this is
+///    the one that catches a handler dropping `repo` before `ReachabilityScope`);
+/// 4. governance, the honest empty — `null == null`, which proves little alone;
+/// 5. governance, a DECLARED rule with a real violation — the case that carries the
+///    weight, since 4 would pass over two equally broken surfaces.
 #[cfg(feature = "ui")]
 #[tokio::test]
 async fn the_http_and_cli_renderings_of_one_workspace_agree_field_for_field() {
