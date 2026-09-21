@@ -1301,30 +1301,40 @@ async fn loading_every_workspace_endpoint_repeatedly_leaves_every_store_unchange
 
 /// **No widening of the resident-engine ceiling** ([NFR-PE-10]).
 ///
-/// The quantity is the **connection count** — residents × the per-member read pool,
-/// the unit [NFR-PE-11]'s budget is written in — read off the registry the router
-/// is actually serving from. Each route is measured on its **own fresh registry**,
-/// warm on the default member only: measuring them in sequence on one registry
-/// would compare each new route against a ceiling the earlier ones had already
-/// raised, which is a comparison that cannot fail.
+/// Measured on **two** instruments, because neither alone is enough:
+/// `live_read_connections()` (residents × the per-member read pool — the unit
+/// [NFR-PE-11]'s budget is written in) and `engine_starts()`. Core names the second
+/// as *the* instrument for this claim: "A read-model that must not construct
+/// engines of its own therefore asserts on this — `starts == walks × members` — not
+/// on `resident_count()`" (`registry.rs`). It is strictly the sharper of the two,
+/// because a handler that opens a member twice inside one fan-out, or thrashes it
+/// through eviction, moves `starts` while leaving residency — and therefore the
+/// connection count — exactly where it was.
 ///
-/// # What this bounds, and what it does not
-/// The fixture has two members and `workspace/status` fans over both, so the
-/// existing fan-out's ceiling is the whole roster and nothing can exceed it *within
-/// the registry*. What the assertion does catch is a handler that pays more than
-/// the fan-out it joined — a second registry, an eagerly-warmed roster, a member
-/// opened outside the budget — because all of those move this readout above the
-/// route it is compared against. It is deliberately an inequality against a
-/// measured baseline rather than a hardcoded number, so it stays honest when the
-/// roster changes.
+/// Each route is measured on its **own fresh registry**, warm on the default member
+/// only. Measuring them in sequence on one registry would compare each new route
+/// against a ceiling the earlier ones had already raised, which is a comparison
+/// that cannot fail.
+///
+/// # What this can fail on, and what it cannot
+/// It fails on a handler that constructs more engines than the fan-out it joined —
+/// an extra all-member walk, a repeated open, eviction thrash. It **cannot** see
+/// cost paid outside this registry: a handler that built a whole second
+/// `EngineRegistry` of its own would leak read connections per request and move
+/// neither readout here, because both are per-instance counters on the registry the
+/// router serves from. Nothing observable from `backing` can catch that, so this
+/// test does not claim to — the guard against it is `workspace_read` being the one
+/// seam that reaches a registry at all, and review. Said explicitly because an
+/// earlier revision of this comment claimed the opposite, and a review agent
+/// disproved it by leaking 24 connections per request past a green assertion.
 #[tokio::test]
 async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fan_out() {
     let tmp = workspace();
     declare_rules(tmp.path(), GOVERNANCE_RULES);
 
     /// Serve `path` on a registry warm on the default member only, and return the
-    /// live read-connection count it leaves behind.
-    async fn connections_after(tmp: &TempDir, path: &str) -> usize {
+    /// live read-connection count and the engine-start count it leaves behind.
+    async fn cost_of(tmp: &TempDir, path: &str) -> (usize, u64) {
         let federation = discover(tmp.path()).expect("discovery").expect("a workspace");
         let backing = Arc::new(Backing::Federated(Box::new(
             EngineRegistry::<Engine>::new_serve_default(federation),
@@ -1332,19 +1342,27 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
         let router = web::router_for_backing(Arc::clone(&backing)).expect("the router builds");
         let resp = router.oneshot(get(path)).await.expect("route responds");
         assert_eq!(resp.status(), StatusCode::OK, "{path}");
-        backing.as_federated().expect("the federated registry").live_read_connections()
+        let registry = backing.as_federated().expect("the federated registry");
+        (registry.live_read_connections(), registry.engine_starts())
     }
 
     // The baseline: what the widest route of the EXISTING fan-out already pays.
-    let status = connections_after(&tmp, "/api/v1/workspace/status").await;
-    assert!(status > 0, "the existing fan-out really does hold read connections");
+    let (status_conns, status_starts) = cost_of(&tmp, "/api/v1/workspace/status").await;
+    assert!(status_conns > 0, "the existing fan-out really does hold read connections");
+    assert!(status_starts > 0, "and really does construct member engines");
 
     for path in ["/api/v1/workspace/reachability", "/api/v1/workspace/check"] {
-        let paid = connections_after(&tmp, path).await;
+        let (conns, starts) = cost_of(&tmp, path).await;
         assert!(
-            paid <= status,
-            "{path} holds {paid} read connections where the existing fan-out pays \
-             {status} — the resident-engine ceiling widened (NFR-PE-10)"
+            conns <= status_conns,
+            "{path} holds {conns} read connections where the existing fan-out pays \
+             {status_conns} — the resident-engine ceiling widened (NFR-PE-10)"
+        );
+        assert!(
+            starts <= status_starts,
+            "{path} started {starts} member engines where the existing fan-out starts \
+             {status_starts} — it constructs engines the fan-out it joined does not \
+             (NFR-PE-10)"
         );
     }
 }
