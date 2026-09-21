@@ -1309,17 +1309,85 @@ async fn single_root_answers_404_for_both_routes_without_allocating_a_registry()
     }
 }
 
-/// Row counts for the tables a write-on-read fault would grow, per member store.
-fn store_counts(db: &Path) -> Vec<(&'static str, i64)> {
+/// A content digest of one member store — **every** user table, not a chosen few.
+///
+/// `count(*)` over a hand-picked table list is a proxy, and review agent 4 broke it:
+/// an `INSERT OR REPLACE` into `project_metadata` on every `check` GET passed the
+/// old three-table count comparison. The schema has ~29 tables, and a count is
+/// blind in two directions at once — an insert into any table it does not watch,
+/// and an in-place UPDATE of a row in one it does.
+///
+/// So this enumerates the store's own `sqlite_master` and digests each table's full
+/// contents, which closes both directions: a new row, a changed row and a deleted
+/// row all move the digest. `quote()` renders every column including NULLs and
+/// BLOBs, and the ordering is fixed by `rowid` so the digest is stable across
+/// re-reads of an unchanged store.
+fn store_digest(db: &Path) -> Vec<(String, String)> {
+    if !db.exists() {
+        return Vec::new();
+    }
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .expect("open the member store read-only");
-    ["nodes", "edges", "metric_snapshots"]
+        .unwrap_or_else(|e| panic!("open {} read-only: {e}", db.display()));
+    let tables: Vec<String> = {
+        let mut q = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .expect("enumerate tables");
+        let rows = q.query_map([], |r| r.get::<_, String>(0)).expect("table names");
+        rows.map(|r| r.expect("a table name")).collect()
+    };
+    assert!(
+        !tables.is_empty(),
+        "{} declares no tables — the digest would be vacuous",
+        db.display()
+    );
+    tables
         .into_iter()
         .map(|t| {
-            let n: i64 = conn
-                .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
-                .unwrap_or_else(|e| panic!("count {t}: {e}"));
-            (t, n)
+            // `quote(t.*)` is not valid SQLite, so build the column list explicitly.
+            let cols: Vec<String> = {
+                let mut q = conn
+                    .prepare(&format!("SELECT name FROM pragma_table_info('{t}')"))
+                    .expect("columns");
+                let rows = q.query_map([], |r| r.get::<_, String>(0)).expect("column names");
+                rows.map(|r| r.expect("a column name")).collect()
+            };
+            let quoted = cols
+                .iter()
+                .map(|c| format!("quote(\"{c}\")"))
+                .collect::<Vec<_>>()
+                .join("||','||");
+            let sql = if quoted.is_empty() {
+                format!("SELECT count(*) || ':' FROM \"{t}\"")
+            } else {
+                // Ordered by the RENDERED row text, not by `rowid`: the FTS shadow
+                // tables have no rowid, and the rendered text is deterministic for
+                // an unchanged table whatever the storage order.
+                format!(
+                    "SELECT count(*) || ':' || coalesce(group_concat(r, '|'), '') \
+                     FROM (SELECT {quoted} AS r FROM \"{t}\" ORDER BY 1)"
+                )
+            };
+            let digest: String = conn
+                .query_row(&sql, [], |r| r.get(0))
+                .unwrap_or_else(|e| panic!("digest {t}: {e}"));
+            (t, digest)
+        })
+        .collect()
+}
+
+/// Both stores a member keeps: the graph store and the temporal history store. The
+/// single-root guard this mirrors (`read_only_views.rs`) watches both, and the AC
+/// says "every store's contents", so watching only `logos.db` would answer a
+/// narrower question than the one asked.
+fn member_digests(root: &Path, member: &str) -> Vec<(String, Vec<(String, String)>)> {
+    ["logos.db", "history.db"]
+        .into_iter()
+        .map(|f| {
+            let path = root.join(member).join(".logos").join(f);
+            (format!("{member}/{f}"), store_digest(&path))
         })
         .collect()
 }
@@ -1329,21 +1397,29 @@ fn store_counts(db: &Path) -> Vec<(&'static str, i64)> {
 /// contents unchanged.
 ///
 /// Driven off [`WORKSPACE_ENDPOINTS`] rather than an ad-hoc list, so a route added
-/// to the fan-out without being added here cannot exist. The `nodes` denominator
-/// is non-zero (both members are indexed), which is what separates "nothing was
-/// written" from "nothing was there".
+/// to the fan-out without being added there cannot exist. The comparison is a
+/// full-content digest of every table of both of each member's stores, so an insert
+/// into a table nobody thought to watch, and an in-place update that leaves the row
+/// count alone, both fail it.
 #[tokio::test]
 async fn loading_every_workspace_endpoint_repeatedly_leaves_every_store_unchanged() {
     let tmp = workspace();
     declare_rules(tmp.path(), GOVERNANCE_RULES);
     let members = ["api", "web"];
-    let db = |m: &str| tmp.path().join(m).join(".logos").join("logos.db");
 
-    let before: Vec<Vec<(&str, i64)>> = members.iter().map(|m| store_counts(&db(m))).collect();
-    for counts in &before {
+    let before: Vec<_> = members.iter().map(|m| member_digests(tmp.path(), m)).collect();
+    // The denominator: the graph store really does hold rows, so "unchanged" is a
+    // statement about content and not about two empty stores.
+    for (member, stores) in members.iter().zip(&before) {
+        let (name, tables) = &stores[0];
+        let nodes = tables
+            .iter()
+            .find(|(t, _)| t == "nodes")
+            .unwrap_or_else(|| panic!("{name} has a nodes table"));
         assert!(
-            counts.iter().any(|(t, n)| *t == "nodes" && *n > 0),
-            "the fixture indexed a non-empty graph, so the denominator is real: {counts:?}"
+            !nodes.1.starts_with("0:"),
+            "member {member} was indexed, so the digest has real content: {}",
+            nodes.1
         );
     }
 
@@ -1356,11 +1432,24 @@ async fn loading_every_workspace_endpoint_repeatedly_leaves_every_store_unchange
         }
     }
 
-    let after: Vec<Vec<(&str, i64)>> = members.iter().map(|m| store_counts(&db(m))).collect();
-    assert_eq!(
-        after, before,
-        "no GET on the workspace fan-out changed any member store (ADR-28, FR-UI-03)"
-    );
+    let after: Vec<_> = members.iter().map(|m| member_digests(tmp.path(), m)).collect();
+    for (member, (b, a)) in members.iter().zip(before.iter().zip(&after)) {
+        for ((bname, btables), (aname, atables)) in b.iter().zip(a) {
+            assert_eq!(bname, aname, "the same stores are compared");
+            // Compare table-by-table so a failure names the table that moved.
+            let changed: Vec<&str> = btables
+                .iter()
+                .zip(atables)
+                .filter(|((bt, bd), (at, ad))| bt == at && bd != ad)
+                .map(|((t, _), _)| t.as_str())
+                .collect();
+            assert!(
+                changed.is_empty() && btables.len() == atables.len(),
+                "member {member}: a GET on the workspace fan-out changed {bname} \
+                 (tables: {changed:?}) — ADR-28, FR-UI-03"
+            );
+        }
+    }
 }
 
 /// **No widening of the resident-engine ceiling** ([NFR-PE-10]).
