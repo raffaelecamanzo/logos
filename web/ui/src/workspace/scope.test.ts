@@ -84,6 +84,19 @@ describe("the shared `?repo=` rule (S-426, FR-UI-35, NFR-RA-05)", () => {
     expect(cases.length).toBeGreaterThanOrEqual(20);
     expect(cases.filter((c) => c.expected === null).length).toBeGreaterThanOrEqual(5);
     expect(cases.filter((c) => c.expected !== null).length).toBeGreaterThanOrEqual(5);
+    // A count alone cannot say WHICH rows were read: a parser that silently dropped
+    // the near-miss keys would still clear the floor above with rows to spare. These
+    // are the rows whose loss would be invisible and would matter.
+    expect(cases.map((c) => c.query)).toEqual(
+      expect.arrayContaining([
+        "REPO=api",
+        "arepo=api",
+        "repo2=api",
+        "repo=first&repo=last",
+        "repo=%EF%BB%BFapi",
+        "repo=+",
+      ]),
+    );
   });
 
   it.each(cases)("normalises `?$query` exactly as the server does", ({ query, expected }) => {
@@ -138,9 +151,25 @@ describe("urlWithMember — the browser-URL write (S-426, ADR-52)", () => {
 
   it("does NOT mistake a near-miss param for the member's own", () => {
     // `notrepo`/`arepo`/`repo2` are not `repo`; dropping one would silently lose a
-    // view's own state on every member switch.
+    // view's own state on every member switch. These are the UNDER-capture direction
+    // — keys that are longer than `repo`.
     expect(urlWithMember("/graph?notrepo=a&arepo=b&repo2=c", "web")).toBe(
       "/graph?notrepo=a&arepo=b&repo2=c&repo=web",
+    );
+  });
+
+  it("does NOT capture a key that only becomes `repo` under a transformation", () => {
+    // The OVER-capture direction, which a longer-key case cannot reach: keys that
+    // equal `repo` once you fold case, trim, or decode twice. Each of those is a
+    // one-word edit to `pairKey`, and each would silently delete somebody else's
+    // param on every member switch. `REPO` in particular is pinned as NOT the member
+    // by the shared table (`REPO=api` → unscoped) and by the server, so capturing it
+    // here would contradict a rule asserted two files away.
+    // Both spellings of "padded key" are here on purpose, because they catch
+    // DIFFERENT edits: ` repo` (a literal space) catches a trim applied before the
+    // decode, `%20repo` catches one applied after it.
+    expect(urlWithMember("/graph?REPO=a& repo=b&%20repo=c&%2572epo=d&repo%00=e", "web")).toBe(
+      "/graph?REPO=a& repo=b&%20repo=c&%2572epo=d&repo%00=e&repo=web",
     );
   });
 

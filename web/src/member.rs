@@ -237,6 +237,23 @@ mod tests {
                 && cases.iter().filter(|(_, m)| m.is_some()).count() >= 5,
             "the table must carry both unscoped and named rows"
         );
+        // A count alone cannot say WHICH rows were read: a parser that silently
+        // dropped the near-miss keys would still clear the floor above with rows to
+        // spare. These are the rows whose loss would be invisible and would matter.
+        // The SPA's `scope.test.ts` asserts the same list.
+        for required in [
+            "REPO=api",
+            "arepo=api",
+            "repo2=api",
+            "repo=first&repo=last",
+            "repo=%EF%BB%BFapi",
+            "repo=+",
+        ] {
+            assert!(
+                cases.iter().any(|(q, _)| *q == required),
+                "the shared table no longer carries the row `{required}`"
+            );
+        }
         for (query, expected) in cases {
             assert_eq!(
                 member_of(&format!("/api/v1/health?{query}")).as_deref(),

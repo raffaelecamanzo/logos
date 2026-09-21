@@ -260,6 +260,25 @@ describe("the URL names the member (S-426, FR-UI-35)", () => {
     await waitFor(() => expect(screen.getByTestId("member")).toHaveTextContent("api"));
     expect(scopedMember()).toBe("api");
   });
+
+  it("registers exactly one popstate listener and removes it on unmount", () => {
+    // Neither half is visible in a behaviour assertion: a leaked listener keeps
+    // resolving members for an unmounted provider, and a duplicate one resolves
+    // twice per back/forward. Both are silent, so they are counted.
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    stubApi();
+    const { unmount } = mount();
+    const pops = () => add.mock.calls.filter(([type]) => type === "popstate").length;
+    const unpops = () => remove.mock.calls.filter(([type]) => type === "popstate").length;
+
+    return waitFor(() => expect(pops()).toBe(1)).then(() => {
+      expect(unpops()).toBe(0);
+      unmount();
+      expect(unpops()).toBe(1);
+      expect(pops()).toBe(1);
+    });
+  });
 });
 
 describe("an unknown member is refused, not substituted (S-426, NFR-RA-05)", () => {
