@@ -150,7 +150,13 @@ export const POPULATED_COVERAGE: CrossServiceCoverage = {
   covers_all_members: true,
 };
 
-/** The coverage rider, healthy by default. */
+/** The coverage rider, healthy by default.
+ *
+ *  Note what is NOT here: `covers_all_members`. `logos-core`'s `CoverageRider`
+ *  has no such field — only `members_read` / `members_total` — and this fixture
+ *  used to invent one, which is exactly how a view reading it shipped a caveat
+ *  that fired on every answer. A fixture that carries a field the server does not
+ *  send tests a payload shape that does not exist. */
 export function coverageRider(over: Partial<CoverageRider> = {}): CoverageRider {
   return {
     bound: 12,
@@ -165,7 +171,6 @@ export function coverageRider(over: Partial<CoverageRider> = {}): CoverageRider 
     spec_conformance_measured: 16,
     members_read: 3,
     members_total: 3,
-    covers_all_members: true,
     ...over,
   };
 }
@@ -181,7 +186,7 @@ export function reachabilityAnswer(
     reachability: {
       view: "app-wide-union",
       advisory: true,
-      scope: { promotions_only: true },
+      scope: { repo: null, promotions_only: true },
       coverage: rider,
       members: [
         {

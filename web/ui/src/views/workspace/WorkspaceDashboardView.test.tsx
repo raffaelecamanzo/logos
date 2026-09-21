@@ -179,7 +179,7 @@ describe("a member that could not be opened is drawn degraded and named (AC4)", 
           },
         ],
         skipped_members: ["web"],
-        coverage: coverageRider({ members_read: 2, covers_all_members: false }),
+        coverage: coverageRider({ members_read: 2 }),
       }),
     });
 
@@ -204,6 +204,30 @@ describe("a member that could not be opened is drawn degraded and named (AC4)", 
       reachability: reachabilityAnswer({ skipped_members: ["web"] }),
     });
     expect(screen.getByText(/could not be read/i)).toHaveTextContent("web");
+  });
+});
+
+describe("the reachability rider's shortfall caveat (FR-WS-16, NFR-CC-04)", () => {
+  it("does NOT claim a lower bound when every member was read", async () => {
+    // The regression this pins: the rider carries no `covers_all_members` flag,
+    // so a view consulting one reads `undefined` — falsy — and stamps "lower
+    // bound" on a COMPLETE answer. Found in the S-428 review; it survived the
+    // first round because the fixture had invented the field.
+    await mount();
+    expect(screen.getByText(/3 of 3 members read/)).toBeInTheDocument();
+    expect(screen.queryByText(/lower bound/i)).toBeNull();
+  });
+
+  it("DOES claim a lower bound when a member's surface was not read", async () => {
+    // The control: without it, "no caveat" and "this view has no caveat" are the
+    // same observation.
+    await mount({
+      reachability: reachabilityAnswer({
+        coverage: coverageRider({ members_read: 2, members_total: 3 }),
+      }),
+    });
+    expect(screen.getByText(/2 of 3 members read/)).toBeInTheDocument();
+    expect(screen.getByText(/lower bound/i)).toBeInTheDocument();
   });
 });
 

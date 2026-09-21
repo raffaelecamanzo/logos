@@ -145,6 +145,11 @@ function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
   const { reachability } = answer;
   const rider = reachability.coverage;
   const promotions = reachability.live_via_cross_service;
+  // The shortfall predicate, derived from the two counts the rider carries.
+  // This rider has NO `covers_all_members` flag (unlike the coverage summary and
+  // the degraded roll-up), so reading one would be reading `undefined` — falsy —
+  // and would stamp "lower bound" on a complete answer too (S-428 review).
+  const partial = rider.members_read < rider.members_total;
   return (
     <Card
       title="Cross-service reachability"
@@ -155,7 +160,7 @@ function ReachabilityCard({ answer }: { answer: WorkspaceReachabilityAnswer }) {
         live across the workspace union. Seeded from {rider.bridge_invocation_edges} invocation
         edge{rider.bridge_invocation_edges === 1 ? "" : "s"}; the coverage this rests on is{" "}
         {rider.members_read} of {rider.members_total} members read
-        {rider.covers_all_members ? "" : " — every figure here is a lower bound"}.
+        {partial ? " — every figure here is a lower bound" : ""}.
       </p>
       {/* The applied bounds, stated. `dead: null` is SUPPRESSED, deliberately
           distinct from `[]` ("computed, and genuinely empty") — so it is rendered

@@ -1594,8 +1594,13 @@ export interface XserviceImpact {
  *  echoed on the payload so a filtered reply can never be read as the whole
  *  answer (NFR-CC-04). */
 export interface ReachabilityScope {
-  /** The member the view was scoped to (`?repo=`), absent when unscoped. */
-  repo?: string;
+  /** The member the view was scoped to (`?repo=`), `null` when unscoped.
+   *
+   *  `null`, not absent: the Rust field is an `Option<String>` with **no**
+   *  `skip_serializing_if`, so the key is always present on the wire. Declaring
+   *  it optional here would tell a reader the key can be missing, which it
+   *  cannot. */
+  repo: string | null;
   /** `true` under the default: only the cross-service promotions are carried and
    *  {@link BoundedReachability.dead} is **suppressed** — which is why `dead` is
    *  `null` rather than `[]`. `?all` sets it `false`. */
@@ -1636,11 +1641,16 @@ export interface CoverageRider {
   spec_conformance_measured: number;
   /** Members whose surface this rider actually read. */
   members_read: number;
-  /** Members in the roster it was computed over. */
+  /** Members in the roster it was computed over.
+   *
+   *  This rider carries **no `covers_all_members` flag** — unlike
+   *  {@link CrossServiceCoverage} and {@link DegradedRollup}, which do. The
+   *  shortfall predicate here is `members_read < members_total` and nothing else;
+   *  reading a flag that is not on the wire yields `undefined`, which is falsy,
+   *  so a view that consults one states "computed over fewer than all members" on
+   *  every answer including a complete one (found in the S-428 review — the
+   *  fixture had fabricated the field, so no test saw it). */
   members_total: number;
-  /** `false` means every figure on this rider covers fewer than all members
-   *  (FR-WS-16, NFR-CC-04). */
-  covers_all_members: boolean;
 }
 
 /** One member's union-view tally (mirrors `MemberReachability`, FR-WS-12). */
