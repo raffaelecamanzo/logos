@@ -1228,3 +1228,272 @@ fn regex_hex() -> impl Fn(&str) -> bool {
         false
     }
 }
+
+// ── 14. A view never names a CSS-Module class its stylesheet does not define ───
+//
+// Added by S-429, which made `StatisticsView.module.css` serve TWO views. The
+// hazard is specific to this toolchain and invisible to the SPA suite: `css: false`
+// in `vitest.config.ts` makes every CSS Module resolve to `{}`, so `styles.gone` is
+// `undefined`, React renders no class at all, and all 800-plus specs stay green. A
+// rule deleted from a shared stylesheet as "only its original view uses this" would
+// therefore break the other consumer in total silence.
+//
+// It is checked HERE, not in Vitest, because for a `*.module.css` Vite's CSS-modules
+// plugin wins over the `?raw` query — the glob hands back the empty proxy rather than
+// the stylesheet text. This file reads stylesheets off disk, which is the same reason
+// it already owns every other stylesheet contract in the project.
+//
+// Both scanners below were written by hand (no regex crate here) and both were WRONG
+// in their first form — a review agent broke each one with a mutation the guard
+// passed. The two defects are named at their fixes, because a hand-rolled scanner
+// that admits a non-definition is worse than no guard: it reports safety it does not
+// provide.
+
+/// The stylesheet each `import <binding> from "….module.css"` binds, as
+/// `(binding, relative path)`.
+///
+/// Matched on the SPECIFIER, not on the binding name. The first version of this
+/// scanner looked for the literal `import styles from "` and so skipped, in silence,
+/// any file that binds its stylesheet to another name — and skipped every import
+/// after the first, because it used `split_once`.
+fn module_css_imports(source: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("import ") else { continue };
+        let Some((binding, after)) = rest.split_once(" from ") else { continue };
+        let binding = binding.trim();
+        if binding.is_empty() || !binding.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue; // a named/namespace import, never a CSS-Module default
+        }
+        let spec = after.trim().trim_end_matches(';').trim_matches('"').trim_matches('\'');
+        if spec.ends_with(".module.css") {
+            found.push((binding.to_string(), spec.to_string()));
+        }
+    }
+    found
+}
+
+/// Every class key `binding` is used with in `source` — both `binding.key` and
+/// `binding["key"]`.
+///
+/// The bracket form was missed entirely by the first version. It type-checks against
+/// the CSS-Module declaration and is what any codemod or dynamic-key refactor emits,
+/// so a view could name a nonexistent class through it and this guard would pass —
+/// proven by mutation before this arm existed.
+fn module_style_keys(source: &str, binding: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let bytes = source.as_bytes();
+    let dotted = format!("{binding}.");
+    let bracketed = format!("{binding}[");
+    let mut i = 0;
+    while i < bytes.len() {
+        // These sources are UTF-8 with plenty of em dashes in their comments, so a
+        // byte cursor must not be used to slice: `source[i..]` panics mid-character.
+        // (The scan stays byte-driven because every token it looks for is ASCII.)
+        if !source.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        // The byte before must not be able to continue an identifier, so a longer
+        // name ending in the binding (`myStyles.foo`) is not a match.
+        let boundary_ok = i == 0 || {
+            let p = bytes[i - 1];
+            !(p.is_ascii_alphanumeric() || p == b'_' || p == b'$' || p == b'.')
+        };
+        if !boundary_ok {
+            i += 1;
+            continue;
+        }
+        if source[i..].starts_with(&dotted) {
+            let mut j = i + dotted.len();
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > i + dotted.len() {
+                keys.push(source[i + dotted.len()..j].to_string());
+            }
+            i = j.max(i + 1);
+            continue;
+        }
+        if source[i..].starts_with(&bracketed) {
+            let after = &source[i + bracketed.len()..];
+            // A literal key only. A computed key cannot be checked statically, and
+            // saying so is better than pretending the walk covered it.
+            let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'' || *c == '`');
+            if let Some(q) = quote {
+                if let Some(end) = after[1..].find(q) {
+                    let key = &after[1..1 + end];
+                    if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        keys.push(key.to_string());
+                    }
+                }
+            }
+            i += bracketed.len();
+            continue;
+        }
+        i += 1;
+    }
+    keys
+}
+
+/// The SELECTOR PRELUDES of `css` — the text that actually creates rules: everything
+/// between a `}` (or the start of the file) and the next `{`, with at-rule preludes,
+/// functional-pseudo argument lists (`:not(…)`, `:is(…)`, `:where(…)`, `:has(…)`)
+/// and quoted strings removed.
+///
+/// Scanning the whole stylesheet was the second defect. `(`, `)` and `"` are all
+/// identifier boundaries, so `.capNoteZ:not(.capNote) { … }` and
+/// `content: ".capNote"` both counted `.capNote` as DEFINED — while no rule defines
+/// it and every view using it renders no class. That is the exact failure this guard
+/// exists to catch, so it read green on its own subject.
+fn selector_preludes(css: &str) -> String {
+    let mut out = String::new();
+    let mut segment = String::new();
+    let mut quote: Option<char> = None;
+    let mut paren_depth = 0usize;
+    for c in css.chars() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue; // drop the whole string body
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            _ if paren_depth > 0 => {}
+            '{' => {
+                let trimmed = segment.trim();
+                if !trimmed.starts_with('@') {
+                    out.push_str(trimmed);
+                    out.push('\n');
+                }
+                segment.clear();
+            }
+            '}' => segment.clear(),
+            _ => segment.push(c),
+        }
+    }
+    out
+}
+
+/// Does `preludes` define `.key` as a class selector?
+fn defines_class(preludes: &str, key: &str) -> bool {
+    let pat = format!(".{key}");
+    let mut rest = preludes;
+    while let Some(at) = rest.find(&pat) {
+        let after = &rest[at + pat.len()..];
+        let next_ok = after
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        let before_ok = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        if next_ok && before_ok {
+            return true;
+        }
+        rest = &rest[at + 1..];
+    }
+    false
+}
+
+fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sources(&path, out);
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| (n.ends_with(".ts") || n.ends_with(".tsx")) && !n.contains(".test."))
+        {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn every_module_style_key_a_view_uses_is_defined_in_the_stylesheet_it_imports() {
+    // The ONE pre-existing violation this guard found when it was written, named
+    // rather than excluded by narrowing the walk. `Tabs.tsx` sets `styles.tabs` and
+    // `Tabs.module.css` defines `.tablist` / `.tab` / `.active` / `.panel` but no
+    // `.tabs`, so that wrapper has silently carried no class. It is a real defect and
+    // it is OUTSIDE S-429's scope — that component is in no diff here, and guessing
+    // at the intended rule would be a change nobody asked for.
+    const ALLOWED_PREEXISTING: [(&str, &str); 1] = [("components/Tabs.tsx", "tabs")];
+
+    let src = ui_dir().join("src");
+    let mut sources = Vec::new();
+    collect_sources(&src, &mut sources);
+    // The walk's own denominator: a partial walk would make every assertion below
+    // vacuously true.
+    assert!(
+        sources.len() > 60,
+        "the source walk found only {} modules — it is not walking the tree",
+        sources.len(),
+    );
+
+    let mut pairs = 0usize;
+    let mut checked = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+    let mut hit_exemptions: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    for path in &sources {
+        let source = std::fs::read_to_string(path).unwrap();
+        let rel_src = path.strip_prefix(&src).unwrap().display().to_string();
+        for (binding, spec) in module_css_imports(&source) {
+            let stylesheet = path.parent().unwrap().join(&spec);
+            let Ok(css_raw) = std::fs::read_to_string(&stylesheet) else {
+                panic!("{rel_src} imports {spec}, which does not exist");
+            };
+            let preludes = selector_preludes(&strip_comments(&css_raw));
+            pairs += 1;
+            for key in module_style_keys(&source, &binding) {
+                checked += 1;
+                if defines_class(&preludes, &key) {
+                    continue;
+                }
+                let pair = (rel_src.clone(), key.clone());
+                if ALLOWED_PREEXISTING.contains(&(pair.0.as_str(), pair.1.as_str())) {
+                    hit_exemptions.insert(pair);
+                    continue;
+                }
+                missing.push(format!("{rel_src} uses {binding}.{key}, undefined in {spec}"));
+            }
+        }
+    }
+
+    assert!(pairs >= 10, "found only {pairs} view/stylesheet pairs — the import scan is broken");
+    assert!(checked >= 50, "checked only {checked} class keys — the key scan is broken");
+    assert!(
+        missing.is_empty(),
+        "a view names {} CSS-Module class(es) its stylesheet does not define. \
+         Under `css: false` this renders as NO class and no Vitest spec can see it:\n  {}",
+        missing.len(),
+        missing.join("\n  "),
+    );
+
+    // A stale exemption is a lie about the codebase, so it fails too. Compared as a
+    // SET of pairs, not as a count of occurrences: the first version counted
+    // occurrences against the list's length, so a second use of an allow-listed key
+    // made the counts disagree and the diagnostic underflowed a `usize` — the test
+    // still failed, but with "attempt to subtract with overflow" instead of its
+    // message. Found by mutation.
+    let declared: std::collections::BTreeSet<(String, String)> = ALLOWED_PREEXISTING
+        .iter()
+        .map(|(f, k)| ((*f).to_string(), (*k).to_string()))
+        .collect();
+    let stale: Vec<_> = declared.difference(&hit_exemptions).collect();
+    assert!(
+        stale.is_empty(),
+        "{} allow-listed pre-existing violation(s) no longer occur — delete the stale \
+         entr{} from ALLOWED_PREEXISTING: {stale:?}",
+        stale.len(),
+        if stale.len() == 1 { "y" } else { "ies" },
+    );
+}

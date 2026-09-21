@@ -95,8 +95,10 @@ describe("Sidebar — Statistics nav (S-235, FR-UI-27)", () => {
 
 // ── S-250 / FR-UI-29 AC4: the workspace tab is workspace-mode ONLY ────────────
 
-/** Render the sidebar inside a provider whose roster probe answers `probeStatus`. */
-function mountWithMode(probeStatus: number) {
+/** Render the sidebar inside a provider whose roster probe answers `probeStatus`.
+ *  `callsTotal` drives the member-scoped telemetry probe: `0` is the empty store that
+ *  mutes the member-scoped Statistics item. */
+function mountWithMode(probeStatus: number, callsTotal = 1) {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
@@ -106,7 +108,9 @@ function mountWithMode(probeStatus: number) {
         status: isProbe ? probeStatus : 200,
         json: () =>
           Promise.resolve(
-            isProbe ? { workspace: "shop", default: "api", members: ["api", "web"] } : stats(1),
+            isProbe
+              ? { workspace: "shop", default: "api", members: ["api", "web"] }
+              : stats(callsTotal),
           ),
       } as Response);
     }),
@@ -289,5 +293,56 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     ).toEqual(NAV_ITEMS.map((i) => [i.path, i.label]));
     // Every item still carries its inline-SVG icon (CR-042).
     expect(nav.querySelectorAll("li > a > span:first-child > svg")).toHaveLength(NAV_ITEMS.length);
+  });
+});
+
+// ── S-429 / FR-UI-37: the two invariants the app-scoped Statistics tab added ───
+//
+// Both were found by a review agent's mutations, and both were completely untested:
+// nothing in the SPA tree asserted the muting behaviour at all, and the icon count
+// covered only the member roster.
+
+describe("the app-scoped Statistics tab (S-429, FR-UI-37)", () => {
+  it("mutes the MEMBER-scoped Statistics item on an empty store and never the app-scoped one", async () => {
+    // The muting probe reads `/api/v1/statistics` at the SELECTED MEMBER's scope, so
+    // muting the workspace tab from it would assert one member's emptiness about the
+    // whole workspace. `Sidebar.tsx` therefore matches `v.id === "statistics"` by
+    // EXACT equality — and rewriting that as `v.id.endsWith("statistics")`, the exact
+    // untruth the comment there says was avoided, left all 827 specs green.
+    mountWithMode(200, 0);
+    await screen.findByRole("link", { name: /^Workspace$/ });
+
+    // Two links read "Statistics" — one per scope — so each is located by its section.
+    const member = within(region("Service")).getByRole("link", { name: /Statistics/ });
+    const app = within(region("Workspace")).getByRole("link", { name: /Statistics/ });
+
+    await waitFor(() =>
+      expect(member).toHaveAttribute("title", expect.stringMatching(/awaiting data/i)),
+    );
+    // The app-scoped tab answers for a different population, so it is not muted by
+    // this probe — and the assertion is anchored on the member-scoped item above
+    // having ALREADY been muted, so it cannot pass merely because nothing settled.
+    expect(app).not.toHaveAttribute("title");
+  });
+
+  it("gives every Workspace-section item its inline-SVG icon, not just the member ones", async () => {
+    // `NavLink` renders `{Icon && <Icon />}`, so a missing `ICONS` entry degrades to an
+    // empty `<span>`. The standing icon guard counts against `NAV_ITEMS.length` — the
+    // member roster only — so deleting the new `"workspace-statistics": IconStatistics`
+    // entry left the suite green, as it would for either S-428 entry. This is the
+    // "a story enumerates a surface a later story extends" shape, so the count is
+    // derived per section rather than written out.
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /^Workspace$/ });
+
+    for (const [scope, roster] of [
+      ["Workspace", WORKSPACE_NAV_ITEMS],
+      ["Service", NAV_ITEMS],
+    ] as const) {
+      expect(roster.length).toBeGreaterThan(0);
+      expect(
+        region(scope).querySelectorAll("li > a > span:first-child > svg"),
+      ).toHaveLength(roster.length);
+    }
   });
 });

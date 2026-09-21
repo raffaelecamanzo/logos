@@ -25,6 +25,7 @@ import { GapsView } from "./gaps/GapsView.tsx";
 import { GraphView } from "./graph/GraphView.tsx";
 import { HealthView } from "./health/HealthView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
+import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.tsx";
 import { CoverageView } from "./analytics/CoverageView.tsx";
 import { FilesView } from "./analytics/FilesView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
@@ -70,6 +71,12 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // than to a blank shell. Their NAV items are workspace-mode-only (nav.ts).
   "/workspace-dashboard": WorkspaceDashboardView,
   "/workspace-health": WorkspaceHealthView,
+  // S-429 — the app-level Statistics view (FR-UI-37) over the engine-free
+  // `workspace/statistics` aggregate. Registered unconditionally for the same
+  // reason as the two above; its nav item is workspace-mode-only (nav.ts). It
+  // lives beside its member-scoped twin in `views/statistics/` because it shares
+  // that view's pure model layer, not the `views/workspace/` layout grammar.
+  "/workspace-statistics": WorkspaceStatisticsView,
 };
 
 /**

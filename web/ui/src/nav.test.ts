@@ -35,6 +35,7 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
       ["workspace-dashboard", "/workspace-dashboard"],
       ["workspace-health", "/workspace-health"],
       ["workspace", "/workspace"],
+      ["workspace-statistics", "/workspace-statistics"],
     ]);
   });
 });
@@ -70,6 +71,7 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
       ["workspace-dashboard", "app"],
       ["workspace-health", "app"],
       ["workspace", "app"],
+      ["workspace-statistics", "app"],
     ]);
   });
 
@@ -77,10 +79,44 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     // ADR-66 accepted this deliberately: `/` stays the per-member Dashboard so no
     // bookmark is re-homed, and the two levels are told apart by the section
     // label the sidebar renders — never by renaming one of them.
-    const appLabels = WORKSPACE_NAV_ITEMS.filter((i) => i.path !== "/workspace").map((i) => i.label);
-    expect(appLabels).toEqual(["Dashboard", "Health"]);
+    // Keyed off the ids that HAVE a member-scoped twin, not off "everything except
+    // /workspace". The exclusion spelling silently swept in S-429's app-scoped
+    // Statistics entry the moment it was registered, and would sweep in the next
+    // one too — an expectation that grows a new obligation every time the list does
+    // is asserting the list, not the property.
+    const twinned = ["workspace-dashboard", "workspace-health", "workspace-statistics"];
+    const appLabels = WORKSPACE_NAV_ITEMS.filter((i) => twinned.includes(i.id)).map((i) => i.label);
+    expect(appLabels).toEqual(["Dashboard", "Health", "Statistics"]);
     for (const label of appLabels) {
       expect(NAV_ITEMS.map((i) => i.label)).toContain(label);
+    }
+  });
+
+  it("files the app-scoped Statistics tab in its member-scoped twin's CR-042 group (S-429)", () => {
+    // The group says WHAT a tab answers, and this one answers the same question as
+    // the per-member Statistics tab, one scope up — so it is filed with it rather
+    // than beside the three cross-service surfaces, which answer a different one.
+    // Asserted as the equality rather than as the literal "C": the day CR-042 moves
+    // Statistics to another group, the two must move together or the sidebar starts
+    // grouping one question two ways.
+    const member = NAV_ITEMS.find((i) => i.id === "statistics") as NavItem;
+    const app = WORKSPACE_NAV_ITEMS.find((i) => i.id === "workspace-statistics") as NavItem;
+    expect(member).toBeDefined();
+    expect(app).toBeDefined();
+    expect(app.group).toBe(member.group);
+    // …and the three cross-service tabs are NOT in that group, which is what makes
+    // the grouping visible in the rendered section at all.
+    //
+    // Keyed on the ids that ARE the cross-service surfaces, not on "everything except
+    // workspace-statistics". The exclusion spelling is the same false obligation this
+    // file fixes 25 lines above — it would fail the day a second group-C app entry is
+    // registered, with nothing wrong.
+    const crossService = WORKSPACE_NAV_ITEMS.filter((i) =>
+      ["workspace-dashboard", "workspace-health", "workspace"].includes(i.id),
+    );
+    expect(crossService.length).toBeGreaterThan(0);
+    for (const item of crossService) {
+      expect(item.group).not.toBe(app.group);
     }
   });
 
