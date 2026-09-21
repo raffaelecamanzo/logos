@@ -64,6 +64,11 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   config: IconConfig,
   // Workspace mode only (S-250) — absent from a single-root sidebar.
   workspace: IconWorkspace,
+  // S-428: the app-level twins of the Dashboard and Health tabs (FR-UI-36). They
+  // carry their member-scoped twin's icon deliberately — the icon says WHAT the
+  // view answers, and the section label says what it answers FOR (ADR-66 §4).
+  "workspace-dashboard": IconDashboard,
+  "workspace-health": IconHealth,
 };
 
 function NavLink({ item, active, muted }: { item: NavItem; active: boolean; muted?: boolean }) {
@@ -149,8 +154,8 @@ export function Sidebar({ pathname }: { pathname: string }) {
   // The Statistics item is muted when the telemetry store is empty (NFR-CC-04) —
   // an honest "awaiting data" signal that agrees with the tab's own empty state.
   const statisticsAwaiting = useStatisticsAwaiting();
-  // The Workspace tab exists only in workspace mode (S-250, FR-UI-29); a plain repo
-  // renders the unchanged item list.
+  // The workspace-only tabs exist only in workspace mode (S-250, FR-UI-29; S-428
+  // added two beside the original); a plain repo renders the unchanged item list.
   const { mode } = useWorkspace();
   const isWorkspace = mode === "workspace";
   const items = navItemsFor(isWorkspace);

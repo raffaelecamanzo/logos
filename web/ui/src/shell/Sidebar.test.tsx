@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StatsInfo } from "../api/types.ts";
-import { NAV_GROUPS, NAV_ITEMS } from "../nav.ts";
+import { NAV_GROUPS, NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 
@@ -155,8 +155,8 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
         .getAllByRole("link")
         .map((a) => a.textContent);
 
-    // The app-scoped tab, alone, above the boundary the selector governs…
-    expect(names("Workspace")).toEqual(["Workspace"]);
+    // The app-scoped tabs, above the boundary the selector governs…
+    expect(names("Workspace")).toEqual(WORKSPACE_NAV_ITEMS.map((i) => i.label));
     // …and every member-scoped tab below it. Same list, same order as the
     // single-root sidebar: the CR-042 A/B/C groups survive INSIDE the section
     // rather than being re-ordered by it.

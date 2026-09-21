@@ -24,10 +24,18 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
     expect(navItemsFor(false).some((i) => i.id === "workspace")).toBe(false);
   });
 
-  it("appends the workspace tab — and only that — in workspace mode", () => {
+  it("appends the workspace-only tabs — and only those — in workspace mode", () => {
     expect(navItemsFor(true)).toEqual([...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS]);
     const added = navItemsFor(true).filter((i) => !NAV_ITEMS.includes(i));
-    expect(added.map((i) => [i.id, i.path])).toEqual([["workspace", "/workspace"]]);
+    // Pinned as the literal roster rather than derived from WORKSPACE_NAV_ITEMS:
+    // three sessions across this sprint append to this ONE list, and a parallel
+    // append to a single list is a known entry-DROPPING merge. A derived
+    // expectation agrees with whatever survived the merge and reports nothing.
+    expect(added.map((i) => [i.id, i.path])).toEqual([
+      ["workspace-dashboard", "/workspace-dashboard"],
+      ["workspace-health", "/workspace-health"],
+      ["workspace", "/workspace"],
+    ]);
   });
 });
 
@@ -58,7 +66,34 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     // The eleven pre-existing tabs answer for ONE member through `?repo=`; the
     // Workspace tab answers for the whole workspace over the unscoped fan-out.
     expect(NAV_ITEMS.map((i) => i.scope)).toEqual(NAV_ITEMS.map(() => "member"));
-    expect(WORKSPACE_NAV_ITEMS.map((i) => [i.id, i.scope])).toEqual([["workspace", "app"]]);
+    expect(WORKSPACE_NAV_ITEMS.map((i) => [i.id, i.scope])).toEqual([
+      ["workspace-dashboard", "app"],
+      ["workspace-health", "app"],
+      ["workspace", "app"],
+    ]);
+  });
+
+  it("gives the two S-428 views the SAME labels as their member-scoped twins", () => {
+    // ADR-66 accepted this deliberately: `/` stays the per-member Dashboard so no
+    // bookmark is re-homed, and the two levels are told apart by the section
+    // label the sidebar renders — never by renaming one of them.
+    const appLabels = WORKSPACE_NAV_ITEMS.filter((i) => i.path !== "/workspace").map((i) => i.label);
+    expect(appLabels).toEqual(["Dashboard", "Health"]);
+    for (const label of appLabels) {
+      expect(NAV_ITEMS.map((i) => i.label)).toContain(label);
+    }
+  });
+
+  it("keeps every app-scoped route a SIBLING of /workspace, never a child of it", () => {
+    // `navItemMatches` treats a path under a tab's route as belonging to that tab
+    // — the rule that keeps the Wiki tab lit while its reader is open. A route
+    // under `/workspace` would therefore highlight TWO sidebar items at once.
+    const workspaceTab = WORKSPACE_NAV_ITEMS.find((i) => i.id === "workspace");
+    expect(workspaceTab).toBeDefined();
+    for (const item of ALL_ITEMS) {
+      if (item.id === "workspace") continue;
+      expect(navItemMatches(workspaceTab as NavItem, item.path)).toBe(false);
+    }
   });
 });
 

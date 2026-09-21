@@ -72,14 +72,18 @@ export const NAV_ITEMS: readonly NavItem[] = [
 ];
 
 /**
- * The workspace-only tabs (S-250, CR-061, FR-UI-29). Appended to the sidebar **only
- * in workspace mode** — a single-root serve has no cross-service axis, so offering
- * a service map there would be a fabricated surface, and the sidebar must stay
- * byte-for-byte what it has always been.
+ * The workspace-only tabs (S-250, CR-061, FR-UI-29; extended by S-428, FR-UI-36).
+ * Appended to the sidebar **only in workspace mode** — a single-root serve has no
+ * cross-service axis, so offering a service map there would be a fabricated
+ * surface, and the sidebar must stay byte-for-byte what it has always been.
  *
- * One tab, three panels (service map / cross-service coverage / cross-service
- * impact): they share one member roster and one binding set, so splitting them
- * across three sidebar items would mean three probes of the same read-models.
+ * The **Workspace** tab is one tab over three panels (service map /
+ * cross-service coverage / cross-service impact): they share one member roster
+ * and one binding set, so splitting them across three sidebar items would mean
+ * three probes of the same read-models. The two S-428 views beside it are
+ * separate tabs for the opposite reason — they answer two different questions
+ * ("how coupled is this?", "is this current?") over two different read-model
+ * pairs, and neither re-reads the other's.
  *
  * Workspace-mode-only and app-scoped are two different axes that happen to agree
  * for every entry here today: this list decides whether the tab is OFFERED,
@@ -87,6 +91,27 @@ export const NAV_ITEMS: readonly NavItem[] = [
  * other.
  */
 export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
+  // S-428 (CR-137, FR-UI-36): the two app-level views over read-models that
+  // already existed and had never been reachable from the interface — the
+  // cross-service picture, and the operational roll-up.
+  //
+  // Named "Dashboard" and "Health", exactly like their member-scoped twins.
+  // ADR-66 accepted that deliberately: `/` stays the per-member Dashboard so no
+  // bookmark changes meaning, and the two levels are told apart by the SECTION
+  // label the sidebar renders, not by a second name.
+  //
+  // Their routes are siblings of `/workspace`, not children of it. A path under
+  // it would prefix-match in {@link navItemMatches} — the rule that keeps the
+  // Wiki tab lit while its reader is open — and light up BOTH the Workspace tab
+  // and the new one at once.
+  {
+    id: "workspace-dashboard",
+    label: "Dashboard",
+    path: "/workspace-dashboard",
+    group: "A",
+    scope: "app",
+  },
+  { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
 ];
 

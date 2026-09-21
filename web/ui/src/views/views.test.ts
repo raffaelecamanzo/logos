@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
+import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
+import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
 import { NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { viewForPath, VIEW_REGISTRY } from "./index.ts";
 
@@ -61,5 +63,21 @@ describe("the workspace route (S-250, FR-UI-29)", () => {
   it("registers /workspace so a hand-typed URL resolves (its NAV item is workspace-only)", () => {
     expect(viewForPath("/workspace")).toBe(VIEW_REGISTRY["/workspace"]);
     expect(VIEW_REGISTRY["/workspace"]).toBeDefined();
+  });
+});
+
+describe("the app-level workspace views (S-428, FR-UI-36)", () => {
+  it("registers both so a hand-typed URL resolves to the honest not-a-workspace state", () => {
+    expect(VIEW_REGISTRY["/workspace-dashboard"]).toBe(WorkspaceDashboardView);
+    expect(VIEW_REGISTRY["/workspace-health"]).toBe(WorkspaceHealthView);
+  });
+
+  it("does NOT let /workspace shadow either of them", () => {
+    // They are siblings of `/workspace`, not children: `viewForPath` resolves a
+    // sub-path to its longest registered prefix, so a route UNDER `/workspace`
+    // would have been claimable by the Workspace tab.
+    expect(viewForPath("/workspace-dashboard")).toBe(WorkspaceDashboardView);
+    expect(viewForPath("/workspace-health")).toBe(WorkspaceHealthView);
+    expect(viewForPath("/workspace")).not.toBe(WorkspaceDashboardView);
   });
 });

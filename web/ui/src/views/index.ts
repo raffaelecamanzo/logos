@@ -28,6 +28,8 @@ import { StatisticsView } from "./statistics/StatisticsView.tsx";
 import { CoverageView } from "./analytics/CoverageView.tsx";
 import { FilesView } from "./analytics/FilesView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
+import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
+import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
 import { WorkspaceView } from "./workspace/WorkspaceView.tsx";
 
 /** A view is a plain, prop-less component mounted in the shell content slot. */
@@ -62,6 +64,12 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // rendered only in workspace mode (nav.ts), and in a single-root serve the view
   // states honestly that this is not a workspace (FR-UI-29).
   "/workspace": WorkspaceView,
+  // S-428 — the two app-level workspace views (FR-UI-36). Registered
+  // unconditionally for the same reason `/workspace` is: a hand-typed URL must
+  // resolve to a view that states honestly that this is not a workspace, rather
+  // than to a blank shell. Their NAV items are workspace-mode-only (nav.ts).
+  "/workspace-dashboard": WorkspaceDashboardView,
+  "/workspace-health": WorkspaceHealthView,
 };
 
 /**

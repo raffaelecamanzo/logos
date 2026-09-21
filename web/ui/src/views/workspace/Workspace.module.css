@@ -1,6 +1,8 @@
-/* The Workspace tab (S-250, FR-UI-29; frontend-design §4.16/§4.17). Design-system
-   tokens only — no new hue, no new spacing step (FR-UI-23). The service map reuses
-   the graph canvas's own module styles; only the surrounding layout lives here. */
+/* The Workspace tab (S-250, FR-UI-29; frontend-design §4.16/§4.17) and, since
+   S-428, the two app-level workspace views that share its layout grammar
+   (FR-UI-36). Design-system tokens only — no new hue, no new spacing step
+   (FR-UI-23). The service map reuses the graph canvas's own module styles; only
+   the surrounding layout lives here. */
 
 .view {
   display: flex;
