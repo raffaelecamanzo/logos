@@ -1228,3 +1228,167 @@ fn regex_hex() -> impl Fn(&str) -> bool {
         false
     }
 }
+
+// ── 14. A view never names a CSS-Module class its stylesheet does not define ───
+//
+// Added by S-429, which made `StatisticsView.module.css` serve TWO views. The
+// hazard is specific to this toolchain and invisible to the SPA suite: `css: false`
+// in `vitest.config.ts` makes every CSS Module resolve to `{}`, so `styles.gone` is
+// `undefined`, React renders no class at all, and all 800-plus specs stay green. A
+// rule deleted from a shared stylesheet as "only its original view uses this" would
+// therefore break the other consumer in total silence.
+//
+// It is checked HERE, not in Vitest, because for a `*.module.css` Vite's CSS-modules
+// plugin wins over the `?raw` query — the glob hands back the empty proxy rather than
+// the stylesheet text. This file reads stylesheets off disk, which is the same reason
+// it already owns every other stylesheet contract in the project.
+
+/// Every `styles.<key>` identifier used in a TS/TSX source.
+fn module_style_keys(source: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let bytes = source.as_bytes();
+    let needle = b"styles.";
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] != needle {
+            i += 1;
+            continue;
+        }
+        // Reject a longer identifier ending in `styles` (`myStyles.foo`): the byte
+        // before must not be able to continue an identifier.
+        let boundary_ok = i == 0 || {
+            let p = bytes[i - 1];
+            !(p.is_ascii_alphanumeric() || p == b'_' || p == b'$' || p == b'.')
+        };
+        let mut j = i + needle.len();
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
+        }
+        if boundary_ok && j > i + needle.len() {
+            keys.push(source[i + needle.len()..j].to_string());
+        }
+        i = j.max(i + 1);
+    }
+    keys
+}
+
+/// Does `css` define `.key` as a class selector (followed by a selector boundary)?
+fn defines_class(css: &str, key: &str) -> bool {
+    let pat = format!(".{key}");
+    let mut rest = css;
+    while let Some(at) = rest.find(&pat) {
+        let after = &rest[at + pat.len()..];
+        let next_ok = after
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        // The char before must not make this part of a longer token (`.foo.bar` is
+        // fine — `.` is a boundary — but `x.foo` is a property access, not a class).
+        let before_ok = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        if next_ok && before_ok {
+            return true;
+        }
+        rest = &rest[at + 1..];
+    }
+    false
+}
+
+fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sources(&path, out);
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| (n.ends_with(".ts") || n.ends_with(".tsx")) && !n.contains(".test."))
+        {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn every_module_style_key_a_view_uses_is_defined_in_the_stylesheet_it_imports() {
+    let src = ui_dir().join("src");
+    let mut sources = Vec::new();
+    collect_sources(&src, &mut sources);
+    // The walk's own denominator, pinned by SHAPE rather than as a floor a subset
+    // clears: a partial walk would make every assertion below vacuously true.
+    assert!(
+        sources.len() > 60,
+        "the source walk found only {} modules — it is not walking the tree",
+        sources.len(),
+    );
+
+    // The ONE pre-existing violation this guard found when it was written, named
+    // rather than excluded by narrowing the walk. `Tabs.tsx` sets `styles.tabs` on
+    // its outer wrapper and `Tabs.module.css` defines `.tablist` / `.tab` /
+    // `.active` / `.panel` but no `.tabs`, so that wrapper has silently carried no
+    // class. It is a real defect and it is OUTSIDE S-429's scope (that component is
+    // not in this story's diff, and guessing at the intended rule would be a change
+    // nobody asked for). The exemption is asserted to still be VIOLATING below, so
+    // fixing `Tabs` fails this test rather than leaving a stale exemption behind.
+    const ALLOWED_PREEXISTING: [(&str, &str); 1] = [("components/Tabs.tsx", "tabs")];
+
+    let mut pairs = 0usize;
+    let mut checked = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+    let mut exempted = 0usize;
+    for path in &sources {
+        let source = std::fs::read_to_string(path).unwrap();
+        // `import styles from "<rel>.module.css"` — the one spelling this tree uses.
+        let Some(at) = source.find("from \"") .and_then(|_| {
+            source
+                .split_once("import styles from \"")
+                .map(|(_, rest)| rest)
+        }) else {
+            continue;
+        };
+        let Some((rel, _)) = at.split_once('"') else { continue };
+        if !rel.ends_with(".module.css") {
+            continue;
+        }
+        let stylesheet = path.parent().unwrap().join(rel);
+        let Ok(css_raw) = std::fs::read_to_string(&stylesheet) else {
+            panic!("{} imports {rel}, which does not exist", path.display());
+        };
+        let css = strip_comments(&css_raw);
+        pairs += 1;
+        for key in module_style_keys(&source) {
+            checked += 1;
+            if !defines_class(&css, &key) {
+                let rel_src = path.strip_prefix(&src).unwrap().display().to_string();
+                if ALLOWED_PREEXISTING.contains(&(rel_src.as_str(), key.as_str())) {
+                    exempted += 1;
+                    continue;
+                }
+                missing.push(format!("{rel_src} uses styles.{key}, undefined in {rel}"));
+            }
+        }
+    }
+
+    assert!(pairs >= 10, "found only {pairs} view/stylesheet pairs — the import scan is broken");
+    assert!(checked >= 50, "checked only {checked} class keys — the key scan is broken");
+    assert!(
+        missing.is_empty(),
+        "a view names {} CSS-Module class(es) its stylesheet does not define. \
+         Under `css: false` this renders as NO class and no Vitest spec can see it:\n  {}",
+        missing.len(),
+        missing.join("\n  "),
+    );
+    // A stale exemption is a lie about the codebase, so it fails too: every entry in
+    // the allow-list must still be a live violation.
+    assert_eq!(
+        exempted,
+        ALLOWED_PREEXISTING.len(),
+        "{} of the {} allow-listed pre-existing violation(s) no longer occur — delete \
+         the stale entry from ALLOWED_PREEXISTING",
+        ALLOWED_PREEXISTING.len() - exempted,
+        ALLOWED_PREEXISTING.len(),
+    );
+}
