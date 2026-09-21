@@ -1527,15 +1527,31 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// three — and silently, which is the failure mode an enumerated list has instead of
 /// a wildcard. This asserts the list and the router's own route table name exactly
 /// the same set, read out of `src/lib.rs` at compile time. Set equality in both
-/// directions, so it needs no count to keep up to date and cannot pass vacuously on
-/// a parse that found nothing.
+/// directions, so it needs no count to keep up to date.
+///
+/// # Two blind spots a line-based scan had, both closed
+/// The first version split each *line* on `.route("`, which two real patterns in
+/// the same file defeat. A review agent proved the first by adding a route whose
+/// call rustfmt wraps across four lines: invisible to the scan, so the guard passed
+/// over an unenumerated route. The second is already live here — `VERIFY_POST_ROUTE`
+/// registers a path by **constant**, not by inline literal, so a future
+/// `/api/v1/workspace/*` GET written that way would also slip through.
+///
+/// So the scan runs over the whole source as one string (formatting-independent),
+/// and a second assertion requires that no `/api/v1/workspace/` path is declared as
+/// a `const`. The `!declared.is_empty()` check remains, but note what it is and is
+/// not: it catches a *total* parse failure, not a partial one — the second
+/// assertion is what covers the const form.
 #[test]
 fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
     const ROUTER_SOURCE: &str = include_str!("../src/lib.rs");
 
+    // Whole-source scan: `.route(` followed by a string literal, wherever the line
+    // breaks fall.
     let mut declared: Vec<&str> = ROUTER_SOURCE
-        .lines()
-        .filter_map(|line| line.split(".route(\"").nth(1))
+        .split(".route(")
+        .skip(1)
+        .filter_map(|rest| rest.trim_start().strip_prefix('"'))
         .filter_map(|rest| rest.split('"').next())
         .filter(|path| path.starts_with("/api/v1/workspace/"))
         .collect();
@@ -1558,5 +1574,21 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
         "WORKSPACE_ENDPOINTS and the router's /api/v1/workspace/* route table have \
          drifted: a route in the table but not the list is unguarded by every loop \
          that walks the list"
+    );
+
+    // The const form the inline scan cannot see. `VERIFY_POST_ROUTE` is the live
+    // precedent for it in this very file, so this is a pattern already in use.
+    let const_declared: Vec<&str> = ROUTER_SOURCE
+        .lines()
+        .filter(|l| l.contains("const ") && l.contains(": &str"))
+        .filter_map(|l| l.split('"').nth(1))
+        .filter(|path| path.starts_with("/api/v1/workspace/"))
+        .collect();
+    assert!(
+        const_declared.is_empty(),
+        "a /api/v1/workspace/* path is declared as a const ({const_declared:?}), which \
+         the route-table scan above cannot see. Either inline the literal at its \
+         `.route(` call or teach this guard to resolve the constant — do not leave \
+         the route enumerable only by hand."
     );
 }
