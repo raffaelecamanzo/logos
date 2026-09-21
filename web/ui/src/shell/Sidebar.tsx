@@ -143,6 +143,14 @@ function NavGroups({
                 // prefix-matching `/health`) lives in `nav.ts`, which is also what
                 // `scopeForPath` asks.
                 active={navItemMatches(v, pathname)}
+                // Exact id equality, and the MEMBER-scoped tab only. S-429 added an
+                // app-scoped Statistics tab with an awaiting-data state of its own,
+                // and it is deliberately never muted from here: `useStatisticsAwaiting`
+                // probes `/api/v1/statistics` at the SELECTED MEMBER's scope, so
+                // muting the workspace tab from it would assert one member's emptiness
+                // about the whole workspace. Muting it honestly would need a second,
+                // unscoped fan-out read on every shell mount (NFR-PE-10). A prefix or
+                // label match here would have introduced exactly that untruth.
                 muted={v.id === "statistics" && statisticsAwaiting}
               />
             ))}
