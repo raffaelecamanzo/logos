@@ -1350,10 +1350,9 @@ fn module_style_keys(source: &str, binding: &str) -> Vec<String> {
 fn selector_preludes(css: &str) -> String {
     let mut out = String::new();
     let mut segment = String::new();
-    let mut chars = css.chars().peekable();
     let mut quote: Option<char> = None;
     let mut paren_depth = 0usize;
-    while let Some(c) = chars.next() {
+    for c in css.chars() {
         if let Some(q) = quote {
             if c == q {
                 quote = None;
