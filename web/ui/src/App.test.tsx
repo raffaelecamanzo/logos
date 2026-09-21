@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // effectivePath-prevents-flash guarantee.
 const { mockRedirect } = vi.hoisted(() => ({ mockRedirect: vi.fn() }));
 let mockPathname = "/overview";
-vi.mock("./router.tsx", () => ({
+// PARTIAL, not whole: the shell calls more of the router than this spec overrides
+// (S-426 added `currentUrl`/`replaceUrl`, which a member switch writes the URL
+// through). A whole-module mock silently under-supplies the module as it grows.
+vi.mock("./router.tsx", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./router.tsx")>()),
   usePathname: () => mockPathname,
   navigate: vi.fn(),
   redirect: mockRedirect,

@@ -1,0 +1,34 @@
+/* The unknown-member refusal (S-426, FR-UI-35, NFR-RA-05). Design-system tokens
+   verbatim (FR-UI-23, ADR-44): no new colour and no new spacing step, so a theme
+   stays a token remap. The panel chrome itself is `ErrorPanel`'s — this file only
+   lays out the claim and the roster inside it. */
+
+.claim {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-base);
+}
+
+/* The member name the user asked for, and each name the workspace has: mono,
+   because they are identifiers the user may have mistyped and will compare
+   character by character. */
+.name {
+  font-family: var(--font-mono);
+  color: var(--text-1);
+}
+
+.rosterLabel {
+  margin: var(--space-3) 0 var(--space-2);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+/* A list, not a sentence: the roster can be long, and each entry is an action. */
+.roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

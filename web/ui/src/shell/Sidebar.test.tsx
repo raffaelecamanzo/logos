@@ -6,7 +6,13 @@ import { NAV_GROUPS, NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 
-vi.mock("../router.tsx", () => ({ navigate: vi.fn() }));
+// PARTIAL, not whole: the shell calls more of the router than this spec overrides
+// (S-426 added `currentUrl`/`replaceUrl`, which a member switch writes the URL
+// through). A whole-module mock silently under-supplies the module as it grows.
+vi.mock("../router.tsx", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../router.tsx")>()),
+  navigate: vi.fn(),
+}));
 
 function stats(callsTotal: number): StatsInfo {
   return {

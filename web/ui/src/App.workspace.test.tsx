@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.tsx";
 import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 import { scopedMember, setScopedMember } from "./workspace/scope.ts";
-import { stubApi } from "./workspace/testFixtures.ts";
+import { ROSTER, stubApi } from "./workspace/testFixtures.ts";
 
 /** The real shell is rendered — sidebar included, which is where S-425 put the
  *  member selector — so it needs the theme context `main.tsx` provides in
@@ -55,8 +55,14 @@ vi.mock("./views/index.ts", async () => {
   };
 });
 
+// A PARTIAL mock: only the three entry points that would drive the SPA's own
+// navigation are stubbed, so a spec can pin the pathname without the shell
+// navigating under it. `currentUrl`/`replaceUrl` are the REAL ones (S-426) — they
+// are the seam the member switch writes the URL through, and a stub would make the
+// URL assertions below pin the stub instead of the behaviour.
 const { pathname } = vi.hoisted(() => ({ pathname: { current: "/" } }));
-vi.mock("./router.tsx", () => ({
+vi.mock("./router.tsx", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./router.tsx")>()),
   usePathname: () => pathname.current,
   navigate: vi.fn(),
   redirect: vi.fn(),
@@ -67,6 +73,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
   setScopedMember(null);
   pathname.current = "/";
+  // The URL is shared state across specs now that the shell writes to it.
+  window.history.replaceState(null, "", "/");
 });
 
 /** Every read the mounted MEMBER-scoped view issued (the Header probes `status`
@@ -167,5 +175,105 @@ describe("a member switch remounts the member-scoped views and no app-scoped one
     render(app());
     await waitFor(() => expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=api"]));
     expect(await screen.findByRole("link", { name: /^Dashboard$/ })).toHaveAttribute("href", "/");
+  });
+});
+
+// ── S-426 / FR-UI-35 / NFR-RA-05: the unknown member is refused on the DOM ──
+
+/** Open the SPA on `url` — what a bookmark, a shared link or a refresh supplies. */
+function openAt(url: string) {
+  window.history.replaceState(null, "", url);
+}
+
+describe("a deep-linked member scopes the FIRST read (S-426, FR-UI-35)", () => {
+  it("issues exactly ONE read, already scoped to the URL's member", async () => {
+    // The property, counted rather than inferred: one read, carrying `web`. A
+    // provider that opened on the manifest default and then corrected itself to the
+    // URL's member would remount the view and leave TWO reads here, the first of
+    // them against a member the user never asked for — and it would settle in an
+    // identical final state, which is why no state assertion can see it.
+    openAt("/?repo=web");
+    const calls = stubApi();
+    render(app());
+
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=web"]);
+    // Nothing at all went out under the default member, from any caller.
+    expect(calls().some((u) => u.includes("repo=api"))).toBe(false);
+  });
+});
+
+describe("an unknown ?repo= renders a refusal and NO view (NFR-RA-05)", () => {
+  it("names the members the workspace has, while no view renders any figures", async () => {
+    // The failure being prevented is a 200-shaped page: the shell falls back to the
+    // default member, the view paints ITS figures, and the URL still says `ghost`.
+    // Asserted on rendered DOM, because that page passes every state assertion.
+    openAt("/?repo=ghost");
+    const calls = stubApi();
+    render(app());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member\s+ghost/);
+    // The members it DOES have, named — a dead end that lists the way out.
+    for (const name of ROSTER.members) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+    // No view is mounted at all…
+    expect(screen.queryByTestId("view")).toBeNull();
+    // …so no member's figures were even fetched, under `ghost`'s name or any other.
+    expect(viewCalls(calls())).toEqual([]);
+    expect(scopedMember()).toBeNull();
+    // Nor the header badge, which sits OUTSIDE the view subtree and reads
+    // `/api/v1/status`: unscoped, that answers from the default member and would put
+    // its counts inches from the name the user asked for.
+    expect(screen.getByText("Connecting…")).toBeInTheDocument();
+    expect(calls().some((u) => u.startsWith("/api/v1/status"))).toBe(false);
+  });
+
+  it("recovers: picking a named member mounts the view, scoped to THAT member", async () => {
+    openAt("/?repo=ghost");
+    const calls = stubApi();
+    render(app());
+    await screen.findByRole("alert");
+
+    await userEvent.click(screen.getByRole("button", { name: "web" }));
+
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=web"]);
+    expect(window.location.search).toBe("?repo=web");
+  });
+
+  it("an unstartable member is the read's 500, a DIFFERENT state from the refusal", async () => {
+    // `member.rs` refuses to conflate "no such member" (404) with "that member's
+    // engine would not start" (500), and the client must not re-merge them: the two
+    // send the user to different places — a typo, or a broken store. Two fixtures,
+    // two rendered states; this is the second.
+    openAt("/?repo=web");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.startsWith("/api/v1/workspace/roster")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve(ROSTER),
+          } as Response);
+        }
+        // The member IS in the roster; its engine is what fails.
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          json: () =>
+            Promise.resolve({ error: "workspace member `web` could not be started: locked" }),
+        } as Response);
+      }),
+    );
+    render(app());
+
+    // The view mounted and reported the failure IT saw…
+    await waitFor(() => expect(screen.getByTestId("view")).toHaveTextContent("error"));
+    // …and the unknown-member refusal is nowhere on the page.
+    expect(screen.queryByText(/No workspace member/)).toBeNull();
+    // The member stayed selected: it exists, so it is still what the shell presents.
+    expect(scopedMember()).toBe("web");
   });
 });

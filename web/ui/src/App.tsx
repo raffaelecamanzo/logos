@@ -14,6 +14,13 @@
  * transport: "member is part of the cache key", enforced once in the shell rather
  * than re-implemented per view. In single-root mode the key is a constant, so
  * nothing ever remounts and the UI behaves exactly as it did before.
+ *
+ * S-426 (FR-UI-35, NFR-RA-05) adds one more gate beside the probe gate: while the
+ * URL names a member this workspace does not have, NO view is mounted at all. The
+ * refusal takes the content slot instead. A view mounted there would read unscoped
+ * and paint the DEFAULT member's figures under the requested member's name — a
+ * `200`-shaped page that is wrong about its own subject, which is precisely what
+ * the server refuses with a `404` and what this shell must not undo.
  */
 
 import { useEffect } from "react";
@@ -24,11 +31,12 @@ import { usePathname, redirect } from "./router.tsx";
 import { Header } from "./shell/Header.tsx";
 import { Sidebar } from "./shell/Sidebar.tsx";
 import { viewForPath } from "./views/index.ts";
+import { UnknownMember } from "./workspace/UnknownMember.tsx";
 import { useWorkspace, WorkspaceProvider } from "./workspace/WorkspaceContext.tsx";
 
 function Shell() {
   const rawPathname = usePathname();
-  const { cacheKey, mode } = useWorkspace();
+  const { cacheKey, mode, unknownMember } = useWorkspace();
 
   // Silently migrate the retired /overview bookmark to / without adding a
   // back-stack entry.
@@ -62,6 +70,11 @@ function Shell() {
           round-trip against an engine-free endpoint. */}
       {mode === "loading" ? (
         <LoadingState label="Starting…" />
+      ) : unknownMember !== null ? (
+        /* INSTEAD of the view, never beside it: there is no member to answer for,
+           and the transport is unscoped, so nothing on screen can be one member's
+           figures wearing another member's name (NFR-RA-05). */
+        <UnknownMember />
       ) : (
         View && <View key={viewKey} />
       )}

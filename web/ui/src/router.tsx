@@ -7,9 +7,20 @@
  * Deliberately dependency-free: the client route table is small (one route per
  * tab), so a full router (react-router) would be premature weight on the bundle
  * the S-184 fitness budget tracks. It can be adopted if the route table grows.
+ *
+ * S-426 (FR-UI-35, NFR-RA-05): the router is where `?repo=` meets `window.history`.
+ * Every entry this module writes carries the ACTIVE member, so a workspace URL
+ * names the member it shows — a tab change must not drop the member and silently
+ * re-open the default one. It is the only member policy here: which member is
+ * active, and what an unknown one means, belong to `WorkspaceContext`. In
+ * single-root mode `scopedMember()` is `null` and `urlWithMember` returns the path
+ * verbatim, so every URL this module writes is byte-for-byte the pre-workspace one
+ * ([ADR-52]).
  */
 
 import { useEffect, useState } from "react";
+
+import { scopedMember, urlWithMember } from "./workspace/scope.ts";
 
 /** The current client-side pathname, kept in sync with browser history. */
 export function usePathname(): string {
@@ -30,7 +41,7 @@ export function usePathname(): string {
  * or read-model change.
  */
 export function navigate(path: string, state: unknown = {}): void {
-  window.history.pushState(state, "", path);
+  window.history.pushState(state, "", urlWithMember(path, scopedMember()));
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
@@ -57,6 +68,30 @@ export function useNavigationState<T = unknown>(): T | null {
  * `/overview` → `/`).
  */
 export function redirect(path: string): void {
-  window.history.replaceState({}, "", path);
+  window.history.replaceState({}, "", urlWithMember(path, scopedMember()));
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+/** The current history entry's full in-SPA URL — path, query and fragment. */
+export function currentUrl(): string {
+  const { pathname, search, hash } = window.location;
+  return `${pathname}${search}${hash}`;
+}
+
+/**
+ * Rewrite the current history entry's URL in place (S-426).
+ *
+ * Three properties, each load-bearing and none of them shared with {@link redirect}:
+ *
+ *   - `replaceState`, so a member switch on the view you are already looking at adds
+ *     **no** back-stack entry. Ten switches must not cost ten presses of Back.
+ *   - `history.state` is carried across, not replaced with `{}` — the current entry's
+ *     ephemeral payload (the wiki search term, FR-WK-28) belongs to the entry, not to
+ *     the member shown in it.
+ *   - **no** `popstate` is dispatched. The caller is the one that just changed the
+ *     state; re-notifying the SPA would have it re-derive from the URL the answer it
+ *     has already committed to.
+ */
+export function replaceUrl(url: string): void {
+  window.history.replaceState(window.history.state, "", url);
 }
