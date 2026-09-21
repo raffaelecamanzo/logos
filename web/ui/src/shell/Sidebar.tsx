@@ -69,6 +69,9 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   // view answers, and the section label says what it answers FOR (ADR-66 §4).
   "workspace-dashboard": IconDashboard,
   "workspace-health": IconHealth,
+  // S-429: same reasoning — the app-level Statistics view answers the same question
+  // as the member-scoped one, one scope up, so it carries the same icon (FR-UI-37).
+  "workspace-statistics": IconStatistics,
 };
 
 function NavLink({ item, active, muted }: { item: NavItem; active: boolean; muted?: boolean }) {

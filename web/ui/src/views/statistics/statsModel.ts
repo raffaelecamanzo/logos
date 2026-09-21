@@ -12,7 +12,28 @@
  * sum to `calls_total` (the read-model warns it can be less).
  */
 
-import type { OriginUsage, StatsInfo } from "../../api/types.ts";
+import type { DailyActivity, OriginUsage, ToolUsage } from "../../api/types.ts";
+
+/**
+ * The usage projections every transform below reads — and nothing else.
+ *
+ * Declared as its own shape rather than as `StatsInfo` so the SAME functions serve
+ * both scopes: the member-scoped `StatsInfo` (S-235) and the app-scoped
+ * `WorkspaceStatistics` aggregate (S-429, FR-UI-37), which carries these four
+ * fields and deliberately omits the latency percentiles and `artifact_bindings`.
+ * Both satisfy it structurally, so "top tools ranked by calls" has one spelling in
+ * the tree — the hand-mirrored twin this project has been bitten by before is a
+ * second copy of exactly this arithmetic, diverging quietly from the first.
+ *
+ * Each function takes only the slice it reads, so a caller that has one projection
+ * and not the others can still use it.
+ */
+export interface UsageProjections {
+  calls_total: number;
+  calls_by_tool: ToolUsage[];
+  activity_by_day: DailyActivity[];
+  calls_by_origin: OriginUsage[];
+}
 
 // ── Brand palette (hardcoded hex mirroring the design tokens, as the Graph canvas
 //    does — a canvas cannot read the CSS custom properties; the accessible truth is
@@ -34,8 +55,13 @@ export const TOP_TOOLS_LIMIT = 8;
 /** The Statistics store is "empty/awaiting data" when the window recorded no calls
  *  at all — the single honest predicate the view (empty state) and the sidebar
  *  (muted nav item) share (NFR-CC-04). An empty store returns a zeroed model, so
- *  `calls_total === 0` is exactly the awaiting-data signal. */
-export function isStatsEmpty(stats: StatsInfo): boolean {
+ *  `calls_total === 0` is exactly the awaiting-data signal.
+ *
+ *  The app-scoped Statistics view (S-429, FR-UI-37) keys its awaiting-data state on
+ *  THIS predicate over the workspace aggregate, because FR-UI-37 asks for "the
+ *  honest awaiting-data state the member-scoped view already renders" — one
+ *  predicate, not a second one that could disagree with it. */
+export function isStatsEmpty(stats: Pick<UsageProjections, "calls_total">): boolean {
   return stats.calls_total === 0;
 }
 
@@ -49,7 +75,7 @@ export interface ActivityPoint {
 }
 
 /** The daily-activity series, oldest day first (the read-model already orders it). */
-export function activitySeries(stats: StatsInfo): ActivityPoint[] {
+export function activitySeries(stats: Pick<UsageProjections, "activity_by_day">): ActivityPoint[] {
   return stats.activity_by_day.map((d) => ({ day: d.day, calls: d.calls, ok_calls: d.ok_calls }));
 }
 
@@ -64,7 +90,10 @@ export interface ToolRow {
  * calls desc (ties broken by tool name asc for a stable order), capped to
  * {@link TOP_TOOLS_LIMIT}. `truncated` is true when tools were dropped by the cap.
  */
-export function topTools(stats: StatsInfo, limit: number = TOP_TOOLS_LIMIT): {
+export function topTools(
+  stats: Pick<UsageProjections, "calls_by_tool">,
+  limit: number = TOP_TOOLS_LIMIT,
+): {
   rows: ToolRow[];
   truncated: boolean;
 } {
@@ -86,7 +115,7 @@ export interface SurfaceRow {
 
 /** Usage aggregated by recording surface (cli / mcp / watcher), ranked desc.
  *  Web-dashboard activity is filtered server-side (HF-1), so it never appears. */
-export function bySurface(stats: StatsInfo): SurfaceRow[] {
+export function bySurface(stats: Pick<UsageProjections, "calls_by_tool">): SurfaceRow[] {
   const totals = new Map<string, number>();
   for (const u of stats.calls_by_tool) {
     totals.set(u.surface, (totals.get(u.surface) ?? 0) + u.calls);
@@ -110,7 +139,7 @@ export interface OriginRow {
  *  desc (ties by origin asc). Rendered as charted (no normalisation): the read-model
  *  warns the split can sum to less than `calls_total` because rolled-up days carry
  *  no `origin` ([FR-OB-08]). */
-export function originSplit(stats: StatsInfo): OriginRow[] {
+export function originSplit(stats: Pick<UsageProjections, "calls_by_origin">): OriginRow[] {
   return stats.calls_by_origin
     .map((o: OriginUsage): OriginRow => ({
       origin: o.origin,

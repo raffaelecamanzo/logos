@@ -1784,3 +1784,85 @@ export interface WorkspaceGovernance {
 export interface WorkspaceGovernanceAnswer extends AnswerCompleteness {
   governance: WorkspaceGovernance | null;
 }
+
+/**
+ * Why one workspace member contributed nothing to the statistics aggregate
+ * (mirrors `UnreadReason`, [FR-UI-37], kebab-case on the wire).
+ *
+ * Three states, not a boolean, because they call for different reactions and a
+ * surface must render them apart: `"absent"` is the normal state of a member
+ * nobody has run Logos in and is **not** an incident, `"locked"` is transient and
+ * worth retrying, `"unreadable"` is a fault someone must look at. Typed as a
+ * closed union — the server's enum is closed, and the view maps each arm to its
+ * own words.
+ */
+export type UnreadReason = "absent" | "locked" | "unreadable";
+
+/** One member whose telemetry could not be read, **named** with its reason
+ *  (mirrors `UnreadMember`). `detail` is present for every row — the error chain
+ *  for a locked or unreadable store, a fixed sentence for an absent one — so a
+ *  surface never synthesises wording for one of the three cases (NFR-CC-04). */
+export interface UnreadMember {
+  /** The member's repo-qualified manifest name. */
+  member: string;
+  reason: UnreadReason;
+  detail: string;
+}
+
+/**
+ * `GET /api/v1/workspace/statistics[?window=<days>]` (S-429, FR-UI-37) — usage
+ * across every workspace member over one trailing window, aggregated **without
+ * constructing a member engine** (NFR-PE-10).
+ *
+ * Every figure here is a sum over `members_read` members, **not** over the
+ * roster, and the two differ whenever `unread` is non-empty — so the denominator
+ * travels with the figures rather than being left to the reader (NFR-CC-04).
+ *
+ * Three absences are deliberate, and a consumer must not fall back to the
+ * member-scoped {@link StatsInfo} shape for any of them:
+ *   - **no `latency_p*_ms`** — a summed percentile is a fabricated figure, not a
+ *     coarser one;
+ *   - **no `artifact_bindings`** — that is a live-graph property, and merging it
+ *     is exactly what makes `Engine::stats` engine-bound (ADR-13, NFR-PE-10);
+ *   - **no quality signal of any kind** — this is a telemetry sum, and a mean of
+ *     per-repository signals would have no referent ([BR-56]).
+ *
+ * The awaiting-data predicate is `calls_total === 0` — the *member-scoped* view's
+ * own `isStatsEmpty`, deliberately shared rather than re-derived. It is **not**
+ * `members_read === 0`: a workspace whose members all have migrated but eventless
+ * stores reads every one of them and still has nothing to show, and rendering
+ * zeros there is the failure NFR-CC-04 names.
+ *
+ * As with {@link StatsInfo}, the wire also carries an `attribution_coverage`
+ * rider that is not typed here because nothing renders it — this file mirrors the
+ * read-models the SPA consumes, not every field the server sends.
+ */
+export interface WorkspaceStatistics {
+  /** The workspace name from the manifest. */
+  workspace: string;
+  /** The trailing window every member was read over, in days. */
+  window_days: number;
+  /** Members on the roster — the population the aggregate *could* have covered. */
+  members_total: number;
+  /** Members whose telemetry was actually read — **the denominator** of every
+   *  figure below. */
+  members_read: number;
+  /** `members_read === members_total`, published by the server rather than left to
+   *  the consumer's arithmetic so the marker and the figures cannot be read apart. */
+  covers_all_members: boolean;
+  /** Every member that contributed nothing, named with why, in roster order. */
+  unread: UnreadMember[];
+  /** Total calls across the read members. */
+  calls_total: number;
+  /** Per-`(surface, tool)` usage summed across the read members, sorted by surface
+   *  then tool — the same order one member's `StatsInfo` carries. */
+  calls_by_tool: ToolUsage[];
+  /** Per-UTC-day activity summed across the read members, **oldest day first**. */
+  activity_by_day: DailyActivity[];
+  /** The dev-vs-`main` split summed across the read members, `"dev"` first. */
+  calls_by_origin: OriginUsage[];
+  /** Estimated ad-hoc file reads avoided, summed — an estimate, labeled as one. */
+  reads_saved_estimate: number;
+  /** The headline value estimate, summed — likewise an estimate, never a measurement. */
+  tokens_saved_estimate: number;
+}

@@ -16,10 +16,12 @@
 
 import { ApiError } from "../intent.ts";
 import { apiFetch } from "./client.ts";
+import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
   WorkspaceGovernanceAnswer,
   WorkspaceReachabilityAnswer,
   WorkspaceRoster,
+  WorkspaceStatistics,
   WorkspaceStatus,
   XserviceImpact,
   XserviceRouteProviders,
@@ -80,6 +82,30 @@ export function fetchWorkspaceReachability(member?: string): Promise<WorkspaceRe
  *  passing report (NFR-CC-04). */
 export function fetchWorkspaceGovernance(): Promise<WorkspaceGovernanceAnswer> {
   return apiFetch<WorkspaceGovernanceAnswer>("workspace/check");
+}
+
+/**
+ * `GET /api/v1/workspace/statistics?window=<days>` (S-429, FR-UI-37) — usage
+ * summed across every member over one trailing window, carrying the member
+ * denominator it summed over and naming every member it could not read.
+ *
+ * It fans out, but **not through `Engine::stats`**: each member's `telemetry.db`
+ * is opened read-only on its own, so a view load constructs no member engine and
+ * the resident-engine count is what a `workspace status` already pays
+ * ([NFR-PE-10]). That is the whole reason this read exists as its own endpoint
+ * rather than as N calls to `/api/v1/statistics?repo=`.
+ *
+ * App-level, so it carries **no** `?repo=` — `apiUrl` exempts the `workspace/*`
+ * prefix, and narrowing this to the shell's selected member would answer a
+ * different question from the one the view asks. The `window` is the same lenient
+ * query param `/api/v1/statistics` takes; the server clamps and defaults it.
+ *
+ * Always `200` in workspace mode: an unreadable member is named *in the payload*,
+ * never raised as an error ([NFR-RA-05]). A single-root serve answers `404`, like
+ * every other `workspace/*` route.
+ */
+export function fetchWorkspaceStatistics(window: StatisticsWindow): Promise<WorkspaceStatistics> {
+  return apiFetch<WorkspaceStatistics>("workspace/statistics", { window });
 }
 
 /** What the boot-time probe found: a workspace (with its roster) or a plain repo. */

@@ -67,10 +67,21 @@ vi.mock("./views/index.ts", async () => {
  *  Deliberately a literal list rather than a filter over `WORKSPACE_NAV_ITEMS`:
  *  the shell decides the mount key from the SAME `scope` field that filter would
  *  read, so deriving it here would let one mutation move both sides at once. The
- *  price is that a fourth app-scoped view must be added here by hand — which the
- *  floor assertion below turns into a failing test rather than a silent gap. */
+ *  price is that each new app-scoped view must be added here by hand — which the
+ *  floor assertion below turns into a failing test rather than a silent gap. It did
+ *  exactly that for S-429's `/workspace-statistics`, which is why that route is on
+ *  the list.
+ *
+ *  Every route here is driven by the SAME app-scoped stand-in view above, not by the
+ *  real component: what is under test is the shell's mount key, and a stand-in whose
+ *  one read is unscoped isolates that from whatever each real view happens to fetch. */
 const { APP_ROUTES, pathname } = vi.hoisted(() => ({
-  APP_ROUTES: ["/workspace", "/workspace-dashboard", "/workspace-health"] as string[],
+  APP_ROUTES: [
+    "/workspace",
+    "/workspace-dashboard",
+    "/workspace-health",
+    "/workspace-statistics",
+  ] as string[],
   pathname: { current: "/" },
 }));
 vi.mock("./router.tsx", async (importOriginal) => ({

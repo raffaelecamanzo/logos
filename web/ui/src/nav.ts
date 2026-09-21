@@ -113,6 +113,25 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   },
   { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
+  // S-429 (CR-137, FR-UI-37): usage summed across every member, over an aggregate
+  // that constructs no member engine (NFR-PE-10).
+  //
+  // Group C, not A, so it sits apart from the three cross-service surfaces exactly
+  // as its member-scoped twin sits apart from the read surfaces above it — the
+  // CR-042 grouping is a property of WHAT a tab answers, and this one answers the
+  // same question one scope up. Group B falls out empty in this section and renders
+  // nothing, which {@link NavItem} already relies on.
+  //
+  // Appended LAST, and this position is load-bearing rather than incidental:
+  // `Sidebar.test.tsx` asserts the Workspace section renders in this list's order,
+  // and within the section a group-C entry renders after every group-A one.
+  {
+    id: "workspace-statistics",
+    label: "Statistics",
+    path: "/workspace-statistics",
+    group: "C",
+    scope: "app",
+  },
 ];
 
 /** The sidebar groups in render order. */
