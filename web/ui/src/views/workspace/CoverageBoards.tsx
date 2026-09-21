@@ -14,6 +14,12 @@
  * Every figure here is the SERVER's, displayed and never recomputed — including
  * the two composed lines (`resolvedEdgesSummary`, `specConformanceSummary`) that
  * make BR-51's and CR-111's pairings structural rather than remembered.
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the rules (R0-R5) every absence-
+ * reporting site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import {

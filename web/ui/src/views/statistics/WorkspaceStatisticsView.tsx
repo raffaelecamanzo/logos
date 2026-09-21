@@ -49,6 +49,12 @@
  * remount it on a member switch — and the read below carries no member in its
  * dependency array, so nothing re-fetches when one changes. Unreachable and
  * unrendered in single-root mode.
+ *
+ * Absence wording here follows the one taxonomy rather than restating it:
+ * `models::quality::absence` in `logos-core/src/models/quality.rs` (S-434) —
+ * the closed sentinel vocabulary and the rules (R0-R5) every absence-
+ * reporting site keeps. Enumerated from source by
+ * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
 import { useMemo, useState } from "react";

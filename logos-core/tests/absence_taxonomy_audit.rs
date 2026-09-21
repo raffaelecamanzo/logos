@@ -20,7 +20,7 @@
 //! occurrences (each rendering carried both an `n/a` and an `empty graph`, and
 //! the duplicated pair collapsed into one constant), which leaves the census
 //! recorded below at **81 production occurrences over 37 production rows**,
-//! beside 105 occurrences inside test scope — enumerated and separated, never
+//! beside 106 occurrences inside test scope — enumerated and separated, never
 //! truncated away. [`the_audit_reports_its_count_with_its_denominator`] pins
 //! both populations and the arithmetic between them.
 //!
@@ -267,7 +267,7 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 66] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 67] = [
     (
         "core",
         "logos-core/src/config/discovery.rs",
@@ -787,6 +787,14 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 66] = [
         2,
         0,
         "CONFORMANT — THE REFERENCE MODEL, asserted unchanged. Its middle arm is the one a persisted snapshot can reach and a computing readout cannot, which is R0 in one line",
+    ),
+    (
+        "spa",
+        "web/ui/src/views/statistics/WorkspaceStatisticsView.test.tsx",
+        "none recorded",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s): the words fall inside a Vitest title, `awaits data when every member IS read but none recorded anything`, describing the fixture the case builds rather than a string the view renders. The view's own awaiting-data wording is `No member recorded any telemetry in this window`, which is not a sentinel. Added by S-429 T2 (CR-137); enumerated, never truncated away",
     ),
     (
         "spa",
@@ -1970,9 +1978,9 @@ fn the_audit_reports_its_count_with_its_denominator() {
             SURFACES.len(),
             AUDITED_ON,
         ),
-        (3, 1, 81, 37, 105, 3, "2026-09-20"),
+        (3, 1, 81, 37, 106, 3, "2026-09-20"),
         "the census as it now stands: 81 production occurrences over 37 \
-         production rows across 3 surfaces, beside 105 test-scope occurrences, \
+         production rows across 3 surfaces, beside 106 test-scope occurrences, \
          read on 2026-09-20. Change the header and this tuple together — a \
          count without its denominator says nothing, and an undated one is \
          read as a standing property"
