@@ -87,15 +87,24 @@ export function Header() {
   // FR-UI-29). The `pathname` is what makes the refresh navigation-driven — the
   // router already tracks it, so joining it here needs no new mechanism and adds no
   // timer (FR-UI-34).
-  const { cacheKey, mode } = useWorkspace();
+  const { cacheKey, mode, unknownMember } = useWorkspace();
   const pathname = usePathname();
 
   useEffect(() => {
-    // Until the workspace probe settles we do not know the member, so a request now
-    // would go out unscoped and have to be re-issued anyway. Stay honestly "Connecting…".
-    if (mode === "loading") return;
-    let alive = true;
+    // Two states in which there is no member to report figures for, and the badge
+    // must show none rather than the wrong ones:
+    //   - the probe has not settled, so we do not know the member yet and a request
+    //     now would go out unscoped and have to be re-issued anyway;
+    //   - the URL names a member this workspace does not have (S-426), so an
+    //     unscoped read would answer from the DEFAULT member and put its counts
+    //     inches from the requested member's name (NFR-RA-05) — the same
+    //     substitution the content slot refuses by rendering no view at all.
+    // The readout is reset rather than merely left alone: arriving here from a valid
+    // member (a back/forward into an unknown one) would otherwise keep that member's
+    // figures on screen.
     setReadout({ kind: "loading" });
+    if (mode === "loading" || unknownMember !== null) return;
+    let alive = true;
     // Through the typed client, so the read carries the active `?repo=` scope. In
     // single-root mode no param is appended and the request is byte-for-byte the
     // shape every other read has.
@@ -111,7 +120,7 @@ export function Header() {
     return () => {
       alive = false;
     };
-  }, [cacheKey, mode, pathname]);
+  }, [cacheKey, mode, unknownMember, pathname]);
 
   return (
     <header className={styles.header}>

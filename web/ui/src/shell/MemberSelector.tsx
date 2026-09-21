@@ -16,9 +16,12 @@
  * two controls. That heading is text at every breakpoint (`Sidebar.module.css`),
  * so the accessible name can never be the thing a narrow viewport drops.
  *
- * Selecting a member re-scopes the transport and re-keys every member-scoped view
- * (see `WorkspaceContext` and `App.tsx`), so a switch re-fetches rather than showing
- * one member's figures under another member's name.
+ * Selecting a member re-scopes the transport, re-keys every member-scoped view (see
+ * `WorkspaceContext` and `App.tsx`), and — since S-426 — writes the member into the
+ * URL, so a switch re-fetches rather than showing one member's figures under another
+ * member's name, and the URL it leaves behind names what is on screen. The URL write
+ * replaces the current history entry rather than pushing one: a switch on the view
+ * you are already looking at must not cost a press of Back.
  *
  * It lists names and nothing else. The shell's roster probe is deliberately
  * engine-free (NFR-PE-10), so it does NOT know which members are indexed — and a

@@ -10,14 +10,15 @@
  * thing that fails if that line is deleted.
  */
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
+import { redirect } from "./router.tsx";
 import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 import { scopedMember, setScopedMember } from "./workspace/scope.ts";
-import { stubApi } from "./workspace/testFixtures.ts";
+import { ROSTER, stubApi } from "./workspace/testFixtures.ts";
 
 /** The real shell is rendered — sidebar included, which is where S-425 put the
  *  member selector — so it needs the theme context `main.tsx` provides in
@@ -55,8 +56,14 @@ vi.mock("./views/index.ts", async () => {
   };
 });
 
+// A PARTIAL mock: only the three entry points that would drive the SPA's own
+// navigation are stubbed, so a spec can pin the pathname without the shell
+// navigating under it. `currentUrl`/`replaceUrl` are the REAL ones (S-426) — they
+// are the seam the member switch writes the URL through, and a stub would make the
+// URL assertions below pin the stub instead of the behaviour.
 const { pathname } = vi.hoisted(() => ({ pathname: { current: "/" } }));
-vi.mock("./router.tsx", () => ({
+vi.mock("./router.tsx", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./router.tsx")>()),
   usePathname: () => pathname.current,
   navigate: vi.fn(),
   redirect: vi.fn(),
@@ -67,6 +74,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
   setScopedMember(null);
   pathname.current = "/";
+  // The URL is shared state across specs now that the shell writes to it.
+  window.history.replaceState(null, "", "/");
 });
 
 /** Every read the mounted MEMBER-scoped view issued (the Header probes `status`
@@ -167,5 +176,222 @@ describe("a member switch remounts the member-scoped views and no app-scoped one
     render(app());
     await waitFor(() => expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=api"]));
     expect(await screen.findByRole("link", { name: /^Dashboard$/ })).toHaveAttribute("href", "/");
+  });
+});
+
+// ── S-426 / FR-UI-35 / NFR-RA-05: the unknown member is refused on the DOM ──
+
+/** Open the SPA on `url` — what a bookmark, a shared link or a refresh supplies. */
+function openAt(url: string) {
+  window.history.replaceState(null, "", url);
+}
+
+describe("the /overview migration keeps the member (S-426, S-194)", () => {
+  // `redirect` is stubbed for the specs above, which is precisely why this was
+  // invisible: the one suite that drives the real shell with a roster never ran the
+  // real migration. These use the real one.
+  const realRouter = async () => await vi.importActual<typeof import("./router.tsx")>("./router.tsx");
+
+  it("carries a deep-linked ?repo= across /overview → /", async () => {
+    const { redirect: realRedirect } = await realRouter();
+    pathname.current = "/overview";
+    openAt("/overview?repo=web");
+    const calls = stubApi();
+    vi.mocked(redirect).mockImplementation((path: string) => {
+      realRedirect(path);
+      pathname.current = "/";
+    });
+    render(app());
+
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    // The migration rewrites the PATH. Dropping the query with it would open the
+    // manifest default and paint ITS figures for a URL that asked for `web`.
+    expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=web"]);
+    expect(scopedMember()).toBe("web");
+  });
+
+  it("carries an UNKNOWN ?repo= across it too, so the refusal is not bypassed", async () => {
+    const { redirect: realRedirect } = await realRouter();
+    pathname.current = "/overview";
+    openAt("/overview?repo=ghost");
+    const calls = stubApi();
+    vi.mocked(redirect).mockImplementation((path: string) => {
+      realRedirect(path);
+      pathname.current = "/";
+    });
+    render(app());
+
+    // Losing the member here would resolve `ghost` to the default member with
+    // nothing on screen admitting it — the 200-shaped page NFR-RA-05 forbids.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
+    expect(screen.queryByTestId("view")).toBeNull();
+    expect(viewCalls(calls())).toEqual([]);
+  });
+});
+
+describe("a deep-linked member scopes the FIRST read (S-426, FR-UI-35)", () => {
+  it("issues exactly ONE read, already scoped to the URL's member", async () => {
+    // The property, counted rather than inferred: one read, carrying `web`. A
+    // provider that opened on the manifest default and then corrected itself to the
+    // URL's member would remount the view and leave TWO reads here, the first of
+    // them against a member the user never asked for — and it would settle in an
+    // identical final state, which is why no state assertion can see it.
+    openAt("/?repo=web");
+    const calls = stubApi();
+    render(app());
+
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=web"]);
+    // Nothing at all went out under the default member, from any caller.
+    expect(calls().some((u) => u.includes("repo=api"))).toBe(false);
+  });
+});
+
+describe("an unknown ?repo= renders a refusal and NO view (NFR-RA-05)", () => {
+  it("names the members the workspace has, while no view renders any figures", async () => {
+    // The failure being prevented is a 200-shaped page: the shell falls back to the
+    // default member, the view paints ITS figures, and the URL still says `ghost`.
+    // Asserted on rendered DOM, because that page passes every state assertion.
+    openAt("/?repo=ghost");
+    const calls = stubApi();
+    render(app());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member\s+ghost/);
+    // The members it DOES have, named — a dead end that lists the way out.
+    for (const name of ROSTER.members) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+    // No view is mounted at all…
+    expect(screen.queryByTestId("view")).toBeNull();
+    expect(scopedMember()).toBeNull();
+    // …and NOTHING was read but the boot probe itself. Asserted as the COMPLEMENT,
+    // not as a whitelist of endpoints: "no /api/v1/overview and no /api/v1/status"
+    // would pass while a third endpoint was being fetched unscoped, which is the
+    // same default-member substitution wearing a different URL (NFR-RA-05).
+    expect(calls().filter((u) => !u.startsWith("/api/v1/workspace/roster"))).toEqual([]);
+    // The header badge in particular sits OUTSIDE the view subtree, so it is the one
+    // thing that could still be counting.
+    expect(screen.getByText("Connecting…")).toBeInTheDocument();
+  });
+
+  it("names the roster it READ, not a list of its own", async () => {
+    // A roster that differs from the fixture's, so a hardcoded `["api","web"]` or a
+    // hardcoded `ghost` cannot pass: the failure this guards is a refusal panel that
+    // looks right against one workspace and names the wrong members in every other.
+    openAt("/?repo=nosuch");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve(
+              url.startsWith("/api/v1/workspace/roster")
+                ? { workspace: "acme", default: "alpha", members: ["alpha", "beta"] }
+                : {},
+            ),
+        } as Response),
+      ),
+    );
+    render(app());
+
+    const panel = await screen.findByRole("alert");
+    expect(panel).toHaveTextContent(/nosuch/);
+    expect(panel).toHaveTextContent(/acme/);
+    expect(screen.getByRole("button", { name: "alpha" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "beta" })).toBeInTheDocument();
+    // The fixture's own members must NOT appear — that is what a hardcode would show.
+    expect(screen.queryByRole("button", { name: "api" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "web" })).toBeNull();
+  });
+
+  it("drops a valid member's figures when the URL turns unknown under it", async () => {
+    // Every other spec enters the refusal as the FIRST state, where the header badge
+    // is already "Connecting…" and a reset is invisible. This is the transition: the
+    // badge must go back, or a real member's counts stay on screen beside a name the
+    // workspace does not have.
+    openAt("/?repo=web");
+    const calls = stubApi();
+    render(app());
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(calls().some((u) => u.startsWith("/api/v1/status?repo=web"))).toBe(true),
+    );
+    const readsBefore = calls().length;
+
+    await act(async () => {
+      window.history.replaceState(null, "", "/?repo=ghost");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
+    expect(screen.queryByTestId("view")).toBeNull();
+    expect(screen.getByText("Connecting…")).toBeInTheDocument();
+    // …and the transition issued no new read of any kind.
+    expect(calls().length).toBe(readsBefore);
+  });
+
+  it("refuses an APP-level path too — the claim is the URL's, not the view's reads", async () => {
+    // `/workspace` is app-scoped (ADR-66): its fan-out is never member-scoped, so it
+    // could render correct figures here. It is refused anyway, and this pins that
+    // decision — without it, narrowing the gate to member-scoped views would be a
+    // silent behaviour change that no spec noticed.
+    pathname.current = "/workspace";
+    openAt("/workspace?repo=ghost");
+    const calls = stubApi();
+    render(app());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
+    expect(screen.queryByTestId("view")).toBeNull();
+    expect(appViewCalls(calls())).toEqual([]);
+  });
+
+  it("recovers: picking a named member mounts the view, scoped to THAT member", async () => {
+    openAt("/?repo=ghost");
+    const calls = stubApi();
+    render(app());
+    await screen.findByRole("alert");
+
+    await userEvent.click(screen.getByRole("button", { name: "web" }));
+
+    await waitFor(() => expect(screen.getByTestId("view")).toBeInTheDocument());
+    expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=web"]);
+    expect(window.location.search).toBe("?repo=web");
+  });
+
+  it("an unstartable member is the read's 500, a DIFFERENT state from the refusal", async () => {
+    // `member.rs` refuses to conflate "no such member" (404) with "that member's
+    // engine would not start" (500), and the client must not re-merge them: the two
+    // send the user to different places — a typo, or a broken store. Two fixtures,
+    // two rendered states; this is the second.
+    openAt("/?repo=web");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.startsWith("/api/v1/workspace/roster")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve(ROSTER),
+          } as Response);
+        }
+        // The member IS in the roster; its engine is what fails.
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          json: () =>
+            Promise.resolve({ error: "workspace member `web` could not be started: locked" }),
+        } as Response);
+      }),
+    );
+    render(app());
+
+    // The view mounted and reported the failure IT saw…
+    await waitFor(() => expect(screen.getByTestId("view")).toHaveTextContent("error"));
+    // …and the unknown-member refusal is nowhere on the page.
+    expect(screen.queryByText(/No workspace member/)).toBeNull();
+    // The member stayed selected: it exists, so it is still what the shell presents.
+    expect(scopedMember()).toBe("web");
   });
 });

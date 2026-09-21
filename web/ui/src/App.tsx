@@ -14,6 +14,27 @@
  * transport: "member is part of the cache key", enforced once in the shell rather
  * than re-implemented per view. In single-root mode the key is a constant, so
  * nothing ever remounts and the UI behaves exactly as it did before.
+ *
+ * S-426 (FR-UI-35, NFR-RA-05) adds one more gate beside the probe gate: while the
+ * URL names a member this workspace does not have, NO view is mounted at all. The
+ * refusal takes the content slot instead.
+ *
+ * For a MEMBER-scoped view the reason is direct: mounted there it would read
+ * unscoped and paint the DEFAULT member's figures under the requested member's name
+ * — a `200`-shaped page that is wrong about its own subject, which is what the
+ * server refuses with a `404` and what this shell must not undo.
+ *
+ * The gate is deliberately NOT narrowed to those views, and the reason above is not
+ * the reason why. An app-level view reads the `workspace/*` fan-out, which
+ * `api/client.ts` never scopes to a member, so it would render correct figures — it
+ * cannot commit that substitution. It is refused because the refusal is about the
+ * URL, not about what the view happens to read: `?repo=ghost` is a claim this
+ * workspace cannot honour, and a page that answered it in full while the address bar
+ * named a member that does not exist would invite exactly the reading the refusal
+ * exists to prevent. One invalid URL, one page state.
+ *
+ * This reads no scope and adds no second notion of one (ADR-66): it does not consult
+ * the path at all. `viewKey` below remains the only consumer of the declared field.
  */
 
 import { useEffect } from "react";
@@ -24,16 +45,25 @@ import { usePathname, redirect } from "./router.tsx";
 import { Header } from "./shell/Header.tsx";
 import { Sidebar } from "./shell/Sidebar.tsx";
 import { viewForPath } from "./views/index.ts";
+import { UnknownMember } from "./workspace/UnknownMember.tsx";
 import { useWorkspace, WorkspaceProvider } from "./workspace/WorkspaceContext.tsx";
 
 function Shell() {
   const rawPathname = usePathname();
-  const { cacheKey, mode } = useWorkspace();
+  const { cacheKey, mode, unknownMember } = useWorkspace();
 
   // Silently migrate the retired /overview bookmark to / without adding a
-  // back-stack entry.
+  // back-stack entry. Only the PATH is retired, so the query and fragment are
+  // carried across verbatim: this effect fires on mount, before the workspace probe
+  // has answered, so `redirect` has no member scope to re-apply yet (S-426). A bare
+  // `redirect("/")` therefore discarded the whole query — and with it a deep-linked
+  // `?repo=`, which then resolved to the manifest default and painted ITS figures
+  // for a URL that named another member, or bypassed the unknown-member refusal
+  // outright (NFR-RA-05).
   useEffect(() => {
-    if (rawPathname === "/overview") redirect("/");
+    if (rawPathname === "/overview") {
+      redirect(`/${window.location.search}${window.location.hash}`);
+    }
   }, [rawPathname]);
 
   // Canonical path: resolve the redirect synchronously so the Dashboard view
@@ -62,6 +92,11 @@ function Shell() {
           round-trip against an engine-free endpoint. */}
       {mode === "loading" ? (
         <LoadingState label="Starting…" />
+      ) : unknownMember !== null ? (
+        /* INSTEAD of the view, never beside it — for EVERY path, app-level ones
+           included; see the header for why that is the URL's claim and not the
+           view's reads (NFR-RA-05). */
+        <UnknownMember />
       ) : (
         View && <View key={viewKey} />
       )}

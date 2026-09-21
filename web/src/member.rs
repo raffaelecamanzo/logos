@@ -187,6 +187,83 @@ mod tests {
         );
     }
 
+    /// The shared `?repo=` case table, read from the SAME bytes the SPA's own test
+    /// reads ([S-426], [FR-UI-35]).
+    ///
+    /// # Why a table and not two independent test suites
+    ///
+    /// Since S-426 `?repo=` is also the browser-URL vocabulary: the SPA parses it
+    /// out of `window.location.search` and writes it back on a member switch. Two
+    /// implementations now decide what a given URL means — this one, and
+    /// `web/ui/src/workspace/scope.ts`'s `memberFromSearch` — and they cannot share
+    /// code across the process boundary. They share this table instead. A drift in
+    /// either spelling (a `+` read as a plus rather than a space, a repeated `repo`
+    /// resolved to the first rather than the last) reds that side's test, rather
+    /// than making `?repo=%20api` mean two different members on the two ends of
+    /// the loopback.
+    ///
+    /// `-` on the right means "unscoped". Blank and `#` lines are skipped.
+    ///
+    /// [S-426]: ../../docs/planning/sprints/sprint-74.md
+    /// [FR-UI-35]: ../../docs/specs/requirements/FR-UI-35.md
+    const REPO_PARAM_CASES: &str = include_str!("../ui/src/workspace/repo-param-cases.txt");
+
+    /// Every `(raw query string, expected member)` row of [`REPO_PARAM_CASES`].
+    fn shared_cases() -> Vec<(&'static str, Option<&'static str>)> {
+        REPO_PARAM_CASES
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let (query, expected) =
+                    line.split_once('\t').expect("every case row is `query TAB expected`");
+                (query, (expected != "-").then_some(expected))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_repo_rule_agrees_with_the_spa_on_every_shared_case() {
+        let cases = shared_cases();
+        // The denominator. A table that parsed to nothing would pin nothing, and the
+        // loop below would pass exactly as loudly.
+        assert!(
+            cases.len() >= 20,
+            "the shared case table parsed to {} row(s) — it is meant to carry 20+",
+            cases.len()
+        );
+        assert!(
+            cases.iter().filter(|(_, m)| m.is_none()).count() >= 5
+                && cases.iter().filter(|(_, m)| m.is_some()).count() >= 5,
+            "the table must carry both unscoped and named rows"
+        );
+        // A count alone cannot say WHICH rows were read: a parser that silently
+        // dropped the near-miss keys would still clear the floor above with rows to
+        // spare. These are the rows whose loss would be invisible and would matter.
+        // The SPA's `scope.test.ts` asserts the same list.
+        for required in [
+            "REPO=api",
+            "arepo=api",
+            "repo2=api",
+            "repo=first&repo=last",
+            "repo=%EF%BB%BFapi",
+            "repo=+",
+        ] {
+            assert!(
+                cases.iter().any(|(q, _)| *q == required),
+                "the shared table no longer carries the row `{required}`"
+            );
+        }
+        for (query, expected) in cases {
+            assert_eq!(
+                member_of(&format!("/api/v1/health?{query}")).as_deref(),
+                expected,
+                "`?{query}` — this row is also asserted by the SPA's `scope.test.ts`; \
+                 one of the two spellings has drifted"
+            );
+        }
+    }
+
     /// The `?repo=` normalisation is the SAME one the `/api/v1/workspace/*` fan-out
     /// applies (`api_v1::opt_param`) — one param, one rule. If these two ever drifted,
     /// `/api/v1/health?repo=%20api` and `/api/v1/workspace/search?repo=%20api` would

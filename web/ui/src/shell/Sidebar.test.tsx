@@ -6,7 +6,13 @@ import { NAV_GROUPS, NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 
-vi.mock("../router.tsx", () => ({ navigate: vi.fn() }));
+// PARTIAL, not whole: the shell calls more of the router than this spec overrides
+// (S-426 added `currentUrl`/`replaceUrl`, which a member switch writes the URL
+// through). A whole-module mock silently under-supplies the module as it grows.
+vi.mock("../router.tsx", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../router.tsx")>()),
+  navigate: vi.fn(),
+}));
 
 function stats(callsTotal: number): StatsInfo {
   return {
@@ -28,9 +34,27 @@ function stats(callsTotal: number): StatsInfo {
 function stubStats(callsTotal: number) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(stats(callsTotal)) } as Response)),
+    vi.fn((url: string) =>
+      Promise.resolve({
+        // The roster probe 404s: these specs are about the nav, so they run the
+        // sidebar in the single-root shell it has always rendered in.
+        ok: !url.startsWith("/api/v1/workspace/roster"),
+        status: url.startsWith("/api/v1/workspace/roster") ? 404 : 200,
+        json: () => Promise.resolve(stats(callsTotal)),
+      } as Response),
+    ),
   );
 }
+
+/** The sidebar inside the workspace context it actually renders in. The Statistics
+ *  probe holds until the mode SETTLES (S-426) — it must not read a member before the
+ *  shell knows which one — so a bare `<Sidebar/>` sits at the pre-probe `loading`
+ *  default forever and the probe never fires. */
+const sidebar = (pathname: string) => (
+  <WorkspaceProvider>
+    <Sidebar pathname={pathname} />
+  </WorkspaceProvider>
+);
 
 afterEach(() => {
   cleanup();
@@ -50,7 +74,7 @@ describe("Sidebar — Statistics nav (S-235, FR-UI-27)", () => {
 
   it("mutes the Statistics item when the telemetry store is empty (NFR-CC-04)", async () => {
     stubStats(0);
-    render(<Sidebar pathname="/" />);
+    render(sidebar("/"));
     const link = screen.getByRole("link", { name: /Statistics/ });
     await waitFor(() =>
       expect(link).toHaveAttribute("title", expect.stringMatching(/awaiting data/i)),
@@ -59,7 +83,7 @@ describe("Sidebar — Statistics nav (S-235, FR-UI-27)", () => {
 
   it("does NOT mute the Statistics item when usage has been recorded", async () => {
     stubStats(5);
-    render(<Sidebar pathname="/" />);
+    render(sidebar("/"));
     const link = screen.getByRole("link", { name: /Statistics/ });
     // Wait until the probe has actually fired and settled — otherwise "no title"
     // could pass merely because the probe is still loading (loading ≠ populated).

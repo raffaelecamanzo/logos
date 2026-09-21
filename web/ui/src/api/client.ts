@@ -16,7 +16,7 @@
  */
 
 import { apiGet, ApiError } from "../intent.ts";
-import { scopedMember } from "../workspace/scope.ts";
+import { REPO_PARAM, scopedMember } from "../workspace/scope.ts";
 import type {
   ArchitectureModel,
   CoverageModel,
@@ -71,7 +71,7 @@ export function apiUrl(endpoint: string, params?: Params): string {
   const scope = rel.startsWith("workspace/") ? null : scopedMember();
   if (!params && !scope) return path;
   const search = new URLSearchParams();
-  if (scope) search.set("repo", scope);
+  if (scope) search.set(REPO_PARAM, scope);
   for (const [key, value] of Object.entries(params ?? {})) {
     if (value === undefined || value === null || value === "" || value === false) continue;
     search.set(key, String(value));

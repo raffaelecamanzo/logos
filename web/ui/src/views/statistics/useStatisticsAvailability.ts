@@ -16,6 +16,20 @@
  * telemetry (or leave it lit for one that has none) while the tab's own empty state,
  * which IS keyed, says the opposite. That is precisely the disagreement the docstring
  * above promises cannot happen.
+ *
+ * Sitting outside that subtree has a second consequence (S-426, NFR-RA-05). When the
+ * URL names a member this workspace does not have, the shell mounts no view — but
+ * this probe is not a view, so it would still fire, UNSCOPED, and mute or light the
+ * Statistics item from the DEFAULT member's telemetry while the address bar names
+ * another member. So it does not fire at all in that state, and the resource stays
+ * `loading` — which the contract above already defines as "does not mute": an
+ * unknown state is not an empty one.
+ *
+ * It holds for the same reason until the workspace probe SETTLES. Before that the
+ * member is not yet known, so a read now would go out unscoped against the default
+ * member and have to be re-issued the moment the mode flips — the two-pass page load
+ * the shell's own probe gate exists to avoid. This is the policy the Header already
+ * applies to its readout; this probe is the other reader outside the view subtree.
  */
 
 import { fetchStatistics, DEFAULT_STATISTICS_WINDOW } from "../../api/statisticsClient.ts";
@@ -26,7 +40,16 @@ import { isStatsEmpty } from "./statsModel.ts";
 /** Whether the Statistics tab is awaiting data (empty store) — drives the muted
  *  nav item. `false` while the probe is loading or after it failed. */
 export function useStatisticsAwaiting(): boolean {
-  const { cacheKey } = useWorkspace();
-  const stats = useApiResource(() => fetchStatistics(DEFAULT_STATISTICS_WINDOW), [cacheKey]);
+  const { cacheKey, mode, unknownMember } = useWorkspace();
+  const stats = useApiResource(
+    () =>
+      mode !== "loading" && unknownMember === null
+        ? fetchStatistics(DEFAULT_STATISTICS_WINDOW)
+        : // Never settles, so the resource holds at `loading` — the state this hook
+          // already treats as "no answer, do not mute". A rejection would be a lie
+          // (nothing failed) and a resolved empty would mute the item on no evidence.
+          new Promise<never>(() => {}),
+    [cacheKey, mode, unknownMember],
+  );
   return stats.status === "ready" && stats.data !== undefined && isStatsEmpty(stats.data);
 }

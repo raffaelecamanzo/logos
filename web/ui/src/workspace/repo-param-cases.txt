@@ -1,0 +1,56 @@
+# The `?repo=` normalisation contract (S-426, FR-UI-35, NFR-RA-05) — ONE table,
+# read by BOTH spellings of the rule:
+#
+#   - the server's, `web/src/member.rs::requested_member` (via `api_v1::opt_param`)
+#   - the client's, `web/ui/src/workspace/scope.ts::memberFromSearch`
+#
+# The SPA now puts `?repo=` in the browser URL, so the two must agree about what a
+# given URL means. They cannot share code across the process boundary, so they
+# share this table instead: each side parses it in its own test and asserts its own
+# implementation against every row. A drift in either spelling reds that side.
+#
+# Format: <raw query string> TAB <expected member>, where `-` means "unscoped"
+# (absent, blank, or whitespace-only — never a member named empty). Lines that are
+# blank or start with `#` are skipped. The raw query string is what follows `?`,
+# so percent- and `+`-decoding are part of what is being pinned.
+
+# ── absent, and the near misses that must NOT be read as `repo` ──
+untested=1	-
+notrepo=api	-
+arepo=api	-
+repo2=api	-
+REPO=api	-
+
+# ── present but empty: unscoped, never a member named `""` ──
+repo=	-
+repo=%20	-
+repo=%20%20%20	-
+repo=+	-
+repo=%09	-
+repo=%0A%09%20	-
+
+# ── named ──
+repo=api	api
+repo=%20api%20	api
+repo=+api+	api
+repo=%09api%0A	api
+repo=services%2Fapi	services/api
+repo=a+b	a b
+repo=%C3%A9quipe	équipe
+repo=notrepo	notrepo
+
+# ── position among other params is irrelevant ──
+repo=api&untested=1	api
+untested=1&repo=api	api
+
+# ── repeated: the LAST wins (what a form-urlencoded map decode yields) ──
+repo=first&repo=last	last
+
+# ── the BOM is NOT whitespace ──
+# U+FEFF is `Cf`, not `White_Space`, so it is part of the name rather than padding.
+# The expected value below carries a LITERAL U+FEFF before `api` and is therefore
+# invisible in most editors — that is the point of the row. JavaScript's
+# `String.trim()` strips U+FEFF and the Unicode property does not, so a client that
+# reached for `trim()` here would read this URL as the member `api` while the server
+# read it as a member the workspace does not have.
+repo=%EF%BB%BFapi	﻿api
