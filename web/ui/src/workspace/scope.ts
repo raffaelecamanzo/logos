@@ -49,9 +49,18 @@ let scoped: string | null = null;
  * pinned against one shared case table (`repo-param-cases.txt`) so a drift in
  * either reds a test rather than silently making `?repo=%20api` mean two different
  * members on the two sides of the loopback.
+ *
+ * It trims the Unicode **White_Space** set explicitly rather than calling
+ * `String.trim()`, and that is not a stylistic choice. JavaScript's `trim` strips
+ * one character the property does not contain — U+FEFF, the BOM — while Rust's
+ * `str::trim` is the property exactly. With `trim()` here, `?repo=%EF%BB%BFapi`
+ * meant the member `api` to this client and a member the workspace does not have to
+ * the server: the SPA would scope every read to `api` and the server would `404`
+ * each one. `\p{White_Space}` is the same property on both sides, so the sets are
+ * now identical by construction; the BOM case is a row in the shared table.
  */
 export function normaliseMember(raw: string | null | undefined): string | null {
-  const trimmed = raw?.trim();
+  const trimmed = raw?.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
   return trimmed ? trimmed : null;
 }
 

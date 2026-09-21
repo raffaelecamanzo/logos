@@ -45,3 +45,12 @@ untested=1&repo=api	api
 
 # ── repeated: the LAST wins (what a form-urlencoded map decode yields) ──
 repo=first&repo=last	last
+
+# ── the BOM is NOT whitespace ──
+# U+FEFF is `Cf`, not `White_Space`, so it is part of the name rather than padding.
+# The expected value below carries a LITERAL U+FEFF before `api` and is therefore
+# invisible in most editors — that is the point of the row. JavaScript's
+# `String.trim()` strips U+FEFF and the Unicode property does not, so a client that
+# reached for `trim()` here would read this URL as the member `api` while the server
+# read it as a member the workspace does not have.
+repo=%EF%BB%BFapi	﻿api
