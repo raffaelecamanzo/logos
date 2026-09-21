@@ -62,9 +62,9 @@ use serde::Serialize;
 
 use logos_core::config::ConfigReadModel;
 use logos_core::federation::{
-    app_wide_reachability, open_state, query as fed_query, workspace_governance, Backing,
-    BoundedReachability, ContractBridge, DegradedRollup, EngineRegistry, ReachabilityScope,
-    WorkspaceGovernance,
+    app_wide_reachability, open_state, query as fed_query, workspace_governance,
+    workspace_statistics, Backing, BoundedReachability, ContractBridge, DegradedRollup,
+    EngineRegistry, ReachabilityScope, WorkspaceGovernance, WorkspaceStatistics,
 };
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
@@ -1185,6 +1185,61 @@ pub(crate) async fn workspace_check(
                 completeness: AnswerCompleteness::after_reading(registry),
             })
         },
+    )
+    .await
+}
+
+/// `GET /api/v1/workspace/statistics[?window=<days>]` — every member's telemetry
+/// summed over one trailing window ([`workspace_statistics`], [FR-UI-37],
+/// [FR-OB-04]): the **`app`-scoped** twin of [`statistics`], which answers for one
+/// member.
+///
+/// # It costs no member engine ([NFR-PE-10] — the binding constraint)
+/// The obvious fan-out would call `Engine::stats` per member and construct N
+/// engines on one view load, undoing the warm-only-the-default policy the
+/// federated serve exists to keep. This reads each member's `telemetry.db`
+/// directly instead, so loading the view leaves the resident-engine count exactly
+/// where a `workspace status` over the same workspace left it — asserted on
+/// connection count in `logos-core/tests/workspace_statistics_engine_free.rs`.
+///
+/// # It states the population it summed over ([NFR-CC-04])
+/// `members_read` of `members_total` is the denominator of **every** figure in the
+/// payload, and `unread` names each member that contributed nothing with its
+/// reason (`absent` / `locked` / `unreadable`). A consumer must render the
+/// denominator beside the totals; `covers_all_members` is the marker that governs
+/// them.
+///
+/// The **awaiting-data** state is `calls_total == 0`, which is the app-scoped twin
+/// of the member-scoped view's own `isStatsEmpty` predicate — [FR-UI-37] requires
+/// the same honest empty state the member-scoped view already renders, and that
+/// view keys on `calls_total`. It is *not* `members_read == 0`: a workspace whose
+/// members all have migrated but eventless stores reads every one of them and
+/// still has nothing to show, and rendering zeros there is the failure
+/// [NFR-CC-04] names. `members_read` governs the denominator line instead.
+///
+/// `?window=<days>` scopes the trailing window; an absent or unparseable value falls
+/// back to the core read-model's own default (7, [FR-OB-04]), the same lenient query
+/// contract [`statistics`] uses. Infallible at the surface — an unreadable member is
+/// named in the payload, never raised as an error — so this pairs `workspace_fan`
+/// with its plain (non-`try`) form. Answers the same honest `404` under a single-root
+/// backing as every other `/api/v1/workspace/*` route.
+///
+/// [FR-OB-04]: ../../docs/specs/requirements/FR-OB-04.md
+/// [FR-UI-37]: ../../docs/specs/requirements/FR-UI-37.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-PE-10]: ../../docs/specs/requirements/NFR-PE-10.md
+pub(crate) async fn workspace_statistics_aggregate(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let window = q.get("window").and_then(|w| w.trim().parse::<u32>().ok());
+    workspace_fan(
+        backing,
+        bridge,
+        "api_v1_workspace_statistics",
+        Surface::Web,
+        move |registry, _bridge| -> WorkspaceStatistics { workspace_statistics(registry, window) },
     )
     .await
 }

@@ -656,5 +656,45 @@ pub(crate) fn traced_infallible_timed<T>(tool: Tool, f: impl FnOnce() -> T) -> (
     }
 }
 
-/// Aggregated usage/perf stats from `telemetry.db` — see [`crate::Engine::stats`].
-pub(crate) use stats::{attribution_coverage, stats, DEFAULT_WINDOW_DAYS as DEFAULT_STATS_WINDOW_DAYS};
+/// Create, migrate and seed a **file-backed** `telemetry.db` under `logos_dir`
+/// — the crate-wide test seam for the engine-free per-member read
+/// ([`read_stats`], [FR-UI-37]).
+///
+/// Lives here rather than in the fan-out's own test module because `db` is
+/// private to this module: a fixture built anywhere else would have to
+/// hand-write `CREATE TABLE`, which is a second copy of [`db::MIGRATIONS`] that
+/// can drift from the first. Seeding through the real migration and the real
+/// insert keeps one schema.
+///
+/// [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
+#[cfg(test)]
+pub(crate) fn seed_store_for_tests(
+    logos_dir: &Path,
+    events: &[(&'static str, &str, u64, bool, i64, &str)],
+) -> Result<()> {
+    std::fs::create_dir_all(logos_dir)?;
+    let mut conn = db::open(&logos_dir.join(TELEMETRY_DB_FILENAME))?;
+    let batch: Vec<EventRecord> = events
+        .iter()
+        .map(|&(surface, tool, duration_ms, ok, at, origin)| EventRecord {
+            at,
+            surface,
+            tool: tool.to_string(),
+            duration_ms,
+            ok,
+            origin: origin.to_string(),
+            session_id: "test-session".to_string(),
+        })
+        .collect();
+    db::write_batch(&mut conn, &batch)
+}
+
+/// Aggregated usage/perf stats from `telemetry.db` — see [`crate::Engine::stats`]
+/// for the engine-bound read, and `stats::read_stats` for the engine-free one a
+/// workspace fan-out uses ([FR-UI-37]).
+///
+/// [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
+pub(crate) use stats::{
+    attribution_coverage, read_stats, stats, DEFAULT_WINDOW_DAYS as DEFAULT_STATS_WINDOW_DAYS,
+    NO_TELEMETRY_YET,
+};

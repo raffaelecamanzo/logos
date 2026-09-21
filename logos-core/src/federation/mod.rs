@@ -36,6 +36,11 @@
 //!   [`bridge`] matches (service-layer boundaries, no-cross-service-callers),
 //!   reported at the workspace level and **structurally incapable** of moving a
 //!   member's per-repo gate ([FR-WS-13], [ADR-56]).
+//! - the [`telemetry`] — the workspace **usage aggregate**: every member's
+//!   `telemetry.db` summed over one window through the engine-free read, stating
+//!   the member denominator it summed over and naming every member it could not
+//!   read with its reason. Constructs no member engine, in the same spirit as
+//!   the manifest-only roster ([FR-UI-37], [NFR-PE-10], [NFR-CC-04]).
 //! - the [`warm`] — the bounded background index warm: the effective-bound
 //!   resolution seam (K = `max(1, cores / 4)` capped at 4, override-ready) and
 //!   the bounded queue one detached supervisor runs over the newly approved
@@ -53,6 +58,7 @@
 //!   skipped by laziness or reclaimed by the [`budget`]'s eviction is never
 //!   reported degraded ([FR-WS-16], [NFR-CC-04], [BR-45]).
 //!
+//! [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
 //! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 //! [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -96,6 +102,7 @@ pub mod query;
 pub mod reach;
 pub mod registry;
 pub mod residue;
+pub mod telemetry;
 pub mod topics;
 pub mod warm;
 pub mod warm_state;
@@ -142,6 +149,9 @@ pub use registry::{
 // call sites ([CR-125] §4.4).
 pub use residue::{
     EgressResidue, MemberEgressResidue, ResidueReason, WorkspaceEgressResidue,
+};
+pub use telemetry::{
+    workspace_statistics, UnreadMember, UnreadReason, WorkspaceStatistics,
 };
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};

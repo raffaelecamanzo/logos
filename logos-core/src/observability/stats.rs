@@ -108,6 +108,16 @@ pub(crate) const DEFAULT_WINDOW_DAYS: u32 = 7;
 ///
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
 /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
+/// The sentence a surface shows for a repository that has never recorded
+/// telemetry — [`stats`]'s warning and the workspace fan-out's `absent` detail
+/// alike.
+///
+/// One definition because two read-models emit it for the same condition and the
+/// SPA pins it byte-for-byte (`statsModel.test.ts`, `StatisticsView.test.tsx`).
+/// Two copies of a fixed user-facing sentence in one crate can drift, and the
+/// drift would show up as one scope rendering a different absence than the other.
+pub(crate) const NO_TELEMETRY_YET: &str = "no telemetry recorded yet (telemetry.db not found)";
+
 const ORIGIN_BUCKET: &str =
     "CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END";
 
@@ -131,26 +141,122 @@ const ORIGIN_BUCKET: &str =
 /// [FR-OB-07]: ../../../docs/specs/requirements/FR-OB-07.md
 pub(crate) fn stats(root: &Path, window_days: Option<u32>) -> Result<StatsInfo> {
     let window_days = window_days.unwrap_or(DEFAULT_WINDOW_DAYS);
+    Ok(read_stats(root, window_days)?.unwrap_or_else(|| StatsInfo {
+        window_days,
+        // Empty figures still carry their coverage labels: a consumer
+        // rendering the (absent) cross-tab reads the same limits it would on
+        // a populated store, rather than a silently zeroed struct.
+        attribution_coverage: attribution_coverage(window_days),
+        warnings: vec![NO_TELEMETRY_YET.to_string()],
+        ..StatsInfo::default()
+    }))
+}
+
+/// The **engine-free** telemetry read for one repository root ([FR-UI-37],
+/// [NFR-PE-10]) — and the body [`stats`] itself runs.
+///
+/// `Ok(None)` means there is no `telemetry.db` at the resolved directory;
+/// `Err` means one is there and could not be read. [`stats`] folds the first
+/// into its warning-carrying empty model, so a caller that needs to tell the
+/// two apart — the workspace fan-out, which must *name* each member it could
+/// not read and why ([NFR-CC-04]) — calls this instead of re-deriving the
+/// distinction from a `warnings` string.
+///
+/// # Why this is the whole of the engine-free claim ([CR-137] CRA-01)
+/// Everything the read needs is on this signature: a `&Path` and a window. The
+/// store resolution ([`super::telemetry_logos_dir`]), the read-only open
+/// ([`super::db::open_readonly`]) and the projection ([`stats_from`]) are all
+/// free functions over a path and a [`Connection`] — no [`crate::Engine`], no
+/// graph store, no watcher, no worker pool. A workspace may therefore aggregate
+/// N members for N small store reads rather than N engine constructions, which
+/// is the only way the aggregate stays inside [NFR-PE-10]'s ceiling.
+///
+/// The `artifact_bindings` half of `Engine::stats` is deliberately *not* here:
+/// it is a live-graph property read from `logos.db` and reaching it is exactly
+/// what would need an engine. Its absence from a member's contribution is a
+/// property of this read-model, not a degradation of it.
+///
+/// # "Read-only" is about the DATA, not about the directory
+/// `telemetry.db` is a WAL store ([`super::db::open`] sets
+/// `journal_mode = WAL`), and a `SQLITE_OPEN_READ_ONLY` connection to a WAL
+/// database must still materialise the WAL index: opening one **creates
+/// `telemetry.db-shm` and `telemetry.db-wal`** beside the store when they are
+/// absent, and a read-only connection cannot checkpoint them away on close. A
+/// workspace fan-out therefore leaves those two sidecars in every member's
+/// `.logos/`. This is stated rather than claimed away, because three earlier
+/// doc comments here asserted a property the code does not have.
+///
+/// It is nonetheless the accepted behaviour, on three grounds: the sidecars are
+/// SQLite's ordinary working files for a database that is *already* WAL, so the
+/// member's own Logos process creates them anyway; nothing in the store's
+/// contents changes; and [ADR-50]'s actual rule — never *seed* `.logos/` state
+/// in another checkout — is upheld, because the store's own existence is
+/// confirmed before the open and a missing one is never created. Tightening the
+/// open further (`immutable=1`, `nolock=1`) was rejected: the telemetry writer is
+/// a live concurrent writer in normal operation, and both flags trade a correct
+/// read for an incoherent one.
+///
+/// The visible consequence is that a member whose `.logos/` is **not writable**
+/// by the reading process — a read-only mount, a checkout owned by someone else
+/// — fails the WAL-index creation with `SQLITE_READONLY_DIRECTORY` and is
+/// reported unreadable although its rows are intact. That is a property of the
+/// environment rather than of the store, and it is named here so a caller
+/// rendering the reason knows what it can mean.
+///
+/// # Errors
+/// Returns an error when `telemetry.db` exists but cannot be opened or queried
+/// — locked by a concurrent writer, on a directory this process cannot write the
+/// WAL index into, corrupt, or not a regular file. A store that is simply absent
+/// is `Ok(None)`, never an error.
+///
+/// [CR-137]: ../../../docs/requests/CR-137-a-view-declares-the-scope-it-answers-for.md
+/// [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) fn read_stats(root: &Path, window_days: u32) -> Result<Option<StatsInfo>> {
     let db_path = super::telemetry_logos_dir(root).join(super::TELEMETRY_DB_FILENAME);
-    if !db_path.is_file() {
-        return Ok(StatsInfo {
-            window_days,
-            // Empty figures still carry their coverage labels: a consumer
-            // rendering the (absent) cross-tab reads the same limits it would on
-            // a populated store, rather than a silently zeroed struct.
-            attribution_coverage: attribution_coverage(window_days),
-            warnings: vec!["no telemetry recorded yet (telemetry.db not found)".to_string()],
-            ..StatsInfo::default()
-        });
+    // `Ok(None)` is reserved for "there is genuinely no store here". A bare
+    // `is_file()` would not do: it answers `false` for **every** `stat` failure —
+    // a `.logos/` the process cannot traverse, a symlink loop, a path component
+    // that is not a directory — and the caller reports `Ok(None)` to a user as
+    // *"no telemetry recorded yet"*, a routine state. Reporting an unreadable
+    // checkout that way is the exact inversion the workspace fan-out's three-way
+    // reason taxonomy exists to prevent, and the sentence would be false besides:
+    // the file is there. So the error kind is inspected rather than discarded.
+    match std::fs::metadata(&db_path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("inspecting the telemetry store at {}", db_path.display())
+            })
+        }
+        // Present, and not a store: a directory or a device named `telemetry.db`
+        // is a broken checkout, not an empty one.
+        Ok(meta) if !meta.is_file() => anyhow::bail!(
+            "the telemetry store at {} is not a regular file",
+            db_path.display()
+        ),
+        Ok(_) => {}
     }
     let conn = super::db::open_readonly(&db_path)?;
-    stats_from(&conn, window_days, now_unix())
+    stats_from(&conn, window_days, now_unix()).map(Some)
 }
 
 /// The computation under [`stats`], on an explicit connection and clock —
 /// the testable seam.
 pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> Result<StatsInfo> {
-    let cutoff = now_unix - i64::from(window_days) * 86_400;
+    // Clamped at the epoch, which is what keeps the read-model **monotone** in
+    // the window. There is no integer overflow here — `u32::MAX` days is ~3.7e14
+    // seconds, well inside `i64` — but the two `daily_rollup` queries below
+    // filter on `day >= date(?1, 'unixepoch')`, and SQLite's `date()` returns
+    // NULL once the cutoff falls below its julian-day floor. `day >= NULL` is
+    // NULL, so *no* rollup row matches and the rolled-up half of `calls_total`,
+    // `calls_by_tool` and `activity_by_day` silently vanishes: a LONGER window
+    // returns FEWER calls. A cutoff of 0 covers every row that can exist, so the
+    // clamp restores "wider window, no fewer calls" for any input.
+    let cutoff = now_unix
+        .saturating_sub(i64::from(window_days).saturating_mul(86_400))
+        .max(0);
     // The self-referential exclusion ([FR-OB-09]), derived once from the two
     // exhaustive classifications — `Tool`'s and `Surface`'s — and interpolated
     // into every query below, raw events and rolled-up days alike, so the two
