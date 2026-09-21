@@ -1207,9 +1207,15 @@ pub(crate) async fn workspace_check(
 /// payload, and `unread` names each member that contributed nothing with its
 /// reason (`absent` / `locked` / `unreadable`). A consumer must render the
 /// denominator beside the totals; `covers_all_members` is the marker that governs
-/// them. `members_read == 0` is the awaiting-data state — no member has a readable
-/// store, so the zeros below are absences, not measurements. In every other case
-/// they are measurements: a member whose store recorded nothing is *read*.
+/// them.
+///
+/// The **awaiting-data** state is `calls_total == 0`, which is the app-scoped twin
+/// of the member-scoped view's own `isStatsEmpty` predicate — [FR-UI-37] requires
+/// the same honest empty state the member-scoped view already renders, and that
+/// view keys on `calls_total`. It is *not* `members_read == 0`: a workspace whose
+/// members all have migrated but eventless stores reads every one of them and
+/// still has nothing to show, and rendering zeros there is the failure
+/// [NFR-CC-04] names. `members_read` governs the denominator line instead.
 ///
 /// `?window=<days>` scopes the trailing window; an absent or unparseable value falls
 /// back to the core read-model's own default (7, [FR-OB-04]), the same lenient query

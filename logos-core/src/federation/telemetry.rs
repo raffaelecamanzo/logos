@@ -18,7 +18,13 @@
 //! manifest-only roster ([`super::query::workspace_roster`], [FR-WS-06]) and the
 //! warm-outcome sidecar read ([FR-WS-17]). Like the roster, it takes the
 //! registry only to reach [`EngineRegistry::federation`] — the member set — and
-//! touches no engine at all.
+//! constructs no engine.
+//!
+//! "Constructs none" is the claim, deliberately, and not the stronger "touches
+//! none": [NFR-PE-10] bounds *construction* cost, and construction is what the
+//! registry's monotone `engine_starts` counter can witness. Reaching into an
+//! already-resident engine would move no counter any test can read, so a
+//! stronger sentence here would be prose no assertion stands behind.
 //!
 //! # It states the population it summed over ([NFR-CC-04])
 //! A total over "the workspace" that quietly covered three of five members is
@@ -41,6 +47,12 @@
 //! - **Any quality signal.** This aggregates usage, not quality: no per-member
 //!   gate verdict, score or violation count is rolled up here ([BR-56],
 //!   [ADR-56]).
+//! - **The tool×origin cross-tab and the class×origin roll-up** ([FR-OB-11]).
+//!   Unlike the percentiles these *would* sum cleanly; they are absent because
+//!   [FR-UI-37] names four projections and neither is among them. If a later
+//!   story wants them app-wide they are the same fold as [`sum_by_tool`].
+//!
+//! [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
 //!
 //! [CR-137]: ../../../docs/requests/CR-137-a-view-declares-the-scope-it-answers-for.md
 //! [ADR-13]: ../../../docs/specs/architecture/decisions/ADR-13.md
@@ -62,7 +74,9 @@ use super::registry::{EngineRegistry, MemberEngine};
 use crate::models::quality::{
     AttributionCoverage, DailyActivity, OriginUsage, StatsInfo, ToolUsage,
 };
-use crate::observability::{attribution_coverage, read_stats, DEFAULT_STATS_WINDOW_DAYS};
+use crate::observability::{
+    attribution_coverage, read_stats, DEFAULT_STATS_WINDOW_DAYS, NO_TELEMETRY_YET,
+};
 
 /// Why one member contributed nothing to the aggregate ([FR-UI-37],
 /// [NFR-CC-04]).
@@ -118,13 +132,27 @@ pub struct UnreadMember {
 /// [`unread`](Self::unread) is non-empty. See the module docs for what this
 /// deliberately does not carry.
 ///
-/// # The awaiting-data state
-/// `members_read == 0` means no member has a readable telemetry store, so there
-/// is nothing to sum and no denominator to state. A consumer renders the honest
-/// awaiting-data state there — never the zeros below, which in every other case
-/// are genuine measurements ([NFR-CC-04]). The distinction is exactly
-/// `members_read`: a member whose store exists and recorded nothing *is* read,
-/// and contributes real zeros.
+/// # The awaiting-data state is `calls_total == 0` — the member-scoped predicate
+/// [FR-UI-37] requires the workspace to render "the honest awaiting-data state
+/// the member-scoped view already renders". That view has exactly one such
+/// predicate, `isStatsEmpty(stats) => stats.calls_total === 0`
+/// (`web/ui/src/views/statistics/statsModel.ts`), shared by its empty state and
+/// by the sidebar's nav muting. The app-scoped twin is therefore
+/// [`calls_total`](Self::calls_total)`== 0`, and **not**
+/// [`members_read`](Self::members_read)`== 0`.
+///
+/// The two are not the same test, and the gap between them is an ordinary
+/// workspace: every member has a migrated store, none recorded anything in the
+/// window. There `members_read == members_total` while `calls_total == 0` — a
+/// consumer keying on `members_read` would render a grid of zeros, which is
+/// precisely the "zeros read as measurements" failure [NFR-CC-04] forbids.
+/// `members_read == 0` implies `calls_total == 0`, so the member-scoped
+/// predicate already subsumes it.
+///
+/// [`members_read`](Self::members_read) answers a different question — *how many
+/// members is this a sum over* — and governs the denominator line, not the empty
+/// state. Both are needed: a member whose store exists and recorded nothing *is*
+/// read and belongs in the denominator, even though it contributes no calls.
 ///
 /// [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -178,9 +206,12 @@ pub struct WorkspaceStatistics {
 ///
 /// Generic over [`MemberEngine`] for the same reason
 /// [`workspace_roster`](super::query::workspace_roster) is: the engine type is
-/// never named in the body, so the signature states the engine-free claim
-/// rather than merely honouring it, and a spy registry can assert the
-/// zero-construction property directly.
+/// never named in the body, and a spy registry can therefore assert the
+/// zero-construction property directly, over real member stores. The genericity
+/// is a testability seam, not a proof — `engine_for` is available for any
+/// `E: MemberEngine`, so the signature does not by itself forbid a construction;
+/// `engine_starts()` is what forbids it, and it is asserted in both this
+/// module's tests and `tests/workspace_statistics_engine_free.rs`.
 ///
 /// The fan-out walks [`EngineRegistry::federation`]'s member set and reads each
 /// member's store through
@@ -217,7 +248,7 @@ where
             Ok(None) => unread.push(UnreadMember {
                 member: member.name.clone(),
                 reason: UnreadReason::Absent,
-                detail: "no telemetry recorded yet (telemetry.db not found)".to_string(),
+                detail: NO_TELEMETRY_YET.to_string(),
             }),
             Err(err) => unread.push(UnreadMember {
                 member: member.name.clone(),
@@ -442,7 +473,10 @@ mod tests {
             &[
                 ("cli", "search", 10, true, at, "main"),
                 ("cli", "search", 12, true, at, "dev-branch"),
-                ("cli", "context", 20, true, at, "main"),
+                // The one FAILED call in the fixture: without it `ok_calls` is
+                // byte-identical to `calls` everywhere and the merge could drop
+                // or zero it undetected.
+                ("cli", "context", 20, false, at, "main"),
             ],
         )
         .expect("api store seeds");
@@ -476,25 +510,78 @@ mod tests {
         // 4 calls across the two readable members — the third contributes
         // nothing rather than being imputed ([NFR-RA-05]).
         assert_eq!(agg.calls_total, 4);
-        let searches: u64 = agg
+        // Both halves of the pair, on a tool whose `ok_calls` is NON-zero. The
+        // failed-`context` assertion below cannot carry this on its own: its
+        // expected `ok_calls` is 0, so a merge that zeroed the field everywhere
+        // would match it exactly — a proxy for the property, not the property.
+        let (searches, searches_ok) = agg
             .calls_by_tool
             .iter()
             .filter(|u| u.tool == "search")
-            .map(|u| u.calls)
-            .sum();
-        assert_eq!(searches, 3, "search is summed ACROSS members: {:?}", agg.calls_by_tool);
-        assert!(
-            agg.calls_by_tool.iter().any(|u| u.tool == "context" && u.calls == 1),
-            "a tool only one member reports still appears: {:?}",
+            .fold((0u64, 0u64), |(c, ok), u| (c + u.calls, ok + u.ok_calls));
+        assert_eq!(
+            (searches, searches_ok),
+            (3, 3),
+            "search is summed ACROSS members, ok_calls included: {:?}",
             agg.calls_by_tool
         );
-        // The dev-vs-main split sums across members and keeps "dev" first.
-        let origins: Vec<(&str, u64)> = agg
+        let context = agg
+            .calls_by_tool
+            .iter()
+            .find(|u| u.tool == "context")
+            .expect("a tool only one member reports still appears");
+        // `(calls, ok_calls)` as a PAIR: the failed call must survive the merge
+        // as a failure, not be rounded up into the total or zeroed out of it.
+        assert_eq!(
+            (context.calls, context.ok_calls),
+            (1, 0),
+            "the failed call is merged as failed: {:?}",
+            agg.calls_by_tool
+        );
+        assert!(
+            agg.calls_by_tool.iter().all(|u| !u.class.is_empty()),
+            "every merged tool keeps its class — the label `sum_by_tool` carries \
+             over from the first member that reported the tool: {:?}",
+            agg.calls_by_tool
+        );
+        // The dev-vs-main split sums across members, keeps "dev" first, and
+        // carries its own ok/total split.
+        let origins: Vec<(&str, u64, u64)> = agg
             .calls_by_origin
             .iter()
-            .map(|o| (o.origin.as_str(), o.calls))
+            .map(|o| (o.origin.as_str(), o.calls, o.ok_calls))
             .collect();
-        assert_eq!(origins, [("dev", 1), ("main", 3)], "{:?}", agg.calls_by_origin);
+        assert_eq!(
+            origins,
+            [("dev", 1, 1), ("main", 3, 2)],
+            "{:?}",
+            agg.calls_by_origin
+        );
+        // The daily series is merged across members too — all four events share
+        // one timestamp, so two members collapse to one day carrying both.
+        assert_eq!(
+            agg.activity_by_day.len(),
+            1,
+            "one seeded instant is one day: {:?}",
+            agg.activity_by_day
+        );
+        assert_eq!(
+            (agg.activity_by_day[0].calls, agg.activity_by_day[0].ok_calls),
+            (4, 3),
+            "the day's calls are summed across BOTH members: {:?}",
+            agg.activity_by_day
+        );
+        assert_eq!(
+            agg.activity_by_day[0].calls, agg.calls_total,
+            "the daily series and the headline count the same population"
+        );
+        // The estimates are summed per member, exactly. `search` is weighted 2
+        // reads and `context` 5, at 1500 tokens an avoided read: api contributes
+        // 2*2 + 1*5 = 9, web 1*2 = 2. Asserted as exact values rather than
+        // "non-zero", so neither a dropped member nor a swap of the two fields
+        // can survive.
+        assert_eq!(agg.reads_saved_estimate, 11, "9 from api + 2 from web");
+        assert_eq!(agg.tokens_saved_estimate, 11 * 1_500);
         assert_eq!(agg.window_days, DEFAULT_STATS_WINDOW_DAYS);
         assert_eq!(agg.workspace, "shop");
 
@@ -535,6 +622,41 @@ mod tests {
         assert_eq!(agg.calls_total, 0);
         assert!(agg.calls_by_tool.is_empty());
         assert_eq!(registry.engine_starts(), 0);
+    }
+
+    /// A `telemetry.db` that is **present but not a regular file** is named
+    /// `unreadable`, never `absent` ([FR-UI-37], [NFR-CC-04]).
+    ///
+    /// The distinction is the one a bare `is_file()` cannot draw. `is_file()`
+    /// answers `false` for every `stat` outcome that is not a regular file —
+    /// including a directory of that name, and including an unreadable parent —
+    /// and the fan-out would then tell the user *"no telemetry recorded yet"*
+    /// about a member that is in fact broken, under the one reason variant
+    /// documented as "Not a fault". The sentence would also be false: the path
+    /// exists.
+    #[test]
+    fn a_present_non_file_store_is_named_unreadable_not_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let fed = federation(root, &["api"]);
+        // A DIRECTORY named `telemetry.db` — present, and not a store.
+        std::fs::create_dir_all(logos_dir(root, "api").join("telemetry.db")).unwrap();
+
+        let agg = workspace_statistics(&registry_of(fed), None);
+
+        assert_eq!(agg.members_read, 0);
+        assert_eq!(agg.unread.len(), 1, "{:?}", agg.unread);
+        assert_eq!(
+            agg.unread[0].reason,
+            UnreadReason::Unreadable,
+            "a present-but-broken store is a fault, not an empty one: {}",
+            agg.unread[0].detail
+        );
+        assert!(
+            !agg.unread[0].detail.contains("not found"),
+            "the diagnostic must not claim the file is missing when it is there: {}",
+            agg.unread[0].detail
+        );
     }
 
     /// A store held by an exclusive writer past the read's busy timeout is named
@@ -624,27 +746,23 @@ mod tests {
         )
         .expect("api store seeds");
 
-        let week = workspace_statistics(&registry_of(federation_reuse(&fed)), Some(7));
-        let quarter = workspace_statistics(&registry_of(federation_reuse(&fed)), Some(90));
+        let week = workspace_statistics(&registry_of(fed.clone()), Some(7));
+        let quarter = workspace_statistics(&registry_of(fed.clone()), Some(90));
 
         assert_eq!(week.calls_total, 1, "the 30-day-old call is outside a 7-day window");
         assert_eq!(quarter.calls_total, 2, "and inside a 90-day one");
         assert_eq!(week.window_days, 7);
         assert_eq!(quarter.window_days, 90);
+        // Asserted on the window that is NOT the default: 7 is
+        // `DEFAULT_STATS_WINDOW_DAYS`, so a coverage block computed from the
+        // default instead of the request would pass the 7-day check and ship a
+        // payload reading `window_days: 90` beside `requested_window_days: 7` —
+        // a document contradicting itself in two adjacent fields ([NFR-CC-04]).
+        assert_eq!(quarter.attribution_coverage.requested_window_days, 90);
+        assert_eq!(
+            quarter.attribution_coverage.covered_window_days, 90,
+            "90 days is inside the raw-retention horizon, so coverage is not truncated"
+        );
         assert_eq!(week.attribution_coverage.requested_window_days, 7);
-    }
-
-    /// Clone a fixture federation — `EngineRegistry::new` takes ownership, and
-    /// this test builds two registries over the same members.
-    fn federation_reuse(fed: &Federation) -> Federation {
-        Federation {
-            name: fed.name.clone(),
-            root: fed.root.clone(),
-            members: fed.members.clone(),
-            default: fed.default.clone(),
-            links: fed.links.clone(),
-            governance: fed.governance.clone(),
-            warm_concurrency: fed.warm_concurrency,
-        }
     }
 }
