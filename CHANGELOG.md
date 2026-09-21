@@ -9,6 +9,50 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.16] — 2026-09-21
+
+Sprint 74 — the workspace stops being one tab and becomes a scope the
+application declares.
+
+### Added
+
+- **Every navigation entry declares the scope it answers for.** `scope`
+  (`app` | `member`) is now a required field, replacing a path-prefix test over a
+  hard-coded one-item list that let the member selector silently govern eleven
+  views and not the twelfth. The sidebar renders a **Workspace** section and a
+  **Service** section whose header carries the member selector, so the control
+  sits inside the boundary it governs. Single-root rendering is unchanged.
+- **Two shipped capabilities gain the HTTP surface they never had.**
+  `GET /api/v1/workspace/reachability` and `GET /api/v1/workspace/check`
+  serialise the existing `federation::reach` and `federation::governance`
+  read-models — reachable from the CLI alone since they shipped. A CLI/HTTP
+  field-for-field agreement test pins them to one read-model rather than to two
+  fixtures that could drift.
+- **The selected member is in the URL.** `?repo=<member>` scopes the SPA on first
+  paint with no unscoped pre-pass, switching writes through history, and a
+  `?repo=` naming a member the workspace does not have renders a state naming the
+  members it does have — while **no** view renders any member's figures. The
+  normalisation is one table compiled into both the server and the client, so the
+  two spellings cannot drift.
+- **Workspace Dashboard and Workspace Health**, two `app`-scoped views. Every
+  ratio carries its denominator and its exclusion; a zero denominator renders the
+  ratio absent rather than as a `0%` that reads like a measurement. No
+  workspace-level score is invented and no per-member signal is aggregated.
+- **Workspace Statistics**, summed over members and read **engine-free** — the
+  view load leaves the resident-engine count unchanged. It states its member
+  denominator and names every member whose telemetry could not be read, reserving
+  "a lower bound" for members that *failed* a read and never for one that simply
+  has no store yet. It omits `artifact_bindings` and latency percentiles by
+  construction: both are `Engine`-bound, and the ceiling is the point.
+
+### Fixed
+
+- **The Dashboard Rule findings card no longer passes a vacuous check.** A
+  contract authoring zero rules now renders the onboarding empty state instead of
+  a green `PASS` badge over a check that evaluated nothing — the fourth and last
+  surface still doing so. Violations still win: a finding raised by an always-on
+  fold-in renders red even on a zero-rule contract.
+
 ## [1.4.15] — 2026-09-21
 
 Sprint 73 — every readout carries the denominator that makes it checkable, and
