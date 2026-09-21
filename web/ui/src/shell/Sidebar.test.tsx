@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StatsInfo } from "../api/types.ts";
-import { NAV_GROUPS, NAV_ITEMS } from "../nav.ts";
+import { NAV_GROUPS, NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 
@@ -179,8 +179,8 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
         .getAllByRole("link")
         .map((a) => a.textContent);
 
-    // The app-scoped tab, alone, above the boundary the selector governs…
-    expect(names("Workspace")).toEqual(["Workspace"]);
+    // The app-scoped tabs, above the boundary the selector governs…
+    expect(names("Workspace")).toEqual(WORKSPACE_NAV_ITEMS.map((i) => i.label));
     // …and every member-scoped tab below it. Same list, same order as the
     // single-root sidebar: the CR-042 A/B/C groups survive INSIDE the section
     // rather than being re-ordered by it.
@@ -241,6 +241,28 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(screen.queryAllByRole("heading")).toEqual([]);
     expect(screen.queryByText("Service")).toBeNull();
     expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("renders NO workspace-only nav item in single-root mode, by name", async () => {
+    // The byte-for-byte snapshot below already forbids this structurally — it
+    // pins every rendered <a> against NAV_ITEMS alone. This states the same
+    // thing about the ITEMS, by name, because that is the clause AC6 is written
+    // in ("neither nav item renders") and because a snapshot regenerated in
+    // haste can absorb a leak that a named assertion cannot.
+    mountWithMode(404);
+    await waitFor(() => expect(screen.getByRole("link", { name: /Dashboard/ })).toBeInTheDocument());
+
+    // Keyed on the PATH, never the label: two of these items are called
+    // "Dashboard" and "Health" exactly like their member-scoped twins, which
+    // ADR-66 chose deliberately — so a label query matches the member-scoped
+    // link that SHOULD be there and proves nothing. The route is what separates
+    // the levels.
+    expect(WORKSPACE_NAV_ITEMS.length).toBeGreaterThan(0);
+    const hrefs = [...document.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+    expect(hrefs.length).toBeGreaterThan(0);
+    for (const item of WORKSPACE_NAV_ITEMS) {
+      expect(hrefs).not.toContain(item.path);
+    }
   });
 
   it("renders the single-root sidebar as the exact markup it rendered before S-425", async () => {

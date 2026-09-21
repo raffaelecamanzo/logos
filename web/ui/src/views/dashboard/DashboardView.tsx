@@ -28,7 +28,14 @@ import type {
   WikiPage,
 } from "../../api/types.ts";
 import { Badge, Callout, Card, EmptyState, ScoreBar } from "../../components/index.ts";
-import { bandOf, fmtInt, freshnessStatement, pctBp, snippetOf } from "./dashboardModel.ts";
+import {
+  bandOf,
+  fmtInt,
+  freshnessStatement,
+  pctBp,
+  resolutionStatement,
+  snippetOf,
+} from "./dashboardModel.ts";
 import styles from "./Dashboard.module.css";
 
 /** Current wall-clock as unix seconds — the reference the freshness line humanises
@@ -241,7 +248,7 @@ function LanguagesCard({
  *  degrade to a single honest empty state rather than a fabricated `0`
  *  ([NFR-CC-04]). */
 function GraphCard({ status }: { status: StatusInfo }) {
-  const resolution = `${(status.resolution_coverage * 100).toFixed(1)}% (${fmtInt(status.refs_resolved)} of ${fmtInt(status.refs_total)} refs)`;
+  const resolution = resolutionStatement(status);
   // Bind the LOC roll-up as a narrowed object so the figures are `number` (not
   // `number | null`) at the render site — the three fields are null in lock-step
   // ([FR-IX-12]), so either all three are present or the rows degrade to the

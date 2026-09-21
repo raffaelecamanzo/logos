@@ -1495,7 +1495,8 @@ export interface WarmRollup {
 
 /** `GET /api/v1/workspace/status` — per-member index freshness and warm state, the
  *  warm roll-up, the coverage summary, and the promoted topic inventory. Fetched by
- *  the Workspace tab (it fans out over every member). */
+ *  the app-level views only — the Workspace tab and S-428's Workspace Dashboard and
+ *  Workspace Health — because it fans out over every member. */
 export interface WorkspaceStatus {
   /** The workspace name from the manifest. */
   workspace: string;
@@ -1581,4 +1582,205 @@ export interface XserviceImpact {
   cross_service: CrossServiceImpact[];
   /** The unresolved egress residue, absent exactly when it is zero (CR-125). */
   unresolved_egress?: EgressResidue;
+}
+
+// ── The S-427 workspace read-models (FR-WS-28): reachability and governance ──
+// Two GETs that serialise read-models the CLI has printed since S-257/S-258.
+// Every shape below mirrors a Rust type in `logos-core/src/federation/` — the
+// field names and the ABSENCES are the contract, so an optional key here means
+// the server OMITS it, never that it sends zero.
+
+/** The bounds a {@link BoundedReachability} projection was taken under (CR-084) —
+ *  echoed on the payload so a filtered reply can never be read as the whole
+ *  answer (NFR-CC-04). */
+export interface ReachabilityScope {
+  /** The member the view was scoped to (`?repo=`), `null` when unscoped.
+   *
+   *  `null`, not absent: the Rust field is an `Option<String>` with **no**
+   *  `skip_serializing_if`, so the key is always present on the wire. Declaring
+   *  it optional here would tell a reader the key can be missing, which it
+   *  cannot. */
+  repo: string | null;
+  /** `true` under the default: only the cross-service promotions are carried and
+   *  {@link BoundedReachability.dead} is **suppressed** — which is why `dead` is
+   *  `null` rather than `[]`. `?all` sets it `false`. */
+  promotions_only: boolean;
+}
+
+/** The coverage the app-wide reachability view rests on (mirrors `CoverageRider`)
+ *  — carried on the payload AND on every claim, so no claim can be separated from
+ *  the coverage that qualifies it (FR-WS-12, ADR-56).
+ *
+ *  Its four classification counts are the POOLED ones (contract-surface and
+ *  invocation together); the intake split lives on {@link CrossServiceCoverage},
+ *  not here. */
+export interface CoverageRider {
+  bound: number;
+  ambiguous: number;
+  unbound: number;
+  no_provider_in_workspace: number;
+  /** The rider's headline: cross-service edges resolved from a captured
+   *  invocation, verbatim from {@link CrossServiceCoverage}. Never renderable
+   *  without {@link egress_resolution} beside it (BR-51). */
+  resolved_cross_service_edges: number;
+  /** The invocation edges the union view was actually SEEDED from (CR-127) — a
+   *  different quantity from `resolved_cross_service_edges`, under a name that
+   *  says which it is. A promotion rests on this one. */
+  bridge_invocation_edges: number;
+  /** The rate at which captured egress sites resolved at all. **Absent** when the
+   *  denominator is 0 — render "not measured", never a bar (BR-51, CR-100). */
+  egress_resolution?: number;
+  /** The denominator {@link egress_resolution} was computed over. Present even
+   *  when the rate is absent, where `0` *is* the finding (CR-111). */
+  egress_resolution_measured: number;
+  /** `bound / (bound + ambiguous + unbound)`. **Absent** over a zero denominator
+   *  (FR-WS-05, NFR-CC-04). */
+  spec_conformance_ratio?: number;
+  /** The denominator {@link spec_conformance_ratio} was computed over, explicit
+   *  rather than derived (CR-111). */
+  spec_conformance_measured: number;
+  /** Members whose surface this rider actually read. */
+  members_read: number;
+  /** Members in the roster it was computed over.
+   *
+   *  This rider carries **no `covers_all_members` flag** — unlike
+   *  {@link CrossServiceCoverage} and {@link DegradedRollup}, which do. The
+   *  shortfall predicate here is `members_read < members_total` and nothing else;
+   *  reading a flag that is not on the wire yields `undefined`, which is falsy,
+   *  so a view that consults one states "computed over fewer than all members" on
+   *  every answer including a complete one (found in the S-428 review — the
+   *  fixture had fabricated the field, so no test saw it). */
+  members_total: number;
+}
+
+/** One member's union-view tally (mirrors `MemberReachability`, FR-WS-12). */
+export interface MemberReachability {
+  member: string;
+  /** Bridge provider endpoints that resolved to a node here and seeded the walk. */
+  extra_roots: number;
+  /** Bridge provider endpoints naming a symbol this member's surface does not
+   *  carry — reported rather than silently dropped (NFR-RA-05). */
+  unresolved_roots: number;
+  /** Callables this member's own graph verdicts as dead — the promotion base. */
+  dead_per_repo: number;
+  /** Of those, the ones the union view promotes to live. */
+  live_via_cross_service: number;
+  /** Of those, the ones still dead app-wide. Always
+   *  `dead_per_repo - live_via_cross_service`. */
+  dead_app_wide: number;
+}
+
+/** The union-view verdict on one callable (mirrors `AppWideVerdict`). Treat the
+ *  union as OPEN, as every other wire token here is. */
+export type AppWideVerdict = "live-via-cross-service" | "dead";
+
+/** One claim of the app-wide reachability view (mirrors `ReachabilityClaim`). */
+export interface ReachabilityClaim {
+  /** The owning member — every claim is repo-qualified (FR-WS-03). */
+  member: string;
+  /** The claimed node's portable symbol identity. */
+  symbol: string;
+  name: string;
+  kind: NodeKind;
+  verdict: AppWideVerdict;
+  /** The coverage this claim is only as good as — carried PER CLAIM by design, so
+   *  a claim can never be rendered apart from its residue (BR-53). */
+  coverage: CoverageRider;
+}
+
+/** The bounded app-wide reachability projection (mirrors `BoundedReachability`,
+ *  FR-WS-12, CR-084) — what `GET /api/v1/workspace/reachability` carries under
+ *  its `reachability` key, byte-identical to `logos workspace reachability --json`. */
+export interface BoundedReachability {
+  /** The view label — this is the union, not a member's gated signal. */
+  view: string;
+  /** Always `true`: advisory, never a gate input (ADR-56). */
+  advisory: boolean;
+  /** Every bound applied to this projection, stated (NFR-CC-04). */
+  scope: ReachabilityScope;
+  /** The coverage rider the whole view rests on — workspace-wide, unaffected by
+   *  `scope`. */
+  coverage: CoverageRider;
+  /** Per-member tallies, sorted; restricted to the scoped member under `?repo=`. */
+  members: MemberReachability[];
+  /** Members the view could NOT read (ADR-53) — always workspace-wide, because a
+   *  degraded member is context a scope must not hide. */
+  skipped_members: string[];
+  /** The promotions: dead per-repo, live across the union. Always carried. */
+  live_via_cross_service: ReachabilityClaim[];
+  /** The app-wide dead set, or `null` when the promotions-only default SUPPRESSED
+   *  it — deliberately distinct from `[]` ("computed, and genuinely empty"). A
+   *  view must never render `null` as "no dead code" (NFR-CC-04). */
+  dead: ReachabilityClaim[] | null;
+}
+
+/** The completeness rider both S-427 answers flatten onto their payload
+ *  ([FR-WS-16]) — an HTTP `200` has no exit code to state a partial fan-out in,
+ *  and neither read-model carries a member table of its own. */
+export interface AnswerCompleteness {
+  /** `false` when a declared member was attempted and could not be OPENED: the
+   *  fan-out behind this answer is partial and says so. Deliberately NOT
+   *  `degraded_rollup.covers_all_members`, which is also false for a member
+   *  laziness never attempted — a coverage fact, not a failure. */
+  complete: boolean;
+  /** The same {@link DegradedRollup} `workspace/status` publishes, naming every
+   *  member that could not be opened. */
+  degraded_rollup: DegradedRollup;
+}
+
+/** `GET /api/v1/workspace/reachability` (FR-WS-28) — the bounded union view plus
+ *  the completeness rider. */
+export interface WorkspaceReachabilityAnswer extends AnswerCompleteness {
+  reachability: BoundedReachability;
+}
+
+/** One workspace-rule violation, anchored on the bridge binding that breached it
+ *  (mirrors `WorkspaceViolation`, FR-WS-13).
+ *
+ *  Its `severity` is the severity of the FINDING. The family itself stays
+ *  advisory: it gates nothing and can never move a member's per-repo signal
+ *  (ADR-56), which is why this is a separate type from the per-repo `Violation`
+ *  the gate scores. */
+export interface WorkspaceViolation {
+  /** `workspace-boundary:<from>-><to>` or `no-cross-service-callers:<glob>`. */
+  rule: string;
+  /** `workspace-boundary` or `workspace-no-cross-service-callers`. */
+  rule_type: string;
+  /** Always `"error"` — checked-in workspace policy is a real breach, not a hint. */
+  severity: string;
+  /** The relation class of the breaching binding (e.g. `route`). */
+  relation: string;
+  /** The consumer endpoint — the calling side. */
+  from: BridgeEndpoint;
+  /** The provider endpoint — the called side. */
+  to: BridgeEndpoint;
+  message: string;
+}
+
+/** The workspace governance report (mirrors `WorkspaceGovernance`, FR-WS-13) —
+ *  produced ONLY when the workspace declares at least one rule. */
+export interface WorkspaceGovernance {
+  workspace: string;
+  /** How many rules were evaluated. */
+  rules_checked: number;
+  /** How many bridge bindings the rules quantified over — the honesty rider that
+   *  tells a clean report over ZERO bindings apart from a healthy one
+   *  (NFR-CC-04, ADR-53). */
+  bindings_checked: number;
+  /** Members a rule names that are not members of this workspace — such a rule is
+   *  silently narrowed, so it is reported loudly. **Absent** when empty (the
+   *  server skips it), never `[]`. */
+  unknown_member_refs?: string[];
+  violations: WorkspaceViolation[];
+}
+
+/** `GET /api/v1/workspace/check` (FR-WS-28) — the governance report plus the
+ *  completeness rider.
+ *
+ *  `governance` is **`null`** over a workspace declaring no rules: the honest
+ *  empty, no report at all. A surface that renders that as a passing report is
+ *  the untruth ADR-56 and NFR-CC-04 forbid — it must say that nothing was
+ *  checked. */
+export interface WorkspaceGovernanceAnswer extends AnswerCompleteness {
+  governance: WorkspaceGovernance | null;
 }

@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setScopedMember } from "../workspace/scope.ts";
 import { ApiError } from "../intent.ts";
-import { fetchWorkspaceImpact, fetchWorkspaceRoster, probeWorkspace } from "./workspaceClient.ts";
+import {
+  fetchWorkspaceGovernance,
+  fetchWorkspaceImpact,
+  fetchWorkspaceReachability,
+  fetchWorkspaceRoster,
+  probeWorkspace,
+} from "./workspaceClient.ts";
 
 /** Stub `fetch` with a fixed status, recording the URLs requested. */
 function stubFetch(status = 200, body: unknown = {}): () => string[] {
@@ -65,5 +71,30 @@ describe("the workspace fan-out is app-level (S-250)", () => {
     setScopedMember("api");
     await fetchWorkspaceImpact("get_user", "web");
     expect(calls()[0]).toBe("/api/v1/workspace/impact?symbol=get_user&repo=web");
+  });
+});
+
+describe("the S-427 reads (FR-WS-28)", () => {
+  it("reads reachability and governance on their own app-level routes", async () => {
+    const calls = stubFetch();
+    setScopedMember("api");
+    await fetchWorkspaceReachability();
+    await fetchWorkspaceGovernance();
+    // Unscoped, like every other `workspace/*` read: the ambient member must not
+    // narrow an answer the views present as workspace-wide (S-250).
+    expect(calls()).toEqual([
+      "/api/v1/workspace/reachability",
+      "/api/v1/workspace/check",
+    ]);
+  });
+
+  it("leaves the promotions-only default in place — it never sends ?all", async () => {
+    // The bound is the SERVER's default and the payload states it in
+    // `reachability.scope`. A client that opted out here would pull the whole
+    // per-repo dead set (~500 KB on a large workspace) into a view that renders
+    // the promotions (CR-084, NFR-PE-10).
+    const calls = stubFetch();
+    await fetchWorkspaceReachability();
+    expect(calls()[0]).not.toContain("all");
   });
 });

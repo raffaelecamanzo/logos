@@ -10,11 +10,12 @@
  * thing that fails if that line is deleted.
  */
 
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
+import { WORKSPACE_NAV_ITEMS } from "./nav.ts";
 import { redirect } from "./router.tsx";
 import { ThemeProvider } from "./theme/ThemeProvider.tsx";
 import { scopedMember, setScopedMember } from "./workspace/scope.ts";
@@ -52,7 +53,7 @@ vi.mock("./views/index.ts", async () => {
     return <div data-testid="view">{status.status}</div>;
   }
   return {
-    viewForPath: (path: string) => (path === "/workspace" ? AppProbeView : MemberProbeView),
+    viewForPath: (path: string) => (APP_ROUTES.includes(path) ? AppProbeView : MemberProbeView),
   };
 });
 
@@ -61,7 +62,17 @@ vi.mock("./views/index.ts", async () => {
 // navigating under it. `currentUrl`/`replaceUrl` are the REAL ones (S-426) — they
 // are the seam the member switch writes the URL through, and a stub would make the
 // URL assertions below pin the stub instead of the behaviour.
-const { pathname } = vi.hoisted(() => ({ pathname: { current: "/" } }));
+/** Every `app`-scoped client route, spelled out.
+ *
+ *  Deliberately a literal list rather than a filter over `WORKSPACE_NAV_ITEMS`:
+ *  the shell decides the mount key from the SAME `scope` field that filter would
+ *  read, so deriving it here would let one mutation move both sides at once. The
+ *  price is that a fourth app-scoped view must be added here by hand — which the
+ *  floor assertion below turns into a failing test rather than a silent gap. */
+const { APP_ROUTES, pathname } = vi.hoisted(() => ({
+  APP_ROUTES: ["/workspace", "/workspace-dashboard", "/workspace-health"] as string[],
+  pathname: { current: "/" },
+}));
 vi.mock("./router.tsx", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./router.tsx")>()),
   usePathname: () => pathname.current,
@@ -141,6 +152,43 @@ describe("a member switch remounts the member-scoped views and no app-scoped one
     );
   });
 
+  it("has an app-scoped route registered for every one this spec drives", () => {
+    // The floor: `it.each([])` registers ZERO tests and raises nothing, so an
+    // empty roster would make the parameterised spec below VANISH rather than
+    // fail. It also catches the reverse — a route declared `app` in `nav.ts` that
+    // this spec never drives — which is how a new app-level view would silently
+    // escape the remount invariant.
+    expect(APP_ROUTES.length).toBeGreaterThan(0);
+    expect([...APP_ROUTES].sort()).toEqual(
+      WORKSPACE_NAV_ITEMS.filter((i) => i.scope === "app")
+        .map((i) => i.path)
+        .sort(),
+    );
+  });
+
+  it.each(APP_ROUTES)(
+    "does NOT re-fetch the app-scoped view at %s — its data is the same for every member",
+    async (route) => {
+      pathname.current = route;
+      const calls = stubApi();
+      render(app());
+      await waitFor(() => expect(appViewCalls(calls())).toHaveLength(1));
+      expect(appViewCalls(calls())).toEqual(["/api/v1/workspace/status"]);
+
+      await userEvent.selectOptions(await screen.findByRole("combobox"), "web");
+
+      // The switch really happened — the transport moved…
+      await waitFor(() => expect(scopedMember()).toBe("web"));
+      // …and a member-scoped read re-fired, so this is not a test in which
+      // nothing at all re-rendered.
+      await waitFor(() =>
+        expect(calls().some((u) => u.includes("/api/v1/status?repo=web"))).toBe(true),
+      );
+      // …while the app-scoped view stayed mounted and read nothing more.
+      expect(appViewCalls(calls())).toEqual(["/api/v1/workspace/status"]);
+    },
+  );
+
   it("does NOT re-fetch the app-scoped view — its data is the same for every member", async () => {
     // The whole point of the declared scope. Re-keying this view on the member would
     // tear the ECharts canvas down and re-run the fan-out every time the user clicks
@@ -175,7 +223,20 @@ describe("a member switch remounts the member-scoped views and no app-scoped one
     const calls = stubApi();
     render(app());
     await waitFor(() => expect(viewCalls(calls())).toEqual(["/api/v1/overview?repo=api"]));
-    expect(await screen.findByRole("link", { name: /^Dashboard$/ })).toHaveAttribute("href", "/");
+    // Scoped to the SERVICE section: since S-428 there are two links named
+    // "Dashboard" in a workspace sidebar — one per level — and the assertion this
+    // spec makes is about the member-scoped one keeping `/`.
+    const service = screen.getByRole("region", { name: "Service" });
+    expect(await within(service).findByRole("link", { name: /^Dashboard$/ })).toHaveAttribute(
+      "href",
+      "/",
+    );
+    // …and the app-level one is a different route, so `/` did not move (ADR-66).
+    const workspace = screen.getByRole("region", { name: "Workspace" });
+    expect(within(workspace).getByRole("link", { name: /^Dashboard$/ })).toHaveAttribute(
+      "href",
+      "/workspace-dashboard",
+    );
   });
 });
 

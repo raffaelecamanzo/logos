@@ -112,6 +112,23 @@ export function humanizeAge(now: number, then: number): string {
 }
 
 /**
+ * A member's reference-resolution coverage, **never bare**: the percentage with
+ * the denominator it was computed over, e.g. `"80.0% (80 of 100 refs)"`.
+ *
+ * One spelling, three call sites — the per-member Dashboard's Graph card, and
+ * the two app-level workspace views' member tables (S-428). It was inlined in
+ * the Graph card alone until the S-428 review found the two new tables printing
+ * the same field as a bare `"40.0%"`: two members with identical coverage over
+ * wildly different reference populations rendered identically, which is the
+ * denominator-disclosure duty [CR-111] made general.
+ *
+ * [CR-111]: ../../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
+ */
+export function resolutionStatement(status: StatusInfo): string {
+  return `${(status.resolution_coverage * 100).toFixed(1)}% (${fmtInt(status.refs_resolved)} of ${fmtInt(status.refs_total)} refs)`;
+}
+
+/**
  * The informative freshness line: a relative age from `last_full_index_at` /
  * `last_sync_at` plus the plain-language caveat — never the raw internal freshness
  * citation (`status.freshness`, the ADR-11 contract prose). Mirrors

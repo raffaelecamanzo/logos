@@ -17,6 +17,8 @@
 import { ApiError } from "../intent.ts";
 import { apiFetch } from "./client.ts";
 import type {
+  WorkspaceGovernanceAnswer,
+  WorkspaceReachabilityAnswer,
   WorkspaceRoster,
   WorkspaceStatus,
   XserviceImpact,
@@ -31,8 +33,9 @@ export function fetchWorkspaceRoster(): Promise<WorkspaceRoster> {
 }
 
 /** `GET /api/v1/workspace/status` — per-member index freshness + the cross-service
- *  coverage summary. This one DOES fan out over every member, so it is fetched by the
- *  Workspace tab (which exists to show exactly that), never by the shell. */
+ *  coverage summary. This one DOES fan out over every member, so it is fetched only
+ *  by the app-level views that exist to show exactly that — the Workspace tab and
+ *  S-428's Workspace Dashboard and Workspace Health — and never by the shell. */
 export function fetchWorkspaceStatus(): Promise<WorkspaceStatus> {
   return apiFetch<WorkspaceStatus>("workspace/status");
 }
@@ -48,6 +51,35 @@ export function fetchWorkspaceBindings(): Promise<XserviceRouteProviders> {
  *  binding. `member` optionally scopes the seed side to one member. */
 export function fetchWorkspaceImpact(symbol: string, member?: string): Promise<XserviceImpact> {
   return apiFetch<XserviceImpact>("workspace/impact", { symbol, repo: member });
+}
+
+/**
+ * `GET /api/v1/workspace/reachability` (S-427, FR-WS-28, FR-WS-12) — the app-wide
+ * cross-service reachability union view, bounded and saying so.
+ *
+ * **No `all` param is ever sent.** The server's promotions-only default carries
+ * the usually-tiny promotion set and suppresses the per-repo dead set to `null`;
+ * lifting it pulls an estimated ~500 KB of claims for a large workspace, which no
+ * view here renders (CR-084, NFR-PE-10). Every applied bound comes back in
+ * `reachability.scope`, so the reply states its own bounds rather than relying on
+ * the caller to remember them.
+ *
+ * `member` scopes the tallies and claims to one member. It is passed EXPLICITLY,
+ * never picked up from the shell's ambient scope — `apiUrl` exempts the
+ * `workspace/*` prefix for that reason, and these views are app-level.
+ */
+export function fetchWorkspaceReachability(member?: string): Promise<WorkspaceReachabilityAnswer> {
+  return apiFetch<WorkspaceReachabilityAnswer>("workspace/reachability", { repo: member });
+}
+
+/** `GET /api/v1/workspace/check` (S-427, FR-WS-28, FR-WS-13) — the workspace
+ *  governance report, advisory and never a gate input (ADR-56).
+ *
+ *  Its `governance` is `null` over a workspace that declares no rules: the honest
+ *  empty, and the caller must render it as "nothing was checked" rather than as a
+ *  passing report (NFR-CC-04). */
+export function fetchWorkspaceGovernance(): Promise<WorkspaceGovernanceAnswer> {
+  return apiFetch<WorkspaceGovernanceAnswer>("workspace/check");
 }
 
 /** What the boot-time probe found: a workspace (with its roster) or a plain repo. */

@@ -770,7 +770,9 @@ fn build_router(state: WebState) -> Router {
         // The engine-free roster the SPA shell probes on every load (S-250): it
         // decides workspace-vs-single-root mode and fills the member selector without
         // warming a single member (NFR-PE-10) — `status` below fans out over all of
-        // them and is fetched only by the Workspace tab that actually shows coverage.
+        // them, so it is fetched by the app-level views that exist to show exactly
+        // that (the Workspace tab, and S-428's Workspace Dashboard and Workspace
+        // Health) and never by the shell.
         .route("/api/v1/workspace/roster", get(api_v1::workspace_roster))
         .route("/api/v1/workspace/status", get(api_v1::workspace_status))
         .route("/api/v1/workspace/route-providers", get(api_v1::workspace_route_providers))
