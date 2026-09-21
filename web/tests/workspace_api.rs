@@ -162,6 +162,10 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // — a route absent from it is silently unguarded on all three.
     "/api/v1/workspace/reachability",
     "/api/v1/workspace/check",
+    // S-429 / [FR-UI-37]: the `app`-scoped telemetry aggregate. Enumerated for
+    // the same reason as the two above — the `200`+CSP loop, the single-root
+    // `404` loop and the write-free loop all walk this list.
+    "/api/v1/workspace/statistics",
 ];
 
 fn ws_router(tmp: &TempDir) -> axum::Router {
@@ -850,6 +854,118 @@ async fn workspace_roster_carries_the_manifest_name_default_and_members() {
     assert_eq!(v["default"], "api");
     let members: Vec<&str> = v["members"].as_array().unwrap().iter().map(|m| m.as_str().unwrap()).collect();
     assert_eq!(members, ["api", "web"], "every member, in manifest order: {body}");
+}
+
+// ── S-429 / FR-UI-37: the `app`-scoped telemetry aggregate ───────────────────
+//
+// What these two assert is the **surface contract** T2 consumes: the denominator,
+// the named unread members and their reasons, over the wire. The summing
+// arithmetic itself — two members with telemetry, one unreadable, counts merged
+// per tool/day/origin — is proven against real seeded stores in
+// `logos_core::federation::telemetry`'s unit tests, which can build a migrated
+// store through the product's own schema; a fixture here could only hand-write
+// `CREATE TABLE`, which is a second copy of the migration ledger.
+
+/// The aggregate states the population it summed over and **names** every member
+/// it could not read, with the reason ([FR-UI-37], [NFR-CC-04]). Neither member of
+/// this fixture has ever run telemetry, so `members_read` is `0` — the honest
+/// awaiting-data signal — and a total is never presented as covering the roster.
+#[tokio::test]
+async fn workspace_statistics_states_its_denominator_and_names_every_unread_member() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/statistics").await;
+
+    assert_eq!(v["workspace"], "shop");
+    assert_eq!(v["window_days"], 7, "the FR-OB-04 default window");
+    assert_eq!(v["members_total"], 2);
+    assert_eq!(v["members_read"], 0, "no member has telemetry: {v}");
+    assert_eq!(
+        v["covers_all_members"], false,
+        "the marker governing every figure below it: {v}"
+    );
+    let unread: Vec<(&str, &str)> = v["unread"]
+        .as_array()
+        .expect("unread is an array")
+        .iter()
+        .map(|u| (u["member"].as_str().unwrap(), u["reason"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        unread,
+        [("api", "absent"), ("web", "absent")],
+        "every member is named with its reason, in roster order: {v}"
+    );
+    assert!(
+        v["unread"][0]["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        "each named member carries its diagnostic: {v}"
+    );
+    // Usage, not quality: no gate verdict, score or violation count is rolled up
+    // here ([BR-56], [ADR-56]).
+    for quality_key in ["signal", "score", "violations", "gate", "rules"] {
+        assert!(
+            v.get(quality_key).is_none(),
+            "the usage aggregate carries no quality-signal element `{quality_key}`: {v}"
+        );
+    }
+    // Latency percentiles are absent rather than averaged across members — a
+    // summed percentile would be a fabricated figure ([NFR-CC-04]).
+    for latency_key in ["latency_p50_ms", "latency_p95_ms", "latency_p99_ms"] {
+        assert!(
+            v.get(latency_key).is_none(),
+            "percentiles must not be summed across members: {v}"
+        );
+    }
+}
+
+/// A member whose `telemetry.db` exists and is not a database is named
+/// `unreadable`, distinctly from a member that simply never ran telemetry
+/// ([FR-UI-37]). Collapsing the two would report a fault as routine.
+#[tokio::test]
+async fn an_unreadable_member_store_is_named_apart_from_an_absent_one() {
+    let tmp = workspace();
+    let broken = tmp.path().join("web").join(".logos");
+    std::fs::create_dir_all(&broken).expect("member .logos");
+    std::fs::write(broken.join("telemetry.db"), b"not a database").expect("broken store");
+
+    let router = ws_router(&tmp);
+    let v = json_body(&router, "/api/v1/workspace/statistics").await;
+
+    let unread: Vec<(&str, &str)> = v["unread"]
+        .as_array()
+        .expect("unread is an array")
+        .iter()
+        .map(|u| (u["member"].as_str().unwrap(), u["reason"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        unread,
+        [("api", "absent"), ("web", "unreadable")],
+        "the two states are reported apart: {v}"
+    );
+    assert_eq!(v["members_read"], 0, "neither contributed: {v}");
+}
+
+/// **The binding criterion at the HTTP surface** ([FR-UI-37], [NFR-PE-10]):
+/// loading the aggregate leaves the resident-engine set exactly where startup
+/// left it. The N = 72 connection-count form of the same claim lives in
+/// `logos-core/tests/workspace_statistics_engine_free.rs`; this one proves the
+/// route the SPA actually calls reaches the engine-free read and not
+/// `Engine::stats`.
+#[tokio::test]
+async fn the_statistics_aggregate_warms_no_member() {
+    let tmp = workspace();
+    let federation = discover(tmp.path()).expect("discovery").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new_serve_default(federation);
+    assert_eq!(registry.resident_members(), ["api"], "only the default member is warm at startup");
+
+    // Read the aggregate straight off the registry the router serves it from.
+    let agg = logos_core::federation::workspace_statistics(&registry, None);
+    assert_eq!(agg.members_total, 2);
+
+    assert_eq!(
+        registry.resident_members(),
+        ["api"],
+        "the telemetry aggregate must not construct any member engine (NFR-PE-10)"
+    );
 }
 
 /// The roster starts **no** member engine ([NFR-PE-10]). The shell probes it on every

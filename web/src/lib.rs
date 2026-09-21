@@ -786,6 +786,15 @@ fn build_router(state: WebState) -> Router {
         // governs these two as it does the six.
         .route("/api/v1/workspace/reachability", get(api_v1::workspace_reachability))
         .route("/api/v1/workspace/check", get(api_v1::workspace_check))
+        // ── The `app`-scoped telemetry aggregate (S-429, [FR-UI-37],
+        // [NFR-PE-10]): every member's `telemetry.db` summed over one window.
+        // The twin of `/api/v1/statistics` one scope up — that one answers for
+        // the selected member, this one for the workspace — and the reason it is
+        // a workspace route and not a `?repo=`-less mode of that one is the
+        // engine budget: it reads each member's store directly rather than
+        // through `Engine::stats`, so a view load constructs no member engine
+        // and the resident count is what a `workspace status` already paid.
+        .route("/api/v1/workspace/statistics", get(api_v1::workspace_statistics_aggregate))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof
