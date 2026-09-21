@@ -810,8 +810,8 @@ found up-tree, see [configuration.md](configuration.md)), it serves **workspace
 mode**: the shared `/api/v1/*` surface runs against the default member (only that
 member is warmed eagerly at startup; the rest are built lazily on first touch),
 and a `/api/v1/workspace/*` fan-out surface exposes the cross-service
-read-models (`status`, `route-providers`, `search`, `callers`, `impact`) to the
-frontend. In a plain repo with no manifest up-tree, `serve --ui` is byte-for-byte
+read-models (`status`, `route-providers`, `search`, `callers`, `impact`,
+`reachability`, `check`, `statistics`) to the frontend. In a plain repo with no manifest up-tree, `serve --ui` is byte-for-byte
 as before — the `/api/v1/workspace/*` routes answer `404` and no member registry
 is allocated. Pass **`--standalone`** to force single-repo focus even under a
 manifest. Every response (workspace or single-root) still carries the unchanged
@@ -820,6 +820,10 @@ self-only CSP and binds `127.0.0.1` only.
 ```bash
 logos serve --ui --standalone                        # force single-repo focus even under a workspace manifest
 curl 127.0.0.1:4983/api/v1/workspace/status          # (workspace mode) per-member freshness + coverage
+curl 127.0.0.1:4983/api/v1/workspace/reachability    # app-wide reachability, promotions-only and bounded by default
+curl '127.0.0.1:4983/api/v1/workspace/reachability?repo=<member>'   # scope it to one member
+curl 127.0.0.1:4983/api/v1/workspace/check           # workspace governance findings (advisory)
+curl 127.0.0.1:4983/api/v1/workspace/statistics      # telemetry summed over members, engine-free
 ```
 
 ---

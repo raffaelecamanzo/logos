@@ -538,11 +538,53 @@ honest empty state naming the producing command:
 - **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat`, Wiki `/wiki`, Architecture / Cycles `/architecture`.
 - **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
+- **Workspace scope (workspace mode only):** Workspace `/workspace`, Workspace Dashboard
+  `/workspace-dashboard`, Workspace Health `/workspace-health`, Workspace Statistics
+  `/workspace-statistics`. These answer for the **whole workspace**, not for the selected
+  member, and the member selector does not govern them.
 
 **Workspace mode.** When `logos serve --ui` starts at a workspace parent (a
 `logos.workspace.toml` is discovered up-tree), the app shell renders a **member
-selector** that scopes every view to one member (the member is part of each
-view's cache key, so switching re-fetches). Alongside the per-member views it
+selector** that scopes the per-member views to one member (the member is part of
+each view's cache key, so switching re-fetches).
+
+**Every view declares the scope it answers for**, and the sidebar is split to match:
+a **Workspace** section for the views that answer for the whole workspace, and a
+**Service** section whose header carries the member selector — so the control sits
+inside the boundary it governs and nothing outside that section is scoped by it.
+Scope is a declared field on each navigation entry, not a path-prefix guess, so a
+view cannot silently fall into the wrong scope by being named differently.
+
+**The selected member is in the URL.** A workspace URL carries `?repo=<member>`, so
+it can be bookmarked and shared and it opens on that member on first paint — with no
+unscoped read issued first. Switching members writes through history (no reload, and
+no extra back-stack entry for a same-view switch); back and forward restore the
+member the entry names. A `?repo=` naming a member the workspace does not have
+renders a state **naming the members it does have**, and **no view renders any
+member's figures** while it is displayed — the failure being prevented is a
+`200`-shaped page showing the default member's numbers under a requested name. A
+blank `?repo=` is unscoped. In a plain single repo the parameter is inert.
+
+The three workspace-scoped views answer questions the per-member views cannot:
+**Workspace Dashboard** renders the server's own composed cross-service
+edge-count/egress-rate line (never the count without the rate beside it) with
+coverage by arm and by intake; **Workspace Health** renders the degraded roll-up in
+words with a per-member table, the advisory governance findings and the topic
+inventory, drawing every unopenable member as degraded and naming it; and
+**Workspace Statistics** sums telemetry over members. Every ratio on these views
+carries its denominator and its exclusion — a zero denominator renders the ratio
+**absent** ("not measured", no bar) with the excluded count still shown, rather than
+a `0%` that reads like a measurement. Workspace Statistics states its **member
+denominator** ("summed over N of M workspace members") and names every member whose
+telemetry could not be read; it reserves "a lower bound" for members that **failed**
+a read, never for one that simply has no store yet, since an absent store is a
+successful determination of no store. It is read **engine-free** — the load leaves
+the resident-engine count unchanged — which is why it omits `artifact_bindings` and
+latency percentiles: both are `Engine`-bound, and the ceiling is the point.
+No workspace-level quality score is rendered anywhere, and no per-member signal is
+aggregated into one.
+
+Alongside the per-member views it
 exposes the cross-service surfaces: an **app-level service map** — the ECharts
 graph canvas drawing services as nodes and cross-service bindings as edges,
 including first-class **topic hops** (`A → topic → B`) once broker coupling is
@@ -637,9 +679,12 @@ the `overview/project-overview` wiki page snippet with a link into `/wiki`
 (CR-034); when that page has not been generated yet it shows an honest "not yet
 generated" empty state rather than a fabricated overview. One widget slot holds
 the **Rule findings** card projecting `check_rules` (FR-GV-02): it reads **green**
-when there are zero rule violations, **red** when there are findings, and a muted
-**onboarding** state when no `.logos/rules.toml` exists — with a link into the
-Rule findings view (`/gaps`). The **Graph card** lists Files / Nodes / Edges /
+when a contract was evaluated and there are zero rule violations, **red** when there
+are findings, and a muted **onboarding** state both when no `.logos/rules.toml`
+exists and when a contract authored **zero rules** — a check that evaluated nothing
+is not a pass, so no green badge is rendered over it. Violations still win: a finding
+raised by an always-on fold-in renders red even on a zero-rule contract. There is a
+link into the Rule findings view (`/gaps`). The **Graph card** lists Files / Nodes / Edges /
 Resolution and, below them, the source/test **lines-of-code roll-up** — Total,
 Source, and Test LOC — mirrored from the `status` read-model's
 `total_line_count` / `source_line_count` / `test_line_count`, with a caption
