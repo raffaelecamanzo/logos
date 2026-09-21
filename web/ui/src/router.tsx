@@ -9,13 +9,26 @@
  * the S-184 fitness budget tracks. It can be adopted if the route table grows.
  *
  * S-426 (FR-UI-35, NFR-RA-05): the router is where `?repo=` meets `window.history`.
- * Every entry this module writes carries the ACTIVE member, so a workspace URL
- * names the member it shows — a tab change must not drop the member and silently
- * re-open the default one. It is the only member policy here: which member is
- * active, and what an unknown one means, belong to `WorkspaceContext`. In
- * single-root mode `scopedMember()` is `null` and `urlWithMember` returns the path
- * verbatim, so every URL this module writes is byte-for-byte the pre-workspace one
- * ([ADR-52]).
+ * {@link navigate} and {@link redirect} stamp the ACTIVE member onto the entry they
+ * write, so a workspace URL names the member it shows and a tab change does not
+ * silently re-open the default one. ({@link replaceUrl} does not: it writes the URL
+ * its caller hands it, already stamped.) That is the whole of the member policy
+ * here — which member is active, and what an unknown one means, belong to
+ * `WorkspaceContext`. In single-root mode `scopedMember()` is `null` and
+ * `urlWithMember` returns the path verbatim, so every URL this module writes is
+ * byte-for-byte the pre-workspace one ([ADR-52]).
+ *
+ * The stamp is the ACTIVE member, which is not always the one the URL names, and the
+ * gap is deliberate rather than overlooked. `scopedMember()` is null in two states
+ * the sidebar is clickable in — before the boot probe answers, and while an unknown
+ * member is being refused — so a tab click in either drops the `?repo=` instead of
+ * carrying it. Reading the URL's member instead would be worse: single-root must
+ * treat a hand-typed `?repo=` as inert, and the router cannot tell the modes apart,
+ * so it would start propagating that param onto every navigation ([ADR-52], AC4).
+ * The resulting page is honest — the URL names no member, and nothing on screen is
+ * labelled with one — so the member is lost, never misreported. A URL migration that
+ * must keep the member therefore passes the query through itself; `App.tsx`'s
+ * `/overview` redirect does exactly that.
  */
 
 import { useEffect, useState } from "react";
@@ -81,10 +94,10 @@ export function currentUrl(): string {
 /**
  * Rewrite the current history entry's URL in place (S-426).
  *
- * Three properties, each load-bearing and none of them shared with {@link redirect}:
+ * It shares `replaceState` with {@link redirect}, so a member switch on the view you
+ * are already looking at adds **no** back-stack entry — ten switches must not cost
+ * ten presses of Back. Two further properties are its own:
  *
- *   - `replaceState`, so a member switch on the view you are already looking at adds
- *     **no** back-stack entry. Ten switches must not cost ten presses of Back.
  *   - `history.state` is carried across, not replaced with `{}` — the current entry's
  *     ephemeral payload (the wiki search term, FR-WK-28) belongs to the entry, not to
  *     the member shown in it.

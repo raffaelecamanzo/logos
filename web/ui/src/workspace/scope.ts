@@ -33,8 +33,8 @@
  */
 
 /** The query param the member scope rides on — in a request URL and, since S-426,
- *  in the browser URL too. Named once here and imported by every site that writes
- *  it (`api/client.ts`, `urlWithMember`), so the wire spelling has one definition. */
+ *  in the browser URL too. Named once here and used by every site that reads or
+ *  writes it, so the wire spelling has one definition. */
 export const REPO_PARAM = "repo";
 
 /** The member every `/api/v1` read is scoped to, or `null` for single-root/unscoped. */

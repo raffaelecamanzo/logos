@@ -102,12 +102,9 @@ export function Header() {
     // The readout is reset rather than merely left alone: arriving here from a valid
     // member (a back/forward into an unknown one) would otherwise keep that member's
     // figures on screen.
-    if (mode === "loading" || unknownMember !== null) {
-      setReadout({ kind: "loading" });
-      return;
-    }
-    let alive = true;
     setReadout({ kind: "loading" });
+    if (mode === "loading" || unknownMember !== null) return;
+    let alive = true;
     // Through the typed client, so the read carries the active `?repo=` scope. In
     // single-root mode no param is appended and the request is byte-for-byte the
     // shape every other read has.
