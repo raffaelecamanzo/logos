@@ -448,7 +448,27 @@ const RECORDED_ADMITTED: usize = 90;
 /// is the broker arm's own keyed-site population, which lives in
 /// `logos-core/tests/broker_topic_corpus.rs` — the single home for the broker
 /// figures — not in the accessor denominator below.
-const RECORDED_ADMITTED_BROKER: usize = 29;
+///
+/// **Re-recorded 2026-09-21: 29 → 36, attributed before being called a gain.**
+/// The move is a **capture gain**, not an admission widening and not a change to
+/// the captured population, and that is measured rather than argued:
+/// - the estate source is byte-identical — all 84 members are git clones whose
+///   newest HEAD is 2026-08-03 (before the 29 was recorded on 2026-09-18) and
+///   whose only uncommitted entry is `?? .logos/`, the index directory itself;
+/// - the sibling headline baseline re-recorded in the same run moved **only**
+///   `unbound → bound` (7 rows) with `references` unchanged at 1036 and every
+///   denominator — 117 egress sites, 345 measured, 691 no-provider — identical.
+///   A widened admission would have moved `references`; it did not.
+/// - the move is confined to the **broker** arm; the HTTP arm is unchanged.
+///
+/// **Cause: [S-424]** (Sprint 72, `3cdff09a` + its review-fixes), the only
+/// broker-resolution change committed after the 29 was recorded. It made the
+/// promotion pass and the bridge call **one** identify function instead of two
+/// that disagreed, so publishes that resolved on one path and not the other now
+/// resolve on both. That is a resolution improvement over an unchanged corpus.
+///
+/// [S-424]: ../../docs/planning/journal.md#s-424-the-promoted-topic-inventory-keys-on-the-committed-value
+const RECORDED_ADMITTED_BROKER: usize = 36;
 
 /// The accessor denominator the figure is stated over — the S-382 reading's
 /// production client-call population.
@@ -513,7 +533,7 @@ const ACCESSOR_DENOMINATOR: usize = 96;
 ///
 /// One row is not a trend and is recorded rather than chased.
 const RECORDED_BUCKETS: [(&str, &str, Option<&str>, usize); 6] = [
-    ("broker-topic", "bound", None, 27),
+    ("broker-topic", "bound", None, 34),
     ("broker-topic", "unbound", Some("no-provider-in-workspace"), 2),
     ("route", "ambiguous", Some("ambiguous"), 29),
     ("route", "bound", None, 18),
@@ -563,7 +583,7 @@ const RECORDED_HTTP_PAIRS: [(&str, &str, usize); 8] = [
 /// story's, and the two are listed apart so a later move can be attributed to an
 /// arm rather than to the total. **No floor is asserted on either.**
 const RECORDED_BRIDGE_INVOCATION_EDGES: [(&str, usize); 2] =
-    [("broker-topic", 33), ("route", 18)];
+    [("broker-topic", 43), ("route", 18)];
 
 /// The reference workspace, or `None` when none is configured — the same
 /// `LOGOS_REF_WORKSPACE` contract the S-355/S-365/S-374/S-377 measurements read.

@@ -1000,16 +1000,16 @@ all**:
 
 ```bash
 logos workspace status            # human
-#   51 resolved cross-service edges; egress resolution 0.385 (45 of 117 egress sites resolved)
+#   61 resolved cross-service edges; egress resolution 0.444 (52 of 117 egress sites resolved)
 ```
 
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "resolved_cross_service_edges": 51,   // edges resolved from a captured invocation
-  "egress_resolution": 0.385,           // absent (null) when no egress site was captured
+  "resolved_cross_service_edges": 61,   // edges resolved from a captured invocation
+  "egress_resolution": 0.444,           // absent (null) when no egress site was captured
   "egress_resolution_measured": 117,    // the rate's denominator, explicit
-  "resolved_edges_summary": "51 resolved cross-service edges; egress resolution 0.385 (45 of 117 egress sites resolved)"
+  "resolved_edges_summary": "61 resolved cross-service edges; egress resolution 0.444 (52 of 117 egress sites resolved)"
 }
 ```
 
@@ -1291,8 +1291,10 @@ Five things worth knowing about these fields:
 
   Both terms of `egress_resolution` moved between generations, so it is quoted here
   with its denominator and should never be quoted without one: `0.032 (5 of 155)`
-  became `0.128 (15 of 117)`, and `0.385 (45 of 117)` on the 2026-09-18 re-enrolled
-  index once the broker arm admitted committed values. The `-38` in the first
+  became `0.128 (15 of 117)`, `0.385 (45 of 117)` on the 2026-09-18 re-enrolled
+  index once the broker arm admitted committed values, and `0.444 (52 of 117)` on
+  2026-09-21 once S-424 gave the promotion pass and the bridge one identify
+  function instead of two that disagreed. The denominator has not moved since. The `-38` in the first
   denominator move has two causes and they are never summed — `-26` sites left the
   captured population entirely when the Go client-call gate became receiver-grained
   (they were never outbound calls), and `-12` moved into
@@ -1315,20 +1317,21 @@ Every row carries its `intake`, and the four counters are reported split by it:
 ```jsonc
 // logos workspace status --json
 "coverage": {
-  "bound": 126, "ambiguous": 175, "unbound": 44, "no_provider_in_workspace": 691,
+  "bound": 133, "ambiguous": 175, "unbound": 37, "no_provider_in_workspace": 691,
   "by_intake": {
     "contract_surface": { "bound": 81, "ambiguous": 146,
                           "unbound": 1, "no_provider_in_workspace": 646 },
-    "invocation":       { "bound": 45, "ambiguous":  29,
-                          "unbound": 43, "no_provider_in_workspace": 45 }
+    "invocation":       { "bound": 52, "ambiguous":  29,
+                          "unbound": 36, "no_provider_in_workspace": 45 }
   }
 }
 ```
 
-Those are the real figures from an 84-member Spring estate, measured 2026-09-18.
-`bound: 126` looks like a workspace that binds; `by_intake.invocation.bound: 45`
-says that of its 162 captured outbound call sites, forty-five resolve — 18 HTTP
-client calls and 27 broker publishes. That is what the split is for — and on the
+Those are the real figures from an 84-member Spring estate, measured 2026-09-21.
+`bound: 133` looks like a workspace that binds; `by_intake.invocation.bound: 52`
+says that of its 162 captured outbound call sites, fifty-two resolve — 18 HTTP
+client calls and 34 broker publishes (it read 45 on 2026-09-18, as 18 and 27; the
++7 is broker alone, attributed to S-424, and the HTTP arm has not moved since). That is what the split is for — and on the
 generation of this estate indexed before the accessor capture hop existed, the same
 field read **0** beside a `bound` of 81, which is the starker form of the same
 point. The `contract_surface` row has not moved across any generation of this

@@ -99,9 +99,9 @@
   },
   "measurement": {
     "references": 1036,
-    "bound": 126,
+    "bound": 133,
     "ambiguous": 175,
-    "unbound": 44,
+    "unbound": 37,
     "no_provider_in_workspace": 691,
     "by_intake": {
       "contract_surface": {
@@ -111,19 +111,19 @@
         "no_provider_in_workspace": 646
       },
       "invocation": {
-        "bound": 45,
+        "bound": 52,
         "ambiguous": 29,
-        "unbound": 43,
+        "unbound": 36,
         "no_provider_in_workspace": 45
       }
     },
-    "resolved_cross_service_edges": 51,
-    "egress_resolution": 0.38461538461538464,
+    "resolved_cross_service_edges": 61,
+    "egress_resolution": 0.4444444444444444,
     "egress_resolution_measured": 117,
-    "resolved_edges_summary": "51 resolved cross-service edges; egress resolution 0.385 (45 of 117 egress sites resolved)",
-    "spec_conformance_ratio": 0.3652173913043478,
+    "resolved_edges_summary": "61 resolved cross-service edges; egress resolution 0.444 (52 of 117 egress sites resolved)",
+    "spec_conformance_ratio": 0.3855072463768116,
     "spec_conformance_measured": 345,
-    "spec_conformance_summary": "0.365 (126 of 345 measured; 691 excluded as no-provider-in-workspace)",
+    "spec_conformance_summary": "0.386 (133 of 345 measured; 691 excluded as no-provider-in-workspace)",
     "members_read": 84,
     "members_total": 84,
     "covers_all_members": true

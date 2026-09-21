@@ -298,18 +298,31 @@ fn measure_the_intake_split_over_the_reference_workspace_when_one_is_configured(
     // message, so a moved corpus reads as a moved corpus.
     assert_eq!(
         (cs.bound, inv.bound),
-        (81, 45),
-        "the recorded split is 81 contract-surface / 45 invocation bound rows, measured \
-         2026-09-18 by S-420 T2 over the estate re-enrolled at logos 1.4.12 (it was \
+        (81, 52),
+        "the recorded split is 81 contract-surface / 52 invocation bound rows, measured \
+         2026-09-21 over the same estate (it was 81 / 45 on 2026-09-18 by S-420 T2, \
          81 / 15 over the merged-Sprint-69-Iteration-1 index, 81 / 5 over the S-397 \
-         generation, and 81 / 0 over the 1.4.7 one). Measured {} / {} over {} \
+         generation, and 81 / 0 over the 1.4.7 one). The 45 -> 52 is +7 BROKER \
+         publishes and ZERO HTTP: attributed to S-424 (Sprint 72), which made the \
+         promotion pass and the bridge call one identify function instead of two \
+         that disagreed. It is a capture gain over an UNCHANGED corpus and an \
+         UNCHANGED admission -- the estate source is byte-identical (newest member \
+         HEAD 2026-08-03; the only uncommitted entry anywhere is the .logos index \
+         dir) and the sibling headline baseline moved only unbound -> bound with \
+         references constant at 1036 and every denominator identical. Measured {} / {} over {} \
          references. If the corpus has been re-indexed or re-enrolled again, RECORD the \
          measured figure — here, and in the `by_intake` block in docs/howto/commands.md, \
          which restates this split in prose no test reads — do not bend the classifier to \
-         reproduce this one. AND DECOMPOSE IT BY ARM before calling it a gain: the 45 is \
+         reproduce this one. AND DECOMPOSE IT BY ARM before calling it a gain: the 45 was \
          18 HTTP client calls and 27 broker publishes, and the 15 it succeeds was HTTP \
-         alone, so a reader who takes 15 -> 45 for outbound HTTP resolution tripling is \
-         wrong by 27 of the 30. CR-120's own criterion was 81 / 0 and it was met on the \
+         alone, so a reader who takes 15 -> 52 for outbound HTTP resolution more than \
+         tripling is wrong by most of it -- that arm moved 15 -> 18. The +7 to 52 is \
+         attributed to the BROKER arm, and the attribution's limits are stated with it: \
+         config_bound_admission's broker population moved by exactly the same +7 in the \
+         same run, and the ONLY resolution commits after the 45 was recorded are S-424's \
+         broker work. These rows carry `intake`, NOT arm, so a 18/34 reading is the \
+         arithmetic consequence of that attribution and NOT an independent measurement \
+         from this payload -- do not quote it as one. CR-120's own criterion was 81 / 0 and it was met on the \
          1.4.7 generation; the invocation column is the accessor hop (S-397 T1, then \
          S-398 T1, then S-399/S-405 and S-409/S-410) and is not a retraction of it.",
         cs.bound,

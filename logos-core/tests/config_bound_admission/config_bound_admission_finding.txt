@@ -412,8 +412,8 @@ number that was later measured.  That is the same weakness the CRITERION_FLOOR
 pin below was already written to avoid; it is generalised here.
 
   the HTTP arm admits 90 of an accessor denominator of 96
-  the broker arm admits 29 rows
-  the bridge draws 51 invocation edges, 18 of them on the route arm
+  the broker arm admits 36 rows
+  the bridge draws 61 invocation edges, 18 of them on the route arm
   before this change the route arm drew 0
 
 
@@ -541,3 +541,51 @@ WHAT A READER SHOULD NOT CONCLUDE FROM THIS SECTION
 * Not "90 is a ceiling reached".  The Kotlin use site and the chained accessor
   named in the 2026-09-13 record still resolve to nothing, and the `.properties`
   gap is still open at a cost of 0 on this corpus.
+
+(e) THE 2026-09-21 RE-MEASUREMENT — ATTRIBUTED BEFORE IT WAS RE-RECORDED
+------------------------------------------------------------------------
+
+Measured 2026-09-21 on logos 1.4.16, same estate, during the Sprint 74 human
+review.  Nothing above this section is rewritten; the pinned sentences at the top
+move because the test matches them, and every dated table below them stands.
+
+                                                 2026-09-21   2026-09-18
+  `config-bound` rows, HTTP arm (relation route)         90           90
+  `config-bound` rows, broker arm (broker-topic)         36           29
+  bucket broker-topic / bound                            34           27
+  bucket broker-topic / unbound no-provider               2            2
+  bucket route / bound                                   18           18
+  bucket route / ambiguous                               29           29
+  bucket route / unbound no-provider                     42           42
+  bucket route / unbound path-not-composed                1            1
+  bridge invocation edges, broker-topic                  43           33
+  bridge invocation edges, route                         18           18
+  resolved cross-service edges (headline sibling)        61           51
+
+THE MOVE IS A CAPTURE GAIN.  Not an admission widening, not a change to the
+captured population.  Each alternative was eliminated by measurement, not by
+argument:
+
+  POPULATION — the estate source is byte-identical.  All 84 members are git
+  clones; the newest HEAD anywhere is 2026-08-03, before every figure recorded
+  here, and the only uncommitted entry in any member is `?? .logos/`, the index
+  directory itself.  The sibling headline baseline re-recorded in the same run
+  holds `references` at 1036 and every denominator identical — 117 egress sites,
+  345 measured, 691 no-provider-in-workspace.
+
+  ADMISSION — a widened admission moves what is captured.  `references` did not
+  move.  The only movement in the headline payload is 7 rows crossing
+  `unbound` -> `bound`, inside the invocation intake.
+
+  ARM — the `route` (HTTP) arm is unchanged on every counter it has: bound 18,
+  ambiguous 29, unbound 42 + 1, bridge edges 18.  The whole move is
+  `broker-topic` / `bound` +7 and its 10 further bridge edges.
+
+CAUSE: S-424 (Sprint 72, commit 3cdff09a and its review-fixes) — the only
+broker-resolution change committed after 2026-09-18, when these figures were
+last recorded.  It made the promotion pass and the bridge call ONE identify
+function instead of two that disagreed, so a publish that resolved on one path
+and not the other now resolves on both.  A resolution improvement over an
+unchanged corpus is exactly what these harnesses exist to distinguish from the
+other two causes, and this is the first re-record in the series to arrive with
+that distinction measured rather than asserted.

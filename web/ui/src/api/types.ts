@@ -1325,8 +1325,8 @@ export interface CrossServiceCoverage {
    *  figure). Present even when the rate is absent, where `0` *is* the finding:
    *  nothing outbound was captured at all. */
   egress_resolution_measured: number;
-  /** The resolved-edge count and its rate as one line, e.g. `"51 resolved
-   *  cross-service edges; egress resolution 0.385 (45 of 117 egress sites
+  /** The resolved-edge count and its rate as one line, e.g. `"61 resolved
+   *  cross-service edges; egress resolution 0.444 (52 of 117 egress sites
    *  resolved)"`. The structural form of BR-51: a view that renders this line
    *  cannot render the count without the rate — and since S-403 both halves are
    *  counted over one population by one walk, so the line cannot disagree with
