@@ -20,7 +20,12 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { UnreadMember, WorkspaceRoster, WorkspaceStatistics } from "../../api/types.ts";
+import type {
+  StatsInfo,
+  UnreadMember,
+  WorkspaceRoster,
+  WorkspaceStatistics,
+} from "../../api/types.ts";
 import { WorkspaceProvider, useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { scopedMember, setScopedMember } from "../../workspace/scope.ts";
 
@@ -36,14 +41,23 @@ vi.mock("./echarts.ts", () => ({
   }),
 }));
 
-import { isStatsEmpty } from "./statsModel.ts";
+import { isStatsEmpty, topTools, type UsageProjections } from "./statsModel.ts";
 import { WorkspaceStatisticsView } from "./WorkspaceStatisticsView.tsx";
 
-/** A three-member roster. Local rather than `workspace/testFixtures.ts`'s
- *  two-member one for one reason: every assertion below is about a DENOMINATOR, and
- *  "2 of 3" is the only shape that tells a stated denominator apart from a count —
- *  with two members, "1 of 2" and a bare "1" and a hard-coded "2" are all
- *  indistinguishable in the rendered text. */
+/** A three-member roster, local rather than shared, and both existing alternatives
+ *  were considered.
+ *
+ *  `workspace/testFixtures.ts`'s roster has TWO members, and every assertion below
+ *  is about a denominator: "2 of 3" is the only shape that tells a stated
+ *  denominator apart from a count, because with two members "1 of 2" and a bare "1"
+ *  and a hard-coded "2" are indistinguishable in the rendered text.
+ *
+ *  `views/workspace/appViewFixtures.ts` DOES export a value-identical three-member
+ *  roster, and it is declined for a different reason: that module is documented as
+ *  serving the two S-428 workspace views, and importing `views/workspace/` machinery
+ *  into `views/statistics/` would invert the directory dependency this view was
+ *  deliberately placed to avoid. Five lines of constants with no divergence
+ *  consequence is the cheaper side of that trade. */
 const ROSTER: WorkspaceRoster = {
   workspace: "shop",
   default: "api",
@@ -146,6 +160,57 @@ function readButEventless(windowDays: number): WorkspaceStatistics {
     reads_saved_estimate: 0,
     tokens_saved_estimate: 0,
   });
+}
+
+/** A populated aggregate whose only unread member is ABSENT. The distinction the
+ *  view has to draw: `covers_all_members` is false, but nothing failed to be read
+ *  and nothing was recorded by that member, so the figures are EXACT — calling them
+ *  a lower bound here is a false caveat, and this is the dominant state of a young
+ *  or large workspace. */
+function absentOnly(windowDays: number): WorkspaceStatistics {
+  return aggregate(windowDays, {
+    members_read: 2,
+    covers_all_members: false,
+    unread: [ABSENT],
+  });
+}
+
+/** Nothing summed AND a member that could not be READ. `calls_total` is the
+ *  server's sum over the members it could read, so the zero says nothing whatever
+ *  about the locked and unreadable ones — the state in which "no member recorded any
+ *  telemetry" is a measurement this view never took. */
+function emptyWithFailedRead(windowDays: number): WorkspaceStatistics {
+  return aggregate(windowDays, {
+    members_read: 1,
+    covers_all_members: false,
+    unread: [LOCKED, UNREADABLE],
+    calls_total: 0,
+    calls_by_tool: [],
+    activity_by_day: [],
+    calls_by_origin: [],
+    reads_saved_estimate: 0,
+    tokens_saved_estimate: 0,
+  });
+}
+
+/** The member-scoped wire shape carrying the SAME four projections as
+ *  `aggregate(7)`, for the cross-scope consistency assertion at the bottom. */
+function memberStats(): StatsInfo {
+  const agg = aggregate(7);
+  return {
+    window_days: agg.window_days,
+    calls_total: agg.calls_total,
+    calls_by_tool: agg.calls_by_tool,
+    latency_p50_ms: 3,
+    latency_p95_ms: 11,
+    latency_p99_ms: 30,
+    reads_saved_estimate: agg.reads_saved_estimate,
+    tokens_saved_estimate: agg.tokens_saved_estimate,
+    artifact_bindings: {},
+    activity_by_day: agg.activity_by_day,
+    calls_by_origin: agg.calls_by_origin,
+    warnings: [],
+  };
 }
 
 /** Stub `fetch` over the surface this view drives, echoing the requested
@@ -319,7 +384,15 @@ describe("every total states the member denominator it is a sum over (AC1, NFR-C
       expect(note.textContent).toMatch(/2\s*of\s*3\s*workspace members/i);
       expect(note.textContent).toMatch(/lower bound/i);
     }
-    expect(screen.getByText(/1 member could not be read/i)).toBeInTheDocument();
+    // Every note now names the count itself, and the callout adds the consequence.
+    // Asserted per-note rather than as an occurrence count, which would just pin the
+    // number of surfaces again.
+    for (const note of screen.getAllByText(/Summed over/i)) {
+      expect(note.textContent).toMatch(/1 member could not be read/i);
+    }
+    expect(
+      screen.getByText(/every figure on this page is lower than the workspace's true usage/i),
+    ).toBeInTheDocument();
   });
 
   it("does not call a complete aggregate a lower bound", async () => {
@@ -327,6 +400,87 @@ describe("every total states the member denominator it is a sum over (AC1, NFR-C
     expect(screen.queryByText(/lower bound/i)).toBeNull();
     for (const note of screen.getAllByText(/Summed over/i)) {
       expect(note.textContent).toMatch(/the whole roster/i);
+    }
+  });
+});
+
+describe("a read FAILURE and an absent store are never conflated (AC1/AC2, NFR-CC-04)", () => {
+  // Server-side, `absent` is `Ok(None)` — a SUCCESSFUL determination that the member
+  // has no telemetry store. `locked`/`unreadable` are read failures. The two demand
+  // opposite statements, and `covers_all_members` is false for both, so it cannot
+  // word either. On the reference estate nearly every member is absent, which is why
+  // getting this wrong would put a false caveat on the page permanently.
+
+  it("does NOT call the figures a lower bound when the only unread member is absent", async () => {
+    await mount(absentOnly);
+    for (const note of screen.getAllByText(/Summed over/i)) {
+      expect(note.textContent).toMatch(/2\s*of\s*3\s*workspace members/i);
+      // Nothing was recorded by that member, so nothing is missing from the sums.
+      expect(note.textContent).not.toMatch(/lower bound/i);
+      expect(note.textContent).toMatch(/no recorded usage is missing/i);
+    }
+    // …and the page does not say a figure is understated, because none is, and does
+    // not assert that a read failed, because none did.
+    expect(screen.queryByText(/lower than the workspace's true usage/i)).toBeNull();
+    expect(screen.queryByText(/member could not be read/i)).toBeNull();
+    expect(screen.queryByText(/usage in this window is unknown/i)).toBeNull();
+    // Including the table's own caption, which used to assert a read failure about
+    // every row in it — the same conflation one level down.
+    const caption = card(/^Members not summed$/).querySelector("caption");
+    expect(caption?.textContent).toMatch(/contributed nothing to the figures above/i);
+    expect(caption?.textContent).not.toMatch(/could not be read/i);
+  });
+
+  it("says an absent store is the ordinary state of a new service, not a fault", async () => {
+    await mount(absentOnly);
+    // The phrase is in the callout AND in the table row's reason sentence — both are
+    // meant to be there, so assert presence in both rather than uniqueness.
+    expect(screen.getAllByText(/no telemetry store yet/i).length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getByText(/ordinary state of a new service rather than a fault/i),
+    ).toBeInTheDocument();
+    expect(
+      within(card(/^Members not summed$/)).getByText(/Not a fault/i),
+    ).toBeInTheDocument();
+  });
+
+  it("DOES call the figures a lower bound when a read actually failed", async () => {
+    // The positive half. Without it the spec above passes over a view that never
+    // says "lower bound" at all.
+    await mount(partial);
+    for (const note of screen.getAllByText(/Summed over/i)) {
+      expect(note.textContent).toMatch(/lower bound/i);
+      expect(note.textContent).toMatch(/usage in this window is unknown/i);
+    }
+  });
+
+  it("treats an UNRECOGNISED reason token as a read failure, not as an absent store", async () => {
+    // The safe direction, and the near miss: a reason arm the server grows against a
+    // shipped bundle must produce a caveat that may be unnecessary rather than
+    // suppress one that is needed. Keyed on exact inequality to "absent", never on a
+    // substring — note this token CONTAINS neither "absent" nor any known arm.
+    await mount((d) =>
+      aggregate(d, {
+        members_read: 2,
+        covers_all_members: false,
+        unread: [{ member: "billing", reason: "quarantined" as UnreadMember["reason"], detail: "d" }],
+      }),
+    );
+    for (const note of screen.getAllByText(/Summed over/i)) {
+      expect(note.textContent).toMatch(/lower bound/i);
+    }
+    expect(screen.queryByText(/no recorded usage is missing/i)).toBeNull();
+  });
+
+  it("words a single unread member in the singular throughout", async () => {
+    await mount(partial);
+    // One member, one row. "the members named below" / "They are named below" for a
+    // single row is the deviation the sibling view does not make.
+    expect(screen.getByText(/It is named below, with its reason/i)).toBeInTheDocument();
+    expect(screen.queryByText(/They are named below/i)).toBeNull();
+    for (const note of screen.getAllByText(/Summed over/i)) {
+      expect(note.textContent).toMatch(/1 member could not be read, so its usage/i);
+      expect(note.textContent).not.toMatch(/their usage/i);
     }
   });
 });
@@ -466,6 +620,38 @@ describe("a workspace with no telemetry awaits data rather than reporting zeros 
     expect(screen.queryByRole("heading", { name: /^Members not summed$/ })).toBeNull();
   });
 
+  it("does NOT claim nothing was recorded when a member could not be READ", async () => {
+    // `calls_total === 0` is the server's sum over the members it COULD read, so with
+    // a locked or unreadable member in the roster a zero is not evidence that nothing
+    // was recorded anywhere. Claiming it would be a measurement this view never took,
+    // and `logos stats` would be the wrong remedy — the blocker is the store.
+    await mount(emptyWithFailedRead);
+    expect(screen.queryByText(/No member recorded any telemetry/i)).toBeNull();
+    expect(screen.queryByText("logos stats")).toBeNull();
+    // What it says instead: scoped to what was read, and honest about the rest.
+    expect(
+      screen.getByText(/None of the 1 member whose telemetry could be read recorded anything/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/2 members could not be read at all/i)).toBeInTheDocument();
+    expect(screen.getByText(/knows nothing about their usage/i)).toBeInTheDocument();
+    // And the callout above does not claim a figure is understated: there is no
+    // figure on the page to understate.
+    expect(screen.queryByText(/every figure on this page is lower/i)).toBeNull();
+    // …and the members are still named.
+    const unread = card(/^Members not summed$/);
+    for (const member of ["web", "billing"]) {
+      expect(within(unread).getByRole("row", { name: new RegExp(member) })).toBeInTheDocument();
+    }
+  });
+
+  it("DOES claim it when every unread member is merely absent", async () => {
+    // The positive half: the universal claim is earned when no read failed, because
+    // every member then either recorded nothing or has no store at all.
+    await mount(nothingRecorded);
+    expect(screen.getByText(/No member recorded any telemetry in this window/i)).toBeInTheDocument();
+    expect(screen.getByText("logos stats")).toBeInTheDocument();
+  });
+
   it("does NOT await data on a populated aggregate", async () => {
     // The negative half: without it the two specs above pass over a view that is
     // permanently empty.
@@ -603,5 +789,35 @@ describe("a failed aggregate read is reported, never imputed (NFR-RA-05)", () =>
     });
     // Critically NOT the awaiting-data state: a broken read is not an empty store.
     expect(screen.queryByText(/No member recorded any telemetry/i)).toBeNull();
+  });
+});
+
+// ── The guard this view owes because of what it SHARES ────────────────────────
+//
+// Note what is NOT here: a check that every `styles.X` key this view references is
+// defined in the stylesheet it shares with the member-scoped view. It cannot live in
+// Vitest — `vitest.config.ts` sets `css: false`, and for a `*.module.css` Vite's
+// CSS-modules plugin wins over the `?raw` query, so the glob hands back the empty
+// proxy object rather than the stylesheet text (measured, not assumed). That guard is
+// in `web/tests/spa_design_system.rs` instead, which reads stylesheets off disk — the
+// same reason that file already owns every other stylesheet contract in this project.
+
+describe("the guard this view owes because it SHARES rather than copies", () => {
+  it("answers identically to the member-scoped view over identical projections", () => {
+    // The consistency BETWEEN two behaviours, which neither view's own specs can see.
+    // Both assignments are plain (no cast), so `tsc -b` fails if either wire shape
+    // drifts out of the contract `statsModel.ts` documents — that claim was prose
+    // until now. The runtime half is the one that matters: the two scopes must not be
+    // able to rank the same tools differently, which is exactly what a second copy of
+    // the arithmetic would eventually do.
+    const fromAggregate: UsageProjections = aggregate(7);
+    const fromMember: UsageProjections = memberStats();
+    expect(topTools(fromAggregate).rows).toEqual(topTools(fromMember).rows);
+    expect(isStatsEmpty(fromAggregate)).toBe(isStatsEmpty(fromMember));
+    // …and the shared predicate really is shared: the member-scoped view's sidebar
+    // probe keys on this same function, so a divergence here would desynchronise the
+    // nav muting from the tab's own empty state.
+    expect(isStatsEmpty({ calls_total: 0 })).toBe(true);
+    expect(isStatsEmpty({ calls_total: 1 })).toBe(false);
   });
 });

@@ -103,6 +103,47 @@ function textCol<R>(key: string, header: string, get: (r: R) => string): Column<
   return { key, header, cell: (r) => get(r), mono: true, sortValue: get };
 }
 
+// ── What "unread" means, and the plural of a count ──────────────────────────────
+
+/** `s` unless `n` is 1 — one spelling for every pluralised count on this page. */
+function s(n: number): string {
+  return n === 1 ? "" : "s";
+}
+
+/**
+ * `unread` holds two populations that call for OPPOSITE statements, and conflating
+ * them is the defect this function exists to prevent (review findings A3-F1/A3-F2).
+ *
+ * A member whose store is **absent** was read successfully: the server determined
+ * it has no `telemetry.db` at all (`Ok(None)` — `federation/telemetry.rs`), so it
+ * recorded nothing, nothing failed, and the totals here are EXACT with respect to
+ * it rather than a lower bound. That is also the dominant state of a young or large
+ * workspace — on the reference estate nearly every member is absent — so a caveat
+ * keyed on `covers_all_members` alone would sit on this page permanently saying
+ * something untrue.
+ *
+ * A member that is **locked** or **unreadable** is a genuine read FAILURE: its
+ * usage in this window is unknown. Every total here is then a lower bound by an
+ * unknown amount, and the awaiting-data state must not claim that nothing was
+ * recorded anywhere — `calls_total` is the server's sum over the members it COULD
+ * read, so a zero says nothing at all about these.
+ *
+ * An UNRECOGNISED token — a reason arm the server grows against a shipped bundle —
+ * falls in with the failures. That is the safe direction: it produces a caveat that
+ * may be unnecessary, rather than suppressing one that is needed. The comparison is
+ * exact equality against the one token that means "read successfully, no store",
+ * never a substring or a truthiness test.
+ */
+function splitUnread(agg: WorkspaceStatistics): {
+  failed: UnreadMember[];
+  absent: UnreadMember[];
+} {
+  return {
+    failed: agg.unread.filter((u) => u.reason !== "absent"),
+    absent: agg.unread.filter((u) => u.reason === "absent"),
+  };
+}
+
 // ── The denominator, in one place (FR-UI-37, NFR-CC-04) ─────────────────────────
 
 /**
@@ -115,16 +156,27 @@ function textCol<R>(key: string, header: string, get: (r: R) => string): Column<
  * than the roster has is a **lower bound**, not a measurement of the workspace.
  */
 function DenominatorNote({ agg }: { agg: WorkspaceStatistics }) {
+  const { failed, absent } = splitUnread(agg);
   return (
     <p className={styles.capNote}>
       Summed over{" "}
       <strong>
         {agg.members_read} of {agg.members_total}
       </strong>{" "}
-      workspace member{agg.members_total === 1 ? "" : "s"}
-      {agg.covers_all_members
-        ? " — the whole roster."
-        : " — a lower bound: the members named below contributed nothing to it."}
+      workspace member{s(agg.members_total)}
+      {/* A lower bound is a claim about a sum, so it is made ONLY when a read
+          actually failed. `covers_all_members` is false for an absent store too,
+          and calling the figures a lower bound there would be false — nothing was
+          recorded, so nothing is missing. */}
+      {failed.length > 0
+        ? ` — a lower bound: ${failed.length} member${s(failed.length)} could not be read, so ${
+            failed.length === 1 ? "its" : "their"
+          } usage in this window is unknown.`
+        : absent.length > 0
+          ? ` — the other ${absent.length} ${
+              absent.length === 1 ? "has" : "have"
+            } no telemetry store yet and recorded nothing, so no recorded usage is missing.`
+          : " — the whole roster."}
     </p>
   );
 }
@@ -167,7 +219,11 @@ function WindowSelector({
  *  the denominator, and the scope in words so the section label is not the only
  *  thing saying which level this answers for (ADR-66, NFR-CC-04). */
 function PopulationCallout({ agg }: { agg: WorkspaceStatistics }) {
-  const complete = agg.covers_all_members;
+  const { failed, absent } = splitUnread(agg);
+  // Whether any figure is on the page at all. The understated-figures claim is
+  // about figures, so it is not made when the awaiting-data state has replaced
+  // them — a page with no sum on it cannot be understating one.
+  const figuresShown = !isStatsEmpty(agg);
   return (
     <Callout label="Population" tone="signal">
       <p className={styles.valueLead}>
@@ -175,11 +231,32 @@ function PopulationCallout({ agg }: { agg: WorkspaceStatistics }) {
         not for the selected member.
       </p>
       <DenominatorNote agg={agg} />
-      {!complete && (
+      {/* Gated on the population each sentence is ABOUT, not on
+          `covers_all_members`, which is true of both and so cannot word either.
+          Both gates are also the predicate for the table that fulfils the promise
+          these sentences make ("named below"), so the promise and the names cannot
+          come apart. */}
+      {failed.length > 0 && (
         <p className={styles.valueNote}>
-          {agg.unread.length} member{agg.unread.length === 1 ? "" : "s"} could not be read, so every
-          figure on this page is lower than the workspace&rsquo;s true usage by whatever those
-          members recorded. They are named below, each with its reason.
+          {failed.length} member{s(failed.length)} could not be read
+          {figuresShown
+            ? `, so every figure on this page is lower than the workspace's true usage by whatever ${
+                failed.length === 1 ? "it" : "they"
+              } recorded`
+            : `, so nothing here is known about ${
+                failed.length === 1 ? "its" : "their"
+              } usage in this window`}
+          . {failed.length === 1 ? "It is" : "They are"} named below, with{" "}
+          {failed.length === 1 ? "its reason" : "their reasons"}.
+        </p>
+      )}
+      {absent.length > 0 && (
+        <p className={styles.valueNote}>
+          {absent.length} member{s(absent.length)} ha{absent.length === 1 ? "s" : "ve"} no telemetry
+          store yet — nobody has run Logos there, so {absent.length === 1 ? "it" : "they"} recorded
+          nothing. That is the ordinary state of a new service rather than a fault, and it takes
+          nothing away from the figures above. {absent.length === 1 ? "It is" : "They are"} named
+          below.
         </p>
       )}
     </Callout>
@@ -213,12 +290,10 @@ function ValueCallout({ agg }: { agg: WorkspaceStatistics }) {
           <dt>Calls</dt>
           <dd className="mono num">{fmtInt(agg.calls_total)}</dd>
         </div>
-        <div>
-          <dt>Members summed</dt>
-          <dd className="mono num">
-            {agg.members_read} / {agg.members_total}
-          </dd>
-        </div>
+        {/* The denominator is NOT restated here as a second `N / M` figure: it is
+            stated once per surface, by the one component that owns its wording
+            (review finding A5-F4 — one figure in two wordings, four lines apart, is
+            the shape `DenominatorNote` exists to prevent). */}
       </dl>
       <DenominatorNote agg={agg} />
     </Callout>
@@ -371,6 +446,36 @@ const UNREAD_REASON_TONES: Readonly<Record<UnreadReason, BadgeTone>> = {
   unreadable: "red",
 };
 
+/**
+ * The two lookups, read through accessors that tell the truth about their result.
+ *
+ * The maps stay keyed on the closed {@link UnreadReason} union, so a token added to
+ * the wire type without words and a tone fails `tsc -b` — that exhaustiveness is
+ * worth keeping. But at the READ the value is genuinely `| undefined`: the union is
+ * closed only in this bundle, and a server that grows a fourth arm hands it
+ * straight through. Without the widening the checker believes the opposite of the
+ * runtime — it types the tone lookup as total, which makes the load-bearing
+ * fallback below look like dead code a future reader may "simplify" away, while
+ * typing the words lookup as a `string` when that is the one that actually yields
+ * `undefined` (review finding A3-F4).
+ *
+ * The asymmetry between them is deliberate and proven: the tone fallback changes
+ * rendered output (without it `Badge` composes no tone class at all), so an
+ * unrecognised token must not be inked as a fault merely for being unrecognised.
+ * A words fallback could only repeat the token the badge already carries — React
+ * renders `undefined` as nothing, not as the string — and the server's own `detail`
+ * in the next column is the sentence for that row.
+ */
+function toneFor(reason: UnreadReason): BadgeTone {
+  const tone: BadgeTone | undefined = UNREAD_REASON_TONES[reason];
+  return tone ?? "muted";
+}
+
+function wordsFor(reason: UnreadReason): string | undefined {
+  const words: string | undefined = UNREAD_REASON_WORDS[reason];
+  return words;
+}
+
 const UNREAD_COLUMNS: Column<UnreadMember>[] = [
   {
     key: "member",
@@ -384,8 +489,7 @@ const UNREAD_COLUMNS: Column<UnreadMember>[] = [
     header: "Reason",
     cell: (u) => (
       <>
-        <Badge tone={UNREAD_REASON_TONES[u.reason] ?? "muted"}>{u.reason}</Badge>{" "}
-        {UNREAD_REASON_WORDS[u.reason]}
+        <Badge tone={toneFor(u.reason)}>{u.reason}</Badge> {wordsFor(u.reason)}
       </>
     ),
     sortValue: (u) => u.reason,
@@ -412,7 +516,10 @@ function UnreadCard({ agg }: { agg: WorkspaceStatistics }) {
       }
     >
       <DataTable
-        caption="Members whose telemetry could not be read, with the reason"
+        // Not "could not be read": an absent store WAS read, successfully, and found
+        // to be absent. The caption has to cover both populations in the table, and
+        // what they share is that neither contributed to the figures above.
+        caption="Members that contributed nothing to the figures above, each with the reason"
         columns={UNREAD_COLUMNS}
         rows={agg.unread}
         rowKey={(u) => u.member}
@@ -441,15 +548,41 @@ function Surfaces({ agg }: { agg: WorkspaceStatistics }) {
   );
 }
 
-/** The honest awaiting-data state (NFR-CC-04): no member recorded anything in this
- *  window, so the view names that fact rather than render a grid of zeros. Zeros
- *  here would read as a measured "nobody uses Logos", which is not what an empty
- *  store says. */
-function AwaitingData() {
+/**
+ * The honest awaiting-data state (NFR-CC-04): nothing was recorded, so the view
+ * names that fact rather than render a grid of zeros — zeros here would read as a
+ * measured "nobody uses Logos", which is not what an empty store says.
+ *
+ * It takes the aggregate because the sentence it is entitled to say depends on WHY
+ * the sum is zero (review finding A3-F1). `calls_total` is the server's sum over
+ * the members it could READ, so with a locked or unreadable member in the roster a
+ * zero is not evidence that nothing was recorded anywhere — and `logos stats` is
+ * then the wrong remedy, because the blocker is the store rather than a shortage of
+ * usage.
+ */
+function AwaitingData({ agg }: { agg: WorkspaceStatistics }) {
+  const { failed } = splitUnread(agg);
+  if (failed.length === 0) {
+    // Every member either has a store that recorded nothing, or has no store at
+    // all. Both mean nothing was recorded, so the universal claim is earned.
+    return (
+      <EmptyState
+        message="No member recorded any telemetry in this window — use Logos in any service and this view will fill in. Try"
+        command="logos stats"
+      />
+    );
+  }
   return (
     <EmptyState
-      message="No member recorded any telemetry in this window — use Logos in any service and this view will fill in. Try"
-      command="logos stats"
+      message={
+        <>
+          {agg.members_read > 0 &&
+            `None of the ${agg.members_read} member${s(agg.members_read)} whose telemetry could be read recorded anything in this window. `}
+          {failed.length} member{s(failed.length)} could not be read at all, so this view knows
+          nothing about {failed.length === 1 ? "its" : "their"} usage —{" "}
+          {failed.length === 1 ? "it is" : "they are"} named below, with the reason.
+        </>
+      }
     />
   );
 }
@@ -521,7 +654,7 @@ export function WorkspaceStatisticsView() {
         {(agg) => (
           <div className={styles.surfaces}>
             <PopulationCallout agg={agg} />
-            {isStatsEmpty(agg) ? <AwaitingData /> : <Surfaces agg={agg} />}
+            {isStatsEmpty(agg) ? <AwaitingData agg={agg} /> : <Surfaces agg={agg} />}
             {agg.unread.length > 0 && <UnreadCard agg={agg} />}
           </div>
         )}
