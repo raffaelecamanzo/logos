@@ -27,6 +27,22 @@ import {
 } from "./appViewFixtures.ts";
 import { WorkspaceHealthView } from "./WorkspaceHealthView.tsx";
 
+/** The two reads this view issues, each with the card that read alone supplies.
+ *  See the Dashboard spec's note: when the inner read fails, the outer read's
+ *  cards are correctly still rendered, so the assertion is scoped to the card
+ *  the FAILED read owns. */
+const READS = [
+  { path: "/api/v1/workspace/status", card: /^Members$/ },
+  { path: "/api/v1/workspace/check", card: /^Workspace rules$/ },
+] as const;
+
+/** The view under test, inside the provider that establishes workspace mode. */
+const tree = () => (
+  <WorkspaceProvider>
+    <WorkspaceHealthView />
+  </WorkspaceProvider>
+);
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -292,5 +308,62 @@ describe("the view is app-level and honest about its mode", () => {
     );
     await waitFor(() => expect(screen.getByText(/Not a workspace/)).toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: /^Members$/ })).toBeNull();
+  });
+});
+
+describe("a failed read is stated, never papered over (NFR-RA-05)", () => {
+  /** Answer `path` with `code` and everything else normally — so the spec can
+   *  fail ONE of the two reads and see what the view does with the other. */
+  function failing(path: string, code = 500) {
+    const calls = stubAppApi();
+    const ok = globalThis.fetch as unknown as (u: string) => Promise<Response>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        url.startsWith(path)
+          ? Promise.resolve({
+              ok: false,
+              status: code,
+              json: () => Promise.resolve({ error: "boom" }),
+            } as Response)
+          : ok(url),
+      ),
+    );
+    return calls;
+  }
+
+  it("has a read to fail for every read this view issues", () => {
+    // The floor: `it.each([])` registers zero tests silently, so an empty roster
+    // would delete the coverage below rather than fail it.
+    expect(READS.length).toBe(2);
+  });
+
+  it.each(READS)("states the failure when $path fails", async ({ path, card }) => {
+    // Both views wire TWO resources into nested `AsyncResource` frames. The
+    // generic hook has its own specs, but those prove the primitive works in
+    // isolation — not that THIS view passed the right resource into the right
+    // frame. A swap or a shared reference would leave one failure invisible,
+    // which is the state this spec exists to rule out.
+    failing(path);
+    render(tree());
+    const panel = await screen.findByText(
+      new RegExp(`${path.replace("/api/v1/", "")}.*failed`, "i"),
+    );
+    expect(panel).toBeInTheDocument();
+    // …and the card that read alone supplies is ABSENT rather than filled with
+    // a fabricated figure (NFR-CC-04).
+    expect(screen.queryByRole("heading", { name: card })).toBeNull();
+  });
+
+  it("states a failed mode probe as a failure, not as a plain repo", async () => {
+    // The THIRD error source: the roster probe behind `useWorkspace()`. A 500
+    // there must not be read as single-root — that would silently hide the
+    // workspace UI (NFR-RA-05), which is why `probeWorkspace` rethrows.
+    failing("/api/v1/workspace/roster");
+    render(tree());
+    await waitFor(() =>
+      expect(screen.getByText(/could not be read/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/Not a workspace/)).toBeNull();
   });
 });

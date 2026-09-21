@@ -219,6 +219,28 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(screen.queryByRole("combobox")).toBeNull();
   });
 
+  it("renders NO workspace-only nav item in single-root mode, by name", async () => {
+    // The byte-for-byte snapshot below already forbids this structurally — it
+    // pins every rendered <a> against NAV_ITEMS alone. This states the same
+    // thing about the ITEMS, by name, because that is the clause AC6 is written
+    // in ("neither nav item renders") and because a snapshot regenerated in
+    // haste can absorb a leak that a named assertion cannot.
+    mountWithMode(404);
+    await waitFor(() => expect(screen.getByRole("link", { name: /Dashboard/ })).toBeInTheDocument());
+
+    // Keyed on the PATH, never the label: two of these items are called
+    // "Dashboard" and "Health" exactly like their member-scoped twins, which
+    // ADR-66 chose deliberately — so a label query matches the member-scoped
+    // link that SHOULD be there and proves nothing. The route is what separates
+    // the levels.
+    expect(WORKSPACE_NAV_ITEMS.length).toBeGreaterThan(0);
+    const hrefs = [...document.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+    expect(hrefs.length).toBeGreaterThan(0);
+    for (const item of WORKSPACE_NAV_ITEMS) {
+      expect(hrefs).not.toContain(item.path);
+    }
+  });
+
   it("renders the single-root sidebar as the exact markup it rendered before S-425", async () => {
     // The byte-for-byte guard (ADR-52, FR-UI-29 AC4). It is a RENDERED snapshot —
     // the form that catches a leak a state-level assertion misses — and it was
