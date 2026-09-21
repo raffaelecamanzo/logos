@@ -2177,6 +2177,93 @@ fn origin_breakdown_collapses_all_branches_into_dev() {
     );
 }
 
+/// The read-model is **monotone in the window**: a wider window never reports
+/// fewer calls ([NFR-CC-04]).
+///
+/// Not a theoretical property. The two `daily_rollup` queries filter on
+/// `day >= date(?1, 'unixepoch')`, and SQLite's `date()` returns **NULL** once the
+/// cutoff falls below its julian-day floor; `day >= NULL` is NULL, so every rollup
+/// row stops matching and the rolled-up half of `calls_total`, `calls_by_tool` and
+/// `activity_by_day` silently disappears. Before the cutoff was clamped at the
+/// epoch, `window = u32::MAX` returned *one* call where `window = 365` returned
+/// 101 — a larger window answering with a smaller total, and no warning.
+///
+/// Reachable from both `?window=` endpoints, neither of which bounds the value.
+#[test]
+fn a_wider_window_never_reports_fewer_calls() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(&mut conn, &[record("search", 10, true, NOW - 120)]).unwrap();
+    // A rolled-up day 200 days back — only a long window reaches it, and only a
+    // rollup row can exercise the `date()` predicate.
+    conn.execute(
+        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                   total_duration_ms, max_duration_ms)
+         VALUES (date(?1, 'unixepoch'), 'cli', 'search', 100, 100, 3000, 50)",
+        [NOW - 200 * 86_400],
+    )
+    .unwrap();
+
+    let windows = [7u32, 365, 1_000_000, u32::MAX];
+    let totals: Vec<u64> = windows
+        .iter()
+        .map(|w| stats_from(&conn, *w, NOW).expect("stats compute").calls_total)
+        .collect();
+
+    assert_eq!(totals[0], 1, "the 7-day window sees only the raw event");
+    assert!(
+        totals[1..].iter().all(|&t| t == 101),
+        "every window reaching the rolled-up day counts it: {windows:?} -> {totals:?}"
+    );
+    for pair in totals.windows(2) {
+        assert!(
+            pair[1] >= pair[0],
+            "a wider window returned fewer calls: {windows:?} -> {totals:?}"
+        );
+    }
+}
+
+/// An **unreadable** store is an `Err` out of [`super::stats`], not the
+/// warning-carrying empty model an *absent* one produces.
+///
+/// The sibling of `stats_without_a_telemetry_db_degrades_with_a_warning`, and
+/// the half that was unpinned: `stats` now delegates to `read_stats`, so the
+/// `?` that propagates a real failure is one edit away from becoming an
+/// `unwrap_or(None)` that swallows it. That edit would report a corrupt store to
+/// every `Engine::stats` caller as "no telemetry recorded yet" — a fault
+/// rendered as a routine state, which is the worse direction and exactly what
+/// the empty/absent distinction exists to keep apart ([NFR-CC-04]).
+#[test]
+fn stats_over_an_unreadable_store_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let logos = dir.path().join(".logos");
+    std::fs::create_dir_all(&logos).unwrap();
+    std::fs::write(logos.join("telemetry.db"), b"not a database").unwrap();
+
+    let err = super::stats(dir.path(), None)
+        .expect_err("a present, unopenable store must not degrade to the empty model");
+    let rendered = format!("{err:#}");
+    assert!(
+        !rendered.contains("no telemetry recorded yet"),
+        "a fault must not be reported as an absence: {rendered}"
+    );
+}
+
+/// A store that is **present but not a regular file** is likewise an error, not
+/// an absence — `is_file()` alone cannot tell the two apart, because it answers
+/// `false` for every `stat` outcome rather than only for "not there".
+#[test]
+fn stats_over_a_non_file_store_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".logos").join("telemetry.db")).unwrap();
+
+    let err = super::stats(dir.path(), None)
+        .expect_err("a directory named telemetry.db is a broken checkout, not an empty one");
+    assert!(
+        format!("{err:#}").contains("not a regular file"),
+        "the diagnostic names what is actually wrong: {err:#}"
+    );
+}
+
 /// A project that never recorded telemetry degrades to a warning-carrying
 /// default through the path-level entry point.
 #[test]

@@ -696,4 +696,5 @@ pub(crate) fn seed_store_for_tests(
 /// [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
 pub(crate) use stats::{
     attribution_coverage, read_stats, stats, DEFAULT_WINDOW_DAYS as DEFAULT_STATS_WINDOW_DAYS,
+    NO_TELEMETRY_YET,
 };
