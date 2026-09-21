@@ -49,8 +49,7 @@ import {
   type Column,
 } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
-import { freshnessStatement } from "../dashboard/dashboardModel.ts";
-import { pct } from "./CoverageBoards.tsx";
+import { freshnessStatement, resolutionStatement } from "../dashboard/dashboardModel.ts";
 import styles from "./Workspace.module.css";
 
 /** What a cell says when the figure behind it was never read — a member whose
@@ -176,8 +175,10 @@ interface MemberRow {
   openState: string;
   degraded: boolean;
   reason: string | null;
-  /** This member's OWN reference-resolution coverage, never averaged (BR-56). */
-  resolution: number | null;
+  /** This member's OWN reference-resolution coverage as the composed never-bare
+   *  line ("40.0% (400 of 1000 refs)"), never averaged (BR-56) and never bare
+   *  (CR-111). `null` when the member was not read. */
+  resolution: string | null;
 }
 
 /** The warm state in words — index PRESENCE, a different axis from openability.
@@ -211,7 +212,7 @@ function memberRow(member: MemberStatus, nowUnix: number): MemberRow {
     // verbatim diagnostic when it did not, and `error` for a member that opened
     // and failed a later walk. Additive, never a replacement.
     reason: member.degraded_reason ?? member.reason ?? member.error ?? null,
-    resolution: member.result?.resolution_coverage ?? null,
+    resolution: member.result ? resolutionStatement(member.result) : null,
   };
 }
 
@@ -248,10 +249,8 @@ const MEMBER_COLUMNS: Column<MemberRow>[] = [
   {
     key: "resolution",
     header: "Its reference resolution",
-    numeric: true,
-    cell: (r) =>
-      r.resolution === null ? <span className="muted">{NOT_READ}</span> : pct(r.resolution),
-    sortValue: (r) => r.resolution ?? -1,
+    cell: (r) => r.resolution ?? <span className="muted">{NOT_READ}</span>,
+    sortValue: (r) => r.resolution ?? "",
   },
 ];
 

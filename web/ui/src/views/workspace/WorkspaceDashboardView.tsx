@@ -45,8 +45,9 @@ import {
   type Column,
 } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
+import { resolutionStatement } from "../dashboard/dashboardModel.ts";
 import { buildCoverageDashboard } from "./coverageModel.ts";
-import { CoveragePanel, pct } from "./CoverageBoards.tsx";
+import { CoveragePanel } from "./CoverageBoards.tsx";
 import styles from "./Workspace.module.css";
 
 /** What a cell says when the figure behind it was never read (FR-EH-04,
@@ -221,8 +222,12 @@ interface RosterRow {
   degraded: boolean;
   /** Why the open failed, when the fan-out said. */
   reason: string | null;
-  /** This member's OWN reference-resolution coverage, or `null` when unread. */
-  resolution: number | null;
+  /** This member's OWN reference-resolution coverage as the composed
+   *  never-bare line ("40.0% (400 of 1000 refs)"), or `null` when unread. The
+   *  denominator travels with the figure: two members on identical coverage over
+   *  wildly different reference populations must not render identically
+   *  (CR-111, FR-WS-05). */
+  resolution: string | null;
   /** This member's own union-view tally, or `null` when the view skipped it. */
   tally: MemberReachability | null;
 }
@@ -264,7 +269,7 @@ function rosterRow(member: MemberStatus, tally: MemberReachability | null): Rost
     reason: member.degraded_reason ?? member.error ?? null,
     // Absent for a member with no result — NOT defaulted to 0, which would read
     // as "nothing resolves here" (NFR-CC-04).
-    resolution: member.result?.resolution_coverage ?? null,
+    resolution: member.result ? resolutionStatement(member.result) : null,
     tally,
   };
 }
@@ -307,10 +312,8 @@ const ROSTER_COLUMNS: Column<RosterRow>[] = [
     // (BR-56): the figure is defined against one member's graph.
     key: "resolution",
     header: "Its reference resolution",
-    numeric: true,
-    cell: (r) =>
-      r.resolution === null ? <span className="muted">{NOT_READ}</span> : pct(r.resolution),
-    sortValue: (r) => r.resolution ?? -1,
+    cell: (r) => r.resolution ?? <span className="muted">{NOT_READ}</span>,
+    sortValue: (r) => r.resolution ?? "",
   },
   {
     key: "extraRoots",

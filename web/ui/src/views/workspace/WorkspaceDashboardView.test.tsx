@@ -234,36 +234,71 @@ describe("the reachability rider's shortfall caveat (FR-WS-16, NFR-CC-04)", () =
 describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {
   it("shows each member's OWN resolution coverage, named — and no mean of them", async () => {
     // Three deliberately distinct per-member signals whose mean is a distinctive
-    // string. If a roll-up is ever added, "60.0%" appears and this fails.
+    // string, over three DIFFERENT denominators — so this spec pins the CR-111
+    // duty (the ratio is never bare) and the BR-56 one (it is never averaged) at
+    // the same time.
     await mount({
       status: workspaceStatus({
         members: [
-          memberStatus("api", { result: statusInfo({ resolution_coverage: 0.4 }) }),
-          memberStatus("orders", { result: statusInfo({ resolution_coverage: 0.6 }) }),
-          memberStatus("web", { result: statusInfo({ resolution_coverage: 0.8 }) }),
+          memberStatus("api", {
+            result: statusInfo({ resolution_coverage: 0.4, refs_resolved: 40, refs_total: 100 }),
+          }),
+          memberStatus("orders", {
+            result: statusInfo({ resolution_coverage: 0.6, refs_resolved: 600, refs_total: 1000 }),
+          }),
+          memberStatus("web", {
+            result: statusInfo({
+              resolution_coverage: 0.8,
+              refs_resolved: 8_000,
+              refs_total: 10_000,
+            }),
+          }),
         ],
       }),
     });
 
     for (const [member, own] of [
-      ["api", "40.0%"],
-      ["orders", "60.0%"],
-      ["web", "80.0%"],
+      ["api", "40.0% (40 of 100 refs)"],
+      ["orders", "60.0% (600 of 1,000 refs)"],
+      ["web", "80.0% (8,000 of 10,000 refs)"],
     ] as const) {
       const row = within(card(/^Members$/)).getByRole("row", { name: new RegExp(member) });
       expect(within(row).getByText(own)).toBeInTheDocument();
     }
-    // The mean (0.6) would render as the SAME string `orders` legitimately shows,
-    // so the roll-up is pinned by counting: exactly one member owns it.
-    expect(within(card(/^Members$/)).getAllByText("60.0%")).toHaveLength(1);
+    // The mean of 0.4/0.6/0.8 is 0.6, which `orders` legitimately owns — so the
+    // roll-up is pinned by COUNTING the percentage, not by its absence.
+    expect(within(card(/^Members$/)).getAllByText(/60\.0%/)).toHaveLength(1);
   });
 
   it("renders no element announcing itself as a workspace-wide quality signal", async () => {
     await mount();
-    // The 0–10000 per-repo signal is defined against ONE repository's baseline, so
-    // a mean of several has no referent (BR-56). Nothing on this view claims one.
-    expect(screen.queryByText(/workspace (signal|score)/i)).toBeNull();
-    expect(screen.queryByText(/overall (signal|score|health)/i)).toBeNull();
+    // BR-56 is about rendering an AGGREGATE AS A SIGNAL, so the guard reads the
+    // places a figure announces itself — card titles and column headers — and not
+    // page prose. Matching all text instead fires on this view's own disclaimer,
+    // which contains the words "quality signal" and "mean" precisely because it is
+    // explaining that neither is computed here.
+    //
+    // The vocabulary is the SIBLING per-member Dashboard's own: its card is titled
+    // "Quality index" and its empty state says "quality signal"
+    // (`views/dashboard/DashboardView.tsx`). An earlier spelling matched only
+    // /workspace (signal|score)/, which an aggregate added in that idiom would
+    // have walked straight past (found in the S-428 review).
+    const labels = [
+      ...screen.getAllByRole("heading").map((h) => h.textContent ?? ""),
+      ...screen.getAllByRole("columnheader").map((c) => c.textContent ?? ""),
+    ];
+    // The floor: an empty `labels` would make every assertion below vanish rather
+    // than fail — a guard that switches itself off exactly when the surface it
+    // guards disappears.
+    expect(labels.length).toBeGreaterThan(5);
+    for (const forbidden of [
+      /quality (index|signal)/i,
+      /workspace (signal|score)/i,
+      /overall (signal|score|health)/i,
+      /\baverage\b|\bmean\b|\btotal signal\b/i,
+    ]) {
+      expect(labels.filter((l) => forbidden.test(l))).toEqual([]);
+    }
   });
 });
 

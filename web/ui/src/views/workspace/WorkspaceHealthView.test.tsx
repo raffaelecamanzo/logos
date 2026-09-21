@@ -192,19 +192,66 @@ describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {
     await mount({
       status: workspaceStatus({
         members: [
-          memberStatus("api", { result: statusInfo({ resolution_coverage: 0.4 }) }),
-          memberStatus("orders", { result: statusInfo({ resolution_coverage: 0.6 }) }),
-          memberStatus("web", { result: statusInfo({ resolution_coverage: 0.8 }) }),
+          memberStatus("api", {
+            result: statusInfo({ resolution_coverage: 0.4, refs_resolved: 40, refs_total: 100 }),
+          }),
+          memberStatus("orders", {
+            result: statusInfo({ resolution_coverage: 0.6, refs_resolved: 600, refs_total: 1000 }),
+          }),
+          memberStatus("web", {
+            result: statusInfo({
+              resolution_coverage: 0.8,
+              refs_resolved: 8_000,
+              refs_total: 10_000,
+            }),
+          }),
         ],
       }),
     });
     const members = card(/^Members$/);
-    for (const own of ["40.0%", "60.0%", "80.0%"]) {
+    // Each member's own figure, with the denominator it was computed over — three
+    // different denominators, so a bare percentage cannot satisfy this (CR-111).
+    for (const own of [
+      "40.0% (40 of 100 refs)",
+      "60.0% (600 of 1,000 refs)",
+      "80.0% (8,000 of 10,000 refs)",
+    ]) {
       expect(within(members).getByText(own)).toBeInTheDocument();
     }
     // The mean of the three is 0.6, which `orders` legitimately owns — so the
     // roll-up is pinned by counting rather than by absence.
-    expect(within(members).getAllByText("60.0%")).toHaveLength(1);
+    expect(within(members).getAllByText(/60\.0%/)).toHaveLength(1);
+  });
+
+  it("renders no element announcing itself as a workspace-wide quality signal", async () => {
+    await mount();
+    // BR-56 is about rendering an AGGREGATE AS A SIGNAL, so the guard reads the
+    // places a figure announces itself — card titles and column headers — and not
+    // page prose. Matching all text instead fires on this view's own disclaimer,
+    // which contains the words "quality signal" and "mean" precisely because it is
+    // explaining that neither is computed here.
+    //
+    // The vocabulary is the SIBLING per-member Dashboard's own: its card is titled
+    // "Quality index" and its empty state says "quality signal"
+    // (`views/dashboard/DashboardView.tsx`). An earlier spelling matched only
+    // /workspace (signal|score)/, which an aggregate added in that idiom would
+    // have walked straight past (found in the S-428 review).
+    const labels = [
+      ...screen.getAllByRole("heading").map((h) => h.textContent ?? ""),
+      ...screen.getAllByRole("columnheader").map((c) => c.textContent ?? ""),
+    ];
+    // The floor: an empty `labels` would make every assertion below vanish rather
+    // than fail — a guard that switches itself off exactly when the surface it
+    // guards disappears.
+    expect(labels.length).toBeGreaterThan(5);
+    for (const forbidden of [
+      /quality (index|signal)/i,
+      /workspace (signal|score)/i,
+      /overall (signal|score|health)/i,
+      /\baverage\b|\bmean\b|\btotal signal\b/i,
+    ]) {
+      expect(labels.filter((l) => forbidden.test(l))).toEqual([]);
+    }
   });
 });
 
