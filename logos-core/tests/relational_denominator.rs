@@ -45,7 +45,7 @@ use std::process::Command;
 use logos_core::models::navigation::{
     AffectedResult, BranchOverlapResult, CalleesResult, CallersResult, DenominatorAbsence,
     ImpactIntersectionResult, ImpactResult, LanguageResolution, PrecedentResult,
-    RelationResolution, ResolutionDenominator,
+    PrecedentTargetKind, RelationResolution, ResolutionDenominator,
 };
 use logos_core::models::quality::CrossFileAbsence;
 use logos_core::Engine;
@@ -90,13 +90,14 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn lib_rs(alpha_body: &str) -> String {
     format!(
         "use crate::util::run;\n\npub fn alpha() {{\n    run();\n    beta();{alpha_body}\n}}\n\n\
-         pub fn beta() {{}}\n"
+         pub fn beta() {{}}\n\npub fn gamma() {{\n    run();\n    beta();\n}}\n"
     )
 }
 
 /// [S-441]'s shapes, in a repository: a Rust crate calling and importing
 /// across two files, and a TypeScript file whose only call stays inside it
-/// but which imports from a sibling. Two branches each edit `alpha`, so
+/// but which imports from a sibling. `gamma` calls what `alpha` calls, so
+/// `precedent` has a Rust analogue to find. Two branches each edit `alpha`, so
 /// `branch_overlap` has a contended symbol to report.
 ///
 /// [S-441]: ../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
@@ -569,4 +570,40 @@ fn an_empty_precedent_over_an_unresolved_language_names_the_denominator() {
             "{target}"
         );
     }
+}
+
+/// `precedent` carries its denominator in **symbol** mode and on a
+/// **non-empty** answer too — not only on the empty file-mode answer its
+/// reason clause reads it for. A symbol-mode target whose language binds no
+/// cross-file call gets the clause from the same field.
+#[test]
+fn precedent_carries_its_denominator_in_symbol_mode_and_on_a_non_empty_answer() {
+    let tmp = fixture();
+    let engine = indexed(&tmp);
+
+    let analogue = engine.precedent("alpha", None);
+    assert_eq!(analogue.target_kind, PrecedentTargetKind::Symbol);
+    assert!(
+        analogue.precedents.iter().any(|p| p.symbol.name == "gamma"),
+        "gamma shares alpha's call shape: {:?}",
+        analogue.empty_reason
+    );
+    assert_eq!(
+        analogue.resolution_denominator.languages,
+        vec![status_row(&engine, "rust")],
+        "a non-empty precedent states the row it was computed over"
+    );
+
+    let symbol = engine.precedent("navItems", None);
+    assert_eq!(symbol.target_kind, PrecedentTargetKind::Symbol);
+    assert_eq!(
+        symbol.resolution_denominator.languages,
+        vec![status_row(&engine, "typescript")]
+    );
+    let reason = symbol.empty_reason.expect("nothing is analogous to navItems");
+    assert!(
+        reason.detail.contains("typescript binds no Calls edge across a file boundary"),
+        "{:?}",
+        reason.detail
+    );
 }
