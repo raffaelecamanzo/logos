@@ -533,25 +533,40 @@ fn the_denominator_is_deterministic_across_runs() {
 // ── precedent (FR-NV-12 AC 4, CR-143 §3.7) ───────────────────────────────────
 
 /// `precedent`'s empty reason no longer states a coverage gap as a property of
-/// the user's code: over a file whose language binds no cross-file call, the
-/// reason names that language's state and points at the denominator, whichever
-/// of the two structural codes applies.
+/// the user's code: over a target whose language binds no cross-file call, the
+/// reason names that language's state and points at the denominator — on
+/// **each** of the two structural codes [CR-143] §3.7 measured, pinned
+/// separately so neither arm can lose the clause behind the other.
+///
+/// `web/labels.ts` defines a constant that calls, implements and registers
+/// nothing, so it has no anchor at all; `web/nav.ts` has anchors that nothing
+/// else shares.
+///
+/// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
 #[test]
 fn an_empty_precedent_over_an_unresolved_language_names_the_denominator() {
     let tmp = fixture();
     let engine = indexed(&tmp);
-    let answer = engine.precedent("web/nav.ts", None);
-    let reason = answer.empty_reason.expect("nothing is analogous in the fixture");
-    assert!(
-        matches!(reason.code.as_str(), "no_structural_anchors" | "anchors_are_unshared"),
-        "one of the two codes CR-143 §3.7 measured: {reason:?}"
-    );
-    assert!(
-        reason.detail.contains("typescript binds no Calls edge across a file boundary")
-            && reason.detail.contains("same-file-only")
-            && reason.detail.contains("resolution_denominator"),
-        "{:?}",
-        reason.detail
-    );
-    assert_eq!(answer.resolution_denominator.languages, vec![status_row(&engine, "typescript")]);
+    for (target, code) in [
+        ("web/labels.ts", "no_structural_anchors"),
+        ("web/nav.ts", "anchors_are_unshared"),
+    ] {
+        let answer = engine.precedent(target, None);
+        let reason = answer
+            .empty_reason
+            .unwrap_or_else(|| panic!("nothing is analogous to {target} in the fixture"));
+        assert_eq!(reason.code.as_str(), code, "{target}: {reason:?}");
+        assert!(
+            reason.detail.contains("typescript binds no Calls edge across a file boundary")
+                && reason.detail.contains("same-file-only")
+                && reason.detail.contains("resolution_denominator"),
+            "{target}: {:?}",
+            reason.detail
+        );
+        assert_eq!(
+            answer.resolution_denominator.languages,
+            vec![status_row(&engine, "typescript")],
+            "{target}"
+        );
+    }
 }
