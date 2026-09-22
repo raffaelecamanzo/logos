@@ -529,3 +529,30 @@ fn a_sync_rebinds_imports_no_token_of_theirs_names() {
     assert_eq!(imported_files(cold_rt, "web/src/App.tsx"), synced_ts);
     assert_eq!(imported_files(cold_rt, "cmd/main.go"), synced_go);
 }
+
+#[test]
+fn a_multi_dot_file_name_keeps_every_dot_but_its_extension() {
+    // `nav.test.ts` beside `nav.ts` is the shape real trees are full of
+    // (`*.test.ts`, `*.module.ts`, `vite.config.ts`): the stem is everything
+    // but the LAST extension, on both the ledger and the file side, or `./nav`
+    // turns ambiguous and `./nav.test` names nothing.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "web/src/nav.ts", NAV);
+    write(tmp.path(), "web/src/nav.test.ts", "export const t = 1;\n");
+    write(
+        tmp.path(),
+        "web/src/a.ts",
+        "import { navItemsFor } from './nav';\n",
+    );
+    write(
+        tmp.path(),
+        "web/src/b.ts",
+        "import { t } from './nav.test.ts';\n",
+    );
+    write(tmp.path(), "web/src/c.ts", "import { t } from './nav.test';\n");
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(imported_files(rt, "web/src/a.ts"), ["web/src/nav.ts"]);
+    assert_eq!(imported_files(rt, "web/src/b.ts"), ["web/src/nav.test.ts"]);
+    assert_eq!(imported_files(rt, "web/src/c.ts"), ["web/src/nav.test.ts"]);
+}
