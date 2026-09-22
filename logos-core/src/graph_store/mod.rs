@@ -1482,6 +1482,24 @@ pub trait GraphStore {
     /// [FR-NV-13]: ../../../docs/specs/requirements/FR-NV-13.md
     fn span_nodes_in_files(&self, paths: &[String]) -> Result<Vec<NodeRow>>;
 
+    /// The language each of the given project-relative file `paths` is tagged
+    /// with (`files.language`), keyed by path ([FR-NV-14], [S-442]).
+    ///
+    /// The anchor half of a relational answer's resolution denominator: the
+    /// answer names which files it is anchored in, and this says which
+    /// per-language row of [`resolution_by_language`](GraphStore::resolution_by_language)
+    /// each one selects. A path the index does not hold is **absent** from the
+    /// map; a held path whose file records no language maps to `None`. Like
+    /// its span-reading sibling it reads only the named files. An empty `paths`
+    /// yields an empty map.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+    fn file_languages(
+        &self,
+        paths: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Option<String>>>;
+
     /// The subset of `node_ids` that carry a **dispatch live-root marker** — a
     /// `RoutesTo` self-edge (`source == target`, [`crate::resolve::dispatch`]).
     ///
@@ -2562,6 +2580,27 @@ impl GraphStore for SqliteGraphStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting span-bearing nodes in files")?;
         raws.into_iter().map(raw_to_node).collect()
+    }
+
+    fn file_languages(
+        &self,
+        paths: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Option<String>>> {
+        if paths.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        // Dynamic `IN (?,?,…)` over the answer's (small) anchor set, as
+        // `span_nodes_in_files`; served by the `files.path` UNIQUE index.
+        let placeholders = vec!["?"; paths.len()].join(",");
+        let sql = format!("SELECT path, language FROM files WHERE path IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(paths.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()
+            .context("reading the languages of the named files")?;
+        Ok(rows)
     }
 
     fn markers_for_nodes(&self, node_ids: &[NodeId]) -> Result<Vec<NodeId>> {

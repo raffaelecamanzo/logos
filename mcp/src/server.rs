@@ -502,7 +502,7 @@ impl LogosMcp {
         .await
     }
 
-    #[tool(description = "Direct callers of a symbol (FR-NV-05).")]
+    #[tool(description = "Direct callers of a symbol (FR-NV-05). Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).")]
     async fn callers(
         &self,
         Parameters(p): Parameters<EdgeParams>,
@@ -511,7 +511,7 @@ impl LogosMcp {
             .await
     }
 
-    #[tool(description = "Direct callees of a symbol (FR-NV-05).")]
+    #[tool(description = "Direct callees of a symbol (FR-NV-05). Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).")]
     async fn callees(
         &self,
         Parameters(p): Parameters<EdgeParams>,
@@ -521,7 +521,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on (FR-NV-06)."
+        description = "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on (FR-NV-06). Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14)."
     )]
     async fn impact(
         &self,
@@ -532,7 +532,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Which planned work items collide, and on what (FR-NV-11). Give work items as `<id>=<symbol>[,<symbol>...]`; returns the pairs whose transitive impact sets intersect (naming the shared symbols), the pairs that are safely parallel, and the coverage limits of that verdict. Ask BEFORE scheduling work in parallel, not after."
+        description = "Which planned work items collide, and on what (FR-NV-11). Give work items as `<id>=<symbol>[,<symbol>...]`; returns the pairs whose transitive impact sets intersect (naming the shared symbols), the pairs that are safely parallel, and the coverage limits of that verdict. Ask BEFORE scheduling work in parallel, not after. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14)."
     )]
     async fn impact_intersection(
         &self,
@@ -545,7 +545,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Structural precedent (FR-NV-12): nodes analogous to a symbol or a project-relative file — those sharing a trait/interface implementation, a registration edge (the same registry, dispatcher or factory names both), or a call shape. Each result names WHY it is analogous and through which nodes; ranking is counted graph facts, never a score, and an empty answer states its reason. Ask BEFORE writing new code, to find the sibling that already does this."
+        description = "Structural precedent (FR-NV-12): nodes analogous to a symbol or a project-relative file — those sharing a trait/interface implementation, a registration edge (the same registry, dispatcher or factory names both), or a call shape. Each result names WHY it is analogous and through which nodes; ranking is counted graph facts, never a score, and an empty answer states its reason, and names the resolution denominator where the reason is the index's reach rather than the code (`resolution_denominator`, FR-NV-14). Ask BEFORE writing new code, to find the sibling that already does this."
     )]
     async fn precedent(
         &self,
@@ -556,7 +556,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Which git refs collide, and what a merge did not carry (FR-NV-13). Give the refs about to be merged; returns the symbols more than one of them modifies (naming the refs, and naming the refs that do NOT touch a shared symbol — the silent-drop shape), plus, with `merge`, the symbols and files a ref changed that the stated merge result does not. Ask BEFORE integrating parallel branches, and again after: a clean merge is not a complete merge."
+        description = "Which git refs collide, and what a merge did not carry (FR-NV-13). Give the refs about to be merged; returns the symbols more than one of them modifies (naming the refs, and naming the refs that do NOT touch a shared symbol — the silent-drop shape), plus, with `merge`, the symbols and files a ref changed that the stated merge result does not. Ask BEFORE integrating parallel branches, and again after: a clean merge is not a complete merge. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14)."
     )]
     async fn branch_overlap(
         &self,

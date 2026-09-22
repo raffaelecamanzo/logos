@@ -239,6 +239,17 @@ pub(crate) fn branch_overlap(
         .take(MAX_PATHS_LISTED)
         .cloned()
         .collect();
+    // Anchored on every changed file the index holds, spans or not. An answer
+    // that stopped before diffing, or whose refs changed no file, keeps the
+    // default `n/a`: no anchor was looked up, so none can be reported missing
+    // (R1, [FR-NV-14]).
+    if !paths.is_empty() {
+        result.resolution_denominator = super::resolution_denominator(
+            runtime,
+            paths.iter().cloned().map(Some).collect(),
+            &mut result.warnings,
+        );
+    }
 
     // ── attribute each ref's ranges to symbols ──────────────────────────────
     let mut rows: BTreeMap<NodeId, &NodeRow> = BTreeMap::new();

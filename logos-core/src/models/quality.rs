@@ -141,7 +141,7 @@ pub struct QualityReadout {
 /// figure. A second question gets a second classifier, never more arms on the
 /// first — otherwise every match carries arms that cannot arise for it.
 ///
-/// This is why there are five vocabularies and not one, and each is a different
+/// This is why there are six vocabularies and not one, and each is a different
 /// question rather than a different dialect:
 ///
 /// | Classifier | The question it answers |
@@ -149,6 +149,7 @@ pub struct QualityReadout {
 /// | [`SignalAbsence`] | why the 0–10000 metric signal is missing — a fact about the **graph** |
 /// | [`EvaluatedSetAbsence`] | why the rule check has no denominator — a fact about the **contract** |
 /// | [`CrossFileAbsence`] | why one language's relation class has no cross-file edge to count — a fact about the **resolver's output** ([S-441]) |
+/// | [`DenominatorAbsence`] | why a relational answer carries no language row for its denominator — a fact about the **answer's anchors** ([S-442]); declared beside the answer types, since two of its spellings are lexicon words this file may not hold outside [`absence::SENTINELS`] |
 /// | `healthModel.ts` `signalAbsence` | why the Health page has no signal to show — a fact about a **persisted snapshot**, so it has a middle arm (`unscanned`) the computing readout cannot reach |
 /// | `healthModel.ts` `snapshotStaleness` | why a signal that **exists** is not asserted current — not an absence at all, and deliberately separate ([CR-135] §3.3) |
 ///
@@ -205,6 +206,8 @@ pub struct QualityReadout {
 /// [S-422]: ../../../docs/planning/journal.md#s-422-the-health-readout-is-internally-consistent-and-never-stale
 /// [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [`DenominatorAbsence`]: crate::models::navigation::DenominatorAbsence
 /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
 /// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
@@ -259,9 +262,19 @@ pub mod absence {
     /// `the_resolution_denominator_speaks_only_the_lexicon` in the audit pins
     /// them to this list structurally instead.
     ///
+    /// # The relational answer's spelling ([S-442], [FR-NV-14])
+    ///
+    /// `no-language-recorded` is the one wording the relational answers'
+    /// denominator added: [`DenominatorAbsence`]'s arm for anchors that
+    /// resolved into no language-tagged file. Its two other arms reuse
+    /// `unindexed` and `n/a` as written, so the relational answers speak three
+    /// words of this list and coin one.
+    ///
+    /// [`DenominatorAbsence`]: crate::models::navigation::DenominatorAbsence
     /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
     /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
     /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
     pub const SENTINELS: &[&str] = &[
         "at an unknown age",
         "de-indexed",
@@ -273,6 +286,7 @@ pub mod absence {
         "no baseline",
         "no pass is stated",
         "no rules contract",
+        "no-language-recorded",
         "no-production-scope",
         "no-references-recorded",
         "no-resolved-edges",
