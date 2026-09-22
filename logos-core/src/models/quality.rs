@@ -126,8 +126,10 @@ pub struct QualityReadout {
 /// (`governance::readout`, `governance::gate`), the CLI itself (`cli/src`), and
 /// the SPA (`web/ui/src`) — and before Sprint 73 they did it three ways. This
 /// module is the statement they share. It adds no state and classifies nothing
-/// itself: the classifiers are [`SignalAbsence`], [`EvaluatedSetAbsence`], and
-/// the SPA's own `signalAbsence` / `snapshotStaleness`. What lives here is the
+/// itself: the classifiers are [`SignalAbsence`], [`EvaluatedSetAbsence`],
+/// [`CrossFileAbsence`], [`DenominatorAbsence`], and the SPA's own
+/// `signalAbsence` / `snapshotStaleness` — the six vocabularies of R0's table
+/// below. What lives here is the
 /// contract all of them already keep, written down so the *next* surface adopts
 /// it rather than guessing at a precedent.
 ///
