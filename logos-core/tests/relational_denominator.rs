@@ -388,6 +388,39 @@ fn nothing_asked_and_a_degraded_answer_read_n_a() {
     );
 }
 
+/// Anchors that resolved into no language-tagged file read
+/// `no-language-recorded`, never `unindexed`, on both ways an anchor can lack
+/// a language: a held file whose `files.language` is `NULL`, and a node whose
+/// file row is gone (`nodes.file_id` is `ON DELETE SET NULL`). R1: the anchor
+/// **is** in the index, so saying otherwise would name a false cause.
+#[test]
+fn an_anchor_with_no_recorded_language_reads_no_language_recorded() {
+    let tmp = fixture();
+    let engine = indexed(&tmp);
+    let db = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).expect("store opens");
+    let no_language = Some(DenominatorAbsence::NoLanguageRecorded { anchors: 1 });
+
+    db.execute_batch("UPDATE files SET language = NULL WHERE path = 'web/labels.ts';")
+        .expect("the language clears");
+    assert_eq!(
+        engine
+            .affected(&strings(&["web/labels.ts"]), false)
+            .resolution_denominator
+            .absence,
+        no_language,
+        "a held file that records no language"
+    );
+
+    db.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM files WHERE path = 'src/util.rs';")
+        .expect("the file row deletes, orphaning its nodes");
+    let callers = engine.callers("run", None);
+    assert!(callers.resolved.is_some(), "`run` still resolves, file-less");
+    assert_eq!(
+        callers.resolution_denominator.absence, no_language,
+        "a node bound to no file"
+    );
+}
+
 /// A denominator read that fails **beside a successful answer** degrades the
 /// denominator alone: the answer keeps its result, the denominator reads
 /// `n/a` — never a cause the failure did not establish — and `warnings` says
