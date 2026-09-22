@@ -449,3 +449,40 @@ fn a_relative_import_binds_only_within_its_own_language() {
     assert_eq!(imported_files(rt, "web/src/App.ts"), ["web/src/util.ts"]);
     assert!(import_row_unresolved(rt, ".::helper"));
 }
+
+#[test]
+fn a_go_import_binds_in_the_importers_own_module_and_the_longest_module_path() {
+    let tmp = TempDir::new().unwrap();
+    // Three example modules that all declare `module example`: only the
+    // importer's own `go.mod` says which one `example/internal/x` means.
+    for m in ["a", "b", "c"] {
+        write(tmp.path(), &format!("examples/{m}/go.mod"), "module example\n");
+    }
+    write(tmp.path(), "examples/a/internal/x/x.go", "package x\n\nfunc X() {}\n");
+    write(tmp.path(), "examples/c/internal/x/x.go", "package x\n\nfunc X() {}\n");
+    let importer = "package main\n\nimport \"example/internal/x\"\n\nfunc main() { x.X() }\n";
+    write(tmp.path(), "examples/b/main.go", importer);
+    write(tmp.path(), "examples/c/main.go", importer);
+    // A nested module owns its subtree: `example.com/shop/tools/gen` lives
+    // under `x/tools`, not at the `tools/gen` the root module would spell.
+    write(tmp.path(), "go.mod", "module example.com/shop\n");
+    write(tmp.path(), "x/tools/go.mod", "module example.com/shop/tools\n");
+    write(tmp.path(), "x/tools/gen/gen.go", "package gen\n\nfunc G() {}\n");
+    write(tmp.path(), "tools/gen/decoy.go", "package gen\n\nfunc G() {}\n");
+    write(
+        tmp.path(),
+        "cmd/main.go",
+        "package main\n\nimport \"example.com/shop/tools/gen\"\n\nfunc main() { gen.G() }\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(
+        imported_files(rt, "examples/b/main.go").is_empty(),
+        "b's own module has no internal/x; another module's must not stand in"
+    );
+    assert_eq!(
+        imported_files(rt, "examples/c/main.go"),
+        ["examples/c/internal/x/x.go"]
+    );
+    assert_eq!(imported_files(rt, "cmd/main.go"), ["x/tools/gen/gen.go"]);
+}

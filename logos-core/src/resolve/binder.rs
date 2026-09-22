@@ -274,8 +274,7 @@ pub(crate) struct Index {
     ///
     /// [`LanguageRegistry::specifier_target_extensions`]: crate::plugin::LanguageRegistry::specifier_target_extensions
     specifier_targets: HashMap<String, HashSet<String>>,
-    /// The Go modules the tree declares, longest module path first (S-439,
-    /// [`super::go_module`]). Empty unless the run was given the tree root
+    /// The Go modules the tree declares (S-439, [`super::go_module`]). Empty unless the run was given the tree root
     /// ([`Index::with_path_specifiers`]).
     go_modules: Vec<GoModule>,
     /// file id → scope facts from its import rows.
@@ -345,9 +344,7 @@ impl Index {
     }
 
     /// Declare which files write their import specifiers as paths, and the Go
-    /// modules a Go import path is anchored on (S-439). The modules must arrive
-    /// longest module path first, as [`super::go_module::discover`] returns
-    /// them.
+    /// modules a Go import path is anchored on (S-439).
     pub(crate) fn with_path_specifiers(
         mut self,
         specifier_targets: HashMap<String, HashSet<String>>,
@@ -1554,7 +1551,7 @@ impl Ctx<'_> {
         // beside a `go.mod` declaring `module shared` is a package specifier,
         // never a path into the Go tree.
         let go_package = if extension_of(source_file) == "go" {
-            self.resolve_go_package(&segs)
+            self.resolve_go_package(source_file, &segs)
         } else {
             None
         };
@@ -1616,29 +1613,62 @@ impl Ctx<'_> {
     /// Terraform module directory takes ([`resolve_module_dir`](Ctx::resolve_module_dir)).
     ///
     /// Consulted only for a `.go` importer. Returns `Some` only for an import
-    /// path that falls under a module the tree declares ([`super::go_module`]) and names a directory holding at least one
-    /// such file; every other case returns `None`, which
-    /// [`resolve_specifier`](Ctx::resolve_specifier) decides **unbound**. The path is matched against the declared module paths,
-    /// longest first, on a whole-segment prefix — so the dotted host is compared
-    /// as written, never split. A path under no declared module is a
-    /// standard-library or third-party import (`net/http`, `context`,
-    /// `github.com/lib/pq`): the module declaration is the evidence that it is
-    /// external, and no directory that merely shares its last segments may
-    /// stand in for it ([NFR-RA-05]). Without a `go.mod` there is no evidence
-    /// where the module path ends, so nothing is bound on a guess.
-    /// `_test.go` files are not part of the package another package imports.
+    /// path that falls under a module the tree declares ([`super::go_module`])
+    /// and names a directory holding at least one such file; every other case
+    /// returns `None`, which [`resolve_specifier`](Ctx::resolve_specifier)
+    /// decides **unbound**.
+    ///
+    /// - The path is matched against the declared module paths on a
+    ///   whole-segment prefix, so the dotted host is compared as written, never
+    ///   split, and `example.com/shopfront` is not under `example.com/shop`.
+    /// - The **longest** matching module path wins — a nested module
+    ///   (`example.com/shop/tools`) owns its subtree, as it does for the Go
+    ///   toolchain.
+    /// - Two `go.mod`s declaring the **same** module path (several
+    ///   `examples/*/go.mod` saying `module example`) are told apart only by
+    ///   the importer: the one whose root holds it — its nearest — is the
+    ///   module it builds in. An importer in neither leaves the import unbound
+    ///   rather than picking one ([NFR-RA-05]).
+    ///
+    /// A path under no declared module is a standard-library or third-party
+    /// import (`net/http`, `context`, `github.com/lib/pq`): the module
+    /// declaration is the evidence that it is external, and no directory that
+    /// merely shares its last segments may stand in for it ([NFR-RA-05]).
+    /// Without a `go.mod` there is no evidence where the module path ends, so
+    /// nothing is bound on a guess. `_test.go` files are not part of the
+    /// package another package imports.
     ///
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    fn resolve_go_package(&self, segs: &[String]) -> Option<Outcome> {
+    fn resolve_go_package(&self, source_file: &str, segs: &[String]) -> Option<Outcome> {
         let spec = segs.join("/");
-        let (module, rest) = self.ix.go_modules.iter().find_map(|m| {
-            let rest = spec.strip_prefix(m.path.as_str())?;
-            match rest.strip_prefix('/') {
-                Some(rest) => Some((m, rest)),
-                None if rest.is_empty() => Some((m, rest)),
-                None => None, // `example.com/shopfront` is not under `example.com/shop`
-            }
-        })?; // under no declared module: external — the caller decides it unbound
+        let mut under: Vec<(&GoModule, &str)> = self
+            .ix
+            .go_modules
+            .iter()
+            .filter_map(|m| {
+                let rest = spec.strip_prefix(m.path.as_str())?;
+                match rest.strip_prefix('/') {
+                    Some(rest) => Some((m, rest)),
+                    None if rest.is_empty() => Some((m, rest)),
+                    None => None, // a longer segment: `example.com/shopfront`
+                }
+            })
+            .collect();
+        // Under no declared module: external — the caller decides it unbound.
+        let longest = under.iter().map(|(m, _)| m.path.len()).max()?;
+        under.retain(|(m, _)| m.path.len() == longest);
+        if under.len() > 1 {
+            let owns = |root: &str| root.is_empty() || source_file.starts_with(&format!("{root}/"));
+            let nearest = under
+                .iter()
+                .filter(|(m, _)| owns(&m.root))
+                .map(|(m, _)| m.root.len())
+                .max()?;
+            under.retain(|(m, _)| owns(&m.root) && m.root.len() == nearest);
+        }
+        let [(module, rest)] = under[..] else {
+            return None;
+        };
         let dir = match (module.root.is_empty(), rest.is_empty()) {
             (true, _) => rest.to_string(),
             (false, true) => module.root.clone(),
