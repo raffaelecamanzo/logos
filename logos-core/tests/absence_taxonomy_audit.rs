@@ -925,7 +925,8 @@ impl Stripped {
 /// included. [S-442]'s first run of this audit found it: two `//` comments in
 /// `navigate/mod.rs`, forty lines below such a continuation, were booked as a
 /// production `n/a` and `unindexed`. A raw string opens only where `r` starts
-/// a token.
+/// a token, or follows a `b`/`c` prefix that does — so byte and C raw strings
+/// (`br"…"`, `cr#"…"#`) still open, which the first version of this fix broke.
 ///
 /// [S-435]: ../../docs/planning/journal.md#s-435-the-wiki-generation-pass-names-its-own-surface
 /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
@@ -957,12 +958,15 @@ fn strip_comments(source: &str, rust: bool) -> Stripped {
             state = State::Code;
         }
         let mut chars = line.chars().peekable();
-        // The character before `c` on this line, for the raw-string opener's
-        // token boundary.
-        let mut prev = ' ';
+        // The two characters before `c` on this line, for the raw-string
+        // opener's token boundary: `r` opens one at a token start, or after a
+        // `b`/`c` prefix that is itself at a token start (`br"…"`, `cr#"…"#`).
+        let (mut prev2, mut prev) = (' ', ' ');
         while let Some(c) = chars.next() {
-            let starts_token = !(prev.is_alphanumeric() || prev == '_');
-            prev = c;
+            let at_boundary = |ch: char| !(ch.is_alphanumeric() || ch == '_');
+            let starts_token =
+                at_boundary(prev) || (matches!(prev, 'b' | 'c') && at_boundary(prev2));
+            (prev2, prev) = (prev, c);
             match state {
                 State::Block => {
                     if c == '*' && chars.peek() == Some(&'/') {
@@ -1690,6 +1694,31 @@ fn g() -> &'static str { r"unscanned" }
         ["unscanned"],
         "only the raw string's sentinel is a site; the comment below `answer\"` is not"
     );
+
+    // The positive side, at every token boundary a raw string can follow —
+    // punctuation, `=`, and a `b`/`c` prefix — and the negative side of the
+    // prefix: `x_r"` is an identifier ending in `r`, not a raw string. Each
+    // raw string holds a `"` that a plain string would close on, then a `//`
+    // that a plain string's close would expose as a comment.
+    for (source, expected) in [
+        (r##"fn f() { g(r#"a" // unscanned"#) }"##, vec!["unscanned"]),
+        (r##"fn f() { let s =r#"a" // unscanned"#; }"##, vec!["unscanned"]),
+        (r##"fn f() -> &'static [u8] { br#"a" // unscanned"# }"##, vec!["unscanned"]),
+        (r##"fn f() { let s = cr#"a" // unscanned"#; }"##, vec!["unscanned"]),
+        // `_` is an identifier character: a continuation line ending `x_r"`
+        // opens nothing, so the comment below it stays prose.
+        (
+            "fn f() -> String {\n    format!(\"one \\\n     x_r\")\n}\n// unscanned\nfn g() {}\n",
+            vec![],
+        ),
+    ] {
+        let code = strip_comments(source, true).code;
+        let hits: Vec<&str> = sentinel_hits(&code)
+            .into_iter()
+            .map(|(_, _, sentinel)| sentinel)
+            .collect();
+        assert_eq!(hits, expected, "{source}");
+    }
 }
 
 #[test]
