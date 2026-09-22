@@ -36,6 +36,8 @@ impl NoSymbolsPlugin {
             language: tree_sitter_rust::LANGUAGE.into(),
             semantics: Semantics {
                 module_separator: "::".to_string(),
+                import_specifier: crate::plugin::ImportSpecifier::Name,
+                specifier_extensions: Vec::new(),
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
                 abi_version: 15,
@@ -4891,3 +4893,139 @@ fn the_single_file_entry_point_records_the_candidate_and_decides_nothing() {
     assert_eq!(facts.forwarding[0].slot, 2);
 }
 
+
+// ── S-439 / CR-142 D1: a module specifier is a path, not a member expression ──
+
+/// Every `Imports` ledger target the file records, sorted, with its alias.
+fn import_targets(facts: &Facts) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target.clone(), r.alias.clone()))
+        .collect();
+    out.sort();
+    out
+}
+
+fn targets_only(facts: &Facts) -> Vec<String> {
+    import_targets(facts).into_iter().map(|(t, _)| t).collect()
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_import_with_an_explicit_extension_is_recorded_as_a_relative_path() {
+    // The two CR-142 §3.1 evidence rows, verbatim: before S-439 the ledger held
+    // `nav::ts` and `shell::Header::tsx`. Pinned separately from the
+    // extension-less spelling below — that distinction is what produced 0 bound
+    // imports in one corpus and 9 in another.
+    let src = "import { navItemsFor } from \"./nav.ts\";\nimport Header from \"./shell/Header.tsx\";\n";
+    for (ext, path) in [("tsx", "web/ui/src/App.tsx"), ("ts", "web/ui/src/app.ts")] {
+        let facts = extract_lang(ext, path, src);
+        assert_eq!(
+            import_targets(&facts),
+            [
+                (".::nav".to_string(), Some("nav".to_string())),
+                (".::shell::Header".to_string(), Some("Header".to_string())),
+            ],
+            "{ext}: the extension is the file's own and is stripped; `.` marks it relative"
+        );
+    }
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_import_without_an_extension_is_recorded_as_the_same_relative_path() {
+    // desk-picker's spelling, pinned on its own fixture.
+    let src = "import { useAuth } from './auth/AuthContext';\nimport api from '../api';\n";
+    for (ext, path) in [
+        ("tsx", "frontend/src/pages/Home.tsx"),
+        ("ts", "frontend/src/pages/home.ts"),
+    ] {
+        let facts = extract_lang(ext, path, src);
+        assert_eq!(
+            targets_only(&facts),
+            ["..::api", ".::auth::AuthContext"],
+            "{ext}: an extension-less relative specifier keeps its relative head"
+        );
+    }
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_js_require_is_a_path_specifier_too() {
+    // JavaScript rides the typescript grammar (`.js`/`.mjs`/`.cjs`).
+    let src = "const util = require('./lib/util.js');\nconst express = require('express');\n";
+    let facts = extract_lang("js", "server/app.js", src);
+    assert_eq!(targets_only(&facts), [".::lib::util", "express"]);
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_package_import_is_unchanged_by_the_path_grammar() {
+    // A bare specifier names a package: no relative head, no stripping, and the
+    // `::`-joined form the framework candidacy gate matches (`next`, `react`).
+    let src = "import React from 'react';\nimport Link from 'next/link';\nimport '@tanstack/react-query';\nimport c from 'chart.js';\n";
+    let facts = extract_lang("tsx", "web/ui/src/Page.tsx", src);
+    assert_eq!(
+        targets_only(&facts),
+        ["@tanstack::react-query", "chart.js", "next::link", "react"]
+    );
+}
+
+#[cfg(feature = "lang-go")]
+#[test]
+fn a_go_import_path_keeps_its_dotted_host_name_whole() {
+    // The Go evidence row: before S-439 the ledger held
+    // `github::com::sourcesense::desk-picker::internal::admin`.
+    let src = "package main\n\nimport (\n\t\"context\"\n\t\"net/http\"\n\n\t\"github.com/lib/pq\"\n\t\"github.com/sourcesense/desk-picker/internal/admin\"\n)\n";
+    let facts = extract_lang("go", "cmd/server/main.go", src);
+    assert_eq!(
+        import_targets(&facts),
+        [
+            ("context".to_string(), Some("context".to_string())),
+            ("github.com::lib::pq".to_string(), Some("pq".to_string())),
+            (
+                "github.com::sourcesense::desk-picker::internal::admin".to_string(),
+                Some("admin".to_string())
+            ),
+            ("net::http".to_string(), Some("http".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn a_name_grammar_import_and_a_member_path_still_split_on_every_dot() {
+    // The member-path grammar is unchanged in every language (S-439 AC5): a
+    // Python dotted import and a Java scoped import stay name-shaped, and a TS
+    // `a.b.c()` still records only its member name.
+    #[cfg(feature = "lang-python")]
+    {
+        let facts = extract_lang(
+            "py",
+            "app/views.py",
+            "import a.b.c\nfrom django.urls import path\n",
+        );
+        assert_eq!(targets_only(&facts), ["a::b::c", "django::urls"]);
+    }
+    #[cfg(feature = "lang-java")]
+    {
+        let facts = extract_lang(
+            "java",
+            "src/main/java/x/A.java",
+            "import org.springframework.web.bind.annotation.GetMapping;\nclass A {}\n",
+        );
+        assert_eq!(
+            targets_only(&facts),
+            ["org::springframework::web::bind::annotation::GetMapping"]
+        );
+    }
+    #[cfg(feature = "lang-typescript")]
+    {
+        let facts = extract_lang("ts", "src/x.ts", "function f() { a.b.c(); }\n");
+        assert!(facts
+            .refs
+            .iter()
+            .any(|r| r.kind == EdgeKind::Calls && r.form == RefForm::Method && r.target == "c"));
+    }
+}

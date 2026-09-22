@@ -50,8 +50,10 @@ use crate::extract::doc::heading_slug;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, RefForm};
 
+use super::go_module::GoModule;
 use super::route_method::preferred_candidates;
 use super::route_template::route_key;
+use crate::extract::refs::is_relative_head;
 
 /// A module's identity: `(crate name, module path segments)`.
 type ModKey = (String, Vec<String>);
@@ -85,6 +87,12 @@ pub(crate) enum Outcome {
     /// because at least one bound. `targets` is non-empty and `NodeId`-sorted, so
     /// the produced edge set is deterministic ([NFR-RA-06]). Still never-fabricate:
     /// every target is a real indexed `ConfigFile` ([NFR-RA-05]).
+    ///
+    /// Two code relations take the same shape for the same reason — one written
+    /// reference that names a *set*: a provable `dyn T` call fanning out to the
+    /// trait method's impls (S-281), and a Go import path naming a package
+    /// directory, which binds to every non-test `.go` file in it (S-439). Both
+    /// carry no payload.
     ///
     /// [FR-CG-08]: ../../../docs/specs/requirements/FR-CG-08.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -246,6 +254,28 @@ pub(crate) struct Index {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
     routes_by_template: HashMap<String, Vec<(String, NodeId)>>,
+    /// file path with its extension removed → the **file-root** module nodes at
+    /// that stem, id-sorted — the universe a relative path specifier binds
+    /// against (S-439), so `./nav.ts` (recorded `.::nav`) and `./nav` reach
+    /// `nav.ts` alike and a `nav.ts` beside a `nav.tsx` is an ambiguity, never a
+    /// pick ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    file_roots_by_stem: HashMap<String, Vec<NodeId>>,
+    /// directory → the `(file path, file-root module)` pairs directly in it,
+    /// id-sorted — the package a Go import path names (S-439).
+    file_roots_by_dir: HashMap<String, Vec<(String, NodeId)>>,
+    /// The extensions of the files whose import specifiers are **paths**
+    /// (S-439; [`LanguageRegistry::path_specifier_extensions`]). Empty unless
+    /// the run was given the registry ([`Index::with_path_specifiers`]); empty
+    /// leaves every non-relative import on the path it took before.
+    ///
+    /// [`LanguageRegistry::path_specifier_extensions`]: crate::plugin::LanguageRegistry::path_specifier_extensions
+    path_specifier_extensions: HashSet<String>,
+    /// The Go modules the tree declares, longest module path first (S-439,
+    /// [`super::go_module`]). Empty unless the run was given the tree root
+    /// ([`Index::with_path_specifiers`]).
+    go_modules: Vec<GoModule>,
     /// file id → scope facts from its import rows.
     file_scopes: HashMap<i64, FileScope>,
     /// Normalised crate names present in the graph.
@@ -286,6 +316,7 @@ impl Index {
         let by_symbol = build_by_symbol(nodes);
         let by_name = build_by_name(nodes);
         let by_file_path = build_by_file_path(nodes);
+        let (file_roots_by_stem, file_roots_by_dir) = build_file_roots(nodes, &parent);
         let routes_by_template = build_routes_by_template(nodes);
         let file_scopes = build_file_scopes(refs);
         let impls_by_trait_method =
@@ -300,11 +331,29 @@ impl Index {
             module_key,
             by_name,
             by_file_path,
+            file_roots_by_stem,
+            file_roots_by_dir,
+            path_specifier_extensions: HashSet::new(),
+            go_modules: Vec::new(),
             routes_by_template,
             file_scopes,
             crates,
             impls_by_trait_method,
         }
+    }
+
+    /// Declare which files write their import specifiers as paths, and the Go
+    /// modules a Go import path is anchored on (S-439). The modules must arrive
+    /// longest module path first, as [`super::go_module::discover`] returns
+    /// them.
+    pub(crate) fn with_path_specifiers(
+        mut self,
+        extensions: HashSet<String>,
+        go_modules: Vec<GoModule>,
+    ) -> Index {
+        self.path_specifier_extensions = extensions;
+        self.go_modules = go_modules;
+        self
     }
 
     /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when
@@ -591,6 +640,44 @@ fn build_by_file_path(nodes: &[NodeRow]) -> HashMap<String, Vec<NodeId>> {
     by_file_path
 }
 
+/// The file-root module nodes (a parentless [`NodeKind::Module`] bound to a
+/// file — one per code file) keyed two ways for path-specifier binding
+/// (S-439): by the file path with its extension removed, and by directory.
+/// `nodes` is id-ordered, so every list is already sorted ([NFR-RA-06]).
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[allow(clippy::type_complexity)]
+fn build_file_roots(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+) -> (
+    HashMap<String, Vec<NodeId>>,
+    HashMap<String, Vec<(String, NodeId)>>,
+) {
+    let mut by_stem: HashMap<String, Vec<NodeId>> = HashMap::new();
+    let mut by_dir: HashMap<String, Vec<(String, NodeId)>> = HashMap::new();
+    for n in nodes {
+        if n.kind != NodeKind::Module || parent.contains_key(&n.id) {
+            continue;
+        }
+        let Some(path) = &n.file_path else { continue };
+        let (dir, name) = match path.rfind('/') {
+            Some(i) => (&path[..i], &path[i + 1..]),
+            None => ("", path.as_str()),
+        };
+        let stem = match name.rsplit_once('.') {
+            Some((stem, _)) if !stem.is_empty() => &path[..path.len() - name.len() + stem.len()],
+            _ => path.as_str(),
+        };
+        by_stem.entry(stem.to_string()).or_default().push(n.id);
+        by_dir
+            .entry(dir.to_string())
+            .or_default()
+            .push((path.clone(), n.id));
+    }
+    (by_stem, by_dir)
+}
+
 /// Normalized template → its `(METHOD, route node)` candidates, for the OpenAPI
 /// operation→route match (S-069). A route name is `"METHOD /path"`; the bucket
 /// key is the positionally-normalized template (parameter names/syntax erased)
@@ -858,6 +945,15 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
                     Res::Found(target) => ctx.bind_doc_ref(source, target),
                     _ => Outcome::Unbound,
                 };
+            }
+            // A path-grammar module specifier (S-439, [CR-142] D1): a relative
+            // specifier binds against the importing file's directory, a Go import
+            // path against the module that declares it — never through the
+            // member-path scope hierarchy, which reads `a::b` as names.
+            if r.kind == EdgeKind::Imports {
+                if let Some(outcome) = ctx.resolve_specifier(&r.target) {
+                    return outcome;
+                }
             }
             let want = if r.kind == EdgeKind::Calls {
                 Want::Callable
@@ -1399,6 +1495,135 @@ impl Ctx<'_> {
             }
         }
         Outcome::Unbound
+    }
+
+    /// Bind a path-grammar module specifier (S-439, [CR-142] D1, [FR-RS-01]),
+    /// or `None` when `target` is not one — the row then takes the member-path
+    /// scope hierarchy exactly as before, which is every import of a
+    /// name-grammar language (Rust, Python, Java, …).
+    ///
+    /// - A **relative** specifier (target headed by `.`/`..`, which only
+    ///   `extract::refs::specifier_segments` produces) is always decided here:
+    ///   [`resolve_relative_specifier`](Ctx::resolve_relative_specifier).
+    /// - Any other specifier from a path-grammar file is decided here too: a Go
+    ///   import path under a declared module by
+    ///   [`resolve_go_package`](Ctx::resolve_go_package), and everything else —
+    ///   a bare package specifier (`react`, `next/link`) — **unbound**. A bare
+    ///   specifier names a package, never a workspace file, so the member-path
+    ///   hierarchy (which would read `react` as a name and bind it to a
+    ///   workspace `react.ts`) is never consulted for one ([NFR-RA-05]).
+    ///   `tsconfig` path aliases, the one way a bare specifier can name a
+    ///   workspace file, are [FR-RS-02] and not this rung.
+    ///
+    /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+    /// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
+    /// [FR-RS-02]: ../../../docs/specs/requirements/FR-RS-02.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_specifier(&self, target: &str) -> Option<Outcome> {
+        let segs = split(target);
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if segs.first().is_some_and(|h| is_relative_head(h)) {
+            return Some(match self.resolve_relative_specifier(source_file, &segs) {
+                Res::Found(target) => Outcome::Bound {
+                    source: self.source,
+                    target,
+                    kind: EdgeKind::Imports,
+                    payload: None,
+                },
+                _ => Outcome::Unbound,
+            });
+        }
+        let ext = Path::new(source_file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)?;
+        if !self.ix.path_specifier_extensions.contains(&ext) {
+            return None;
+        }
+        Some(
+            self.resolve_go_package(&segs)
+                .unwrap_or(Outcome::Unbound),
+        )
+    }
+
+    /// A relative specifier, resolved against the importing file's directory by
+    /// the same fold doc links use ([`fold_path`]), then matched to the one
+    /// file-root module whose extension-less path it names, else to that
+    /// directory's `index` file — the order a TypeScript/JavaScript resolver
+    /// tries them. Exactly-one-or-nothing at each step ([NFR-RA-05]): a
+    /// `nav.ts` beside a `nav.tsx` stays unbound, and a specifier escaping the
+    /// repository root names nothing.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_relative_specifier(&self, source_file: &str, segs: &[String]) -> Res {
+        let Some(path) = fold_path(&dir_segments(source_file), &segs.join("/")) else {
+            return Res::NotFound;
+        };
+        let at_stem = |stem: &str| {
+            self.ix
+                .file_roots_by_stem
+                .get(stem)
+                .map_or(Res::NotFound, |ids| exactly_one(ids))
+        };
+        match at_stem(&path) {
+            Res::NotFound => {}
+            decided => return decided,
+        }
+        if path.is_empty() {
+            at_stem("index")
+        } else {
+            at_stem(&format!("{path}/index"))
+        }
+    }
+
+    /// A Go import path, bound to the **package** it names — every non-test
+    /// `.go` file directly in the package directory, the same one-row fan-out a
+    /// Terraform module directory takes ([`resolve_module_dir`](Ctx::resolve_module_dir)).
+    ///
+    /// Returns `Some` only for an import path that falls under a module the tree
+    /// declares ([`super::go_module`]) and names a directory holding at least one
+    /// such file; every other case returns `None`, which
+    /// [`resolve_specifier`](Ctx::resolve_specifier) decides **unbound**. The path is matched against the declared module paths,
+    /// longest first, on a whole-segment prefix — so the dotted host is compared
+    /// as written, never split. A path under no declared module is a
+    /// standard-library or third-party import (`net/http`, `context`,
+    /// `github.com/lib/pq`): the module declaration is the evidence that it is
+    /// external, and no directory that merely shares its last segments may
+    /// stand in for it ([NFR-RA-05]). Without a `go.mod` there is no evidence
+    /// where the module path ends, so nothing is bound on a guess.
+    /// `_test.go` files are not part of the package another package imports.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_go_package(&self, segs: &[String]) -> Option<Outcome> {
+        let spec = segs.join("/");
+        let (module, rest) = self.ix.go_modules.iter().find_map(|m| {
+            let rest = spec.strip_prefix(m.path.as_str())?;
+            match rest.strip_prefix('/') {
+                Some(rest) => Some((m, rest)),
+                None if rest.is_empty() => Some((m, rest)),
+                None => None, // `example.com/shopfront` is not under `example.com/shop`
+            }
+        })?; // under no declared module: external — the caller decides it unbound
+        let dir = match (module.root.is_empty(), rest.is_empty()) {
+            (true, _) => rest.to_string(),
+            (false, true) => module.root.clone(),
+            (false, false) => format!("{}/{rest}", module.root),
+        };
+        let targets: Vec<NodeId> = self
+            .ix
+            .file_roots_by_dir
+            .get(&dir)
+            .into_iter()
+            .flatten()
+            .filter(|(path, _)| path.ends_with(".go") && !path.ends_with("_test.go"))
+            .map(|&(_, id)| id)
+            .collect();
+        (!targets.is_empty()).then_some(Outcome::BoundMany {
+            source: self.source,
+            targets,
+            kind: EdgeKind::Imports,
+            payload: None,
+        })
     }
 
     /// Every `.tf` [`NodeKind::ConfigFile`] whose file lives **directly** in `dir`

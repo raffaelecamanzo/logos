@@ -230,6 +230,25 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The set of file extensions (normalised: lower-case, no leading dot) whose
+    /// loaded plugin declares its import specifiers **paths**
+    /// ([`ImportSpecifier::Path`](super::ImportSpecifier::Path); S-439,
+    /// [CR-142] D1) — the twin of [`reachability_extensions`](Self::reachability_extensions)
+    /// for the binder: an import recorded by a file with one of these extensions
+    /// is bound by path rules and never through the member-path scope hierarchy,
+    /// so a bare package specifier (`react`) can never land on a workspace file
+    /// that shares its name ([NFR-RA-05]).
+    ///
+    /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    pub fn path_specifier_extensions(&self) -> std::collections::HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| p.semantics().import_specifier == super::ImportSpecifier::Path)
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
     /// Grammars skipped at load due to an ABI mismatch ([FR-PL-03]).
     pub fn skipped(&self) -> &[SkippedGrammar] {
         &self.skipped
@@ -586,6 +605,26 @@ mod tests {
             !exts.contains("toy"),
             "a grammar that omits the flag is not capable (normalised lower-case)"
         );
+    }
+
+    /// The path-grammar extension set is exactly the grammars that declare
+    /// `import_specifier = "path"` (S-439): both TypeScript grammars and Go, and
+    /// no name-grammar language — Rust above all, whose imports must stay on the
+    /// scope hierarchy byte for byte.
+    #[test]
+    fn path_specifier_extensions_collects_only_path_grammar_languages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let exts = reg.path_specifier_extensions();
+        #[cfg(feature = "lang-typescript")]
+        for ext in ["ts", "js", "mjs", "cjs", "tsx", "jsx"] {
+            assert!(exts.contains(ext), "`{ext}` specifiers are paths");
+        }
+        #[cfg(feature = "lang-go")]
+        assert!(exts.contains("go"), "Go import paths are paths");
+        for ext in ["rs", "py", "java", "kt", "cs", "php", "rb", "scala"] {
+            assert!(!exts.contains(ext), "`{ext}` specifiers are names");
+        }
     }
 
     /// A synthetic artifact-class grammar (S-062, CR-010): it reuses the Rust

@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use tree_sitter::{Language, Query};
 
 use super::manifest::{
-    ConfigDescriptor, ExportConvention, PluginManifest, PropertiesDescriptor, TestConvention,
+    ConfigDescriptor, ExportConvention, ImportSpecifier, PluginManifest, PropertiesDescriptor,
+    TestConvention,
 };
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
@@ -25,8 +26,16 @@ use super::manifest::{
 /// [NFR-MA-05]: ../../../docs/specs/requirements/NFR-MA-05.md
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Semantics {
-    /// Module path separator joining symbol segments (`::`, `.`, `/`).
+    /// The **member-path** separator joining symbol segments (`::`, `.`, `/`);
+    /// see [`PluginManifest::module_separator`].
     pub module_separator: String,
+    /// The grammar this language's import specifiers are written in (S-439;
+    /// see [`PluginManifest::import_specifier`]) — consumed by reference
+    /// extraction to choose between the name and the path canonicaliser.
+    pub import_specifier: ImportSpecifier,
+    /// Extensions a relative path specifier may spell for the imported file
+    /// itself (S-439; see [`PluginManifest::specifier_extensions`]).
+    pub specifier_extensions: Vec<String>,
     /// Keywords that increment cyclomatic complexity for this language.
     /// Carried declaratively now; consumed by the complexity metric (S-011+).
     pub complexity_keywords: Vec<String>,
@@ -225,6 +234,8 @@ impl CompiledPlugin {
     ) -> Self {
         let semantics = Semantics {
             module_separator: manifest.module_separator,
+            import_specifier: manifest.import_specifier,
+            specifier_extensions: manifest.specifier_extensions,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,
             abi_version: manifest.abi_version,

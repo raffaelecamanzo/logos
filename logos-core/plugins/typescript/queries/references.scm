@@ -5,8 +5,9 @@
 ;                 policy-gated binding (the Rust `x.f()` posture).
 ;   @ref.import — an import source string (`import x from "express"`) or a
 ;                 CommonJS `require("...")` argument; the quoted text is
-;                 unquoted and canonicalised into the `::`-joined ledger form
-;                 feeding the binder and the framework candidacy gate
+;                 unquoted and canonicalised by the PATH grammar the
+;                 descriptor declares (S-439) into the `::`-joined ledger
+;                 form feeding the binder and the framework candidacy gate
 ;                 (FR-FW-04).
 ;
 ; Droppable on disk at `.logos/plugins/typescript/queries/references.scm`.

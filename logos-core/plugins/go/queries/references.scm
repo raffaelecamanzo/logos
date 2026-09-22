@@ -5,8 +5,10 @@
 ;                 policy-gated binding (package member vs receiver method is
 ;                 a resolution concern).
 ;   @ref.import — an import path string (`import "net/http"`); unquoted and
-;                 canonicalised (slashes → `::`) into the ledger form feeding
-;                 the binder and the framework candidacy gate (FR-FW-04).
+;                 canonicalised by the PATH grammar the descriptor declares
+;                 (only slashes → `::`; a host's dots are kept, S-439) into
+;                 the ledger form feeding the binder and the framework
+;                 candidacy gate (FR-FW-04).
 ;
 ; Droppable on disk at `.logos/plugins/go/queries/references.scm`.
 

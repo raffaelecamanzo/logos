@@ -67,6 +67,11 @@ pub mod dispatch;
 /// shared-state matches to `route`/`component` nodes against the resolved
 /// graph — ledger-gated, binder-proven, reconciled every run. See its module docs.
 pub mod framework;
+/// The Go modules a tree declares (S-439, CR-142 D1): the `go.mod` `module`
+/// directive a Go import path is anchored on, so an intra-module path binds to
+/// its package and an external one never binds to a directory that merely
+/// shares its last segments. See its module docs.
+pub(crate) mod go_module;
 pub(crate) mod grpc_key;
 /// The shared positional route-template normalizer (S-069, CR-011): aligns the
 /// OpenAPI `ApiOperation` path templates with framework-extracted `route` node
@@ -96,6 +101,7 @@ mod promote;
 pub mod topics;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 use rayon::prelude::*;
@@ -104,6 +110,7 @@ use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
 use crate::models::navigation::{LanguageResolution, RelationResolution};
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
+use crate::plugin::LanguageRegistry;
 use crate::runtime::Runtime;
 
 /// `true` when a ledger `target` (canonical `::`-joined) falls under a
@@ -188,6 +195,41 @@ pub fn run(
     policy: BindingPolicy,
     delta: Option<&Delta>,
 ) -> Result<ResolutionStats> {
+    run_with(runtime, policy, delta, None)
+}
+
+/// [`run`], over the tree at `root` indexed with `registry` — the form the
+/// pipeline calls.
+///
+/// What the two add is the path-specifier context (S-439, [CR-142] D1): the
+/// registry says which files write their import specifiers as paths
+/// ([`LanguageRegistry::path_specifier_extensions`]), and the tree supplies the
+/// `go.mod` above each indexed `.go` file ([`go_module`]) so a Go import path
+/// binds against the module that declares it. Without them (plain [`run`]) no
+/// `go.mod` is read and only a relative specifier — whose `.`/`..` head is
+/// unambiguous on its own — takes the path rung, which is what a synthetic
+/// graph with no tree behind it wants.
+///
+/// # Errors
+/// As [`run`].
+///
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+pub fn run_in_tree(
+    runtime: &Runtime,
+    registry: &LanguageRegistry,
+    root: &Path,
+    policy: BindingPolicy,
+    delta: Option<&Delta>,
+) -> Result<ResolutionStats> {
+    run_with(runtime, policy, delta, Some((registry, root)))
+}
+
+fn run_with(
+    runtime: &Runtime,
+    policy: BindingPolicy,
+    delta: Option<&Delta>,
+    tree: Option<(&LanguageRegistry, &Path)>,
+) -> Result<ResolutionStats> {
     let want_file_paths = delta.is_some();
     let snap = runtime.submit_read(|store| {
         Ok(Snapshot {
@@ -208,7 +250,21 @@ pub fn run(
         })
     })?;
 
-    let index = binder::Index::build(&snap.nodes, &snap.edges, &snap.refs);
+    let (path_specifier_extensions, go_modules) =
+        tree.map_or_else(Default::default, |(registry, root)| {
+            let go_files: std::collections::BTreeSet<&str> = snap
+                .nodes
+                .iter()
+                .filter_map(|n| n.file_path.as_deref())
+                .filter(|p| p.ends_with(".go"))
+                .collect();
+            (
+                registry.path_specifier_extensions(),
+                go_module::discover(root, go_files),
+            )
+        });
+    let index = binder::Index::build(&snap.nodes, &snap.edges, &snap.refs)
+        .with_path_specifiers(path_specifier_extensions, go_modules);
 
     // A full index (no delta) re-binds the whole ledger. An incremental sync
     // re-binds only the rows whose outcome the change-set can move; every other
