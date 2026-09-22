@@ -248,6 +248,31 @@ fn the_denominator_is_a_typed_field_on_the_serialised_answer() {
         wire["warnings"].as_array().is_some_and(Vec::is_empty),
         "the denominator is not smuggled through the warnings channel"
     );
+
+    // Every answer that carries the field serialises it — a `#[serde(skip)]`
+    // on any one of the seven passes every Rust-level assertion in this file.
+    let answers = [
+        ("callers", serde_json::to_value(engine.callers("run", None))),
+        ("callees", serde_json::to_value(engine.callees("alpha", None))),
+        ("impact", serde_json::to_value(engine.impact("run", None))),
+        ("affected", serde_json::to_value(engine.affected(&strings(&["src/util.rs"]), true))),
+        (
+            "impact_intersection",
+            serde_json::to_value(engine.impact_intersection(&strings(&["A=alpha", "B=run"]), None)),
+        ),
+        (
+            "branch_overlap",
+            serde_json::to_value(engine.branch_overlap(&strings(&["left", "right"]), None, None)),
+        ),
+        ("precedent", serde_json::to_value(engine.precedent("alpha", None))),
+    ];
+    for (tool, answer) in answers {
+        let answer = answer.expect("serialises");
+        assert_eq!(
+            answer["resolution_denominator"]["languages"][0]["language"], "rust",
+            "{tool} carries the field on the wire: {answer:#}"
+        );
+    }
 }
 
 // ── AC: the empty answer is qualified, by the row status reports ────────────
