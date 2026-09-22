@@ -1204,6 +1204,52 @@ impl ResolutionDenominator {
         Self::absent(DenominatorAbsence::NotAvailable)
     }
 
+    /// The clause a relational answer's own words gain when a language it is
+    /// anchored in binds no `Calls` edge across a file boundary — `None` when
+    /// every such language carries a cross-file figure ([FR-NV-12] AC 4,
+    /// [CR-143] §3.7).
+    ///
+    /// An empty answer phrased about the code — `precedent`'s "no structural
+    /// anchors", the query view's "No callers of …" — would state a coverage
+    /// gap as a property of the user's code where the resolver never binds a
+    /// cross-file call: the structure such a call would supply is unresolved
+    /// rather than absent. Both sites append this one clause, so the two
+    /// surfaces cannot word the same condition twice (R5). The named state is
+    /// the row's own serialised tag, so the clause speaks the closed lexicon
+    /// rather than a spelling of its own.
+    ///
+    /// Only the two states that establish **unresolved** earn it:
+    /// `same-file-only` and `no-resolved-edges`. `no-references-recorded`
+    /// means the language's files recorded no call at all, so a target that
+    /// calls nothing is truly absent of calls, and saying "unresolved" would
+    /// name a cause the condition does not establish (R1).
+    ///
+    /// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
+    /// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+    #[must_use]
+    pub fn unresolved_calls_clause(&self) -> Option<String> {
+        let gaps: Vec<String> = self
+            .languages
+            .iter()
+            .filter_map(|row| {
+                let absence = row.calls.cross_file_absence?;
+                if matches!(absence, CrossFileAbsence::NoReferencesRecorded) {
+                    return None;
+                }
+                let absence = serde_json::to_value(absence).ok()?;
+                Some(format!(
+                    "{} binds no Calls edge across a file boundary ({}; {} of {} Calls \
+                     reference(s) bound)",
+                    row.language,
+                    absence["cause"].as_str()?,
+                    row.calls.bound,
+                    row.calls.references
+                ))
+            })
+            .collect();
+        (!gaps.is_empty()).then(|| gaps.join(", and "))
+    }
+
     fn absent(absence: DenominatorAbsence) -> Self {
         Self {
             languages: Vec::new(),

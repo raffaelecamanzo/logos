@@ -49,7 +49,6 @@ use crate::engine::Engine;
 use crate::graph_store::{GraphStore, NodeRow};
 use crate::hydrate::{EdgeData, Granularity, GraphView, Vertex};
 use crate::model::{EdgeKind, NodeId, NodeKind};
-use crate::models::quality::CrossFileAbsence;
 use crate::runtime::Runtime;
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
@@ -1371,7 +1370,7 @@ pub(crate) fn precedent(
     // Where the target's language binds no call across a file boundary, the
     // two reasons below that describe the target's structure would describe the
     // index's reach instead — so they say so ([FR-NV-12] AC 4, [CR-143] §3.7).
-    let reach_gap = unresolved_calls_clause(&result.resolution_denominator);
+    let reach_gap = result.resolution_denominator.unresolved_calls_clause();
     let anchors = precedent_anchors(graph, &seeds);
     if anchors.is_empty() {
         result.empty_reason = Some(EmptyPrecedent {
@@ -1550,48 +1549,6 @@ pub(crate) fn precedent(
         });
     }
     Ok(result)
-}
-
-/// The clause an empty precedent reason gains when a language of the target
-/// binds no `Calls` edge across a file boundary — `None` when every such
-/// language carries a cross-file figure ([FR-NV-12] AC 4, [CR-143] §3.7).
-///
-/// `no_structural_anchors` and `anchors_are_unshared` describe the target's
-/// structure; where the resolver never binds a cross-file call, the structure a
-/// cross-file call would supply is unresolved rather than absent, and a reason
-/// stated about the code would be a coverage gap attributed to the user. The
-/// named state is the denominator's own serialised tag, so the reason speaks
-/// the closed lexicon rather than a spelling of its own.
-///
-/// Only the two states that establish **unresolved** earn the clause:
-/// `same-file-only` and `no-resolved-edges`. `no-references-recorded` means the
-/// language's files recorded no call at all, so a target that calls nothing is
-/// truly absent of calls, and saying "unresolved, not absent" would name a
-/// cause the condition does not establish (R1).
-///
-/// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
-/// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
-fn unresolved_calls_clause(denominator: &ResolutionDenominator) -> Option<String> {
-    let gaps: Vec<String> = denominator
-        .languages
-        .iter()
-        .filter_map(|row| {
-            let absence = row.calls.cross_file_absence?;
-            if matches!(absence, CrossFileAbsence::NoReferencesRecorded) {
-                return None;
-            }
-            let absence = serde_json::to_value(absence).ok()?;
-            Some(format!(
-                "{} binds no Calls edge across a file boundary ({}; {} of {} Calls reference(s) \
-                 bound)",
-                row.language,
-                absence["cause"].as_str()?,
-                row.calls.bound,
-                row.calls.references
-            ))
-        })
-        .collect();
-    (!gaps.is_empty()).then(|| gaps.join(", and "))
 }
 
 /// The degraded [`PrecedentResult`] for a failed engine call ([ADR-14]).

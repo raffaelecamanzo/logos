@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use super::{
     anchor_sharers, is_registration_edge, line_u32, precedent_anchors,
-    precedent_degraded, read_code, unresolved_calls_clause, PrecedentAnchor,
+    precedent_degraded, read_code, PrecedentAnchor,
 };
 use crate::graph_store::NodeRow;
 use crate::model::{LogosSymbol, NodeId, NodeKind};
@@ -497,7 +497,7 @@ fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure(
         ResolutionDenominator::measured(rows, &anchors)
     };
 
-    assert_eq!(unresolved_calls_clause(&over(vec![row("rust", 4)])), None);
+    assert_eq!(over(vec![row("rust", 4)]).unresolved_calls_clause(), None);
     // A language whose files recorded no call is absent of calls, not
     // unresolved: `no-references-recorded` earns no clause (R1).
     let call_free = LanguageResolution {
@@ -505,15 +505,16 @@ fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure(
         ..row("python", 0)
     };
     assert!(call_free.calls.cross_file_absence.is_some());
-    assert_eq!(unresolved_calls_clause(&over(vec![call_free])), None);
-    assert_eq!(unresolved_calls_clause(&ResolutionDenominator::not_available()), None);
+    assert_eq!(over(vec![call_free]).unresolved_calls_clause(), None);
+    assert_eq!(ResolutionDenominator::not_available().unresolved_calls_clause(), None);
 
     let typescript = row("typescript", 0);
     let tag = serde_json::to_value(typescript.calls.cross_file_absence.unwrap()).unwrap()["cause"]
         .as_str()
         .unwrap()
         .to_string();
-    let clause = unresolved_calls_clause(&over(vec![row("rust", 4), typescript]))
+    let clause = over(vec![row("rust", 4), typescript])
+        .unresolved_calls_clause()
         .expect("the TypeScript row has no cross-file figure");
     assert_eq!(
         clause,
