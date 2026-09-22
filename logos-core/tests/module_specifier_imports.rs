@@ -556,3 +556,22 @@ fn a_multi_dot_file_name_keeps_every_dot_but_its_extension() {
     assert_eq!(imported_files(rt, "web/src/b.ts"), ["web/src/nav.test.ts"]);
     assert_eq!(imported_files(rt, "web/src/c.ts"), ["web/src/nav.test.ts"]);
 }
+
+#[test]
+fn a_go_module_path_matches_only_on_a_whole_segment() {
+    // `github.com/acme/desk-pickerx/foo` shares a byte prefix with the module
+    // `github.com/acme/desk-picker`, not a segment prefix. Read as a raw prefix
+    // its rest would be `x/foo` — and a workspace `x/foo/` exists to catch that.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "go.mod", "module github.com/acme/desk-picker\n");
+    write(tmp.path(), "x/foo/foo.go", "package foo\n\nfunc F() {}\n");
+    write(
+        tmp.path(),
+        "cmd/main.go",
+        "package main\n\nimport \"github.com/acme/desk-pickerx/foo\"\n\nfunc main() { foo.F() }\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(imported_files(rt, "cmd/main.go").is_empty());
+    assert!(import_row_unresolved(rt, "github.com::acme::desk-pickerx::foo"));
+}
