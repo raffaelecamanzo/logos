@@ -2190,6 +2190,8 @@ fn resolution_by_language_keeps_a_language_whose_files_carry_no_node() {
     let store = mem();
     let rust = seed_file(&store, "src/a.rs", "rust");
     seed_in_file(&store, 0, "a", rust);
+    // A second Rust file, so the count is a count and not a presence flag.
+    seed_file(&store, "src/b.rs", "rust");
     // The case `language_composition` deliberately omits: a tagged file with no
     // node. It is still in the index, so here it must still be a row — an
     // absent row is the one rendering FR-RS-09 forbids.
@@ -2204,7 +2206,7 @@ fn resolution_by_language_keeps_a_language_whose_files_carry_no_node() {
         .collect();
     assert_eq!(
         languages,
-        [("rust", 1), ("toml", 1)],
+        [("rust", 2), ("toml", 1)],
         "every tagged language, in name order, with its file count"
     );
     assert_eq!(

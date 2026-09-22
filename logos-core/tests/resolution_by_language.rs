@@ -268,39 +268,44 @@ fn every_indexed_language_is_a_row_in_name_order() {
     let tmp = fixture();
     let engine = indexed(&tmp);
     let status = engine.status();
-    let languages: Vec<&str> = status
+    let rows: Vec<(String, u64)> = status
         .resolution_by_language
         .iter()
-        .map(|r| r.language.as_str())
+        .map(|r| (r.language.clone(), r.files))
         .collect();
 
-    // The files table is the authority on "present in the index".
+    // The fixture's own composition, stated rather than derived: two Rust
+    // files, two TypeScript files, one manifest.
+    assert_eq!(
+        rows,
+        [
+            ("rust".to_string(), 2),
+            ("toml".to_string(), 1),
+            ("typescript".to_string(), 2),
+        ],
+        "one row per indexed language, in name order, with its exact file count"
+    );
+
+    // …and the files table is the authority on "present in the index".
     let conn = Connection::open_with_flags(
         tmp.path().join(".logos/logos.db"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
     let mut stmt = conn
-        .prepare("SELECT DISTINCT language FROM files WHERE language IS NOT NULL ORDER BY language")
+        .prepare(
+            "SELECT language, COUNT(*) FROM files WHERE language IS NOT NULL \
+             GROUP BY language ORDER BY language",
+        )
         .unwrap();
-    let indexed: Vec<String> = stmt
-        .query_map([], |r| r.get(0))
+    let indexed: Vec<(String, u64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert!(
-        indexed.len() >= 3,
-        "the fixture indexes three languages: {indexed:?}"
-    );
     assert_eq!(
-        languages, indexed,
-        "one row per indexed language — never an absent row — in name order"
-    );
-
-    let files: u64 = status.resolution_by_language.iter().map(|r| r.files).sum();
-    assert!(
-        files <= status.file_count,
-        "per-language file counts partition (a subset of) the indexed files"
+        rows, indexed,
+        "never an absent row, never a miscounted one: the readout agrees with `files`"
     );
 }
 
