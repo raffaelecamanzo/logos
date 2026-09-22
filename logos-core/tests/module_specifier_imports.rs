@@ -205,6 +205,9 @@ fn an_ambiguous_or_non_code_relative_import_binds_nothing() {
     // `styles.ts` exists, but `./styles.css` names the stylesheet — an
     // undeclared extension is kept and never read as the code file.
     write(tmp.path(), "src/styles.ts", "export const s = 1;\n");
+    // `../../outside` from `src/` escapes the root. A root `outside.ts` exists
+    // so that clamping the escape, instead of refusing it, would bind it.
+    write(tmp.path(), "outside.ts", "export default 1;\n");
     write(
         tmp.path(),
         "src/main.ts",
