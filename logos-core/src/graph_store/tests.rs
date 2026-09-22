@@ -2167,6 +2167,172 @@ fn language_composition_excludes_untagged_files_and_orphaned_nodes() {
     assert_eq!(comp[0].files, 1);
 }
 
+// ── FR-RS-09 / S-441: per-language resolution counts ─────────────────────────
+
+/// A ledger row of `kind` owned by `file_id`, keyed distinct by `target`.
+fn ref_of(file_id: i64, target: &str, kind: EdgeKind) -> NewUnresolvedRef<'_> {
+    NewUnresolvedRef {
+        kind,
+        ..path_ref(Some(file_id), "src", target)
+    }
+}
+
+#[test]
+fn resolution_by_language_on_empty_store_is_empty() {
+    assert!(
+        mem().resolution_by_language().unwrap().is_empty(),
+        "an un-indexed graph has no language to report"
+    );
+}
+
+#[test]
+fn resolution_by_language_keeps_a_language_whose_files_carry_no_node() {
+    let store = mem();
+    let rust = seed_file(&store, "src/a.rs", "rust");
+    seed_in_file(&store, 0, "a", rust);
+    // A second Rust file, so the count is a count and not a presence flag.
+    seed_file(&store, "src/b.rs", "rust");
+    // The case `language_composition` deliberately omits: a tagged file with no
+    // node. It is still in the index, so here it must still be a row — an
+    // absent row is the one rendering FR-RS-09 forbids.
+    seed_file(&store, "Cargo.toml", "toml");
+    // An untagged file names no language and so earns no row.
+    store.insert_file("LICENSE", None, None).unwrap();
+
+    let rows = store.resolution_by_language().unwrap();
+    let languages: Vec<(&str, u64)> = rows
+        .iter()
+        .map(|r| (r.language.as_str(), r.files))
+        .collect();
+    assert_eq!(
+        languages,
+        [("rust", 2), ("toml", 1)],
+        "every tagged language, in name order, with its file count"
+    );
+    assert_eq!(
+        rows[1].calls,
+        RelationCounts::default(),
+        "a language that recorded nothing reads four zeros, for the classifier to name"
+    );
+}
+
+#[test]
+fn resolution_by_language_reads_the_ledger_numerator_over_its_denominator() {
+    let mut store = mem();
+    let rs = seed_file(&store, "src/a.rs", "rust");
+    let ts = seed_file(&store, "web/a.ts", "typescript");
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&ref_of(rs, "c1", EdgeKind::Calls))?;
+            w.insert_unresolved_ref(&ref_of(rs, "c2", EdgeKind::Calls))?;
+            w.insert_unresolved_ref(&ref_of(rs, "c3", EdgeKind::Calls))?;
+            w.insert_unresolved_ref(&ref_of(rs, "i1", EdgeKind::Imports))?;
+            // A kind neither class selects contributes to neither.
+            w.insert_unresolved_ref(&ref_of(rs, "t1", EdgeKind::References))?;
+            w.insert_unresolved_ref(&ref_of(ts, "c4", EdgeKind::Calls))?;
+            // A row owned by no file is attributable to no language.
+            w.insert_unresolved_ref(&path_ref(None, "src", "orphan"))
+        })
+        .unwrap();
+    let ids: Vec<i64> = store
+        .unresolved_refs()
+        .unwrap()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    // Bind the first two Rust calls and the Rust import.
+    store
+        .write_batch(|w| {
+            w.mark_ref_resolved(ids[0], true)?;
+            w.mark_ref_resolved(ids[1], true)?;
+            w.mark_ref_resolved(ids[3], true)
+        })
+        .unwrap();
+
+    let rows = store.resolution_by_language().unwrap();
+    let rust = rows.iter().find(|r| r.language == "rust").unwrap();
+    assert_eq!(
+        (rust.calls.references, rust.calls.bound),
+        (3, 2),
+        "two of three Rust calls bound"
+    );
+    assert_eq!((rust.imports.references, rust.imports.bound), (1, 1));
+    let ts = rows.iter().find(|r| r.language == "typescript").unwrap();
+    assert_eq!(
+        (ts.calls.references, ts.calls.bound),
+        (1, 0),
+        "the TypeScript call is counted under its own language, unbound"
+    );
+}
+
+#[test]
+fn resolution_by_language_splits_resolved_edges_on_the_file_boundary() {
+    let store = mem();
+    let a = seed_file(&store, "src/a.rs", "rust");
+    let b = seed_file(&store, "src/b.rs", "rust");
+    let t = seed_file(&store, "web/t.ts", "typescript");
+    let a1 = seed_in_file(&store, 0, "a1", a);
+    let a2 = seed_in_file(&store, 1, "a2", a);
+    let b1 = seed_in_file(&store, 2, "b1", b);
+    let t1 = seed_in_file(&store, 3, "t1", t);
+    let t2 = seed_in_file(&store, 4, "t2", t);
+    let orphan = seed(&store, 5, "orphan", NodeKind::Function);
+
+    store.insert_edge(a1, a2, EdgeKind::Calls).unwrap(); // rust, same file
+    store.insert_edge(a1, b1, EdgeKind::Calls).unwrap(); // rust, cross file
+    store.insert_edge(a2, b1, EdgeKind::Calls).unwrap(); // rust, cross file
+    store.insert_edge(a1, b1, EdgeKind::Imports).unwrap(); // rust import, cross file
+    store.insert_edge(t1, t2, EdgeKind::Calls).unwrap(); // typescript, same file
+
+    // Attributed by SOURCE language: a TS→Rust call is a TypeScript edge.
+    store.insert_edge(t2, a1, EdgeKind::Calls).unwrap();
+    // A target in no indexed file has no locality and is counted nowhere.
+    store.insert_edge(t1, orphan, EdgeKind::Calls).unwrap();
+    // A kind neither class selects contributes to neither.
+    store.insert_edge(a1, a2, EdgeKind::Contains).unwrap();
+
+    let rows = store.resolution_by_language().unwrap();
+    let rust = rows.iter().find(|r| r.language == "rust").unwrap();
+    assert_eq!(
+        (rust.calls.same_file_edges, rust.calls.cross_file_edges),
+        (1, 2),
+        "one same-file and two cross-file Rust calls"
+    );
+    assert_eq!(
+        (rust.imports.same_file_edges, rust.imports.cross_file_edges),
+        (0, 1)
+    );
+    let ts = rows.iter().find(|r| r.language == "typescript").unwrap();
+    assert_eq!(
+        (ts.calls.same_file_edges, ts.calls.cross_file_edges),
+        (1, 1),
+        "the orphan-target edge is in neither column"
+    );
+}
+
+/// The three reads share one snapshot through their own read transaction — and
+/// a caller already inside a transaction keeps its own rather than failing on a
+/// nested `BEGIN`, which is what an unconditional `unchecked_transaction` does.
+#[test]
+fn resolution_by_language_reads_inside_a_callers_transaction() {
+    let store = mem();
+    let rust = seed_file(&store, "src/a.rs", "rust");
+    seed_in_file(&store, 0, "a", rust);
+    store.conn.execute_batch("BEGIN").unwrap();
+    let rows = store
+        .resolution_by_language()
+        .expect("a read inside the caller's transaction succeeds");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        !store.conn.is_autocommit(),
+        "the caller's transaction is left open, not committed out from under it"
+    );
+    store.conn.execute_batch("COMMIT").unwrap();
+    // …and outside one, the method opens and closes its own.
+    store.resolution_by_language().unwrap();
+    assert!(store.conn.is_autocommit(), "its own read transaction is closed");
+}
+
 // ── FR-GV-18 / NFR-RA-13 / ADR-46: the fast structural-integrity check ───────
 
 /// A minimal raw connection with just the four tables `structural_report`

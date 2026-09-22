@@ -141,13 +141,14 @@ pub struct QualityReadout {
 /// figure. A second question gets a second classifier, never more arms on the
 /// first — otherwise every match carries arms that cannot arise for it.
 ///
-/// This is why there are four vocabularies and not one, and each is a different
+/// This is why there are five vocabularies and not one, and each is a different
 /// question rather than a different dialect:
 ///
 /// | Classifier | The question it answers |
 /// |---|---|
 /// | [`SignalAbsence`] | why the 0–10000 metric signal is missing — a fact about the **graph** |
 /// | [`EvaluatedSetAbsence`] | why the rule check has no denominator — a fact about the **contract** |
+/// | [`CrossFileAbsence`] | why one language's relation class has no cross-file edge to count — a fact about the **resolver's output** ([S-441]) |
 /// | `healthModel.ts` `signalAbsence` | why the Health page has no signal to show — a fact about a **persisted snapshot**, so it has a middle arm (`unscanned`) the computing readout cannot reach |
 /// | `healthModel.ts` `snapshotStaleness` | why a signal that **exists** is not asserted current — not an absence at all, and deliberately separate ([CR-135] §3.3) |
 ///
@@ -203,6 +204,7 @@ pub struct QualityReadout {
 /// [`readout::render_age`]: crate::governance::readout
 /// [S-422]: ../../../docs/planning/journal.md#s-422-the-health-readout-is-internally-consistent-and-never-stale
 /// [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
+/// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
 /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
 /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
 /// [FR-GV-03]: ../../../docs/specs/requirements/FR-GV-03.md
@@ -244,6 +246,22 @@ pub mod absence {
     /// too, and an identifier that merely happens to spell one is a false
     /// positive the census adjudicates by hand. A census may be wrong in the
     /// loud direction only.
+    ///
+    /// # The three resolution spellings ([S-441], [FR-RS-09])
+    ///
+    /// `no-references-recorded`, `no-resolved-edges` and `same-file-only` are
+    /// the serialised tags of [`CrossFileAbsence`](super::CrossFileAbsence) —
+    /// the typed resolution denominator's named states. They were added here,
+    /// rather than spelled at their first surface, so the vocabulary the
+    /// relational answers consume next ([S-442]) is closed before its second
+    /// consumer exists. Being serde-derived, they are not source literals, so
+    /// the lexical census finds no site for them;
+    /// `the_resolution_denominator_speaks_only_the_lexicon` in the audit pins
+    /// them to this list structurally instead.
+    ///
+    /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+    /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+    /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
     pub const SENTINELS: &[&str] = &[
         "at an unknown age",
         "de-indexed",
@@ -256,9 +274,12 @@ pub mod absence {
         "no pass is stated",
         "no rules contract",
         "no-production-scope",
+        "no-references-recorded",
+        "no-resolved-edges",
         "none recorded",
         "not comparable",
         "nothing was evaluated",
+        "same-file-only",
         "unindexed",
         "unscanned",
     ];
@@ -647,6 +668,114 @@ impl EvaluatedSetAbsence {
             (None, _) | (_, None) => (None, Some(Self::Unrecorded)),
             (Some(_), Some(true)) => (None, Some(Self::NoRulesAuthored)),
             (Some(_), Some(false)) => (None, Some(Self::NoContract)),
+        }
+    }
+}
+
+/// Why one language's relation class has **no cross-file edge to count**
+/// ([S-441], [FR-RS-09], [CR-142] D3) — the named states of the typed
+/// resolution denominator.
+///
+/// The third Rust sibling of [`SignalAbsence`] and [`EvaluatedSetAbsence`], and
+/// shaped like the second: a `classify` constructor that returns **the figure
+/// and the absence, exactly one of which is `Some`**, the same serde tagging
+/// (`tag = "cause"`, kebab-case), and arms that carry whatever establishes them
+/// (R2). Its tags are spelled in [`absence::SENTINELS`], so the relational
+/// answers that attach this denominator next ([S-442]) speak the closed lexicon
+/// rather than a fourth dialect.
+///
+/// # Why a named state rather than a `0`
+///
+/// A cross-file count of `0` beside a same-file count of 245 reads as a
+/// measurement of a codebase that happens not to call across files. It is not:
+/// it is the resolver producing no cross-file binding for that language at all,
+/// which is [CR-142]'s defect, and it survived 74 sprints averaged into one
+/// global ratio ([FR-RS-04]). R4 forbids the favourable reading, so the zero is
+/// never serialised as a figure — the field is `None` and this names why.
+///
+/// # A question about edges, not about references
+///
+/// Every arm is decided by the **resolved edge set** — the set `callers` and
+/// `impact` traverse — and never by the ledger's `resolved` flag alone. The two
+/// are different populations: an edge is unique per `(source, target, kind)`,
+/// and one whose target lies in no indexed file has no locality to report. So
+/// [`NoResolvedEdges`](Self::NoResolvedEdges) carries the ledger's `bound`
+/// figure beside `references` rather than claiming it is `0`: R1 — the arm
+/// names the fact its condition establishes, that no edge left this language,
+/// and reports the ledger's own count as the count it is.
+///
+/// # No arm names a command
+///
+/// No command changes any of these states — the resolver's reach is a property
+/// of the language plugin, not of anything the reader can run (R3).
+///
+/// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
+/// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum CrossFileAbsence {
+    /// The language has resolved edges of this class, and **every one** stays
+    /// inside the file it starts in — the resolver binds same-file references
+    /// and none across a file boundary. [CR-142] §3.1's fingerprint: measured at
+    /// 1.4.15, every non-Rust language in both corpora was in this state for
+    /// `Calls`.
+    ///
+    /// `same_file_edges > 0` is what establishes the arm, and is carried so a
+    /// reader can see the language is not simply unresolved.
+    ///
+    /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+    SameFileOnly {
+        /// Resolved edges of this class whose two endpoints share a file.
+        same_file_edges: u64,
+    },
+    /// The language recorded references of this class and **no resolved edge
+    /// with a locality** leaves any node of it, same-file or cross-file. An
+    /// edge whose target lies in no indexed file has no locality and is counted
+    /// in neither column, so it does not rule this arm out.
+    NoResolvedEdges {
+        /// Ledger rows of this class the language's files recorded — `> 0` is
+        /// what separates this arm from [`NoReferencesRecorded`](Self::NoReferencesRecorded).
+        references: u64,
+        /// Of those rows, the ones the ledger flags bound — reported as the
+        /// ledger's own count, which is usually `0` here but is not what the
+        /// arm asserts (see the type doc).
+        bound: u64,
+    },
+    /// The language's files recorded **no reference** of this class, so there
+    /// is nothing for the resolver to bind — a data grammar's `Calls`, in
+    /// practice. Its own state because "nothing to resolve" and "resolved
+    /// nothing" are different facts, and a reader acts on the second.
+    NoReferencesRecorded,
+}
+
+impl CrossFileAbsence {
+    /// Split one relation class's counts into **the cross-file figure and the
+    /// absence**, exactly one of which is `Some` — [`EvaluatedSetAbsence::classify`]'s
+    /// shape, so "a count and a reason it is missing can never both be present"
+    /// is structural rather than a comment at the call site.
+    ///
+    /// A non-zero `cross_file_edges` settles the question by itself. Otherwise
+    /// the arms are tried in the order of what establishes them: resolved edges
+    /// that all stay in their file, then references with no resolved edge, then
+    /// no reference at all.
+    #[must_use]
+    pub fn classify(
+        references: u64,
+        bound: u64,
+        same_file_edges: u64,
+        cross_file_edges: u64,
+    ) -> (Option<u64>, Option<Self>) {
+        if cross_file_edges > 0 {
+            (Some(cross_file_edges), None)
+        } else if same_file_edges > 0 {
+            (None, Some(Self::SameFileOnly { same_file_edges }))
+        } else if references > 0 {
+            (None, Some(Self::NoResolvedEdges { references, bound }))
+        } else {
+            (None, Some(Self::NoReferencesRecorded))
         }
     }
 }
