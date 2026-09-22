@@ -408,3 +408,24 @@ fn an_import_binds_on_the_sync_that_indexes_its_target_and_matches_a_full_index(
     assert_eq!(imported_files(cold_rt, "web/src/App.tsx"), synced_ts);
     assert_eq!(imported_files(cold_rt, "cmd/server/main.go"), synced_go);
 }
+
+#[test]
+fn a_non_go_import_never_binds_into_a_go_module_of_the_same_name() {
+    // A monorepo whose Go backend is `module shared` and whose TS frontend
+    // imports an npm package (or alias) also called `shared`: the TS specifier
+    // must not be read as a Go import path, however exactly it matches.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "go.mod", "module shared\n");
+    write(tmp.path(), "shared.go", "package shared\n\nfunc Root() {}\n");
+    write(tmp.path(), "pkg/util/util.go", "package util\n\nfunc U() {}\n");
+    write(
+        tmp.path(),
+        "web/src/App.ts",
+        "import client from 'shared';\nimport u from 'shared/pkg/util';\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(imported_files(rt, "web/src/App.ts").is_empty());
+    assert!(import_row_unresolved(rt, "shared"));
+    assert!(import_row_unresolved(rt, "shared::pkg::util"));
+}

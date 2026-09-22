@@ -1540,10 +1540,15 @@ impl Ctx<'_> {
         if !self.ix.path_specifier_extensions.contains(&ext) {
             return None;
         }
-        Some(
+        // Only a Go file can name a Go package: a TypeScript `import 'shared'`
+        // beside a `go.mod` declaring `module shared` is a package specifier,
+        // never a path into the Go tree.
+        let go_package = if ext == "go" {
             self.resolve_go_package(&segs)
-                .unwrap_or(Outcome::Unbound),
-        )
+        } else {
+            None
+        };
+        Some(go_package.unwrap_or(Outcome::Unbound))
     }
 
     /// A relative specifier, resolved against the importing file's directory by
@@ -1580,8 +1585,8 @@ impl Ctx<'_> {
     /// `.go` file directly in the package directory, the same one-row fan-out a
     /// Terraform module directory takes ([`resolve_module_dir`](Ctx::resolve_module_dir)).
     ///
-    /// Returns `Some` only for an import path that falls under a module the tree
-    /// declares ([`super::go_module`]) and names a directory holding at least one
+    /// Consulted only for a `.go` importer. Returns `Some` only for an import
+    /// path that falls under a module the tree declares ([`super::go_module`]) and names a directory holding at least one
     /// such file; every other case returns `None`, which
     /// [`resolve_specifier`](Ctx::resolve_specifier) decides **unbound**. The path is matched against the declared module paths,
     /// longest first, on a whole-segment prefix — so the dotted host is compared
