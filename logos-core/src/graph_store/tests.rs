@@ -2308,6 +2308,29 @@ fn resolution_by_language_splits_resolved_edges_on_the_file_boundary() {
     );
 }
 
+/// The three reads share one snapshot through their own read transaction — and
+/// a caller already inside a transaction keeps its own rather than failing on a
+/// nested `BEGIN`, which is what an unconditional `unchecked_transaction` does.
+#[test]
+fn resolution_by_language_reads_inside_a_callers_transaction() {
+    let store = mem();
+    let rust = seed_file(&store, "src/a.rs", "rust");
+    seed_in_file(&store, 0, "a", rust);
+    store.conn.execute_batch("BEGIN").unwrap();
+    let rows = store
+        .resolution_by_language()
+        .expect("a read inside the caller's transaction succeeds");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        !store.conn.is_autocommit(),
+        "the caller's transaction is left open, not committed out from under it"
+    );
+    store.conn.execute_batch("COMMIT").unwrap();
+    // …and outside one, the method opens and closes its own.
+    store.resolution_by_language().unwrap();
+    assert!(store.conn.is_autocommit(), "its own read transaction is closed");
+}
+
 // ── FR-GV-18 / NFR-RA-13 / ADR-46: the fast structural-integrity check ───────
 
 /// A minimal raw connection with just the four tables `structural_report`

@@ -1377,7 +1377,9 @@ pub trait GraphStore {
     /// indexed file is attributable to no language and no locality, and is
     /// counted nowhere. An empty store yields an empty vector.
     ///
-    /// A pure read: three aggregate `SELECT`s, no write ([ADR-28]).
+    /// A pure read: three aggregate `SELECT`s in one read transaction, so the
+    /// row set and both count halves describe one graph generation; no write
+    /// ([ADR-28]).
     ///
     /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
     /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
@@ -2264,6 +2266,20 @@ impl GraphStore for SqliteGraphStore {
 
     fn resolution_by_language(&self) -> Result<Vec<LanguageRefCounts>> {
         let (calls, imports) = (EdgeKind::Calls as i64, EdgeKind::Imports as i64);
+        // One snapshot for all three reads. Outside a transaction each
+        // statement is its own autocommit read, so a sync committing between
+        // them could seed the rows from one generation and count them from the
+        // next — a language whose first file lands after the seed silently
+        // dropped, or one row mixing a ledger `bound` with another
+        // generation's edge split. A deferred transaction is permitted on the
+        // `query_only` reader and pins the first read's snapshot for the rest.
+        // Opened only in autocommit, so a caller already inside a transaction
+        // keeps its own snapshot rather than failing on a nested `BEGIN`.
+        let snapshot = if self.conn.is_autocommit() {
+            Some(self.conn.unchecked_transaction()?)
+        } else {
+            None
+        };
         // Keyed by language in a `BTreeMap`, so the order is the map's rather
         // than SQLite's collation and is identical on every platform
         // ([NFR-RA-06]). Seeded from `files`, so every language in the index
@@ -2348,6 +2364,9 @@ impl GraphStore for SqliteGraphStore {
                 counts.same_file_edges = same_file;
                 counts.cross_file_edges = cross_file;
             }
+        }
+        if let Some(snapshot) = snapshot {
+            snapshot.commit()?;
         }
         Ok(rows.into_values().collect())
     }
