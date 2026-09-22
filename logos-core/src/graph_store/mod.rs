@@ -391,6 +391,53 @@ pub struct StoreCounts {
     pub refs_resolved: u64,
 }
 
+/// One relation class's raw resolution counts over one language — the four
+/// figures [`GraphStore::resolution_by_language`] reads, before the resolution
+/// engine classifies them ([FR-RS-09]).
+///
+/// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelationCounts {
+    /// Ledger rows of this kind owned by the language's files.
+    pub references: u64,
+    /// Of those, rows flagged `resolved = 1`.
+    pub bound: u64,
+    /// Edges of this kind from the language's nodes to a node in the **same**
+    /// file.
+    pub same_file_edges: u64,
+    /// Edges of this kind from the language's nodes to a node in a
+    /// **different** indexed file.
+    pub cross_file_edges: u64,
+}
+
+/// One language's raw resolution counts ([FR-RS-09]): every language tagged on
+/// an indexed file gets one, with zeroed classes where it recorded nothing.
+///
+/// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanguageRefCounts {
+    /// `files.language`.
+    pub language: String,
+    /// Indexed files tagged with this language.
+    pub files: u64,
+    /// The `Calls` class.
+    pub calls: RelationCounts,
+    /// The `Imports` class.
+    pub imports: RelationCounts,
+}
+
+/// The class a `kind` discriminant from [`GraphStore::resolution_by_language`]'s
+/// two grouped reads lands in; `None` for a kind neither read selects.
+fn relation_class(row: &mut LanguageRefCounts, kind: i64) -> Option<&mut RelationCounts> {
+    if kind == EdgeKind::Calls as i64 {
+        Some(&mut row.calls)
+    } else if kind == EdgeKind::Imports as i64 {
+        Some(&mut row.imports)
+    } else {
+        None
+    }
+}
+
 /// A cross-file edge captured before a synced file's nodes are deleted, so it
 /// can be re-attached after re-extraction ([ADR-10] capture-before-delete).
 ///
@@ -1316,6 +1363,28 @@ pub trait GraphStore {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn language_composition(&self) -> Result<Vec<LanguageCount>>;
 
+    /// Per-language resolution counts for the `Calls` and `Imports` classes
+    /// ([FR-RS-09], [S-441]): one entry per language tagged on an indexed file,
+    /// ordered by language name ascending ([NFR-RA-06]).
+    ///
+    /// Presence is read from the **`files`** table, not the `nodes ⋈ files`
+    /// join [`language_composition`](Self::language_composition) uses: a
+    /// language in the index must never be an absent row here, even one whose
+    /// files contributed no node. The ledger half groups `unresolved_refs` by
+    /// its owning file's language; the edge half groups edges by their
+    /// **source** node's file language and splits them on whether the target
+    /// node lies in the same file. An edge whose source or target lies in no
+    /// indexed file is attributable to no language and no locality, and is
+    /// counted nowhere. An empty store yields an empty vector.
+    ///
+    /// A pure read: three aggregate `SELECT`s, no write ([ADR-28]).
+    ///
+    /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+    /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+    fn resolution_by_language(&self) -> Result<Vec<LanguageRefCounts>>;
+
     /// Best-effort "did you mean" name suggestions for `text` ([FR-NV-09]).
     ///
     /// Tries an FTS5 prefix match on the first search token, then falls back
@@ -2191,6 +2260,96 @@ impl GraphStore for SqliteGraphStore {
                 .then_with(|| a.language.cmp(&b.language))
         });
         Ok(composition)
+    }
+
+    fn resolution_by_language(&self) -> Result<Vec<LanguageRefCounts>> {
+        let (calls, imports) = (EdgeKind::Calls as i64, EdgeKind::Imports as i64);
+        // Keyed by language in a `BTreeMap`, so the order is the map's rather
+        // than SQLite's collation and is identical on every platform
+        // ([NFR-RA-06]). Seeded from `files`, so every language in the index
+        // earns a row before either count half is read.
+        let mut rows: std::collections::BTreeMap<String, LanguageRefCounts> =
+            std::collections::BTreeMap::new();
+        let mut files = self.conn.prepare_cached(
+            "SELECT language, COUNT(*) FROM files WHERE language IS NOT NULL GROUP BY language",
+        )?;
+        for row in files.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })? {
+            let (language, count) = row.context("reading per-language file counts")?;
+            rows.insert(
+                language.clone(),
+                LanguageRefCounts {
+                    language,
+                    files: count,
+                    ..LanguageRefCounts::default()
+                },
+            );
+        }
+        // The ledger half: the numerator over its denominator.
+        let mut ledger = self.conn.prepare_cached(
+            "SELECT f.language, r.kind, COUNT(*), COALESCE(SUM(r.resolved), 0) \
+             FROM unresolved_refs r JOIN files f ON f.id = r.file_id \
+             WHERE f.language IS NOT NULL AND r.kind IN (?1, ?2) \
+             GROUP BY f.language, r.kind",
+        )?;
+        let ledger_rows = ledger
+            .query_map([calls, imports], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u64,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading the per-language reference ledger")?;
+        for (language, kind, references, bound) in ledger_rows {
+            if let Some(counts) = rows
+                .get_mut(&language)
+                .and_then(|r| relation_class(r, kind))
+            {
+                counts.references = references;
+                counts.bound = bound;
+            }
+        }
+
+        // The edge half: the resolved edge set, split on whether the target
+        // shares the source's file. Both endpoints must lie in an indexed file
+        // (the inner joins), or the edge has no locality to report.
+        let mut edges = self.conn.prepare_cached(
+            "SELECT fs.language, e.kind, \
+                    COALESCE(SUM(ns.file_id = nt.file_id), 0), \
+                    COALESCE(SUM(ns.file_id <> nt.file_id), 0) \
+             FROM edges e \
+             JOIN nodes ns ON ns.id = e.source \
+             JOIN nodes nt ON nt.id = e.target \
+             JOIN files fs ON fs.id = ns.file_id \
+             JOIN files ft ON ft.id = nt.file_id \
+             WHERE fs.language IS NOT NULL AND e.kind IN (?1, ?2) \
+             GROUP BY fs.language, e.kind",
+        )?;
+        let edge_rows = edges
+            .query_map([calls, imports], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u64,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading the per-language resolved edge set")?;
+        for (language, kind, same_file, cross_file) in edge_rows {
+            if let Some(counts) = rows
+                .get_mut(&language)
+                .and_then(|r| relation_class(r, kind))
+            {
+                counts.same_file_edges = same_file;
+                counts.cross_file_edges = cross_file;
+            }
+        }
+        Ok(rows.into_values().collect())
     }
 
     fn suggest(&self, text: &str, limit: i64) -> Result<Vec<String>> {

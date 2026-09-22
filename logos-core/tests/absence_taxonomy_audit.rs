@@ -94,7 +94,7 @@
 
 use std::path::{Path, PathBuf};
 
-use logos_core::models::quality::{absence, EvaluatedSetAbsence, SignalAbsence};
+use logos_core::models::quality::{absence, CrossFileAbsence, EvaluatedSetAbsence, SignalAbsence};
 
 /// The date the figures in this module's header were taken. A census is a
 /// reading of one tree at one moment, and an undated one invites being read as
@@ -130,7 +130,7 @@ const AUDITED_ON: &str = "2026-09-20";
 /// # The two exclusions, both stated rather than silent
 ///
 /// `logos-core/src/models/quality.rs` holds [`absence::SENTINELS`], so walking
-/// it would report the lexicon as sixteen sites — the self-reference [S-435]'s
+/// it would report the lexicon as nineteen sites — the self-reference [S-435]'s
 /// sibling harness records hitting. It is checked separately, and more
 /// strictly, by [`the_taxonomy_module_is_not_a_reporting_site`].
 ///
@@ -1224,7 +1224,7 @@ fn whole_token(code: &str, start: usize, end: usize) -> bool {
 /// Match `sentinel` at `at`, tolerating any run of whitespace where it has a
 /// single space; the end offset, or `None`.
 ///
-/// Nine of the sixteen sentinels contain a space, and both languages on these
+/// Nine of the nineteen sentinels contain a space, and both languages on these
 /// surfaces routinely split a rendered sentence across source lines — Rust with
 /// a `\` continuation inside a `format!`, TSX with a formatter wrapping a JSX
 /// text node. `readout.rs` and `governance/mod.rs` are written almost entirely
@@ -1729,7 +1729,7 @@ fn a_character_that_folds_to_a_different_length_does_not_move_a_site() {
 
 /// **A sentinel the formatter wrapped is still one site.**
 ///
-/// Nine of the sixteen sentinels contain a space, and `readout.rs` and
+/// Nine of the nineteen sentinels contain a space, and `readout.rs` and
 /// `governance/mod.rs` are written almost entirely in `\`-continued `format!`
 /// strings. A plain substring match needs exactly one space, so a reflow of the
 /// wrong line makes a conformant site invisible — under-capture, the silent
@@ -2128,6 +2128,11 @@ fn no_new_absence_state_on_any_surface() {
         EvaluatedSetAbsence::NoRulesAuthored => "no-rules-authored",
         EvaluatedSetAbsence::Unrecorded => "unrecorded",
     };
+    let cross_file_cause = |absence: CrossFileAbsence| match absence {
+        CrossFileAbsence::SameFileOnly { .. } => "same-file-only",
+        CrossFileAbsence::NoResolvedEdges { .. } => "no-resolved-edges",
+        CrossFileAbsence::NoReferencesRecorded => "no-references-recorded",
+    };
     assert_eq!(
         (
             signal_cause(&SignalAbsence::EmptyGraph),
@@ -2147,6 +2152,23 @@ fn no_new_absence_state_on_any_surface() {
         ],
         ["no-contract", "no-rules-authored", "unrecorded"],
         "`EvaluatedSetAbsence` answers a different question with three (R0)"
+    );
+    assert_eq!(
+        [
+            cross_file_cause(CrossFileAbsence::SameFileOnly { same_file_edges: 1 }),
+            cross_file_cause(CrossFileAbsence::NoResolvedEdges {
+                references: 1,
+                bound: 0,
+            }),
+            cross_file_cause(CrossFileAbsence::NoReferencesRecorded),
+        ],
+        [
+            "same-file-only",
+            "no-resolved-edges",
+            "no-references-recorded"
+        ],
+        "`CrossFileAbsence` answers a third question — why a language's relation \
+         class has no cross-file edge — with three (R0, S-441)"
     );
 
     let model =
@@ -2244,7 +2266,7 @@ fn one_condition_has_one_wording_across_the_language_boundary() {
 /// **The lexicon's own home is not a reporting site.**
 ///
 /// `models/quality.rs` is deliberately off the scanned surfaces — it holds
-/// [`absence::SENTINELS`], so scanning it would report the lexicon as sixteen
+/// [`absence::SENTINELS`], so scanning it would report the lexicon as nineteen
 /// sites, the self-reference [S-435]'s sibling harness records hitting. That
 /// exclusion is the one hole in the walk, so it is closed here rather than
 /// assumed: the file is a serde read-model and renders nothing, and the only
@@ -2271,6 +2293,56 @@ fn the_taxonomy_module_is_not_a_reporting_site() {
             "models/quality.rs carries {sentinel:?} outside the SENTINELS \
              declaration — it has become a rendering surface and must be \
              added to SURFACES rather than left unwalked"
+        );
+    }
+}
+
+/// **The resolution denominator speaks only the lexicon** ([S-441], [FR-RS-09]).
+///
+/// [`CrossFileAbsence`]'s tags are serde-derived, so they are not source
+/// literals and the lexical census above cannot see them — the blind spot its
+/// own header names, one type over. They are pinned here structurally instead,
+/// in both directions: every tag the type can serialise is a
+/// [`absence::SENTINELS`] spelling, and every resolution spelling the lexicon
+/// carries is produced by some arm, so neither side can rot away from the
+/// other. [S-442] attaches this denominator to the relational answers; this is
+/// what keeps it in the closed vocabulary when it does.
+///
+/// [S-441]: ../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+/// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [FR-RS-09]: ../../docs/specs/requirements/FR-RS-09.md
+#[test]
+fn the_resolution_denominator_speaks_only_the_lexicon() {
+    // Exhaustive by construction: the classifier is the only producer, and
+    // these four inputs reach each of its three arms (the fourth is the
+    // figure, which serialises no tag at all).
+    let tags: Vec<String> = [(1, 0, 1, 0), (1, 0, 0, 0), (0, 0, 0, 0), (1, 1, 1, 1)]
+        .into_iter()
+        .filter_map(|(references, bound, same, cross)| {
+            CrossFileAbsence::classify(references, bound, same, cross).1
+        })
+        .map(|absence| {
+            serde_json::to_value(absence).expect("serialises")["cause"]
+                .as_str()
+                .expect("a string tag")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(tags.len(), 3, "three arms, three tags: {tags:?}");
+    for tag in &tags {
+        assert!(
+            absence::SENTINELS.contains(&tag.as_str()),
+            "{tag:?} is a named state the closed lexicon does not carry"
+        );
+    }
+    for spelling in [
+        "same-file-only",
+        "no-resolved-edges",
+        "no-references-recorded",
+    ] {
+        assert!(
+            tags.iter().any(|t| t == spelling),
+            "{spelling:?} is in the lexicon but no arm produces it"
         );
     }
 }

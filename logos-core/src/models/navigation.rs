@@ -26,6 +26,7 @@
 use serde::Serialize;
 
 use crate::model::{EdgeKind, NodeKind};
+use crate::models::quality::CrossFileAbsence;
 
 /// Result of an FTS5-ranked full-text search over the code graph (FR-NV-01).
 #[derive(Debug, Default, Serialize)]
@@ -938,7 +939,25 @@ pub struct StatusInfo {
     /// Ledger rows persisted for retry — never fabricated (NFR-RA-05).
     pub refs_unresolved: u64,
     /// The resolution bound-ratio (FR-RS-04); `1.0` for an empty ledger.
+    ///
+    /// One ratio over every language, so a language binding nothing across a
+    /// file boundary is averaged into the rest — [CR-142]'s defect survived 74
+    /// sprints behind it. Read it beside
+    /// [`resolution_by_language`](Self::resolution_by_language), never alone.
+    ///
+    /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
     pub resolution_coverage: f64,
+    /// Resolution coverage **per language, with its denominator** ([FR-RS-09],
+    /// [S-441]): one row for every language tagged on an indexed file, in
+    /// language-name order ([NFR-RA-06]). A language present in the index is
+    /// never an absent row — a data grammar with nothing to resolve still
+    /// appears, and says so through its named state. Empty exactly when no
+    /// indexed file carries a language.
+    ///
+    /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+    /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub resolution_by_language: Vec<LanguageResolution>,
     /// Total physical lines of code across the admitted file set, from the
     /// index-time roll-up ([FR-IX-12], [CR-085]) — the same quantity the
     /// beyond-envelope advisory ([NFR-PE-09]) uses, refreshed on full `index`.
@@ -957,6 +976,97 @@ pub struct StatusInfo {
     pub freshness: String,
     /// Degradation channel (ADR-14).
     pub warnings: Vec<String>,
+}
+
+/// One language's resolution coverage, with its denominator ([FR-RS-09],
+/// [S-441], [CR-142] D3) — a row of [`StatusInfo::resolution_by_language`].
+///
+/// `language` is the grammar as the plugin substrate records it on each file
+/// (`files.language`), the token [`LanguageCount`] uses. That is the resolver's
+/// own unit — `module_separator` and `import_strategy` are declared per plugin
+/// — so `.js` files read under `typescript`, the plugin that parses them, and
+/// `.jsx` under `tsx`. [CR-142] §3.1 split those rows by file extension; this
+/// row is their sum.
+///
+/// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+/// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct LanguageResolution {
+    /// The language name, e.g. `"rust"`, `"tsx"`.
+    pub language: String,
+    /// Indexed files tagged with this language — every one of them, including
+    /// files that contributed no node, since presence in the index is what
+    /// earns the row.
+    pub files: u64,
+    /// The `Calls` relation — what `callers` and `impact` traverse.
+    pub calls: RelationResolution,
+    /// The `Imports` relation.
+    pub imports: RelationResolution,
+}
+
+/// One relation class's resolution over one language: the ledger's numerator
+/// over its denominator, and the resolved edges split by whether they cross a
+/// file boundary ([FR-RS-09]).
+///
+/// Two populations, deliberately side by side and deliberately not reconciled.
+/// `bound / references` is the **ledger's** ratio, the per-language slice of
+/// [`StatusInfo::refs_resolved`] over [`StatusInfo::refs_total`]. The locality
+/// split is the **resolved edge set's**: an edge is unique per
+/// `(source, target, kind)` and one whose target lies in no indexed file has no
+/// locality, so `same_file_edges + cross_file_edges` need not equal `bound`.
+///
+/// The cross-file figure and its absence are produced together by
+/// [`CrossFileAbsence::classify`], so exactly one of the two is `Some`: a
+/// cross-file count is only ever a count of something that exists, never a `0`
+/// read as a measurement ([NFR-CC-04], [NFR-RA-05]). This is the **typed
+/// resolution denominator** the relational answers attach next ([S-442]).
+///
+/// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct RelationResolution {
+    /// Ledger rows of this class recorded by the language's files — the
+    /// denominator.
+    pub references: u64,
+    /// Of those rows, the ones currently bound — the numerator.
+    pub bound: u64,
+    /// Resolved edges of this class, leaving the language's nodes, whose two
+    /// endpoints share a file. A `0` here is a real count: it is always
+    /// accompanied by a named state in
+    /// [`cross_file_absence`](Self::cross_file_absence).
+    pub same_file_edges: u64,
+    /// Resolved edges of this class, leaving the language's nodes, that cross a
+    /// file boundary; `None` exactly when there are none, and
+    /// [`cross_file_absence`](Self::cross_file_absence) names why.
+    pub cross_file_edges: Option<u64>,
+    /// Why there is no cross-file figure; `None` exactly when there is one.
+    pub cross_file_absence: Option<CrossFileAbsence>,
+}
+
+impl RelationResolution {
+    /// Assemble one class's row from its four counts, classifying the
+    /// cross-file figure through [`CrossFileAbsence::classify`] — the one
+    /// place a cross-file count becomes a figure or a named state.
+    #[must_use]
+    pub fn measured(
+        references: u64,
+        bound: u64,
+        same_file_edges: u64,
+        cross_file_edges: u64,
+    ) -> Self {
+        let (cross_file_edges, cross_file_absence) =
+            CrossFileAbsence::classify(references, bound, same_file_edges, cross_file_edges);
+        Self {
+            references,
+            bound,
+            same_file_edges,
+            cross_file_edges,
+            cross_file_absence,
+        }
+    }
 }
 
 /// The per-project **language composition** read-model ([FR-UI-10], [CR-021]):

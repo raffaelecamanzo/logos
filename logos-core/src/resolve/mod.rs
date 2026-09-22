@@ -26,6 +26,10 @@
 //! total refs, bound refs, surviving unresolved refs, and the bound-ratio.
 //! Heuristic results are never presented as ground truth — the coverage
 //! number rides along wherever resolution data is consumed.
+//! [`coverage_by_language`] states the same coverage per language, with its
+//! denominator and a same-file/cross-file split ([FR-RS-09]), because one
+//! global ratio averages a language that binds nothing across a file boundary
+//! into the rest.
 //!
 //! [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
 //! [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
@@ -35,6 +39,7 @@
 //! [NFR-RA-11]: ../../../docs/specs/requirements/NFR-RA-11.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
+//! [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
@@ -96,7 +101,8 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 use crate::config::BindingPolicy;
-use crate::graph_store::{EdgeRow, GraphStore, NodeRow, UnresolvedRefRow};
+use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
+use crate::models::navigation::{LanguageResolution, RelationResolution};
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
 use crate::runtime::Runtime;
 
@@ -432,6 +438,59 @@ pub fn coverage(store: &dyn GraphStore) -> Result<ResolutionStats> {
     let resolved = refs.iter().filter(|r| r.resolved).count() as u64;
     let by_relation = relation_coverage(refs.iter().map(|r| (r.payload.as_deref(), r.resolved)));
     Ok(stats(total, resolved, 0, by_relation))
+}
+
+/// Resolution coverage **per language, with its denominator** ([FR-RS-09],
+/// [S-441], [CR-142] D3) — the per-language half of the `coverage()` interface
+/// of the [resolution-engine], read straight from the graph.
+///
+/// [`coverage`] answers "how much of the ledger is bound?" once for the whole
+/// graph, and that single ratio is what let a language binding nothing across
+/// a file boundary hide inside a Rust-dominated aggregate for 74 sprints. This
+/// answers it per language and per relation class, and splits the resolved
+/// edges on whether they cross a file boundary, so *resolves only same-file
+/// references* and *resolves none* are two different rows. Each class's
+/// cross-file figure passes through
+/// [`RelationResolution::measured`](crate::models::RelationResolution::measured),
+/// so a zero is always a named state and never a count.
+///
+/// Computed once and consumed twice ([CR-143] §3.5): `status` renders it, and
+/// the relational answers attach the row for the language they were computed
+/// over ([S-442]).
+///
+/// A pure read that persists nothing ([ADR-28]).
+///
+/// # Errors
+/// Returns an error if the graph cannot be read.
+///
+/// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+/// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+/// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+/// [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
+pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolution>> {
+    Ok(store
+        .resolution_by_language()?
+        .into_iter()
+        .map(|row| LanguageResolution {
+            language: row.language,
+            files: row.files,
+            calls: measured(row.calls),
+            imports: measured(row.imports),
+        })
+        .collect())
+}
+
+/// One class's raw counts, classified.
+fn measured(counts: RelationCounts) -> RelationResolution {
+    RelationResolution::measured(
+        counts.references,
+        counts.bound,
+        counts.same_file_edges,
+        counts.cross_file_edges,
+    )
 }
 
 /// Assemble a [`ResolutionStats`], deriving the unresolved count and the

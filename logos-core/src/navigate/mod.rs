@@ -1879,6 +1879,13 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
     // never-indexed store.
     let graph_revision = runtime.submit_read(|store| store.graph_revision())?;
 
+    // Per-language resolution coverage with its denominator (FR-RS-09, S-441):
+    // the row one global `resolution_coverage` averages away. Three aggregate
+    // reads on the RO pool, whose `query_only` connections make "persists
+    // nothing" structural rather than a promise.
+    let resolution_by_language =
+        runtime.submit_read(|store| crate::resolve::coverage_by_language(store))?;
+
     Ok(StatusInfo {
         indexed,
         file_count: counts.files,
@@ -1893,6 +1900,7 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         refs_resolved: counts.refs_resolved,
         refs_unresolved,
         resolution_coverage,
+        resolution_by_language,
         total_line_count,
         source_line_count,
         test_line_count,
