@@ -524,6 +524,7 @@ pub fn sync(
     let mut removals: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut files_failed: Vec<String> = Vec::new();
+    let mut module_descriptors: Vec<String> = Vec::new();
 
     for path in paths {
         let Some(rel) = relativize(&canon_root, path) else {
@@ -535,6 +536,12 @@ pub fn sync(
         };
         if !seen.insert(rel.clone()) {
             continue; // the same file requested twice
+        }
+        // A Go module descriptor is never indexed, yet its `module` line is what
+        // every Go import binds against (S-439): record it so the resolve pass
+        // re-binds them. The admission gate below then skips it as usual.
+        if rel == "go.mod" || rel.ends_with("/go.mod") {
+            module_descriptors.push(rel.clone());
         }
 
         let abs = canon_root.join(&rel);
@@ -648,6 +655,7 @@ pub fn sync(
         .iter()
         .map(|l| l.rel.clone())
         .chain(removals.iter().cloned())
+        .chain(module_descriptors)
         .collect();
     let old_names: Vec<String> = if changed_paths.is_empty() {
         Vec::new()

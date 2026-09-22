@@ -486,3 +486,46 @@ fn a_go_import_binds_in_the_importers_own_module_and_the_longest_module_path() {
     );
     assert_eq!(imported_files(rt, "cmd/main.go"), ["x/tools/gen/gen.go"]);
 }
+
+#[test]
+fn a_sync_rebinds_imports_no_token_of_theirs_names() {
+    // Three shapes the name-token re-bind selection cannot see (S-439 review):
+    // `'.'` spells no token; a file added to a Go module's ROOT package shares
+    // no token with the module path; a `go.mod` carries no node at all. Each
+    // must bind on the sync that brings its evidence, exactly as a cold index
+    // of the same tree binds it (CR-015).
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "web/src/App.tsx", "import { x } from '.';\nexport const A = x;\n");
+    write(tmp.path(), "shop.go", "package shop\n\nfunc Open() {}\n");
+    write(
+        tmp.path(),
+        "cmd/main.go",
+        "package main\n\nimport \"github.com/acme/shop\"\n\nfunc main() { shop.Open() }\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(imported_files(rt, "web/src/App.tsx").is_empty(), "no index.ts yet");
+    assert!(imported_files(rt, "cmd/main.go").is_empty(), "no go.mod yet");
+
+    write(tmp.path(), "go.mod", "module github.com/acme/shop\n");
+    engine.sync(&["go.mod".into()]);
+    assert_eq!(imported_files(rt, "cmd/main.go"), ["shop.go"], "go.mod arrived");
+
+    write(tmp.path(), "web/src/index.ts", "export const x = 1;\n");
+    write(tmp.path(), "util.go", "package shop\n\nfunc helper() {}\n");
+    engine.sync(&["web/src/index.ts".into(), "util.go".into()]);
+    let synced_ts = imported_files(rt, "web/src/App.tsx");
+    let synced_go = imported_files(rt, "cmd/main.go");
+    assert_eq!(synced_ts, ["web/src/index.ts"]);
+    assert_eq!(synced_go, ["shop.go", "util.go"]);
+    drop(engine);
+
+    let cold = TempDir::new().unwrap();
+    for rel in ["web/src/App.tsx", "web/src/index.ts", "shop.go", "util.go", "cmd/main.go", "go.mod"] {
+        write(cold.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
+    }
+    let cold_engine = index(&cold);
+    let cold_rt = cold_engine.runtime().unwrap();
+    assert_eq!(imported_files(cold_rt, "web/src/App.tsx"), synced_ts);
+    assert_eq!(imported_files(cold_rt, "cmd/main.go"), synced_go);
+}

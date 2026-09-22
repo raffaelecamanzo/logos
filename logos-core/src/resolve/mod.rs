@@ -108,6 +108,7 @@ use rayon::prelude::*;
 
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
+use crate::model::EdgeKind;
 use crate::models::navigation::{LanguageResolution, RelationResolution};
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
 use crate::plugin::LanguageRegistry;
@@ -157,7 +158,9 @@ struct Snapshot {
 /// [`index`]: crate::pipeline::index
 #[derive(Debug, Default)]
 pub struct Delta {
-    /// Project-relative paths re-extracted or removed this sync.
+    /// Project-relative paths re-extracted or removed this sync — plus any Go
+    /// module descriptor (`go.mod`) the sync was handed, which is never indexed
+    /// but moves every Go import binding (S-439).
     pub changed_paths: HashSet<String>,
     /// Tokenized names this sync added or removed (see [`tokens`]).
     pub dirty_tokens: HashSet<String>,
@@ -386,7 +389,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 
 /// Whether the incremental run must re-bind row `r` given `delta`.
 ///
-/// Three reasons force a re-bind; any one suffices:
+/// Four reasons force a re-bind; any one suffices:
 /// 1. **A** — `r` belongs to a file re-extracted or removed this sync. Its source
 ///    may have moved, and capture-before-delete lands inbound cross-file edges
 ///    here as `Symbol` rows ([ADR-10]); both need rebinding.
@@ -394,7 +397,14 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    file-path/route buckets whose normalization can erase the literal a token
 ///    test would key on. They are a small minority, so re-bind them whenever
 ///    anything changed rather than reason about their normalization.
-/// 3. **B** — the row's target (or a name its file's `as`-aliases expand that
+/// 3. **Path-specifier fallback** (S-439) — an import written as a path binds
+///    against the file tree and the `go.mod` module declarations, and neither is
+///    a name a token test sees: `'.'` spells no token at all, a file added to a
+///    Go module's root package shares none with the module path, and a `go.mod`
+///    carries no node. So every `Imports` row from a path-grammar file is
+///    re-bound whenever anything changed — the same stance as the artifact
+///    fallback, for the same reason.
+/// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
 ///
@@ -410,6 +420,9 @@ fn is_affected(
 ) -> bool {
     if let Some(path) = r.file_id.and_then(|id| file_paths.get(&id)) {
         if delta.changed_paths.contains(path) {
+            return true;
+        }
+        if r.kind == EdgeKind::Imports && index.is_path_specifier_file(path) {
             return true;
         }
     }

@@ -355,6 +355,13 @@ impl Index {
         self
     }
 
+    /// Whether a file at `path` writes its import specifiers as paths (S-439) —
+    /// the incremental run re-binds every import such a file records
+    /// (`resolve::is_affected`).
+    pub(crate) fn is_path_specifier_file(&self, path: &str) -> bool {
+        self.specifier_targets.contains_key(&extension_of(path))
+    }
+
     /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when
     /// zero or several carry the name — the never-fabricate acceptance rule
     /// ([NFR-RA-05]) applied to trait resolution: a `dyn T` call whose trait is
