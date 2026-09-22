@@ -991,7 +991,7 @@ pub struct StatusInfo {
 /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
 /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
 /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LanguageResolution {
     /// The language name, e.g. `"rust"`, `"tsx"`.
     pub language: String,
@@ -1022,11 +1022,15 @@ pub struct LanguageResolution {
 /// read as a measurement ([NFR-CC-04], [NFR-RA-05]). This is the **typed
 /// resolution denominator** the relational answers attach next ([S-442]).
 ///
+/// Deliberately **not** `Default`: a defaulted row would carry neither the
+/// figure nor its absence — the one state this type exists to rule out — so
+/// the only constructor is [`measured`](Self::measured).
+///
 /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
 /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RelationResolution {
     /// Ledger rows of this class recorded by the language's files — the
     /// denominator.
