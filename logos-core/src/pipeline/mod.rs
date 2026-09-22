@@ -1940,7 +1940,7 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
 
 /// Pass 2 — resolution ([resolution-engine], [ADR-10], [S-011]).
 ///
-/// Delegates to [`crate::resolve::run_in_tree`]: snapshot the graph, bind the whole
+/// Delegates to [`crate::resolve::run`]: snapshot the graph, bind the whole
 /// `unresolved_refs` ledger (parallel compute on the shared worker pool),
 /// commit bound edges serially through the writer actor. Unbindable refs
 /// survive in the ledger and are retried on the next sync ([FR-RS-03],
@@ -1962,7 +1962,7 @@ fn resolve_pass(
     // (re-bind only the change-affected rows, CR-015). The measured wall-clock
     // rides back for the per-phase index breakdown (FR-OB-06, CR-057).
     let (res, ms) = crate::observability::traced_timed(Tool::Resolve, || {
-        crate::resolve::run_in_tree(runtime, registry, root, policy, delta)
+        crate::resolve::run(runtime, Some((registry, root)), policy, delta)
     });
     Ok((res?, ms))
 }

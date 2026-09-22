@@ -187,6 +187,19 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 /// See the module docs for the snapshot → parallel-compute → serial-commit
 /// shape. Returns the run's [`ResolutionStats`] ([FR-RS-04]).
 ///
+/// `tree` is the registry the tree was indexed with and its root — the
+/// path-specifier context (S-439, [CR-142] D1). The registry says which files
+/// write their import specifiers as paths and which files each may resolve to
+/// ([`LanguageRegistry::specifier_target_extensions`]); the root supplies the
+/// `go.mod` above each indexed `.go` file ([`go_module`]) so a Go import path
+/// binds against the module that declares it. The pipeline always passes it.
+/// `None` is for a synthetic graph with no tree behind it: no `go.mod` is read,
+/// no import binds by path rules, and every import takes the member-path
+/// hierarchy — which reads a bare `react` as a name, so it is not what a real
+/// tree may be resolved with.
+///
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+///
 /// # Errors
 /// Returns an error if the snapshot read or the commit batch fails (the
 /// batch rolls back wholesale, [NFR-RA-07]).
@@ -195,43 +208,9 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
 pub fn run(
     runtime: &Runtime,
-    policy: BindingPolicy,
-    delta: Option<&Delta>,
-) -> Result<ResolutionStats> {
-    run_with(runtime, policy, delta, None)
-}
-
-/// [`run`], over the tree at `root` indexed with `registry` — the form the
-/// pipeline calls.
-///
-/// What the two add is the path-specifier context (S-439, [CR-142] D1): the
-/// registry says which files write their import specifiers as paths
-/// ([`LanguageRegistry::specifier_target_extensions`]), and the tree supplies the
-/// `go.mod` above each indexed `.go` file ([`go_module`]) so a Go import path
-/// binds against the module that declares it. Without them (plain [`run`]) no
-/// `go.mod` is read and only a relative specifier — whose `.`/`..` head is
-/// unambiguous on its own — takes the path rung, which is what a synthetic
-/// graph with no tree behind it wants.
-///
-/// # Errors
-/// As [`run`].
-///
-/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
-pub fn run_in_tree(
-    runtime: &Runtime,
-    registry: &LanguageRegistry,
-    root: &Path,
-    policy: BindingPolicy,
-    delta: Option<&Delta>,
-) -> Result<ResolutionStats> {
-    run_with(runtime, policy, delta, Some((registry, root)))
-}
-
-fn run_with(
-    runtime: &Runtime,
-    policy: BindingPolicy,
-    delta: Option<&Delta>,
     tree: Option<(&LanguageRegistry, &Path)>,
+    policy: BindingPolicy,
+    delta: Option<&Delta>,
 ) -> Result<ResolutionStats> {
     let want_file_paths = delta.is_some();
     let snap = runtime.submit_read(|store| {
@@ -346,10 +325,11 @@ fn run_with(
                     kind,
                     payload,
                 } => {
-                    // A module call fans out to every admitted `.tf` in its source
-                    // dir (CR-011): one edge per target, all sharing the relation
-                    // payload, all idempotent. `targets` is non-empty, so the row
-                    // is resolved.
+                    // One reference naming a set: a Terraform module call's
+                    // `.tf` files (CR-011), a `dyn T` call's impls (S-281), a Go
+                    // import's package files (S-439). One edge per target, all
+                    // sharing the payload, all idempotent. `targets` is
+                    // non-empty, so the row is resolved.
                     for target in targets {
                         if w.insert_edge_with_payload_if_absent(
                             *source,

@@ -921,7 +921,8 @@ fn bench_incremental_vs_full_resolve() {
         let mut refs_total = 0u64;
         for _ in 0..3 {
             let t = Instant::now();
-            let s = logos_core::resolve::run(rt, policy, delta).expect("resolve runs");
+            let tree = Some((engine.registry().expect("registry"), engine.root()));
+            let s = logos_core::resolve::run(rt, tree, policy, delta).expect("resolve runs");
             fastest = fastest.min(t.elapsed());
             refs_total = s.refs_total;
         }
