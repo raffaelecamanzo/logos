@@ -350,3 +350,36 @@ fn the_readout_is_deterministic_and_persists_nothing() {
         "no status call advanced the graph revision"
     );
 }
+
+/// **The readout reaches the wire.** `logos status --json`, the MCP `status`
+/// tool and `GET /api/v1/status` all serialise `StatusInfo` as-is, so the key
+/// path the relational stories consume is pinned on the serialised value — a
+/// `#[serde(skip)]` or a rename on the field would otherwise drop the readout
+/// from all three surfaces with every struct-level assertion still green.
+#[test]
+fn the_readout_is_on_the_serialised_status() {
+    let tmp = fixture();
+    let engine = indexed(&tmp);
+    let json = serde_json::to_value(engine.status()).expect("status serialises");
+    let rows = json["resolution_by_language"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`resolution_by_language` is an array: {json:#}"));
+    let language = |name: &str| {
+        rows.iter()
+            .find(|r| r["language"] == name)
+            .unwrap_or_else(|| panic!("{name} is on the wire: {rows:#?}"))
+    };
+
+    let ts = language("typescript");
+    assert_eq!(ts["files"], 2);
+    assert_eq!(
+        ts["calls"]["cross_file_edges"],
+        serde_json::Value::Null,
+        "a zero cross-file count is absent on the wire, not `0`"
+    );
+    assert_eq!(ts["calls"]["cross_file_absence"]["cause"], "same-file-only");
+
+    let rust = language("rust");
+    assert_eq!(rust["calls"]["cross_file_edges"], 1);
+    assert_eq!(rust["calls"]["cross_file_absence"], serde_json::Value::Null);
+}
