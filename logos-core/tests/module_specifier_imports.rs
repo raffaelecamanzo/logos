@@ -218,8 +218,8 @@ fn an_ambiguous_or_non_code_relative_import_binds_nothing() {
     assert!(import_row_unresolved(rt, "..::..::outside"));
 }
 
-/// A Go module whose package `internal/admin` has two source files and a test
-/// file, plus decoys: directories whose names equal the last segment of external
+/// A Go module whose package `internal/admin` has two source files, a test file
+/// and a TypeScript file, plus decoys: directories whose names equal the last segment of external
 /// imports (`pq/`, `context/`) — the shape a directory-suffix matcher would bind
 /// — and a root `context.go`, the shape the member-path hierarchy would bind.
 fn go_module_fixture() -> TempDir {
@@ -243,6 +243,12 @@ fn go_module_fixture() -> TempDir {
         tmp.path(),
         "internal/admin/admin_test.go",
         "package admin\n\nfunc helper() {}\n",
+    );
+    // A non-Go code file in the package directory is not part of the package.
+    write(
+        tmp.path(),
+        "internal/admin/helper.ts",
+        "export const h = 1;\n",
     );
     write(tmp.path(), "pq/pq.go", "package pq\n\nfunc Open() {}\n");
     write(
