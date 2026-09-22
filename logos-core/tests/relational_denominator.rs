@@ -388,6 +388,35 @@ fn nothing_asked_and_a_degraded_answer_read_n_a() {
     );
 }
 
+/// A denominator read that fails **beside a successful answer** degrades the
+/// denominator alone: the answer keeps its result, the denominator reads
+/// `n/a` — never a cause the failure did not establish — and `warnings` says
+/// why, root cause included ([ADR-14]). The read is broken by renaming the
+/// column it selects, which the traversal `callers` runs never touches.
+///
+/// [ADR-14]: ../../docs/specs/architecture/decisions/ADR-14.md
+#[test]
+fn a_failed_denominator_read_degrades_the_denominator_and_not_the_answer() {
+    let tmp = fixture();
+    let engine = indexed(&tmp);
+    let db = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).expect("store opens");
+    db.execute_batch("ALTER TABLE files RENAME COLUMN language TO language_moved;")
+        .expect("the column renames");
+
+    let answer = engine.callers("run", None);
+    assert!(answer.total > 0, "the traversal itself still answers: {answer:?}");
+    assert_eq!(answer.resolution_denominator, ResolutionDenominator::not_available());
+    let warning = answer
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("the resolution denominator could not be read: "))
+        .unwrap_or_else(|| panic!("the failure is stated: {:?}", answer.warnings));
+    assert!(
+        warning.contains("no such column"),
+        "the warning carries the root cause, not only the outer context: {warning}"
+    );
+}
+
 /// The one constructor that classifies, over synthetic rows: exactly one of
 /// the rows and their absence, and each absence decided by what establishes
 /// it.

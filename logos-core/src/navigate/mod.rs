@@ -620,7 +620,7 @@ fn resolution_denominator(
         ))
     });
     read.unwrap_or_else(|err| {
-        warnings.push(format!("the resolution denominator could not be read: {err}"));
+        warnings.push(format!("the resolution denominator could not be read: {err:#}"));
         ResolutionDenominator::not_available()
     })
 }
