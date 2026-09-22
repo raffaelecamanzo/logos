@@ -731,8 +731,10 @@ pub enum CrossFileAbsence {
         /// Resolved edges of this class whose two endpoints share a file.
         same_file_edges: u64,
     },
-    /// The language recorded references of this class and **no resolved edge**
-    /// of the class leaves any node of it, same-file or cross-file.
+    /// The language recorded references of this class and **no resolved edge
+    /// with a locality** leaves any node of it, same-file or cross-file. An
+    /// edge whose target lies in no indexed file has no locality and is counted
+    /// in neither column, so it does not rule this arm out.
     NoResolvedEdges {
         /// Ledger rows of this class the language's files recorded — `> 0` is
         /// what separates this arm from [`NoReferencesRecorded`](Self::NoReferencesRecorded).

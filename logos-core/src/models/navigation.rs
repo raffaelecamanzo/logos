@@ -1034,9 +1034,10 @@ pub struct RelationResolution {
     /// Of those rows, the ones currently bound — the numerator.
     pub bound: u64,
     /// Resolved edges of this class, leaving the language's nodes, whose two
-    /// endpoints share a file. A `0` here is a real count: it is always
-    /// accompanied by a named state in
-    /// [`cross_file_absence`](Self::cross_file_absence).
+    /// endpoints share a file. Always a plain count, `0` included — unlike the
+    /// cross-file figure it is never replaced by a named state, and a `0` here
+    /// can sit beside a cross-file figure (a class whose every edge crosses a
+    /// file boundary).
     pub same_file_edges: u64,
     /// Resolved edges of this class, leaving the language's nodes, that cross a
     /// file boundary; `None` exactly when there are none, and
