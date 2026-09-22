@@ -429,3 +429,23 @@ fn a_non_go_import_never_binds_into_a_go_module_of_the_same_name() {
     assert!(import_row_unresolved(rt, "shared"));
     assert!(import_row_unresolved(rt, "shared::pkg::util"));
 }
+
+#[test]
+fn a_relative_import_binds_only_within_its_own_language() {
+    // A TS `./helper` beside only a `helper.py` names nothing a TypeScript
+    // resolver can load; and a `util.py` beside `util.ts` must neither answer
+    // `./util` nor make it ambiguous.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "web/src/helper.py", "def h():\n    pass\n");
+    write(tmp.path(), "web/src/util.ts", "export const u = 1;\n");
+    write(tmp.path(), "web/src/util.py", "def u():\n    pass\n");
+    write(
+        tmp.path(),
+        "web/src/App.ts",
+        "import h from './helper';\nimport { u } from './util';\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(imported_files(rt, "web/src/App.ts"), ["web/src/util.ts"]);
+    assert!(import_row_unresolved(rt, ".::helper"));
+}

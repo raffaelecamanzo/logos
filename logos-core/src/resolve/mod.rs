@@ -203,7 +203,7 @@ pub fn run(
 ///
 /// What the two add is the path-specifier context (S-439, [CR-142] D1): the
 /// registry says which files write their import specifiers as paths
-/// ([`LanguageRegistry::path_specifier_extensions`]), and the tree supplies the
+/// ([`LanguageRegistry::specifier_target_extensions`]), and the tree supplies the
 /// `go.mod` above each indexed `.go` file ([`go_module`]) so a Go import path
 /// binds against the module that declares it. Without them (plain [`run`]) no
 /// `go.mod` is read and only a relative specifier — whose `.`/`..` head is
@@ -250,7 +250,7 @@ fn run_with(
         })
     })?;
 
-    let (path_specifier_extensions, go_modules) =
+    let (specifier_targets, go_modules) =
         tree.map_or_else(Default::default, |(registry, root)| {
             let go_files: std::collections::BTreeSet<&str> = snap
                 .nodes
@@ -259,12 +259,12 @@ fn run_with(
                 .filter(|p| p.ends_with(".go"))
                 .collect();
             (
-                registry.path_specifier_extensions(),
+                registry.specifier_target_extensions(),
                 go_module::discover(root, go_files),
             )
         });
     let index = binder::Index::build(&snap.nodes, &snap.edges, &snap.refs)
-        .with_path_specifiers(path_specifier_extensions, go_modules);
+        .with_path_specifiers(specifier_targets, go_modules);
 
     // A full index (no delta) re-binds the whole ledger. An incremental sync
     // re-binds only the rows whose outcome the change-set can move; every other

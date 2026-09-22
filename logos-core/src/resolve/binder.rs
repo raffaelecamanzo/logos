@@ -265,13 +265,15 @@ pub(crate) struct Index {
     /// directory → the `(file path, file-root module)` pairs directly in it,
     /// id-sorted — the package a Go import path names (S-439).
     file_roots_by_dir: HashMap<String, Vec<(String, NodeId)>>,
-    /// The extensions of the files whose import specifiers are **paths**
-    /// (S-439; [`LanguageRegistry::path_specifier_extensions`]). Empty unless
-    /// the run was given the registry ([`Index::with_path_specifiers`]); empty
-    /// leaves every non-relative import on the path it took before.
+    /// The extensions of the files whose import specifiers are **paths**, each
+    /// mapped to the extensions a relative specifier in such a file may resolve
+    /// to (S-439; [`LanguageRegistry::specifier_target_extensions`]). Empty
+    /// unless the run was given the registry ([`Index::with_path_specifiers`]);
+    /// empty leaves every non-relative import on the path it took before, and
+    /// binds no relative one.
     ///
-    /// [`LanguageRegistry::path_specifier_extensions`]: crate::plugin::LanguageRegistry::path_specifier_extensions
-    path_specifier_extensions: HashSet<String>,
+    /// [`LanguageRegistry::specifier_target_extensions`]: crate::plugin::LanguageRegistry::specifier_target_extensions
+    specifier_targets: HashMap<String, HashSet<String>>,
     /// The Go modules the tree declares, longest module path first (S-439,
     /// [`super::go_module`]). Empty unless the run was given the tree root
     /// ([`Index::with_path_specifiers`]).
@@ -333,7 +335,7 @@ impl Index {
             by_file_path,
             file_roots_by_stem,
             file_roots_by_dir,
-            path_specifier_extensions: HashSet::new(),
+            specifier_targets: HashMap::new(),
             go_modules: Vec::new(),
             routes_by_template,
             file_scopes,
@@ -348,10 +350,10 @@ impl Index {
     /// them.
     pub(crate) fn with_path_specifiers(
         mut self,
-        extensions: HashSet<String>,
+        specifier_targets: HashMap<String, HashSet<String>>,
         go_modules: Vec<GoModule>,
     ) -> Index {
-        self.path_specifier_extensions = extensions;
+        self.specifier_targets = specifier_targets;
         self.go_modules = go_modules;
         self
     }
@@ -1109,6 +1111,16 @@ fn fold_path(base_dir: &[&str], path_part: &str) -> Option<String> {
     Some(segs.join("/"))
 }
 
+/// The lower-cased extension of `path` (`""` when it has none) — the key the
+/// path-specifier maps are built on ([`crate::plugin::LanguageRegistry::specifier_target_extensions`]).
+fn extension_of(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
+}
+
 /// The directory segments of `file` (the path with its file name dropped).
 fn dir_segments(file: &str) -> Vec<&str> {
     let mut dir: Vec<&str> = file.split('/').collect();
@@ -1522,8 +1534,12 @@ impl Ctx<'_> {
     fn resolve_specifier(&self, target: &str) -> Option<Outcome> {
         let segs = split(target);
         let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        let targets = self.ix.specifier_targets.get(&extension_of(source_file));
         if segs.first().is_some_and(|h| is_relative_head(h)) {
-            return Some(match self.resolve_relative_specifier(source_file, &segs) {
+            let resolved = targets.map_or(Res::NotFound, |targets| {
+                self.resolve_relative_specifier(source_file, &segs, targets)
+            });
+            return Some(match resolved {
                 Res::Found(target) => Outcome::Bound {
                     source: self.source,
                     target,
@@ -1533,17 +1549,11 @@ impl Ctx<'_> {
                 _ => Outcome::Unbound,
             });
         }
-        let ext = Path::new(source_file)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)?;
-        if !self.ix.path_specifier_extensions.contains(&ext) {
-            return None;
-        }
+        targets?;
         // Only a Go file can name a Go package: a TypeScript `import 'shared'`
         // beside a `go.mod` declaring `module shared` is a package specifier,
         // never a path into the Go tree.
-        let go_package = if ext == "go" {
+        let go_package = if extension_of(source_file) == "go" {
             self.resolve_go_package(&segs)
         } else {
             None
@@ -1560,15 +1570,35 @@ impl Ctx<'_> {
     /// repository root names nothing.
     ///
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    fn resolve_relative_specifier(&self, source_file: &str, segs: &[String]) -> Res {
+    fn resolve_relative_specifier(
+        &self,
+        source_file: &str,
+        segs: &[String],
+        targets: &HashSet<String>,
+    ) -> Res {
         let Some(path) = fold_path(&dir_segments(source_file), &segs.join("/")) else {
             return Res::NotFound;
         };
+        // Only a file of an extension the importing language resolves to is a
+        // candidate: a `helper.py` beside `helper.ts` neither answers `./helper`
+        // nor makes it ambiguous.
         let at_stem = |stem: &str| {
-            self.ix
+            let candidates: Vec<NodeId> = self
+                .ix
                 .file_roots_by_stem
                 .get(stem)
-                .map_or(Res::NotFound, |ids| exactly_one(ids))
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| {
+                    self.ix
+                        .info
+                        .get(id)
+                        .and_then(|i| i.file_path.as_deref())
+                        .is_some_and(|p| targets.contains(&extension_of(p)))
+                })
+                .collect();
+            exactly_one(&candidates)
         };
         match at_stem(&path) {
             Res::NotFound => {}

@@ -230,22 +230,40 @@ impl LanguageRegistry {
             .collect()
     }
 
-    /// The set of file extensions (normalised: lower-case, no leading dot) whose
-    /// loaded plugin declares its import specifiers **paths**
+    /// The file extensions (normalised: lower-case, no leading dot) whose loaded
+    /// plugin declares its import specifiers **paths**
     /// ([`ImportSpecifier::Path`](super::ImportSpecifier::Path); S-439,
-    /// [CR-142] D1) — the twin of [`reachability_extensions`](Self::reachability_extensions)
-    /// for the binder: an import recorded by a file with one of these extensions
-    /// is bound by path rules and never through the member-path scope hierarchy,
-    /// so a bare package specifier (`react`) can never land on a workspace file
-    /// that shares its name ([NFR-RA-05]).
+    /// [CR-142] D1), each mapped to the extensions a relative specifier written
+    /// in that file may resolve to — its plugin's
+    /// [`specifier_extensions`](super::PluginManifest::specifier_extensions).
+    ///
+    /// The binder's twin of [`reachability_extensions`](Self::reachability_extensions).
+    /// The keys say which imports bind by path rules and never through the
+    /// member-path scope hierarchy, so a bare package specifier (`react`) can
+    /// never land on a workspace file that shares its name; the values keep a
+    /// relative specifier inside its own language, so a TypeScript `./helper`
+    /// never binds a `helper.py` beside it ([NFR-RA-05]). Go declares no
+    /// specifier extensions, so its set is empty.
     ///
     /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    pub fn path_specifier_extensions(&self) -> std::collections::HashSet<String> {
+    pub fn specifier_target_extensions(
+        &self,
+    ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
         self.plugins
             .iter()
             .filter(|p| p.semantics().import_specifier == super::ImportSpecifier::Path)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .flat_map(|p| {
+                let targets: std::collections::HashSet<String> = p
+                    .semantics()
+                    .specifier_extensions
+                    .iter()
+                    .map(|e| normalize_ext(e))
+                    .collect();
+                p.extensions()
+                    .iter()
+                    .map(move |e| (normalize_ext(e), targets.clone()))
+            })
             .collect()
     }
 
@@ -607,23 +625,32 @@ mod tests {
         );
     }
 
-    /// The path-grammar extension set is exactly the grammars that declare
+    /// The path-grammar extension map covers exactly the grammars that declare
     /// `import_specifier = "path"` (S-439): both TypeScript grammars and Go, and
     /// no name-grammar language — Rust above all, whose imports must stay on the
-    /// scope hierarchy byte for byte.
+    /// scope hierarchy byte for byte — and each maps to its own family only.
     #[test]
-    fn path_specifier_extensions_collects_only_path_grammar_languages() {
+    fn specifier_target_extensions_collects_only_path_grammar_languages() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
-        let exts = reg.path_specifier_extensions();
+        let exts = reg.specifier_target_extensions();
         #[cfg(feature = "lang-typescript")]
         for ext in ["ts", "js", "mjs", "cjs", "tsx", "jsx"] {
-            assert!(exts.contains(ext), "`{ext}` specifiers are paths");
+            let targets = exts
+                .get(ext)
+                .unwrap_or_else(|| panic!("`{ext}` specifiers are paths"));
+            // A TS/JS relative specifier resolves within the TS family only.
+            assert!(targets.contains("ts") && targets.contains("tsx"), "{ext}: {targets:?}");
+            assert!(!targets.contains("py") && !targets.contains("go"), "{ext}: {targets:?}");
         }
         #[cfg(feature = "lang-go")]
-        assert!(exts.contains("go"), "Go import paths are paths");
+        assert_eq!(
+            exts.get("go").map(|t| t.len()),
+            Some(0),
+            "Go import paths are paths, and name no file extension"
+        );
         for ext in ["rs", "py", "java", "kt", "cs", "php", "rb", "scala"] {
-            assert!(!exts.contains(ext), "`{ext}` specifiers are names");
+            assert!(!exts.contains_key(ext), "`{ext}` specifiers are names");
         }
     }
 
