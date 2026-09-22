@@ -2301,12 +2301,16 @@ fn the_taxonomy_module_is_not_a_reporting_site() {
 ///
 /// [`CrossFileAbsence`]'s tags are serde-derived, so they are not source
 /// literals and the lexical census above cannot see them — the blind spot its
-/// own header names, one type over. They are pinned here structurally instead,
-/// in both directions: every tag the type can serialise is a
-/// [`absence::SENTINELS`] spelling, and every resolution spelling the lexicon
-/// carries is produced by some arm, so neither side can rot away from the
-/// other. [S-442] attaches this denominator to the relational answers; this is
-/// what keeps it in the closed vocabulary when it does.
+/// own header names, one type over. They are pinned here structurally instead:
+/// every tag the type can serialise is an [`absence::SENTINELS`] spelling, and
+/// the three spellings this story added are exactly the tags the arms produce.
+///
+/// What that cannot see is a **fourth** spelling added to the lexicon with no
+/// producer — the lexicon does not mark which entries are resolution ones, so
+/// no reverse walk over it is possible. The lexicon's size is pinned instead,
+/// so any addition, orphan or not, fails here and is reviewed rather than
+/// accepted. [S-442] attaches this denominator to the relational answers; this
+/// is what keeps it in the closed vocabulary when it does.
 ///
 /// [S-441]: ../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
 /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
@@ -2345,4 +2349,12 @@ fn the_resolution_denominator_speaks_only_the_lexicon() {
             "{spelling:?} is in the lexicon but no arm produces it"
         );
     }
+    assert_eq!(
+        absence::SENTINELS.len(),
+        19,
+        "the closed lexicon holds nineteen spellings (sixteen before S-441). An \
+         addition is a new absence wording on some surface: name its producer \
+         and its census row, then change this figure and the prose counts in \
+         this file together"
+    );
 }
