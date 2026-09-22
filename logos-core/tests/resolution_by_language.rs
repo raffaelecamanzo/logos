@@ -52,21 +52,26 @@ fn write(root: &Path, rel: &str, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
-/// A Rust crate calling across two files, a TypeScript file whose only call
-/// stays inside it, and a TOML manifest with nothing to resolve.
+/// A Rust crate calling and importing across two files, a TypeScript file
+/// whose only call stays inside it but which imports from a sibling (a
+/// reference, never called, so the `Calls` reading holds before and after
+/// [S-440]), and a TOML manifest with nothing to resolve.
+///
+/// [S-440]: ../../docs/planning/journal.md#s-440-an-imported-binding-resolves-a-cross-file-call
 fn fixture() -> TempDir {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     write(
         root,
         "src/lib.rs",
-        "mod util;\n\npub fn alpha() {\n    util::run();\n    beta();\n}\n\npub fn beta() {}\n",
+        "use crate::util::run;\n\npub fn alpha() {\n    run();\n    beta();\n}\n\npub fn beta() {}\n",
     );
     write(root, "src/util.rs", "pub fn run() {}\n");
+    write(root, "web/labels.ts", "export const LABEL = \"nav\";\n");
     write(
         root,
         "web/nav.ts",
-        "export function navItems(): number {\n  return count();\n}\n\nfunction count(): number {\n  return 1;\n}\n",
+        "import { LABEL } from \"./labels\";\n\nexport function navItems(): number {\n  return count() + LABEL.length;\n}\n\nfunction count(): number {\n  return 1;\n}\n",
     );
     write(
         root,
@@ -205,7 +210,7 @@ fn a_same_file_only_language_reads_differently_from_one_resolving_across_files()
     let rust_cross = rust
         .calls
         .cross_file_edges
-        .expect("`alpha → util::run` crosses a file boundary");
+        .expect("`alpha → run` crosses a file boundary");
     assert!(rust_cross >= 1, "{rust:?}");
     assert!(
         rust.calls.same_file_edges >= 1,
@@ -216,7 +221,22 @@ fn a_same_file_only_language_reads_differently_from_one_resolving_across_files()
         "the numerator never exceeds its denominator: {rust:?}"
     );
 
+    // The Imports class through the same composition, not only its store
+    // counts: `use crate::util::run` is one reference, bound, across files.
+    // Rust is the control S-439 must leave byte-identical, so this is exact.
+    assert_eq!(
+        rust.imports,
+        RelationResolution::measured(1, 1, 0, 1),
+        "the Rust import reaches the readout as a cross-file figure: {rust:?}"
+    );
+
     let ts = row(&rows, "typescript");
+    // The TypeScript import is recorded under its own language. Its binding is
+    // what S-439 changes, so only the denominator is pinned here.
+    assert_eq!(
+        ts.imports.references, 1,
+        "`import {{ LABEL }} from \"./labels\"` is one Imports reference: {ts:?}"
+    );
     assert_eq!(
         ts.calls.cross_file_absence,
         Some(CrossFileAbsence::SameFileOnly {
