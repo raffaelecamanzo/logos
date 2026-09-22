@@ -157,6 +157,25 @@ mod tests {
     }
 
     #[test]
+    fn discover_stops_at_the_nearest_go_mod_so_an_ancestor_owning_no_file_is_absent() {
+        // Every Go file sits under `svc/`, which has its own go.mod. The root
+        // go.mod owns none of them, so it declares no module an import could be
+        // anchored on — else `example.com/shop/svc/x` would bind through it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("go.mod"), "module example.com/shop\n").unwrap();
+        std::fs::create_dir_all(root.join("svc/x")).unwrap();
+        std::fs::write(root.join("svc/go.mod"), "module example.com/svc\n").unwrap();
+        assert_eq!(
+            discover(root, ["svc/main.go", "svc/x/x.go"]),
+            vec![GoModule {
+                root: "svc".into(),
+                path: "example.com/svc".into()
+            }]
+        );
+    }
+
+    #[test]
     fn discover_reads_nothing_without_go_files_and_finds_nothing_without_go_mod() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("go.mod"), "module example.com/shop\n").unwrap();
