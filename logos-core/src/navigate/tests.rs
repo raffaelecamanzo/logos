@@ -498,6 +498,14 @@ fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure(
     };
 
     assert_eq!(unresolved_calls_clause(&over(vec![row("rust", 4)])), None);
+    // A language whose files recorded no call is absent of calls, not
+    // unresolved: `no-references-recorded` earns no clause (R1).
+    let call_free = LanguageResolution {
+        calls: RelationResolution::measured(0, 0, 0, 0),
+        ..row("python", 0)
+    };
+    assert!(call_free.calls.cross_file_absence.is_some());
+    assert_eq!(unresolved_calls_clause(&over(vec![call_free])), None);
     assert_eq!(unresolved_calls_clause(&ResolutionDenominator::not_available()), None);
 
     let typescript = row("typescript", 0);

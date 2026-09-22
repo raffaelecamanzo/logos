@@ -49,6 +49,7 @@ use crate::engine::Engine;
 use crate::graph_store::{GraphStore, NodeRow};
 use crate::hydrate::{EdgeData, Granularity, GraphView, Vertex};
 use crate::model::{EdgeKind, NodeId, NodeKind};
+use crate::models::quality::CrossFileAbsence;
 use crate::runtime::Runtime;
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
@@ -1562,6 +1563,12 @@ pub(crate) fn precedent(
 /// named state is the denominator's own serialised tag, so the reason speaks
 /// the closed lexicon rather than a spelling of its own.
 ///
+/// Only the two states that establish **unresolved** earn the clause:
+/// `same-file-only` and `no-resolved-edges`. `no-references-recorded` means the
+/// language's files recorded no call at all, so a target that calls nothing is
+/// truly absent of calls, and saying "unresolved, not absent" would name a
+/// cause the condition does not establish (R1).
+///
 /// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
 /// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
 fn unresolved_calls_clause(denominator: &ResolutionDenominator) -> Option<String> {
@@ -1569,7 +1576,11 @@ fn unresolved_calls_clause(denominator: &ResolutionDenominator) -> Option<String
         .languages
         .iter()
         .filter_map(|row| {
-            let absence = serde_json::to_value(row.calls.cross_file_absence?).ok()?;
+            let absence = row.calls.cross_file_absence?;
+            if matches!(absence, CrossFileAbsence::NoReferencesRecorded) {
+                return None;
+            }
+            let absence = serde_json::to_value(absence).ok()?;
             Some(format!(
                 "{} binds no Calls edge across a file boundary ({}; {} of {} Calls reference(s) \
                  bound)",
