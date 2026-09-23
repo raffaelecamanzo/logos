@@ -211,11 +211,13 @@ fn text<'s>(node: Node<'_>, source: &'s str) -> &'s str {
     &source[node.byte_range()]
 }
 
-fn is_pub(node: Node<'_>) -> bool {
+/// Whether `node` is declared bare `pub` — `pub(crate)` and `pub(super)` are
+/// not public API, and no surface outside the crate can call or name them.
+fn is_pub(node: Node<'_>, source: &str) -> bool {
     let mut cursor = node.walk();
     let is_pub = node
         .children(&mut cursor)
-        .any(|child| child.kind() == "visibility_modifier");
+        .any(|child| child.kind() == "visibility_modifier" && text(child, source) == "pub");
     is_pub
 }
 
@@ -272,7 +274,7 @@ fn navigation_types(source: &str) -> BTreeMap<String, NavType> {
     let mut types = BTreeMap::new();
     let mut cursor = root.walk();
     for item in root.named_children(&mut cursor) {
-        if !matches!(item.kind(), "struct_item" | "enum_item") || !is_pub(item) {
+        if !matches!(item.kind(), "struct_item" | "enum_item") || !is_pub(item, source) {
             continue;
         }
         let Some(name) = item.child_by_field_name("name") else {
@@ -371,7 +373,7 @@ fn engine_methods(source: &str) -> Vec<EngineMethod> {
         };
         let mut body_cursor = body.walk();
         for function in body.named_children(&mut body_cursor) {
-            if function.kind() != "function_item" || !is_pub(function) {
+            if function.kind() != "function_item" || !is_pub(function, source) {
                 continue;
             }
             let name = function
@@ -927,6 +929,19 @@ fn a_same_named_type_from_another_module_is_not_enrolled() {
         "",
         "    pub fn work(&self) -> crate::wiki::WorkItem {\n        \
          crate::wiki::WorkItem::default()\n    }",
+    );
+    assert!(report.unreturned.contains("WorkItem"), "{:?}", report.unreturned);
+    assert!(report.missing.is_empty(), "{:?}", report.missing);
+}
+
+/// **A crate-private `Engine` method enrols nothing** — `pub(crate)` is not the
+/// façade any surface reaches.
+#[test]
+fn a_crate_private_engine_method_enrols_nothing() {
+    let report = mutated(
+        "",
+        "    pub(crate) fn parse_item(&self) -> WorkItem {\n        \
+         WorkItem::default()\n    }",
     );
     assert!(report.unreturned.contains("WorkItem"), "{:?}", report.unreturned);
     assert!(report.missing.is_empty(), "{:?}", report.missing);
