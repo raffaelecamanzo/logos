@@ -51,8 +51,9 @@ mod writeback;
 
 pub use admission::AdmissionAuthority;
 pub use chat::{
-    ChatConfig, ChatModelOverrides, ChatProvider, ChatRole, DEFAULT_CHAT_BASE_URL,
-    DEFAULT_MAX_REPLANS, DEFAULT_MAX_SUBAGENT_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS,
+    resolve_chat, ChatConfig, ChatModelOverrides, ChatOrigin, ChatProvider, ChatResolution,
+    ChatRole, DEFAULT_CHAT_BASE_URL, DEFAULT_MAX_REPLANS, DEFAULT_MAX_SUBAGENT_TOOL_CALLS,
+    DEFAULT_MAX_TOOL_CALLS,
 };
 pub use discovery::{
     discover, nested_git_prunes, unindexed_doc_symlinks, zero_admission_diagnostic,
