@@ -67,6 +67,25 @@
 //! adjudicates it as `NOT A SITE` with the reason. A census may be wrong only
 //! in the loud direction.
 //!
+//! # The structural arm beside this one
+//!
+//! The limit above is closed for one class by a second arm, in
+//! `relational_denominator_audit.rs` ([S-443]). A relational answer that finds
+//! nothing — `{"affected":[],"warnings":[]}` — reports its absence in **no**
+//! words, so this census cannot see it however wide its roots. That arm checks
+//! shape instead: it enumerates the navigation answer types from their
+//! definitions in `models/navigation.rs` and fails any that does not carry
+//! `resolution_denominator`. The class divides between the two arms so:
+//!
+//! - an absence that is **spelled**, on any of the three surfaces — this file;
+//! - an absence that is **silent**, on a navigation answer type — that file;
+//! - the denominator's **own** wording (`unindexed`, `n/a`, …) — this file, as
+//!   the `models/navigation.rs` rows of [`CENSUS`]: that arm proves the field
+//!   is there, this one proves what it says is in the lexicon.
+//!
+//! A new absence *rendering* is enrolled here; a new navigation *answer type*
+//! is enrolled there, by construction, and that file's header says how.
+//!
 //! One more limit, and it is about *enforcement* rather than about the scan.
 //! `scripts/gate.sh fast` scopes its test leg to the cargo packages a branch
 //! touched, so this test runs on the session gate only when `logos-core` is in
@@ -98,6 +117,7 @@
 //! [S-434]: ../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 //! [S-435]: ../../docs/planning/journal.md#s-435-the-wiki-generation-pass-names-its-own-surface
 //! [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+//! [S-443]: ../../docs/planning/journal.md#s-443-the-absence-audit-gains-a-structural-arm-over-the-relational-result-types
 //! [FR-EH-04]: ../../docs/specs/requirements/FR-EH-04.md
 //! [FR-UI-04]: ../../docs/specs/requirements/FR-UI-04.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
