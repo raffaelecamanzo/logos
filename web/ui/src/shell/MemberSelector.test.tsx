@@ -15,7 +15,7 @@ function Mode() {
   return <span data-testid="mode">{useWorkspace().mode}</span>;
 }
 
-/** The Service-section heading the sidebar renders beside the control, standing in
+/** The Service-section heading the sidebar renders above the control, standing in
  *  for it here: the control has no label of its own, so a suite that omitted the
  *  heading would assert against a `<select>` with no accessible name — a world the
  *  shell never renders. */
@@ -65,10 +65,11 @@ describe("MemberSelector (S-250, FR-UI-29)", () => {
   });
 
   it("takes its accessible name from the section heading, and renders no label of its own", async () => {
-    // The row is `SERVICE [ orders ▾ ]` (frontend-design §3). A label element here
-    // would put a second word for the same thing on a 232px row — and the heading is
-    // the better name, because it is the one the sidebar guarantees at every
-    // breakpoint (S-425, FR-UI-35, NFR-CC-04).
+    // The header stacks `SERVICE` over `[ orders ▾ ]` (frontend-design §3, stacked by
+    // CR-145). A label element here would put a second word for the same thing on
+    // the control and read as two controls — and the heading is the better name,
+    // because it is the one the sidebar guarantees at every breakpoint (S-425,
+    // FR-UI-35, NFR-CC-04).
     stubApi();
     const { container } = mount();
     const select = await screen.findByRole("combobox");
