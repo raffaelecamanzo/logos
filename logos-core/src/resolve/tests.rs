@@ -1788,8 +1788,9 @@ fn dyn_call_to_an_ambiguously_named_trait_stays_unresolved() {
 // A TypeScript/Go file's call through an import is recorded
 // `<import target>::<name>` by extraction; the binder resolves it within what
 // that file's `Imports` row for `<import target>` bound to. These fixtures pin
-// the rung on its own: each first asserts the import binds, so a failure here
-// is the imported rung and never the specifier canonicaliser (S-439).
+// the rung on its own: each fixture with an import first asserts what that
+// import binds (or, for a package, that it binds nothing), so a failure here is
+// the imported rung and never the specifier canonicaliser (S-439).
 //
 // ```text
 // src/menu.ts (module 300)  ── menu()        (301)
@@ -1895,13 +1896,11 @@ fn a_call_is_resolved_only_within_the_import_it_names() {
     // neither ever binds to both (NFR-RA-05).
     let via_nav = call(3, MENU_TS, 301, ".::nav::navItemsFor");
     let via_b = call(4, MENU_TS, 301, ".::b::navItemsFor");
-    let refs = [
-        menu_import(1, ".::nav", RefForm::Path),
-        menu_import(2, ".::b", RefForm::Path),
-        via_nav.clone(),
-        via_b.clone(),
-    ];
+    let (nav, b) = (menu_import(1, ".::nav", RefForm::Path), menu_import(2, ".::b", RefForm::Path));
+    let refs = [nav.clone(), b.clone(), via_nav.clone(), via_b.clone()];
     let ix = imported_index(&refs, true);
+    bound_to(bind(&nav, &ix, BindingPolicy::Balanced), 300, 310, EdgeKind::Imports);
+    bound_to(bind(&b, &ix, BindingPolicy::Balanced), 300, 320, EdgeKind::Imports);
     bound_to(bind(&via_nav, &ix, BindingPolicy::Aggressive), 301, 311, EdgeKind::Calls);
     bound_to(bind(&via_b, &ix, BindingPolicy::Aggressive), 301, 321, EdgeKind::Calls);
 }
@@ -1925,9 +1924,15 @@ fn an_import_that_binds_nothing_decides_its_calls_unbound() {
 fn only_a_top_level_function_is_an_imported_candidate() {
     // `render` is a method of nav.ts: reached through a value, not through the
     // module, so the rung never binds it (the FR-RS-06 receiver discipline).
+    let import = menu_import(1, ".::nav", RefForm::Path);
     let r = call(2, MENU_TS, 301, ".::nav::render");
-    let refs = [menu_import(1, ".::nav", RefForm::Path), r.clone()];
+    let control = call(3, MENU_TS, 301, ".::nav::navItemsFor");
+    let refs = [import.clone(), r.clone(), control.clone()];
     let ix = imported_index(&refs, true);
+    bound_to(bind(&import, &ix, BindingPolicy::Balanced), 300, 310, EdgeKind::Imports);
+    // The same import, the same scope: a function binds through it…
+    bound_to(bind(&control, &ix, BindingPolicy::Balanced), 301, 311, EdgeKind::Calls);
+    // …and the method beside it does not.
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
 }
 
