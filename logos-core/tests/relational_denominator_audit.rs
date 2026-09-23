@@ -49,12 +49,21 @@
 //!    (today one: `WorkItem`, the parsed input of `impact_intersection`).
 //!
 //! [`the_enumeration_agrees_with_the_engine`] then holds the two derivations
-//! to each other: every `Engine` method that delegates to `crate::navigate`
-//! must return a root. That is what stops a relational answer escaping by
-//! being *nested* — fold `CallersResult` into another type and it stops being a
-//! root, but `Engine::callers` still returns it — and it is what makes the
-//! count non-vacuous without a floor: a parse that read nothing leaves every
-//! delegating method returning no root, and fails.
+//! to each other, three ways:
+//!
+//! - every navigation type an `Engine` method returns must be a root. That
+//!   stops a relational answer escaping by being *nested* — fold
+//!   `CallersResult` into another type and it stops being a root, but
+//!   `Engine::callers` still returns it;
+//! - every method that delegates to `crate::navigate`, by any spelling, must
+//!   return a navigation type — which widens the universe to whatever the
+//!   navigation service answers with;
+//! - some method must delegate at all.
+//!
+//! Together they make the count non-vacuous without a floor: a parse of
+//! `models/navigation.rs` that read nothing leaves every delegating method
+//! returning no navigation type, and a parse of `engine.rs` that read nothing
+//! finds no delegating method. Both fail.
 //!
 //! The one hand-maintained list is [`OUTSIDE_THE_CLASS`], and it lists what is
 //! **exempt**, not what is checked. [S-434]'s correction was to a hand-listed
@@ -510,15 +519,25 @@ fn audit(navigation_source: &str, engine_source: &str) -> Audit {
         }
     }
 
-    for method in methods.iter().filter(|m| m.delegates_to_navigate) {
+    // The façade was read at all: a parse of `engine.rs` that found no method
+    // delegating to the navigation service enrols no answer, and every check
+    // above would pass over nothing.
+    if !methods.iter().any(|m| m.delegates_to_navigate) {
+        report.disagreements.push(format!(
+            "no `Engine` method delegates to crate::navigate — the {ENGINE} parse read no façade"
+        ));
+    }
+    for method in &methods {
         let navigation_returns: Vec<&String> =
             method.returns.iter().filter(|r| names.contains(*r)).collect();
-        if navigation_returns.is_empty() {
+        if method.delegates_to_navigate && navigation_returns.is_empty() {
             report.disagreements.push(format!(
                 "Engine::{} delegates to crate::navigate but returns no type of {NAVIGATION_MODELS}",
                 method.name
             ));
         }
+        // Over every method, not only the delegating ones: an answer computed
+        // inline (as `language_composition` is) can be nested just the same.
         for returned in navigation_returns {
             if !report.answers.contains(returned) {
                 report.disagreements.push(format!(
@@ -794,10 +813,49 @@ fn an_answer_returned_through_the_models_re_export_is_enrolled() {
     }
 }
 
+/// **A method that delegates to the navigation service but returns a type
+/// defined elsewhere is named** — the arm's universe is `models/navigation.rs`
+/// widened to whatever `crate::navigate` returns, and this is the widening.
+/// Checked under both spellings of the delegation.
+#[test]
+fn a_delegating_method_returning_a_type_from_elsewhere_is_named() {
+    for call in ["crate::navigate::dependents", "navigate::dependents"] {
+        let report = mutated(
+            "",
+            &format!(
+                "    pub fn dependents(&self) -> crate::models::deps::DependentsResult {{\n        \
+                 {call}(self)\n    }}"
+            ),
+        );
+        assert_eq!(
+            report.disagreements,
+            vec![format!(
+                "Engine::dependents delegates to crate::navigate but returns no type of \
+                 {NAVIGATION_MODELS}"
+            )],
+            "{call}"
+        );
+    }
+}
+
+/// **A parse of `engine.rs` that reads nothing fails** rather than enrolling
+/// no answer and passing over the empty set.
+#[test]
+fn an_engine_parse_that_reads_no_facade_fails() {
+    let report = audit(&read(NAVIGATION_MODELS), "");
+    assert!(report.answers.is_empty());
+    assert_eq!(
+        report.disagreements,
+        vec![format!(
+            "no `Engine` method delegates to crate::navigate — the {ENGINE} parse read no façade"
+        )]
+    );
+}
+
 /// **An answer cannot escape by being nested.** Folding `CallersResult` into
 /// another navigation type removes it from the containment roots, but
-/// `Engine::callers` still returns it — the agreement check names it, however
-/// the delegation is spelled.
+/// `Engine::callers` still returns it — the agreement check names it, whether
+/// the method delegates or computes the answer inline.
 #[test]
 fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
     let navigation = read(NAVIGATION_MODELS).replacen(
@@ -816,20 +874,21 @@ fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
         "{:?}",
         report.disagreements
     );
-    // The same fold, with `Engine::callers` delegating through a `use`d
-    // `navigate` rather than the `crate::navigate::` prefix.
-    let engine = read(ENGINE).replacen(
-        "crate::navigate::callers(self, symbol, limit)",
-        "navigate::callers(self, symbol, limit)",
+    // The same fold over an answer the `Engine` computes inline rather than
+    // delegating: `language_composition` builds its `LanguageComposition`
+    // itself, so nesting it must be named too.
+    let navigation = read(NAVIGATION_MODELS).replacen(
+        "pub struct StatusInfo {\n",
+        "pub struct StatusInfo {\n    pub composition: LanguageComposition,\n",
         1,
     );
-    assert_ne!(engine, read(ENGINE), "the delegation respelling applied");
-    let report = audit(&navigation, &engine);
+    assert_ne!(navigation, read(NAVIGATION_MODELS), "the inline nesting applied");
+    let report = audit(&navigation, &read(ENGINE));
     assert!(
         report
             .disagreements
             .iter()
-            .any(|d| d.starts_with("Engine::callers returns CallersResult")),
+            .any(|d| d.starts_with("Engine::language_composition returns LanguageComposition")),
         "{:?}",
         report.disagreements
     );
