@@ -334,7 +334,8 @@ logos status --json
 ```
 
 Index health: file/node/edge counts, store size, unresolved-reference ledger,
-resolution coverage, last index/sync timestamps, a persisted monotonic
+resolution coverage (both the single global figure and `resolution_by_language`,
+see below), last index/sync timestamps, a persisted monotonic
 `graph_revision` (a counter bumped once per `index`/`sync` that actually
 changes the graph — a no-op `sync` leaves it untouched; consumers can compare
 it across processes to detect a stale cache), and the freshness posture
@@ -385,7 +386,63 @@ indexed *before* you enabled the workspace keeps reporting `0` until you
 re-index, and that is exactly the state in which the advice would be stale. See
 [`init --workspace`](#init--i---hooks---workspace---yes---exclude-glob) for the two states.
 
+#### `resolution_by_language`
+
+One row per indexed language, in name order, each carrying **both** halves of the
+figure rather than a bare number:
+
+```jsonc
+{ "language": "typescript", "files": 75,
+  "calls":   { "references": 1504, "bound": 580, "same_file_edges": 401,
+               "cross_file_edges": 179, "cross_file_absence": null },
+  "imports": { "references": 166,  "bound": 118, "same_file_edges": 0,
+               "cross_file_edges": 118, "cross_file_absence": null } }
+```
+
+Exactly one of `cross_file_edges` and `cross_file_absence` is present. A language
+that binds nothing across a file boundary is reported as a **named state**, never
+as a `0` that would read as a measurement:
+
+| `cross_file_absence.cause` | What it establishes |
+|---|---|
+| `same-file-only` | references resolved, but every resolved edge stays inside one file |
+| `no-resolved-edges` | references were recorded and none bound |
+| `no-references-recorded` | the language contributed no reference of that class at all |
+
+A global coverage number cannot express a per-language zero — that is why this
+row set exists. Read it before trusting a relational answer on a given language.
+
 ## Navigation
+
+> **Every relational answer carries a `resolution_denominator`.** `callers`,
+> `callees`, `impact`, `impact-intersection`, `branch-overlap`, `affected` and
+> `precedent` each return a typed field naming the resolved edge set the answer
+> was computed over — on **every** answer, empty or not. It is a machine-readable
+> field, not prose in `warnings`.
+>
+> ```jsonc
+> "resolution_denominator": {
+>   "languages": [ { "language": "typescript", "calls": { … }, "imports": { … } } ],
+>   "absence": null
+> }
+> ```
+>
+> `languages` holds the row (same shape as [`resolution_by_language`](#resolution_by_language))
+> for each anchor's language. When no row could be read, `absence` names why
+> instead — `unindexed` (no anchor resolved), `no-language-recorded` (anchors
+> resolved into no language-tagged file) or `n/a` (no denominator was read).
+> Exactly one side is populated.
+>
+> This is what separates *nothing depends on this* from *nothing could be
+> resolved here*. A `total: 0` beside a `same-file-only` row is the index's reach,
+> not evidence of absence — see
+> [where the relational claims hold](README.md#where-the-relational-claims-hold).
+> The denominator is also present on **non-empty** answers, where it tells you
+> whether a count is complete or partial.
+>
+> **Caveat:** a row counts edges *leaving* its language. An inbound answer whose
+> callers live in another language carries only its anchor's row.
+
 
 ### `search`
 
