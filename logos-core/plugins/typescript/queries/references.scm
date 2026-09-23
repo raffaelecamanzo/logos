@@ -2,7 +2,8 @@
 ;
 ;   @ref.call   — a plain-identifier call (`f()`).
 ;   @ref.method — a member call (`obj.m()`, `app.get(...)`); name-only,
-;                 policy-gated binding (the Rust `x.f()` posture).
+;                 policy-gated binding (the Rust `x.f()` posture) — except a
+;                 member call on a namespace import (S-440, below).
 ;   @ref.import — an import source string (`import x from "express"`) or a
 ;                 CommonJS `require("...")` argument; the quoted text is
 ;                 unquoted and canonicalised by the PATH grammar the
@@ -12,8 +13,10 @@
 ;
 ; Droppable on disk at `.logos/plugins/typescript/queries/references.scm`.
 ;
-; Deliberately NOT captured in v1: named-import bindings (`import { Router }`
-; binds no per-name alias yet), dynamic `import()`.
+; Named-import bindings (`import { Router } from './r'`) and namespace imports
+; (`import * as m from './m'`) are read from the `@ref.import` statement by the
+; extraction engine itself (S-440), which records a call through one — `Router()`,
+; `m.f()` — qualified by its module. Not captured: dynamic `import()`.
 
 (call_expression
   function: (identifier) @ref.call)

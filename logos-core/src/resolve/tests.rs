@@ -1782,3 +1782,211 @@ fn dyn_call_to_an_ambiguously_named_trait_stays_unresolved() {
         "a dyn call to an ambiguously-named trait must stay unresolved"
     );
 }
+
+// ── The imported rung for path-grammar files (S-440, CR-142 D2, [FR-RS-03]) ──
+//
+// A TypeScript/Go file's call through an import is recorded
+// `<import target>::<name>` by extraction; the binder resolves it within what
+// that file's `Imports` row for `<import target>` bound to. These fixtures pin
+// the rung on its own: each fixture with an import first asserts what that
+// import binds (or, for a package, that it binds nothing), so a failure here is
+// the imported rung and never the specifier canonicaliser (S-439).
+//
+// ```text
+// src/menu.ts (module 300)  ── menu()        (301)
+// src/nav.ts  (module 310)  ── navItemsFor() (311), render (method, 312)
+// src/b.ts    (module 320)  ── navItemsFor() (321)   ← same name, not imported
+// pkg/one.go  (module 330)  ── F() (331)      pkg/two.go (module 340) ── F() (341), G() (342)
+// ```
+
+/// File id of `src/menu.ts`'s ledger rows.
+const MENU_TS: i64 = 30;
+
+fn imported_fixture() -> (Vec<NodeRow>, Vec<EdgeRow>) {
+    let nodes = vec![
+        node(300, "menu", NodeKind::Module, "src/menu.ts"),
+        node(301, "menu", NodeKind::Function, "src/menu.ts"),
+        node(310, "nav", NodeKind::Module, "src/nav.ts"),
+        node(311, "navItemsFor", NodeKind::Function, "src/nav.ts"),
+        node(312, "render", NodeKind::Method, "src/nav.ts"),
+        node(320, "b", NodeKind::Module, "src/b.ts"),
+        node(321, "navItemsFor", NodeKind::Function, "src/b.ts"),
+        node(330, "one", NodeKind::Module, "pkg/one.go"),
+        node(331, "F", NodeKind::Function, "pkg/one.go"),
+        node(340, "two", NodeKind::Module, "pkg/two.go"),
+        node(341, "F", NodeKind::Function, "pkg/two.go"),
+        node(342, "G", NodeKind::Function, "pkg/two.go"),
+    ];
+    let edges = vec![
+        contains(300, 301),
+        contains(310, 311),
+        contains(310, 312),
+        contains(320, 321),
+        contains(330, 331),
+        contains(340, 341),
+        contains(340, 342),
+    ];
+    (nodes, edges)
+}
+
+/// `.ts` files write path specifiers resolving to `.ts` files (S-439).
+fn ts_specifiers() -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    std::iter::once(("ts".to_string(), std::iter::once("ts".to_string()).collect())).collect()
+}
+
+/// An `Imports` row of `src/menu.ts`, attributed to its file module.
+fn menu_import(id: i64, target: &str, form: RefForm) -> UnresolvedRefRow {
+    make_ref(id, MENU_TS, 300, target, None, form, EdgeKind::Imports)
+}
+
+/// Build the index over `refs` — with the imported scope when `imported`.
+fn imported_index(refs: &[UnresolvedRefRow], imported: bool) -> Index {
+    let (nodes, edges) = imported_fixture();
+    let ix = Index::build(&nodes, &edges, refs).with_path_specifiers(ts_specifiers(), Vec::new());
+    if imported {
+        ix.with_imported_bindings(refs, BindingPolicy::Balanced)
+    } else {
+        ix
+    }
+}
+
+#[test]
+fn a_call_through_a_bound_import_binds_to_the_imported_function() {
+    let import = menu_import(1, ".::nav", RefForm::Path);
+    let r = call(2, MENU_TS, 301, ".::nav::navItemsFor");
+    let refs = [import.clone(), r.clone()];
+    let ix = imported_index(&refs, true);
+    // The import already binds — the precondition this rung builds on.
+    bound_to(bind(&import, &ix, BindingPolicy::Balanced), 300, 310, EdgeKind::Imports);
+    // …and the call binds through it, to nav.ts's navItemsFor — never b.ts's.
+    bound_to(bind(&r, &ix, BindingPolicy::Balanced), 301, 311, EdgeKind::Calls);
+}
+
+#[test]
+fn the_same_call_binds_nothing_when_the_imported_scope_is_not_built() {
+    // The same ledger, the same bound import, but `with_imported_bindings`
+    // never ran: the rung decides the call over an empty scope, and it binds
+    // nowhere (in particular not to b.ts's same-named function). This is the
+    // differential proving the bind in the previous test comes from the
+    // import's binding, and nothing else.
+    let import = menu_import(1, ".::nav", RefForm::Path);
+    let r = call(2, MENU_TS, 301, ".::nav::navItemsFor");
+    let refs = [import.clone(), r.clone()];
+    let ix = imported_index(&refs, false);
+    bound_to(bind(&import, &ix, BindingPolicy::Balanced), 300, 310, EdgeKind::Imports);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+}
+
+#[test]
+fn the_imported_rung_reads_the_import_binding_whatever_bound_it() {
+    // The import row here is a capture-before-delete `Symbol` row: it binds by
+    // exact symbol lookup, with none of S-439's specifier rules involved. The
+    // rung still resolves the call within it — the two defects are provable
+    // apart.
+    let import = menu_import(1, "local sym310", RefForm::Symbol);
+    let r = call(2, MENU_TS, 301, "local sym310::navItemsFor");
+    let refs = [import.clone(), r.clone()];
+    let ix = imported_index(&refs, true);
+    bound_to(bind(&import, &ix, BindingPolicy::Balanced), 300, 310, EdgeKind::Imports);
+    bound_to(bind(&r, &ix, BindingPolicy::Balanced), 301, 311, EdgeKind::Calls);
+}
+
+#[test]
+fn a_call_is_resolved_only_within_the_import_it_names() {
+    // The file imports both nav.ts and b.ts, each defining `navItemsFor`. The
+    // call names its import, so each binds to its own module's function and
+    // neither ever binds to both (NFR-RA-05).
+    let via_nav = call(3, MENU_TS, 301, ".::nav::navItemsFor");
+    let via_b = call(4, MENU_TS, 301, ".::b::navItemsFor");
+    let (nav, b) = (menu_import(1, ".::nav", RefForm::Path), menu_import(2, ".::b", RefForm::Path));
+    let refs = [nav.clone(), b.clone(), via_nav.clone(), via_b.clone()];
+    let ix = imported_index(&refs, true);
+    bound_to(bind(&nav, &ix, BindingPolicy::Balanced), 300, 310, EdgeKind::Imports);
+    bound_to(bind(&b, &ix, BindingPolicy::Balanced), 300, 320, EdgeKind::Imports);
+    bound_to(bind(&via_nav, &ix, BindingPolicy::Aggressive), 301, 311, EdgeKind::Calls);
+    bound_to(bind(&via_b, &ix, BindingPolicy::Aggressive), 301, 321, EdgeKind::Calls);
+}
+
+#[test]
+fn an_import_that_binds_nothing_decides_its_calls_unbound() {
+    // `import { navItemsFor } from 'react-nav'` — a package, bound to nothing.
+    // Two workspace `navItemsFor`s exist and a lexical `menu` too; none is the
+    // call's target, and the call must not fall through to any wider scope.
+    let import = menu_import(1, "react-nav", RefForm::Path);
+    let r = call(2, MENU_TS, 301, "react-nav::navItemsFor");
+    let lexical = call(3, MENU_TS, 301, "react-nav::menu");
+    let refs = [import.clone(), r.clone(), lexical.clone()];
+    let ix = imported_index(&refs, true);
+    assert_eq!(bind(&import, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(bind(&lexical, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+}
+
+#[test]
+fn only_a_top_level_function_is_an_imported_candidate() {
+    // `render` is a method of nav.ts: reached through a value, not through the
+    // module, so the rung never binds it (the FR-RS-06 receiver discipline).
+    let import = menu_import(1, ".::nav", RefForm::Path);
+    let r = call(2, MENU_TS, 301, ".::nav::render");
+    let control = call(3, MENU_TS, 301, ".::nav::navItemsFor");
+    let refs = [import.clone(), r.clone(), control.clone()];
+    let ix = imported_index(&refs, true);
+    bound_to(bind(&import, &ix, BindingPolicy::Balanced), 300, 310, EdgeKind::Imports);
+    // The same import, the same scope: a function binds through it…
+    bound_to(bind(&control, &ix, BindingPolicy::Balanced), 301, 311, EdgeKind::Calls);
+    // …and the method beside it does not.
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+}
+
+#[test]
+fn a_package_import_binding_several_files_needs_exactly_one_definition() {
+    // A Go import binds its package — every file of the directory, one
+    // `BoundMany` row. `G` is defined once across the package and binds; `F`
+    // is defined in both files and stays unresolved rather than binding to
+    // either, or to both (NFR-RA-05).
+    let (mut nodes, mut edges) = imported_fixture();
+    nodes.extend([
+        node(350, "main", NodeKind::Module, "cmd/main.go"),
+        node(351, "main", NodeKind::Function, "cmd/main.go"),
+    ]);
+    edges.push(contains(350, 351));
+    let import = make_ref(1, 31, 350, "example.com::shop::pkg", None, RefForm::Path, EdgeKind::Imports);
+    let g = make_ref(2, 31, 351, "example.com::shop::pkg::G", None, RefForm::Path, EdgeKind::Calls);
+    let f = make_ref(3, 31, 351, "example.com::shop::pkg::F", None, RefForm::Path, EdgeKind::Calls);
+    let refs = [import.clone(), g.clone(), f.clone()];
+    let go: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::iter::once(("go".to_string(), std::iter::once("go".to_string()).collect())).collect();
+    let module = super::go_module::GoModule {
+        root: String::new(),
+        path: "example.com/shop".to_string(),
+    };
+    let ix = Index::build(&nodes, &edges, &refs)
+        .with_path_specifiers(go, vec![module])
+        .with_imported_bindings(&refs, BindingPolicy::Balanced);
+    assert_eq!(
+        bind(&import, &ix, BindingPolicy::Balanced),
+        Outcome::BoundMany {
+            source: NodeId(350),
+            targets: vec![NodeId(330), NodeId(340)],
+            kind: EdgeKind::Imports,
+            payload: None,
+        },
+        "precondition: the import binds the whole package"
+    );
+    bound_to(bind(&g, &ix, BindingPolicy::Balanced), 351, 342, EdgeKind::Calls);
+    assert_eq!(bind(&f, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+}
+
+#[test]
+fn a_rust_qualified_call_never_reaches_the_imported_rung() {
+    // The rung is keyed on the source file's grammar: a Rust `util::run` call
+    // binds through the module tree exactly as it did before S-440, with the
+    // imported scope built and path specifiers declared for `.ts`.
+    let r = call(100, LIB_RS, 2, "util::run");
+    let (nodes, edges) = fixture();
+    let refs = [r.clone()];
+    let ix = Index::build(&nodes, &edges, &refs)
+        .with_path_specifiers(ts_specifiers(), Vec::new())
+        .with_imported_bindings(&refs, BindingPolicy::Strict);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 5, EdgeKind::Calls);
+}

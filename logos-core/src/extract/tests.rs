@@ -5029,3 +5029,127 @@ fn a_name_grammar_import_and_a_member_path_still_split_on_every_dot() {
             .any(|r| r.kind == EdgeKind::Calls && r.form == RefForm::Method && r.target == "c"));
     }
 }
+
+// ── S-440 / CR-142 D2: a call through an import is recorded through it ──
+
+/// Every `Calls` ledger row the file records, as `(target, form)`, sorted.
+fn call_targets(facts: &Facts) -> Vec<(String, RefForm)> {
+    let mut out: Vec<(String, RefForm)> = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Calls)
+        .map(|r| (r.target.clone(), r.form))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_call_through_a_named_import_is_recorded_through_its_module() {
+    // The dominant shape in both CR-142 corpora (320 of 454, 345 of 429
+    // relative import statements are named imports), a rename, and the
+    // namespace form — in both TypeScript grammars.
+    let src = "import { navItemsFor, isAppLevelPath } from './nav.ts';\n\
+import { slugify as slug } from '../util';\n\
+import * as api from './api';\n\
+export function f(p: string) { navItemsFor(p); slug(p); api.get(p); return isAppLevelPath(p); }\n";
+    for (ext, path) in [("ts", "src/a/f.ts"), ("tsx", "src/a/f.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        assert_eq!(
+            call_targets(&facts),
+            [
+                ("..::util::slugify".to_string(), RefForm::Path),
+                (".::api::get".to_string(), RefForm::Path),
+                (".::nav::isAppLevelPath".to_string(), RefForm::Path),
+                (".::nav::navItemsFor".to_string(), RefForm::Path),
+            ],
+            "{ext}: a rename reads the exported name; a namespace member is qualified"
+        );
+    }
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_call_not_through_a_relative_import_keeps_its_bare_form() {
+    // A package import (`react`), a default import, a global, a method on a
+    // value, and a local declaration shadowing an imported name all record
+    // exactly what they recorded before S-440.
+    let src = "import { useState } from 'react';\n\
+import Header from './Header';\n\
+import { local, obj } from './m';\n\
+function local() { return 1; }\n\
+export function f() { useState(); Header(); fetch('/x'); obj.run(); local(); }\n";
+    let facts = extract_lang("ts", "src/f.ts", src);
+    assert_eq!(
+        call_targets(&facts),
+        [
+            ("Header".to_string(), RefForm::Path),
+            ("fetch".to_string(), RefForm::Path),
+            ("local".to_string(), RefForm::Path),
+            ("run".to_string(), RefForm::Method),
+            ("useState".to_string(), RefForm::Path),
+        ]
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_jsx_component_element_is_recorded_as_a_call() {
+    // `<RuleFindingsCard />` calls the component; `<div>` is an intrinsic
+    // element; `<Nav.Item>` is not a plain name. An imported component is
+    // recorded through its module like any named-import call.
+    let src = "import { Badge } from './Badge';\n\
+export function View() { return <div><RuleFindingsCard /><Badge tone=\"x\">ok</Badge><Nav.Item /></div>; }\n\
+function RuleFindingsCard() { return <p />; }\n";
+    let facts = extract_lang("tsx", "src/View.tsx", src);
+    assert_eq!(
+        call_targets(&facts),
+        [
+            (".::Badge::Badge".to_string(), RefForm::Path),
+            ("RuleFindingsCard".to_string(), RefForm::Path),
+        ]
+    );
+}
+
+#[cfg(feature = "lang-go")]
+#[test]
+fn a_go_package_qualified_call_is_recorded_through_its_import_path() {
+    // `admin.Register()` names the package; `adm` is an explicit alias; `fmt`
+    // is external and is recorded through its path all the same (binding it is
+    // the resolver's decision); `s.Start()` is a method on a value and stays a
+    // bare method name (FR-RS-06); a dot import binds no qualifier.
+    let src = "package main\n\nimport (\n\t\"fmt\"\n\tadm \"example.com/shop/internal/audit\"\n\t\"example.com/shop/internal/admin\"\n\t. \"example.com/shop/internal/dot\"\n)\n\n\
+func main() {\n\tadmin.Register()\n\tadm.Log()\n\tfmt.Println()\n\ts := admin.Server{}\n\ts.Start()\n\tHelper()\n}\n";
+    let facts = extract_lang("go", "cmd/main.go", src);
+    assert_eq!(
+        call_targets(&facts),
+        [
+            ("Helper".to_string(), RefForm::Path),
+            ("Start".to_string(), RefForm::Method),
+            ("example.com::shop::internal::admin::Register".to_string(), RefForm::Path),
+            ("example.com::shop::internal::audit::Log".to_string(), RefForm::Path),
+            ("fmt::Println".to_string(), RefForm::Path),
+        ]
+    );
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_rust_call_is_recorded_exactly_as_before_s440() {
+    // Rust declares name-grammar imports: no import is read for qualification,
+    // so `use a::helper; helper()` and `m.run()` record what they always did.
+    let facts = extract_lang(
+        "rs",
+        "src/lib.rs",
+        "use crate::a::helper;\nfn f(m: M) { helper(); m.run(); util::go(); }\n",
+    );
+    assert_eq!(
+        call_targets(&facts),
+        [
+            ("helper".to_string(), RefForm::Path),
+            ("run".to_string(), RefForm::Method),
+            ("util::go".to_string(), RefForm::Path),
+        ]
+    );
+}

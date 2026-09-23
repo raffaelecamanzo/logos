@@ -105,7 +105,8 @@ use config::accessor::{BindingView, DeclaredTypes};
 use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 
 use refs::{
-    flatten_use_tree, import_segments, macro_call_refs, specifier_segments, split_path_text,
+    flatten_use_tree, import_segments, is_relative_head, macro_call_refs, specifier_segments,
+    split_path_text,
 };
 use symbol::{build_symbol, descriptor_for, path_segments};
 
@@ -1302,7 +1303,9 @@ fn file_module_name(path_segments: &[&str]) -> String {
 /// [`split_path_text`] / [`flatten_use_tree`] — or, for an import in a language
 /// whose `semantics` declare path specifiers, [`specifier_segments`] (S-439) —
 /// deduplicated, and sorted into the canonical `(source, target, form, kind)`
-/// order ([NFR-RA-06]).
+/// order ([NFR-RA-06]). In such a language a call **through** an import is
+/// recorded qualified by the module it names, `<import target>::<name>`, and a
+/// JSX tag naming a local value records nothing ([`ImportBindings`], S-440).
 fn collect_refs(
     query: &Query,
     root: Node<'_>,
@@ -1334,6 +1337,10 @@ fn collect_refs(
     };
 
     let capture_names = query.capture_names();
+    let imports = match semantics.import_specifier {
+        ImportSpecifier::Path => ImportBindings::collect(query, root, source, decls, semantics),
+        ImportSpecifier::Name => ImportBindings::default(),
+    };
     let mut out: Vec<RefFact> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
@@ -1353,9 +1360,22 @@ fn collect_refs(
                     if segments.is_empty() {
                         continue;
                     }
+                    let target = segments.join("::");
+                    // A JSX tag naming a local value (`const Icon = icons[k];
+                    // <Icon />`) renders that value: it calls no component
+                    // (S-440), so it records no reference at all.
+                    let jsx = node.parent().is_some_and(|p| p.kind().starts_with("jsx_"));
+                    if jsx && imports.locally_bound(node, &target) {
+                        continue;
+                    }
+                    // A call through a named import is recorded qualified by the
+                    // module it was imported from (S-440, `ImportBindings`).
+                    let target = imports
+                        .named_target(node, &target)
+                        .map_or(target.clone(), str::to_string);
                     out.push(RefFact {
                         source: source_symbol,
-                        target: segments.join("::"),
+                        target,
                         alias: None,
                         form: RefForm::Path,
                         kind: EdgeKind::Calls,
@@ -1366,6 +1386,21 @@ fn collect_refs(
                 "ref.method" => {
                     let name = text.trim();
                     if name.is_empty() {
+                        continue;
+                    }
+                    // A member call whose receiver is an imported module — a Go
+                    // package, a TS namespace import — is a qualified path, not a
+                    // receiver-method call (S-440, `ImportBindings`).
+                    if let Some(module) = imports.qualifier_of(node, source) {
+                        out.push(RefFact {
+                            source: source_symbol,
+                            target: format!("{module}::{name}"),
+                            alias: None,
+                            form: RefForm::Path,
+                            kind: EdgeKind::Calls,
+                            line,
+                            relation: None,
+                        });
                         continue;
                     }
                     // Trait-object dynamic dispatch (S-281, CR-073, FR-RS-08): when
@@ -2106,6 +2141,339 @@ fn rust_impl_trait_name(method: Node<'_>, source: &[u8]) -> Option<String> {
         return None;
     }
     trait_simple_name(impl_item.child_by_field_name("trait")?, source)
+}
+
+/// The in-scope names a path-grammar file's imports bind (S-440, [CR-142] D2,
+/// [FR-RS-03]) — the per-file syntactic evidence that a call goes **through an
+/// import**, so it can be recorded qualified by the module it names.
+///
+/// The imported rung of the binder needs to know which module a call's name
+/// came from; the call's own text does not say. This pre-pass reads it off the
+/// file's import statements and rewrites exactly two call shapes into the
+/// `<specifier target>::<name>` form the binder resolves against that
+/// import's **bound** target (the `Imports` edge, not the name hierarchy):
+///
+/// - a bare call of a **named import** — TypeScript/JavaScript
+///   `import { a } from './m'` makes `a()` read `.::m::a`, and
+///   `import { a as b }` makes `b()` read `.::m::a`, the name the module
+///   exports it under, never the local spelling;
+/// - a member call whose receiver is an **imported module** — a Go package
+///   (`admin.Register()` → `…::internal::admin::Register`, its qualifier the
+///   explicit import alias or the path's last segment), or a TypeScript
+///   namespace import (`import * as nav` → `nav.f()` reads `.::nav::f`).
+///
+/// Everything else is left exactly as before. Only a **relative** TypeScript
+/// specifier contributes (a package such as `react` names no workspace file,
+/// and its calls keep their bare form); a default import is not read (the name
+/// it was exported under is not in the importing file); a Go dot or blank
+/// import binds no qualifier. A local name the file also **declares** is
+/// dropped, and so is one a function scope enclosing the call **binds** — a
+/// parameter, a local, a destructured prop, a Go `:=` ([`local_bindings`]):
+/// `func handle(admin *admin.Server) { admin.Reload() }` calls a method on the
+/// parameter, not the package. The shadowed call keeps its bare form — a
+/// missed edge, never a fabricated one ([NFR-RA-05]). The receiver of a Go
+/// method call on a value (`s.Start()`) is no import and stays a
+/// receiver-unqualified method name, so the [FR-RS-06] discipline is
+/// untouched.
+///
+/// Built only for a language declaring [`ImportSpecifier::Path`]; every other
+/// language (Rust included) takes [`ImportBindings::default`], which rewrites
+/// nothing.
+///
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+/// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
+/// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Default)]
+struct ImportBindings {
+    /// A named import's local name → `<specifier target>::<exported name>`.
+    named: HashMap<String, String>,
+    /// A module qualifier's local name → the specifier target it names.
+    qualifiers: HashMap<String, String>,
+    /// Function-scope node id → the names bound locally in it: parameters,
+    /// variable declarators, destructured patterns, Go `:=` left-hand sides
+    /// ([`local_bindings`]). A name bound here shadows any import of that name
+    /// for every reference inside the scope.
+    locals: HashMap<usize, HashSet<String>>,
+}
+
+impl ImportBindings {
+    /// Read the file's import statements off the `@ref.import` captures.
+    fn collect(
+        query: &Query,
+        root: Node<'_>,
+        source: &[u8],
+        decls: &[Decl<'_>],
+        semantics: &Semantics,
+    ) -> ImportBindings {
+        let capture_names = query.capture_names();
+        let mut reader = ImportReader {
+            source,
+            named: HashMap::new(),
+            qualifiers: HashMap::new(),
+        };
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, root, source);
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                if capture_names[cap.index as usize] == "ref.import" {
+                    reader.read(cap.node, &semantics.specifier_extensions);
+                }
+            }
+        }
+        let declared: HashSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+        let keep = |map: HashMap<String, Option<String>>| -> HashMap<String, String> {
+            map.into_iter()
+                .filter(|(local, _)| !declared.contains(local.as_str()))
+                .filter_map(|(local, v)| v.map(|v| (local, v)))
+                .collect()
+        };
+        ImportBindings {
+            named: keep(reader.named),
+            qualifiers: keep(reader.qualifiers),
+            locals: local_bindings(root, source),
+        }
+    }
+
+    /// Whether `name`, referenced at `node`, is bound by a function scope that
+    /// encloses it — a parameter, a local, a destructured prop — and so names
+    /// that local value rather than anything imported or declared at the top
+    /// level of the file.
+    fn locally_bound(&self, node: Node<'_>, name: &str) -> bool {
+        if self.locals.is_empty() {
+            return false;
+        }
+        let mut ancestor = node.parent();
+        while let Some(n) = ancestor {
+            if self.locals.get(&n.id()).is_some_and(|names| names.contains(name)) {
+                return true;
+            }
+            ancestor = n.parent();
+        }
+        false
+    }
+
+    /// The qualified target a bare call of `name` at `node` is recorded under,
+    /// when `name` is a named import not shadowed by a local binding.
+    fn named_target(&self, node: Node<'_>, name: &str) -> Option<&str> {
+        let target = self.named.get(name)?;
+        (!self.locally_bound(node, name)).then_some(target.as_str())
+    }
+
+    /// The specifier target of `method_name`'s receiver when that receiver is a
+    /// plain identifier naming an imported module — a Go `selector_expression`
+    /// operand or a TypeScript `member_expression` object — else `None`.
+    fn qualifier_of(&self, method_name: Node<'_>, source: &[u8]) -> Option<&str> {
+        if self.qualifiers.is_empty() {
+            return None;
+        }
+        let access = method_name.parent()?;
+        let receiver = match access.kind() {
+            "selector_expression" => access.child_by_field_name("operand")?,
+            "member_expression" => access.child_by_field_name("object")?,
+            _ => return None,
+        };
+        if receiver.kind() != "identifier" {
+            return None;
+        }
+        let name = receiver.utf8_text(source).ok()?;
+        let module = self.qualifiers.get(name)?;
+        (!self.locally_bound(receiver, name)).then_some(module.as_str())
+    }
+}
+
+/// The node kinds that open a function scope in the path-grammar languages —
+/// TypeScript/JavaScript functions, arrows and methods, Go functions, methods
+/// and function literals.
+const FUNCTION_SCOPES: &[&str] = &[
+    "function_declaration",
+    "function_expression",
+    "function",
+    "generator_function",
+    "generator_function_declaration",
+    "arrow_function",
+    "method_definition",
+    "method_declaration",
+    "func_literal",
+];
+
+/// Every name bound inside a function scope of the file, keyed by the scope's
+/// node id (S-440) — the evidence that a reference names a local value.
+///
+/// Conservative by construction: a name bound anywhere in a scope (in any
+/// block of it, before or after the reference) counts for the whole scope, so
+/// an over-approximation can only turn a call through an import back into a
+/// bare, unresolved one — a missed edge, never a fabricated one ([NFR-RA-05]).
+/// A binding at file scope is not collected: TypeScript and Go both reject a
+/// top-level redeclaration of an imported name.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn local_bindings(root: Node<'_>, source: &[u8]) -> HashMap<usize, HashSet<String>> {
+    let mut out: HashMap<usize, HashSet<String>> = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        if !binds_a_name(node) {
+            continue;
+        }
+        let Some(scope) = enclosing_function_scope(node) else { continue };
+        if let Ok(name) = node.utf8_text(source) {
+            out.entry(scope.id()).or_default().insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// The nearest function-scope ancestor of `node`, if any.
+fn enclosing_function_scope(node: Node<'_>) -> Option<Node<'_>> {
+    let mut ancestor = node.parent();
+    while let Some(n) = ancestor {
+        if FUNCTION_SCOPES.contains(&n.kind()) {
+            return Some(n);
+        }
+        ancestor = n.parent();
+    }
+    None
+}
+
+/// Whether `node` is an identifier in a **binding** position: a parameter, a
+/// declarator name, a destructuring pattern element, a `catch` parameter, a
+/// `for … of` variable, or a Go parameter / `:=` / `range` left-hand side.
+fn binds_a_name(node: Node<'_>) -> bool {
+    if node.kind() == "shorthand_property_identifier_pattern" {
+        return true;
+    }
+    if node.kind() != "identifier" {
+        return false;
+    }
+    let Some(parent) = node.parent() else { return false };
+    let is_field = |field: &str| parent.child_by_field_name(field) == Some(node);
+    match parent.kind() {
+        "formal_parameters" | "array_pattern" | "rest_pattern" | "object_pattern" => true,
+        "required_parameter" | "optional_parameter" => is_field("pattern"),
+        "arrow_function" => is_field("parameter"),
+        "variable_declarator" => is_field("name"),
+        // Go names every parameter of `a, b int` in one declaration, and its type
+        // is never a plain `identifier`, so each identifier child is a name.
+        "parameter_declaration" | "variadic_parameter_declaration" | "var_spec" | "const_spec" => {
+            true
+        }
+        "pair_pattern" => is_field("value"),
+        "assignment_pattern" | "object_assignment_pattern" => is_field("left"),
+        "catch_clause" => is_field("parameter"),
+        "for_in_statement" => is_field("left"),
+        // Go `a, b := …` and `for k, v := range …`: the left expression list.
+        "expression_list" => parent.parent().is_some_and(|gp| {
+            matches!(gp.kind(), "short_var_declaration" | "range_clause")
+                && gp.child_by_field_name("left") == Some(parent)
+        }),
+        _ => false,
+    }
+}
+
+/// The accumulator [`ImportBindings::collect`] fills, one import statement at a
+/// time. A local name bound twice with different values (invalid code, or a
+/// merge artefact) maps to `None` — it decides nothing.
+struct ImportReader<'s> {
+    source: &'s [u8],
+    named: HashMap<String, Option<String>>,
+    qualifiers: HashMap<String, Option<String>>,
+}
+
+impl ImportReader<'_> {
+    fn text(&self, n: Node<'_>) -> Option<String> {
+        n.utf8_text(self.source).ok().map(str::to_string)
+    }
+
+    fn bind(map: &mut HashMap<String, Option<String>>, local: String, value: String) {
+        map.entry(local)
+            .and_modify(|v| {
+                if v.as_ref() != Some(&value) {
+                    *v = None;
+                }
+            })
+            .or_insert(Some(value));
+    }
+
+    /// One `@ref.import` capture: the specifier string of a TypeScript
+    /// `import … from '<spec>'` or a Go `import [alias] "<path>"`.
+    fn read(&mut self, spec_node: Node<'_>, extensions: &[String]) {
+        let Some(spec) = self.text(spec_node) else { return };
+        let segments = specifier_segments(&spec, extensions);
+        let (Some(first), Some(statement)) = (segments.first(), spec_node.parent()) else {
+            return;
+        };
+        let target = segments.join("::");
+        match statement.kind() {
+            "import_statement" if is_relative_head(first) => {
+                let mut cursor = statement.walk();
+                let clauses: Vec<Node<'_>> = statement
+                    .named_children(&mut cursor)
+                    .filter(|c| c.kind() == "import_clause")
+                    .collect();
+                for clause in clauses {
+                    self.read_ts_clause(clause, &target);
+                }
+            }
+            "import_spec" => {
+                let local = match statement.child_by_field_name("name") {
+                    Some(n) if n.kind() == "package_identifier" => self.text(n),
+                    Some(_) => None, // a dot or blank import binds no qualifier
+                    None => segments.last().cloned(),
+                };
+                if let Some(local) = local {
+                    Self::bind(&mut self.qualifiers, local, target);
+                }
+            }
+            _ => {} // a `require()` argument, or a package specifier
+        }
+    }
+
+    /// A TypeScript `import_clause`: its named imports and namespace import. A
+    /// default import is not read — the name it was exported under is unknown.
+    fn read_ts_clause(&mut self, clause: Node<'_>, target: &str) {
+        let mut cursor = clause.walk();
+        let parts: Vec<Node<'_>> = clause.named_children(&mut cursor).collect();
+        for part in parts {
+            match part.kind() {
+                "named_imports" => {
+                    let mut spec_cursor = part.walk();
+                    let specs: Vec<Node<'_>> = part.named_children(&mut spec_cursor).collect();
+                    for s in specs {
+                        self.read_ts_specifier(s, target);
+                    }
+                }
+                "namespace_import" => {
+                    let mut ns_cursor = part.walk();
+                    let ns = part
+                        .named_children(&mut ns_cursor)
+                        .find(|n| n.kind() == "identifier")
+                        .and_then(|n| self.text(n));
+                    if let Some(ns) = ns {
+                        Self::bind(&mut self.qualifiers, ns, target.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// One `import_specifier`: `a` or `a as b` — the local name maps to the
+    /// name the module exports.
+    fn read_ts_specifier(&mut self, specifier: Node<'_>, target: &str) {
+        let exported = specifier
+            .child_by_field_name("name")
+            .filter(|n| n.kind() == "identifier")
+            .and_then(|n| self.text(n));
+        let local = specifier
+            .child_by_field_name("alias")
+            .and_then(|n| self.text(n))
+            .or_else(|| exported.clone());
+        if let (Some(local), Some(exported)) = (local, exported) {
+            Self::bind(&mut self.named, local, format!("{target}::{exported}"));
+        }
+    }
 }
 
 /// The trait name when a receiver-method call's receiver is a **provable**

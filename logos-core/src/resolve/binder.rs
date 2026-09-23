@@ -19,7 +19,12 @@
 //! 2. **module** — the file-module scope is the last step of (1); sibling and
 //!    child *file* modules resolve through the path-derived module tree;
 //! 3. **imports** — the file's `use`-alias map (including `as` renames), then
-//!    its glob imports ([FR-RS-01], [FR-RS-02]);
+//!    its glob imports ([FR-RS-01], [FR-RS-02]). A language whose import
+//!    specifiers are *paths* (TypeScript, JavaScript, Go) reaches this rung
+//!    differently: extraction records a call through an import qualified by
+//!    the module it names, and [`Ctx::resolve_imported_call`] binds it within
+//!    that import's **bound** targets — the `Imports` binding itself, never
+//!    the name hierarchy, which cannot read a path (S-440);
 //! 4. **crate** — explicit `crate::`/`self::`/`super::` paths and
 //!    crate-name-headed paths through the module tree;
 //! 5. **workspace** — policy-gated unique-candidate fallbacks
@@ -279,6 +284,11 @@ pub(crate) struct Index {
     go_modules: Vec<GoModule>,
     /// file id → scope facts from its import rows.
     file_scopes: HashMap<i64, FileScope>,
+    /// file id → specifier target of each of the file's path-grammar `Imports`
+    /// rows → the file-root modules that row binds to, id-sorted (empty when it
+    /// binds nothing) — the **imported** scope a path-grammar call binds within
+    /// (S-440, [`Index::with_imported_bindings`]). Empty until that is called.
+    imported: HashMap<i64, HashMap<String, Vec<NodeId>>>,
     /// Normalised crate names present in the graph.
     crates: HashSet<String>,
     /// `(trait node, method name)` → the concrete workspace impl method nodes of
@@ -338,6 +348,7 @@ impl Index {
             go_modules: Vec::new(),
             routes_by_template,
             file_scopes,
+            imported: HashMap::new(),
             crates,
             impls_by_trait_method,
         }
@@ -352,6 +363,62 @@ impl Index {
     ) -> Index {
         self.specifier_targets = specifier_targets;
         self.go_modules = go_modules;
+        self
+    }
+
+    /// Bind every path-grammar `Imports` row of `refs` and record what each
+    /// bound to, per file — the imported scope [`Ctx::resolve_imported_call`]
+    /// consults (S-440, [CR-142] D2, [FR-RS-03]).
+    ///
+    /// The scope is the **outcome of the import's own binding** ([`bind`], under
+    /// the same `policy`), so a call can only ever resolve into a file its
+    /// import edge reaches, however that edge came to bind. Computed here, before
+    /// any call is bound, so one pass binds imports and the calls through them
+    /// alike: a cold index needs no second run to see its own import edges.
+    /// Call after [`Index::with_path_specifiers`] — without the specifier context
+    /// no file is path-grammar and the scope stays empty.
+    ///
+    /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+    /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
+    pub(crate) fn with_imported_bindings(
+        mut self,
+        refs: &[UnresolvedRefRow],
+        policy: BindingPolicy,
+    ) -> Index {
+        let mut imported: HashMap<i64, HashMap<String, Vec<NodeId>>> = HashMap::new();
+        for r in refs {
+            if r.kind != EdgeKind::Imports {
+                continue;
+            }
+            let Some(file_id) = r.file_id else { continue };
+            let path_grammar = self
+                .by_symbol
+                .get(&r.source_symbol)
+                .and_then(|id| self.info.get(id))
+                .and_then(|i| i.file_path.as_deref())
+                .is_some_and(|p| self.is_path_specifier_file(p));
+            if !path_grammar {
+                continue;
+            }
+            let targets = match bind(r, &self, policy) {
+                Outcome::Bound { target, .. } => vec![target],
+                Outcome::BoundMany { targets, .. } => targets,
+                Outcome::Unbound => Vec::new(),
+            };
+            imported
+                .entry(file_id)
+                .or_default()
+                .entry(r.target.clone())
+                .or_default()
+                .extend(targets);
+        }
+        for by_target in imported.values_mut() {
+            for targets in by_target.values_mut() {
+                targets.sort();
+                targets.dedup();
+            }
+        }
+        self.imported = imported;
         self
     }
 
@@ -961,6 +1028,18 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
                     return outcome;
                 }
             }
+            // A call through an import of a path-grammar file (S-440, [CR-142]
+            // D2): bound within what that import binds to, never through the
+            // member-path hierarchy, whose workspace fallback would read a
+            // specifier path as names.
+            if r.kind == EdgeKind::Calls {
+                if let Some(resolved) = ctx.resolve_imported_call(&r.target) {
+                    return match resolved {
+                        Res::Found(target) => bound(target),
+                        _ => Outcome::Unbound,
+                    };
+                }
+            }
             let want = if r.kind == EdgeKind::Calls {
                 Want::Callable
             } else {
@@ -1563,6 +1642,70 @@ impl Ctx<'_> {
             None
         };
         Some(go_package.unwrap_or(Outcome::Unbound))
+    }
+
+    /// The **imported** rung for a path-grammar file (S-440, [CR-142] D2,
+    /// [FR-RS-03]), or `None` for a single-segment name or a file whose
+    /// specifiers are not paths (every Rust call, so Rust binds exactly as
+    /// before).
+    ///
+    /// `target` is `<import target>::<name>`, the form extraction records for a
+    /// call through a named import or through an imported module's qualifier
+    /// (`extract::ImportBindings`). It is the **only** multi-segment call a
+    /// path-grammar file records — its `@ref.call` captures are plain
+    /// identifiers — so every such row is decided here, `Some`, including one
+    /// whose prefix names no import of the file: no candidate, unbound. The candidates are the top-level
+    /// [`NodeKind::Function`]s named `name` in the file-root modules the file's
+    /// `Imports` row for `<import target>` **bound** to
+    /// ([`Index::with_imported_bindings`]); exactly one binds ([NFR-RA-05]).
+    ///
+    /// Why this is not the Rust alias step, and its own over-binding reasoning:
+    ///
+    /// - The evidence is the import the call went through, so a same-named
+    ///   function in a module the file did **not** import that name from is
+    ///   never a candidate — `helper` imported from `./a` never reaches `./b`'s
+    ///   `helper`, and never both.
+    /// - An import that binds nothing (an external package: `react`,
+    ///   `github.com/lib/pq`), or a module that defines no such function (a
+    ///   barrel re-exporting it), decides the call **unbound** — `Some`, not
+    ///   `None` — so it never falls through to the workspace suffix match,
+    ///   which would bind `pq.Open` to a workspace `pq/pq.go`.
+    /// - Only a `Function` is a candidate: what a package or module qualifier
+    ///   reaches is a top-level function. A method is reached through a value,
+    ///   whose type the call does not state, and stays under the [FR-RS-06]
+    ///   receiver discipline as a bare method name.
+    /// - The [FR-RS-07] tie-break and the [FR-RS-08] trait fan-out are not
+    ///   consulted: there is no associated method to break a tie with among
+    ///   top-level functions, and no trait object in either language.
+    ///
+    /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+    /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
+    /// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_imported_call(&self, target: &str) -> Option<Res> {
+        let (module, name) = target.rsplit_once("::")?;
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if !self.ix.is_path_specifier_file(source_file) {
+            return None;
+        }
+        let roots = self
+            .file_id
+            .and_then(|f| self.ix.imported.get(&f))
+            .and_then(|by_target| by_target.get(module));
+        let candidates: Vec<NodeId> = roots
+            .into_iter()
+            .flatten()
+            .flat_map(|&root| self.ix.members_named(root, name, Want::Callable))
+            .filter(|id| {
+                self.ix
+                    .info
+                    .get(id)
+                    .is_some_and(|i| i.kind == NodeKind::Function)
+            })
+            .collect();
+        Some(exactly_one(&candidates))
     }
 
     /// A relative specifier, resolved against the importing file's directory by
