@@ -1303,7 +1303,9 @@ fn file_module_name(path_segments: &[&str]) -> String {
 /// [`split_path_text`] / [`flatten_use_tree`] — or, for an import in a language
 /// whose `semantics` declare path specifiers, [`specifier_segments`] (S-439) —
 /// deduplicated, and sorted into the canonical `(source, target, form, kind)`
-/// order ([NFR-RA-06]).
+/// order ([NFR-RA-06]). In such a language a call **through** an import is
+/// recorded qualified by the module it names, `<import target>::<name>`, and a
+/// JSX tag naming a local value records nothing ([`ImportBindings`], S-440).
 fn collect_refs(
     query: &Query,
     root: Node<'_>,
