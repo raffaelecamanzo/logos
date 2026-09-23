@@ -835,6 +835,56 @@ async fn single_root_ignores_the_repo_param() {
     assert_eq!(plain, scoped, "a single-root serve answers the same engine, `?repo=` or not");
 }
 
+// ── S-448 / FR-WS-30: the effective-chat slice under a federated backing ─────
+
+/// The serialized config read-model up to — not including — its effective-chat
+/// slice: every byte the Config editor reads and round-trips.
+fn literal_prefix(payload: &str) -> &str {
+    &payload[..payload.find(",\"effective_chat\":").expect("the payload carries the slice")]
+}
+
+/// Under a federated backing `GET /api/v1/config` resolves the slice against the
+/// workspace root the backing already holds ([FR-WS-30], S-448 AC4): a member
+/// that declares nothing inherits both halves (`workspace` origin), a member that
+/// declares its own model keeps it (`member`) and inherits only the key — and in
+/// both, every byte before the slice is the member's literal document, exactly
+/// what a read with **no** workspace root serves (S-448 AC1). The raw key is never
+/// on the wire; its last-4 is ([NFR-SE-07]).
+#[tokio::test]
+async fn config_endpoint_resolves_the_slice_against_the_backings_workspace_root() {
+    let tmp = workspace();
+    let ws_key = "sk-workspace-held-key-ws99";
+    write(tmp.path(), ".logos/config.toml", "[chat]\nprovider = \"anthropic\"\nmodel = \"ws/model\"\n");
+    write(tmp.path(), ".logos/secrets.toml", &format!("[chat]\napi_key = \"{ws_key}\"\n"));
+    write(&tmp.path().join("web"), ".logos/config.toml", "[chat]\nmodel = \"web/own-model\"\n");
+    let router = ws_router(&tmp);
+
+    for (path, member, model, policy_origin) in [
+        ("/api/v1/config", "api", "ws/model", "workspace"),
+        ("/api/v1/config?repo=api", "api", "ws/model", "workspace"),
+        ("/api/v1/config?repo=web", "web", "web/own-model", "member"),
+    ] {
+        let resp = router.clone().oneshot(get(path)).await.expect("route responds");
+        let (status, body, headers) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_self_only_csp(&headers, path);
+
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let slice = &v["effective_chat"];
+        assert_eq!(slice["policy"]["model"], model, "{path}: {body}");
+        assert_eq!(slice["policy_origin"], policy_origin, "{path}: {body}");
+        assert_eq!(slice["credential_origin"], "workspace", "{path}: {body}");
+        assert_eq!(slice["credential"], serde_json::json!({"present": true, "last4": "ws99"}), "{path}");
+        assert!(!body.contains(ws_key) && !body.contains("workspace-held"), "{path}: the raw key leaked");
+
+        // The literal fields are the member's own — the inherited half is not in them.
+        let alone = Engine::open(tmp.path().join(member)).config_read(None).expect("core read");
+        let alone = serde_json::to_string(&alone).unwrap();
+        assert_eq!(literal_prefix(&body), literal_prefix(&alone), "{path}: a literal field moved");
+        assert!(!literal_prefix(&body).contains("ws/model"), "{path}: the inherited model leaked");
+    }
+}
+
 // ── S-250: the shell's boot probe, and the member scope on the WRITE seam ─────
 
 /// `workspace roster` carries the manifest — name, default member, member names — and

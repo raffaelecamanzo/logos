@@ -35,7 +35,8 @@ use super::error::ConfigError;
 use super::secrets::SECRETS_RELPATH;
 use super::{
     load_config_from_root, load_rules_from_root, load_secrets_from_root, parse_config, parse_rules,
-    Config, Constraints, MaskedSecret, MetricThresholds, Rules, CONFIG_RELPATH, RULES_RELPATH,
+    resolve_chat, ChatConfig, ChatOrigin, ChatResolution, Config, Constraints, MaskedSecret,
+    MetricThresholds, Rules, CONFIG_RELPATH, RULES_RELPATH,
 };
 
 /// Which checked-in policy file a [`read_documents`]/write targets.
@@ -99,6 +100,66 @@ pub struct ConfigReadModel {
     /// [BR-37]: ../../../docs/specs/software-spec.md#326-web-ui
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     pub defaults: ConfigDefaults,
+
+    /// The **effective** chat policy and masked credential, with the origin of
+    /// each half, as [`resolve_chat`] computes them ([FR-WS-30], [ADR-67],
+    /// S-448) — the resolution the Chat tab's usability gate reads.
+    ///
+    /// Carried **beside** [`config`](Self::config) and
+    /// [`chat_key`](Self::chat_key), never merged into them: those stay the
+    /// member's literal document and its own masked key, which the Config
+    /// editor round-trips, so an inherited value can never be posted back into
+    /// the member's `config.toml` on save ([NFR-RA-05]). Declared **last**, so
+    /// the fields before it serialize to the same bytes they always did.
+    ///
+    /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    pub effective_chat: EffectiveChat,
+}
+
+/// The read-model projection of a [`ChatResolution`] ([FR-WS-30], S-448): the
+/// effective policy, the masked credential, and where each half came from.
+///
+/// A distinct type rather than the [`ChatResolution`] itself because the
+/// resolution **holds** the raw key for the turn path's egress call. This
+/// projection is built by dropping it, so — like [`ConfigReadModel::chat_key`]
+/// — no form of the key but presence + last-4 is ever *in* a read-model, let
+/// alone serialized from one ([NFR-SE-07]). It serializes to the same shape as
+/// [`ChatResolution`].
+///
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EffectiveChat {
+    /// The effective `[chat]` table (see [`ChatResolution::policy`]).
+    pub policy: ChatConfig,
+    /// Where [`policy`](Self::policy) came from.
+    pub policy_origin: ChatOrigin,
+    /// The masked effective credential (presence + last-4).
+    pub credential: MaskedSecret,
+    /// Where [`credential`](Self::credential) came from.
+    pub credential_origin: ChatOrigin,
+}
+
+impl From<ChatResolution> for EffectiveChat {
+    /// Keep the masked halves and their origins; the raw key the resolution
+    /// holds is dropped here, never copied.
+    fn from(resolution: ChatResolution) -> Self {
+        let ChatResolution {
+            policy,
+            policy_origin,
+            credential,
+            credential_origin,
+            ..
+        } = resolution;
+        EffectiveChat {
+            policy,
+            policy_origin,
+            credential,
+            credential_origin,
+        }
+    }
 }
 
 /// The `defaults` projection ([CR-067], [BR-37]): every value traces to a Rust
@@ -344,12 +405,23 @@ pub enum ConfigApplyOutcome {
 /// is reported `exists = false` with empty content and the effective default
 /// model ([NFR-DM-04]) — not an error.
 ///
+/// `workspace_root` is the already-resolved federation root, or `None` in
+/// single-root mode; it is handed to [`resolve_chat`] for the
+/// [`effective_chat`](ConfigReadModel::effective_chat) slice **only**. Every
+/// other field is read from `root` alone, so it is the same whatever
+/// `workspace_root` is, and with `None` no [`ChatOrigin::Workspace`] is
+/// reachable.
+///
 /// # Errors
 /// A present-but-invalid file fails loud through the load path
 /// ([`load_config_from_root`] / [`load_rules_from_root`]): an unknown key, a
 /// non-compiling glob, or an out-of-range value is a [`ConfigError`] (exit 2),
-/// exactly as the CLI would report it.
-pub fn read_documents(root: &Path) -> Result<ConfigReadModel, ConfigError> {
+/// exactly as the CLI would report it. That includes an invalid chat file at
+/// `workspace_root` when the member inherits from it ([`resolve_chat`]).
+pub fn read_documents(
+    root: &Path,
+    workspace_root: Option<&Path>,
+) -> Result<ConfigReadModel, ConfigError> {
     let config_path = root.join(CONFIG_RELPATH);
     let rules_path = root.join(RULES_RELPATH);
 
@@ -381,11 +453,15 @@ pub fn read_documents(root: &Path) -> Result<ConfigReadModel, ConfigError> {
             constraints: Constraints::recommended(),
         },
     };
+    // The effective slice is resolved separately and set beside the literal
+    // fields above, which it never feeds (S-448, NFR-RA-05).
+    let effective_chat = resolve_chat(root, workspace_root)?.into();
     Ok(ConfigReadModel {
         config,
         rules,
         chat_key,
         defaults,
+        effective_chat,
     })
 }
 
@@ -570,7 +646,7 @@ mod tests {
         seed(dir.path(), "config.toml", "max_file_size = 4096\n");
         seed(dir.path(), "rules.toml", "[constraints]\nmax_cycles = 2\n");
 
-        let docs = read_documents(dir.path()).unwrap();
+        let docs = read_documents(dir.path(), None).unwrap();
 
         assert!(docs.config.exists);
         assert_eq!(docs.config.path, ".logos/config.toml");
@@ -588,7 +664,7 @@ mod tests {
         // NFR-DM-04: an absent policy file is exists=false + empty content + the
         // effective default model — not an error.
         let dir = tempfile::tempdir().unwrap();
-        let docs = read_documents(dir.path()).unwrap();
+        let docs = read_documents(dir.path(), None).unwrap();
 
         assert!(!docs.config.exists);
         assert!(docs.config.content.is_empty());
@@ -616,7 +692,7 @@ mod tests {
             "[constraints]\nmax_fan_in = 7\n[metric_thresholds]\nbrain_lines = 3\n",
         );
 
-        let docs = read_documents(dir.path()).unwrap();
+        let docs = read_documents(dir.path(), None).unwrap();
 
         // config.toml defaults equal Config::default() whole (CR-067 CRA-02),
         // not the just-loaded (departed) live document.
@@ -692,7 +768,7 @@ mod tests {
         // as the CLI would report it.
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path(), "config.toml", "langauges = [\"rust\"]\n"); // typo'd key
-        let err = read_documents(dir.path()).unwrap_err();
+        let err = read_documents(dir.path(), None).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
         assert_eq!(err.exit_code(), 2);
     }
@@ -703,7 +779,7 @@ mod tests {
         // through the load path, so an unknown rules key is exit 2.
         let dir = tempfile::tempdir().unwrap();
         seed(dir.path(), "rules.toml", "bogus_rules_key = 99\n");
-        let err = read_documents(dir.path()).unwrap_err();
+        let err = read_documents(dir.path(), None).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
         assert_eq!(err.exit_code(), 2);
     }
@@ -724,7 +800,7 @@ mod tests {
         assert_eq!(outcome.bytes_written, candidate.len() as u64);
 
         // Reload through config_read: the new model is what we wrote.
-        let docs = read_documents(dir.path()).unwrap();
+        let docs = read_documents(dir.path(), None).unwrap();
         assert_eq!(docs.config.content, candidate);
         assert_eq!(docs.config.parsed.max_file_size, 8192);
         assert_eq!(docs.config.parsed.languages, vec!["rust".to_string()]);
@@ -920,7 +996,7 @@ mod tests {
 
         // …but read_documents returns only the masked form (the raw key is never
         // in the read-model the surface serialises).
-        let docs = read_documents(dir.path()).unwrap();
+        let docs = read_documents(dir.path(), None).unwrap();
         assert!(docs.chat_key.present);
         assert_eq!(docs.chat_key.last4.as_deref(), Some("1234"));
         let serialised = serde_json::to_string(&docs).unwrap();
@@ -957,7 +1033,7 @@ mod tests {
         // A blank value clears the key — the editor's "remove the key" action.
         let dir = tempfile::tempdir().unwrap();
         write_secret(dir.path(), "sk-present-9999").unwrap();
-        assert!(read_documents(dir.path()).unwrap().chat_key.present);
+        assert!(read_documents(dir.path(), None).unwrap().chat_key.present);
 
         let outcome = write_secret(dir.path(), "   ").unwrap();
         assert!(!outcome.chat_key.present, "blank clears the key");
@@ -965,7 +1041,7 @@ mod tests {
             outcome.chat_key.last4.is_none(),
             "a cleared key reports no last-4"
         );
-        assert!(!read_documents(dir.path()).unwrap().chat_key.present);
+        assert!(!read_documents(dir.path(), None).unwrap().chat_key.present);
     }
 
     #[test]
@@ -1040,7 +1116,7 @@ mod tests {
         let candidate = "[chat]\nmodel = \"chat/model\"\n\n[wiki]\nmodel = \"wiki/model\"\n";
         write_config(dir.path(), candidate).unwrap();
 
-        let docs = read_documents(dir.path()).unwrap();
+        let docs = read_documents(dir.path(), None).unwrap();
         assert_eq!(docs.config.parsed.wiki.model.as_deref(), Some("wiki/model"));
         assert_eq!(docs.config.parsed.chat.model.as_deref(), Some("chat/model"));
 
@@ -1083,5 +1159,166 @@ mod tests {
             before,
             "an invalid store is left byte-identical"
         );
+    }
+
+    // ── effective_chat: the resolution beside the literal document (S-448) ──
+
+    /// The workspace tier's chat model — distinct from anything a member declares.
+    const WS_MODEL: &str = "workspace/chat-model";
+    /// The workspace tier's raw key; only `wk42` may ever be serialized.
+    const WS_KEY: &str = "sk-workspace-secret-wk42";
+
+    /// A workspace root declaring a whole `[chat]` table and a key, with one
+    /// member beneath it that declares **neither** — the inheriting member
+    /// ([FR-WS-30]). The member still has a literal `config.toml` of its own.
+    fn inheriting_member() -> (tempfile::TempDir, std::path::PathBuf) {
+        let ws = tempfile::tempdir().unwrap();
+        seed(
+            ws.path(),
+            "config.toml",
+            &format!("[chat]\nprovider = \"anthropic\"\nmodel = \"{WS_MODEL}\"\n"),
+        );
+        seed(ws.path(), "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
+        let member = ws.path().join("member");
+        seed(&member, "config.toml", "max_file_size = 4096\n");
+        (ws, member)
+    }
+
+    /// The serialized payload up to — not including — the effective slice: the
+    /// bytes of every field the Config editor reads and round-trips.
+    fn literal_prefix(payload: &str) -> &str {
+        let at = payload
+            .find(",\"effective_chat\":")
+            .unwrap_or_else(|| panic!("the payload carries an effective_chat key: {payload}"));
+        &payload[..at]
+    }
+
+    #[test]
+    fn the_effective_slice_is_appended_after_the_literal_fields_and_never_inside_them() {
+        // S-448 AC1: the slice sits BESIDE content/exists/parsed/chat_key — the
+        // payload is exactly the four pre-existing fields, in their pre-existing
+        // order, followed by the slice as its last key.
+        let (ws, member) = inheriting_member();
+        let docs = read_documents(&member, Some(ws.path())).unwrap();
+        fn json<T: Serialize>(value: &T) -> String {
+            serde_json::to_string(value).unwrap()
+        }
+        let expected = format!(
+            "{{\"config\":{},\"rules\":{},\"chat_key\":{},\"defaults\":{},\"effective_chat\":{}}}",
+            json(&docs.config),
+            json(&docs.rules),
+            json(&docs.chat_key),
+            json(&docs.defaults),
+            json(&docs.effective_chat),
+        );
+        assert_eq!(serde_json::to_string(&docs).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_workspace_tier_moves_only_the_slice_never_the_literal_fields() {
+        // S-448 AC1 + NFR-RA-05: the same on-disk member, read with and without
+        // the workspace root. Every byte before the slice is identical — the
+        // inherited policy and key reach the slice and nothing else.
+        let (ws, member) = inheriting_member();
+        let inherited = read_documents(&member, Some(ws.path())).unwrap();
+        let alone = read_documents(&member, None).unwrap();
+
+        let inherited_json = serde_json::to_string(&inherited).unwrap();
+        let alone_json = serde_json::to_string(&alone).unwrap();
+        assert_eq!(
+            literal_prefix(&inherited_json),
+            literal_prefix(&alone_json),
+            "the workspace tier changed a literal field"
+        );
+        // The literal document is still the member's own: no model, no key.
+        assert_eq!(inherited.config.parsed.chat.model, None);
+        assert!(!inherited.chat_key.present);
+        assert!(!inherited_json[..literal_prefix(&inherited_json).len()].contains(WS_MODEL));
+
+        // The slice carries the inheritance, with its origin per half.
+        let slice = &inherited.effective_chat;
+        assert_eq!(slice.policy.model.as_deref(), Some(WS_MODEL));
+        assert_eq!(slice.policy_origin, ChatOrigin::Workspace);
+        assert_eq!(slice.credential_origin, ChatOrigin::Workspace);
+        assert_eq!(slice.credential, MaskedSecret::from_key(Some(WS_KEY)));
+
+        // Read alone, the same member resolves to nothing at all.
+        assert_eq!(alone.effective_chat.policy_origin, ChatOrigin::Unset);
+        assert_eq!(alone.effective_chat.credential_origin, ChatOrigin::Unset);
+    }
+
+    #[test]
+    fn no_workspace_origin_is_reachable_without_a_workspace_root() {
+        // S-448 AC2 / ADR-52: with `None`, whatever the member declares, no
+        // serialized payload carries a `workspace` origin — even when the member
+        // sits under a manifest and a chat-declaring root that a DISCOVERY would
+        // find. The root is taken, never discovered.
+        let states = [
+            ("neither", None, None, ChatOrigin::Unset, ChatOrigin::Unset),
+            ("model only", Some("m/model"), None, ChatOrigin::Member, ChatOrigin::Unset),
+            ("key only", None, Some("sk-member-mm11"), ChatOrigin::Unset, ChatOrigin::Member),
+            ("both", Some("m/model"), Some("sk-member-mm11"), ChatOrigin::Member, ChatOrigin::Member),
+        ];
+        for (label, model, key, policy_origin, credential_origin) in states {
+            let (ws, member) = inheriting_member();
+            fs::write(ws.path().join("logos.workspace.toml"), "[workspace]\nname = \"w\"\n")
+                .unwrap();
+            if let Some(model) = model {
+                seed(&member, "config.toml", &format!("[chat]\nmodel = \"{model}\"\n"));
+            }
+            if let Some(key) = key {
+                seed(&member, "secrets.toml", &format!("[chat]\napi_key = \"{key}\"\n"));
+            }
+
+            let docs = read_documents(&member, None).unwrap();
+            let payload = serde_json::to_string(&docs).unwrap();
+            assert!(
+                !payload.contains("\"workspace\""),
+                "{label}: a single-root payload carries a workspace origin: {payload}"
+            );
+            assert_eq!(docs.effective_chat.policy_origin, policy_origin, "{label}");
+            assert_eq!(docs.effective_chat.credential_origin, credential_origin, "{label}");
+        }
+    }
+
+    #[test]
+    fn saving_an_inheriting_members_literal_document_declares_nothing_it_inherited() {
+        // S-448 AC3 / NFR-RA-05: the editor posts the member's `content` back
+        // verbatim. After that save the member's file still declares no model and
+        // no key of its own — the inherited value did not materialise.
+        let (ws, member) = inheriting_member();
+        let docs = read_documents(&member, Some(ws.path())).unwrap();
+        assert_eq!(docs.effective_chat.policy_origin, ChatOrigin::Workspace);
+
+        write_config(&member, &docs.config.content).unwrap();
+
+        let saved = fs::read_to_string(member.join(CONFIG_RELPATH)).unwrap();
+        assert_eq!(saved, "max_file_size = 4096\n");
+        assert!(!member.join(".logos/secrets.toml").exists(), "no key was written to the member");
+        let own = resolve_chat(&member, None).unwrap();
+        assert_eq!(own.policy_origin, ChatOrigin::Unset, "the member declares no policy");
+        assert_eq!(own.credential_origin, ChatOrigin::Unset, "the member holds no key");
+        // …and it still inherits, from where it always did.
+        let reread = read_documents(&member, Some(ws.path())).unwrap();
+        assert_eq!(reread.effective_chat.policy_origin, ChatOrigin::Workspace);
+    }
+
+    #[test]
+    fn the_slice_masks_the_credential_at_both_tiers() {
+        // S-448 AC5 / NFR-SE-07: presence + last-4 only, whichever root holds it.
+        let member_key = "sk-member-secret-mb77";
+        let (ws, member) = inheriting_member();
+
+        let inherited = serde_json::to_string(&read_documents(&member, Some(ws.path())).unwrap())
+            .unwrap();
+        assert!(inherited.contains("\"credential\":{\"present\":true,\"last4\":\"wk42\"}"), "{inherited}");
+        assert!(!inherited.contains(WS_KEY) && !inherited.contains("workspace-secret"), "{inherited}");
+
+        seed(&member, "secrets.toml", &format!("[chat]\napi_key = \"{member_key}\"\n"));
+        let own = serde_json::to_string(&read_documents(&member, Some(ws.path())).unwrap()).unwrap();
+        assert!(own.contains("\"credential\":{\"present\":true,\"last4\":\"mb77\"}"), "{own}");
+        assert!(own.contains("\"credential_origin\":\"member\""), "{own}");
+        assert!(!own.contains(member_key) && !own.contains("member-secret"), "{own}");
+        assert!(!own.contains(WS_KEY), "{own}");
     }
 }

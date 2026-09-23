@@ -676,7 +676,7 @@ async fn config_save_rules_write_stamps_provenance_and_reparses() {
         "the written rules.toml carries the provenance comment: {written:?}",
     );
     // … and still parses via the standard load path (the read half of the seam).
-    let read = Engine::open(dir.path()).config_read().expect("the stamped file reparses");
+    let read = Engine::open(dir.path()).config_read(None).expect("the stamped file reparses");
     assert!(read.rules.exists, "the reparsed rules view sees the written file");
 }
 

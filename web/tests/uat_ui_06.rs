@@ -243,7 +243,7 @@ async fn uat_ui_06_rules_edit_save_then_apply_re_evaluates_the_gate() {
         "the written rules.toml carries the provenance comment: {written:?}",
     );
     assert!(
-        Engine::open(dir.path()).config_read().expect("the stamped file reparses").rules.exists,
+        Engine::open(dir.path()).config_read(None).expect("the stamped file reparses").rules.exists,
         "the stamped rules.toml reparses via the standard load path",
     );
 
