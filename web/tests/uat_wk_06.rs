@@ -223,11 +223,13 @@ async fn uat_wk_06_configured_read_model_discloses_distinct_wiki_and_chat_models
 // ── Centerpiece: open → regenerate → stream → dual-axis fresh → dedicated
 // model honored → key never echoed ─────────────────────────────────────────────
 
-/// The centerpiece scenario: resolve the effective wiki model exactly as
-/// production does ([`Config::effective_wiki_model`]), drive a real background
-/// generation run through the real `POST /wiki/generate` SSE route, and prove
-/// the full chain: pages stream in over SSE, the regenerated pages read fresh
-/// on **both** axes, the persisted `generator` is the **dedicated wiki model**
+/// The centerpiece scenario: resolve the effective wiki model as single-root
+/// production does ([`Config::effective_wiki_model`] — the same `resolve_parts`
+/// spelling production's `WikiConfig::resolve_inherited` runs over the chat
+/// resolution, which under single-root reads exactly these two files), drive a
+/// real background generation run through the real `POST /wiki/generate` SSE
+/// route, and prove the full chain: pages stream in over SSE, the regenerated
+/// pages read fresh on **both** axes, the persisted `generator` is the **dedicated wiki model**
 /// (not the chat model), every written page is reachable only through
 /// `wiki_read` (the `wiki write` contract), and the raw key never appears
 /// anywhere in the flow ([FR-WK-18], [FR-CF-07], [FR-WK-03], [FR-WK-12],

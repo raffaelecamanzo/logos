@@ -545,18 +545,35 @@ pub fn workspace_router_with_intent(
 /// reading member B, so answering its chat turn from member A's graph would state one
 /// member's answers under another member's name ([NFR-RA-05]) — so bind a service to the
 /// resolved engine instead. `Arc::ptr_eq` is the test: same engine ⇒ the injected service
-/// (mock seams preserved); a different engine ⇒ a service for that member.
+/// (mock seams preserved); a different engine ⇒ a service for that member, resolving its
+/// inherited chat halves against the same `workspace_root` ([ADR-67]).
 #[cfg(feature = "agents")]
 fn chat_for(
     injected: &Arc<dyn chat::ChatService>,
     default: &Arc<Engine>,
     scoped: Arc<Engine>,
+    workspace_root: Option<std::path::PathBuf>,
 ) -> Arc<dyn chat::ChatService> {
     if Arc::ptr_eq(default, &scoped) {
         Arc::clone(injected)
     } else {
-        Arc::new(chat::ConfiguredChatService::new(scoped))
+        Arc::new(chat::ConfiguredChatService::new(scoped, workspace_root))
     }
+}
+
+/// The workspace root the agent services resolve their chat policy and credential
+/// against ([ADR-67], [FR-WS-30]): the federation's already-resolved root under
+/// [`Backing::Federated`], and `None` under [`Backing::Single`] — so single-root
+/// consults no second tier by construction ([ADR-52]). Never discovered here.
+///
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+#[cfg(feature = "agents")]
+fn agent_workspace_root(backing: &Backing<Engine>) -> Option<std::path::PathBuf> {
+    backing
+        .as_federated()
+        .map(|registry| registry.federation().root.clone())
 }
 
 /// The wiki-generation service for this request's member scope (S-250, [FR-UI-29]).
@@ -570,11 +587,15 @@ fn wiki_for(
     injected: &Arc<dyn wikigen::WikiRunService>,
     default: &Arc<Engine>,
     scoped: Arc<Engine>,
+    workspace_root: Option<std::path::PathBuf>,
 ) -> Arc<dyn wikigen::WikiRunService> {
     if Arc::ptr_eq(default, &scoped) {
         Arc::clone(injected)
     } else {
-        Arc::new(wikigen::ConfiguredWikiRunService::new(scoped))
+        Arc::new(wikigen::ConfiguredWikiRunService::new(
+            scoped,
+            workspace_root,
+        ))
     }
 }
 
@@ -585,10 +606,14 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
     let bridge = Arc::new(ContractBridge::new());
     #[cfg(feature = "agents")]
     {
-        let chat: Arc<dyn chat::ChatService> =
-            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
-        let wiki: Arc<dyn wikigen::WikiRunService> =
-            Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
+        let workspace_root = agent_workspace_root(&backing);
+        let chat: Arc<dyn chat::ChatService> = Arc::new(chat::ConfiguredChatService::new(
+            Arc::clone(&engine),
+            workspace_root.clone(),
+        ));
+        let wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(
+            wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine), workspace_root),
+        );
         WebState {
             engine,
             backing,
@@ -647,8 +672,10 @@ pub fn router_with_chat(
     intent: IntentToken,
     chat: Arc<dyn chat::ChatService>,
 ) -> Router {
-    let wiki: Arc<dyn wikigen::WikiRunService> =
-        Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine)));
+    let wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(wikigen::ConfiguredWikiRunService::new(
+        Arc::clone(&engine),
+        None,
+    ));
     let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
     build_router(WebState {
         engine,
@@ -678,7 +705,7 @@ pub fn router_with_wiki(
     wiki: Arc<dyn wikigen::WikiRunService>,
 ) -> Router {
     let chat: Arc<dyn chat::ChatService> =
-        Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine)));
+        Arc::new(chat::ConfiguredChatService::new(Arc::clone(&engine), None));
     let backing = Arc::new(Backing::Single(Arc::clone(&engine)));
     build_router(WebState {
         engine,
@@ -889,12 +916,14 @@ fn build_router(state: WebState) -> Router {
 async fn chat_turn(
     State(chat): State<Arc<dyn chat::ChatService>>,
     State(default): State<Arc<Engine>>,
+    State(backing): State<Arc<Backing<Engine>>>,
     MemberEngine(engine): MemberEngine,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    // Answer from the member the user is actually reading (S-250).
-    let chat = chat_for(&chat, &default, engine);
+    // Answer from the member the user is actually reading (S-250), resolving its
+    // chat halves against the workspace root it may inherit them from ([ADR-67]).
+    let chat = chat_for(&chat, &default, engine, agent_workspace_root(&backing));
     let question = form
         .get("q")
         .or_else(|| form.get("message"))
@@ -973,13 +1002,15 @@ async fn chat_turn(
 async fn wiki_generate(
     State(wiki): State<Arc<dyn wikigen::WikiRunService>>,
     State(default): State<Arc<Engine>>,
+    State(backing): State<Arc<Backing<Engine>>>,
     MemberEngine(engine): MemberEngine,
     State(run_state): State<wikigen::WikiRunState>,
     headers: HeaderMap,
 ) -> Response {
     // Generate INTO the member whose pages the tab is showing — never the default's
-    // wiki.db (S-250; the Wiki read-models are member-scoped).
-    let wiki = wiki_for(&wiki, &default, engine);
+    // wiki.db (S-250; the Wiki read-models are member-scoped) — inheriting its chat
+    // provider and key through the same seam the turn reads ([ADR-67], [ADR-42]).
+    let wiki = wiki_for(&wiki, &default, engine, agent_workspace_root(&backing));
     let streaming = wants_event_stream(&headers);
     // The single-run lock ([FR-WK-18]): begin → own the one connection-independent
     // background run. The run's lifetime is owned by `run_state`, not this response
@@ -1634,29 +1665,30 @@ mod tests {
         let other = Arc::new(Engine::start(other_dir.path()).expect("member engine"));
 
         let injected_chat: Arc<dyn chat::ChatService> =
-            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&default)));
-        let injected_wiki: Arc<dyn wikigen::WikiRunService> =
-            Arc::new(wikigen::ConfiguredWikiRunService::new(Arc::clone(&default)));
+            Arc::new(chat::ConfiguredChatService::new(Arc::clone(&default), None));
+        let injected_wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(
+            wikigen::ConfiguredWikiRunService::new(Arc::clone(&default), None),
+        );
 
         // Unscoped (or single-root): the injected service is used verbatim — the mock
         // seam the chat/wiki carve-out tests inject is never bypassed.
         assert!(Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&default)),
+            &chat_for(&injected_chat, &default, Arc::clone(&default), None),
             &injected_chat
         ));
         assert!(Arc::ptr_eq(
-            &wiki_for(&injected_wiki, &default, Arc::clone(&default)),
+            &wiki_for(&injected_wiki, &default, Arc::clone(&default), None),
             &injected_wiki
         ));
 
         // Scoped to another member: a DIFFERENT service, bound to that member's engine —
         // so the turn is answered from, and the wiki written into, the member on screen.
         assert!(!Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&other)),
+            &chat_for(&injected_chat, &default, Arc::clone(&other), None),
             &injected_chat
         ));
         assert!(!Arc::ptr_eq(
-            &wiki_for(&injected_wiki, &default, Arc::clone(&other)),
+            &wiki_for(&injected_wiki, &default, Arc::clone(&other), None),
             &injected_wiki
         ));
     }

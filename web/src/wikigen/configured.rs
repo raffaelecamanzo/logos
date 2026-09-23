@@ -33,6 +33,16 @@
 //! records that boundary as a declared, classified site rather than leaving it
 //! assumed.
 //!
+//! # The inherited chat halves come from the seam ([ADR-67], [ADR-42])
+//! The wiki agent has no provider, endpoint or key of its own: it inherits them
+//! from `[chat]`. Those inherited halves are read through
+//! [`resolve_chat`] over the member root and the already-resolved federation
+//! workspace root — the same resolution the chat turn and the tab read — so a
+//! member that inherits its credential (or its whole chat policy) from the
+//! workspace gets wiki generation as well as chat. The member's own
+//! `[wiki].model` still wins over the effective chat model, exactly as before;
+//! the `[wiki]` table itself is read from the member alone.
+//!
 //! # Blocking setup is offloaded ([ADR-03])
 //! Reading `config.toml`/`secrets.toml` are synchronous filesystem operations; like
 //! every other engine touch on the surface (and the chat service's `build_setup`,
@@ -44,6 +54,7 @@
 //! [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
 //! [ADR-03]: ../../../docs/specs/architecture/decisions/ADR-03.md
 //! [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
+//! [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
 //! [FR-WK-18]: ../../../docs/specs/requirements/FR-WK-18.md
 //! [FR-UI-18]: ../../../docs/specs/requirements/FR-UI-18.md
 //! [FR-CF-07]: ../../../docs/specs/requirements/FR-CF-07.md
@@ -55,54 +66,66 @@
 //! [`wiki-agent`]: ../../../docs/specs/architecture/components/wiki-agent.md
 //! [`agent-core`]: ../../../docs/specs/architecture/components/agent-core.md
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use logos_core::config::{load_config_from_root, load_secrets_from_root, EffectiveWikiModel};
+use logos_core::config::{load_config_from_root, resolve_chat, EffectiveWikiModel};
 use logos_core::observability::{in_surface, Surface};
 use logos_core::Engine;
 use wiki_agent::{run_configured, ConfiguredRun, DEFAULT_RUN_BUDGET};
 
 use super::{spawn_run, WikiRunGuard, WikiRunService, WikiSink};
+use crate::chat::resolution_fault;
 
-/// The production wiki-generation service over the live [`Engine`] and the on-disk
-/// `[wiki]`/`[chat]` policy + `secrets.toml` key ([FR-CF-07]).
+/// The production wiki-generation service over the live [`Engine`], the member's
+/// `[wiki]` policy, and the `[chat]` policy + `secrets.toml` key resolved against
+/// the member and workspace roots ([FR-CF-07], [ADR-67]).
 pub(crate) struct ConfiguredWikiRunService {
     engine: Arc<Engine>,
+    /// The federation's workspace root, or `None` in single-root mode — passed in
+    /// from the backing that already resolved it, never discovered here.
+    workspace_root: Option<PathBuf>,
 }
 
 impl ConfiguredWikiRunService {
-    /// Build the service over the shared engine.
-    pub(crate) fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
+    /// Build the service over the shared engine and the already-resolved workspace
+    /// root (`None` under single-root backing, where no second tier is consulted).
+    pub(crate) fn new(engine: Arc<Engine>, workspace_root: Option<PathBuf>) -> Self {
+        Self {
+            engine,
+            workspace_root,
+        }
     }
 }
 
-/// Resolve the effective wiki model from the on-disk policy — the **blocking** half
-/// of a run's setup ([ADR-03]). Returns an honest setup-fault message on a
-/// config/secret read failure ([NFR-CC-04]); a missing model/key is **not** decided
-/// here — it is [`run_configured`](wiki_agent::run_configured)'s configure-first
-/// state, so the resolution stays a pure read.
+/// Resolve the effective wiki model — the member's `[wiki]` table over the chat
+/// halves [`resolve_chat`] resolved — the **blocking** half of a run's setup
+/// ([ADR-03]). Returns an honest setup-fault message on a config/secret read
+/// failure ([NFR-CC-04]); a missing model/key is **not** decided here — it is
+/// [`run_configured`](wiki_agent::run_configured)'s configure-first state, so the
+/// resolution stays a pure read.
 ///
-/// The **secrets** read fault is surfaced with a **fixed** message that never
-/// interpolates the underlying error ([NFR-SE-07]): a `secrets.toml` TOML-parse
-/// error's `Display` embeds a snippet of the offending input line, which could be
-/// the `api_key = "…"` line — echoing it into the SSE `error` frame the UI renders
-/// verbatim would leak the raw key. The `config.toml` read carries no secret, so its
-/// detailed error is kept for diagnosability.
-fn resolve_effective_model(root: &Path) -> Result<EffectiveWikiModel, String> {
+/// A `secrets.toml` **parse** fault, at either root, is surfaced with a **fixed**
+/// message that never interpolates the underlying error ([NFR-SE-07],
+/// [`resolution_fault`]): its `Display` embeds a snippet of the offending input
+/// line, which could be the `api_key = "…"` line — echoing it into the SSE `error`
+/// frame the UI renders verbatim would leak the raw key. A `config.toml` read
+/// carries no secret, so its detailed error is kept for diagnosability.
+fn resolve_effective_model(
+    root: &Path,
+    workspace_root: Option<&Path>,
+) -> Result<EffectiveWikiModel, String> {
     let config = load_config_from_root(root)
         .map_err(|e| format!("could not read the wiki config: {e}"))?;
-    let secrets = load_secrets_from_root(root).map_err(|_| {
-        "could not read the wiki secret — check that .logos/secrets.toml is valid TOML".to_string()
-    })?;
-    Ok(config.effective_wiki_model(&secrets))
+    let chat = resolve_chat(root, workspace_root).map_err(|e| resolution_fault("wiki", &e))?;
+    Ok(config.wiki.resolve_inherited(&chat))
 }
 
 impl WikiRunService for ConfiguredWikiRunService {
     fn start_run(&self, guard: WikiRunGuard, sink: WikiSink) {
         let engine = Arc::clone(&self.engine);
         let root = engine.root().to_path_buf();
+        let workspace_root = self.workspace_root.clone();
 
         spawn_run(guard, sink, move |sink| async move {
             // The deterministic presented tier runs FIRST (FR-WK-20, FR-WK-18,
@@ -141,18 +164,21 @@ impl WikiRunService for ConfiguredWikiRunService {
             // Blocking config/secret read off the async executor thread ([ADR-03]);
             // a read fault is an honest single `error` frame, never a crash
             // ([NFR-CC-04]).
-            let effective =
-                match tokio::task::spawn_blocking(move || resolve_effective_model(&root)).await {
-                    Ok(Ok(effective)) => effective,
-                    Ok(Err(message)) => {
-                        sink.error(message);
-                        return;
-                    }
-                    Err(_join) => {
-                        sink.error("the wiki setup task failed unexpectedly");
-                        return;
-                    }
-                };
+            let effective = match tokio::task::spawn_blocking(move || {
+                resolve_effective_model(&root, workspace_root.as_deref())
+            })
+            .await
+            {
+                Ok(Ok(effective)) => effective,
+                Ok(Err(message)) => {
+                    sink.error(message);
+                    return;
+                }
+                Err(_join) => {
+                    sink.error("the wiki setup task failed unexpectedly");
+                    return;
+                }
+            };
 
             // Drive the runner, forwarding each per-page event onto the SSE channel.
             // `run_configured` owns the configure-first guard, the pre-send
@@ -180,8 +206,97 @@ impl WikiRunService for ConfiguredWikiRunService {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use super::resolve_effective_model;
     use tempfile::TempDir;
+
+    fn write(root: &Path, file: &str, body: &str) {
+        fs::create_dir_all(root.join(".logos")).unwrap();
+        fs::write(root.join(".logos").join(file), body).unwrap();
+    }
+
+    /// A workspace declaring the whole chat policy and the key, with an empty
+    /// member nested at `<ws>/svc`.
+    fn inheriting_estate() -> (TempDir, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "config.toml",
+            "[chat]\nprovider = \"openai\"\nmodel = \"workspace/chat\"\n\
+             base_url = \"https://workspace.example/v1\"\nmax_provider_retries = 7\n",
+        );
+        write(
+            tmp.path(),
+            "secrets.toml",
+            "[chat]\napi_key = \"sk-workspace-ws42\"\n",
+        );
+        let member = tmp.path().join("svc");
+        fs::create_dir_all(member.join(".logos")).unwrap();
+        (tmp, member)
+    }
+
+    /// [ADR-42] under [ADR-67]: a member inheriting its chat halves from the
+    /// workspace gets wiki generation too — the effective model, provider,
+    /// endpoint, retry policy and key are the workspace's.
+    ///
+    /// [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    #[test]
+    fn an_inheriting_member_resolves_the_workspace_chat_halves() {
+        let (tmp, member) = inheriting_estate();
+        let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
+        assert_eq!(effective.model.as_deref(), Some("workspace/chat"));
+        assert_eq!(effective.api_key.as_deref(), Some("sk-workspace-ws42"));
+        assert_eq!(effective.base_url, "https://workspace.example/v1");
+        assert_eq!(effective.max_provider_retries, 7);
+    }
+
+    /// The member's own `[wiki].model` still wins over the (inherited) chat model;
+    /// only the chat halves are two-tier.
+    #[test]
+    fn the_member_wiki_model_still_wins_over_the_inherited_chat_model() {
+        let (tmp, member) = inheriting_estate();
+        write(&member, "config.toml", "[wiki]\nmodel = \"member/wiki\"\n");
+        let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
+        assert_eq!(effective.model.as_deref(), Some("member/wiki"));
+        assert_eq!(
+            effective.api_key.as_deref(),
+            Some("sk-workspace-ws42"),
+            "key inherited"
+        );
+    }
+
+    /// Single-root (`None`): the enclosing workspace files are never consulted.
+    #[test]
+    fn single_root_consults_no_second_tier() {
+        let (_tmp, member) = inheriting_estate();
+        let effective = resolve_effective_model(&member, None).expect("resolves");
+        assert_eq!(effective.model, None);
+        assert_eq!(effective.api_key, None);
+    }
+
+    /// An invalid **workspace** `secrets.toml` the member relies on fails loud with
+    /// the fixed message, naming the workspace file and never echoing the key.
+    #[test]
+    fn a_workspace_secrets_fault_never_echoes_the_key() {
+        let (tmp, member) = inheriting_estate();
+        write(
+            tmp.path(),
+            "secrets.toml",
+            "[chat]\napi_key = \"sk-LEAKME-WORKSPACE\" not valid toml here\n",
+        );
+        let err = resolve_effective_model(&member, Some(tmp.path())).expect_err("a read fault");
+        assert!(
+            !err.contains("sk-LEAKME-WORKSPACE"),
+            "never echoes the key: {err}"
+        );
+        assert!(
+            err.contains(&tmp.path().join(".logos/secrets.toml").display().to_string()),
+            "names the workspace file: {err}",
+        );
+    }
 
     /// [NFR-SE-07] regression guard: a malformed `secrets.toml` — whose raw TOML
     /// parse error would embed the offending `api_key` line — must surface a fixed
@@ -197,7 +312,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = resolve_effective_model(dir.path())
+        let err = resolve_effective_model(dir.path(), None)
             .expect_err("a malformed secrets.toml is a read fault");
         assert!(
             !err.contains("sk-LEAKME-DEADBEEF"),
