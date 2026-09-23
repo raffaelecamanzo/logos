@@ -1228,7 +1228,11 @@ mod resolution_tests {
     fn resolve_chat_reads_no_file_outside_the_roots_it_needs() {
         let e = Estate::new();
         Estate::policy(&e.workspace, "[chat]\nbogus = 1\n");
-        fs::write(e.workspace.join(".logos/secrets.toml"), "[chat]\nbogus = 1\n").unwrap();
+        fs::write(
+            e.workspace.join(".logos/secrets.toml"),
+            "[chat]\nbogus = 1\n",
+        )
+        .unwrap();
 
         let r = resolve_chat(&e.member, None).expect("None reads only the member root");
         assert_eq!(origins(&r), (ChatOrigin::Unset, ChatOrigin::Unset));
