@@ -331,8 +331,15 @@ pub(crate) fn ignored_state() -> Vec<&'static str> {
 /// evidence is one project's telemetry, and [FR-OB-11]'s tool class is what
 /// re-measures it ([NFR-CC-04]: an explicit caveat over a confident claim).
 ///
+/// Its relational claims are scoped by language ([CR-143] §3.8): the
+/// "Where the relational claims hold" paragraph is one statement all three
+/// texts carry verbatim, pointing at the resolution denominator rather than
+/// naming languages, and `surface_parity`'s `RELATIONAL_SCOPE` is the wording
+/// each is checked against — edit it there and in all three, or none.
+///
 /// [FR-OB-11]: ../../../docs/specs/requirements/FR-OB-11.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
 const CLAUDE_MD_BLOCK: &str = "\
 <!-- logos:managed:begin -->
 ## Logos — structural code intelligence
@@ -359,13 +366,27 @@ Each tool's own description says what it returns; these are the moments to ask.
 
 - **Relational / cross-file** (\"who calls this?\", \"where is X used?\", dead code)
   — `logos:node` / `logos:callers` / `logos:callees`, and `logos:search` /
-  `logos:explore` to find and group. The graph beats grep here.
+  `logos:explore` to find and group, on the languages the graph resolves (below).
 - **Localized lookups** (a string, a value, a formula inside a file you can already
   name) — a direct read or grep is fine, sometimes faster. Don't force the graph on
   a question grep already answers.
 - **Disambiguate by symbol** — prefer a unique name as the entry point. `logos:node`
   on a common bare name (`new`, `map`, `severity`) resolves to one arbitrary match;
   pivot from a unique caller or qualify the path instead.
+
+**Where the relational claims hold.** Relational answers hold only on the languages
+the graph resolves. The answers that traverse resolved edges — callers, callees,
+impact, affected, precedent, impact intersection and branch overlap — say which:
+each carries a `resolution_denominator` whose `languages` rows give each anchor
+language's `calls` resolution. A node answer's edge list carries none, so read it
+against the project's rows named below. Where a row has a `cross_file_edges` figure,
+the graph beats grep for that language, as completely as its `bound` share of
+`references` — a partial ratio is a partial answer. Where its `cross_file_absence`
+reads `same-file-only` or `no-resolved-edges`, the graph binds no call across a file
+boundary there: an empty or short answer is the index's reach, not evidence of
+absence, and grep is the better tool. Callers can live in another language than
+their target, so read the whole project's rows as well — `resolution_by_language` in
+the status readout. For this project that is `logos status --json`.
 
 This ordering is a **hypothesis under measurement, not a settled finding** — it comes
 from one project's telemetry. `logos stats --json` breaks calls down by tool class

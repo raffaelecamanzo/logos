@@ -24,7 +24,10 @@ the work is split into tasks and before anyone decides what to read:
 - **Has this already been done here?** — `logos precedent <symbol-or-file>`
   returns the code that plays the same structural role — sharing a supertype, a
   registration, or a call shape — each result naming why it is analogous. Ranked
-  by counted graph facts, never a similarity score; an empty answer says why.
+  by counted graph facts, never a similarity score. An empty answer gives its
+  reason, and where the target's language binds no call across a file boundary
+  that reason says the structure is unresolved there rather than absent — see
+  [where the relational claims hold](#where-the-relational-claims-hold).
 - **How large is the change really?** — `logos impact <symbol>` for a symbol's
   transitive blast radius, `logos affected <file>…` for the reverse-transitive
   file closure of a changed set.
@@ -36,6 +39,23 @@ the work is split into tasks and before anyone decides what to read:
 Navigating by structure *while you edit* — `search`, `node`, `callers`,
 `callees`, `explore` — is the secondary mode, covered in
 [Usage](usage.md) and [Commands](commands.md).
+
+### Where the relational claims hold
+
+Relational answers hold only on the languages the graph resolves. The answers
+that traverse resolved edges — callers, callees, impact, affected, precedent,
+impact intersection and branch overlap — say which: each carries a
+`resolution_denominator` whose `languages` rows give each anchor language's
+`calls` resolution. A node answer's edge list carries none, so read it against
+the project's rows named below. Where a row has a `cross_file_edges` figure, the
+graph beats grep for that language, as completely as its `bound` share of
+`references` — a partial ratio is a partial answer. Where its
+`cross_file_absence` reads `same-file-only` or `no-resolved-edges`, the graph
+binds no call across a file boundary there: an empty or short answer is the
+index's reach, not evidence of absence, and grep is the better tool. Callers can
+live in another language than their target, so read the whole project's rows as
+well — `resolution_by_language` in the status readout. For this project that is
+`logos status --json`.
 
 > **This ordering is a hypothesis under measurement, not a settled finding.** It
 > comes from this project's own telemetry, where the task-scoping call fired about
