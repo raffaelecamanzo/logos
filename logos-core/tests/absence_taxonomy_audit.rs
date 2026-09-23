@@ -74,17 +74,15 @@
 //! nothing — `{"affected":[],"warnings":[]}` — reports its absence in **no**
 //! words, so this census cannot see it however wide its roots. That arm checks
 //! shape instead: it enumerates the navigation answer types from their
-//! definitions in `models/navigation.rs` and fails any that does not carry
-//! `resolution_denominator`. The class divides between the two arms so:
+//! definitions in `models/navigation.rs` and fails any that neither carries
+//! `resolution_denominator` nor is exempted there with a reason.
 //!
-//! - an absence that is **spelled**, on any of the three surfaces — this file;
-//! - an absence that is **silent**, on a navigation answer type — that file;
-//! - the denominator's **own** wording (`unindexed`, `n/a`, …) — this file, as
-//!   the `models/navigation.rs` rows of [`CENSUS`]: that arm proves the field
-//!   is there, this one proves what it says is in the lexicon.
-//!
-//! A new absence *rendering* is enrolled here; a new navigation *answer type*
-//! is enrolled there, by construction, and that file's header says how.
+//! The division of the class between the two arms — which absence each owns,
+//! and where a new surface or answer type is enrolled — is tabled once, in that
+//! file's header, so the two cannot drift. The seam is the denominator's own
+//! wording: that arm proves the field is there; this file proves what it says
+//! is in the lexicon, through the `models/navigation.rs` rows of [`CENSUS`] and
+//! `the_resolution_denominator_speaks_only_the_lexicon`.
 //!
 //! One more limit, and it is about *enforcement* rather than about the scan.
 //! `scripts/gate.sh fast` scopes its test leg to the cargo packages a branch
