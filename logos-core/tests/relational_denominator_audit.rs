@@ -306,8 +306,13 @@ struct EngineMethod {
     delegates_to_navigate: bool,
 }
 
+/// Whether a body calls into the navigation service by any path spelling —
+/// `crate::navigate::…`, `navigate::…` under a `use crate::navigate`, or
+/// `self::…::navigate::…` — rather than one literal prefix.
 fn mentions_navigate(node: Node<'_>, source: &str) -> bool {
-    if node.kind() == "scoped_identifier" && text(node, source).starts_with("crate::navigate::") {
+    if node.kind() == "scoped_identifier"
+        && text(node, source).split("::").any(|segment| segment.trim() == "navigate")
+    {
         return true;
     }
     let mut cursor = node.walk();
@@ -318,12 +323,17 @@ fn mentions_navigate(node: Node<'_>, source: &str) -> bool {
 }
 
 /// Bare type names in a return type, dropping any path-qualified name whose
-/// path is not the navigation module.
+/// path is not the navigation module — or `models`, which re-exports it
+/// (`pub use navigation::*`), so `crate::models::CallersResult` is the same
+/// type as `crate::models::navigation::CallersResult`.
 fn returned_names(node: Node<'_>, source: &str, into: &mut BTreeSet<String>) {
     if node.kind() == "scoped_type_identifier" {
-        let from_navigation = node
-            .child_by_field_name("path")
-            .is_some_and(|p| text(p, source).ends_with("navigation"));
+        let from_navigation = node.child_by_field_name("path").is_some_and(|p| {
+            matches!(
+                text(p, source).rsplit("::").next().map(str::trim),
+                Some("navigation" | "models")
+            )
+        });
         if !from_navigation {
             // Still walk the generic arguments, never the qualified name.
             let mut cursor = node.walk();
@@ -761,9 +771,33 @@ fn a_near_miss_denominator_field_is_not_the_denominator() {
     }
 }
 
+/// **An answer returned through the `models` re-export is enrolled.**
+/// `models/mod.rs` re-exports the navigation module, so a method spelling its
+/// return `crate::models::X` returns the same type as one spelling it
+/// `crate::models::navigation::X`, and must be checked the same way.
+#[test]
+fn an_answer_returned_through_the_models_re_export_is_enrolled() {
+    for path in ["crate::models", "crate::models::navigation"] {
+        let report = mutated(
+            "#[derive(Debug, Default, Serialize)]\npub struct DependentsResult {\n    \
+             pub query: String,\n}",
+            &format!(
+                "    pub fn dependents(&self, symbol: &str) -> {path}::DependentsResult {{\n        \
+                 {path}::DependentsResult {{ query: symbol.to_string() }}\n    }}"
+            ),
+        );
+        assert_eq!(
+            report.missing,
+            vec![format!("DependentsResult has no `{DENOMINATOR_FIELD}` field")],
+            "{path}::DependentsResult"
+        );
+    }
+}
+
 /// **An answer cannot escape by being nested.** Folding `CallersResult` into
 /// another navigation type removes it from the containment roots, but
-/// `Engine::callers` still returns it — the agreement check names it.
+/// `Engine::callers` still returns it — the agreement check names it, however
+/// the delegation is spelled.
 #[test]
 fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
     let navigation = read(NAVIGATION_MODELS).replacen(
@@ -774,6 +808,23 @@ fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
     assert_ne!(navigation, read(NAVIGATION_MODELS), "the nesting mutation applied");
     let report = audit(&navigation, &read(ENGINE));
     assert!(!report.answers.contains("CallersResult"), "nesting hid it from the roots");
+    assert!(
+        report
+            .disagreements
+            .iter()
+            .any(|d| d.starts_with("Engine::callers returns CallersResult")),
+        "{:?}",
+        report.disagreements
+    );
+    // The same fold, with `Engine::callers` delegating through a `use`d
+    // `navigate` rather than the `crate::navigate::` prefix.
+    let engine = read(ENGINE).replacen(
+        "crate::navigate::callers(self, symbol, limit)",
+        "navigate::callers(self, symbol, limit)",
+        1,
+    );
+    assert_ne!(engine, read(ENGINE), "the delegation respelling applied");
+    let report = audit(&navigation, &engine);
     assert!(
         report
             .disagreements
