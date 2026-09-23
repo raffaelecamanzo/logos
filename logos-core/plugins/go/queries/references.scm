@@ -1,9 +1,11 @@
 ; Go reference-extraction query (S-015, capability = "references").
 ;
 ;   @ref.call   — a plain-identifier call (`f()`).
-;   @ref.method — a selector call (`pkg.F()`, `recv.M()`); name-only,
-;                 policy-gated binding (package member vs receiver method is
-;                 a resolution concern).
+;   @ref.method — a selector call (`pkg.F()`, `recv.M()`). A call on a value
+;                 (`recv.M()`) stays name-only, policy-gated (FR-RS-06); a
+;                 call whose operand is an imported package (`pkg.F()`) is
+;                 recorded qualified by its import path by the extraction
+;                 engine itself (S-440).
 ;   @ref.import — an import path string (`import "net/http"`); unquoted and
 ;                 canonicalised by the PATH grammar the descriptor declares
 ;                 (only slashes → `::`; a host's dots are kept, S-439) into
