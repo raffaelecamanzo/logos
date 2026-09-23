@@ -1785,7 +1785,8 @@ mod surface_parity {
     ///
     /// Read off real serialised values rather than listed, so a renamed field
     /// or tag fails the guidance instead of leaving it describing a shape the
-    /// binary no longer has.
+    /// binary no longer has. An absence's payload keys are left out: they reuse
+    /// row field names, and would otherwise keep a renamed row field "present".
     ///
     /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
     fn denominator_vocabulary() -> (BTreeSet<String>, BTreeMap<String, bool>) {
@@ -1794,8 +1795,13 @@ mod surface_parity {
             StatusInfo,
         };
 
+        // A `cause`-tagged object is an absence, whose payload reuses row field
+        // names (`no-resolved-edges` carries `references` and `bound`). Its tag
+        // is collected below; its payload is not, so a renamed row field cannot
+        // survive on an absence's key of the same name.
         fn keys(value: &serde_json::Value, into: &mut BTreeSet<String>) {
             match value {
+                serde_json::Value::Object(map) if map.contains_key("cause") => {}
                 serde_json::Value::Object(map) => {
                     for (key, inner) in map {
                         into.insert(key.clone());
