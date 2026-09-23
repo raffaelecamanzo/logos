@@ -105,7 +105,8 @@ use config::accessor::{BindingView, DeclaredTypes};
 use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 
 use refs::{
-    flatten_use_tree, import_segments, macro_call_refs, specifier_segments, split_path_text,
+    flatten_use_tree, import_segments, is_relative_head, macro_call_refs, specifier_segments,
+    split_path_text,
 };
 use symbol::{build_symbol, descriptor_for, path_segments};
 
@@ -1334,6 +1335,10 @@ fn collect_refs(
     };
 
     let capture_names = query.capture_names();
+    let imports = match semantics.import_specifier {
+        ImportSpecifier::Path => ImportBindings::collect(query, root, source, decls, semantics),
+        ImportSpecifier::Name => ImportBindings::default(),
+    };
     let mut out: Vec<RefFact> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
@@ -1353,9 +1358,13 @@ fn collect_refs(
                     if segments.is_empty() {
                         continue;
                     }
+                    let target = segments.join("::");
+                    // A call through a named import is recorded qualified by the
+                    // module it was imported from (S-440, `ImportBindings`).
+                    let target = imports.named.get(&target).cloned().unwrap_or(target);
                     out.push(RefFact {
                         source: source_symbol,
-                        target: segments.join("::"),
+                        target,
                         alias: None,
                         form: RefForm::Path,
                         kind: EdgeKind::Calls,
@@ -1366,6 +1375,21 @@ fn collect_refs(
                 "ref.method" => {
                     let name = text.trim();
                     if name.is_empty() {
+                        continue;
+                    }
+                    // A member call whose receiver is an imported module — a Go
+                    // package, a TS namespace import — is a qualified path, not a
+                    // receiver-method call (S-440, `ImportBindings`).
+                    if let Some(module) = imports.qualifier_of(node, source) {
+                        out.push(RefFact {
+                            source: source_symbol,
+                            target: format!("{module}::{name}"),
+                            alias: None,
+                            form: RefForm::Path,
+                            kind: EdgeKind::Calls,
+                            line,
+                            relation: None,
+                        });
                         continue;
                     }
                     // Trait-object dynamic dispatch (S-281, CR-073, FR-RS-08): when
@@ -2106,6 +2130,214 @@ fn rust_impl_trait_name(method: Node<'_>, source: &[u8]) -> Option<String> {
         return None;
     }
     trait_simple_name(impl_item.child_by_field_name("trait")?, source)
+}
+
+/// The in-scope names a path-grammar file's imports bind (S-440, [CR-142] D2,
+/// [FR-RS-03]) — the per-file syntactic evidence that a call goes **through an
+/// import**, so it can be recorded qualified by the module it names.
+///
+/// The imported rung of the binder needs to know which module a call's name
+/// came from; the call's own text does not say. This pre-pass reads it off the
+/// file's import statements and rewrites exactly two call shapes into the
+/// `<specifier target>::<name>` form the binder resolves against that
+/// import's **bound** target (the `Imports` edge, not the name hierarchy):
+///
+/// - a bare call of a **named import** — TypeScript/JavaScript
+///   `import { a } from './m'` makes `a()` read `.::m::a`, and
+///   `import { a as b }` makes `b()` read `.::m::a`, the name the module
+///   exports it under, never the local spelling;
+/// - a member call whose receiver is an **imported module** — a Go package
+///   (`admin.Register()` → `…::internal::admin::Register`, its qualifier the
+///   explicit import alias or the path's last segment), or a TypeScript
+///   namespace import (`import * as nav` → `nav.f()` reads `.::nav::f`).
+///
+/// Everything else is left exactly as before. Only a **relative** TypeScript
+/// specifier contributes (a package such as `react` names no workspace file,
+/// and its calls keep their bare form); a default import is not read (the name
+/// it was exported under is not in the importing file); a Go dot or blank
+/// import binds no qualifier. A local name the file also **declares** is
+/// dropped, so a shadowing declaration keeps the bare call and the lexical
+/// rung decides it — a missed edge, never a fabricated one ([NFR-RA-05]). The
+/// receiver of a Go method call on a value (`s.Start()`) is no import and stays
+/// a receiver-unqualified method name, so the [FR-RS-06] discipline is
+/// untouched.
+///
+/// Built only for a language declaring [`ImportSpecifier::Path`]; every other
+/// language (Rust included) takes [`ImportBindings::default`], which rewrites
+/// nothing.
+///
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+/// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
+/// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Default)]
+struct ImportBindings {
+    /// A named import's local name → `<specifier target>::<exported name>`.
+    named: HashMap<String, String>,
+    /// A module qualifier's local name → the specifier target it names.
+    qualifiers: HashMap<String, String>,
+}
+
+impl ImportBindings {
+    /// Read the file's import statements off the `@ref.import` captures.
+    fn collect(
+        query: &Query,
+        root: Node<'_>,
+        source: &[u8],
+        decls: &[Decl<'_>],
+        semantics: &Semantics,
+    ) -> ImportBindings {
+        let capture_names = query.capture_names();
+        let mut reader = ImportReader {
+            source,
+            named: HashMap::new(),
+            qualifiers: HashMap::new(),
+        };
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, root, source);
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                if capture_names[cap.index as usize] == "ref.import" {
+                    reader.read(cap.node, &semantics.specifier_extensions);
+                }
+            }
+        }
+        let declared: HashSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+        let keep = |map: HashMap<String, Option<String>>| -> HashMap<String, String> {
+            map.into_iter()
+                .filter(|(local, _)| !declared.contains(local.as_str()))
+                .filter_map(|(local, v)| v.map(|v| (local, v)))
+                .collect()
+        };
+        ImportBindings {
+            named: keep(reader.named),
+            qualifiers: keep(reader.qualifiers),
+        }
+    }
+
+    /// The specifier target of `method_name`'s receiver when that receiver is a
+    /// plain identifier naming an imported module — a Go `selector_expression`
+    /// operand or a TypeScript `member_expression` object — else `None`.
+    fn qualifier_of(&self, method_name: Node<'_>, source: &[u8]) -> Option<&str> {
+        if self.qualifiers.is_empty() {
+            return None;
+        }
+        let access = method_name.parent()?;
+        let receiver = match access.kind() {
+            "selector_expression" => access.child_by_field_name("operand")?,
+            "member_expression" => access.child_by_field_name("object")?,
+            _ => return None,
+        };
+        if receiver.kind() != "identifier" {
+            return None;
+        }
+        let name = receiver.utf8_text(source).ok()?;
+        self.qualifiers.get(name).map(String::as_str)
+    }
+}
+
+/// The accumulator [`ImportBindings::collect`] fills, one import statement at a
+/// time. A local name bound twice with different values (invalid code, or a
+/// merge artefact) maps to `None` — it decides nothing.
+struct ImportReader<'s> {
+    source: &'s [u8],
+    named: HashMap<String, Option<String>>,
+    qualifiers: HashMap<String, Option<String>>,
+}
+
+impl ImportReader<'_> {
+    fn text(&self, n: Node<'_>) -> Option<String> {
+        n.utf8_text(self.source).ok().map(str::to_string)
+    }
+
+    fn bind(map: &mut HashMap<String, Option<String>>, local: String, value: String) {
+        map.entry(local)
+            .and_modify(|v| {
+                if v.as_ref() != Some(&value) {
+                    *v = None;
+                }
+            })
+            .or_insert(Some(value));
+    }
+
+    /// One `@ref.import` capture: the specifier string of a TypeScript
+    /// `import … from '<spec>'` or a Go `import [alias] "<path>"`.
+    fn read(&mut self, spec_node: Node<'_>, extensions: &[String]) {
+        let Some(spec) = self.text(spec_node) else { return };
+        let segments = specifier_segments(&spec, extensions);
+        let (Some(first), Some(statement)) = (segments.first(), spec_node.parent()) else {
+            return;
+        };
+        let target = segments.join("::");
+        match statement.kind() {
+            "import_statement" if is_relative_head(first) => {
+                let mut cursor = statement.walk();
+                let clauses: Vec<Node<'_>> = statement
+                    .named_children(&mut cursor)
+                    .filter(|c| c.kind() == "import_clause")
+                    .collect();
+                for clause in clauses {
+                    self.read_ts_clause(clause, &target);
+                }
+            }
+            "import_spec" => {
+                let local = match statement.child_by_field_name("name") {
+                    Some(n) if n.kind() == "package_identifier" => self.text(n),
+                    Some(_) => None, // a dot or blank import binds no qualifier
+                    None => segments.last().cloned(),
+                };
+                if let Some(local) = local {
+                    Self::bind(&mut self.qualifiers, local, target);
+                }
+            }
+            _ => {} // a `require()` argument, or a package specifier
+        }
+    }
+
+    /// A TypeScript `import_clause`: its named imports and namespace import. A
+    /// default import is not read — the name it was exported under is unknown.
+    fn read_ts_clause(&mut self, clause: Node<'_>, target: &str) {
+        let mut cursor = clause.walk();
+        let parts: Vec<Node<'_>> = clause.named_children(&mut cursor).collect();
+        for part in parts {
+            match part.kind() {
+                "named_imports" => {
+                    let mut spec_cursor = part.walk();
+                    let specs: Vec<Node<'_>> = part.named_children(&mut spec_cursor).collect();
+                    for s in specs {
+                        self.read_ts_specifier(s, target);
+                    }
+                }
+                "namespace_import" => {
+                    let mut ns_cursor = part.walk();
+                    let ns = part
+                        .named_children(&mut ns_cursor)
+                        .find(|n| n.kind() == "identifier")
+                        .and_then(|n| self.text(n));
+                    if let Some(ns) = ns {
+                        Self::bind(&mut self.qualifiers, ns, target.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// One `import_specifier`: `a` or `a as b` — the local name maps to the
+    /// name the module exports.
+    fn read_ts_specifier(&mut self, specifier: Node<'_>, target: &str) {
+        let exported = specifier
+            .child_by_field_name("name")
+            .filter(|n| n.kind() == "identifier")
+            .and_then(|n| self.text(n));
+        let local = specifier
+            .child_by_field_name("alias")
+            .and_then(|n| self.text(n))
+            .or_else(|| exported.clone());
+        if let (Some(local), Some(exported)) = (local, exported) {
+            Self::bind(&mut self.named, local, format!("{target}::{exported}"));
+        }
+    }
 }
 
 /// The trait name when a receiver-method call's receiver is a **provable**

@@ -246,7 +246,8 @@ pub fn run(
             )
         });
     let index = binder::Index::build(&snap.nodes, &snap.edges, &snap.refs)
-        .with_path_specifiers(specifier_targets, go_modules);
+        .with_path_specifiers(specifier_targets, go_modules)
+        .with_imported_bindings(&snap.refs, policy);
 
     // A full index (no delta) re-binds the whole ledger. An incremental sync
     // re-binds only the rows whose outcome the change-set can move; every other
@@ -381,9 +382,11 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    against the file tree and the `go.mod` module declarations, and neither is
 ///    a name a token test sees: `'.'` spells no token at all, a file added to a
 ///    Go module's root package shares none with the module path, and a `go.mod`
-///    carries no node. So every `Imports` row from a path-grammar file is
-///    re-bound whenever anything changed — the same stance as the artifact
-///    fallback, for the same reason.
+///    carries no node. So every `Imports` row from a path-grammar file — and
+///    every call recorded through one of its imports (S-440), which binds within
+///    that import's targets ([`is_import_scoped`]) — is re-bound whenever
+///    anything changed: the same stance as the artifact fallback, for the same
+///    reason.
 /// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
@@ -402,7 +405,7 @@ fn is_affected(
         if delta.changed_paths.contains(path) {
             return true;
         }
-        if r.kind == EdgeKind::Imports && index.is_path_specifier_file(path) {
+        if index.is_path_specifier_file(path) && is_import_scoped(r) {
             return true;
         }
     }
@@ -410,6 +413,15 @@ fn is_affected(
         return true;
     }
     index.ref_affected(r, &delta.dirty_tokens)
+}
+
+/// Whether `r` binds against a path-grammar import's target — an `Imports` row
+/// itself (S-439), or a call recorded through one, `<import target>::<name>`
+/// (S-440). Such a call reads the import's binding, which moves with the file
+/// tree and the `go.mod` declarations exactly as the import does, so it is
+/// re-selected on the same terms. A single-segment call names no import.
+fn is_import_scoped(r: &UnresolvedRefRow) -> bool {
+    r.kind == EdgeKind::Imports || (r.kind == EdgeKind::Calls && r.target.contains("::"))
 }
 
 /// Group a stream of `(relation payload, is-bound)` pairs into per-relation-class

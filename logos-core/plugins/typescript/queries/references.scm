@@ -12,8 +12,9 @@
 ;
 ; Droppable on disk at `.logos/plugins/typescript/queries/references.scm`.
 ;
-; Deliberately NOT captured in v1: named-import bindings (`import { Router }`
-; binds no per-name alias yet), dynamic `import()`.
+; Named-import bindings (`import { Router } from './r'`) are read from the
+; `@ref.import` statement by the extraction engine itself (S-440), which records
+; a call through one qualified by its module. Not captured: dynamic `import()`.
 
 (call_expression
   function: (identifier) @ref.call)
