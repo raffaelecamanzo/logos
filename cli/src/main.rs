@@ -2062,20 +2062,25 @@ mod surface_parity {
         // against the serialised denominator by
         // `the_relational_scope_speaks_the_denominators_own_vocabulary`, not
         // against the router — where tools are named bare they would otherwise
-        // read as tool claims.
-        let scope_spans: BTreeSet<String> =
-            inline_code_spans("the relational scope statement", RELATIONAL_SCOPE)
-                .into_iter()
-                .collect();
+        // read as tool claims. Only the statement's own run of spans is exempt:
+        // the same words anywhere else in a text are still claims to check.
+        let scope_spans = inline_code_spans("the relational scope statement", RELATIONAL_SCOPE);
 
         for g in shipped_guidance() {
             // How many spans this text actually RECONCILED against the binary.
             // Without a floor, a text the parser mis-reads (or a future edit that
             // drops every backticked claim) checks nothing and still passes.
             let mut reconciled = 0_usize;
-            for span in inline_code_spans(g.label, &g.text) {
+            let spans = inline_code_spans(g.label, &g.text);
+            // Where the statement sits in this text's span sequence; a text that
+            // lacks it exempts nothing, and fails the scope test instead.
+            let statement = spans
+                .windows(scope_spans.len())
+                .position(|run| run == scope_spans.as_slice())
+                .map_or(0..0, |at| at..at + scope_spans.len());
+            for (index, span) in spans.into_iter().enumerate() {
                 // `logos:*` is the tool NAMESPACE, not a tool.
-                if span == "logos:*" || scope_spans.contains(&span) {
+                if span == "logos:*" || statement.contains(&index) {
                     continue;
                 }
                 if let Some(rest) = span.strip_prefix("logos:") {
