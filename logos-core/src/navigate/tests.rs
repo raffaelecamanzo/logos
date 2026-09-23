@@ -473,3 +473,55 @@ fn every_empty_precedent_code_has_a_stable_snake_case_wire_value() {
         assert_eq!(code.as_str(), wire, "as_str disagrees with the wire value");
     }
 }
+
+/// `precedent`'s empty reasons gain the reach clause **only** for a language
+/// with no cross-file `Calls` figure ([FR-NV-12] AC 4, [CR-143] §3.7): a Rust
+/// target, whose resolver binds across files, keeps the structural wording
+/// unchanged, and a same-file-only language is named with its own state and
+/// counts. The expected tag is read off the serialiser rather than spelled
+/// here, so this file adds no absence wording of its own.
+///
+/// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
+/// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+#[test]
+fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure() {
+    use crate::models::navigation::{LanguageResolution, RelationResolution, ResolutionDenominator};
+    let row = |language: &str, cross_file: u64| LanguageResolution {
+        language: language.to_string(),
+        files: 3,
+        calls: RelationResolution::measured(20, 7, 7, cross_file),
+        imports: RelationResolution::measured(0, 0, 0, 0),
+    };
+    let over = |rows: Vec<LanguageResolution>| {
+        let anchors: Vec<Option<String>> = rows.iter().map(|r| Some(r.language.clone())).collect();
+        ResolutionDenominator::measured(rows, &anchors)
+    };
+
+    assert_eq!(over(vec![row("rust", 4)]).unresolved_calls_clause(), None);
+    // A language whose files recorded no call is absent of calls, not
+    // unresolved: `no-references-recorded` earns no clause (R1).
+    let call_free = LanguageResolution {
+        calls: RelationResolution::measured(0, 0, 0, 0),
+        ..row("python", 0)
+    };
+    assert!(call_free.calls.cross_file_absence.is_some());
+    assert_eq!(over(vec![call_free]).unresolved_calls_clause(), None);
+    assert_eq!(ResolutionDenominator::not_available().unresolved_calls_clause(), None);
+
+    let typescript = row("typescript", 0);
+    let tag = serde_json::to_value(typescript.calls.cross_file_absence.unwrap()).unwrap()["cause"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let clause = over(vec![row("rust", 4), typescript])
+        .unresolved_calls_clause()
+        .expect("the TypeScript row has no cross-file figure");
+    assert_eq!(
+        clause,
+        format!(
+            "typescript binds no Calls edge across a file boundary ({tag}; 7 of 20 Calls \
+             reference(s) bound)"
+        ),
+        "only the language without a figure is named, with its state and counts"
+    );
+}

@@ -49,6 +49,7 @@ use crate::engine::Engine;
 use crate::graph_store::{GraphStore, NodeRow};
 use crate::hydrate::{EdgeData, Granularity, GraphView, Vertex};
 use crate::model::{EdgeKind, NodeId, NodeKind};
+use crate::runtime::Runtime;
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
     EdgeDirection, EdgeSummary, EmptyPrecedent, EmptyPrecedentCode, ExploreResult,
@@ -57,7 +58,7 @@ use crate::models::navigation::{
     ImpactIntersectionResult, ImpactResult, ImplementorsResult, IntersectionCoverage,
     ItemIntersection, ItemPair, NodeDetail, NodeInfo, Precedent, PrecedentCoverage, PrecedentFacet,
     PrecedentRank, PrecedentReason, PrecedentResult, PrecedentTargetKind, ReferencingDocsResult,
-    SearchResult, SharedSymbol, StatusInfo, SymbolRef, TraceLink, UbiquitousAnchor,
+    ResolutionDenominator, SearchResult, SharedSymbol, StatusInfo, SymbolRef, TraceLink, UbiquitousAnchor,
     UnresolvedDeclaration, WorkItem, WorkItemImpact, MIN_SHARED_CALLEES,
 };
 
@@ -572,6 +573,68 @@ pub(crate) fn node(engine: &Engine, symbol: &str, include_code: bool) -> Result<
     })
 }
 
+/// The resolution denominator of an answer anchored on `anchors` — one entry
+/// per anchor, its file or `None` for a file-less node ([FR-NV-14], [S-442]).
+///
+/// One pooled read takes both halves from one connection: the per-language
+/// rows `status` reports (`resolve::coverage_by_language`, so the readout and
+/// the answer cannot disagree) and the anchors' `files.language`. A path the
+/// index does not hold is not an anchor — so a changed-file list can be passed
+/// as it came, and a list of nothing but unindexed paths reads `unindexed`
+/// rather than as anchors with no language. A failed read
+/// degrades the **denominator** to `n/a` and says why in `warnings`; it never
+/// fails the answer it annotates ([ADR-14]).
+///
+/// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+fn resolution_denominator(
+    runtime: &Runtime,
+    anchors: Vec<Option<String>>,
+    warnings: &mut Vec<String>,
+) -> ResolutionDenominator {
+    if anchors.is_empty() {
+        // Settled without a read: nothing to select a row for.
+        return ResolutionDenominator::measured(Vec::new(), &[]);
+    }
+    let read = runtime.submit_read(move |store| {
+        let paths: Vec<String> = anchors
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let tagged = store.file_languages(&paths)?;
+        let languages: Vec<Option<String>> = anchors
+            .iter()
+            .filter_map(|file| match file {
+                Some(path) => tagged.get(path).cloned(),
+                None => Some(None),
+            })
+            .collect();
+        Ok(ResolutionDenominator::measured(
+            crate::resolve::coverage_by_language(store)?,
+            &languages,
+        ))
+    });
+    read.unwrap_or_else(|err| {
+        warnings.push(format!("the resolution denominator could not be read: {err:#}"));
+        ResolutionDenominator::not_available()
+    })
+}
+
+/// [`resolution_denominator`] for a one-symbol answer: anchored on the node
+/// the query resolved to, or on nothing when it resolved to none.
+fn symbol_denominator(
+    runtime: &Runtime,
+    resolved: Option<&SymbolRef>,
+    warnings: &mut Vec<String>,
+) -> ResolutionDenominator {
+    let anchors = resolved.map(|r| r.file.clone()).into_iter().collect();
+    resolution_denominator(runtime, anchors, warnings)
+}
+
 /// `callers` — direct callers, limit honoured ([FR-NV-05]).
 pub(crate) fn callers(
     engine: &Engine,
@@ -580,13 +643,17 @@ pub(crate) fn callers(
 ) -> Result<CallersResult> {
     let (resolved, total, rows, suggestions) =
         adjacency(engine, symbol, limit, AdjacencyKind::Callers)?;
+    let mut warnings = Vec::new();
+    let resolution_denominator =
+        symbol_denominator(engine.nav_runtime()?, resolved.as_ref(), &mut warnings);
     Ok(CallersResult {
         query: symbol.to_string(),
         resolved,
         total,
         callers: rows,
         suggestions,
-        warnings: Vec::new(),
+        resolution_denominator,
+        warnings,
     })
 }
 
@@ -598,13 +665,17 @@ pub(crate) fn callees(
 ) -> Result<CalleesResult> {
     let (resolved, total, rows, suggestions) =
         adjacency(engine, symbol, limit, AdjacencyKind::Callees)?;
+    let mut warnings = Vec::new();
+    let resolution_denominator =
+        symbol_denominator(engine.nav_runtime()?, resolved.as_ref(), &mut warnings);
     Ok(CalleesResult {
         query: symbol.to_string(),
         resolved,
         total,
         callees: rows,
         suggestions,
-        warnings: Vec::new(),
+        resolution_denominator,
+        warnings,
     })
 }
 
@@ -627,6 +698,7 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
             }
             None => Ok((None, Vec::new(), store.suggest(symbol, SUGGEST_LIMIT)?)),
         })?;
+    let mut warnings = Vec::new();
     let Some(row) = resolved else {
         return Ok(ImpactResult {
             query: symbol.to_string(),
@@ -635,9 +707,12 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
             downstream_label: DOWNSTREAM_LABEL.to_string(),
             docs_label: DOCS_LABEL.to_string(),
             suggestions,
+            resolution_denominator: symbol_denominator(runtime, None, &mut warnings),
+            warnings,
             ..ImpactResult::default()
         });
     };
+    let resolution_denominator = symbol_denominator(runtime, Some(&symbol_ref(&row)), &mut warnings);
 
     let view = engine.hydrate(Granularity::ExcludeContains)?;
     let (upstream, downstream) = match view.index_of(row.symbol.as_str()) {
@@ -661,7 +736,8 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
         docs_label: DOCS_LABEL.to_string(),
         docs,
         suggestions: Vec::new(),
-        warnings: Vec::new(),
+        resolution_denominator,
+        warnings,
     })
 }
 
@@ -747,6 +823,7 @@ pub(crate) fn impact_intersection(
         .enumerate()
         .flat_map(|(i, item)| item.symbols.iter().map(move |s| (i, s.clone())))
         .collect();
+    let nothing_declared = declared.is_empty();
     let resolved = runtime.submit_read(move |store| {
         let mut out: Vec<DeclaredSymbol> = Vec::with_capacity(declared.len());
         for (item, text) in declared {
@@ -854,12 +931,25 @@ pub(crate) fn impact_intersection(
     }
 
     let (intersecting, safe_parallel) = pair_up(engine, &items, &seeds, &reach, &view)?;
+    // Anchored on every node any item's declarations resolved to. Nothing
+    // declared is nothing asked, which no anchor can be missing from — `n/a`,
+    // not `unindexed` (R1).
+    let resolution_denominator = if nothing_declared {
+        ResolutionDenominator::not_available()
+    } else {
+        let anchors = rows
+            .iter()
+            .flat_map(|item| item.resolved.iter().map(|r| r.file.clone()))
+            .collect();
+        resolution_denominator(runtime, anchors, &mut warnings)
+    };
     Ok(ImpactIntersectionResult {
         depth: depth as u32,
         items: rows,
         intersecting,
         safe_parallel,
         coverage,
+        resolution_denominator,
         warnings,
     })
 }
@@ -1184,6 +1274,8 @@ pub(crate) fn precedent(
     let seed_rows = match resolution {
         PrecedentTarget::Unresolved(suggestions) => {
             result.suggestions = suggestions;
+            result.resolution_denominator =
+                resolution_denominator(runtime, Vec::new(), &mut result.warnings);
             result.empty_reason = Some(EmptyPrecedent {
                 code: EmptyPrecedentCode::TargetUnresolved,
                 detail: format!(
@@ -1215,6 +1307,11 @@ pub(crate) fn precedent(
             seeds
         }
     };
+    result.resolution_denominator = resolution_denominator(
+        runtime,
+        seed_rows.iter().map(|row| row.file_path.clone()).collect(),
+        &mut result.warnings,
+    );
     result.coverage.compared = seed_rows
         .iter()
         .take(MAX_COMPARED_LISTED)
@@ -1270,15 +1367,28 @@ pub(crate) fn precedent(
         return Ok(result);
     }
 
+    // Where the target's language binds no call across a file boundary, the
+    // two reasons below that describe the target's structure would describe the
+    // index's reach instead — so they say so ([FR-NV-12] AC 4, [CR-143] §3.7).
+    let reach_gap = result.resolution_denominator.unresolved_calls_clause();
     let anchors = precedent_anchors(graph, &seeds);
     if anchors.is_empty() {
         result.empty_reason = Some(EmptyPrecedent {
             code: EmptyPrecedentCode::NoStructuralAnchors,
-            detail: format!(
-                "the {} compared symbol(s) implement nothing, are registered by nothing, and call \
-                 nothing in the indexed symbol graph — there is no structure to compare on",
-                seeds.len()
-            ),
+            detail: match &reach_gap {
+                None => format!(
+                    "the {} compared symbol(s) implement nothing, are registered by nothing, and \
+                     call nothing in the indexed symbol graph — there is no structure to compare on",
+                    seeds.len()
+                ),
+                Some(gap) => format!(
+                    "the {} compared symbol(s) have no structural anchor in the indexed symbol \
+                     graph, and {gap} — the anchors a cross-file call would supply are unresolved, \
+                     not absent, so this is the index's reach rather than a property of the code \
+                     (see resolution_denominator)",
+                    seeds.len()
+                ),
+            },
         });
         return Ok(result);
     }
@@ -1341,16 +1451,27 @@ pub(crate) fn precedent(
                 ),
             }
         } else {
+            let counts = format!(
+                "{} candidate(s) shared an anchor but none cleared a facet, {} anchor(s) were \
+                 discarded as ubiquitous",
+                result.coverage.candidates_considered, discarded
+            );
             EmptyPrecedent {
                 code: EmptyPrecedentCode::AnchorsAreUnshared,
-                detail: format!(
-                    "the target's {} structural anchor(s) are attached to no other node under \
-                     this notion ({} candidate(s) shared an anchor but none cleared a facet, {} \
-                     anchor(s) were discarded as ubiquitous)",
-                    anchors.len(),
-                    result.coverage.candidates_considered,
-                    discarded
-                ),
+                detail: match &reach_gap {
+                    None => format!(
+                        "the target's {} structural anchor(s) are attached to no other node under \
+                         this notion ({counts})",
+                        anchors.len()
+                    ),
+                    Some(gap) => format!(
+                        "the target's {} structural anchor(s) are attached to no other node under \
+                         this notion ({counts}), and {gap} — the sharers a cross-file call would \
+                         supply are unresolved, not absent, so this is the index's reach rather \
+                         than a property of the code (see resolution_denominator)",
+                        anchors.len()
+                    ),
+                },
             }
         });
         return Ok(result);
@@ -2378,7 +2499,7 @@ pub(crate) fn affected(
     tests_only: bool,
 ) -> Result<AffectedResult> {
     // Same prologue contract as the other navigation queries (FR-IX-07).
-    engine.nav_runtime()?;
+    let runtime = engine.nav_runtime()?;
     let view = engine.hydrate(Granularity::File)?;
     let graph = view.graph();
 
@@ -2441,12 +2562,23 @@ pub(crate) fn affected(
             .then_with(|| a.file.cmp(&b.file))
     });
 
+    // Anchored on the changed files the index holds. Stated on every answer
+    // and not only an empty one: `--tests-only` turning `[]` into "run no
+    // tests" is the CI failure this field exists for ([FR-CL-04], [CR-143]).
+    let mut warnings = Vec::new();
+    let resolution_denominator = if files.is_empty() {
+        ResolutionDenominator::not_available()
+    } else {
+        let anchors = changed.iter().cloned().map(Some).collect();
+        resolution_denominator(runtime, anchors, &mut warnings)
+    };
     Ok(AffectedResult {
         changed,
         tests_only,
         affected,
         unknown,
-        warnings: Vec::new(),
+        resolution_denominator,
+        warnings,
     })
 }
 

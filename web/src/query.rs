@@ -264,30 +264,43 @@ fn run_relation(engine: &Engine, raw_verb: &str, target: &str) -> QueryResponse 
     }
     let echo = format!("{} {target}", verb.noun());
     // Each arm clones what it needs out of the read-model (hits + resolved name)
-    // before moving its `suggestions`/`warnings`, so no borrow of the read-model
-    // outlives it.
-    let (resolved, hits, total, suggestions, warnings) = match verb {
+    // before moving its `suggestions`/`warnings`/denominator, so no borrow of the
+    // read-model outlives it.
+    let (resolved, hits, total, suggestions, warnings, denominator) = match verb {
         Verb::Callers => {
             let r = engine.callers(target, Some(QUERY_LIMIT));
-            (resolved_name(r.resolved.as_ref()), rank_hits(&r.callers), r.total, r.suggestions, r.warnings)
+            let (name, hits) = (resolved_name(r.resolved.as_ref()), rank_hits(&r.callers));
+            (name, hits, r.total, r.suggestions, r.warnings, r.resolution_denominator)
         }
         Verb::Callees => {
             let r = engine.callees(target, Some(QUERY_LIMIT));
-            (resolved_name(r.resolved.as_ref()), rank_hits(&r.callees), r.total, r.suggestions, r.warnings)
+            let (name, hits) = (resolved_name(r.resolved.as_ref()), rank_hits(&r.callees));
+            (name, hits, r.total, r.suggestions, r.warnings, r.resolution_denominator)
         }
         Verb::Impact => {
             let r = engine.impact(target, None);
             let nodes = impact_nodes(&r);
             let total = nodes.len() as u32;
             let hits = rank_hits(nodes);
-            (resolved_name(r.resolved.as_ref()), hits, total, r.suggestions, r.warnings)
+            (resolved_name(r.resolved.as_ref()), hits, total, r.suggestions, r.warnings, r.resolution_denominator)
         }
     };
     let note = if resolved.is_none() {
         Some(format!("“{target}” did not resolve to a symbol."))
     } else if hits.is_empty() {
-        // An empty relation is a fact about a real, resolved node, not an error.
-        Some(format!("No {} {}.", verb.noun(), resolved.as_deref().unwrap_or(target)))
+        // An empty relation is a fact about a real, resolved node — but only as
+        // complete as the resolved edge set it was read from. Where the node's
+        // language binds no cross-file call, "No callers of X." would state that
+        // gap as a fact about X, so the note says which it is ([FR-NV-14]).
+        let name = resolved.as_deref().unwrap_or(target);
+        Some(match denominator.unresolved_calls_clause() {
+            None => format!("No {} {name}.", verb.noun()),
+            Some(gap) => format!(
+                "No {} {name} found — but {gap}, so an empty answer here is the index's \
+                 reach, not evidence that there are none.",
+                verb.noun()
+            ),
+        })
     } else {
         None
     };
@@ -366,6 +379,53 @@ fn layer_token(layer: GraphLayer) -> &'static str {
 mod tests {
     use super::*;
     use logos_core::models::navigation::ImpactEntry;
+
+    /// The relational form's empty note says whether it is a fact about the
+    /// symbol or about the index ([FR-NV-14], [CR-143] §4.5): a TypeScript
+    /// symbol nothing calls, in a language whose calls never bind across a
+    /// file, gets the resolution clause the core states — the SPA's query view
+    /// renders this note verbatim — while a Rust symbol nothing calls, in a
+    /// language that does bind across files, keeps the plain note.
+    ///
+    /// [FR-NV-14]: ../../docs/specs/requirements/FR-NV-14.md
+    /// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+    #[test]
+    fn an_empty_relation_note_states_the_resolution_it_was_read_from() {
+        let tmp = tempfile::TempDir::new().expect("temp root");
+        for (rel, body) in [
+            ("src/lib.rs", "use crate::util::run;\n\npub fn alpha() {\n    run();\n}\n\npub fn lone() {}\n"),
+            ("src/util.rs", "pub fn run() {}\n"),
+            (
+                "web/nav.ts",
+                "export function navItems(): number {\n  return count();\n}\n\nfunction count(): number {\n  return 1;\n}\n",
+            ),
+        ] {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        engine.index();
+        let note = |target: &str| {
+            let params: HashMap<String, String> = [("verb", "callers-of"), ("target", target)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let response = run(&engine, &params);
+            assert_eq!((response.mode, response.total), ("relation", 0), "{target}");
+            response.note.expect("an empty relation carries a note")
+        };
+
+        let typescript = note("navItems");
+        assert!(
+            typescript.starts_with("No callers of navItems found — but typescript binds no Calls \
+                                    edge across a file boundary (")
+                && typescript.ends_with("so an empty answer here is the index's reach, not \
+                                         evidence that there are none."),
+            "{typescript}"
+        );
+        assert_eq!(note("lone"), "No callers of lone.");
+    }
 
     fn sym(symbol: &str, name: &str, kind: NodeKind, file: Option<&str>) -> SymbolRef {
         SymbolRef {

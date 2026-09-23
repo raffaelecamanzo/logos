@@ -185,6 +185,11 @@ pub struct CallersResult {
     pub callers: Vec<SymbolRef>,
     /// "Did you mean" names when the symbol is unknown (FR-NV-09).
     pub suggestions: Vec<String>,
+    /// The resolved edge set this answer was computed over ([FR-NV-14]):
+    /// present on every answer, empty or not.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    pub resolution_denominator: ResolutionDenominator,
     /// Degradation channel (ADR-14).
     pub warnings: Vec<String>,
 }
@@ -202,6 +207,11 @@ pub struct CalleesResult {
     pub callees: Vec<SymbolRef>,
     /// "Did you mean" names when the symbol is unknown (FR-NV-09).
     pub suggestions: Vec<String>,
+    /// The resolved edge set this answer was computed over ([FR-NV-14]):
+    /// present on every answer, empty or not.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    pub resolution_denominator: ResolutionDenominator,
     /// Degradation channel (ADR-14).
     pub warnings: Vec<String>,
 }
@@ -234,6 +244,11 @@ pub struct ImpactResult {
     pub docs: Vec<TraceLink>,
     /// "Did you mean" names when the symbol is unknown (FR-NV-09).
     pub suggestions: Vec<String>,
+    /// The resolved edge set this answer was computed over ([FR-NV-14]):
+    /// present on every answer, empty or not.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    pub resolution_denominator: ResolutionDenominator,
     /// Degradation channel (ADR-14).
     pub warnings: Vec<String>,
 }
@@ -356,6 +371,11 @@ pub struct ImpactIntersectionResult {
     pub safe_parallel: Vec<ItemPair>,
     /// What this answer can and cannot see ([NFR-CC-04]).
     pub coverage: IntersectionCoverage,
+    /// The resolved edge set this answer was computed over ([FR-NV-14]):
+    /// present on every answer, empty or not.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    pub resolution_denominator: ResolutionDenominator,
     /// Degradation channel (ADR-14) — also where a malformed `--item` spec and
     /// a single-item call are reported.
     pub warnings: Vec<String>,
@@ -559,6 +579,11 @@ pub struct PrecedentResult {
     pub coverage: PrecedentCoverage,
     /// "Did you mean" names for an unresolved target ([FR-NV-09]).
     pub suggestions: Vec<String>,
+    /// The resolved edge set this answer was computed over ([FR-NV-14]):
+    /// present on every answer, empty or not.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    pub resolution_denominator: ResolutionDenominator,
     /// Degradation channel ([ADR-14]).
     pub warnings: Vec<String>,
 }
@@ -769,6 +794,11 @@ pub struct BranchOverlapResult {
     pub merge: Option<MergeCheck>,
     /// What this answer can and cannot see ([NFR-CC-04]).
     pub coverage: OverlapCoverage,
+    /// The resolved edge set this answer was computed over ([FR-NV-14]):
+    /// present on every answer, empty or not.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    pub resolution_denominator: ResolutionDenominator,
     /// Degradation channel ([ADR-14]) — also where an unresolvable ref, a
     /// missing `git`, and a single-ref call are reported.
     pub warnings: Vec<String>,
@@ -1074,6 +1104,204 @@ impl RelationResolution {
     }
 }
 
+/// The **resolution denominator** a relational answer was computed over
+/// ([FR-NV-14], [S-442], [CR-143]): the [`LanguageResolution`] row of every
+/// language the answer is anchored in.
+///
+/// A relational answer is a traversal of the resolved edge set, and an empty or
+/// short traversal has two causes a bare list cannot tell apart — *nothing
+/// depends on this* and *nothing could be resolved here*. This is the field that
+/// tells them apart, on the answer, where a machine consumer reads it: beside
+/// `total: 0` for a TypeScript symbol it reads `calls.cross_file_absence:
+/// same-file-only`, and beside a Rust answer it reads the cross-file figure the
+/// traversal ran over. It rides **every** answer, empty or not — a partial set
+/// read as complete is the same false clearance with a count in front of it
+/// ([CR-143] D3).
+///
+/// # Keyed by the anchor, not by the result
+///
+/// The anchors are what the query named and resolved — the symbol of
+/// `callers`/`callees`/`impact`, every declared symbol of `impact_intersection`,
+/// the changed files of `affected`, every changed file of `branch_overlap` the
+/// index holds — and each anchor contributes the row of its file's
+/// `files.language`, the same key [`StatusInfo::resolution_by_language`] uses.
+/// The rows are that read-model's rows, computed by the same
+/// `resolve::coverage_by_language`, so the readout and the answer can never
+/// disagree ([CR-143] §3.5: computed once, consumed twice).
+///
+/// A row counts edges **leaving** its language's nodes. An inbound answer
+/// (`callers`, `impact` upstream, `affected`) whose dependents live in a second
+/// language is therefore bounded by that language's row too, which this field
+/// does not carry; a `typescript` anchor called from `tsx` is the common case.
+///
+/// # Exactly one of the rows or their absence
+///
+/// `languages` is non-empty exactly when `absence` is `None`, so the one state
+/// this type exists to rule out — no row and no reason — has no spelling.
+/// [`measured`](Self::measured) is the only constructor that decides between
+/// them. [`Default`] is the `n/a` state, **not** an empty list: a defaulted
+/// answer (the [ADR-14] degraded path) states that no denominator was read,
+/// rather than an absence of one.
+///
+/// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+/// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolutionDenominator {
+    /// One row per language an anchor of the answer lies in, in language-name
+    /// order ([NFR-RA-06]). Empty exactly when [`absence`](Self::absence) names
+    /// why.
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub languages: Vec<LanguageResolution>,
+    /// Why there is no row; `None` exactly when there is one.
+    pub absence: Option<DenominatorAbsence>,
+}
+
+impl ResolutionDenominator {
+    /// Select the rows for an answer's resolved anchors — one entry per anchor,
+    /// carrying its file's language, or `None` when the anchor has no file or
+    /// its file records no language — out of the per-language `rows`
+    /// `resolve::coverage_by_language` read.
+    ///
+    /// The one place a denominator becomes rows or a named absence: no anchor
+    /// resolved is [`DenominatorAbsence::Unindexed`]; anchors that resolved
+    /// and select no row are [`DenominatorAbsence::NoLanguageRecorded`]. An
+    /// anchor with no language beside anchors that have one selects nothing
+    /// and is not reported separately.
+    #[must_use]
+    pub fn measured(rows: Vec<LanguageResolution>, anchors: &[Option<String>]) -> Self {
+        if anchors.is_empty() {
+            return Self::absent(DenominatorAbsence::Unindexed);
+        }
+        let wanted: std::collections::BTreeSet<&str> =
+            anchors.iter().flatten().map(String::as_str).collect();
+        let mut languages: Vec<LanguageResolution> = rows
+            .into_iter()
+            .filter(|row| wanted.contains(row.language.as_str()))
+            .collect();
+        if languages.is_empty() {
+            return Self::absent(DenominatorAbsence::NoLanguageRecorded {
+                anchors: anchors.len() as u64,
+            });
+        }
+        // The read-model already orders by name; re-sorting here makes the
+        // order this type's own guarantee rather than its producer's.
+        languages.sort_by(|a, b| a.language.cmp(&b.language));
+        Self {
+            languages,
+            absence: None,
+        }
+    }
+
+    /// The denominator of an answer that read none — the [ADR-14] degraded
+    /// path, or a denominator read that failed beside a successful answer.
+    ///
+    /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+    #[must_use]
+    pub fn not_available() -> Self {
+        Self::absent(DenominatorAbsence::NotAvailable)
+    }
+
+    /// The clause a relational answer's own words gain when a language it is
+    /// anchored in binds no `Calls` edge across a file boundary — `None` when
+    /// every such language carries a cross-file figure ([FR-NV-12] AC 4,
+    /// [CR-143] §3.7).
+    ///
+    /// An empty answer phrased about the code — `precedent`'s "no structural
+    /// anchors", the query view's "No callers of …" — would state a coverage
+    /// gap as a property of the user's code where the resolver never binds a
+    /// cross-file call: the structure such a call would supply is unresolved
+    /// rather than absent. Both sites append this one clause, so the two
+    /// surfaces cannot word the same condition twice (R5). The named state is
+    /// the row's own serialised tag, so the clause speaks the closed lexicon
+    /// rather than a spelling of its own.
+    ///
+    /// Only the two states that establish **unresolved** earn it:
+    /// `same-file-only` and `no-resolved-edges`. `no-references-recorded`
+    /// means the language's files recorded no call at all, so a target that
+    /// calls nothing is truly absent of calls, and saying "unresolved" would
+    /// name a cause the condition does not establish (R1).
+    ///
+    /// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
+    /// [CR-143]: ../../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+    #[must_use]
+    pub fn unresolved_calls_clause(&self) -> Option<String> {
+        let gaps: Vec<String> = self
+            .languages
+            .iter()
+            .filter_map(|row| {
+                let absence = row.calls.cross_file_absence?;
+                if matches!(absence, CrossFileAbsence::NoReferencesRecorded) {
+                    return None;
+                }
+                let absence = serde_json::to_value(absence).ok()?;
+                Some(format!(
+                    "{} binds no Calls edge across a file boundary ({}; {} of {} Calls \
+                     reference(s) bound)",
+                    row.language,
+                    absence["cause"].as_str()?,
+                    row.calls.bound,
+                    row.calls.references
+                ))
+            })
+            .collect();
+        (!gaps.is_empty()).then(|| gaps.join(", and "))
+    }
+
+    fn absent(absence: DenominatorAbsence) -> Self {
+        Self {
+            languages: Vec::new(),
+            absence: Some(absence),
+        }
+    }
+}
+
+impl Default for ResolutionDenominator {
+    /// [`not_available`](Self::not_available) — never an empty row list with
+    /// no reason, which is the state this type rules out.
+    fn default() -> Self {
+        Self::not_available()
+    }
+}
+
+/// Why a relational answer's [`ResolutionDenominator`] carries **no language
+/// row** ([FR-NV-14], [S-442]) — a classifier over one question, R0 of
+/// [`absence`](crate::models::quality::absence).
+///
+/// It lives here rather than beside [`CrossFileAbsence`] because two of its
+/// spellings are lexicon words reused as written — `unindexed` and `n/a` —
+/// and `models/quality.rs` must hold no sentinel outside the lexicon's own
+/// declaration. Each arm's wording is an [`absence::SENTINELS`] spelling.
+///
+/// [`absence::SENTINELS`]: crate::models::quality::absence::SENTINELS
+/// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum DenominatorAbsence {
+    /// Nothing the answer is anchored on is in the index — the symbol resolved
+    /// to no node, or no changed path is an indexed file. R1: that is the
+    /// whole of what the condition establishes. R3: no command is named,
+    /// because a misspelt symbol is as likely as an unindexed one and the
+    /// answer's `suggestions` already speak to it.
+    Unindexed,
+    /// The anchors resolved, and none lies in a file the index records a
+    /// language for (a file-less node, or a file no plugin tagged), so there is
+    /// no row to select. R2: carries how many anchors were looked up.
+    NoLanguageRecorded {
+        /// How many resolved anchors selected no row.
+        anchors: u64,
+    },
+    /// No denominator was read: the answer degraded, the denominator's own
+    /// read failed (the answer's `warnings` say why), or the question named
+    /// nothing to anchor on — no changed file, no declared symbol, no ref that
+    /// changed anything. R1: names no cause.
+    #[serde(rename = "n/a")]
+    NotAvailable,
+}
+
 /// The per-project **language composition** read-model ([FR-UI-10], [CR-021]):
 /// the languages **actually present** in the indexed graph, each with its graph
 /// node/symbol count and the number of files that contributed those nodes.
@@ -1138,6 +1366,11 @@ pub struct AffectedResult {
     pub affected: Vec<AffectedFile>,
     /// Changed paths not present in the indexed graph — reported, not erred.
     pub unknown: Vec<String>,
+    /// The resolved edge set this answer was computed over ([FR-NV-14]):
+    /// present on every answer, empty or not.
+    ///
+    /// [FR-NV-14]: ../../../docs/specs/requirements/FR-NV-14.md
+    pub resolution_denominator: ResolutionDenominator,
     /// Degradation channel (ADR-14).
     pub warnings: Vec<String>,
 }

@@ -32,6 +32,17 @@
 //! conformant before the audit ran, and manufacturing corrections to improve
 //! that figure would defeat its purpose.
 //!
+//! **Addendum, 2026-09-22 ([S-442]) — 2 production rows added, 3 occurrences,
+//! both conformant; no correction.** The relational answers' denominator
+//! reuses two lexicon words as written — `unindexed` and `n/a`, the wire tags
+//! of `DenominatorAbsence` in `models/navigation.rs` — so the walk finds them
+//! there, and they are adjudicated below. The census now reads **84 production
+//! occurrences over 39 production rows**, beside the same 106 in test scope.
+//! The 2026-09-20 result above is left as it was written: the addition is
+//! stated as its own delta ([`S442_ADDITION`]), so both readings stay checkable
+//! from this one table. The same story fixed the scanner's raw-string opener
+//! (see [`strip_comments`]); that fix moved no other row.
+//!
 //! # What is enumerated, and what this cannot catch
 //!
 //! The walk covers [`SURFACES`] in full — every `.rs`, `.ts` and `.tsx` file
@@ -86,6 +97,7 @@
 //! [S-422]: ../../docs/planning/journal.md#s-422-the-health-readout-is-internally-consistent-and-never-stale
 //! [S-434]: ../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 //! [S-435]: ../../docs/planning/journal.md#s-435-the-wiki-generation-pass-names-its-own-surface
+//! [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
 //! [FR-EH-04]: ../../docs/specs/requirements/FR-EH-04.md
 //! [FR-UI-04]: ../../docs/specs/requirements/FR-UI-04.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
@@ -94,6 +106,7 @@
 
 use std::path::{Path, PathBuf};
 
+use logos_core::models::navigation::{DenominatorAbsence, ResolutionDenominator};
 use logos_core::models::quality::{absence, CrossFileAbsence, EvaluatedSetAbsence, SignalAbsence};
 
 /// The date the figures in this module's header were taken. A census is a
@@ -130,7 +143,7 @@ const AUDITED_ON: &str = "2026-09-20";
 /// # The two exclusions, both stated rather than silent
 ///
 /// `logos-core/src/models/quality.rs` holds [`absence::SENTINELS`], so walking
-/// it would report the lexicon as nineteen sites — the self-reference [S-435]'s
+/// it would report the lexicon as twenty sites — the self-reference [S-435]'s
 /// sibling harness records hitting. It is checked separately, and more
 /// strictly, by [`the_taxonomy_module_is_not_a_reporting_site`].
 ///
@@ -267,7 +280,7 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 67] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 69] = [
     (
         "core",
         "logos-core/src/config/discovery.rs",
@@ -451,6 +464,22 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 67] = [
         0,
         2,
         "NO PRODUCTION SITE — 2 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+    ),
+    (
+        "core",
+        "logos-core/src/models/navigation.rs",
+        "n/a",
+        1,
+        0,
+        "CONFORMANT — `DenominatorAbsence::NotAvailable`'s wire tag, a `#[serde(rename)]`: a relational answer that read no resolution denominator — the ADR-14 degraded path, or a failed denominator read beside a successful answer, whose `warnings` say why. R1: names no cause. R4: a defaulted answer states this, never an empty row list that reads as a measured absence (S-442, FR-NV-14)",
+    ),
+    (
+        "core",
+        "logos-core/src/models/navigation.rs",
+        "unindexed",
+        2,
+        0,
+        "CONFORMANT — `DenominatorAbsence::Unindexed`, the variant and its one construction in `ResolutionDenominator::measured`, serialised by the kebab-case derive as the lexicon's own spelling. R1: its condition — no anchor of the answer resolved to an indexed node or file — establishes exactly that. R3: names no command, unlike the Health page's `unindexed`, because a misspelt symbol is as likely as an unindexed one and the answer's `suggestions` already speak to it (S-442, FR-NV-14)",
     ),
     (
         "core",
@@ -860,7 +889,7 @@ impl Stripped {
 /// stay. Nothing is truncated: the test module is blanked nowhere, and
 /// [`rust_test_spans`] classifies it instead.
 ///
-/// # Four things this gets right that the obvious version does not
+/// # Five things this gets right that the obvious version does not
 ///
 /// **`//` is only a comment outside a string.** `line.split_once("//")` is
 /// quote-blind, and a line carrying a URL — `let u = "https://x"; f("n/a")` —
@@ -888,7 +917,19 @@ impl Stripped {
 /// a brace out of the block walk. Raw strings are matched by their hash count,
 /// and they may span lines.
 ///
+/// **An `r` that ends an identifier opens nothing.** A Rust `"…"` string may
+/// continue onto the next line after a `\`, and this scanner resets `"` state
+/// at each newline, so a continuation line is read as code — and one ending
+/// `…answer",` put `r` before `"`, which the raw-string check took for `r"`.
+/// Everything to the next `"` was then read as raw-string code, comments
+/// included. [S-442]'s first run of this audit found it: two `//` comments in
+/// `navigate/mod.rs`, forty lines below such a continuation, were booked as a
+/// production `n/a` and `unindexed`. A raw string opens only where `r` starts
+/// a token, or follows a `b`/`c` prefix that does — so byte and C raw strings
+/// (`br"…"`, `cr#"…"#`) still open, which the first version of this fix broke.
+///
 /// [S-435]: ../../docs/planning/journal.md#s-435-the-wiki-generation-pass-names-its-own-surface
+/// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
 fn strip_comments(source: &str, rust: bool) -> Stripped {
     /// What the scanner is in the middle of, between characters.
     enum State {
@@ -917,7 +958,15 @@ fn strip_comments(source: &str, rust: bool) -> Stripped {
             state = State::Code;
         }
         let mut chars = line.chars().peekable();
+        // The two characters before `c` on this line, for the raw-string
+        // opener's token boundary: `r` opens one at a token start, or after a
+        // `b`/`c` prefix that is itself at a token start (`br"…"`, `cr#"…"#`).
+        let (mut prev2, mut prev) = (' ', ' ');
         while let Some(c) = chars.next() {
+            let at_boundary = |ch: char| !(ch.is_alphanumeric() || ch == '_');
+            let starts_token =
+                at_boundary(prev) || (matches!(prev, 'b' | 'c') && at_boundary(prev2));
+            (prev2, prev) = (prev, c);
             match state {
                 State::Block => {
                     if c == '*' && chars.peek() == Some(&'/') {
@@ -965,7 +1014,7 @@ fn strip_comments(source: &str, rust: bool) -> Stripped {
                 }
                 State::Code => {
                     // A raw string opener, before `r` could be read as a letter.
-                    if rust && c == 'r' && matches!(chars.peek(), Some('"' | '#')) {
+                    if rust && starts_token && c == 'r' && matches!(chars.peek(), Some('"' | '#')) {
                         let mut lookahead = chars.clone();
                         let mut hashes = 0usize;
                         while lookahead.peek() == Some(&'#') {
@@ -1224,7 +1273,7 @@ fn whole_token(code: &str, start: usize, end: usize) -> bool {
 /// Match `sentinel` at `at`, tolerating any run of whitespace where it has a
 /// single space; the end offset, or `None`.
 ///
-/// Nine of the nineteen sentinels contain a space, and both languages on these
+/// Nine of the twenty sentinels contain a space, and both languages on these
 /// surfaces routinely split a rendered sentence across source lines — Rust with
 /// a `\` continuation inside a `format!`, TSX with a formatter wrapping a JSX
 /// text node. `readout.rs` and `governance/mod.rs` are written almost entirely
@@ -1619,6 +1668,59 @@ fn a_test_module_is_recognised_by_its_declaration_not_its_name() {
 /// there, so the brace walk has to be told which braces are code. Review
 /// reproduced all three consequences of not telling it, and every one of them
 /// arrives from ordinary Rust that carries no sentinel at all.
+/// **An identifier ending in `r` before a quote opens no raw string** — the
+/// near miss of the raw-string opener, one character from `r"`. The source is
+/// the shape [S-442] tripped on: a `"` string continued onto a second line, read
+/// as code, ending `answer"`, with a comment below it. That comment is prose;
+/// the real raw string after it is still a site.
+///
+/// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+#[test]
+fn an_identifier_ending_in_r_before_a_quote_opens_no_raw_string() {
+    let source = r#"fn f() -> String {
+    format!("one \
+     answer")
+}
+// n/a is prose in a comment
+fn g() -> &'static str { r"unscanned" }
+"#;
+    let code = strip_comments(source, true).code;
+    let hits: Vec<&str> = sentinel_hits(&code)
+        .into_iter()
+        .map(|(_, _, sentinel)| sentinel)
+        .collect();
+    assert_eq!(
+        hits,
+        ["unscanned"],
+        "only the raw string's sentinel is a site; the comment below `answer\"` is not"
+    );
+
+    // The positive side, at every token boundary a raw string can follow —
+    // punctuation, `=`, and a `b`/`c` prefix — and the negative side of the
+    // prefix: `x_r"` is an identifier ending in `r`, not a raw string. Each
+    // raw string holds a `"` that a plain string would close on, then a `//`
+    // that a plain string's close would expose as a comment.
+    for (source, expected) in [
+        (r##"fn f() { g(r#"a" // unscanned"#) }"##, vec!["unscanned"]),
+        (r##"fn f() { let s =r#"a" // unscanned"#; }"##, vec!["unscanned"]),
+        (r##"fn f() -> &'static [u8] { br#"a" // unscanned"# }"##, vec!["unscanned"]),
+        (r##"fn f() { let s = cr#"a" // unscanned"#; }"##, vec!["unscanned"]),
+        // `_` is an identifier character: a continuation line ending `x_r"`
+        // opens nothing, so the comment below it stays prose.
+        (
+            "fn f() -> String {\n    format!(\"one \\\n     x_r\")\n}\n// unscanned\nfn g() {}\n",
+            vec![],
+        ),
+    ] {
+        let code = strip_comments(source, true).code;
+        let hits: Vec<&str> = sentinel_hits(&code)
+            .into_iter()
+            .map(|(_, _, sentinel)| sentinel)
+            .collect();
+        assert_eq!(hits, expected, "{source}");
+    }
+}
+
 #[test]
 fn a_brace_in_a_string_literal_is_not_a_block() {
     // (1) The loud one: a lone `{` in a test module made the walk run off the
@@ -1729,7 +1831,7 @@ fn a_character_that_folds_to_a_different_length_does_not_move_a_site() {
 
 /// **A sentinel the formatter wrapped is still one site.**
 ///
-/// Nine of the nineteen sentinels contain a space, and `readout.rs` and
+/// Nine of the twenty sentinels contain a space, and `readout.rs` and
 /// `governance/mod.rs` are written almost entirely in `\`-continued `format!`
 /// strings. A plain substring match needs exactly one space, so a reflow of the
 /// wrong line makes a conformant site invisible — under-capture, the silent
@@ -1960,11 +2062,31 @@ fn every_absence_reporting_site_is_enumerated_and_recorded() {
 /// occurrences became two and the `empty graph` row left the file entirely.
 const CORRECTION_DELTA: (usize, usize) = (1, 4);
 
+/// What [S-442] added to the census on 2026-09-22: `(production rows added,
+/// production occurrences added)` — the two `models/navigation.rs` rows, one
+/// `n/a` and two `unindexed`.
+///
+/// Stated as a delta for the same reason as [`CORRECTION_DELTA`]: the
+/// 2026-09-20 figures in the header stay tied to this table by arithmetic
+/// rather than surviving only as prose about a tree that no longer exists.
+///
+/// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+const S442_ADDITION: (usize, usize) = (2, 3);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
-    let production_rows = CENSUS.iter().filter(|r| r.3 > 0).count();
-    let production_occurrences: usize = CENSUS.iter().map(|r| r.3).sum();
+    let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
+    let production_occurrences_now: usize = CENSUS.iter().map(|r| r.3).sum();
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
+    assert_eq!(
+        (production_occurrences_now, production_rows_now, test_occurrences),
+        (84, 39, 106),
+        "the census as it stands after S-442's addendum, 2026-09-22: 84 production \
+         occurrences over 39 production rows, beside 106 test-scope occurrences"
+    );
+    // The 2026-09-20 reading the header and the tuple below state.
+    let production_rows = production_rows_now - S442_ADDITION.0;
+    let production_occurrences = production_occurrences_now - S442_ADDITION.1;
     let corrected_files: std::collections::BTreeSet<&str> =
         CORRECTIONS.iter().map(|(file, _, _, _)| *file).collect();
 
@@ -2170,6 +2292,21 @@ fn no_new_absence_state_on_any_surface() {
         "`CrossFileAbsence` answers a third question — why a language's relation \
          class has no cross-file edge — with three (R0, S-441)"
     );
+    let denominator_cause = |absence: DenominatorAbsence| match absence {
+        DenominatorAbsence::Unindexed => "unindexed",
+        DenominatorAbsence::NoLanguageRecorded { .. } => "no-language-recorded",
+        DenominatorAbsence::NotAvailable => "n/a",
+    };
+    assert_eq!(
+        [
+            denominator_cause(DenominatorAbsence::Unindexed),
+            denominator_cause(DenominatorAbsence::NoLanguageRecorded { anchors: 1 }),
+            denominator_cause(DenominatorAbsence::NotAvailable),
+        ],
+        ["unindexed", "no-language-recorded", "n/a"],
+        "`DenominatorAbsence` answers a fourth question — why a relational answer \
+         carries no language row — with three (R0, S-442)"
+    );
 
     let model =
         std::fs::read_to_string(workspace_root().join("web/ui/src/views/health/healthModel.ts"))
@@ -2266,7 +2403,7 @@ fn one_condition_has_one_wording_across_the_language_boundary() {
 /// **The lexicon's own home is not a reporting site.**
 ///
 /// `models/quality.rs` is deliberately off the scanned surfaces — it holds
-/// [`absence::SENTINELS`], so scanning it would report the lexicon as nineteen
+/// [`absence::SENTINELS`], so scanning it would report the lexicon as twenty
 /// sites, the self-reference [S-435]'s sibling harness records hitting. That
 /// exclusion is the one hole in the walk, so it is closed here rather than
 /// assumed: the file is a serde read-model and renders nothing, and the only
@@ -2297,13 +2434,20 @@ fn the_taxonomy_module_is_not_a_reporting_site() {
     }
 }
 
-/// **The resolution denominator speaks only the lexicon** ([S-441], [FR-RS-09]).
+/// **The resolution denominator speaks only the lexicon** ([S-441], [FR-RS-09],
+/// [S-442], [FR-NV-14]).
 ///
 /// [`CrossFileAbsence`]'s tags are serde-derived, so they are not source
 /// literals and the lexical census above cannot see them — the blind spot its
 /// own header names, one type over. They are pinned here structurally instead:
 /// every tag the type can serialise is an [`absence::SENTINELS`] spelling, and
-/// the three spellings this story added are exactly the tags the arms produce.
+/// the three spellings [S-441] added are exactly the tags the arms produce.
+///
+/// The relational answers' [`DenominatorAbsence`] is pinned the same way, from
+/// its one classifying constructor and its `n/a` state: every tag is a lexicon
+/// spelling, and `no-language-recorded` — the one wording [S-442] added — is
+/// produced by an arm. Its other two tags reuse lexicon words and are census
+/// rows besides, since one of them is written as a literal.
 ///
 /// What that cannot see is a **fourth** spelling added to the lexicon with no
 /// producer — the lexicon does not mark which entries are resolution ones, so
@@ -2315,6 +2459,7 @@ fn the_taxonomy_module_is_not_a_reporting_site() {
 /// [S-441]: ../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
 /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
 /// [FR-RS-09]: ../../docs/specs/requirements/FR-RS-09.md
+/// [FR-NV-14]: ../../docs/specs/requirements/FR-NV-14.md
 #[test]
 fn the_resolution_denominator_speaks_only_the_lexicon() {
     // Exhaustive by construction: the classifier is the only producer, and
@@ -2349,12 +2494,36 @@ fn the_resolution_denominator_speaks_only_the_lexicon() {
             "{spelling:?} is in the lexicon but no arm produces it"
         );
     }
+    // The answer-level denominator: every arm, reached through the only
+    // constructors that produce them.
+    let answer_tags: Vec<String> = [
+        ResolutionDenominator::measured(Vec::new(), &[]),
+        ResolutionDenominator::measured(Vec::new(), &[None]),
+        ResolutionDenominator::not_available(),
+    ]
+    .into_iter()
+    .map(|denominator| {
+        serde_json::to_value(denominator.absence.expect("no row, so an absence"))
+            .expect("serialises")["cause"]
+            .as_str()
+            .expect("a string tag")
+            .to_string()
+    })
+    .collect();
+    assert_eq!(answer_tags, ["unindexed", "no-language-recorded", "n/a"]);
+    for tag in &answer_tags {
+        assert!(
+            absence::SENTINELS.contains(&tag.as_str()),
+            "{tag:?} is a relational answer's named state the closed lexicon does not carry"
+        );
+    }
+
     assert_eq!(
         absence::SENTINELS.len(),
-        19,
-        "the closed lexicon holds nineteen spellings (sixteen before S-441). An \
-         addition is a new absence wording on some surface: name its producer \
-         and its census row, then change this figure and the prose counts in \
-         this file together"
+        20,
+        "the closed lexicon holds twenty spellings (sixteen before S-441, \
+         nineteen before S-442). An addition is a new absence wording on some \
+         surface: name its producer and its census row, then change this figure \
+         and the prose counts in this file together"
     );
 }

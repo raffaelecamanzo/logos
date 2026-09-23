@@ -6,9 +6,9 @@
 //! One member is not a type: [`quality::absence`] states the cross-surface
 //! absence taxonomy — the vocabulary and the rules every surface keeps when it
 //! reports a figure it does not have ([S-434]). It declares no type and
-//! serialises nothing; it is here because the three classifiers it governs,
-//! [`quality::SignalAbsence`], [`quality::EvaluatedSetAbsence`] and
-//! [`quality::CrossFileAbsence`], are.
+//! serialises nothing; it is here because the four Rust classifiers it governs,
+//! [`quality::SignalAbsence`], [`quality::EvaluatedSetAbsence`],
+//! [`quality::CrossFileAbsence`] and [`navigation::DenominatorAbsence`], are.
 //!
 //! [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 //!
