@@ -1216,4 +1216,24 @@ mod resolution_tests {
         let r = e.resolve();
         assert_eq!(origins(&r), (ChatOrigin::Member, ChatOrigin::Member));
     }
+
+    /// The read-set contract through the public `resolve_chat`, not only the
+    /// injected seam: with the enclosing `.logos/` holding two files that would
+    /// fail to parse, any read of them would surface as an error. `None` never
+    /// touches them, and neither does a workspace root the member never needs.
+    #[test]
+    fn resolve_chat_reads_no_file_outside_the_roots_it_needs() {
+        let e = Estate::new();
+        Estate::policy(&e.workspace, "[chat]\nbogus = 1\n");
+        fs::write(e.workspace.join(".logos/secrets.toml"), "[chat]\nbogus = 1\n").unwrap();
+
+        let r = resolve_chat(&e.member, None).expect("None reads only the member root");
+        assert_eq!(origins(&r), (ChatOrigin::Unset, ChatOrigin::Unset));
+
+        Estate::policy(&e.member, MEMBER_CHAT);
+        Estate::key(&e.member, MEMBER_KEY);
+        let r = resolve_chat(&e.member, Some(&e.workspace))
+            .expect("a fully declaring member never reads the workspace tier");
+        assert_eq!(origins(&r), (ChatOrigin::Member, ChatOrigin::Member));
+    }
 }
