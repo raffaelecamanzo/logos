@@ -405,7 +405,7 @@ fn is_affected(
         if delta.changed_paths.contains(path) {
             return true;
         }
-        if index.is_path_specifier_file(path) && is_import_scoped(r) {
+        if is_import_scoped(r) && index.is_path_specifier_file(path) {
             return true;
         }
     }
