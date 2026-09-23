@@ -27,13 +27,29 @@ Prefer the graph tools over raw file reads, but match the tool to the question:
 - **Relational / cross-file** ("who calls this?", "what breaks if I change
   it?", "where is X used?", dead code) — `node` for one symbol's detail,
   `search` / `explore` to find and group, and `callers` / `callees` for call
-  relations. The graph beats grep here.
+  relations — on the languages the graph resolves (next section).
 - **Localized lookups** (a string, a value, a formula inside a file you can
   already name) — a direct read or grep is fine, sometimes faster. Don't force
   the graph on a question grep already answers.
 - **Disambiguate by symbol** — prefer a unique name as the entry point. `node`
   on a common bare name (`new`, `map`, `severity`) resolves to one arbitrary
   match; pivot from a unique caller or qualify the path instead.
+
+## Where the relational claims hold
+
+Relational answers hold only on the languages the graph resolves, and each one
+says which. The answers that traverse resolved edges — callers, callees, impact,
+affected, precedent, impact intersection and branch overlap — carry a
+`resolution_denominator` whose `languages` rows give each anchor language's
+`calls` resolution. Where a row has a `cross_file_edges` figure, the graph beats
+grep for that language, as completely as its `bound` share of `references` — a
+partial ratio is a partial answer. Where its `cross_file_absence` reads
+`same-file-only` or `no-resolved-edges`, the graph binds no call across a file
+boundary there: an empty or short answer is the index's reach, not evidence of
+absence, and grep is the better tool. Callers can live in another language than
+their target, so read the whole project's rows as well —
+`resolution_by_language` in the status readout. For this project that is the
+`status` tool.
 
 ## This ordering is a hypothesis, not a finding
 

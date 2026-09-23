@@ -43,6 +43,16 @@
 //! from this one table. The same story fixed the scanner's raw-string opener
 //! (see [`strip_comments`]); that fix moved no other row.
 //!
+//! **Addendum, 2026-09-23 ([S-444]) — 2 production rows added, 2 occurrences,
+//! beside 2 in test scope; neither is a site, no correction.** The shipped
+//! guidance now states the language scope of its relational claims by naming
+//! the two `cross_file_absence` tags a reader should look for — `same-file-only`
+//! and `no-resolved-edges` — in the managed `CLAUDE.md` block (`init/mod.rs`),
+//! and `cli/src/main.rs`'s `surface_parity` holds the one wording the three
+//! guidance texts are checked against. The census now reads **86 production
+//! occurrences over 41 production rows**, beside 108 in test scope; the delta
+//! is [`S444_ADDITION`], so every earlier reading stays checkable.
+//!
 //! # What is enumerated, and what this cannot catch
 //!
 //! The walk covers [`SURFACES`] in full — every `.rs`, `.ts` and `.tsx` file
@@ -98,6 +108,7 @@
 //! [S-434]: ../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 //! [S-435]: ../../docs/planning/journal.md#s-435-the-wiki-generation-pass-names-its-own-surface
 //! [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+//! [S-444]: ../../docs/planning/journal.md#s-444-the-shipped-guidance-states-the-language-scope-its-relational-claims-hold-on
 //! [FR-EH-04]: ../../docs/specs/requirements/FR-EH-04.md
 //! [FR-UI-04]: ../../docs/specs/requirements/FR-UI-04.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
@@ -280,7 +291,7 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 69] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 73] = [
     (
         "core",
         "logos-core/src/config/discovery.rs",
@@ -451,6 +462,22 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 69] = [
     ),
     (
         "core",
+        "logos-core/src/init/mod.rs",
+        "no-resolved-edges",
+        1,
+        0,
+        "NOT A SITE — the managed CLAUDE.md block's \"Where the relational claims hold\" paragraph, naming the `cross_file_absence` tags a reader should look for on a relational answer's `resolution_denominator`. Guidance prose reporting no absence of its own; it speaks the lexicon's spelling, pinned to the serialised tag by `surface_parity`'s vocabulary check (S-444, FR-IN-09 AC 4)",
+    ),
+    (
+        "core",
+        "logos-core/src/init/mod.rs",
+        "same-file-only",
+        1,
+        0,
+        "NOT A SITE — the managed CLAUDE.md block's \"Where the relational claims hold\" paragraph, naming the `cross_file_absence` tags a reader should look for on a relational answer's `resolution_denominator`. Guidance prose reporting no absence of its own; it speaks the lexicon's spelling, pinned to the serialised tag by `surface_parity`'s vocabulary check (S-444, FR-IN-09 AC 4)",
+    ),
+    (
+        "core",
         "logos-core/src/metrics/tests.rs",
         "empty graph",
         0,
@@ -524,10 +551,26 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 69] = [
     (
         "cli",
         "cli/src/main.rs",
+        "no-resolved-edges",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s): `surface_parity`'s `RELATIONAL_SCOPE`, the one wording the three guidance texts are checked against, asserting the site declared on `logos-core/src/init/mod.rs` (S-444); enumerated, never truncated away",
+    ),
+    (
+        "cli",
+        "cli/src/main.rs",
         "nothing was evaluated",
         1,
         0,
         "CONFORMANT — R4: the absent contract is named instead of rendered as a zero violation count (NFR-CC-04), which is the whole reason this arm exists rather than printing the report",
+    ),
+    (
+        "cli",
+        "cli/src/main.rs",
+        "same-file-only",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s): `surface_parity`'s `RELATIONAL_SCOPE`, the one wording the three guidance texts are checked against, asserting the site declared on `logos-core/src/init/mod.rs` (S-444); enumerated, never truncated away",
     ),
     (
         "spa",
@@ -2073,6 +2116,17 @@ const CORRECTION_DELTA: (usize, usize) = (1, 4);
 /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
 const S442_ADDITION: (usize, usize) = (2, 3);
 
+/// What [S-444] added to the census on 2026-09-23: `(production rows added,
+/// production occurrences added, test occurrences added)` — the managed
+/// block's `same-file-only` and `no-resolved-edges`, and the one test-scope
+/// copy of each in `surface_parity`'s `RELATIONAL_SCOPE`.
+///
+/// The first delta to carry test-scope occurrences, so it has the third field
+/// [`S442_ADDITION`] never needed.
+///
+/// [S-444]: ../../docs/planning/journal.md#s-444-the-shipped-guidance-states-the-language-scope-its-relational-claims-hold-on
+const S444_ADDITION: (usize, usize, usize) = (2, 2, 2);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
@@ -2080,13 +2134,15 @@ fn the_audit_reports_its_count_with_its_denominator() {
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
-        (84, 39, 106),
-        "the census as it stands after S-442's addendum, 2026-09-22: 84 production \
-         occurrences over 39 production rows, beside 106 test-scope occurrences"
+        (86, 41, 108),
+        "the census as it stands after S-444's addendum, 2026-09-23: 86 production \
+         occurrences over 41 production rows, beside 108 test-scope occurrences"
     );
     // The 2026-09-20 reading the header and the tuple below state.
-    let production_rows = production_rows_now - S442_ADDITION.0;
-    let production_occurrences = production_occurrences_now - S442_ADDITION.1;
+    let production_rows = production_rows_now - S444_ADDITION.0 - S442_ADDITION.0;
+    let production_occurrences =
+        production_occurrences_now - S444_ADDITION.1 - S442_ADDITION.1;
+    let test_occurrences = test_occurrences - S444_ADDITION.2;
     let corrected_files: std::collections::BTreeSet<&str> =
         CORRECTIONS.iter().map(|(file, _, _, _)| *file).collect();
 

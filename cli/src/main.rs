@@ -1518,7 +1518,9 @@ mod surface_parity {
                 min_reconciled_claims: 16,
             },
             Guidance {
-                label: "the README",
+                // FR-IN-09 says "the README"; no top-level one exists, and this
+                // user guide is the README the AC means (CR-143 §3.8, S-444).
+                label: "the user guide (docs/howto/README.md)",
                 text: read(repo_root().join("docs/howto/README.md")),
                 bare_names_are_tools: false,
                 scoping_marker: "## What it is primarily for: scoping work before you decompose it",
@@ -1670,6 +1672,242 @@ mod surface_parity {
         }
     }
 
+    /// The one statement of where the guidance's relational claims hold
+    /// ([FR-IN-09] AC 4, [CR-143] §3.8), carried **verbatim** by all three
+    /// texts — whitespace aside, since each wraps its lines differently.
+    ///
+    /// # Why three checked copies and not one derived source
+    ///
+    /// The three texts spell the same tool three ways (`logos:callers`,
+    /// `callers`, `logos callers`), so deriving them whole would need a
+    /// templating layer, and the README is a hand-edited document outside every
+    /// crate that no constant can generate. What must agree is this one
+    /// statement, so it is written spelling-neutral — tools named in prose, only
+    /// the denominator's own vocabulary in code spans — and each text is checked
+    /// to contain it. That is the guarantee a derived source would give the two
+    /// embedded texts, and the only one available for the README: editing one
+    /// copy without the others fails here, so "two of three" cannot ship.
+    ///
+    /// # Why it reads the denominator instead of naming languages
+    ///
+    /// Which languages resolve a cross-file call is exactly what the resolver's
+    /// next increment changes. A statement that named them would be false the
+    /// day that lands; one that tells the reader which field to read stays
+    /// true, and [`the_relational_scope_speaks_the_denominators_own_vocabulary`]
+    /// pins that field to what [S-442] actually serialises.
+    ///
+    /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    /// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+    /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+    const RELATIONAL_SCOPE: &str = "\
+        Relational answers hold only on the languages the graph resolves, and each \
+        one says which. The answers that traverse resolved edges — callers, callees, \
+        impact, affected, precedent, impact intersection and branch overlap — carry a \
+        `resolution_denominator` whose `languages` rows give each anchor language's \
+        `calls` resolution. Where a row has a `cross_file_edges` figure, the graph \
+        beats grep for that language, as completely as its `bound` share of \
+        `references` — a partial ratio is a partial answer. Where its \
+        `cross_file_absence` reads `same-file-only` or `no-resolved-edges`, the graph \
+        binds no call across a file boundary there: an empty or short answer is the \
+        index's reach, not evidence of absence, and grep is the better tool. Callers \
+        can live in another language than their target, so read the whole project's \
+        rows as well — `resolution_by_language` in the status readout.";
+
+    /// The relational over-claims [CR-143] §3.8 measured false outside Rust. Each
+    /// may appear in a guidance text only inside [`RELATIONAL_SCOPE`], which
+    /// states the language scope it holds on.
+    ///
+    /// A lexical tripwire against re-introducing the unscoped sentence beside
+    /// the scoped one, not a detector of every possible over-claim: a rewording
+    /// escapes it, which is why the positive check — every text carries the
+    /// scope statement — is the load-bearing half.
+    ///
+    /// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+    const RELATIONAL_OVERCLAIMS: &[&str] = &["beats grep", "says why"];
+
+    /// `text` with every whitespace run collapsed to one space, so a statement
+    /// matches however a text wraps it.
+    fn normalise_whitespace(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Every guidance text states the language scope its relational claims hold
+    /// on, in the one shared wording, and states none of them unscoped
+    /// ([FR-IN-09] AC 4, [CR-143] §3.8).
+    ///
+    /// Every text is judged before anything fails, and the failure names each
+    /// offending text: a surface corrected while its sibling is not is exactly
+    /// the outcome this exists to reject ([S-434]'s sibling call site).
+    ///
+    /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    /// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+    /// [S-434]: ../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
+    #[test]
+    fn the_shipped_guidance_states_the_language_scope_of_its_relational_claims() {
+        let scope = normalise_whitespace(RELATIONAL_SCOPE);
+        let guidance = shipped_guidance();
+        let mut failures = Vec::new();
+        for g in &guidance {
+            let text = normalise_whitespace(&g.text);
+            let Some(at) = text.find(&scope) else {
+                failures.push(format!(
+                    "{} does not carry the relational scope statement verbatim",
+                    g.label
+                ));
+                continue;
+            };
+            let outside = format!("{}{}", &text[..at], &text[at + scope.len()..]);
+            for claim in RELATIONAL_OVERCLAIMS {
+                if outside.contains(claim) {
+                    failures.push(format!(
+                        "{} claims {claim:?} outside the scope statement, which \
+                         states the languages that claim holds on",
+                        g.label
+                    ));
+                }
+            }
+        }
+        assert_eq!(guidance.len(), 3, "FR-IN-09 governs three texts");
+        assert!(
+            failures.is_empty(),
+            "the shipped guidance overclaims its relational reach (FR-IN-09 AC 4, \
+             CR-143 §3.8) — every text must state the language scope, or none of \
+             them is corrected:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+
+    /// The object keys and `cause` tags a relational answer and the status
+    /// readout actually serialise, over one language row in each cross-file
+    /// state — paired, for each tag, with whether [S-442]'s
+    /// `unresolved_calls_clause` treats that state as **unresolved**.
+    ///
+    /// Read off real serialised values rather than listed, so a renamed field
+    /// or tag fails the guidance instead of leaving it describing a shape the
+    /// binary no longer has.
+    ///
+    /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+    fn denominator_vocabulary() -> (BTreeSet<String>, BTreeMap<String, bool>) {
+        use logos_core::models::navigation::{
+            CallersResult, LanguageResolution, RelationResolution, ResolutionDenominator,
+            StatusInfo,
+        };
+
+        fn keys(value: &serde_json::Value, into: &mut BTreeSet<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, inner) in map {
+                        into.insert(key.clone());
+                        keys(inner, into);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| keys(v, into)),
+                _ => {}
+            }
+        }
+
+        // (language, references, bound, same-file edges, cross-file edges): a
+        // cross-file figure, then each arm of `CrossFileAbsence::classify`.
+        let rows: Vec<LanguageResolution> = [
+            ("rust", 10, 8, 3, 5),
+            ("tsx", 10, 4, 4, 0),
+            ("go", 10, 0, 0, 0),
+            ("toml", 0, 0, 0, 0),
+        ]
+        .into_iter()
+        .map(|(language, references, bound, same, cross)| LanguageResolution {
+            language: language.to_string(),
+            files: 1,
+            calls: RelationResolution::measured(references, bound, same, cross),
+            imports: RelationResolution::measured(0, 0, 0, 0),
+        })
+        .collect();
+
+        let mut tags = BTreeMap::new();
+        for row in &rows {
+            let Some(absence) = row.calls.cross_file_absence else {
+                continue;
+            };
+            let tag = serde_json::to_value(absence).expect("serialises")["cause"]
+                .as_str()
+                .expect("a cross-file absence is tagged by `cause`")
+                .to_string();
+            let unresolved = ResolutionDenominator::measured(
+                vec![row.clone()],
+                &[Some(row.language.clone())],
+            )
+            .unresolved_calls_clause()
+            .is_some();
+            tags.insert(tag, unresolved);
+        }
+        assert_eq!(tags.len(), 3, "one row per `CrossFileAbsence` arm");
+
+        let anchors: Vec<Option<String>> = rows.iter().map(|r| Some(r.language.clone())).collect();
+        let mut vocabulary = BTreeSet::new();
+        keys(
+            &serde_json::to_value(CallersResult {
+                resolution_denominator: ResolutionDenominator::measured(rows.clone(), &anchors),
+                ..CallersResult::default()
+            })
+            .expect("serialises"),
+            &mut vocabulary,
+        );
+        keys(
+            &serde_json::to_value(StatusInfo {
+                resolution_by_language: rows,
+                ..StatusInfo::default()
+            })
+            .expect("serialises"),
+            &mut vocabulary,
+        );
+        vocabulary.extend(tags.keys().cloned());
+        (vocabulary, tags)
+    }
+
+    /// The scope statement speaks the denominator [S-442] ships: every code span
+    /// in it is a key or tag the answers really serialise, and the states it
+    /// hands to grep are exactly the ones `unresolved_calls_clause` treats as
+    /// unresolved ([FR-IN-09] AC 4, [CR-143] §3.8).
+    ///
+    /// The second half is what "consistent with the denominator" means: were the
+    /// statement to send the reader to grep on `no-references-recorded` — a
+    /// language that records no call, where an empty answer is true — it would
+    /// word the same condition differently from the answer it points at.
+    ///
+    /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+    /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    /// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
+    #[test]
+    fn the_relational_scope_speaks_the_denominators_own_vocabulary() {
+        let (vocabulary, tags) = denominator_vocabulary();
+        let spans = inline_code_spans("the relational scope statement", RELATIONAL_SCOPE);
+        assert!(spans.len() >= 8, "the statement names the fields it points at");
+        for span in &spans {
+            assert!(
+                vocabulary.contains(span),
+                "the relational scope statement names `{span}`, which no relational \
+                 answer or status readout serialises (FR-IN-09 AC 4). Serialised: \
+                 {vocabulary:?}"
+            );
+        }
+        let named: BTreeSet<&str> = spans
+            .iter()
+            .map(String::as_str)
+            .filter(|span| tags.contains_key(*span))
+            .collect();
+        let unresolved: BTreeSet<&str> = tags
+            .iter()
+            .filter(|(_, unresolved)| **unresolved)
+            .map(|(tag, _)| tag.as_str())
+            .collect();
+        assert_eq!(
+            named, unresolved,
+            "the scope statement sends the reader to grep on a different set of \
+             states from the ones the answer itself calls unresolved (S-442's \
+             `unresolved_calls_clause`)"
+        );
+    }
+
     /// The three planning-time capabilities ([FR-NV-11], [FR-NV-12], [FR-NV-13])
     /// — tool name and CLI command spelling.
     const CAPABILITIES: &[(&str, &str)] = &[
@@ -1753,6 +1991,15 @@ mod surface_parity {
         // Hidden commands included: a hidden command is still shipped, so naming
         // one is not a false claim (the same reasoning as the McpOnly check).
         let commands = all_cli_command_paths();
+        // The scope statement's spans are field names and tags, reconciled
+        // against the serialised denominator by
+        // `the_relational_scope_speaks_the_denominators_own_vocabulary`, not
+        // against the router — where tools are named bare they would otherwise
+        // read as tool claims.
+        let scope_spans: BTreeSet<String> =
+            inline_code_spans("the relational scope statement", RELATIONAL_SCOPE)
+                .into_iter()
+                .collect();
 
         for g in shipped_guidance() {
             // How many spans this text actually RECONCILED against the binary.
@@ -1761,7 +2008,7 @@ mod surface_parity {
             let mut reconciled = 0_usize;
             for span in inline_code_spans(g.label, &g.text) {
                 // `logos:*` is the tool NAMESPACE, not a tool.
-                if span == "logos:*" {
+                if span == "logos:*" || scope_spans.contains(&span) {
                     continue;
                 }
                 if let Some(rest) = span.strip_prefix("logos:") {
