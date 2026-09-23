@@ -1166,4 +1166,33 @@ mod resolution_tests {
         assert_eq!(r.api_key(), Some("sk-padded-WXYZ"));
         assert_eq!(r.credential.last4.as_deref(), Some("WXYZ"));
     }
+
+    /// An invalid member file fails loud, naming the member path, even when a
+    /// valid workspace tier could have supplied that half — it is never
+    /// silently masked by inheritance.
+    #[test]
+    fn an_invalid_member_file_fails_loud_despite_a_valid_workspace() {
+        let bad_config = Estate::new();
+        Estate::policy(&bad_config.member, "[chat]\nbogus = 1\n");
+        Estate::policy(&bad_config.workspace, WORKSPACE_CHAT);
+        Estate::key(&bad_config.workspace, WORKSPACE_KEY);
+
+        let bad_secrets = Estate::new();
+        fs::write(
+            bad_secrets.member.join(".logos/secrets.toml"),
+            "[chat]\nbogus = 1\n",
+        )
+        .unwrap();
+        Estate::policy(&bad_secrets.workspace, WORKSPACE_CHAT);
+        Estate::key(&bad_secrets.workspace, WORKSPACE_KEY);
+
+        for (e, file) in [(&bad_config, "config.toml"), (&bad_secrets, "secrets.toml")] {
+            let err = resolve_chat(&e.member, Some(&e.workspace)).unwrap_err();
+            let expected = e.member.join(".logos").join(file);
+            assert!(
+                matches!(err, ConfigError::Parse { ref path, .. } if *path == expected),
+                "{file}: {err:?}"
+            );
+        }
+    }
 }
