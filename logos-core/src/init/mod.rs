@@ -375,17 +375,18 @@ Each tool's own description says what it returns; these are the moments to ask.
   pivot from a unique caller or qualify the path instead.
 
 **Where the relational claims hold.** Relational answers hold only on the languages
-the graph resolves, and each one says which. The answers that traverse resolved
-edges — callers, callees, impact, affected, precedent, impact intersection and
-branch overlap — carry a `resolution_denominator` whose `languages` rows give each
-anchor language's `calls` resolution. Where a row has a `cross_file_edges` figure,
+the graph resolves. The answers that traverse resolved edges — callers, callees,
+impact, affected, precedent, impact intersection and branch overlap — say which:
+each carries a `resolution_denominator` whose `languages` rows give each anchor
+language's `calls` resolution. A node answer's edge list carries none, so read it
+against the project's rows named below. Where a row has a `cross_file_edges` figure,
 the graph beats grep for that language, as completely as its `bound` share of
 `references` — a partial ratio is a partial answer. Where its `cross_file_absence`
 reads `same-file-only` or `no-resolved-edges`, the graph binds no call across a file
 boundary there: an empty or short answer is the index's reach, not evidence of
 absence, and grep is the better tool. Callers can live in another language than
-their target, so read the whole project's rows as well — `resolution_by_language`
-in the status readout. For this project that is `logos status --json`.
+their target, so read the whole project's rows as well — `resolution_by_language` in
+the status readout. For this project that is `logos status --json`.
 
 This ordering is a **hypothesis under measurement, not a settled finding** — it comes
 from one project's telemetry. `logos stats --json` breaks calls down by tool class

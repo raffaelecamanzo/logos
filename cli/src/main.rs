@@ -1700,12 +1700,13 @@ mod surface_parity {
     /// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
     /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
     const RELATIONAL_SCOPE: &str = "\
-        Relational answers hold only on the languages the graph resolves, and each \
-        one says which. The answers that traverse resolved edges — callers, callees, \
-        impact, affected, precedent, impact intersection and branch overlap — carry a \
+        Relational answers hold only on the languages the graph resolves. The answers \
+        that traverse resolved edges — callers, callees, impact, affected, precedent, \
+        impact intersection and branch overlap — say which: each carries a \
         `resolution_denominator` whose `languages` rows give each anchor language's \
-        `calls` resolution. Where a row has a `cross_file_edges` figure, the graph \
-        beats grep for that language, as completely as its `bound` share of \
+        `calls` resolution. A node answer's edge list carries none, so read it against \
+        the project's rows named below. Where a row has a `cross_file_edges` figure, \
+        the graph beats grep for that language, as completely as its `bound` share of \
         `references` — a partial ratio is a partial answer. Where its \
         `cross_file_absence` reads `same-file-only` or `no-resolved-edges`, the graph \
         binds no call across a file boundary there: an empty or short answer is the \
