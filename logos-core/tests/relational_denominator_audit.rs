@@ -92,16 +92,25 @@
 //!   `crate::navigate`.** The universe is the navigation-service's read-model
 //!   module, as its own header declares; the agreement check widens it to
 //!   whatever `crate::navigate` returns, and no further. The `Engine` also
-//!   returns quality, wiki, history and config read-models, none of which
-//!   traverses the resolved edge set.
+//!   returns quality, wiki, history and config read-models; some of those read
+//!   edges too — `dsm` counts dependency edges between modules, `doc_gaps`
+//!   reads `DocReference` edges — but they are governance readouts, not the
+//!   relational queries [CR-143] §1 names, and they are outside this arm.
+//! - **A spelling the parse does not resolve.** A return type named through a
+//!   `type` alias, or a delegation through a `navigate` function imported by
+//!   name and called bare, is read as what it spells. The workspace answers of
+//!   `federation::query` are built from per-member `Engine::callers` /
+//!   `Engine::impact` results, which carry the field, and are not enumerated
+//!   here.
 //! - **A root no `Engine` method returns yet.** It is named in the denominator
-//!   line and the dated record below moves, but its shape is not checked until
+//!   line and the dated record above moves, but its shape is not checked until
 //!   a method returns it — at which point it is.
 //! - **A denominator that is present but wrong.** That is behaviour, owned by
 //!   `relational_denominator.rs` and the lexical census.
 //! - **Type identity by name.** The parse compares type names, not resolved
-//!   paths; a same-named type from another module would read as a navigation
-//!   type. Path-qualified names outside `navigation` are excluded.
+//!   paths; a same-named type from another module, imported bare, would read as
+//!   a navigation type. Path-qualified names outside `navigation` (or `models`,
+//!   which re-exports it) are excluded on both sides of the parse.
 //!
 //! It adds no runtime surface and no dispatch arm: it is a test that reads two
 //! source files ([NFR-MA-02]).
@@ -142,11 +151,17 @@ const ENGINE: &str = "src/engine.rs";
 /// Answer types that are **not** relational answers, each with the reason.
 ///
 /// This is an exemption list, never an inclusion list: an answer type absent
-/// from it must carry the denominator (see the module header). Two entries
-/// carry edges and are recorded as **not adjudicated** rather than argued out
-/// of the class — [CR-143] enumerated its relational queries and named neither,
-/// and deciding them is a scope question for a change request, not for the
-/// check that enforces the scope.
+/// from it must carry the denominator (see the module header).
+///
+/// Four entries carry edges, and they are decided two ways by one rule: what
+/// the denominator's rows can describe. Those rows measure **code** resolution
+/// (`Calls` and `Imports` per language). `ImplementorsResult` and
+/// `ReferencingDocsResult` are computed over doc→code trace edges, which no row
+/// measures, so the field could state nothing true about them — they are argued
+/// out. `NodeInfo` and `GraphElements` carry code edges the rows *do* measure,
+/// and [CR-143] names neither among its relational queries; whether they belong
+/// is a scope question for a change request, not for the check that enforces
+/// the scope, so they are recorded as **not adjudicated**.
 ///
 /// [CR-143]: ../../docs/requests/CR-143-a-relational-answer-states-its-resolution-denominator.md
 const OUTSIDE_THE_CLASS: [(&str, &str); 9] = [
