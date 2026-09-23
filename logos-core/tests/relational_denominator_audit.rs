@@ -219,19 +219,8 @@ fn is_pub(node: Node<'_>) -> bool {
     is_pub
 }
 
-/// Every `type_identifier` under `node`, as text.
-fn type_names(node: Node<'_>, source: &str, into: &mut BTreeSet<String>) {
-    if node.kind() == "type_identifier" {
-        into.insert(text(node, source).to_string());
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        type_names(child, source, into);
-    }
-}
-
 /// One field of a navigation type, as the check needs to see it.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Field {
     name: String,
     ty: String,
@@ -240,7 +229,7 @@ struct Field {
 }
 
 /// One top-level `pub` struct or enum of `models/navigation.rs`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct NavType {
     fields: Vec<Field>,
     /// The other types this one holds, by name, through any field or variant.
@@ -298,7 +287,7 @@ fn navigation_types(source: &str) -> BTreeMap<String, NavType> {
             if body.kind() == "field_declaration_list" {
                 fields = fields_of(body, source);
             }
-            type_names(body, source, &mut holds);
+            navigation_type_names(body, source, &mut holds);
         }
         holds.remove(&name);
         types.insert(name, NavType { fields, holds });
@@ -331,11 +320,12 @@ fn mentions_navigate(node: Node<'_>, source: &str) -> bool {
     found
 }
 
-/// Bare type names in a return type, dropping any path-qualified name whose
-/// path is not the navigation module — or `models`, which re-exports it
+/// Every type name under `node` — a field list, a variant list or a return
+/// type — dropping any path-qualified name whose path is not the navigation
+/// module — or `models`, which re-exports it
 /// (`pub use navigation::*`), so `crate::models::CallersResult` is the same
 /// type as `crate::models::navigation::CallersResult`.
-fn returned_names(node: Node<'_>, source: &str, into: &mut BTreeSet<String>) {
+fn navigation_type_names(node: Node<'_>, source: &str, into: &mut BTreeSet<String>) {
     if node.kind() == "scoped_type_identifier" {
         let from_navigation = node.child_by_field_name("path").is_some_and(|p| {
             matches!(
@@ -343,18 +333,13 @@ fn returned_names(node: Node<'_>, source: &str, into: &mut BTreeSet<String>) {
                 Some("navigation" | "models")
             )
         });
-        if !from_navigation {
-            // Still walk the generic arguments, never the qualified name.
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "type_arguments" {
-                    returned_names(child, source, into);
-                }
+        // A qualified type's generic arguments hang off the enclosing
+        // `generic_type`, not off this node, so there is nothing below it to
+        // walk either way.
+        if from_navigation {
+            if let Some(name) = node.child_by_field_name("name") {
+                into.insert(text(name, source).to_string());
             }
-            return;
-        }
-        if let Some(name) = node.child_by_field_name("name") {
-            into.insert(text(name, source).to_string());
         }
         return;
     }
@@ -363,7 +348,7 @@ fn returned_names(node: Node<'_>, source: &str, into: &mut BTreeSet<String>) {
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        returned_names(child, source, into);
+        navigation_type_names(child, source, into);
     }
 }
 
@@ -394,7 +379,7 @@ fn engine_methods(source: &str) -> Vec<EngineMethod> {
                 .map_or_else(String::new, |n| text(n, source).to_string());
             let mut returns = BTreeSet::new();
             if let Some(ret) = function.child_by_field_name("return_type") {
-                returned_names(ret, source, &mut returns);
+                navigation_type_names(ret, source, &mut returns);
             }
             let delegates_to_navigate = function
                 .child_by_field_name("body")
@@ -879,12 +864,13 @@ fn an_engine_parse_that_reads_no_facade_fails() {
 /// the method delegates or computes the answer inline.
 #[test]
 fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
-    let navigation = read(NAVIGATION_MODELS).replacen(
+    let live_source = read(NAVIGATION_MODELS);
+    let navigation = live_source.replacen(
         "pub struct LanguageComposition {\n",
         "pub struct LanguageComposition {\n    pub callers: CallersResult,\n",
         1,
     );
-    assert_ne!(navigation, read(NAVIGATION_MODELS), "the nesting mutation applied");
+    assert_ne!(navigation, live_source, "the nesting mutation applied");
     let report = audit(&navigation, &read(ENGINE));
     assert!(!report.answers.contains("CallersResult"), "nesting hid it from the roots");
     assert!(
@@ -898,12 +884,13 @@ fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
     // The same fold over an answer the `Engine` computes inline rather than
     // delegating: `language_composition` builds its `LanguageComposition`
     // itself, so nesting it must be named too.
-    let navigation = read(NAVIGATION_MODELS).replacen(
+    let live_source = read(NAVIGATION_MODELS);
+    let navigation = live_source.replacen(
         "pub struct StatusInfo {\n",
         "pub struct StatusInfo {\n    pub composition: LanguageComposition,\n",
         1,
     );
-    assert_ne!(navigation, read(NAVIGATION_MODELS), "the inline nesting applied");
+    assert_ne!(navigation, live_source, "the inline nesting applied");
     let report = audit(&navigation, &read(ENGINE));
     assert!(
         report
@@ -997,13 +984,14 @@ fn an_exemption_without_a_reason_or_a_subject_is_stale() {
 /// **An exemption stops excusing a type the moment it grows the field.**
 #[test]
 fn an_exemption_over_a_type_that_carries_the_field_is_stale() {
-    let navigation = read(NAVIGATION_MODELS).replacen(
+    let live_source = read(NAVIGATION_MODELS);
+    let navigation = live_source.replacen(
         "pub struct ImplementorsResult {\n",
         "pub struct ImplementorsResult {\n    \
          pub resolution_denominator: ResolutionDenominator,\n",
         1,
     );
-    assert_ne!(navigation, read(NAVIGATION_MODELS), "the mutation applied");
+    assert_ne!(navigation, live_source, "the mutation applied");
     let report = audit(&navigation, &read(ENGINE));
     assert_eq!(
         report.stale_exemptions,
