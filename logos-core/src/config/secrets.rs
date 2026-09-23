@@ -9,7 +9,7 @@
 //! # The never-echo invariant ([NFR-SE-07])
 //! The raw key is loadable here (the agent needs it at egress time) but must
 //! **never** surface in an HTTP response body, a log line, or a rendered page.
-//! Two guards enforce that structurally:
+//! Three guards enforce that structurally:
 //!
 //! 1. [`Secrets`] and [`ChatSecrets`] carry **hand-written `Debug`** impls that
 //!    render presence + last-4 only, so a `{:?}` in a `tracing` event or an
@@ -19,6 +19,10 @@
 //!    last-4, `Serialize`-safe — **not** the raw [`Secrets`]. The raw key is
 //!    never placed in a serialisable read-model, so it cannot be JSON-encoded
 //!    into a response by construction.
+//! 3. A store that fails to parse reports a **redacted** [`ConfigError::Parse`]
+//!    ([`parse_secrets`]): the path, line and column, never the offending
+//!    source line — the `toml` error's own rendering quotes that line, which
+//!    is the key itself when the key is what is malformed.
 //!
 //! [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
 //! [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
@@ -156,12 +160,64 @@ impl MaskedSecret {
 ///
 /// # Errors
 /// [`ConfigError::Parse`] on invalid TOML or an unknown key
-/// (`#[serde(deny_unknown_fields)]`).
+/// (`#[serde(deny_unknown_fields)]`), **redacted** ([NFR-SE-07]): see
+/// [`redact_parse_error`].
 pub(crate) fn parse_secrets(text: &str, path: &Path) -> Result<Secrets, ConfigError> {
     toml::from_str(text).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
-        source,
+        source: redact_parse_error(&source, text),
     })
+}
+
+/// The identifiers `secrets.toml` legitimately declares — the only quoted
+/// tokens a redacted parse message keeps.
+const SCHEMA_NAMES: [&str; 2] = ["chat", "api_key"];
+
+/// Rebuild a `secrets.toml` parse error without any fragment of the file
+/// ([NFR-SE-07]).
+///
+/// `toml`'s rendering quotes the offending source line, and its message can
+/// quote the offending value (`invalid type: integer `…``) — for this file
+/// that is the key. The rebuilt error keeps the line and column and the
+/// message with every quoted token elided except the schema's own names, and
+/// carries no source text, so neither `Display` nor `Debug` can echo it.
+fn redact_parse_error(source: &toml::de::Error, text: &str) -> toml::de::Error {
+    let at = source
+        .span()
+        .map(|span| {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            format!(" at line {line}, column {column}")
+        })
+        .unwrap_or_default();
+    let message = elide_quoted(source.message().lines().next().unwrap_or_default());
+    <toml::de::Error as serde::de::Error>::custom(format!(
+        "{message}{at} (the secret store's contents are not echoed)"
+    ))
+}
+
+/// `message` with the content of every `` ` ``- or `"`-quoted token replaced
+/// by `…`, unless it is one of the [`SCHEMA_NAMES`].
+fn elide_quoted(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(open) = rest.find(['`', '"']) {
+        let quote = rest[open..].chars().next().unwrap_or('`');
+        out.push_str(&rest[..=open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(quote) else {
+            // An unterminated quote: nothing after it can be trusted.
+            out.push('…');
+            return out;
+        };
+        let token = &after[..close];
+        out.push_str(if SCHEMA_NAMES.contains(&token) { token } else { "…" });
+        out.push(quote);
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Load `secrets.toml` from `<root>/.logos/secrets.toml`, or
@@ -229,6 +285,34 @@ mod tests {
         let err = load_secrets_from_root(dir.path()).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
         assert_eq!(err.exit_code(), 2);
+    }
+
+    /// A malformed store fails loud (exit 2) naming its path and position, but
+    /// no form of the key appears in the error's `Display` or `Debug`
+    /// ([NFR-SE-07]) — whichever way the key line is malformed.
+    #[test]
+    fn a_malformed_store_never_echoes_the_key_in_its_error() {
+        let cases = [
+            ("unquoted", "[chat]\napi_key = sk-unquoted-secret-zz99\n", "sk-unquoted-secret-zz99"),
+            ("integer", "[chat]\napi_key = 918273645546\n", "918273645546"),
+            ("in an array", "[chat]\napi_key = [\"sk-array-secret-aa11\"]\n", "sk-array-secret-aa11"),
+            ("as a key name", "[chat]\nsk-keyname-secret-kk22 = 1\n", "sk-keyname-secret-kk22"),
+            ("unterminated", "[chat]\napi_key = \"sk-open-secret-oo33\n", "sk-open-secret-oo33"),
+        ];
+        for (label, text, secret) in cases {
+            let path = Path::new("/ws/.logos/secrets.toml");
+            let err = parse_secrets(text, path).expect_err(label);
+            assert!(matches!(err, ConfigError::Parse { .. }), "{label}: {err:?}");
+            assert_eq!(err.exit_code(), 2, "{label}");
+            let shown = format!("{err} | {err:?} | {err:#}");
+            assert!(shown.contains("/ws/.logos/secrets.toml"), "{label}: the path is named: {shown}");
+            assert!(shown.contains("line 2"), "{label}: the position is named: {shown}");
+            let tail = &secret[secret.len() - 8..];
+            assert!(!shown.contains(tail), "{label}: key material leaked: {shown}");
+        }
+        // The schema's own names survive, so an unknown key stays actionable.
+        let err = parse_secrets("[chat]\nbogus = 1\n", Path::new("s.toml")).unwrap_err();
+        assert!(err.to_string().contains("`api_key`"), "{err}");
     }
 
     #[test]
