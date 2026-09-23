@@ -1909,6 +1909,72 @@ mod surface_parity {
         );
     }
 
+    /// The answers the scope statement says carry a denominator, and the one it
+    /// says does not, are the ones whose result types serialise it ([S-442],
+    /// [FR-IN-09] AC 4).
+    ///
+    /// The vocabulary check above pins the statement's code spans; this pins its
+    /// prose list, which names answers in words so it can read the same on all
+    /// three surfaces. Without it the list was checked by reading — "node" could
+    /// join it on every copy at once and every other guard stayed green.
+    ///
+    /// [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+    /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
+    #[test]
+    fn the_relational_scope_names_the_answers_that_carry_a_denominator() {
+        use logos_core::models::navigation::{
+            AffectedResult, BranchOverlapResult, CalleesResult, CallersResult,
+            ImpactIntersectionResult, ImpactResult, NodeInfo, PrecedentResult,
+        };
+
+        let carries = |value: serde_json::Value| value.get("resolution_denominator").is_some();
+        let answers = [
+            ("callers", carries(serde_json::to_value(CallersResult::default()).unwrap())),
+            ("callees", carries(serde_json::to_value(CalleesResult::default()).unwrap())),
+            ("impact", carries(serde_json::to_value(ImpactResult::default()).unwrap())),
+            ("affected", carries(serde_json::to_value(AffectedResult::default()).unwrap())),
+            ("precedent", carries(serde_json::to_value(PrecedentResult::default()).unwrap())),
+            (
+                "impact intersection",
+                carries(serde_json::to_value(ImpactIntersectionResult::default()).unwrap()),
+            ),
+            (
+                "branch overlap",
+                carries(serde_json::to_value(BranchOverlapResult::default()).unwrap()),
+            ),
+        ];
+        for (answer, carried) in answers {
+            assert!(
+                carried,
+                "the relational scope statement says the {answer} answer carries a \
+                 `resolution_denominator`, and its result type does not serialise one"
+            );
+        }
+        let (last, rest) = answers.split_last().expect("seven answers");
+        let listed = format!(
+            "— {} and {} —",
+            rest.iter().map(|(a, _)| *a).collect::<Vec<_>>().join(", "),
+            last.0
+        );
+        let scope = normalise_whitespace(RELATIONAL_SCOPE);
+        assert!(
+            scope.contains(&listed),
+            "the relational scope statement's list of answers is not {listed:?} — \
+             the list this test checks against the result types"
+        );
+
+        assert!(
+            scope.contains("A node answer's edge list carries none"),
+            "the statement no longer says the node answer carries no denominator — \
+             drop this half with it"
+        );
+        assert!(
+            !carries(serde_json::to_value(NodeInfo::default()).unwrap()),
+            "the node answer now carries a `resolution_denominator`: the statement's \
+             \"A node answer's edge list carries none\" is false — move node into the list"
+        );
+    }
+
     /// The three planning-time capabilities ([FR-NV-11], [FR-NV-12], [FR-NV-13])
     /// — tool name and CLI command spelling.
     const CAPABILITIES: &[(&str, &str)] = &[
