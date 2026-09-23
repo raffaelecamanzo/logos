@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StatsInfo } from "../api/types.ts";
 import { NAV_GROUPS, NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
+import styles from "./Sidebar.module.css";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 
 // PARTIAL, not whole: the shell calls more of the router than this spec overrides
@@ -209,6 +210,16 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
 
     expect(lists("Workspace")).toEqual(groupSizes(WORKSPACE_NAV_ITEMS));
     expect(lists("Service")).toEqual(groupSizes(NAV_ITEMS));
+
+    // And the scoped class lands on the Workspace section and ONLY there. Under
+    // `css: false` a CSS-Module import is a proxy that names every key, so this
+    // reads the rendered class, not the stylesheet: whether the key is DEFINED is
+    // the Rust suite's job (`every_module_style_key_a_view_uses_is_defined_in_the_…`).
+    // On the Service section it would erase that section's group hairlines.
+    expect(region("Workspace").classList).toContain(styles.section);
+    expect(region("Workspace").classList).toContain(styles.appSection);
+    expect(region("Service").classList).toContain(styles.section);
+    expect(region("Service").classList).not.toContain(styles.appSection);
     expect(lists("Workspace")).toHaveLength(2);
     expect(lists("Service")).toHaveLength(3);
   });

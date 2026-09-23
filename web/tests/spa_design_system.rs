@@ -1081,8 +1081,9 @@ fn the_service_section_header_gives_width_back_but_stays_a_control() {
 /// above `.group + .group`, the second Workspace group would keep its top gap.
 ///
 /// The markup half — that the Workspace region still renders two lists and the
-/// Service region three — is asserted in `web/ui/src/shell/Sidebar.test.tsx`; this is
-/// the stylesheet half, which that suite cannot see because it runs with `css: false`.
+/// Service region three, and that the Workspace section and only it carries
+/// `appSection` — is asserted in `web/ui/src/shell/Sidebar.test.tsx`; this is the
+/// stylesheet half, which that suite cannot see because it runs with `css: false`.
 #[test]
 fn the_workspace_section_renders_its_groups_as_one_list() {
     const SCOPED: &str = ".appSection .group";
@@ -1142,15 +1143,6 @@ fn the_workspace_section_renders_its_groups_as_one_list() {
              come AFTER it in source order to win; it comes before",
         );
     }
-
-    // The class the rule scopes to is applied by the component. That it is applied
-    // to the Workspace section and not the Service one is a rendered-state fact this
-    // suite cannot read (checked at review); a key the stylesheet does not define is
-    // caught by `every_module_style_key_a_view_uses_is_defined_in_the_stylesheet_it_imports`.
-    assert!(
-        read("src/shell/Sidebar.tsx").contains("styles.appSection"),
-        "`Sidebar.tsx` never applies `styles.appSection`, so `{SCOPED}` matches nothing",
-    );
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
