@@ -47,21 +47,29 @@ const PATH_KINDS: &[&str] = &[
     "metavariable",
 ];
 
-/// Canonicalise a path expression's source text into its segments.
+/// Canonicalise a **member path**'s source text into its segments — the
+/// `a.b.c` / `a::b::c` grammar, and the import text of a language whose
+/// specifiers are names ([`ImportSpecifier::Name`]).
 ///
 /// Strips whitespace and any `<…>` span (turbofish / generic arguments — for
 /// binding purposes `Vec::<u8>::new` is the path `Vec::new`), then splits on
 /// the path separators of the supported languages — `::` (Rust/C++/Ruby), `.`
-/// (Python/TS/Go/Java member paths), `/` (Go/TS import paths), and `\` (PHP
+/// (Python/TS/Go/Java member paths), `/` (Ruby `require` paths), and `\` (PHP
 /// namespace paths, S-060) — dropping empty segments (which also normalises a
-/// leading global-path `::std::x` to `std::x`, a relative `./users` to
-/// `users`, and PHP's leading-`\` fully-qualified `\App\X` to `App::X`). Each
-/// separator is unique to its languages' path text, so a language that never
-/// uses one is left byte-identical by its inclusion ([NFR-RA-03]) — Rust path
-/// text contains no bare `.`/`/`/`\`, and PHP's backslash appears in no other
-/// language's paths.
+/// leading global-path `::std::x` to `std::x` and PHP's leading-`\`
+/// fully-qualified `\App\X` to `App::X`). Each separator is unique to its
+/// languages' path text, so a language that never uses one is left
+/// byte-identical by its inclusion ([NFR-RA-03]) — Rust path text contains no
+/// bare `.`/`/`/`\`, and PHP's backslash appears in no other language's paths.
+///
+/// A **module specifier** written as a path (`"./nav.ts"`,
+/// `"github.com/lib/pq"`) is *not* this grammar — splitting it here records
+/// `nav::ts` and cuts the host in half — and goes through
+/// [`specifier_segments`] instead (S-439, [CR-142] D1).
 ///
 /// [NFR-RA-03]: ../../../docs/specs/requirements/NFR-RA-03.md
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+/// [`ImportSpecifier::Name`]: crate::plugin::ImportSpecifier::Name
 pub(crate) fn split_path_text(text: &str) -> Vec<String> {
     let mut cleaned = String::with_capacity(text.len());
     let mut depth = 0usize;
@@ -81,19 +89,79 @@ pub(crate) fn split_path_text(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Canonicalise one captured `@ref.import` node's text into path segments.
+/// Canonicalise one captured `@ref.import` node's text into path segments, for
+/// a language whose specifiers are **names** ([`ImportSpecifier::Name`]).
 ///
-/// Import sources arrive in language-shaped clothing: a Python dotted name
-/// (`django.urls`), a Go/TS quoted module string (`"net/http"`, `'./users'`),
-/// a Java scoped identifier (`org.springframework.web`). One matching pair of
-/// surrounding quotes is stripped, then the text splits like any path. The
-/// result feeds a `RefFact` whose `::`-joined target is the ledger's canonical
-/// form — the framework candidacy gate ([FR-FW-04]) and the binder both read
-/// that form, whatever the source language.
+/// Name-shaped import sources arrive in language-shaped clothing: a Python
+/// dotted name (`django.urls`), a Java scoped identifier
+/// (`org.springframework.web`), a PHP namespace path, a Ruby `require` string.
+/// One matching pair of surrounding quotes is stripped, then the text splits
+/// like any member path. The result feeds a `RefFact` whose `::`-joined target
+/// is the ledger's canonical form — the framework candidacy gate ([FR-FW-04])
+/// and the binder both read that form, whatever the source language. A
+/// language whose specifiers are paths uses [`specifier_segments`].
 ///
 /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+/// [`ImportSpecifier::Name`]: crate::plugin::ImportSpecifier::Name
 pub(crate) fn import_segments(text: &str) -> Vec<String> {
     split_path_text(unquote(text))
+}
+
+/// The leading segment a relative specifier keeps in the ledger target: `.`
+/// (the importing file's directory) or `..` (its parent). Neither can survive
+/// [`split_path_text`] — `.` is one of its separators — so a target headed by
+/// one is unambiguously a relative path specifier to the binder.
+pub(crate) fn is_relative_head(segment: &str) -> bool {
+    matches!(segment, "." | "..")
+}
+
+/// Canonicalise one captured `@ref.import` node's text by **path** rules, for a
+/// language whose specifiers are paths ([`ImportSpecifier::Path`]; S-439,
+/// [CR-142] D1, [FR-RS-01]).
+///
+/// A module specifier is a path, not a member expression:
+/// - one pair of surrounding quotes is stripped, and **only `/`** separates — a
+///   dot belongs to the segment it sits in, so `github.com/org/repo` keeps its
+///   host whole (`github.com::org::repo`) and `lodash.debounce` stays one name;
+/// - a **relative** specifier (`./x`, `../x`, `.`) keeps its leading `.`/`..`
+///   segment ([`is_relative_head`]) so the binder can resolve it against the
+///   importing file, which extraction deliberately does not do — the ledger
+///   records what the file wrote, and binding is the resolution pass's job
+///   ([NFR-RA-05]). Interior `.` hops are dropped; interior `..` hops are kept
+///   for the binder to fold;
+/// - a relative specifier's trailing extension is stripped **iff** it is one of
+///   `extensions` — the extensions that name the imported file itself — so
+///   `"./nav.ts"` and `"./nav"` canonicalise to the one target `.::nav`. Any
+///   other extension (`"./styles.css"`) is kept, so it can never be read as a
+///   code file of the same stem. A bare specifier (`react`, `next/link`) names
+///   a package, never a file, and is never stripped.
+///
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+/// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [`ImportSpecifier::Path`]: crate::plugin::ImportSpecifier::Path
+pub(crate) fn specifier_segments(text: &str, extensions: &[String]) -> Vec<String> {
+    let spec = unquote(text);
+    let relative = spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../");
+    let mut segments: Vec<String> = Vec::new();
+    for (i, seg) in spec.split('/').enumerate() {
+        match seg {
+            "" => {}
+            // The leading `.` is the relative marker; an interior one is a no-op.
+            "." if i > 0 => {}
+            _ => segments.push(seg.to_string()),
+        }
+    }
+    if relative {
+        if let Some(last) = segments.last_mut().filter(|s| !is_relative_head(s)) {
+            if let Some((stem, ext)) = last.rsplit_once('.') {
+                if !stem.is_empty() && extensions.iter().any(|e| e == ext) {
+                    *last = stem.to_string();
+                }
+            }
+        }
+    }
+    segments
 }
 
 /// Strip one matching pair of surrounding string-literal quotes, if present.
@@ -356,15 +424,15 @@ mod tests {
             split_path_text("org.springframework.web"),
             ["org", "springframework", "web"]
         );
-        // Go / TS slash-separated module paths.
-        assert_eq!(split_path_text("net/http"), ["net", "http"]);
+        // Ruby `require` paths are name-grammar import text that uses `/`.
         assert_eq!(
-            split_path_text("github.com/gin-gonic/gin"),
-            ["github", "com", "gin-gonic", "gin"]
+            split_path_text("active_support/core_ext"),
+            ["active_support", "core_ext"]
         );
-        // A relative TS specifier: the `.`/`..` hops dissolve into separators,
-        // leaving the module stem.
-        assert_eq!(split_path_text("./users"), ["users"]);
+        // A TS/Go module specifier is NOT this grammar (S-439): it goes through
+        // `specifier_segments`, pinned below. What stays here is that the member
+        // path grammar still splits every dot — `a.b.c` is three names.
+        assert_eq!(split_path_text("a.b.c"), ["a", "b", "c"]);
         // PHP namespace paths (S-060): backslash is a separator, so a
         // `use Illuminate\Support\Facades\Route` import and a leading-`\`
         // fully-qualified name both canonicalise to `::`-joined segments — the
@@ -385,6 +453,90 @@ mod tests {
         assert_eq!(import_segments("fastapi"), ["fastapi"]);
         assert_eq!(import_segments("\"unterminated"), ["\"unterminated"]);
         assert!(import_segments("\"\"").is_empty());
+    }
+
+    fn ts_exts() -> Vec<String> {
+        ["ts", "tsx", "js", "jsx", "mjs", "cjs"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    #[test]
+    fn a_relative_specifier_with_an_extension_keeps_its_relative_head_and_drops_the_extension() {
+        // The CR-142 §3.1 evidence row: `App.tsx:22` wrote `"./nav.ts"` and the
+        // ledger recorded `nav::ts`. Path grammar: `.` marks it relative, the
+        // declared extension is the file's own and is stripped.
+        assert_eq!(specifier_segments("\"./nav.ts\"", &ts_exts()), [".", "nav"]);
+        assert_eq!(
+            specifier_segments("'./shell/Header.tsx'", &ts_exts()),
+            [".", "shell", "Header"]
+        );
+    }
+
+    #[test]
+    fn a_relative_specifier_without_an_extension_canonicalises_to_the_same_shape() {
+        // desk-picker's spelling. Pinned separately from the extension-present
+        // case: one of the two produced 0 bound imports and the other 9, so
+        // neither may be inferred from the other.
+        assert_eq!(
+            specifier_segments("\"./auth/AuthContext\"", &ts_exts()),
+            [".", "auth", "AuthContext"]
+        );
+        assert_eq!(specifier_segments("'./nav'", &ts_exts()), [".", "nav"]);
+    }
+
+    #[test]
+    fn a_specifier_splits_on_slash_only_so_a_dotted_host_name_stays_whole() {
+        // The Go evidence row: the host was cut mid-name into `github::com`.
+        assert_eq!(
+            specifier_segments("\"github.com/sourcesense/desk-picker/internal/admin\"", &[]),
+            [
+                "github.com",
+                "sourcesense",
+                "desk-picker",
+                "internal",
+                "admin"
+            ]
+        );
+        assert_eq!(specifier_segments("\"gopkg.in/yaml.v3\"", &[]), ["gopkg.in", "yaml.v3"]);
+        // Bare package specifiers are unchanged where they carry no dot…
+        assert_eq!(specifier_segments("\"net/http\"", &[]), ["net", "http"]);
+        assert_eq!(specifier_segments("'next/link'", &ts_exts()), ["next", "link"]);
+        assert_eq!(specifier_segments("'react'", &ts_exts()), ["react"]);
+        // …and a bare specifier names a package, never a file: no stripping.
+        assert_eq!(specifier_segments("'chart.js'", &ts_exts()), ["chart.js"]);
+    }
+
+    #[test]
+    fn a_relative_specifier_keeps_an_undeclared_extension_and_its_parent_hops() {
+        // `.css` is not a code extension of the language: kept, so it can never
+        // be read as a `styles.ts` of the same stem.
+        assert_eq!(
+            specifier_segments("'./styles.css'", &ts_exts()),
+            [".", "styles.css"]
+        );
+        assert_eq!(
+            specifier_segments("'../api/client.js'", &ts_exts()),
+            ["..", "api", "client"]
+        );
+        assert_eq!(specifier_segments("'../../a/./b'", &ts_exts()), ["..", "..", "a", "b"]);
+        // A bare-directory specifier keeps only its marker.
+        assert_eq!(specifier_segments("'.'", &ts_exts()), ["."]);
+        assert_eq!(specifier_segments("'..'", &ts_exts()), [".."]);
+        // A dotfile stem is not an extension to strip.
+        assert_eq!(specifier_segments("'./.ts'", &ts_exts()), [".", ".ts"]);
+        assert!(specifier_segments("\"\"", &ts_exts()).is_empty());
+    }
+
+    #[test]
+    fn only_a_relative_head_is_a_relative_marker() {
+        assert!(is_relative_head("."));
+        assert!(is_relative_head(".."));
+        assert!(!is_relative_head("..."));
+        assert!(!is_relative_head(".nav"));
+        assert!(!is_relative_head("self"));
+        // The member-path grammar can never produce the marker.
+        assert!(split_path_text("./a.b").iter().all(|s| !is_relative_head(s)));
     }
 }
 

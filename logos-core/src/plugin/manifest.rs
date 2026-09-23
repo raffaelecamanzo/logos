@@ -96,6 +96,44 @@ pub enum ExportConvention {
     PublicDefault,
 }
 
+/// The grammar a language's **import specifier** is written in — the text an
+/// `@ref.import` capture holds (S-439, [CR-142] D1, [FR-RS-01]).
+///
+/// A specifier and a member expression are two grammars, and a descriptor that
+/// declared only [`module_separator`](PluginManifest::module_separator) could not
+/// say so. In a member path `a.b.c` the dot separates names; in a module
+/// specifier `"./nav.ts"` it introduces a file extension, and in
+/// `"github.com/org/repo/internal/admin"` it sits *inside* a host name. With no
+/// way to declare the difference, every import was split by the member-path
+/// grammar — on every separator any language's member paths use — which
+/// recorded `./nav.ts` as `nav::ts` and cut the Go host in half, so neither
+/// could ever match a file: the reason TypeScript, TSX, JavaScript and Go
+/// produced zero `Imports` edges.
+///
+/// The default is [`ImportSpecifier::Name`], the behaviour every descriptor had
+/// before this field existed, so a language that omits it is untouched
+/// ([NFR-MA-01]).
+///
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+/// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportSpecifier {
+    /// A dotted/scoped **name** (`django.urls`, `org.springframework.web`,
+    /// `Illuminate\Support\Route`): canonicalised like a member path, every
+    /// separator the language's paths use splitting a segment.
+    #[default]
+    Name,
+    /// A **path** (`"./nav.ts"`, `"github.com/lib/pq"`): only `/` separates, a
+    /// dot is part of the segment it sits in, a relative specifier keeps its
+    /// leading `.`/`..` so the binder can resolve it against the importing file,
+    /// and a relative specifier's trailing
+    /// [`specifier_extensions`](PluginManifest::specifier_extensions) extension is
+    /// stripped.
+    Path,
+}
+
 /// How a language marks a function as a test — the declarative rule behind the
 /// extraction-time test-marker evidence flag ([FR-EX-06], [ADR-18], [CR-001]).
 ///
@@ -197,8 +235,26 @@ pub struct PluginManifest {
     pub name: String,
     /// File extensions claimed (without the leading dot), e.g. `["rs"]`.
     pub extensions: Vec<String>,
-    /// Module path separator joining symbol segments (`::`, `.`, `/`).
+    /// The **member-path** separator joining symbol segments (`::`, `.`, `/`) —
+    /// the `a.b.c` grammar only. An import specifier's grammar is declared
+    /// separately by [`import_specifier`](Self::import_specifier), because the
+    /// two are different grammars (S-439).
     pub module_separator: String,
+    /// The grammar this language's import specifiers are written in
+    /// ([`ImportSpecifier`]). Defaults to [`ImportSpecifier::Name`] when omitted.
+    #[serde(default)]
+    pub import_specifier: ImportSpecifier,
+    /// File extensions (without the leading dot) a **relative** path specifier
+    /// may spell and that name the imported file itself, so `"./nav.ts"` and
+    /// `"./nav"` canonicalise to the one ledger target (S-439). Only meaningful
+    /// under [`ImportSpecifier::Path`]; declaring any under
+    /// [`ImportSpecifier::Name`] is a descriptor error. An extension not listed
+    /// here (`"./styles.css"`) is kept, so it can never be read as a code file of
+    /// the same stem ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[serde(default)]
+    pub specifier_extensions: Vec<String>,
     /// The tree-sitter ABI version this grammar was generated against. Asserted
     /// against the compiled grammar at load ([FR-PL-02], `abi::assert_abi`).
     pub abi_version: usize,
@@ -742,6 +798,23 @@ impl PluginManifest {
         if self.module_separator.is_empty() {
             return bail("`module_separator` must not be empty".to_string());
         }
+        // Stripping is a path-grammar rule: a name-grammar language has no file
+        // extension in its specifiers to strip, so a list there is a descriptor
+        // bug rather than a no-op to tolerate.
+        if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
+            return bail(
+                "`specifier_extensions` requires `import_specifier = \"path\"`".to_string(),
+            );
+        }
+        if let Some(bad) = self
+            .specifier_extensions
+            .iter()
+            .find(|e| e.is_empty() || e.contains(['.', '/']))
+        {
+            return bail(format!(
+                "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
+            ));
+        }
         // Every declared capability must have a query backing it, so a `logos
         // languages` capability claim can never be a query the engine cannot
         // run.
@@ -985,6 +1058,50 @@ mod tests {
         assert!(!m.artifact);
         assert!(m.filenames.is_empty());
         assert!(m.config.is_none());
+        // A descriptor that does not declare its specifier grammar keeps the
+        // name grammar it always had (S-439, NFR-MA-01).
+        assert_eq!(m.import_specifier, ImportSpecifier::Name);
+        assert!(m.specifier_extensions.is_empty());
+    }
+
+    /// The specifier grammar is declared apart from the member-path separator
+    /// (S-439): `module_separator = "."` and `import_specifier = "path"` coexist,
+    /// and stripping is a path-grammar-only rule over bare extensions.
+    #[test]
+    fn the_specifier_grammar_is_declared_apart_from_the_member_path_separator() {
+        let ts = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \".\"\nimport_specifier = \"path\"\nspecifier_extensions = [\"ts\", \"tsx\"]",
+        );
+        let m = PluginManifest::parse("typescript/plugin.toml", &ts).unwrap();
+        assert_eq!(m.module_separator, ".");
+        assert_eq!(m.import_specifier, ImportSpecifier::Path);
+        assert_eq!(m.specifier_extensions, ["ts", "tsx"]);
+
+        let on_a_name_grammar = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \"::\"\nspecifier_extensions = [\"rs\"]",
+        );
+        let err = PluginManifest::parse("x/plugin.toml", &on_a_name_grammar)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires `import_specifier"), "{err}");
+
+        for bad in ["\".ts\"", "\"\"", "\"a/b\""] {
+            let toml = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \".\"\nimport_specifier = \"path\"\nspecifier_extensions = [{bad}]"),
+            );
+            let err = PluginManifest::parse("x/plugin.toml", &toml)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("must be a bare extension"), "{bad}: {err}");
+        }
+        let unknown = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \".\"\nimport_specifier = \"url\"",
+        );
+        assert!(PluginManifest::parse("x/plugin.toml", &unknown).is_err());
     }
 
     #[test]

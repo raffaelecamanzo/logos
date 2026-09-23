@@ -7,9 +7,15 @@
 name = "typescript"
 extensions = ["ts", "js", "mjs", "cjs"]
 
-# Member paths join with a dot; import specifiers are quoted module paths —
-# reference extraction canonicalises both into the `::`-joined ledger form.
+# Member paths join with a dot (`a.b.c`). An import specifier is a different
+# grammar — a PATH — and is declared separately (S-439, CR-142 D1): only `/`
+# separates, a relative specifier resolves against the importing file, and a
+# trailing extension below is stripped so `"./nav.ts"` and `"./nav"` name the
+# same file. Both TS grammars declare the pair identically (ADR-09); an
+# extension not listed (`"./styles.css"`) is kept and so never reads as code.
 module_separator = "."
+import_specifier = "path"
+specifier_extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"]
 
 # tree-sitter-typescript 0.23 is generated against ABI 14; asserted at load
 # against the compiled grammar (FR-PL-03, NFR-PC-03).

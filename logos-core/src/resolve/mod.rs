@@ -67,6 +67,11 @@ pub mod dispatch;
 /// shared-state matches to `route`/`component` nodes against the resolved
 /// graph — ledger-gated, binder-proven, reconciled every run. See its module docs.
 pub mod framework;
+/// The Go modules a tree declares (S-439, CR-142 D1): the `go.mod` `module`
+/// directive a Go import path is anchored on, so an intra-module path binds to
+/// its package and an external one never binds to a directory that merely
+/// shares its last segments. See its module docs.
+pub(crate) mod go_module;
 pub(crate) mod grpc_key;
 /// The shared positional route-template normalizer (S-069, CR-011): aligns the
 /// OpenAPI `ApiOperation` path templates with framework-extracted `route` node
@@ -96,14 +101,17 @@ mod promote;
 pub mod topics;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 use rayon::prelude::*;
 
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
+use crate::model::EdgeKind;
 use crate::models::navigation::{LanguageResolution, RelationResolution};
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
+use crate::plugin::LanguageRegistry;
 use crate::runtime::Runtime;
 
 /// `true` when a ledger `target` (canonical `::`-joined) falls under a
@@ -150,7 +158,9 @@ struct Snapshot {
 /// [`index`]: crate::pipeline::index
 #[derive(Debug, Default)]
 pub struct Delta {
-    /// Project-relative paths re-extracted or removed this sync.
+    /// Project-relative paths re-extracted or removed this sync — plus any Go
+    /// module descriptor (`go.mod`) the sync was handed, which is never indexed
+    /// but moves every Go import binding (S-439).
     pub changed_paths: HashSet<String>,
     /// Tokenized names this sync added or removed (see [`tokens`]).
     pub dirty_tokens: HashSet<String>,
@@ -177,6 +187,19 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 /// See the module docs for the snapshot → parallel-compute → serial-commit
 /// shape. Returns the run's [`ResolutionStats`] ([FR-RS-04]).
 ///
+/// `tree` is the registry the tree was indexed with and its root — the
+/// path-specifier context (S-439, [CR-142] D1). The registry says which files
+/// write their import specifiers as paths and which files each may resolve to
+/// ([`LanguageRegistry::specifier_target_extensions`]); the root supplies the
+/// `go.mod` above each indexed `.go` file ([`go_module`]) so a Go import path
+/// binds against the module that declares it. The pipeline always passes it.
+/// `None` is for a synthetic graph with no tree behind it: no `go.mod` is read,
+/// no import binds by path rules, and every import takes the member-path
+/// hierarchy — which reads a bare `react` as a name, so it is not what a real
+/// tree may be resolved with.
+///
+/// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
+///
 /// # Errors
 /// Returns an error if the snapshot read or the commit batch fails (the
 /// batch rolls back wholesale, [NFR-RA-07]).
@@ -185,6 +208,7 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
 pub fn run(
     runtime: &Runtime,
+    tree: Option<(&LanguageRegistry, &Path)>,
     policy: BindingPolicy,
     delta: Option<&Delta>,
 ) -> Result<ResolutionStats> {
@@ -208,7 +232,21 @@ pub fn run(
         })
     })?;
 
-    let index = binder::Index::build(&snap.nodes, &snap.edges, &snap.refs);
+    let (specifier_targets, go_modules) =
+        tree.map_or_else(Default::default, |(registry, root)| {
+            let go_files: std::collections::BTreeSet<&str> = snap
+                .nodes
+                .iter()
+                .filter_map(|n| n.file_path.as_deref())
+                .filter(|p| p.ends_with(".go"))
+                .collect();
+            (
+                registry.specifier_target_extensions(),
+                go_module::discover(root, go_files),
+            )
+        });
+    let index = binder::Index::build(&snap.nodes, &snap.edges, &snap.refs)
+        .with_path_specifiers(specifier_targets, go_modules);
 
     // A full index (no delta) re-binds the whole ledger. An incremental sync
     // re-binds only the rows whose outcome the change-set can move; every other
@@ -287,10 +325,11 @@ pub fn run(
                     kind,
                     payload,
                 } => {
-                    // A module call fans out to every admitted `.tf` in its source
-                    // dir (CR-011): one edge per target, all sharing the relation
-                    // payload, all idempotent. `targets` is non-empty, so the row
-                    // is resolved.
+                    // One reference naming a set: a Terraform module call's
+                    // `.tf` files (CR-011), a `dyn T` call's impls (S-281), a Go
+                    // import's package files (S-439). One edge per target, all
+                    // sharing the payload, all idempotent. `targets` is
+                    // non-empty, so the row is resolved.
                     for target in targets {
                         if w.insert_edge_with_payload_if_absent(
                             *source,
@@ -330,7 +369,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 
 /// Whether the incremental run must re-bind row `r` given `delta`.
 ///
-/// Three reasons force a re-bind; any one suffices:
+/// Four reasons force a re-bind; any one suffices:
 /// 1. **A** — `r` belongs to a file re-extracted or removed this sync. Its source
 ///    may have moved, and capture-before-delete lands inbound cross-file edges
 ///    here as `Symbol` rows ([ADR-10]); both need rebinding.
@@ -338,7 +377,14 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    file-path/route buckets whose normalization can erase the literal a token
 ///    test would key on. They are a small minority, so re-bind them whenever
 ///    anything changed rather than reason about their normalization.
-/// 3. **B** — the row's target (or a name its file's `as`-aliases expand that
+/// 3. **Path-specifier fallback** (S-439) — an import written as a path binds
+///    against the file tree and the `go.mod` module declarations, and neither is
+///    a name a token test sees: `'.'` spells no token at all, a file added to a
+///    Go module's root package shares none with the module path, and a `go.mod`
+///    carries no node. So every `Imports` row from a path-grammar file is
+///    re-bound whenever anything changed — the same stance as the artifact
+///    fallback, for the same reason.
+/// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
 ///
@@ -354,6 +400,9 @@ fn is_affected(
 ) -> bool {
     if let Some(path) = r.file_id.and_then(|id| file_paths.get(&id)) {
         if delta.changed_paths.contains(path) {
+            return true;
+        }
+        if r.kind == EdgeKind::Imports && index.is_path_specifier_file(path) {
             return true;
         }
     }

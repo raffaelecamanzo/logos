@@ -1817,7 +1817,8 @@ pub struct LanguageDescriptor {
     /// `logos languages` distinguishes artifact plugins.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub artifact: bool,
-    /// Module path separator joining symbol segments (`::`, `.`, `/`).
+    /// The member-path separator joining symbol segments (`::`, `.`, `/`) — not
+    /// the import-specifier grammar, which a plugin declares apart (S-439).
     pub module_separator: String,
     /// Extraction capabilities this grammar supports (e.g. `["symbols"]`).
     pub capabilities: Vec<String>,

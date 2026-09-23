@@ -6,10 +6,13 @@
 name = "go"
 extensions = ["go"]
 
-# Go member access joins with a dot (`http.HandleFunc`); import paths are
-# slash-separated module strings — reference extraction canonicalises both
-# into the `::`-joined ledger form.
+# Go member access joins with a dot (`http.HandleFunc`). An import path is a
+# different grammar — a PATH — declared separately (S-439, CR-142 D1): only `/`
+# separates, so the dotted host in `"github.com/org/repo/internal/admin"` stays
+# one segment. The binder resolves an intra-module path against the module's
+# `go.mod`; Go import paths name directories, so no extension is stripped.
 module_separator = "."
+import_specifier = "path"
 
 # tree-sitter-go 0.25 is generated against ABI 15.
 abi_version = 15
@@ -42,8 +45,9 @@ test_convention = "go-test-func"
 
 # The ratified v1 Go framework set (FR-FW-03): net/http + Gin. Canonical
 # `::`-joined prefixes of the import paths ("net/http",
-# "github.com/gin-gonic/gin").
-framework_detectors = ["net::http", "github::com::gin-gonic::gin"]
+# "github.com/gin-gonic/gin") — path-grammar canonical, so the host keeps its
+# dot (S-439).
+framework_detectors = ["net::http", "github.com::gin-gonic::gin"]
 
 # Canonical reference prefixes whose presence in a file's ledger makes the file
 # an outbound **HTTP client-call** candidate (S-345, CR-108, FR-WS-08) — the

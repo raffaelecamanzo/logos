@@ -215,7 +215,8 @@ pub fn index(
     // Pass 2 binds the freshly persisted reference ledger (S-011); the
     // framework pass promotes route/component matches against the resolved
     // graph (S-012); Pass 3 annotates the resolved graph (S-014).
-    let (mut resolution, resolve_ms) = resolve_pass(runtime, config.resolution.policy, None)?;
+    let (mut resolution, resolve_ms) =
+        resolve_pass(runtime, registry, root, config.resolution.policy, None)?;
     let (framework, promoted_nodes) =
         framework_pass(runtime, registry, root, config.resolution.policy, None)?;
     // CR-017 / S-080: bind any deferred reference (an OpenAPI operation's route
@@ -224,6 +225,8 @@ pub fn index(
     // the same seam and folded into the resolve-phase total (FR-OB-06).
     let rebind_ms = rebind_for_promotions(
         runtime,
+        registry,
+        root,
         config.resolution.policy,
         &promoted_nodes,
         &mut resolution,
@@ -521,6 +524,7 @@ pub fn sync(
     let mut removals: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut files_failed: Vec<String> = Vec::new();
+    let mut module_descriptors: Vec<String> = Vec::new();
 
     for path in paths {
         let Some(rel) = relativize(&canon_root, path) else {
@@ -532,6 +536,12 @@ pub fn sync(
         };
         if !seen.insert(rel.clone()) {
             continue; // the same file requested twice
+        }
+        // A Go module descriptor is never indexed, yet its `module` line is what
+        // every Go import binds against (S-439): record it so the resolve pass
+        // re-binds them. The admission gate below then skips it as usual.
+        if rel == "go.mod" || rel.ends_with("/go.mod") {
+            module_descriptors.push(rel.clone());
         }
 
         let abs = canon_root.join(&rel);
@@ -645,6 +655,7 @@ pub fn sync(
         .iter()
         .map(|l| l.rel.clone())
         .chain(removals.iter().cloned())
+        .chain(module_descriptors)
         .collect();
     let old_names: Vec<String> = if changed_paths.is_empty() {
         Vec::new()
@@ -750,7 +761,8 @@ pub fn sync(
     // Sync does not surface a per-phase breakdown (FR-OB-06 is index-scoped), so
     // the seam-measured durations these passes return are discarded here — the
     // `tracing` events still reach telemetry unchanged.
-    let (resolution, _resolve_ms) = resolve_pass(runtime, config.resolution.policy, Some(&delta))?;
+    let (resolution, _resolve_ms) =
+        resolve_pass(runtime, registry, &canon_root, config.resolution.policy, Some(&delta))?;
     result.resolution = resolution;
     let (framework, promoted_nodes) =
         framework_pass(runtime, registry, &canon_root, config.resolution.policy, Some(&delta))?;
@@ -759,6 +771,8 @@ pub fn sync(
     // the resolve above; rebind deferred cross-artifact references that target it.
     rebind_for_promotions(
         runtime,
+        registry,
+        &canon_root,
         config.resolution.policy,
         &promoted_nodes,
         &mut result.resolution,
@@ -895,7 +909,8 @@ pub fn reconcile(
                 changed_paths: purge.paths.iter().cloned().collect(),
                 dirty_tokens,
             };
-            let (res, _resolve_ms) = resolve_pass(runtime, config.resolution.policy, Some(&delta))?;
+            let (res, _resolve_ms) =
+                resolve_pass(runtime, registry, root, config.resolution.policy, Some(&delta))?;
             resolution = res;
         }
     }
@@ -1937,6 +1952,8 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn resolve_pass(
     runtime: &Runtime,
+    registry: &LanguageRegistry,
+    root: &Path,
     policy: BindingPolicy,
     delta: Option<&crate::resolve::Delta>,
 ) -> Result<(ResolutionStats, u64)> {
@@ -1945,7 +1962,7 @@ fn resolve_pass(
     // (re-bind only the change-affected rows, CR-015). The measured wall-clock
     // rides back for the per-phase index breakdown (FR-OB-06, CR-057).
     let (res, ms) = crate::observability::traced_timed(Tool::Resolve, || {
-        crate::resolve::run(runtime, policy, delta)
+        crate::resolve::run(runtime, Some((registry, root)), policy, delta)
     });
     Ok((res?, ms))
 }
@@ -2062,6 +2079,8 @@ fn dispatch_pass(
 /// per-phase index breakdown (FR-OB-06, CR-057).
 fn rebind_for_promotions(
     runtime: &Runtime,
+    registry: &LanguageRegistry,
+    root: &Path,
     policy: BindingPolicy,
     promoted: &[String],
     resolution: &mut ResolutionStats,
@@ -2080,7 +2099,7 @@ fn rebind_for_promotions(
         changed_paths: HashSet::new(),
         dirty_tokens,
     };
-    let (res, ms) = resolve_pass(runtime, policy, Some(&delta))?;
+    let (res, ms) = resolve_pass(runtime, registry, root, policy, Some(&delta))?;
     *resolution = res;
     Ok(ms)
 }

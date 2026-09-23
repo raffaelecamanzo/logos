@@ -98,13 +98,15 @@ use rayon::prelude::*;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, RefForm};
-use crate::plugin::{LanguagePlugin, LanguageRegistry};
+use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, Semantics};
 use crate::resolve::http_client_call::ClientCallRefusal;
 
 use config::accessor::{BindingView, DeclaredTypes};
 use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 
-use refs::{flatten_use_tree, import_segments, macro_call_refs, split_path_text};
+use refs::{
+    flatten_use_tree, import_segments, macro_call_refs, specifier_segments, split_path_text,
+};
 use symbol::{build_symbol, descriptor_for, path_segments};
 
 /// The capture-name group prefix the `symbols` query uses (`@symbol.<kind>`).
@@ -720,6 +722,7 @@ fn extract_one(
             &decls,
             &symbols,
             file_module.as_ref(),
+            plugin.semantics(),
         );
     }
 
@@ -1296,8 +1299,10 @@ fn file_module_name(path_segments: &[&str]) -> String {
 ///
 /// Each capture is attributed to its innermost enclosing captured declaration
 /// (falling back to the file module for file-scope references), normalised via
-/// [`split_path_text`] / [`flatten_use_tree`], deduplicated, and sorted into
-/// the canonical `(source, target, form, kind)` order ([NFR-RA-06]).
+/// [`split_path_text`] / [`flatten_use_tree`] — or, for an import in a language
+/// whose `semantics` declare path specifiers, [`specifier_segments`] (S-439) —
+/// deduplicated, and sorted into the canonical `(source, target, form, kind)`
+/// order ([NFR-RA-06]).
 fn collect_refs(
     query: &Query,
     root: Node<'_>,
@@ -1305,6 +1310,7 @@ fn collect_refs(
     decls: &[Decl<'_>],
     symbols: &[Option<LogosSymbol>],
     file_module: Option<&LogosSymbol>,
+    semantics: &Semantics,
 ) -> Vec<RefFact> {
     let id_to_idx: HashMap<usize, usize> = decls
         .iter()
@@ -1384,13 +1390,21 @@ fn collect_refs(
                     });
                 }
                 // The language-agnostic import capture (S-015): the captured
-                // node's *text* is one import path — a Python dotted name, a
-                // Go/TS quoted module string, a Java scoped identifier. The
-                // Rust grammar keeps `ref.use` below because its use-trees
-                // (groups, renames, globs) need a structural walk no text
-                // split can express.
+                // node's *text* is one import specifier — a Python dotted name,
+                // a Go/TS quoted module string, a Java scoped identifier. Which
+                // grammar that text is written in is the descriptor's
+                // declaration, not a guess from the text (S-439): a path
+                // specifier canonicalises by path rules, a name by the
+                // member-path rules. The Rust grammar keeps `ref.use` below
+                // because its use-trees (groups, renames, globs) need a
+                // structural walk no text split can express.
                 "ref.import" => {
-                    let segments = import_segments(text);
+                    let segments = match semantics.import_specifier {
+                        ImportSpecifier::Path => {
+                            specifier_segments(text, &semantics.specifier_extensions)
+                        }
+                        ImportSpecifier::Name => import_segments(text),
+                    };
                     if segments.is_empty() {
                         continue;
                     }
