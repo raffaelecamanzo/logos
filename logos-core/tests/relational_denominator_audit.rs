@@ -417,20 +417,28 @@ fn denominator_problem(ty: &NavType) -> Option<String> {
     let Some(field) = ty.fields.iter().find(|f| f.name == DENOMINATOR_FIELD) else {
         return Some(format!("has no `{DENOMINATOR_FIELD}` field"));
     };
-    if field.ty != DENOMINATOR_TYPE {
+    // Compared by its last path segment, so a fully qualified spelling of the
+    // same type is the same type; `Option<…>` and every other wrapper is not.
+    if field.ty.rsplit("::").next() != Some(DENOMINATOR_TYPE) {
         return Some(format!(
             "declares `{DENOMINATOR_FIELD}: {}`, not `{DENOMINATOR_TYPE}` — the answer must \
              always state it, so an optional or re-typed field is the silent absence again",
             field.ty
         ));
     }
-    if let Some(skip) = field
+    // Any attribute but a doc attribute can take the field off the default
+    // wire: `cfg` compiles it out of a build, `serde(skip…)` omits it,
+    // `serde(flatten)` dissolves its key into the parent, `serde(rename…)`
+    // moves it. The field must serialise as written, under its own name, in
+    // every build — so none may qualify it.
+    if let Some(attribute) = field
         .attributes
         .iter()
-        .find(|a| a.contains("serde") && a.contains("skip"))
+        .find(|a| !a.trim_start_matches("#[").trim_start().starts_with("doc"))
     {
         return Some(format!(
-            "carries `{DENOMINATOR_FIELD}` but `{skip}` keeps it off the wire"
+            "carries `{DENOMINATOR_FIELD}` qualified by `{attribute}`, which can keep it off \
+             the wire under its own name"
         ));
     }
     None
@@ -680,12 +688,21 @@ fn a_new_relational_answer_with_the_denominator_passes() {
     );
     assert!(report.missing.is_empty(), "{:?}", report.missing);
     assert!(report.carrying.contains("DependentsResult"));
+    // The same type, fully qualified, and a doc attribute are not near misses.
+    let report = mutated(
+        "#[derive(Debug, Default, Serialize)]\npub struct DependentsResult {\n    \
+         pub query: String,\n    #[doc = \"The resolved edge set.\"]\n    \
+         pub resolution_denominator: crate::models::navigation::ResolutionDenominator,\n}",
+        NEW_METHOD,
+    );
+    assert!(report.missing.is_empty(), "{:?}", report.missing);
     assert!(report.disagreements.is_empty(), "{:?}", report.disagreements);
 }
 
 /// **The near misses: a field that is almost the denominator is not it.**
-/// One character off the name, optional, re-typed, or kept off the wire —
-/// each is the silent absence again, and each is named.
+/// One character off the name, optional, re-typed, or qualified by an
+/// attribute that can keep it off the wire (`skip`, `flatten`, `rename`,
+/// `cfg`) — each is the silent absence again, and each is named.
 #[test]
 fn a_near_miss_denominator_field_is_not_the_denominator() {
     let cases = [
@@ -703,12 +720,28 @@ fn a_near_miss_denominator_field_is_not_the_denominator() {
         ),
         (
             "#[serde(skip)]\n    /// Hidden.\n    pub resolution_denominator: ResolutionDenominator,",
-            "keeps it off the wire",
+            "qualified by `#[serde(skip)]`",
         ),
         (
             "#[serde(skip_serializing_if = \"is_unread\")]\n    \
              pub resolution_denominator: ResolutionDenominator,",
-            "keeps it off the wire",
+            "qualified by `#[serde(skip_serializing_if = \"is_unread\")]`",
+        ),
+        (
+            "#[serde(flatten)]\n    pub resolution_denominator: ResolutionDenominator,",
+            "qualified by `#[serde(flatten)]`",
+        ),
+        (
+            "#[serde(rename = \"coverage\")]\n    pub resolution_denominator: ResolutionDenominator,",
+            "qualified by `#[serde(rename = \"coverage\")]`",
+        ),
+        (
+            "#[cfg(feature = \"agents\")]\n    pub resolution_denominator: ResolutionDenominator,",
+            "qualified by `#[cfg(feature = \"agents\")]`",
+        ),
+        (
+            "#[cfg_attr(test, serde(skip))]\n    pub resolution_denominator: ResolutionDenominator,",
+            "qualified by `#[cfg_attr(test, serde(skip))]`",
         ),
     ];
     for (field, expected) in cases {
