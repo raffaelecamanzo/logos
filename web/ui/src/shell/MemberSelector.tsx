@@ -2,7 +2,7 @@
  * The member/service selector (S-250, CR-061, FR-UI-29) — the shell's project axis,
  * and the SPA's only net-new shell primitive.
  *
- * Rendered in **workspace mode only**, on the sidebar's Service-section header row
+ * Rendered in **workspace mode only**, in the sidebar's Service-section header
  * and nowhere else (S-425, FR-UI-35, ADR-66 §4, frontend-design §3): the control
  * sits inside the boundary it governs, rather than in the app header above every
  * section including the one it does not reach. In single-root mode this component
@@ -10,11 +10,13 @@
  * so the sidebar is byte-for-byte the one it has always been (there is no member
  * axis in a plain repo, so offering one would be a lie).
  *
- * It carries no label element of its own. The section heading beside it IS its
- * label, named through `labelledBy`: the row is `SERVICE [ orders ▾ ]`, and a
- * second word for the same thing would not fit the 232px column and would read as
- * two controls. That heading is text at every breakpoint (`Sidebar.module.css`),
- * so the accessible name can never be the thing a narrow viewport drops.
+ * It carries no label element of its own. The section heading above it IS its
+ * label, named through `labelledBy`: the header stacks `SERVICE` over
+ * `[ orders ▾ ]` (stacked by CR-145; the two shared one row until then, and a
+ * long member name truncated the heading to `Se…`), and a second word for the
+ * same thing would read as two controls. That heading is text at every breakpoint
+ * (`Sidebar.module.css`), so the accessible name can never be the thing a narrow
+ * viewport drops.
  *
  * Selecting a member re-scopes the transport, re-keys every member-scoped view (see
  * `WorkspaceContext` and `App.tsx`), and — since S-426 — writes the member into the

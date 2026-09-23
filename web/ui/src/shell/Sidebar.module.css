@@ -29,15 +29,19 @@
   padding-top: var(--space-3);
 }
 
-/* The label and the selector share ONE row (frontend-design §3:
-   `SERVICE [ orders ▾ ]`). The column is 232px at desktop width, so the row takes
-   width back from the LABEL first and from the control never — the control has a
-   floor in `MemberSelector.module.css`, and a control squeezed to a sliver is
-   present but not reachable (FR-UI-29). */
+/* The header is a COLUMN (frontend-design §3, stacked by CR-145): the label on its
+   own row, the selector beneath it at the column's full width. The two shared one
+   row until then, and on the 232px desktop column a `<select>` sized to a long
+   member name took that row and truncated the label to `Se…` — the one element
+   that tells two same-named views apart (FR-UI-35). Stacked, neither competes with
+   the other for width: `stretch` gives the control the whole column, above the
+   floor in `MemberSelector.module.css` (a control squeezed to a sliver is present
+   but not reachable, FR-UI-29). `min-width: 0` stays so no child's intrinsic size
+   can pin the header wider than the column. */
 .sectionHeader {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--space-2);
   padding: 0 var(--space-3) var(--space-3);
   min-width: 0;
@@ -56,9 +60,11 @@
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   color: var(--text-2);
-  /* Yields before the control does, and by ELLIPSIS rather than by removal: it is
-     the selector's accessible name as well as the section's, so taking it off the
-     page would leave a `<select>` with no name at all. */
+  /* A BACKSTOP now that the label has a row of its own: nothing beside it competes
+     for width, so these rungs only engage for a label longer than the column. If
+     they do, it yields by ELLIPSIS rather than by removal or overflow: it is the
+     selector's accessible name as well as the section's, so taking it off the page
+     would leave a `<select>` with no name at all. */
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

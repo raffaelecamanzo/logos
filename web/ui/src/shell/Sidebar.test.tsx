@@ -201,7 +201,7 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(region("Service")).toContainElement(select);
     expect(region("Workspace")).not.toContainElement(select);
 
-    // The heading beside it is its accessible name — the control carries no label of
+    // The heading above it is its accessible name — the control carries no label of
     // its own, so the section label is load-bearing twice over (FR-UI-35).
     expect(select).toHaveAccessibleName("Service");
 

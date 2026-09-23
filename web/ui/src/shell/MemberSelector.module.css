@@ -2,12 +2,14 @@
    Reuses the design-system tokens verbatim (FR-UI-23): no new colour, no new
    spacing step, so a theme remains a token remap. Rendered in workspace mode only. */
 
-/* The selector renders as a BARE `<select>` on the sidebar's Service-section
-   header row (S-425, FR-UI-35, frontend-design §3) — no wrapper, no label element:
-   the section heading beside it is its accessible name, and a second word for the
-   same thing would not fit the 232px column. The row's width ordering therefore
-   lives in `Sidebar.module.css` (`.sectionHeader`, `.sectionLabel`); what lives
-   here is the floor the control never goes below. */
+/* The selector renders as a BARE `<select>` in the sidebar's Service-section
+   header (S-425, FR-UI-35, frontend-design §3), on its own row beneath the section
+   heading (stacked by CR-145) — no wrapper, no label element: the heading above it
+   is its accessible name, and a second word for the same thing would read as two
+   controls. The header's layout — the column, and the stretch that gives this
+   control the column's full width — therefore lives in `Sidebar.module.css`
+   (`.sectionHeader`, `.sectionLabel`); what lives here is the floor the control
+   never goes below and the cap it never exceeds. */
 
 /* The control stops yielding at a size that is still a control. Without a floor it
    was measured at 24px at 1024px in workspace mode, when it shared the header row

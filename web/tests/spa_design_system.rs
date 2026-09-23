@@ -959,20 +959,29 @@ fn sidebar_scope_label_survives_every_breakpoint() {
     );
 }
 
-/// The member selector sits on the sidebar's Service-section header row (S-425,
-/// frontend-design §3: `SERVICE [ orders ▾ ]`); it shared the app header's row with
-/// the graph-state readout until then. That row is a 232px column, and a `<select>`
-/// sizes itself to its LONGEST option — on the reference workspace a 42-character
-/// member name, measured at 467px, which overflowed a 420px viewport by 242px even
-/// after the header had dropped both of its own elements, and which overflows the
-/// narrower column by more. So the row must be able to give width back, must give it
-/// back from the LABEL first, and must stop giving it back while the control is
-/// still a control. All three are asserted, because each one alone is a defect: no
+/// The member selector sits in the sidebar's Service-section header (S-425); it
+/// shared the app header's row with the graph-state readout until then. The header
+/// is a 232px column, and a `<select>` sizes itself to its LONGEST option — on the
+/// reference workspace a 42-character member name, measured at 467px, which
+/// overflowed a 420px viewport by 242px even after the header had dropped both of
+/// its own elements, and which overflows the narrower column by more. So the header
+/// must be able to give width back, the label must yield by ellipsis rather than
+/// overflow or vanish, and the control must stop yielding while it is still a
+/// control. All three are asserted, because each one alone is a defect: no
 /// `min-width: 0` on the label is an overflow, no floor on the control is one
-/// measured at 24px, and no ellipsis on the label puts the control on that floor
-/// early.
+/// measured at 24px, and no ellipsis on the label is a clipped name.
 ///
-/// It reads TWO stylesheets, because the row is two components: the header row and
+/// Since CR-145 the header is a COLUMN — the label on its own row, the control at
+/// full width beneath it (frontend-design §3) — because the shared row it replaced
+/// gave width to a long member name and truncated the label to `Se…`. The label no
+/// longer competes with the control for width, so its yield rungs are a BACKSTOP
+/// for a label longer than the column rather than the row's width ordering; they
+/// are still declared, and this test asserts them unchanged. The stacking itself is
+/// verified against rendered state at review, not here: this suite reads
+/// declarations, and no declaration check can tell a column that fits from one
+/// that does not.
+///
+/// It reads TWO stylesheets, because the header is two components: the header and
 /// its label belong to the sidebar, the control to its own module. An earlier
 /// version of this test read the selector's module alone, back when that module
 /// owned a `.selector` wrapper and a `.label`; both were deleted in S-425 when the
