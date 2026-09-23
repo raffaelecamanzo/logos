@@ -210,6 +210,9 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
 
     expect(lists("Workspace")).toEqual(groupSizes(WORKSPACE_NAV_ITEMS));
     expect(lists("Service")).toEqual(groupSizes(NAV_ITEMS));
+    // Not pinned as 2/3 (see the single-root snapshot below for why), but the
+    // property needs a seam to exist: one Workspace group would make it vacuous.
+    expect(lists("Workspace").length).toBeGreaterThan(1);
 
     // And the scoped class lands on the Workspace section and ONLY there. Under
     // `css: false` a CSS-Module import is a proxy that names every key, so this
@@ -220,8 +223,6 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(region("Workspace").classList).toContain(styles.appSection);
     expect(region("Service").classList).toContain(styles.section);
     expect(region("Service").classList).not.toContain(styles.appSection);
-    expect(lists("Workspace")).toHaveLength(2);
-    expect(lists("Service")).toHaveLength(3);
   });
 
   it("renders the member selector in the Service section header and NOWHERE else", async () => {
