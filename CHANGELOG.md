@@ -9,6 +9,48 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.17] — 2026-09-23
+
+### Fixed
+
+- **The cross-file call relation is no longer Rust-only.** A module specifier is
+  now canonicalised as a *path* rather than through the member-path separator, so
+  TypeScript, TSX, JavaScript and Go stop producing zero `Imports` edges, and the
+  **imported** rung of the scope hierarchy now binds a call through an imported
+  binding. `logos callers navItemsFor` returned a confident `total: 0` for a
+  function called at `web/ui/src/shell/Sidebar.tsx:172`; it now returns its real
+  callers. Capitalised JSX elements (`<RuleFindingsCard />`) are captured as
+  calls, without admitting `<div>` or `<Nav.Item>`. Rust resolution is unchanged,
+  asserted by hashing the sorted edge set rather than by comparing counts
+  (CR-142).
+
+### Added
+
+- **`status` reports resolution coverage per language, with its denominator**
+  (`resolution_by_language`). A language that binds nothing across a file
+  boundary renders as a named state — `same-file-only`, `no-resolved-edges` or
+  `no-references-recorded` — never as a bare `0` that would read as a
+  measurement. A single global coverage figure cannot express a per-language
+  zero, which is how the defect above survived (FR-RS-09).
+- **Every relational answer states the resolution denominator it was computed
+  over** (`resolution_denominator`), on `callers`, `callees`, `impact`,
+  `impact-intersection`, `branch-overlap`, `affected` and `precedent` — present
+  on empty *and* non-empty answers, as a typed field rather than prose. This
+  separates *nothing depends on this* from *nothing could be resolved here*
+  (FR-NV-14, CR-143).
+- **A structural arm to the absence audit**: the relational result types are
+  enumerated from their definitions, so a new answer type that omits the
+  denominator fails the suite rather than shipping silently.
+- The shipped guidance in the managed `CLAUDE.md` block, the MCP server
+  instructions and `docs/howto/README.md` now state the language scope on which
+  their relational claims hold, keyed on the denominator rather than on a
+  hardcoded language list.
+
+### Upgrade note
+
+Existing stores need a full `logos index`, not a `sync` — a sync does not
+re-extract unchanged files, so the new `Imports`/`Calls` edges would not appear.
+
 ## [1.4.16] — 2026-09-21
 
 Sprint 74 — the workspace stops being one tab and becomes a scope the
