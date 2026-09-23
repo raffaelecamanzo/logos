@@ -1138,4 +1138,19 @@ mod resolution_tests {
         assert_eq!(value["policy_origin"], "workspace");
         assert_eq!(value["credential_origin"], "workspace");
     }
+
+    /// A blank member key is undeclared, like a blank `model`: it does not
+    /// shadow the workspace credential, and origin and `api_key()` agree.
+    #[test]
+    fn a_blank_member_key_does_not_shadow_the_workspace_credential() {
+        let e = Estate::new();
+        Estate::policy(&e.member, MEMBER_CHAT);
+        Estate::key(&e.member, "   ");
+        Estate::key(&e.workspace, WORKSPACE_KEY);
+
+        let r = e.resolve();
+        assert_eq!(r.credential_origin, ChatOrigin::Workspace);
+        assert_eq!(r.api_key(), Some(WORKSPACE_KEY));
+        assert_eq!(r.credential.last4.as_deref(), Some("BEEF"));
+    }
 }
