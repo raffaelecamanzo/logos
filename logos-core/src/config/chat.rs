@@ -1195,4 +1195,25 @@ mod resolution_tests {
             );
         }
     }
+
+    /// An invalid workspace `secrets.toml` fails loud, naming the workspace
+    /// path, when the member leaves the credential to it — and is never read
+    /// (so cannot fail) when the member declares its own.
+    #[test]
+    fn an_invalid_workspace_secret_store_fails_loud_only_when_it_is_needed() {
+        let e = Estate::new();
+        Estate::policy(&e.member, MEMBER_CHAT);
+        let ws_secrets = e.workspace.join(".logos/secrets.toml");
+        fs::write(&ws_secrets, "[chat]\nbogus = 1\n").unwrap();
+
+        let err = resolve_chat(&e.member, Some(&e.workspace)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Parse { ref path, .. } if *path == ws_secrets),
+            "{err:?}"
+        );
+
+        Estate::key(&e.member, MEMBER_KEY);
+        let r = e.resolve();
+        assert_eq!(origins(&r), (ChatOrigin::Member, ChatOrigin::Member));
+    }
 }
