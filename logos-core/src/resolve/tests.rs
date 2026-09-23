@@ -1863,10 +1863,12 @@ fn a_call_through_a_bound_import_binds_to_the_imported_function() {
 }
 
 #[test]
-fn the_same_call_binds_nothing_when_the_imported_rung_is_bypassed() {
-    // The same ledger, the same bound import, but no imported scope: the call
-    // binds nowhere (and in particular not to b.ts's same-named function). This
-    // is the pre-S-440 state — an import edge with no call through it.
+fn the_same_call_binds_nothing_when_the_imported_scope_is_not_built() {
+    // The same ledger, the same bound import, but `with_imported_bindings`
+    // never ran: the rung decides the call over an empty scope, and it binds
+    // nowhere (in particular not to b.ts's same-named function). This is the
+    // differential proving the bind in the previous test comes from the
+    // import's binding, and nothing else.
     let import = menu_import(1, ".::nav", RefForm::Path);
     let r = call(2, MENU_TS, 301, ".::nav::navItemsFor");
     let refs = [import.clone(), r.clone()];
