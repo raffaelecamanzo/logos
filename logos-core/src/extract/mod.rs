@@ -1359,9 +1359,18 @@ fn collect_refs(
                         continue;
                     }
                     let target = segments.join("::");
+                    // A JSX tag naming a local value (`const Icon = icons[k];
+                    // <Icon />`) renders that value: it calls no component
+                    // (S-440), so it records no reference at all.
+                    let jsx = node.parent().is_some_and(|p| p.kind().starts_with("jsx_"));
+                    if jsx && imports.locally_bound(node, &target) {
+                        continue;
+                    }
                     // A call through a named import is recorded qualified by the
                     // module it was imported from (S-440, `ImportBindings`).
-                    let target = imports.named.get(&target).cloned().unwrap_or(target);
+                    let target = imports
+                        .named_target(node, &target)
+                        .map_or(target.clone(), str::to_string);
                     out.push(RefFact {
                         source: source_symbol,
                         target,
@@ -2156,10 +2165,13 @@ fn rust_impl_trait_name(method: Node<'_>, source: &[u8]) -> Option<String> {
 /// and its calls keep their bare form); a default import is not read (the name
 /// it was exported under is not in the importing file); a Go dot or blank
 /// import binds no qualifier. A local name the file also **declares** is
-/// dropped, so a shadowing declaration keeps the bare call and the lexical
-/// rung decides it — a missed edge, never a fabricated one ([NFR-RA-05]). The
-/// receiver of a Go method call on a value (`s.Start()`) is no import and stays
-/// a receiver-unqualified method name, so the [FR-RS-06] discipline is
+/// dropped, and so is one a function scope enclosing the call **binds** — a
+/// parameter, a local, a destructured prop, a Go `:=` ([`local_bindings`]):
+/// `func handle(admin *admin.Server) { admin.Reload() }` calls a method on the
+/// parameter, not the package. The shadowed call keeps its bare form — a
+/// missed edge, never a fabricated one ([NFR-RA-05]). The receiver of a Go
+/// method call on a value (`s.Start()`) is no import and stays a
+/// receiver-unqualified method name, so the [FR-RS-06] discipline is
 /// untouched.
 ///
 /// Built only for a language declaring [`ImportSpecifier::Path`]; every other
@@ -2176,6 +2188,11 @@ struct ImportBindings {
     named: HashMap<String, String>,
     /// A module qualifier's local name → the specifier target it names.
     qualifiers: HashMap<String, String>,
+    /// Function-scope node id → the names bound locally in it: parameters,
+    /// variable declarators, destructured patterns, Go `:=` left-hand sides
+    /// ([`local_bindings`]). A name bound here shadows any import of that name
+    /// for every reference inside the scope.
+    locals: HashMap<usize, HashSet<String>>,
 }
 
 impl ImportBindings {
@@ -2212,7 +2229,33 @@ impl ImportBindings {
         ImportBindings {
             named: keep(reader.named),
             qualifiers: keep(reader.qualifiers),
+            locals: local_bindings(root, source),
         }
+    }
+
+    /// Whether `name`, referenced at `node`, is bound by a function scope that
+    /// encloses it — a parameter, a local, a destructured prop — and so names
+    /// that local value rather than anything imported or declared at the top
+    /// level of the file.
+    fn locally_bound(&self, node: Node<'_>, name: &str) -> bool {
+        if self.locals.is_empty() {
+            return false;
+        }
+        let mut ancestor = node.parent();
+        while let Some(n) = ancestor {
+            if self.locals.get(&n.id()).is_some_and(|names| names.contains(name)) {
+                return true;
+            }
+            ancestor = n.parent();
+        }
+        false
+    }
+
+    /// The qualified target a bare call of `name` at `node` is recorded under,
+    /// when `name` is a named import not shadowed by a local binding.
+    fn named_target(&self, node: Node<'_>, name: &str) -> Option<&str> {
+        let target = self.named.get(name)?;
+        (!self.locally_bound(node, name)).then_some(target.as_str())
     }
 
     /// The specifier target of `method_name`'s receiver when that receiver is a
@@ -2232,7 +2275,98 @@ impl ImportBindings {
             return None;
         }
         let name = receiver.utf8_text(source).ok()?;
-        self.qualifiers.get(name).map(String::as_str)
+        let module = self.qualifiers.get(name)?;
+        (!self.locally_bound(receiver, name)).then_some(module.as_str())
+    }
+}
+
+/// The node kinds that open a function scope in the path-grammar languages —
+/// TypeScript/JavaScript functions, arrows and methods, Go functions, methods
+/// and function literals.
+const FUNCTION_SCOPES: &[&str] = &[
+    "function_declaration",
+    "function_expression",
+    "function",
+    "generator_function",
+    "generator_function_declaration",
+    "arrow_function",
+    "method_definition",
+    "method_declaration",
+    "func_literal",
+];
+
+/// Every name bound inside a function scope of the file, keyed by the scope's
+/// node id (S-440) — the evidence that a reference names a local value.
+///
+/// Conservative by construction: a name bound anywhere in a scope (in any
+/// block of it, before or after the reference) counts for the whole scope, so
+/// an over-approximation can only turn a call through an import back into a
+/// bare, unresolved one — a missed edge, never a fabricated one ([NFR-RA-05]).
+/// A binding at file scope is not collected: TypeScript and Go both reject a
+/// top-level redeclaration of an imported name.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn local_bindings(root: Node<'_>, source: &[u8]) -> HashMap<usize, HashSet<String>> {
+    let mut out: HashMap<usize, HashSet<String>> = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        if !binds_a_name(node) {
+            continue;
+        }
+        let Some(scope) = enclosing_function_scope(node) else { continue };
+        if let Ok(name) = node.utf8_text(source) {
+            out.entry(scope.id()).or_default().insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// The nearest function-scope ancestor of `node`, if any.
+fn enclosing_function_scope(node: Node<'_>) -> Option<Node<'_>> {
+    let mut ancestor = node.parent();
+    while let Some(n) = ancestor {
+        if FUNCTION_SCOPES.contains(&n.kind()) {
+            return Some(n);
+        }
+        ancestor = n.parent();
+    }
+    None
+}
+
+/// Whether `node` is an identifier in a **binding** position: a parameter, a
+/// declarator name, a destructuring pattern element, a `catch` parameter, a
+/// `for … of` variable, or a Go parameter / `:=` / `range` left-hand side.
+fn binds_a_name(node: Node<'_>) -> bool {
+    if node.kind() == "shorthand_property_identifier_pattern" {
+        return true;
+    }
+    if node.kind() != "identifier" {
+        return false;
+    }
+    let Some(parent) = node.parent() else { return false };
+    let is_field = |field: &str| parent.child_by_field_name(field) == Some(node);
+    match parent.kind() {
+        "formal_parameters" | "array_pattern" | "rest_pattern" | "object_pattern" => true,
+        "required_parameter" | "optional_parameter" => is_field("pattern"),
+        "arrow_function" => is_field("parameter"),
+        "variable_declarator" => is_field("name"),
+        // Go names every parameter of `a, b int` in one declaration, and its type
+        // is never a plain `identifier`, so each identifier child is a name.
+        "parameter_declaration" | "variadic_parameter_declaration" | "var_spec" | "const_spec" => {
+            true
+        }
+        "pair_pattern" => is_field("value"),
+        "assignment_pattern" | "object_assignment_pattern" => is_field("left"),
+        "catch_clause" => is_field("parameter"),
+        "for_in_statement" => is_field("left"),
+        // Go `a, b := …` and `for k, v := range …`: the left expression list.
+        "expression_list" => parent.parent().is_some_and(|gp| {
+            matches!(gp.kind(), "short_var_declaration" | "range_clause")
+                && gp.child_by_field_name("left") == Some(parent)
+        }),
+        _ => false,
     }
 }
 

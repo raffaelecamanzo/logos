@@ -515,3 +515,79 @@ fn a_node_kind_the_rung_binds_is_a_function() {
     assert_eq!(kind, Some(NodeKind::Function));
     assert_eq!(callers_of(rt, "src/k.ts:k"), ["src/use.ts:use"]);
 }
+
+#[test]
+fn a_local_binding_that_shadows_an_import_is_not_a_call_through_it() {
+    // A parameter, a destructured prop, or a plain local that reuses the
+    // import's name is a value of its own: a call on it names the local, not
+    // the import, so no edge to the imported definition may come of it
+    // (NFR-RA-05). A call outside that scope still goes through the import.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/nav.ts", NAV);
+    write(tmp.path(), "src/Row.tsx", "export function Row() { return <tr />; }\n");
+    write(
+        tmp.path(),
+        "src/menu.ts",
+        "import { navItemsFor } from './nav';\n\
+export function byParam(navItemsFor: (r: string) => string[]) { return navItemsFor('a'); }\n\
+export function byConst() { const navItemsFor = pick(); return navItemsFor('b'); }\n\
+export function real() { return navItemsFor('c'); }\n",
+    );
+    write(
+        tmp.path(),
+        "src/Table.tsx",
+        "import { Row } from './Row';\n\
+export function Table({ Row }: { Row: () => null }) { return <table><Row /></table>; }\n\
+export function Plain() { return <table><Row /></table>; }\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(imported_files(rt, "src/menu.ts"), ["src/nav.ts"]);
+    assert_eq!(callers_of(rt, "src/nav.ts:navItemsFor"), ["src/menu.ts:real"]);
+    assert_eq!(callers_of(rt, "src/Row.tsx:Row"), ["src/Table.tsx:Plain"]);
+}
+
+#[test]
+fn a_go_value_named_like_an_imported_package_is_not_the_package() {
+    // `func handle(admin *admin.Server) { admin.Reload() }` calls a method on
+    // the parameter; `admin := …; admin.Reload()` on a local. Neither is the
+    // package's `Reload`, which `other()` really calls.
+    let tmp = go_fixture();
+    // The package-level `Reload` and the method `(*Server).Reload` live in two
+    // files: one Go file declaring both aborts the index on a duplicate
+    // `Contains` edge today, a defect that predates this story.
+    write(tmp.path(), "internal/admin/reload.go", "package admin\n\nfunc Reload() {}\n");
+    write(
+        tmp.path(),
+        "internal/admin/server.go",
+        "package admin\n\nfunc (s *Server) Reload() {}\n",
+    );
+    write(
+        tmp.path(),
+        "cmd/server/main.go",
+        "package main\n\nimport \"github.com/acme/desk-picker/internal/admin\"\n\n\
+func handle(peer, admin *admin.Server) {\n\tadmin.Reload()\n}\n\n\
+func local() {\n\tadmin := &admin.Server{}\n\tadmin.Reload()\n}\n\n\
+func other() {\n\tadmin.Reload()\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(callers_of(rt, "internal/admin/reload.go:Reload"), ["cmd/server/main.go:other"]);
+}
+
+#[test]
+fn a_jsx_tag_naming_a_local_value_is_not_a_call_of_a_same_named_component() {
+    // The dynamic-component idiom: `const Icon = icons[name]; <Icon />` renders
+    // a value, not the file's own top-level `Icon` component.
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/Icons.tsx",
+        "export function Icon() { return <i />; }\n\
+export function Named({ name }: { name: string }) { const Icon = icons[name]; return <Icon />; }\n\
+export function Plain() { return <Icon />; }\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(callers_of(rt, "src/Icons.tsx:Icon"), ["src/Icons.tsx:Plain"]);
+}
