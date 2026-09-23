@@ -192,10 +192,12 @@ export function Sidebar({ pathname }: { pathname: string }) {
                 {NAV_SCOPE_LABELS[scope]}
               </h2>
               {/* The selector governs the member-scoped views and only those, so it
-                  is rendered on THIS header row and nowhere else in the tree — the
+                  is rendered in THIS header and nowhere else in the tree — the
                   presentation defect FR-UI-35 exists to close (NFR-CC-04). The
-                  heading beside it is its accessible name; it carries no label of
-                  its own (frontend-design §3: `SERVICE [ orders ▾ ]`). */}
+                  heading above it is its accessible name; it carries no label of
+                  its own. The header is a column — label row, then the selector at
+                  full width beneath it (frontend-design §3, stacked by CR-145) —
+                  which is `Sidebar.module.css`'s doing, not this markup's. */}
               {scope === "member" && <MemberSelector labelledBy={headingId} />}
             </div>
             <NavGroups items={scoped} pathname={pathname} statisticsAwaiting={statisticsAwaiting} />
