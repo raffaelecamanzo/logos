@@ -591,3 +591,29 @@ export function Plain() { return <Icon />; }\n",
     let rt = engine.runtime().unwrap();
     assert_eq!(callers_of(rt, "src/Icons.tsx:Icon"), ["src/Icons.tsx:Plain"]);
 }
+
+#[test]
+fn a_go_dot_or_blank_import_binds_no_qualifier() {
+    // `import . "…/admin"` and `import _ "…/admin"` bind no `admin` name. A
+    // package-level `admin` value declared in a sibling file of `package main`
+    // is what `admin.Register()` calls in each — never the package function.
+    let tmp = go_fixture();
+    for (dir, spec) in [("cmd/dot", "."), ("cmd/blank", "_")] {
+        write(
+            tmp.path(),
+            &format!("{dir}/state.go"),
+            "package main\n\ntype handle struct{}\n\nfunc (h *handle) Register() {}\n\nvar admin = &handle{}\n",
+        );
+        write(
+            tmp.path(),
+            &format!("{dir}/main.go"),
+            &format!(
+                "package main\n\nimport {spec} \"github.com/acme/desk-picker/internal/admin\"\n\nfunc main() {{\n\tadmin.Register()\n}}\n"
+            ),
+        );
+    }
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(imported_files(rt, "cmd/dot/main.go").len(), 2, "precondition: the dot import binds");
+    assert!(callers_of(rt, "internal/admin/admin.go:Register").is_empty());
+}
