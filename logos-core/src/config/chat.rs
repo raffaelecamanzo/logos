@@ -461,8 +461,11 @@ impl fmt::Debug for ChatResolution {
 ///
 /// # Errors
 /// A present-but-invalid file at either root fails loud through the ordinary
-/// loaders ([`load_config_from_root`] / [`load_secrets_from_root`]), whose
-/// [`ConfigError`] names the offending path.
+/// loaders ([`load_config_from_root`] / [`load_secrets_from_root`]). A read or
+/// parse fault ([`ConfigError::Io`] / [`ConfigError::Parse`]) names the
+/// offending path; a validation fault ([`ConfigError::BadGlob`],
+/// [`ConfigError::EscapingPattern`], [`ConfigError::InvalidValue`]) is the
+/// loader's own and does **not** say which root it came from.
 ///
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 pub fn resolve_chat(
