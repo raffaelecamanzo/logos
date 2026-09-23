@@ -1153,4 +1153,17 @@ mod resolution_tests {
         assert_eq!(r.api_key(), Some(WORKSPACE_KEY));
         assert_eq!(r.credential.last4.as_deref(), Some("BEEF"));
     }
+
+    /// A padded key dials and masks as its trimmed value — the same key the
+    /// pre-existing `chat_api_key` read yields.
+    #[test]
+    fn a_padded_key_is_trimmed_for_dialling_and_masking() {
+        let e = Estate::new();
+        Estate::key(&e.member, "  sk-padded-WXYZ  ");
+
+        let r = e.resolve_single_root();
+        assert_eq!(r.credential_origin, ChatOrigin::Member);
+        assert_eq!(r.api_key(), Some("sk-padded-WXYZ"));
+        assert_eq!(r.credential.last4.as_deref(), Some("WXYZ"));
+    }
 }
