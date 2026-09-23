@@ -1645,13 +1645,16 @@ impl Ctx<'_> {
     }
 
     /// The **imported** rung for a path-grammar file (S-440, [CR-142] D2,
-    /// [FR-RS-03]), or `None` when `target` is not a call through an import —
-    /// a single-segment name, or a file whose specifiers are not paths (every
-    /// Rust call, so Rust binds exactly as before).
+    /// [FR-RS-03]), or `None` for a single-segment name or a file whose
+    /// specifiers are not paths (every Rust call, so Rust binds exactly as
+    /// before).
     ///
     /// `target` is `<import target>::<name>`, the form extraction records for a
     /// call through a named import or through an imported module's qualifier
-    /// (`extract::ImportBindings`). The candidates are the top-level
+    /// (`extract::ImportBindings`). It is the **only** multi-segment call a
+    /// path-grammar file records — its `@ref.call` captures are plain
+    /// identifiers — so every such row is decided here, `Some`, including one
+    /// whose prefix names no import of the file: no candidate, unbound. The candidates are the top-level
     /// [`NodeKind::Function`]s named `name` in the file-root modules the file's
     /// `Imports` row for `<import target>` **bound** to
     /// ([`Index::with_imported_bindings`]); exactly one binds ([NFR-RA-05]).
