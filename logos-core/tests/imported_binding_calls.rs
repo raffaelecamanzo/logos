@@ -617,3 +617,25 @@ fn a_go_dot_or_blank_import_binds_no_qualifier() {
     assert_eq!(imported_files(rt, "cmd/dot/main.go").len(), 2, "precondition: the dot import binds");
     assert!(callers_of(rt, "internal/admin/admin.go:Register").is_empty());
 }
+
+#[test]
+fn a_go_aliased_import_binds_only_its_alias() {
+    // `import adm "…/admin"` names the package `adm`; the path's last segment
+    // `admin` is free, and here it is a package-level value of `package main`
+    // declared in a sibling file. `adm.Register()` is the package call;
+    // `admin.Register()` is a method on that value.
+    let tmp = go_fixture();
+    write(
+        tmp.path(),
+        "cmd/server/state.go",
+        "package main\n\ntype handle struct{}\n\nfunc (h *handle) Register() {}\n\nvar admin = &handle{}\n",
+    );
+    write(
+        tmp.path(),
+        "cmd/server/main.go",
+        "package main\n\nimport adm \"github.com/acme/desk-picker/internal/admin\"\n\nfunc viaAlias() {\n\tadm.Register()\n}\n\nfunc viaValue() {\n\tadmin.Register()\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(callers_of(rt, "internal/admin/admin.go:Register"), ["cmd/server/main.go:viaAlias"]);
+}
