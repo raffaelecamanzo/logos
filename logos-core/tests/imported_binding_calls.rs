@@ -451,6 +451,13 @@ fn a_go_mod_edit_rebinds_the_calls_through_its_imports_on_sync() {
     // in untouched files that bind through its module path. Renaming the module
     // makes `…/desk-picker/internal/admin` an external path: the import stops
     // binding (S-439), and the call through it must stop binding with it.
+    //
+    // This pins the LEDGER, not the graph. A row that flips to unbound keeps the
+    // edge it committed (the resolution pass's commit semantics for every edge
+    // kind), so after this sync `callers` still reports `main` where a cold index
+    // of the same tree reports nothing. That sync ≠ cold divergence predates
+    // this story (S-439 review, deferred) and is deferred again at S-440 review;
+    // it is recorded there, not asserted away here.
     let tmp = go_fixture();
     write(
         tmp.path(),
