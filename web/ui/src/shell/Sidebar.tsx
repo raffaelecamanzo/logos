@@ -186,7 +186,16 @@ export function Sidebar({ pathname }: { pathname: string }) {
         if (scoped.length === 0) return null;
         const headingId = `nav-scope-${scope}`;
         return (
-          <section className={styles.section} key={scope} aria-labelledby={headingId}>
+          <section
+            // The Workspace section renders its groups as one list (S-454): the
+            // groups stay in the markup, and only the stylesheet drops the hairline
+            // between them — so the class is the whole of this component's part.
+            className={[styles.section, scope === "app" ? styles.appSection : ""]
+              .filter(Boolean)
+              .join(" ")}
+            key={scope}
+            aria-labelledby={headingId}
+          >
             <div className={styles.sectionHeader}>
               <h2 className={styles.sectionLabel} id={headingId}>
                 {NAV_SCOPE_LABELS[scope]}

@@ -191,6 +191,28 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(names("Service")).toEqual(NAV_ITEMS.map((i) => i.label));
   });
 
+  it("keeps each section's CR-042 groups as separate lists in the markup (S-454)", async () => {
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /Workspace/ });
+
+    // The Workspace section READS as one list, and that is the stylesheet's doing
+    // alone (`.appSection .group`, guarded in `web/tests/spa_design_system.rs`). The
+    // grouping itself survives: one `<ul>` per non-empty group, per section — today
+    // two in Workspace and three in Service. Derived from the registry, so a new
+    // view does not stale it; a component that collapsed the groups does.
+    const lists = (scope: string) =>
+      within(region(scope))
+        .getAllByRole("list")
+        .map((ul) => within(ul).getAllByRole("listitem").length);
+    const groupSizes = (items: readonly { group: string }[]) =>
+      NAV_GROUPS.map((g) => items.filter((i) => i.group === g).length).filter((n) => n > 0);
+
+    expect(lists("Workspace")).toEqual(groupSizes(WORKSPACE_NAV_ITEMS));
+    expect(lists("Service")).toEqual(groupSizes(NAV_ITEMS));
+    expect(lists("Workspace")).toHaveLength(2);
+    expect(lists("Service")).toHaveLength(3);
+  });
+
   it("renders the member selector in the Service section header and NOWHERE else", async () => {
     mountWithMode(200);
     const select = await screen.findByRole("combobox");

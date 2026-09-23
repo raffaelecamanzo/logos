@@ -1064,6 +1064,95 @@ fn the_service_section_header_gives_width_back_but_stays_a_control() {
     }
 }
 
+/// The Workspace section reads as ONE list (S-454, [FR-UI-35], [FR-UI-37]). Its two
+/// CR-042 groups stay two `<ul>`s — the group says what a tab answers, and the
+/// app-scoped Statistics tab shares its member-scoped twin's group on purpose — but
+/// the hairline between them left that Statistics entry stranded between the
+/// hairline and the Workspace/Service boundary, reading as belonging to neither
+/// scope. So the inter-group hairline and gap are suppressed inside that section
+/// only, by a section-scoped rule.
+///
+/// Four facts, because each alone is a half-applied fix that looks like a working
+/// one: the scoped rule zeroes the border and both inter-group paddings; the
+/// unscoped rules still declare them (the Service section's hairlines and gaps are
+/// unchanged); the section boundary still declares its own; and the scoped rule
+/// comes AFTER every rule it ties with. `.appSection .group` is two classes, exactly
+/// as `.group:last-child` and `.group + .group` are, so source order decides — placed
+/// above `.group + .group`, the second Workspace group would keep its top gap.
+///
+/// The markup half — that the Workspace region still renders two lists and the
+/// Service region three — is asserted in `web/ui/src/shell/Sidebar.test.tsx`; this is
+/// the stylesheet half, which that suite cannot see because it runs with `css: false`.
+#[test]
+fn the_workspace_section_renders_its_groups_as_one_list() {
+    const SCOPED: &str = ".appSection .group";
+    let css = strip_comments(&read("src/shell/Sidebar.module.css"));
+    let decl = |sel: &str, prop: &str| -> Option<String> {
+        declarations_of(&rule_body(&css, sel))
+            .into_iter()
+            .find(|(name, _)| name == prop)
+            .map(|(_, value)| value)
+    };
+    let zero = |v: &str| v == "none" || length_px(v) == Some(0.0);
+
+    // The scoped rule zeroes the hairline and the gap on both sides of it. Read as
+    // longhands: a respelling as a shorthand fails here by name rather than passing.
+    for prop in ["border-bottom", "padding-top", "padding-bottom"] {
+        let value = decl(SCOPED, prop)
+            .unwrap_or_else(|| panic!("`{SCOPED}` declares no `{prop}` (as a longhand)"));
+        assert!(
+            zero(&value),
+            "`{SCOPED}` must zero `{prop}` — the Workspace section renders as one list \
+             (FR-UI-35); found `{value}`",
+        );
+    }
+
+    // The unscoped rules still declare what the scoped one suppresses: the Service
+    // section keeps its group hairlines and the gaps around them.
+    for (sel, prop) in [(".group", "border-bottom"), (".group + .group", "padding-top")] {
+        let value = decl(sel, prop).unwrap_or_else(|| panic!("`{sel}` declares no `{prop}`"));
+        assert!(
+            !zero(&value),
+            "`{sel}` must still declare a non-zero `{prop}` — the suppression is scoped \
+             to the Workspace section, and the Service section's groups keep it; found \
+             `{value}`",
+        );
+    }
+
+    // The Workspace/Service boundary is its own rule and keeps its own hairline.
+    let boundary = decl(".section + .section", "border-top")
+        .unwrap_or_else(|| panic!("`.section + .section` declares no `border-top`"));
+    assert!(
+        !zero(&boundary),
+        "the Workspace/Service boundary must keep its hairline; found `{boundary}`",
+    );
+
+    // Source order: the scoped rule wins the specificity tie only by coming later.
+    let order: Vec<String> = top_level_rules(&css).into_iter().map(|(sel, _)| sel).collect();
+    let at = |sel: &str| {
+        order
+            .iter()
+            .position(|s| s == sel)
+            .unwrap_or_else(|| panic!("rule `{sel}` not found in the stylesheet"))
+    };
+    for tied in [".group:last-child", ".group + .group"] {
+        assert!(
+            at(SCOPED) > at(tied),
+            "`{SCOPED}` ties with `{tied}` on specificity (two classes each), so it must \
+             come AFTER it in source order to win; it comes before",
+        );
+    }
+
+    // The class the rule scopes to is applied by the component. That it is applied
+    // to the Workspace section and not the Service one is a rendered-state fact this
+    // suite cannot read (checked at review); a key the stylesheet does not define is
+    // caught by `every_module_style_key_a_view_uses_is_defined_in_the_stylesheet_it_imports`.
+    assert!(
+        read("src/shell/Sidebar.tsx").contains("styles.appSection"),
+        "`Sidebar.tsx` never applies `styles.appSection`, so `{SCOPED}` matches nothing",
+    );
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// A CSS length in px (`rem` resolved at the 16px root), or `None` when the value is
