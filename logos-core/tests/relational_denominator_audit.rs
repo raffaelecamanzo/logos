@@ -481,8 +481,8 @@ fn audit_with(
     let types = navigation_types(navigation_source);
     let names: BTreeSet<String> = types.keys().cloned().collect();
     let held: BTreeSet<String> = types
-        .iter()
-        .flat_map(|(_, ty)| ty.holds.iter())
+        .values()
+        .flat_map(|ty| ty.holds.iter())
         .filter(|h| names.contains(*h))
         .cloned()
         .collect();
