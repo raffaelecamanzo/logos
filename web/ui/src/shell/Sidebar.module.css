@@ -36,8 +36,10 @@
    that tells two same-named views apart (FR-UI-35). Stacked, neither competes with
    the other for width: `stretch` gives the control the whole column, above the
    floor in `MemberSelector.module.css` (a control squeezed to a sliver is present
-   but not reachable, FR-UI-29). `min-width: 0` stays so no child's intrinsic size
-   can pin the header wider than the column. */
+   but not reachable, FR-UI-29). `min-width: 0` is kept as a backstop the stylesheet
+   guard asserts: inert while the header's parent is a block box, it only matters
+   if that parent becomes a flex row or grid, where it stops a long member name
+   pinning the header wider than the column. */
 .sectionHeader {
   display: flex;
   flex-direction: column;
@@ -61,10 +63,12 @@
   text-transform: uppercase;
   color: var(--text-2);
   /* A BACKSTOP now that the label has a row of its own: nothing beside it competes
-     for width, so these rungs only engage for a label longer than the column. If
-     they do, it yields by ELLIPSIS rather than by removal or overflow: it is the
-     selector's accessible name as well as the section's, so taking it off the page
-     would leave a `<select>` with no name at all. */
+     for width. `overflow` + `text-overflow` + `white-space` engage only for a label
+     longer than the column, and then it yields by ELLIPSIS rather than by removal
+     or overflow: it is the selector's accessible name as well as the section's, so
+     taking it off the page would leave a `<select>` with no name at all.
+     `min-width: 0` is inert in the column (width is the cross axis there) and is
+     kept for the guard and for a return to a row. */
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
