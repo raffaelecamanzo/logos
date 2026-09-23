@@ -424,6 +424,8 @@ struct Audit {
     answers: BTreeSet<String>,
     /// The answers that carry the denominator as required.
     carrying: BTreeSet<String>,
+    /// The answers excused by an exemption — measured, not the list's length.
+    exempt: BTreeSet<String>,
     /// Answers outside [`OUTSIDE_THE_CLASS`] that do not carry it, with why.
     missing: Vec<String>,
     /// Exemptions that name no answer, or an answer that carries the field.
@@ -464,11 +466,21 @@ fn denominator_problem(ty: &NavType) -> Option<String> {
 }
 
 fn audit(navigation_source: &str, engine_source: &str) -> Audit {
+    audit_with(navigation_source, engine_source, &OUTSIDE_THE_CLASS)
+}
+
+/// [`audit`] over an explicit exemption list, so the checks on the list itself
+/// can be fed a bad one.
+fn audit_with(
+    navigation_source: &str,
+    engine_source: &str,
+    exemptions: &[(&str, &str)],
+) -> Audit {
     let types = navigation_types(navigation_source);
     let names: BTreeSet<String> = types.keys().cloned().collect();
     let held: BTreeSet<String> = types
         .iter()
-        .flat_map(|(name, ty)| ty.holds.iter().filter(move |h| *h != name))
+        .flat_map(|(_, ty)| ty.holds.iter())
         .filter(|h| names.contains(*h))
         .cloned()
         .collect();
@@ -491,7 +503,7 @@ fn audit(navigation_source: &str, engine_source: &str) -> Audit {
         answers,
         ..Audit::default()
     };
-    let exempt: BTreeMap<&str, &str> = OUTSIDE_THE_CLASS.iter().copied().collect();
+    let exempt: BTreeMap<&str, &str> = exemptions.iter().copied().collect();
 
     for answer in &report.answers {
         let problem = denominator_problem(&types[answer]);
@@ -500,13 +512,18 @@ fn audit(navigation_source: &str, engine_source: &str) -> Audit {
                 report.carrying.insert(answer.clone());
             }
             (false, Some(problem)) => report.missing.push(format!("{answer} {problem}")),
-            (true, None) => report.stale_exemptions.push(format!(
-                "{answer} carries `{DENOMINATOR_FIELD}` yet is exempted — drop the exemption"
-            )),
-            (true, Some(_)) => {}
+            (true, None) => {
+                report.exempt.insert(answer.clone());
+                report.stale_exemptions.push(format!(
+                    "{answer} carries `{DENOMINATOR_FIELD}` yet is exempted — drop the exemption"
+                ));
+            }
+            (true, Some(_)) => {
+                report.exempt.insert(answer.clone());
+            }
         }
     }
-    for (name, why) in OUTSIDE_THE_CLASS {
+    for &(name, why) in exemptions {
         if why.trim().is_empty() {
             report
                 .stale_exemptions
@@ -563,16 +580,20 @@ fn live() -> Audit {
 /// The denominator every failure message states, so "every type was checked"
 /// is read off the message rather than assumed.
 fn denominator_line(report: &Audit) -> String {
+    let unreturned = if report.unreturned.is_empty() {
+        "none".to_string()
+    } else {
+        report.unreturned.iter().cloned().collect::<Vec<_>>().join(", ")
+    };
     format!(
         "{} root type(s) enumerated from {NAVIGATION_MODELS}, {} returned by no `Engine` \
-         method ({}); of the {} answer type(s), {} carry `{DENOMINATOR_FIELD}`, {} are \
-         outside the class, {} are missing it",
+         method ({unreturned}); of the {} answer type(s), {} carry `{DENOMINATOR_FIELD}`, {} \
+         are outside the class, {} are missing it",
         report.roots.len(),
         report.unreturned.len(),
-        report.unreturned.iter().cloned().collect::<Vec<_>>().join(", "),
         report.answers.len(),
         report.carrying.len(),
-        OUTSIDE_THE_CLASS.len(),
+        report.exempt.len(),
         report.missing.len()
     )
 }
@@ -641,7 +662,7 @@ fn the_arm_reports_its_count_with_its_denominator() {
             report.unreturned.len(),
             report.answers.len(),
             report.carrying.len(),
-            OUTSIDE_THE_CLASS.len(),
+            report.exempt.len(),
             report.missing.len(),
             AUDITED_ON,
         ),
@@ -657,7 +678,7 @@ fn the_arm_reports_its_count_with_its_denominator() {
     );
     assert_eq!(
         report.answers.len(),
-        report.carrying.len() + OUTSIDE_THE_CLASS.len() + report.missing.len(),
+        report.carrying.len() + report.exempt.len() + report.missing.len(),
         "every answer type is exactly one of carrying, exempt or missing"
     );
 }
@@ -908,6 +929,69 @@ fn a_root_no_engine_method_returns_is_named_in_the_denominator() {
     assert!(!report.answers.contains("OrphanResult"));
     assert!(report.missing.is_empty(), "{:?}", report.missing);
     assert!(denominator_line(&report).contains("OrphanResult"));
+}
+
+/// **A path-qualified return from another module is not a navigation type**,
+/// even when it shares a navigation type's name: `crate::wiki::WorkItem` is
+/// not the `WorkItem` of `models/navigation.rs`, so it enrols nothing.
+#[test]
+fn a_same_named_type_from_another_module_is_not_enrolled() {
+    let report = mutated(
+        "",
+        "    pub fn work(&self) -> crate::wiki::WorkItem {\n        \
+         crate::wiki::WorkItem::default()\n    }",
+    );
+    assert!(report.unreturned.contains("WorkItem"), "{:?}", report.unreturned);
+    assert!(report.missing.is_empty(), "{:?}", report.missing);
+}
+
+/// **An enum answer type is enrolled like a struct** — it has no field to
+/// carry the denominator in, so it is named as missing it.
+#[test]
+fn an_enum_answer_type_is_enrolled() {
+    let report = mutated(
+        "#[derive(Debug, Serialize)]\npub enum DependentsResult {\n    Clear,\n    \
+         Found(Vec<SymbolRef>),\n}",
+        "    pub fn dependents(&self) -> DependentsResult {\n        \
+         DependentsResult::Clear\n    }",
+    );
+    assert_eq!(
+        report.missing,
+        vec![format!("DependentsResult has no `{DENOMINATOR_FIELD}` field")]
+    );
+}
+
+/// **A type that holds itself is still a root** — `children: Vec<Self>` is not
+/// another type holding it.
+#[test]
+fn a_self_referential_answer_type_is_still_enrolled() {
+    let report = mutated(
+        "#[derive(Debug, Default, Serialize)]\npub struct DependentsResult {\n    \
+         pub query: String,\n    pub children: Vec<DependentsResult>,\n}",
+        NEW_METHOD,
+    );
+    assert_eq!(
+        report.missing,
+        vec![format!("DependentsResult has no `{DENOMINATOR_FIELD}` field")]
+    );
+}
+
+/// **An exemption needs a reason, and a subject that exists.** Fed through
+/// [`audit_with`], because the live list has neither defect to show.
+#[test]
+fn an_exemption_without_a_reason_or_a_subject_is_stale() {
+    let mut exemptions: Vec<(&str, &str)> = OUTSIDE_THE_CLASS.to_vec();
+    exemptions.retain(|(name, _)| *name != "LanguageComposition");
+    exemptions.push(("LanguageComposition", "   "));
+    exemptions.push(("NoSuchResult", "a reason for a type that does not exist"));
+    let report = audit_with(&read(NAVIGATION_MODELS), &read(ENGINE), &exemptions);
+    assert_eq!(
+        report.stale_exemptions,
+        vec![
+            "LanguageComposition is exempted without a reason".to_string(),
+            format!("NoSuchResult is exempted but is not an answer type of {NAVIGATION_MODELS}"),
+        ]
+    );
 }
 
 /// **An exemption stops excusing a type the moment it grows the field.**
