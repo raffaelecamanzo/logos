@@ -81,6 +81,7 @@ const { APP_ROUTES, pathname } = vi.hoisted(() => ({
     "/workspace-dashboard",
     "/workspace-health",
     "/workspace-statistics",
+    "/workspace-config",
   ] as string[],
   pathname: { current: "/" },
 }));

@@ -132,6 +132,19 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
     group: "C",
     scope: "app",
   },
+  // S-430 (CR-137, FR-UI-38): the app-level Config editor over the workspace's own
+  // files — `logos.workspace.toml` today. Named "Config" like its member-scoped
+  // twin (ADR-66 tells the two apart by section label), group C beside it, and
+  // after Statistics exactly as the member-scoped Config sits after its
+  // Statistics. A sibling route of `/workspace`, not a child, for the reason the
+  // S-428 entries above give.
+  {
+    id: "workspace-config",
+    label: "Config",
+    path: "/workspace-config",
+    group: "C",
+    scope: "app",
+  },
 ];
 
 /** The sidebar groups in render order. */

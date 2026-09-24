@@ -14,11 +14,14 @@
  * that reason; the one place a member is passed here, it is passed explicitly.
  */
 
-import { ApiError } from "../intent.ts";
-import { apiFetch } from "./client.ts";
+import { ApiError, apiMutate } from "../intent.ts";
+import { apiFetch, apiUrl } from "./client.ts";
+import { ConfigMutateError, FORM_HEADERS, detailOf, formBody } from "./configClient.ts";
 import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
+  ManifestSaveOutcome,
   WorkspaceGovernanceAnswer,
+  WorkspaceManifestDocument,
   WorkspaceReachabilityAnswer,
   WorkspaceRoster,
   WorkspaceStatistics,
@@ -106,6 +109,57 @@ export function fetchWorkspaceGovernance(): Promise<WorkspaceGovernanceAnswer> {
  */
 export function fetchWorkspaceStatistics(window: StatisticsWindow): Promise<WorkspaceStatistics> {
   return apiFetch<WorkspaceStatistics>("workspace/statistics", { window });
+}
+
+/**
+ * `GET /api/v1/workspace/manifest` (S-430, FR-UI-38) — `logos.workspace.toml` as
+ * the workspace Config editor loads it: the literal document, the fingerprint a
+ * save must post back, and the parse verdict. A manifest broken on disk still
+ * loads (`parsed: null`, `error` set) — the editor is its repair path.
+ *
+ * App-level: no `?repo=`, like every `workspace/*` read.
+ */
+export function fetchWorkspaceManifest(): Promise<WorkspaceManifestDocument> {
+  return apiFetch<WorkspaceManifestDocument>("workspace/manifest");
+}
+
+/** The `/api/v1` family's JSON error body (`{ "error": "…" }`) as its message, or
+ *  {@link detailOf}'s verbatim text when the body is not that shape. */
+async function workspaceErrorDetail(res: Response): Promise<string> {
+  const text = await detailOf(res);
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error === "string") return parsed.error;
+  } catch {
+    // Not JSON — the verbatim text is the honest detail.
+  }
+  return text;
+}
+
+/**
+ * `POST /api/v1/workspace/manifest/save` (S-430, FR-UI-38) — save the whole
+ * candidate manifest against the `fingerprint` the editor loaded, through the
+ * intent-guarded {@link apiMutate} seam (ADR-31, NFR-SE-06).
+ *
+ * Resolves with the {@link ManifestSaveOutcome} for `written`, `unchanged` AND
+ * `conflict`: a `409` is not a fault but the server declining to clobber an edit
+ * made on disk since the load, and its body carries what is on disk now so the
+ * view can put the choice to the user. Every other non-2xx throws a
+ * {@link ConfigMutateError} carrying the server's message — `422` for a candidate
+ * the parser rejects (the file untouched), `400` for a missing fingerprint, `500`
+ * for an I/O fault.
+ */
+export async function saveWorkspaceManifest(
+  content: string,
+  fingerprint: string,
+): Promise<ManifestSaveOutcome> {
+  const res = await apiMutate(apiUrl("workspace/manifest/save"), {
+    headers: FORM_HEADERS,
+    body: formBody({ content, fingerprint }),
+    credentials: "same-origin",
+  });
+  if (res.ok || res.status === 409) return (await res.json()) as ManifestSaveOutcome;
+  throw new ConfigMutateError(res.status, await workspaceErrorDetail(res));
 }
 
 /** What the boot-time probe found: a workspace (with its roster) or a plain repo. */

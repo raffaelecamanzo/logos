@@ -6,9 +6,12 @@ import {
   fetchWorkspaceGovernance,
   fetchWorkspaceImpact,
   fetchWorkspaceReachability,
+  fetchWorkspaceManifest,
   fetchWorkspaceRoster,
   probeWorkspace,
+  saveWorkspaceManifest,
 } from "./workspaceClient.ts";
+import { ConfigMutateError } from "./configClient.ts";
 
 /** Stub `fetch` with a fixed status, recording the URLs requested. */
 function stubFetch(status = 200, body: unknown = {}): () => string[] {
@@ -96,5 +99,65 @@ describe("the S-427 reads (FR-WS-28)", () => {
     const calls = stubFetch();
     await fetchWorkspaceReachability();
     expect(calls()[0]).not.toContain("all");
+  });
+});
+
+describe("the S-430 manifest read and save (FR-UI-38)", () => {
+  /** Stub one response with a body readable as JSON and as text. */
+  function stubOnce(status: number, body: unknown): { url: string; init?: RequestInit }[] {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return Promise.resolve({
+          ok: status >= 200 && status < 300,
+          status,
+          json: () => Promise.resolve(body),
+          text: () => Promise.resolve(typeof body === "string" ? body : JSON.stringify(body)),
+        } as Response);
+      }),
+    );
+    return calls;
+  }
+
+  it("reads and saves on the app-level routes, never carrying the ambient member", async () => {
+    setScopedMember("api");
+    const calls = stubOnce(200, { outcome: "unchanged", path: "logos.workspace.toml", fingerprint: "f" });
+    await fetchWorkspaceManifest();
+    await saveWorkspaceManifest("[workspace]\nname = \"a\"\n", "f");
+    expect(calls.map((c) => c.url)).toEqual([
+      "/api/v1/workspace/manifest",
+      "/api/v1/workspace/manifest/save",
+    ]);
+    const form = new URLSearchParams(String(calls[1].init?.body));
+    expect(form.get("content")).toBe('[workspace]\nname = "a"\n');
+    expect(form.get("fingerprint")).toBe("f");
+  });
+
+  it("resolves a 409 conflict as an outcome — it is the server declining to clobber, not a fault", async () => {
+    const conflict = {
+      outcome: "conflict",
+      path: "logos.workspace.toml",
+      loaded_fingerprint: "a",
+      disk_fingerprint: "b",
+      disk_content: "x",
+    };
+    stubOnce(409, conflict);
+    await expect(saveWorkspaceManifest("c", "a")).resolves.toEqual(conflict);
+  });
+
+  it("throws a 422 with the family's JSON error message, not its raw body", async () => {
+    stubOnce(422, { error: "unknown field `membrs`" });
+    const err = await saveWorkspaceManifest("c", "a").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigMutateError);
+    expect((err as ConfigMutateError).status).toBe(422);
+    expect((err as ConfigMutateError).detail).toBe("unknown field `membrs`");
+  });
+
+  it("keeps a non-JSON error body verbatim", async () => {
+    stubOnce(403, "missing or invalid intent token");
+    const err = (await saveWorkspaceManifest("c", "a").catch((e: unknown) => e)) as ConfigMutateError;
+    expect(err.detail).toBe("missing or invalid intent token");
   });
 });

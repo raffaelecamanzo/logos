@@ -270,8 +270,8 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 /// `POST` (ADR-31, NFR-SE-06) — the chat, wiki-generation and verify constants
 /// below are the only other admitted `POST`s; every other path/method stays
 /// GET-only (`405`). The three member routes bridge to the [`api-facade`]'s
-/// mutating config seam; the two workspace routes reach the same writers without
-/// an engine (below). All five are additionally gated by [`intent_guard`]
+/// mutating config seam; the three workspace routes write at the workspace root
+/// without an engine (below). All six are additionally gated by [`intent_guard`]
 /// (same-origin + per-session token).
 ///
 /// - `/config/save` → [`Engine::config_write`] (validated atomic write).
@@ -284,6 +284,10 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 ///   directly rather than through an [`Engine`] because none may be constructed
 ///   at the workspace root ([ADR-40]); that is also why the workspace tier has
 ///   **no** apply route here.
+/// - `/api/v1/workspace/manifest/save` → [`manifest::save_document`], the
+///   whole-manifest write path over `logos.workspace.toml` (S-430, [FR-UI-38]):
+///   validated by the parser discovery runs, refused on a stale load
+///   fingerprint, written verbatim. Engine-free for the same reason.
 ///
 /// The match is exact path equality, so a route mounted with `post(` and missing
 /// from this list is refused `405` before it routes. The unit test
@@ -296,6 +300,8 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 /// [`write_secret`]: logos_core::config::write_secret
 /// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
 /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+/// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+/// [`manifest::save_document`]: logos_core::federation::manifest::save_document
 /// [ADR-40]: ../../../docs/specs/architecture/decisions/ADR-40.md
 /// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
@@ -305,6 +311,7 @@ pub const CONFIG_POST_ROUTES: &[&str] = &[
     "/config/secret",
     "/api/v1/workspace/config/save",
     "/api/v1/workspace/config/secret",
+    "/api/v1/workspace/manifest/save",
 ];
 
 /// The enumerated chat `POST` route (S-170, [FR-UI-19], [NFR-SE-06]): the only
@@ -843,6 +850,11 @@ fn build_router(state: WebState) -> Router {
         // mounted with the other enumerated POSTs below; single-root answers all
         // three with the family's `404`.
         .route("/api/v1/workspace/config", get(api_v1::workspace_config))
+        // ── The workspace manifest as an editable document (S-430, [FR-UI-38]):
+        // the read half — the literal manifest, its load fingerprint and the parse
+        // verdict, read at the workspace root with no engine. Its save twin is
+        // mounted with the enumerated POSTs below; single-root answers both `404`.
+        .route("/api/v1/workspace/manifest", get(api_v1::workspace_manifest))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof
@@ -898,6 +910,9 @@ fn build_router(state: WebState) -> Router {
         // like the three above; deliberately no apply twin (ADR-40).
         .route("/api/v1/workspace/config/save", post(api_v1::workspace_config_save))
         .route("/api/v1/workspace/config/secret", post(api_v1::workspace_config_secret))
+        // S-430 / FR-UI-38: the whole-manifest save — validate, refuse a stale
+        // fingerprint, write verbatim. Listed in `CONFIG_POST_ROUTES` like the rest.
+        .route("/api/v1/workspace/manifest/save", post(api_v1::workspace_manifest_save))
         // The SPA history fallback (ADR-43): an unmatched **HTML navigation** GET
         // returns the shell so a client-side route survives a refresh, and a
         // root-level embedded asset (e.g. `/theme-init.js`) resolves from the

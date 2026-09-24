@@ -66,6 +66,7 @@ use logos_core::federation::{
     workspace_statistics, Backing, BoundedReachability, ContractBridge, DegradedRollup,
     EngineRegistry, ReachabilityScope, WorkspaceGovernance, WorkspaceStatistics,
 };
+use logos_core::federation::manifest::{self, ManifestDocument, ManifestSaveOutcome};
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
 use logos_core::observability::Surface;
@@ -1733,6 +1734,120 @@ pub(crate) async fn workspace_config_secret(
     })
     .await;
     written(outcome)
+}
+
+// ── The workspace manifest as an editable document ([FR-UI-38], S-430) ────────
+//
+// One read and one write over `logos.workspace.toml` itself — the file that
+// governs N repositories — through core's whole-manifest write path
+// (`manifest::read_document` / `manifest::save_document`), which validates the
+// candidate with the parser `discover` runs, writes nothing for a byte-identical
+// result, refuses a save made against a manifest that changed on disk since the
+// load, and otherwise writes the candidate verbatim through the shared atomic
+// publish. Like the config routes above, no engine is involved: the manifest is a
+// file at the workspace root, so no member is started, reindexed or written.
+//
+// [FR-UI-38]: ../../docs/specs/requirements/FR-UI-38.md
+
+/// `GET /api/v1/workspace/manifest` — the literal manifest, the fingerprint the
+/// editor must post back with its save, and the parse verdict over it
+/// ([`ManifestDocument`], [FR-UI-38]) — plus whether the `[governance]` family on
+/// disk is the one this serve is evaluating.
+///
+/// A manifest that no longer parses is a `200` with `parsed: null` and the
+/// parser's message in `error`, not a `500`: the editor is the repair path, and
+/// it needs the document and its fingerprint to repair it. Only an unreadable
+/// file is a `500`. Single-root answers the family's `404`.
+///
+/// [FR-UI-38]: ../../docs/specs/requirements/FR-UI-38.md
+pub(crate) async fn workspace_manifest(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+) -> Response {
+    workspace_fan_try(
+        backing,
+        bridge,
+        "api_v1_workspace_manifest",
+        Surface::Web,
+        |registry, _bridge| -> anyhow::Result<WorkspaceManifestAnswer> {
+            let federation = registry.federation();
+            let document = manifest::read_document(&federation.root)?;
+            let governance_in_effect = document
+                .parsed
+                .as_ref()
+                .is_some_and(|m| m.governance == federation.governance);
+            Ok(WorkspaceManifestAnswer {
+                document,
+                governance_in_effect,
+            })
+        },
+    )
+    .await
+}
+
+/// The manifest read-model plus the one fact the file cannot state about itself.
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceManifestAnswer {
+    #[serde(flatten)]
+    document: ManifestDocument,
+    /// Whether the `[governance]` family on disk equals the one this serve loaded
+    /// at startup — the family `GET /api/v1/workspace/check` evaluates. The serve
+    /// never re-reads the manifest, so after a save that changes the rules the
+    /// findings beside the editor are over the **previous** rules until the next
+    /// `logos serve`; `false` is what lets the view say so rather than present
+    /// them as the verdict on what the user just saved ([NFR-CC-04]). Also `false`
+    /// when the manifest on disk does not parse.
+    ///
+    /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+    governance_in_effect: bool,
+}
+
+/// `POST /api/v1/workspace/manifest/save` → [`manifest::save_document`]
+/// ([FR-UI-38]). Form fields: `content=<toml>` (the whole candidate manifest) and
+/// `fingerprint=<hex>` (the one the editor's read returned).
+///
+/// - `200` with `outcome: "written"` or `"unchanged"` (nothing written).
+/// - `409` with `outcome: "conflict"`: the manifest changed on disk since the
+///   load; nothing was written, and the body carries the document on disk now so
+///   the editor can offer the user the choice.
+/// - `422` for a candidate the parser rejects (the manifest byte-identical), `500`
+///   for an I/O fault — the member config routes' mapping ([`config_write_status`]).
+/// - `400` when `fingerprint` is missing: a save that cannot say what it was made
+///   against cannot be checked for a clobber, so it is not attempted.
+///
+/// Rides the enumerated allow-list and the unchanged same-origin + intent-token
+/// guard like every mutating route ([ADR-31], [NFR-SE-06]); single-root answers the
+/// family's `404` before the body is read.
+///
+/// [FR-UI-38]: ../../docs/specs/requirements/FR-UI-38.md
+/// [ADR-31]: ../../docs/specs/architecture/decisions/ADR-31.md
+/// [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
+pub(crate) async fn workspace_manifest_save(
+    WorkspaceRoot(root): WorkspaceRoot,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let Some(loaded) = form.get("fingerprint").map(|f| f.trim().to_string()).filter(|f| !f.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "a manifest save must carry the fingerprint its read returned (fingerprint=…)"
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    };
+    let content = form.get("content").cloned().unwrap_or_default();
+    let outcome = run_blocking("api_v1_workspace_manifest_save", Surface::Web, move || {
+        manifest::save_document(&root, &content, &loaded).map_err(anyhow::Error::from)
+    })
+    .await;
+    match outcome {
+        Ok(conflict @ ManifestSaveOutcome::Conflict { .. }) => {
+            (StatusCode::CONFLICT, Json(conflict)).into_response()
+        }
+        other => written(other),
+    }
 }
 
 /// Render a workspace-root write: the outcome on success, else the [`ApiError`]

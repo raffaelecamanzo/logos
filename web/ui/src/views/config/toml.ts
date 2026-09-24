@@ -105,6 +105,75 @@ function regionBounds(lines: string[], table: string): RegionBounds {
 }
 
 /**
+ * How many lines the `key = value` beginning at `lines[at]` occupies: `1`, unless
+ * its value is an array still open at the end of that line — the multi-line shape
+ * `toml::to_string_pretty` writes, which is how `logos init --workspace` writes a
+ * manifest's `members` — in which case every line through the one that closes it.
+ *
+ * Without this, patching such a key replaced only its first line and left the
+ * array's tail dangling: invalid TOML the server then (correctly) refused, so the
+ * typed field could not edit the shape the tool itself writes. Brackets inside a
+ * quoted string or after a `#` are not counted. An array never closed before EOF
+ * spans only its own line, which is what the patcher did before this existed.
+ */
+function valueSpan(lines: string[], at: number): number {
+  let depth = 0;
+  let open: MultilineQuote | null = null;
+  for (let i = at; i < lines.length; i++) {
+    const scan = bracketDelta(i === at ? lines[i].slice(lines[i].indexOf("=") + 1) : lines[i], open);
+    depth += scan.delta;
+    open = scan.open;
+    if (depth <= 0 && open === null) return i - at + 1;
+  }
+  return 1;
+}
+
+/** A TOML multi-line string delimiter — the one quoting that spans lines. */
+type MultilineQuote = '"""' | "'''";
+
+/** Where the string opened by `quote` closes in `text` from index `from`: the
+ *  index just past its closing delimiter, or `-1` when it runs past the line.
+ *  Only basic strings (`"`, `"""`) honour a backslash escape. */
+function closeOf(text: string, from: number, quote: string): number {
+  for (let j = from; j < text.length; j++) {
+    if (text[j] === "\\" && quote.startsWith('"')) j++;
+    else if (text.startsWith(quote, j)) return j + quote.length;
+  }
+  return -1;
+}
+
+/** The net `[` minus `]` count on one line of TOML, skipping brackets inside a
+ *  quoted string and everything after a `#` comment — and carrying a multi-line
+ *  string `open` at the line's end into the next line, whose brackets are string
+ *  content until it closes (a line never ends inside a one-line string). */
+function bracketDelta(
+  text: string,
+  open: MultilineQuote | null,
+): { delta: number; open: MultilineQuote | null } {
+  let delta = 0;
+  let j = 0;
+  if (open !== null) {
+    j = closeOf(text, 0, open);
+    if (j < 0) return { delta, open };
+  }
+  while (j < text.length) {
+    const c = text[j];
+    if (c === "#") break;
+    if (c === '"' || c === "'") {
+      const quote = text.startsWith(c.repeat(3), j) ? c.repeat(3) : c;
+      const after = closeOf(text, j + quote.length, quote);
+      if (after < 0) return { delta, open: quote.length === 3 ? (quote as MultilineQuote) : null };
+      j = after;
+      continue;
+    }
+    if (c === "[") delta++;
+    else if (c === "]") delta--;
+    j++;
+  }
+  return { delta, open: null };
+}
+
+/**
  * Patch (replace / insert / remove) `key` in `table` of the raw TOML document
  * `raw`, returning the updated document. `table === ""` addresses a top-level key.
  * An empty field value (`tomlValue` ⇒ `null`) removes the key; a non-empty value
@@ -130,12 +199,12 @@ export function patch(
     }
   }
   if (serialised === null) {
-    if (found >= 0) lines.splice(found, 1);
+    if (found >= 0) lines.splice(found, valueSpan(lines, found));
     return lines.join("\n");
   }
   const newLine = `${key} = ${serialised}`;
   if (found >= 0) {
-    lines[found] = newLine;
+    lines.splice(found, valueSpan(lines, found), newLine);
   } else if (table !== "" && region.headerIdx >= 0) {
     lines.splice(region.start, 0, newLine); // right after the existing header
   } else if (table !== "") {
@@ -144,5 +213,26 @@ export function patch(
   } else {
     lines.splice(region.end, 0, newLine); // end of the top-level region
   }
+  return lines.join("\n");
+}
+
+/**
+ * Remove the `[table]` header from `raw` when the table no longer holds any key —
+ * only blank and comment lines between it and the next header. Returns `raw`
+ * unchanged when the table is absent or still declares a key.
+ *
+ * For a table whose mere PRESENCE means something: a bare
+ * `[workspace.autodiscover]` turns discovery ON (its `enabled` defaults to
+ * `true`), so clearing `enabled` must take the header with it, or "not declared"
+ * would save the opposite of an operator's `enabled = false`. Pure, like
+ * {@link patch}.
+ */
+export function dropEmptyTable(raw: string, table: string): string {
+  const lines = raw.split("\n");
+  const region = regionBounds(lines, table);
+  if (region.headerIdx < 0) return raw;
+  const holdsKey = lines.slice(region.start, region.end).some((l) => l.trim() !== "" && !l.trim().startsWith("#"));
+  if (holdsKey) return raw;
+  lines.splice(region.headerIdx, 1);
   return lines.join("\n");
 }
