@@ -575,6 +575,131 @@ mod tests {
         );
     }
 
+    /// Every reachable refusal shape, pinned **whole**: each (policy origin,
+    /// credential origin) pair that refuses, with and without a workspace root
+    /// passed, names exactly its root, its absent half, the origin of its present
+    /// half and the action that fixes it ([NFR-CC-04]). A mislabelled origin or a
+    /// wrong action cannot survive an equality the way it survives `contains`.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn every_refusal_shape_names_exactly_its_facts() {
+        use Half::{Absent, Declared};
+        // (member model, member key, ws model, ws key, pass ws, absent, present, action)
+        let rows = [
+            (
+                Absent,
+                Absent,
+                Absent,
+                Absent,
+                true,
+                "neither a provider model nor an API key is declared",
+                None,
+                "Choose a provider model and add an API key",
+            ),
+            (
+                Absent,
+                Declared,
+                Absent,
+                Absent,
+                true,
+                "no provider model is declared",
+                Some(("API key", false)),
+                "Choose a provider model",
+            ),
+            (
+                Absent,
+                Absent,
+                Absent,
+                Declared,
+                true,
+                "no provider model is declared",
+                Some(("API key", true)),
+                "Choose a provider model",
+            ),
+            (
+                Declared,
+                Absent,
+                Absent,
+                Absent,
+                true,
+                "no API key is declared",
+                Some(("provider model", false)),
+                "Add an API key",
+            ),
+            (
+                Absent,
+                Absent,
+                Declared,
+                Absent,
+                true,
+                "no API key is declared",
+                Some(("provider model", true)),
+                "Add an API key",
+            ),
+            (
+                Absent,
+                Absent,
+                Declared,
+                Declared,
+                false,
+                "neither a provider model nor an API key is declared",
+                None,
+                "Choose a provider model and add an API key",
+            ),
+            (
+                Absent,
+                Declared,
+                Declared,
+                Declared,
+                false,
+                "no provider model is declared",
+                Some(("API key", false)),
+                "Choose a provider model",
+            ),
+            (
+                Declared,
+                Absent,
+                Declared,
+                Declared,
+                false,
+                "no API key is declared",
+                Some(("provider model", false)),
+                "Add an API key",
+            ),
+        ];
+        for (mm, mk, wm, wk, pass_ws, absent, present, action) in rows {
+            let e = estate(mm, mk, wm, wk);
+            let ws = pass_ws.then_some(e.ws.as_path());
+            let member = e.member.display();
+            let looked = match ws {
+                Some(ws) => format!(" by this member or by the workspace root {}", ws.display()),
+                None => String::new(),
+            };
+            let present = match present {
+                None => String::new(),
+                Some((half, true)) => {
+                    format!(
+                        "; the {half} is inherited from the workspace root {}",
+                        e.ws.display()
+                    )
+                }
+                Some((half, false)) => format!("; the {half} is declared by {member}"),
+            };
+            let expected = format!(
+                "Chat is not configured yet for {member} — {absent}{looked}{present}. {action} \
+                 in the Config tab before starting a turn."
+            );
+            let actual = build_setup(&e.member, ws, None, "q")
+                .err()
+                .expect("refused");
+            assert_eq!(
+                actual, expected,
+                "member({mm:?},{mk:?}) ws({wm:?},{wk:?}) pass={pass_ws}"
+            );
+        }
+    }
+
     /// A refused turn is decided before any store is touched: it records no
     /// thread and no message.
     #[test]
