@@ -178,20 +178,37 @@ fn configure_first_message(
 /// worded for `subject` (`"chat"` or `"wiki"`) and shared by both agents that
 /// read the seam.
 ///
-/// A `secrets.toml` **parse** fault gets a fixed message naming only the file
-/// ([NFR-SE-07]): the TOML error's `Display` embeds a snippet of the offending
-/// line, which may be the `api_key = "…"` line, and the frame is rendered
-/// verbatim. Every other fault carries its detailed error — none of them holds
-/// secret material.
+/// A **parse** fault — of `secrets.toml` *or* `config.toml`, at either root — is
+/// reported by file and position only ([NFR-SE-07]): the TOML error's `Display`
+/// quotes the offending line, and its message may quote a value, so either could
+/// carry an `api_key = "…"` line (a key pasted into `config.toml` is exactly the
+/// line `deny_unknown_fields` rejects), and the frame is rendered verbatim. Only
+/// the leading `TOML parse error at line L, column C` line is kept. The other
+/// faults keep their detailed error: an I/O fault names the path and the OS error,
+/// and a validation fault names the key and its bound, never file content.
 ///
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
 pub(crate) fn resolution_fault(subject: &str, err: &ConfigError) -> String {
     match err {
-        ConfigError::Parse { path, .. }
-            if path.file_name().is_some_and(|name| name == "secrets.toml") =>
-        {
+        ConfigError::Parse { path, .. } => {
+            let what = if path.file_name().is_some_and(|name| name == "secrets.toml") {
+                "secret"
+            } else {
+                "configuration"
+            };
+            // The first line of the TOML error is its position; everything after
+            // it quotes the file.
+            let position = std::error::Error::source(err)
+                .map(ToString::to_string)
+                .and_then(|text| text.lines().next().map(str::to_string))
+                .and_then(|line| {
+                    line.strip_prefix("TOML parse error at ")
+                        .map(|at| format!(" ({at})"))
+                })
+                .unwrap_or_default();
             format!(
-                "could not read the {subject} secret — check that {} is valid TOML",
+                "could not read the {subject} {what} — check that {} is valid TOML with only \
+                 known keys{position}",
                 path.display()
             )
         }

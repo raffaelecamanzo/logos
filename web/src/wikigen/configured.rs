@@ -105,18 +105,16 @@ impl ConfiguredWikiRunService {
 /// [`run_configured`](wiki_agent::run_configured)'s configure-first state, so the
 /// resolution stays a pure read.
 ///
-/// A `secrets.toml` **parse** fault, at either root, is surfaced with a **fixed**
-/// message that never interpolates the underlying error ([NFR-SE-07],
-/// [`resolution_fault`]): its `Display` embeds a snippet of the offending input
-/// line, which could be the `api_key = "…"` line — echoing it into the SSE `error`
-/// frame the UI renders verbatim would leak the raw key. A `config.toml` read
-/// carries no secret, so its detailed error is kept for diagnosability.
+/// A **parse** fault of either file, at either root, is surfaced by file and
+/// position only ([NFR-SE-07], [`resolution_fault`]): its `Display` embeds a
+/// snippet of the offending input line, which could be an `api_key = "…"` line —
+/// in `secrets.toml`, or pasted into `config.toml` by mistake — and echoing it into
+/// the SSE `error` frame the UI renders verbatim would leak the raw key.
 fn resolve_effective_model(
     root: &Path,
     workspace_root: Option<&Path>,
 ) -> Result<EffectiveWikiModel, String> {
-    let config = load_config_from_root(root)
-        .map_err(|e| format!("could not read the wiki config: {e}"))?;
+    let config = load_config_from_root(root).map_err(|e| resolution_fault("wiki", &e))?;
     let chat = resolve_chat(root, workspace_root).map_err(|e| resolution_fault("wiki", &e))?;
     Ok(config.wiki.resolve_inherited(&chat))
 }
@@ -275,6 +273,39 @@ mod tests {
         let effective = resolve_effective_model(&member, None).expect("resolves");
         assert_eq!(effective.model, None);
         assert_eq!(effective.api_key, None);
+    }
+
+    /// A key pasted into `config.toml` is never echoed by the wiki's parse fault —
+    /// neither from the member's own `config.toml` nor from the workspace's.
+    #[test]
+    fn a_config_toml_parse_fault_never_echoes_a_pasted_key_at_either_root() {
+        let pasted = "[chat]\nmodel = \"m\"\napi_key = \"sk-LEAKME-CONFIG\"\n";
+
+        let (tmp, member) = inheriting_estate();
+        write(&member, "config.toml", pasted);
+        let member_fault = resolve_effective_model(&member, Some(tmp.path())).expect_err("fault");
+
+        let (tmp2, member2) = inheriting_estate();
+        write(tmp2.path(), "config.toml", pasted);
+        let ws_fault = resolve_effective_model(&member2, Some(tmp2.path())).expect_err("fault");
+
+        for (err, file) in [
+            (&member_fault, member.join(".logos/config.toml")),
+            (&ws_fault, tmp2.path().join(".logos/config.toml")),
+        ] {
+            assert!(
+                !err.contains("sk-LEAKME-CONFIG"),
+                "never echoes the key: {err}"
+            );
+            assert!(
+                err.starts_with("could not read the wiki configuration"),
+                "{err}"
+            );
+            assert!(
+                err.contains(&file.display().to_string()),
+                "names the file: {err}"
+            );
+        }
     }
 
     /// An invalid **workspace** `secrets.toml` the member relies on fails loud with

@@ -587,6 +587,45 @@ mod tests {
         );
     }
 
+    /// A key pasted into `config.toml` — the line `deny_unknown_fields` rejects —
+    /// is never echoed by the parse fault, at the member root or at the workspace
+    /// root an inheriting member reads ([NFR-SE-07]); the fault still names the
+    /// file and the position.
+    ///
+    /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+    #[test]
+    fn a_config_toml_parse_fault_never_echoes_a_pasted_key_at_either_root() {
+        let pasted = "[chat]\nmodel = \"m\"\napi_key = \"sk-LEAKME-CONFIG\"\n";
+
+        let e = estate(Half::Absent, Half::Absent, Half::Absent, Half::Declared);
+        write(&e.member, "config.toml", pasted);
+        let member_fault = build_setup(&e.member, None, None, "q")
+            .err()
+            .expect("a fault");
+
+        let e2 = estate(Half::Absent, Half::Absent, Half::Absent, Half::Declared);
+        write(&e2.ws, "config.toml", pasted);
+        let ws_fault = build_setup(&e2.member, Some(&e2.ws), None, "q")
+            .err()
+            .expect("a fault");
+
+        for (m, file) in [
+            (&member_fault, e.member.join(".logos/config.toml")),
+            (&ws_fault, e2.ws.join(".logos/config.toml")),
+        ] {
+            assert!(!m.contains("sk-LEAKME-CONFIG"), "never echoes the key: {m}");
+            assert!(
+                m.starts_with("could not read the chat configuration"),
+                "a config fault, not a secret fault: {m}"
+            );
+            assert!(
+                m.contains(&file.display().to_string()),
+                "names the file: {m}"
+            );
+            assert!(m.contains("line 3"), "names the position: {m}");
+        }
+    }
+
     /// Known consequence (b) of [S-447], kept: the seam always reads the member's
     /// `secrets.toml`, so an invalid one with no model reports the parse fault
     /// (fail loud) rather than "not configured" — and never echoes the key.
