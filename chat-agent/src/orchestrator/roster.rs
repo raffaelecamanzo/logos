@@ -7,7 +7,10 @@
 //! least-privilege tool domains (S-167):
 //!
 //! - **Graph-Navigator** — the 8 graph tools (`search`/`context`/`node`/
-//!   `callers`/`callees`/`impact`/`explore`/`affected`);
+//!   `callers`/`callees`/`impact`/`explore`/`affected`), plus — under a
+//!   **federated** backing only — the 4 read-only `xservice_*` tools
+//!   (`xservice_route_providers`/`xservice_callers`/`xservice_impact`/
+//!   `xservice_search`, [S-431], [FR-WS-29]);
 //! - **Governance-Analyst** — the 8 governance tools (`scan`/`check_rules`/
 //!   `hotspots`/`dsm`/`gate`/`evolution`/`doc_gaps`/`health`);
 //! - **Source-Reader** — the 3 sandboxed source tools (`read`/`grep`/`glob`),
@@ -31,7 +34,23 @@
 //! built-in multi-turn tool loop precisely so every tool call passes through the
 //! budget tree; `rig`'s own loop would dispatch tools internally and bypass it.
 //!
+//! # Cross-service reach, only in a workspace ([S-431], [ADR-52])
+//!
+//! [`SubagentRoster::with_xservice`] hands in the federated query backing. Under a
+//! single backing none is supplied, so the Graph-Navigator's registered tool list,
+//! its preamble and every observation it produces are byte-for-byte what they were
+//! before S-431. Under a federated one, every `xservice_*` result's deterministic
+//! `reading` line — repo-qualified, and carrying the unresolved residue as
+//! `UNRESOLVED` when a cross-service answer is empty over a non-zero residue
+//! ([BR-53]) — is appended **verbatim** to the step's observation
+//! ([`with_xservice_readings`]), so the planner and the Synthesizer read the
+//! qualification whether or not the model's own summary repeats it.
+//!
 //! [S-174]: ../../../docs/planning/journal.md#s-174-specialized-subagent-roster-on-rig
+//! [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+//! [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
+//! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+//! [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-41]: ../../../docs/specs/architecture/decisions/ADR-41.md
 //! [chat-agent]: ../../../docs/specs/architecture/components/chat-agent.md
 //! [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
@@ -42,8 +61,8 @@ use std::sync::Arc;
 use agent_core::rig::completion::{AssistantContent, CompletionModel};
 use agent_core::rig::message::{Message, ToolCall};
 use agent_core::{
-    governance_toolset, graph_toolset, source_toolset, BoundedDispatcher, DispatchError, Sandbox,
-    ToolBudget,
+    governance_toolset, graph_toolset, source_toolset, xservice_reading, xservice_toolset,
+    BoundedDispatcher, DispatchError, Sandbox, ToolBudget, XserviceBacking,
 };
 use logos_core::Engine;
 
@@ -90,6 +109,22 @@ multiple symbols, or asks for a neighborhood/overview rather than one known \
 symbol — prefer a single `context` call (one ranked multi-symbol bundle) over \
 several separate `search`/`node` calls; reach for `search`/`node` once you already \
 know the specific symbol you need.";
+
+/// What the Graph-Navigator's preamble gains under a **federated** backing
+/// ([S-431], [FR-WS-29]) — appended to [`GRAPH_NAVIGATOR_PREAMBLE`], never
+/// substituted for it, and never under a single backing.
+///
+/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+/// [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
+pub const GRAPH_NAVIGATOR_XSERVICE_ADDENDUM: &str = "This codebase is one member of a multi-repository WORKSPACE. Your graph tools above \
+answer from this member only. For a question that crosses repositories — which \
+services call an endpoint, what another service breaks, where a symbol lives across \
+the workspace — use the cross-service tools: xservice_search, xservice_callers, \
+xservice_impact, xservice_route_providers. Pass `repo` when you already know the \
+member, so only that member is opened. Cross-service results are repo-qualified: \
+name the member with every result, and never merge the same symbol from two members \
+into one. An xservice reading that says UNRESOLVED is not an absence — report it as \
+unresolved, with its count, never as \"none\".";
 
 /// System preamble for the **Governance-Analyst** subagent.
 ///
@@ -239,11 +274,19 @@ impl<M: Clone> RoleModels<M> {
 /// orchestrator dispatches plan steps to ([S-174], [ADR-41]).
 ///
 /// Holds the shared [`Engine`] (behind the graph + governance tools), the
-/// [`Sandbox`] (behind the source tools), the per-role [`RoleModels`], and the
-/// optional `[chat]` sampling params applied to every subagent request.
+/// [`Sandbox`] (behind the source tools), the optional federated backing (behind
+/// the `xservice_*` tools), the per-role [`RoleModels`], and the optional
+/// `[chat]` sampling params applied to every subagent request.
 pub struct SubagentRoster<M> {
     engine: Arc<Engine>,
     sandbox: Arc<Sandbox>,
+    /// The federated query backing ([S-431]); `None` (the default, and always
+    /// under a single root) leaves the Graph-Navigator's roster exactly the eight
+    /// graph tools ([ADR-52]).
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    xservice: Option<XserviceBacking>,
     models: RoleModels<M>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
@@ -272,6 +315,7 @@ where
         Self {
             engine,
             sandbox,
+            xservice: None,
             models,
             temperature: None,
             max_tokens: None,
@@ -290,6 +334,45 @@ where
         self
     }
 
+    /// Compose the `xservice_*` tools onto the Graph-Navigator over `xservice` —
+    /// the federated backing, which exists only in a workspace ([S-431],
+    /// [ADR-52]). `None` is a no-op, so a caller can hand in whatever
+    /// [`XserviceBacking::federated`] returned.
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    pub fn with_xservice(mut self, xservice: Option<XserviceBacking>) -> Self {
+        self.xservice = xservice;
+        self
+    }
+
+    /// `role`'s registered tool definitions (name, description, schema), in
+    /// registration order — exactly what its model is offered. Introspection for
+    /// the [ADR-52] byte-identity assertion, which is made on what is registered
+    /// rather than on a behaviour; the tool-less Synthesizer has none.
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    pub async fn registered_tools(
+        &self,
+        role: StepRole,
+    ) -> Vec<agent_core::rig::completion::ToolDefinition> {
+        match self.toolset_for(role) {
+            Some(toolset) => toolset.get_tool_definitions().await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The system preamble `role` runs under: [`preamble_for`], plus the
+    /// cross-service addendum for the Graph-Navigator under a federated backing.
+    pub fn preamble(&self, role: StepRole) -> String {
+        match (role, &self.xservice) {
+            (StepRole::GraphNavigator, Some(_)) => {
+                format!("{GRAPH_NAVIGATOR_PREAMBLE}\n\n{GRAPH_NAVIGATOR_XSERVICE_ADDENDUM}")
+            }
+            _ => preamble_for(role).to_string(),
+        }
+    }
+
     /// Set the sampling temperature applied to every subagent request
     /// (`[chat].temperature`, [FR-CF-06]).
     pub fn with_temperature(mut self, temperature: Option<f64>) -> Self {
@@ -305,10 +388,20 @@ where
     }
 
     /// Build the `rig` `ToolSet` for a tool-bearing role; the Synthesizer is
-    /// tool-less ([`None`]).
+    /// tool-less ([`None`]). The Graph-Navigator's set gains the `xservice_*`
+    /// tools, after the eight graph tools, only when a federated backing was
+    /// supplied — building them touches no member engine ([NFR-PE-10]).
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     fn toolset_for(&self, role: StepRole) -> Option<agent_core::rig::tool::ToolSet> {
         match role {
-            StepRole::GraphNavigator => Some(graph_toolset(self.engine.clone())),
+            StepRole::GraphNavigator => {
+                let mut toolset = graph_toolset(self.engine.clone());
+                if let Some(xservice) = &self.xservice {
+                    toolset.add_tools(xservice_toolset(xservice.clone()));
+                }
+                Some(toolset)
+            }
             StepRole::GovernanceAnalyst => Some(governance_toolset(self.engine.clone())),
             StepRole::SourceReader => Some(source_toolset(self.sandbox.clone())),
             StepRole::Synthesizer => None,
@@ -326,14 +419,14 @@ where
         ctx: &StepContext<'_>,
     ) -> Result<StepObservation, StepError> {
         let model = self.models.for_role(step.role);
-        let preamble = preamble_for(step.role);
+        let preamble = self.preamble(step.role);
         match self.toolset_for(step.role) {
             // Tool-bearing subagent: run its bounded tool loop.
             Some(toolset) => {
                 run_tool_subagent(
                     model,
                     step.role,
-                    preamble,
+                    &preamble,
                     toolset,
                     &step.instruction,
                     ctx,
@@ -356,7 +449,7 @@ where
                 };
                 run_synthesizer(
                     model,
-                    preamble,
+                    &preamble,
                     &instruction,
                     self.temperature,
                     self.max_tokens,
@@ -452,6 +545,12 @@ where
     // on any `Ok` dispatch; when it reaches the cap the step soft-closes.
     let mut tool_error_streak: usize = 0;
 
+    // The `reading` line of every `xservice_*` result this step dispatched, in
+    // dispatch order — appended verbatim to whatever observation the step ends
+    // with ([`with_xservice_readings`]). Always empty under a single backing,
+    // where no `xservice_*` tool is registered.
+    let mut readings: Vec<String> = Vec::new();
+
     loop {
         // Rebuilt every round from the step's CURRENT `ToolBudget` state, so the
         // "calls remaining" the subagent is told is a genuinely running count,
@@ -511,7 +610,7 @@ where
                     "the {role:?} subagent returned neither a tool call nor an answer"
                 )));
             }
-            return Ok(StepObservation::new(text));
+            return Ok(StepObservation::new(with_xservice_readings(text, &readings)));
         }
 
         // Record the assistant's tool-call turn, then run each call (charged).
@@ -546,6 +645,7 @@ where
                     CloseReason::GlobalCeiling {
                         limit: ctx.budget_tree().global_limit(),
                     },
+                    &readings,
                     temperature,
                     max_tokens,
                 )
@@ -559,6 +659,9 @@ where
                     // The dispatcher charged this step's per-subagent budget; now
                     // charge the shared global ceiling for the call that ran.
                     ctx.budget_tree().charge_global()?;
+                    if let Some(reading) = xservice_reading(name, &output) {
+                        readings.push(reading);
+                    }
                     conversation.push(Message::tool_result(tool_call.id.clone(), output));
                     // Progress — a successful dispatch resets the consecutive-error
                     // streak so an earlier stumble the subagent recovered from never
@@ -583,6 +686,7 @@ where
                         CloseReason::SubagentCap {
                             limit: exhausted.limit,
                         },
+                        &readings,
                         temperature,
                         max_tokens,
                     )
@@ -611,6 +715,7 @@ where
                         &mut conversation,
                         &tool_calls[idx + 1..],
                         &mut tool_error_streak,
+                        &readings,
                         ctx,
                         temperature,
                         max_tokens,
@@ -656,6 +761,7 @@ where
                         &mut conversation,
                         &tool_calls[idx + 1..],
                         &mut tool_error_streak,
+                        &readings,
                         ctx,
                         temperature,
                         max_tokens,
@@ -688,6 +794,7 @@ async fn note_tool_error_and_maybe_close<M>(
     conversation: &mut Vec<Message>,
     dangling: &[ToolCall],
     streak: &mut usize,
+    readings: &[String],
     ctx: &StepContext<'_>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
@@ -710,6 +817,7 @@ where
         std::mem::take(conversation),
         dangling,
         CloseReason::ToolErrors { count: *streak },
+        readings,
         temperature,
         max_tokens,
     )
@@ -807,6 +915,7 @@ async fn close_and_summarize<M>(
     mut conversation: Vec<Message>,
     dangling: &[ToolCall],
     reason: CloseReason,
+    readings: &[String],
     temperature: Option<f64>,
     max_tokens: Option<u64>,
 ) -> Result<StepObservation, StepError>
@@ -866,7 +975,35 @@ where
     } else {
         format!("[bounded — {reason}; this summary may be partial]\n{text}")
     };
-    Ok(StepObservation::new(summary))
+    Ok(StepObservation::new(with_xservice_readings(summary, readings)))
+}
+
+/// Append the step's `xservice_*` readings, verbatim, to its observation text
+/// ([S-431], [BR-53], [NFR-CC-04]).
+///
+/// The readings are the tools' own deterministic lines — repo-qualified, and
+/// `UNRESOLVED` where an empty cross-service answer sits over a non-zero residue
+/// — so the planner and the Synthesizer read that qualification even when the
+/// model's summary drops it. No readings (every single-backing step) leaves the
+/// text untouched, byte for byte ([ADR-52]).
+///
+/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+/// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+fn with_xservice_readings(text: String, readings: &[String]) -> String {
+    if readings.is_empty() {
+        return text;
+    }
+    let mut out = text;
+    // Deliberately neutral: the verdict word lives in each reading, so a
+    // zero-residue answer carries no qualification it did not earn ([BR-53]).
+    out.push_str("\n\nCross-service readings (verbatim tool results, repo-qualified):");
+    for reading in readings {
+        out.push_str("\n- ");
+        out.push_str(reading);
+    }
+    out
 }
 
 /// Run the tool-less Synthesizer: one **streaming** completion with **no** tools

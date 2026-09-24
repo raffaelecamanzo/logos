@@ -51,6 +51,30 @@ turn that makes no codebase claim (a greeting, or a meta-question about this cha
 that answers directly with no tool steps. Ground every claim in the subagents' \
 observations. Never invent a tool result.";
 
+/// What the planner preamble gains under a **federated** backing ([S-431],
+/// [FR-WS-29]): the Graph-Navigator now also carries the cross-service tools, so a
+/// cross-repository question is routed to it rather than answered from one
+/// member. Appended to [`DEFAULT_PLANNER_PREAMBLE`] by
+/// [`workspace_planner_preamble`]; a single-root turn never sees it.
+///
+/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+/// [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
+pub const WORKSPACE_PLANNER_ADDENDUM: &str = "\
+This codebase is one member of a multi-repository workspace. In this workspace the \
+graph_navigator ALSO has cross-service tools (xservice_search, xservice_callers, \
+xservice_impact, xservice_route_providers) that answer across every member, \
+repo-qualified. Route any question that crosses repositories — which services call \
+something, what another service would break, where a symbol lives across the \
+workspace — to graph_navigator and say in its instruction that the question is \
+cross-service. An observation line marked UNRESOLVED means the cross-service answer \
+is missing outbound calls: it must reach the answer as unresolved, never as \"none\".";
+
+/// The planner preamble for a turn over a **federated** backing:
+/// [`DEFAULT_PLANNER_PREAMBLE`] followed by [`WORKSPACE_PLANNER_ADDENDUM`].
+pub fn workspace_planner_preamble() -> String {
+    format!("{DEFAULT_PLANNER_PREAMBLE}\n\n{WORKSPACE_PLANNER_ADDENDUM}")
+}
+
 /// The plan→act→observe→replan planner over a `rig` `Agent` ([ADR-41]).
 ///
 /// Holds the completion model (cloned to build a fresh `Agent` per round; the
@@ -255,6 +279,20 @@ fn escape_control_chars_in_strings(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::orchestrator::plan::StepRole;
+
+    /// [S-431]: the workspace preamble is today's, extended with the cross-service
+    /// routing — and today's names no `xservice_*` tool, so a single-root planner
+    /// is never told about a tool its Graph-Navigator does not have.
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    #[test]
+    fn the_workspace_preamble_extends_the_default_and_the_default_names_no_xservice_tool() {
+        let workspace = workspace_planner_preamble();
+        assert!(workspace.starts_with(DEFAULT_PLANNER_PREAMBLE), "{workspace}");
+        assert!(workspace.contains("xservice_callers"), "{workspace}");
+        assert!(workspace.contains("UNRESOLVED"), "{workspace}");
+        assert!(!DEFAULT_PLANNER_PREAMBLE.contains("xservice"), "{DEFAULT_PLANNER_PREAMBLE}");
+    }
 
     #[test]
     fn parses_a_bare_json_decision() {

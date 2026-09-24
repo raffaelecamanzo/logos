@@ -574,17 +574,23 @@ pub fn workspace_router_with_intent(
 /// resolved engine instead. `Arc::ptr_eq` is the test: same engine ⇒ the injected service
 /// (mock seams preserved); a different engine ⇒ a service for that member, resolving its
 /// inherited chat halves against the same `workspace_root` ([ADR-67]).
+///
+/// A scoped member's service keeps the workspace's cross-service reach: `xservice` is
+/// the router's federated backing ([S-431]), `None` under single-root.
+///
+/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
 #[cfg(feature = "agents")]
 fn chat_for(
     injected: &Arc<dyn chat::ChatService>,
     default: &Arc<Engine>,
     scoped: Arc<Engine>,
     workspace_root: Option<std::path::PathBuf>,
+    xservice: Option<agent_core::XserviceBacking>,
 ) -> Arc<dyn chat::ChatService> {
     if Arc::ptr_eq(default, &scoped) {
         Arc::clone(injected)
     } else {
-        Arc::new(chat::ConfiguredChatService::new(scoped, workspace_root))
+        Arc::new(chat::ConfiguredChatService::new(scoped, workspace_root).with_xservice(xservice))
     }
 }
 
@@ -619,10 +625,14 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
     #[cfg(feature = "agents")]
     {
         let workspace_root = workspace_root_of(&backing);
-        let chat: Arc<dyn chat::ChatService> = Arc::new(chat::ConfiguredChatService::new(
-            Arc::clone(&engine),
-            workspace_root.clone(),
-        ));
+        // Cross-service reach for the chat turn ([S-431]): `Some` only over a
+        // federated backing, over the same bridge the workspace endpoints stitch.
+        let xservice =
+            agent_core::XserviceBacking::federated(Arc::clone(&backing), Arc::clone(&bridge));
+        let chat: Arc<dyn chat::ChatService> = Arc::new(
+            chat::ConfiguredChatService::new(Arc::clone(&engine), workspace_root.clone())
+                .with_xservice(xservice),
+        );
         let wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(
             wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine), workspace_root),
         );
@@ -941,13 +951,16 @@ async fn chat_turn(
     State(chat): State<Arc<dyn chat::ChatService>>,
     State(default): State<Arc<Engine>>,
     State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
     MemberEngine(engine): MemberEngine,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     // Answer from the member the user is actually reading (S-250), resolving its
-    // chat halves against the workspace root it may inherit them from ([ADR-67]).
-    let chat = chat_for(&chat, &default, engine, workspace_root_of(&backing));
+    // chat halves against the workspace root it may inherit them from ([ADR-67]),
+    // with the workspace's cross-service reach when there is one ([S-431]).
+    let xservice = agent_core::XserviceBacking::federated(Arc::clone(&backing), bridge);
+    let chat = chat_for(&chat, &default, engine, workspace_root_of(&backing), xservice);
     let question = form
         .get("q")
         .or_else(|| form.get("message"))
@@ -1716,7 +1729,7 @@ mod tests {
         // Unscoped (or single-root): the injected service is used verbatim — the mock
         // seam the chat/wiki carve-out tests inject is never bypassed.
         assert!(Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&default), None),
+            &chat_for(&injected_chat, &default, Arc::clone(&default), None, None),
             &injected_chat
         ));
         assert!(Arc::ptr_eq(
@@ -1727,7 +1740,7 @@ mod tests {
         // Scoped to another member: a DIFFERENT service, bound to that member's engine —
         // so the turn is answered from, and the wiki written into, the member on screen.
         assert!(!Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&other), None),
+            &chat_for(&injected_chat, &default, Arc::clone(&other), None, None),
             &injected_chat
         ));
         assert!(!Arc::ptr_eq(

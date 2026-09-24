@@ -52,6 +52,7 @@ pub use retry::{
     RetryPolicy, RetryingModel, DEFAULT_MAX_PROVIDER_RETRIES, DEFAULT_PROVIDER_RETRY_BASE_MS,
 };
 pub use tools::{
-    governance_toolset, graph_toolset, source_toolset, BoundedDispatcher, BudgetExhausted,
-    DispatchError, Sandbox, SandboxError, ToolBudget, ToolCallError, ToolDomain,
+    governance_toolset, graph_toolset, source_toolset, xservice_reading, xservice_toolset,
+    BoundedDispatcher, BudgetExhausted, DispatchError, Sandbox, SandboxError, ToolBudget,
+    ToolCallError, ToolDomain, XserviceAnswer, XserviceBacking, XSERVICE_TOOL_NAMES,
 };
