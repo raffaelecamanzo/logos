@@ -33,7 +33,7 @@
  * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 
 import {
@@ -188,8 +188,8 @@ function constraintHint(recommended: unknown): string {
  * literal document. Pre-filling a field from the slice would materialise the
  * inherited value in the member's file on the next save (NFR-RA-05).
  */
-function inheritedPolicyNote(effective: EffectiveChat): ReactNode {
-  if (effective.policy_origin !== "workspace") return undefined;
+function inheritedPolicyNote(effective: EffectiveChat | null): ReactNode {
+  if (effective?.policy_origin !== "workspace") return undefined;
   const p = effective.policy;
   return (
     <p className={styles.inherited}>
@@ -209,7 +209,7 @@ function inheritedPolicyNote(effective: EffectiveChat): ReactNode {
 
 /** The `config.toml` typed fields: top-level scalars/lists + the `[chat]` group
  *  (with its read-only inheritance note, when the policy is inherited). */
-function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat): FieldGroup[] {
+function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat | null): FieldGroup[] {
   return [
     {
       fields: [
@@ -451,11 +451,14 @@ function FileEditor({
   view,
   groups,
   isRules,
+  onSaved,
 }: {
   file: PolicyFile;
   view: FileView<unknown>;
   groups: FieldGroup[];
   isRules: boolean;
+  /** Called after a successful save — the document on disk has changed. */
+  onSaved?: () => void;
 }) {
   const [raw, setRaw] = useState<string>(view.content);
   const [values, setValues] = useState<Record<string, string>>(() => {
@@ -490,6 +493,7 @@ function FileEditor({
     try {
       const outcome = await saveConfig(file, raw);
       setSaveResult({ kind: "ok", text: describeSaved(outcome) });
+      onSaved?.();
     } catch (e) {
       setSaveResult(
         e instanceof ConfigMutateError
@@ -782,6 +786,18 @@ function GraphConsistencyCard() {
 
 /** The editors over a loaded read-model. */
 function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
+  // The inheritance notes are claims about the RESOLUTION, which a save can change
+  // (a member that declares its own model stops inheriting the table). So the slice
+  // is re-read after a write; the editors themselves keep their own state and are
+  // never re-seeded from it. A failed re-read drops the notes rather than keep
+  // asserting a resolution this page no longer knows to be current (NFR-CC-04).
+  const [effective, setEffective] = useState<EffectiveChat | null>(model.effective_chat);
+  const refreshEffective = useCallback(() => {
+    fetchConfig().then(
+      (fresh) => setEffective(fresh.effective_chat),
+      () => setEffective(null),
+    );
+  }, []);
   return (
     <div className={styles.view}>
       <Callout label="CONFIG EDITOR" tone="muted">
@@ -794,15 +810,16 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       <FileEditor
         file="config"
         view={model.config}
-        groups={configGroups(model.config.parsed, model.defaults.config, model.effective_chat)}
+        groups={configGroups(model.config.parsed, model.defaults.config, effective)}
         isRules={false}
+        onSaved={refreshEffective}
       />
       {/* Directly beneath the [chat] fields (S-452): the key is a separate save to a
           separate endpoint, and an unrelated card between the two made saving the
           config document read as completing the chat configuration. */}
       <SecretEditor
         initial={model.chat_key}
-        inherited={model.effective_chat.credential_origin === "workspace"}
+        inherited={effective?.credential_origin === "workspace"}
       />
       <GraphConsistencyCard />
       <FileEditor

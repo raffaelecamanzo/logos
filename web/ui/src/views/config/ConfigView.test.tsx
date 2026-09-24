@@ -460,6 +460,32 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     expect(written).not.toContain("api.anthropic.com");
   });
 
+  it("drops the policy note once a save makes the member declare its own model", async () => {
+    // The note is a claim about the resolution, so it must follow the resolution:
+    // after the save, the re-read reports the member's own policy.
+    let reads = 0;
+    const own = inheriting();
+    own.effective_chat = { ...own.effective_chat, policy: { ...own.effective_chat.policy, model: "own-model" }, policy_origin: "member" };
+    mockFetch({
+      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(reads++ === 0 ? inheriting() : own) }),
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 140, provenance_stamped: false }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("model"), { target: { value: "own-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
+    await screen.findByText(/Saved \.logos\/config\.toml \(140 bytes\)/);
+    await waitFor(() =>
+      expect(screen.queryByText(/table is inherited from the workspace root/)).not.toBeInTheDocument(),
+    );
+  });
+
   it("says the key is inherited without ever showing the inherited key's last-4", async () => {
     mockFetch({
       "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }),
