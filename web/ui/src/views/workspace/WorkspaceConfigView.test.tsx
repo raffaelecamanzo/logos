@@ -791,7 +791,14 @@ describe("the tier's reach is stated on the surface (S-451 AC2, AC3)", () => {
   it("states that members inherit each half they do not declare (ADR-67)", async () => {
     const { card } = await mountedTier();
     const banner = within(card).getByText("INHERITED PER HALF").closest("section") as HTMLElement;
-    expect(banner).toHaveTextContent(/declares no \[chat\] model inherits this whole \[chat\] table/);
+    // The policy half is conditional on THIS root declaring a model (ADR-67 §3)…
+    expect(banner).toHaveTextContent(
+      /When this root declares a \[chat\] model, a member whose own \.logos\/config\.toml declares none inherits this whole \[chat\] table/,
+    );
+    expect(banner).toHaveTextContent(/with no model here, nothing is inherited/);
+    // …and the credential reaches every member that does not inherit the policy,
+    // including one whose policy is unset at both roots (ADR-67 §2).
+    expect(banner).toHaveTextContent(/does not inherit this root's \[chat\] table — it declares its own, or neither root declares one/);
     expect(banner).toHaveTextContent(/holds no key .* uses the key saved here/);
     // HF-1: the direction a member key never travels is stated, not left implied.
     expect(banner).toHaveTextContent(/with this root's key only/);

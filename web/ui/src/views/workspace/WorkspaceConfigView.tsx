@@ -750,14 +750,16 @@ function InheritanceBanner() {
       </p>
       <ul>
         <li>
-          <strong>Policy.</strong> A member whose own <code>.logos/config.toml</code> declares no{" "}
-          <code>[chat] model</code> inherits this whole <code>[chat]</code> table, and dials its
-          endpoint with this root&apos;s key only — never with a key of its own. A member that declares a{" "}
-          <code>[chat] model</code> owns its whole table.
+          <strong>Policy.</strong> When this root declares a <code>[chat] model</code>, a member whose own{" "}
+          <code>.logos/config.toml</code> declares none inherits this whole <code>[chat]</code> table, and
+          dials its endpoint with this root&apos;s key only — never with a key of its own. A member that
+          declares a <code>[chat] model</code> owns its whole table; with no model here, nothing is
+          inherited.
         </li>
         <li>
-          <strong>Credential.</strong> A member that owns its <code>[chat]</code> table but holds no key
-          in its own <code>.logos/secrets.toml</code> uses the key saved here.
+          <strong>Credential.</strong> A member that does not inherit this root&apos;s <code>[chat]</code>{" "}
+          table — it declares its own, or neither root declares one — and holds no key in its own{" "}
+          <code>.logos/secrets.toml</code> uses the key saved here.
         </li>
       </ul>
     </Callout>
