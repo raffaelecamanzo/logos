@@ -2964,3 +2964,26 @@ async fn a_fingerprintless_rejected_or_identical_tier_save_writes_nothing() {
     assert_eq!(v["fingerprint"], fingerprint.as_str(), "{body}");
     unmoved("an identical save");
 }
+
+/// **Validation precedes identity** (S-451 T2). Posting the broken document back
+/// unchanged — the first thing a user does who opens the repair editor and
+/// clicks Save — is a `422`, not an `unchanged` `200` that would report success
+/// over a file every inheriting member still fails on; nothing is rewritten.
+#[tokio::test]
+async fn re_saving_the_identical_broken_tier_document_is_a_422_not_unchanged() {
+    let tmp = workspace();
+    let path = tmp.path().join(".logos/config.toml");
+    let broken = "[chat]\nmodle = \"ws/typo\"\n";
+    write(tmp.path(), ".logos/config.toml", broken);
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/config").await;
+    let fingerprint = loaded["config"]["fingerprint"].as_str().unwrap().to_string();
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(past).unwrap();
+
+    let (status, body, _h) = save_tier(&router, &intent, broken, &fingerprint).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "byte-identical");
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), past, "not rewritten");
+}
+

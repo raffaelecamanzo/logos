@@ -570,4 +570,18 @@ mod tests {
             assert!(doc.effective_chat.is_none());
         }
     }
+
+    /// Validation precedes identity: re-saving the broken document on disk is a
+    /// refusal, never an `Unchanged` that would report success over a file every
+    /// inheriting member still fails on.
+    #[test]
+    fn re_saving_the_identical_broken_document_is_refused_not_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let broken = "[chat]\nmodle = \"typo\"\n";
+        seed(root.path(), "config.toml", broken);
+        let loaded = fingerprint(broken.as_bytes());
+        let err = write_workspace_config(root.path(), broken, &loaded).expect_err("an invalid candidate is refused");
+        assert!(err.downcast_ref::<ConfigError>().is_some_and(|e| matches!(e, ConfigError::Parse { .. })), "{err:#}");
+        assert_eq!(std::fs::read_to_string(root.path().join(CONFIG_RELPATH)).unwrap(), broken);
+    }
 }
