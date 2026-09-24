@@ -172,21 +172,22 @@ export function hostOf(url: string): string {
   return host === "" ? url.trim() : host;
 }
 
-/** The effective wiki model ([FR-CF-07]): `[wiki].model` if set, else `[chat].model`;
- *  `null` when neither resolves (the configure-first state). Mirrors the server's
- *  `WikiConfig::resolve` fallback. */
+/** The effective wiki model ([FR-CF-07]): the member's `[wiki].model` if set, else
+ *  the **effective** chat model — the member's own or the one it inherits from the
+ *  workspace root (`effective_chat`, [ADR-67]); `null` when neither resolves (the
+ *  configure-first state). Mirrors the server's `WikiConfig::resolve_inherited`. */
 export function effectiveWikiModel(config: ConfigReadModel): string | null {
-  const parsed = config.config.parsed;
-  const wikiModel = parsed.wiki?.model?.trim();
+  const wikiModel = config.config.parsed.wiki?.model?.trim();
   if (wikiModel) return wikiModel;
-  const chatModel = parsed.chat.model?.trim();
+  const chatModel = config.effective_chat.policy.model?.trim();
   return chatModel && chatModel !== "" ? chatModel : null;
 }
 
-/** Is wiki generation usable? An effective model AND a present key (mirrors the
- *  server's configure-first predicate — a model with no key is still configure-first). */
+/** Is wiki generation usable? An effective model AND an effective key — declared on
+ *  the member or inherited from the workspace root (mirrors the server's
+ *  configure-first predicate — a model with no key is still configure-first). */
 export function isWikiConfigured(config: ConfigReadModel): boolean {
-  return effectiveWikiModel(config) !== null && config.chat_key.present;
+  return effectiveWikiModel(config) !== null && config.effective_chat.credential.present;
 }
 
 /** The provider disclosure the first-use consent banner names (NFR-SE-07): the
@@ -197,9 +198,11 @@ export interface WikiDisclosure {
   endpointHost: string;
 }
 
-/** Compose the consent disclosure from the config read-model (NFR-SE-07). */
+/** Compose the consent disclosure from the config read-model (NFR-SE-07): the
+ *  provider and endpoint are the effective chat policy's, so an inherited endpoint
+ *  is the one disclosed. */
 export function wikiDisclosure(config: ConfigReadModel): WikiDisclosure {
-  const chat = config.config.parsed.chat;
+  const chat = config.effective_chat.policy;
   const model = effectiveWikiModel(config) ?? "(no model)";
   const endpointHost = chat.provider === "anthropic" ? ANTHROPIC_HOST : hostOf(chat.base_url);
   return { provider: chat.provider, model, endpointHost };

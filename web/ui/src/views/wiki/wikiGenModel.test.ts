@@ -190,6 +190,49 @@ describe("configure-first + endpoint disclosure (FR-CF-07, NFR-SE-07)", () => {
     // The disclosure carries no key material by construction.
     expect(JSON.stringify(oai)).not.toContain("9f3a");
   });
+
+  // Workspace inheritance (FR-WS-30, ADR-67): the member's literal document declares
+  // no [chat] and holds no key, but the effective slice resolves both from the
+  // workspace root. The server generates for this member (S-449), so the tab must
+  // not show configure-first, and must disclose the INHERITED endpoint.
+  function inherited(): ConfigReadModel {
+    const c = config({ keyPresent: false });
+    c.effective_chat = {
+      policy: { provider: "openai", model: "ws-model", base_url: "https://llm.example.org/v1" },
+      policy_origin: "workspace",
+      credential: { present: true, last4: "KEY1" },
+      credential_origin: "workspace",
+    };
+    return c;
+  }
+
+  it("is configured from an inherited workspace policy and key (FR-WS-30)", () => {
+    const c = inherited();
+    expect(c.config.parsed.chat.model).toBeNull();
+    expect(c.chat_key.present).toBe(false);
+    expect(effectiveWikiModel(c)).toBe("ws-model");
+    expect(isWikiConfigured(c)).toBe(true);
+  });
+
+  it("the member's own [wiki].model still wins over the inherited chat model", () => {
+    const c = inherited();
+    c.config.parsed.wiki = { model: "member-wiki-model" };
+    expect(effectiveWikiModel(c)).toBe("member-wiki-model");
+  });
+
+  it("discloses the inherited endpoint host, never the member literal's", () => {
+    const d = wikiDisclosure(inherited());
+    expect(d.endpointHost).toBe("llm.example.org");
+    expect(d.model).toBe("ws-model");
+    expect(JSON.stringify(d)).not.toContain("KEY1");
+  });
+
+  it("an inherited policy with no key anywhere stays configure-first", () => {
+    const c = inherited();
+    c.effective_chat.credential = { present: false };
+    c.effective_chat.credential_origin = "unset";
+    expect(isWikiConfigured(c)).toBe(false);
+  });
 });
 
 describe("consent gate (NFR-SE-07)", () => {
