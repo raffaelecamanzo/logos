@@ -8,15 +8,19 @@ import {
   endpointHost,
   hasConsent,
   hostOf,
+  chatReadiness,
+  chatScope,
+  configureFirstCopy,
   initialTurn,
-  isConfigured,
   parseSseBlock,
   readSseStream,
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
   type ChatConfigReadModel,
+  type ChatOrigin,
   type ChatPolicy,
+  type ChatScope,
   type SseFrame,
   type TurnState,
 } from "./chatModel.ts";
@@ -30,10 +34,17 @@ const POLICY: ChatPolicy = {
   max_replans: 3,
 };
 
-function configModel(overrides: Partial<ChatPolicy>, keyPresent: boolean): ChatConfigReadModel {
+/** The effective-chat read-model slice (S-448) with the two origins the readiness
+ *  verdict is read off. `policy` is the effective table; a half the resolution
+ *  found no declaration for carries `unset`. */
+function configModel(policyOrigin: ChatOrigin, credentialOrigin: ChatOrigin): ChatConfigReadModel {
   return {
-    config: { parsed: { chat: { ...POLICY, ...overrides } } },
-    chat_key: { present: keyPresent, last4: keyPresent ? "1234" : null },
+    effective_chat: {
+      policy: policyOrigin === "unset" ? { ...POLICY, model: null } : POLICY,
+      policy_origin: policyOrigin,
+      credential: { present: credentialOrigin !== "unset" },
+      credential_origin: credentialOrigin,
+    },
   };
 }
 
@@ -206,12 +217,153 @@ describe("endpoint disclosure", () => {
   });
 });
 
-describe("isConfigured", () => {
-  it("needs both a model and a present key", () => {
-    expect(isConfigured(configModel({}, true))).toBe(true);
-    expect(isConfigured(configModel({}, false))).toBe(false);
-    expect(isConfigured(configModel({ model: null }, true))).toBe(false);
-    expect(isConfigured(configModel({ model: "  " }, true))).toBe(false);
+describe("chatReadiness (S-452, FR-UI-18) — the full origin matrix, no DOM", () => {
+  const SINGLE: ChatScope = { mode: "single" };
+  const WORKSPACE: ChatScope = { mode: "workspace", member: "billing-service" };
+
+  // The nine origin pairs S-447's resolution matrix produces, named by the shape
+  // that yields each. A single-root payload never carries `workspace`, but the
+  // verdict must not depend on the mode for readiness, so every pair runs in both.
+  const MATRIX: {
+    shape: string;
+    policy: ChatOrigin;
+    credential: ChatOrigin;
+    ready: boolean;
+    absent?: "model" | "key" | "both";
+    present?: { half: "model" | "key"; origin: "member" | "workspace" } | null;
+  }[] = [
+    { shape: "member declares both", policy: "member", credential: "member", ready: true },
+    { shape: "workspace declares both", policy: "workspace", credential: "workspace", ready: true },
+    { shape: "member policy, workspace key", policy: "member", credential: "workspace", ready: true },
+    { shape: "workspace policy, member key", policy: "workspace", credential: "member", ready: true },
+    { shape: "nothing anywhere", policy: "unset", credential: "unset", ready: false, absent: "both", present: null },
+    { shape: "member key only", policy: "unset", credential: "member", ready: false, absent: "model", present: { half: "key", origin: "member" } },
+    { shape: "workspace key only", policy: "unset", credential: "workspace", ready: false, absent: "model", present: { half: "key", origin: "workspace" } },
+    { shape: "member model only", policy: "member", credential: "unset", ready: false, absent: "key", present: { half: "model", origin: "member" } },
+    { shape: "workspace model only", policy: "workspace", credential: "unset", ready: false, absent: "key", present: { half: "model", origin: "workspace" } },
+  ];
+
+  for (const scope of [SINGLE, WORKSPACE]) {
+    for (const row of MATRIX) {
+      it(`${scope.mode}: ${row.shape} → ${row.ready ? "ready" : `configure-first (${row.absent})`}`, () => {
+        const verdict = chatReadiness(configModel(row.policy, row.credential), scope);
+        expect(verdict.ready).toBe(row.ready);
+        if (verdict.ready) {
+          // The configured surface receives the EFFECTIVE policy, not the member literal.
+          expect(verdict.policy).toEqual(POLICY);
+          expect(verdict.policyOrigin).toBe(row.policy);
+        } else {
+          expect(verdict.absent).toBe(row.absent);
+          expect(verdict.present).toEqual(row.present);
+        }
+      });
+    }
+  }
+
+  it("reads the verdict off the origins, never off the policy's model", () => {
+    // A slice whose policy still carries a model but whose origin is unset (the seam
+    // treats a blank model as undeclared) is configure-first — the tab and the turn
+    // path read the same two origins (ADR-67), not a second model check.
+    const m = configModel("unset", "member");
+    m.effective_chat.policy = POLICY;
+    expect(chatReadiness(m, SINGLE).ready).toBe(false);
+  });
+
+  it("names 'this repository' in single-root mode and never a member", () => {
+    const v = chatReadiness(configModel("unset", "unset"), SINGLE);
+    if (v.ready) throw new Error("expected configure-first");
+    expect(v.root).toEqual({ kind: "repository", label: "this repository" });
+    expect(v.configHref).toBe("/config");
+    expect(v.workspaceFiles).toEqual([]);
+  });
+
+  it("names the member by name in workspace mode and links ITS Config tab", () => {
+    const v = chatReadiness(configModel("unset", "unset"), WORKSPACE);
+    if (v.ready) throw new Error("expected configure-first");
+    expect(v.root).toEqual({ kind: "member", label: "billing-service" });
+    // A plain link reloads the shell, which re-opens whatever member the URL names —
+    // so it must name this one, or it opens the default member's editor instead.
+    expect(v.configHref).toBe("/config?repo=billing-service");
+  });
+
+  it("never fabricates a member name when the workspace selected none", () => {
+    const v = chatReadiness(configModel("unset", "unset"), { mode: "workspace", member: null });
+    if (v.ready) throw new Error("expected configure-first");
+    expect(v.root.kind).toBe("default-member");
+    expect(v.root.label).toBe("the workspace's default member");
+    expect(v.configHref).toBe("/config");
+  });
+
+  it("names, as text, the workspace file each absent half would be declared in", () => {
+    const files = (p: ChatOrigin, c: ChatOrigin) => {
+      const v = chatReadiness(configModel(p, c), WORKSPACE);
+      return v.ready ? null : v.workspaceFiles;
+    };
+    expect(files("unset", "unset")).toEqual([
+      "<workspace-root>/.logos/config.toml",
+      "<workspace-root>/.logos/secrets.toml",
+    ]);
+    expect(files("unset", "member")).toEqual(["<workspace-root>/.logos/config.toml"]);
+    expect(files("member", "unset")).toEqual(["<workspace-root>/.logos/secrets.toml"]);
+  });
+});
+
+describe("configureFirstCopy (S-452) — the rendered claim, composed off the verdict", () => {
+  const copy = (p: ChatOrigin, c: ChatOrigin, scope: ChatScope) => {
+    const v = chatReadiness(configModel(p, c), scope);
+    if (v.ready) throw new Error("expected configure-first");
+    return configureFirstCopy(v);
+  };
+  const WS: ChatScope = { mode: "workspace", member: "billing-service" };
+
+  it("single-root: names this repository, the absent half, and nothing about a workspace", () => {
+    const c = copy("unset", "member", { mode: "single" });
+    expect(c.summary).toBe("Chat is not configured yet for this repository — no provider model is declared.");
+    expect(c.present).toBe("The API key is declared by this repository.");
+    expect(c.action).toBe("Choose a provider model");
+    expect(c.actionScope).toBe("");
+    expect(c.workspaceLead).toBeNull();
+    expect(Object.values(c).join(" ")).not.toMatch(/workspace/);
+  });
+
+  it("workspace: names the member, both roots looked in, and an inherited present half", () => {
+    const c = copy("unset", "workspace", WS);
+    expect(c.summary).toBe(
+      "Chat is not configured yet for billing-service — no provider model is declared by billing-service or by the workspace root.",
+    );
+    expect(c.present).toBe("The API key is inherited from the workspace root.");
+    expect(c.actionScope).toBe(" for billing-service");
+    expect(c.workspaceLead).toBe("Or declare it once for every member of the workspace, in");
+  });
+
+  it("workspace: a member-declared present half is attributed to the member by name", () => {
+    const c = copy("member", "unset", WS);
+    expect(c.summary).toMatch(/— no API key is declared by billing-service or by the workspace root\.$/);
+    expect(c.present).toBe("The provider model is declared by billing-service.");
+    expect(c.action).toBe("Add an API key");
+  });
+
+  it("both absent: one sentence names both halves and no present origin is invented", () => {
+    const c = copy("unset", "unset", WS);
+    expect(c.summary).toMatch(/neither a provider model nor an API key is declared/);
+    expect(c.present).toBeNull();
+    expect(c.action).toBe("Choose a provider model and add an API key");
+    expect(c.workspaceLead).toMatch(/^Or declare them once/);
+  });
+
+  it("an unselected workspace member is referred to without a name", () => {
+    const c = copy("member", "unset", { mode: "workspace", member: null });
+    expect(c.summary).toMatch(/^Chat is not configured yet for the workspace's default member — /);
+    expect(c.present).toBe("The provider model is declared by that member.");
+    expect(c.actionScope).toBe("");
+  });
+});
+
+describe("chatScope", () => {
+  it("is a workspace scope only in workspace mode", () => {
+    expect(chatScope("workspace", "api")).toEqual({ mode: "workspace", member: "api" });
+    expect(chatScope("single", null)).toEqual({ mode: "single" });
+    expect(chatScope("loading", null)).toEqual({ mode: "single" });
   });
 });
 

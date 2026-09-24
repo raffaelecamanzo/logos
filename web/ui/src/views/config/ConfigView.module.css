@@ -59,6 +59,17 @@
   line-height: var(--leading-base);
 }
 
+/* A read-only inheritance disclosure (S-452): prose beside the fields it
+ * concerns, set off by a muted left rule so it never reads as a field. */
+.inherited {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading-base);
+}
+
 /* The server-sourced default / recommended-baseline affordance beside a
  * field's help text (CR-067, FR-UI-12, BR-37) — visually distinct (mono,
  * block) but never a separate color-only signal. */

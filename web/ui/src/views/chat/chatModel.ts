@@ -2,7 +2,9 @@
  * Chat view model (S-190, CR-049, FR-UI-18, FR-UI-19, FR-UI-23) — the PURE half of
  * the migrated Chat tab: the SSE wire types, the SSE-block parser, the per-turn
  * event reducer (plan / subagent-activity / answer-token / final-answer / honest
- * halt / honest error), and the consent + endpoint-disclosure helpers.
+ * halt / honest error), the readiness verdict over the effective chat resolution
+ * (S-452 — which root was inspected, which half is absent, where the present half
+ * came from), and the consent + endpoint-disclosure helpers.
  *
  * It holds NO React and NO network: the orchestrator's SSE contract is unchanged
  * ([chat-agent]) — this is a re-homed client. Keeping the reducer pure makes every
@@ -10,8 +12,11 @@
  * fetch, and lets the component (`ChatView.tsx`) stay a thin renderer over it.
  *
  * The masked chat key is NEVER referenced here — the consent banner discloses only
- * the provider, the configured model, and the endpoint host (NFR-SE-07).
+ * the effective provider, model, and endpoint host (NFR-SE-07).
  */
+
+import { urlWithMember } from "../../workspace/scope.ts";
+import type { WorkspaceMode } from "../../workspace/WorkspaceContext.tsx";
 
 // ── SSE wire types (mirror chat-agent's `OrchestratorEvent`, serde-tagged on
 //    `event`, `rename_all = "snake_case"`; `chat-agent/src/orchestrator/event.rs`,
@@ -41,32 +46,51 @@ export type OrchestratorEvent =
   | { event: "answer_delta"; delta: string }
   | { event: "final_answer"; answer: string };
 
-// ── Config read-model (the slice the consent banner needs) ────────────────────
-// A focused mirror of the chat-relevant fields of `ConfigReadModel`
-// (`logos-core/src/config/writeback.rs`) the `GET /api/v1/config` endpoint
-// serializes. The full read-model + its typed fetch belong to the Config view
-// (S-191); chat reads only what its consent banner discloses, so it mirrors only
-// that slice here to stay independent of the parallel Config migration.
+// ── Config read-model (the effective-chat slice, S-448/S-452) ──────────────────
+// A focused mirror of the ONE part of `ConfigReadModel`
+// (`logos-core/src/config/writeback.rs`) the Chat tab reads: `effective_chat`, the
+// resolution of the `[chat]` policy and its credential across the member root and,
+// in a workspace, the workspace root — each half with the root it came from
+// ([FR-WS-30], [ADR-67]). The full read-model and its typed fetch belong to the
+// Config view.
 //
-// `chat_key` is the MASKED secret (presence + last-4 only — masked by construction
-// server-side); the chat surface reads `present` for the configured-state gate and
-// NEVER renders the key material (NFR-SE-07).
+// The member's LITERAL document (`config.parsed.chat`) and its own key (`chat_key`)
+// are deliberately NOT mirrored here: an inheriting member declares neither, so a
+// verdict read off them reports "not configured" over a configuration the turn path
+// would dial — the CR-145 defect. Leaving them out of the type makes that
+// misreading impossible to write rather than merely wrong.
+//
+// The credential is mirrored as presence alone. The wire's last-4 is never needed
+// by this surface, so it is not carried into it (NFR-SE-07).
 
-/** The `[chat]` policy slice (mirrors `ChatConfig`). */
+/** The `[chat]` policy slice (mirrors `ChatConfig`). `model` is omitted on the
+ *  wire when unset. */
 export interface ChatPolicy {
   provider: "anthropic" | "openai";
-  model: string | null;
+  model?: string | null;
   base_url: string;
   max_tool_calls: number;
   max_subagent_tool_calls: number;
   max_replans: number;
 }
 
+/** Where one half of the effective resolution came from (mirrors `ChatOrigin`).
+ *  `workspace` is reachable only under a federated server. */
+export type ChatOrigin = "member" | "workspace" | "unset";
+
+/** The effective chat resolution (mirrors `EffectiveChat`, `GET /api/v1/config`). */
+export interface EffectiveChatSlice {
+  /** The effective `[chat]` table — the member's, the workspace's, or the defaults. */
+  policy: ChatPolicy;
+  policy_origin: ChatOrigin;
+  /** Presence only — never rendered (NFR-SE-07). */
+  credential: { present: boolean };
+  credential_origin: ChatOrigin;
+}
+
 /** The chat-relevant slice of `ConfigReadModel` (`GET /api/v1/config`). */
 export interface ChatConfigReadModel {
-  config: { parsed: { chat: ChatPolicy } };
-  /** The MASKED chat key — presence + last-4 only; never rendered (NFR-SE-07). */
-  chat_key: { present: boolean; last4?: string | null };
+  effective_chat: EffectiveChatSlice;
 }
 
 // ── Thread read API (S-209 producer contract; S-210 consumer) ─────────────────
@@ -106,11 +130,175 @@ export interface PersistedChatMessage {
  *  mirrors the server view's `host_of(DEFAULT_ANTHROPIC_BASE_URL)` (web/src/views/chat.rs). */
 export const ANTHROPIC_HOST = "api.anthropic.com";
 
-/** Is chat usable? A configured model AND a present key (mirrors the server view's
- *  `configured` predicate). A model with no key is still configure-first. */
-export function isConfigured(model: ChatConfigReadModel): boolean {
-  const chat = model.config.parsed.chat;
-  return chat.model != null && chat.model.trim() !== "" && model.chat_key.present;
+// ── Readiness (S-452, FR-UI-18, NFR-CC-04) ─────────────────────────────────────
+
+/** Which root the tab's reads were answered from — the shell's scope, not the
+ *  read-model's (the read-model carries no root name). In workspace mode the
+ *  member is always selected before any view mounts; `null` survives only for a
+ *  manifest with no members, and is then named as what it is rather than guessed. */
+export type ChatScope = { mode: "single" } | { mode: "workspace"; member: string | null };
+
+/** The root the configure-first state names. */
+export interface RootInspected {
+  kind: "repository" | "member" | "default-member";
+  /** `this repository`, the member's name, or `the workspace's default member`. */
+  label: string;
+}
+
+/** Which half of the configuration is missing. */
+export type AbsentHalf = "model" | "key" | "both";
+
+/** The half that IS declared, and the root that declares it. */
+export interface PresentHalf {
+  half: "model" | "key";
+  origin: "member" | "workspace";
+}
+
+/** Chat is usable: the configured surface receives the EFFECTIVE policy, and the
+ *  origins so the consent banner can say where an inherited endpoint came from. */
+export interface ChatReady {
+  ready: true;
+  policy: ChatPolicy;
+  policyOrigin: "member" | "workspace";
+  credentialOrigin: "member" | "workspace";
+}
+
+/** Chat is not yet usable, stated checkably: the root inspected, the absent half,
+ *  the origin of any present half, and where the absent half is written. */
+export interface ConfigureFirst {
+  ready: false;
+  root: RootInspected;
+  absent: AbsentHalf;
+  present: PresentHalf | null;
+  /** The member Config tab — the control that writes either half at this root. */
+  configHref: string;
+  /** Workspace mode only: the workspace-root file each absent half would be
+   *  declared in. Named as TEXT — the workspace-tier editor (S-451) does not exist
+   *  yet, and a link to a control that does not exist is not a link. */
+  workspaceFiles: string[];
+}
+
+export type ChatReadiness = ChatReady | ConfigureFirst;
+
+/** The workspace-root file that declares the policy half. */
+export const WORKSPACE_CONFIG_FILE = "<workspace-root>/.logos/config.toml";
+/** The workspace-root file that holds the credential half. */
+export const WORKSPACE_SECRETS_FILE = "<workspace-root>/.logos/secrets.toml";
+
+function rootInspected(scope: ChatScope): RootInspected {
+  if (scope.mode === "single") return { kind: "repository", label: "this repository" };
+  if (scope.member === null) {
+    return { kind: "default-member", label: "the workspace's default member" };
+  }
+  return { kind: "member", label: scope.member };
+}
+
+/**
+ * Is chat usable, and if not, what exactly is missing? A PURE function of the
+ * read-model's effective-chat slice and the shell's scope — the view renders the
+ * answer and decides nothing.
+ *
+ * Ready iff BOTH origins are declared. That is the predicate the turn path applies
+ * (`turn_provider`, `web/src/chat/mod.rs`) to the same resolution ([ADR-67] §6), so
+ * the tab and the turn cannot disagree. No second model-or-key check is made here:
+ * the seam already treats a blank model and a blank key as undeclared.
+ */
+export function chatReadiness(model: ChatConfigReadModel, scope: ChatScope): ChatReadiness {
+  const { policy, policy_origin, credential_origin } = model.effective_chat;
+  if (policy_origin !== "unset" && credential_origin !== "unset") {
+    return { ready: true, policy, policyOrigin: policy_origin, credentialOrigin: credential_origin };
+  }
+  const absent: AbsentHalf =
+    policy_origin === "unset" ? (credential_origin === "unset" ? "both" : "model") : "key";
+  const present: PresentHalf | null =
+    absent === "both"
+      ? null
+      : absent === "model"
+        ? { half: "key", origin: credential_origin as PresentHalf["origin"] }
+        : { half: "model", origin: policy_origin as PresentHalf["origin"] };
+  const member = scope.mode === "workspace" ? scope.member : null;
+  const workspaceFiles =
+    scope.mode === "single"
+      ? []
+      : [
+          ...(absent === "key" ? [] : [WORKSPACE_CONFIG_FILE]),
+          ...(absent === "model" ? [] : [WORKSPACE_SECRETS_FILE]),
+        ];
+  return {
+    ready: false,
+    root: rootInspected(scope),
+    absent,
+    present,
+    configHref: urlWithMember("/config", member),
+    workspaceFiles,
+  };
+}
+
+/** Map the shell's workspace mode + selected member onto the scope the verdict
+ *  names. Views mount only after the probe settles, so `loading` is never seen in
+ *  the shell; outside it (a bare render) nothing is scoped, which is single-root. */
+export function chatScope(mode: WorkspaceMode, member: string | null): ChatScope {
+  return mode === "workspace" ? { mode: "workspace", member } : { mode: "single" };
+}
+
+/** The configure-first state's sentences, composed from the verdict alone so the
+ *  view only lays them out. Worded to match the turn path's refusal
+ *  (`configure_first_message`, `web/src/chat/mod.rs`): same halves, same origins. */
+export interface ConfigureFirstCopy {
+  /** The root inspected and the absent half, e.g. "Chat is not configured yet for
+   *  billing-service — no API key is declared by billing-service or by the
+   *  workspace root." */
+  summary: string;
+  /** Where the present half came from, or `null` when both are absent. */
+  present: string | null;
+  /** What to do, e.g. "Add an API key" — the view links the Config tab after it. */
+  action: string;
+  /** Trails the Config-tab link: " for billing-service", or "" in single-root. */
+  actionScope: string;
+  /** Leads the named workspace files, or `null` when there are none to name. */
+  workspaceLead: string | null;
+}
+
+const HALF_LABEL: Record<PresentHalf["half"], string> = { model: "provider model", key: "API key" };
+
+export function configureFirstCopy(state: ConfigureFirst): ConfigureFirstCopy {
+  const { root, absent, present } = state;
+  // How the member root is referred to after the root has been named once.
+  const memberRef =
+    root.kind === "member"
+      ? root.label
+      : root.kind === "default-member"
+        ? "that member"
+        : "this repository";
+  const whereLooked = root.kind === "repository" ? "" : ` by ${memberRef} or by the workspace root`;
+  const absentPhrase =
+    absent === "both"
+      ? "neither a provider model nor an API key is declared"
+      : absent === "model"
+        ? "no provider model is declared"
+        : "no API key is declared";
+  const presentLine =
+    present === null
+      ? null
+      : present.origin === "workspace"
+        ? `The ${HALF_LABEL[present.half]} is inherited from the workspace root.`
+        : `The ${HALF_LABEL[present.half]} is declared by ${memberRef}.`;
+  const action =
+    absent === "both"
+      ? "Choose a provider model and add an API key"
+      : absent === "model"
+        ? "Choose a provider model"
+        : "Add an API key";
+  return {
+    summary: `Chat is not configured yet for ${root.label} — ${absentPhrase}${whereLooked}.`,
+    present: presentLine,
+    action,
+    actionScope: root.kind === "member" ? ` for ${root.label}` : "",
+    workspaceLead:
+      state.workspaceFiles.length === 0
+        ? null
+        : `Or declare ${absent === "both" ? "them" : "it"} once for every member of the workspace, in`,
+  };
 }
 
 /** Extract the host authority from a URL — the run between `://` and the next `/`,

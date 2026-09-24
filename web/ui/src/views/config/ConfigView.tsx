@@ -18,6 +18,12 @@
  * explicit confirmation (BR-35). The chat API key is a write-only/masked secret
  * (FR-CF-06, NFR-SE-07) edited in its own section — never echoed onto this surface.
  *
+ * Inheritance (S-452, FR-WS-30): in a workspace a member may inherit either chat
+ * half from the workspace root. That is disclosed as read-only prose beside the
+ * `[chat]` fields and in the key card, read off the read-model's `effective_chat`
+ * slice; the editors themselves render and post ONLY the member's literal document
+ * and its own key.
+ *
  * Renders exclusively through the S-193 design system; every read is GET-only.
  *
  * Absence wording here follows the one taxonomy rather than restating it:
@@ -44,6 +50,7 @@ import type {
   ConfigApplyOutcome,
   ConfigReadModel,
   ConfigWriteOutcome,
+  EffectiveChat,
   FileView,
   MaskedSecret,
   ParsedConfig,
@@ -98,6 +105,8 @@ interface FieldDescriptor {
 interface FieldGroup {
   legend?: string;
   fields: FieldDescriptor[];
+  /** Read-only prose rendered beneath the fields — never a control, never posted. */
+  note?: ReactNode;
 }
 
 /** The TOML serialisation type for a control (provider serialises as a string). */
@@ -170,8 +179,37 @@ function constraintHint(recommended: unknown): string {
   return `Default: unset → not enforced · Recommended: ${fmtDefault(recommended)}`;
 }
 
-/** The `config.toml` typed fields: top-level scalars/lists + the `[chat]` group. */
-function configGroups(c: ParsedConfig, d: ParsedConfig): FieldGroup[] {
+/**
+ * The read-only disclosure of an inherited `[chat]` policy (S-452, FR-WS-30), or
+ * `undefined` when this member's own document is what is in effect.
+ *
+ * It reads the `effective_chat` slice and nothing else, and it is PROSE: the typed
+ * fields and the raw pane above it keep showing — and posting — only the member's
+ * literal document. Pre-filling a field from the slice would materialise the
+ * inherited value in the member's file on the next save (NFR-RA-05).
+ */
+function inheritedPolicyNote(effective: EffectiveChat): ReactNode {
+  if (effective.policy_origin !== "workspace") return undefined;
+  const p = effective.policy;
+  return (
+    <p className={styles.inherited}>
+      This member&apos;s <code>config.toml</code> declares no <code>[chat] model</code>, so the whole{" "}
+      <code>[chat]</code> table is inherited from the workspace root: provider{" "}
+      <code>{p.provider}</code>, model <code>{p.model}</code>
+      {p.provider === "openai" && (
+        <>
+          , base_url <code>{p.base_url}</code>
+        </>
+      )}
+      . The fields above show only this member&apos;s own document; setting a model here overrides the
+      inherited table as a whole.
+    </p>
+  );
+}
+
+/** The `config.toml` typed fields: top-level scalars/lists + the `[chat]` group
+ *  (with its read-only inheritance note, when the policy is inherited). */
+function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat): FieldGroup[] {
   return [
     {
       fields: [
@@ -189,6 +227,7 @@ function configGroups(c: ParsedConfig, d: ParsedConfig): FieldGroup[] {
         { table: "chat", key: "model", control: "str", initial: c.chat.model ?? "", placeholder: "leave blank to unset", help: "The model the chat agent uses (a Claude id, or an OpenRouter model slug for openai). Required — until set the Chat tab stays “not yet usable”.", defaultHint: defaultHint(d.chat.model) },
         { table: "chat", key: "base_url", control: "str", initial: c.chat.base_url, placeholder: "leave blank for the default (OpenRouter)", help: "The OpenAI-compatible endpoint for the openai provider (anthropic ignores this). Leave blank to fall back to OpenRouter.", defaultHint: defaultHint(d.chat.base_url) },
       ],
+      note: inheritedPolicyNote(effective),
     },
     {
       // S-224/FR-CF-07: the `[wiki]` section carries only `model` — provider,
@@ -505,6 +544,7 @@ function FileEditor({
               />
             ))}
           </div>
+          {g.note}
         </fieldset>
       ))}
 
@@ -554,7 +594,7 @@ function FileEditor({
  *  NFR-SE-07). The input is never pre-filled (the browser never receives the
  *  stored key); only the masked presence (set + last-4 / not set) is shown, and a
  *  successful write updates that masked state — the secret is never echoed. */
-function SecretEditor({ initial }: { initial: MaskedSecret }) {
+function SecretEditor({ initial, inherited }: { initial: MaskedSecret; inherited: boolean }) {
   const [masked, setMasked] = useState<MaskedSecret>(initial);
   const [value, setValue] = useState("");
   const [result, setResult] = useState<ResultMessage | null>(null);
@@ -595,6 +635,15 @@ function SecretEditor({ initial }: { initial: MaskedSecret }) {
         <code>.logos/secrets.toml</code> and never echoed — this page only shows whether a key is
         set and its last 4 characters.
       </p>
+      {/* S-452: an inherited key is disclosed, never shown — not even its last-4,
+          which belongs to the workspace root's secret, not this member's. */}
+      {inherited && !masked.present && (
+        <p className={styles.inherited}>
+          No key is set for this member, so the key is inherited from the workspace root (
+          <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>). Saving a key here overrides it for
+          this member only.
+        </p>
+      )}
       <TextField
         label="api_key"
         type="password"
@@ -745,11 +794,17 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       <FileEditor
         file="config"
         view={model.config}
-        groups={configGroups(model.config.parsed, model.defaults.config)}
+        groups={configGroups(model.config.parsed, model.defaults.config, model.effective_chat)}
         isRules={false}
       />
+      {/* Directly beneath the [chat] fields (S-452): the key is a separate save to a
+          separate endpoint, and an unrelated card between the two made saving the
+          config document read as completing the chat configuration. */}
+      <SecretEditor
+        initial={model.chat_key}
+        inherited={model.effective_chat.credential_origin === "workspace"}
+      />
       <GraphConsistencyCard />
-      <SecretEditor initial={model.chat_key} />
       <FileEditor
         file="rules"
         view={model.rules}
