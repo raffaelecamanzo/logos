@@ -61,8 +61,10 @@ export function formBody(params: Record<string, string>): string {
     .join("&");
 }
 
-/** Read the server's verbatim error text (trimmed) for an honest rejection. */
-async function detailOf(res: Response): Promise<string> {
+/** Read the server's verbatim error text (trimmed) for an honest rejection.
+ *  Exported so the workspace writes layer their JSON `{error}` read on top of
+ *  it rather than restating it. */
+export async function detailOf(res: Response): Promise<string> {
   try {
     return (await res.text()).trim();
   } catch {

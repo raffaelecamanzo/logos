@@ -16,7 +16,7 @@
 
 import { ApiError, apiMutate } from "../intent.ts";
 import { apiFetch, apiUrl } from "./client.ts";
-import { ConfigMutateError, FORM_HEADERS, formBody } from "./configClient.ts";
+import { ConfigMutateError, FORM_HEADERS, detailOf, formBody } from "./configClient.ts";
 import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
   ManifestSaveOutcome,
@@ -124,14 +124,9 @@ export function fetchWorkspaceManifest(): Promise<WorkspaceManifestDocument> {
 }
 
 /** The `/api/v1` family's JSON error body (`{ "error": "…" }`) as its message, or
- *  the raw text when the body is not that shape. */
+ *  {@link detailOf}'s verbatim text when the body is not that shape. */
 async function workspaceErrorDetail(res: Response): Promise<string> {
-  let text = "";
-  try {
-    text = (await res.text()).trim();
-  } catch {
-    return "";
-  }
+  const text = await detailOf(res);
   try {
     const parsed = JSON.parse(text) as { error?: unknown };
     if (typeof parsed.error === "string") return parsed.error;
