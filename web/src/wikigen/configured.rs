@@ -294,10 +294,14 @@ mod tests {
         let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
         assert_eq!(effective.model.as_deref(), Some("workspace/chat"));
         assert_eq!(effective.api_key, None, "the withheld member key is not dialled");
+        // …and the run's configure-first text is told why (the policy is inherited,
+        // the member's key withheld), so it does not advise adding a key.
+        assert!(effective.chat_policy_inherited && effective.member_key_withheld);
 
         write(&member, "config.toml", "[chat]\nmodel = \"member/chat\"\n");
         let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
         assert_eq!(effective.api_key.as_deref(), Some("sk-member-mb77"));
+        assert!(!effective.chat_policy_inherited && !effective.member_key_withheld);
     }
 
     /// Single-root (`None`): the enclosing workspace files are never consulted.

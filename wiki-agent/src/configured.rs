@@ -79,15 +79,28 @@ pub async fn run_configured(
                 .to_string(),
         ));
     };
-    // Likewise a missing/blank inherited key ([FR-CF-06]).
+    // Likewise a missing/blank inherited key ([FR-CF-06]). Under a `[chat]` policy
+    // inherited from the workspace only the workspace root's key is dialled
+    // ([ADR-67] §2), so the text never advises a member key alone — one declared is
+    // withheld, and one added would be (HF-1).
     let api_key = match effective.api_key.clone() {
         Some(key) if !key.trim().is_empty() => key,
         _ => {
-            return Ok(ConfiguredRun::ConfigureFirst(
+            let message = if effective.member_key_withheld {
+                "Wiki generation is not configured — the workspace root declares no API key \
+                 for the [chat] table this member inherits, and this member's own API key \
+                 is not used with the inherited workspace endpoint. Declare a [chat] model \
+                 on this member in the Config tab to use its own key before generating."
+            } else if effective.chat_policy_inherited {
+                "Wiki generation is not configured — the workspace root declares no API key \
+                 for the [chat] table this member inherits, and an API key added to this \
+                 member is not used with the inherited workspace endpoint. Declare a [chat] \
+                 model and an API key on this member in the Config tab before generating."
+            } else {
                 "Wiki generation is not configured — add an API key in the Config tab \
                  before generating."
-                    .to_string(),
-            ))
+            };
+            return Ok(ConfiguredRun::ConfigureFirst(message.to_string()));
         }
     };
 
