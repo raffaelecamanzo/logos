@@ -119,26 +119,30 @@ function regionBounds(lines: string[], table: string): RegionBounds {
 function valueSpan(lines: string[], at: number): number {
   let depth = 0;
   for (let i = at; i < lines.length; i++) {
-    const text = i === at ? lines[i].slice(lines[i].indexOf("=") + 1) : lines[i];
-    let quote: string | null = null;
-    for (let j = 0; j < text.length; j++) {
-      const c = text[j];
-      if (quote !== null) {
-        if (c === "\\" && quote === '"') j++;
-        else if (c === quote) quote = null;
-      } else if (c === '"' || c === "'") {
-        quote = c;
-      } else if (c === "#") {
-        break;
-      } else if (c === "[") {
-        depth++;
-      } else if (c === "]") {
-        depth--;
-      }
-    }
+    depth += bracketDelta(i === at ? lines[i].slice(lines[i].indexOf("=") + 1) : lines[i]);
     if (depth <= 0) return i - at + 1;
   }
   return 1;
+}
+
+/** The net `[` minus `]` count on one line of TOML, skipping brackets inside a
+ *  quoted string and everything after a `#` comment. */
+function bracketDelta(text: string): number {
+  let delta = 0;
+  let quote: string | null = null;
+  for (let j = 0; j < text.length; j++) {
+    const c = text[j];
+    if (quote !== null) {
+      if (c === "\\" && quote === '"') j++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "#") break;
+    if (c === '"' || c === "'") quote = c;
+    else if (c === "[") delta++;
+    else if (c === "]") delta--;
+  }
+  return delta;
 }
 
 /**
