@@ -670,3 +670,39 @@ async fn the_tool_error_and_global_ceiling_close_outs_keep_the_readings() {
         );
     }
 }
+
+/// `repo` reaches every tool that takes it: impact's seed and route-providers'
+/// provider filter are scoped to the named member.
+#[tokio::test]
+async fn repo_scopes_impact_and_route_providers() {
+    let ws = workspace_of(Shape::Bound);
+    let (observation, _) = run_turn(
+        &ws,
+        "what does changing shared in api break, and which routes do web and api provide?",
+        vec![
+            MockTurn::tool_call(
+                "x1",
+                "xservice_impact",
+                serde_json::json!({ "symbol": ws.shared, "repo": "api" }),
+            ),
+            MockTurn::tool_call("x2", "xservice_route_providers", serde_json::json!({ "repo": "web" })),
+            MockTurn::tool_call("x3", "xservice_route_providers", serde_json::json!({ "repo": "api" })),
+            MockTurn::text("done."),
+        ],
+    )
+    .await;
+    let seed = observation
+        .split("seed per member — ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("an impact reading: {observation}"));
+    let seed = seed.lines().next().unwrap_or_default();
+    assert!(seed.starts_with("api:") && !seed.contains("web:"), "{seed}");
+    assert!(
+        observation.contains("xservice_route_providers — no resolved cross-service bindings provided by web"),
+        "{observation}"
+    );
+    assert!(
+        observation.contains("xservice_route_providers — 1 resolved cross-service binding(s) provided by api:"),
+        "{observation}"
+    );
+}
