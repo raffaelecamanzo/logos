@@ -839,7 +839,11 @@ describe("the tier's reach is stated on the surface (S-451 AC2, AC3)", () => {
       expect(within(card).queryByLabelText(key)).toBeNull();
     }
     expect(screen.queryByRole("button", { name: /Apply/ })).toBeNull();
-    expect(screen.queryByText(/rules\.toml/, { selector: "span" })).toBeNull();
+    // No rules editor in this group: no rules.toml named anywhere in it, and no
+    // control labelled for rules. (The page-level callout legitimately names the
+    // member's rules.toml, so the check is scoped to the group.)
+    expect(within(card).queryByText(/rules\.toml/)).toBeNull();
+    expect(within(card).queryByLabelText(/rules/i)).toBeNull();
   });
 });
 
