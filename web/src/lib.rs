@@ -1653,13 +1653,15 @@ where
     run_blocking(view, surface, move || call(&engine)).await
 }
 
-/// The one blocking hop every adapter boundary on this surface crosses: run
-/// `call` on the blocking pool ([ADR-03]) inside the [`in_surface`] scope its
+/// The blocking hop the handler adapters share — [`bridge`], the workspace
+/// fan-out and the workspace config routes: run `call` on the blocking pool ([ADR-03]) inside the [`in_surface`] scope its
 /// caller names, and log the render timing. [`bridge`] hands it an engine call;
 /// the workspace fan-out (`api_v1::workspace_read`) a registry call; the
 /// workspace config routes (S-450) a filesystem call at a root that has no
 /// engine. One body, so the three cannot drift on the scope, the pool or the
-/// panic rule.
+/// panic rule. (Not every hop on this surface: member resolution and the agent
+/// services still cross on a bare `spawn_blocking`, and name their surface — or
+/// need none — on their own.)
 ///
 /// [ADR-03]: ../../docs/specs/architecture/decisions/ADR-03.md
 pub(crate) async fn run_blocking<T, F>(view: &'static str, surface: Surface, call: F) -> T
@@ -1670,8 +1672,8 @@ where
     let started = Instant::now();
     let out = tokio::task::spawn_blocking(move || in_surface(surface, call))
         .await
-        // The Engine read-models are infallible at the surface (ADR-14); a
-        // panic crossing the pool is a core bug — re-raise rather than mask it.
+        // A fallible call's errors ride inside `T`; a panic crossing the pool is
+        // a bug — re-raise rather than mask it.
         .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
     tracing::info!(
         target: "logos::web",

@@ -753,8 +753,9 @@ where
 }
 
 /// The shared body of both fan-out adapters: the single-root guard, then the
-/// [`run_blocking`] hop every adapter on this surface crosses (the [ADR-03]
-/// `spawn_blocking`, the surface scope and the render-timing log). `None` means the backing is not federated — the one condition on which
+/// [`run_blocking`] hop the handler adapters share (the [ADR-03]
+/// `spawn_blocking`, the surface scope and the render-timing log). `None` means
+/// the backing is not federated — the one condition on which
 /// both adapters answer [`not_a_workspace`], kept here so neither can answer it on
 /// a different test.
 async fn workspace_read<T, F>(
