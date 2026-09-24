@@ -558,6 +558,16 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
   });
 
   it("shows no inheritance note when the member declares its own halves", async () => {
+    // Both halves the member's own: the case the note must stay out of.
+    const own = model();
+    own.effective_chat = { ...own.effective_chat, policy: { ...own.effective_chat.policy, model: "own-model" }, policy_origin: "member", credential_origin: "member" };
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(own) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.queryByText(/inherited from the workspace root/)).not.toBeInTheDocument();
+  });
+
+  it("shows no inheritance note when nothing is declared anywhere", async () => {
     mockFetch({});
     renderView();
     await screen.findByText(/CONFIG EDITOR/);
