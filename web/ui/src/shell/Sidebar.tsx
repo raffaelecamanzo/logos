@@ -72,6 +72,9 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   // S-429: same reasoning — the app-level Statistics view answers the same question
   // as the member-scoped one, one scope up, so it carries the same icon (FR-UI-37).
   "workspace-statistics": IconStatistics,
+  // S-430: the app-level Config editor answers "what is configured", one scope up
+  // from the member-scoped Config tab, so it carries the same icon (FR-UI-38).
+  "workspace-config": IconConfig,
 };
 
 function NavLink({ item, active, muted }: { item: NavItem; active: boolean; muted?: boolean }) {

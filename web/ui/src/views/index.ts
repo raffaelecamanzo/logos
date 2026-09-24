@@ -29,6 +29,7 @@ import { WorkspaceStatisticsView } from "./statistics/WorkspaceStatisticsView.ts
 import { CoverageView } from "./analytics/CoverageView.tsx";
 import { FilesView } from "./analytics/FilesView.tsx";
 import { WikiView } from "./wiki/WikiView.tsx";
+import { WorkspaceConfigView } from "./workspace/WorkspaceConfigView.tsx";
 import { WorkspaceDashboardView } from "./workspace/WorkspaceDashboardView.tsx";
 import { WorkspaceHealthView } from "./workspace/WorkspaceHealthView.tsx";
 import { WorkspaceView } from "./workspace/WorkspaceView.tsx";
@@ -77,6 +78,11 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // lives beside its member-scoped twin in `views/statistics/` because it shares
   // that view's pure model layer, not the `views/workspace/` layout grammar.
   "/workspace-statistics": WorkspaceStatisticsView,
+  // S-430 — the app-level Config editor over `logos.workspace.toml` (FR-UI-38).
+  // Registered unconditionally like the three above, so a hand-typed URL in a
+  // single-root serve states that this is not a workspace; its nav item is
+  // workspace-mode-only (nav.ts), and its endpoints answer `404` there.
+  "/workspace-config": WorkspaceConfigView,
 };
 
 /**

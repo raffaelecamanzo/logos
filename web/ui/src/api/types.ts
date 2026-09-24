@@ -1813,6 +1813,93 @@ export interface WorkspaceGovernanceAnswer extends AnswerCompleteness {
   governance: WorkspaceGovernance | null;
 }
 
+/** One `[[governance.service_layers]]` band: a named layer over member names
+ *  (mirrors `ServiceLayer`, FR-WS-13). */
+export interface ManifestServiceLayer {
+  name: string;
+  members: string[];
+}
+
+/** One `[[governance.boundaries]]` rule: `from` may not call `to` (mirrors
+ *  `ServiceBoundary`). `reason` is always on the wire, `null` when undeclared. */
+export interface ManifestServiceBoundary {
+  from: string;
+  to: string;
+  reason: string | null;
+}
+
+/** One `[[governance.no_cross_service_callers]]` contract (mirrors
+ *  `NoCrossServiceCallers`). */
+export interface ManifestNoCrossServiceCallers {
+  symbol: string;
+  member: string | null;
+  reason: string | null;
+}
+
+/**
+ * The parsed `logos.workspace.toml` (mirrors `federation::manifest::Manifest`,
+ * FR-WS-01). Every optional table and list is **absent** from the wire when the
+ * manifest does not declare it — the server skips it — so "absent" and "declared
+ * empty" are not distinguishable here, and a view must never render a default for
+ * one as though the manifest said it (NFR-RA-05).
+ */
+export interface WorkspaceManifest {
+  workspace: {
+    name: string;
+    members?: string[];
+    default?: string;
+    autodiscover?: { enabled: boolean };
+    /** A bare `[workspace.warm]` table arrives as `{}` — declared, no override. */
+    warm?: { concurrency?: number };
+  };
+  links?: { relation: string; from: string; to: string }[];
+  governance?: {
+    service_layers?: ManifestServiceLayer[];
+    boundaries?: ManifestServiceBoundary[];
+    no_cross_service_callers?: ManifestNoCrossServiceCallers[];
+  };
+}
+
+/**
+ * `GET /api/v1/workspace/manifest` (S-430, FR-UI-38) — the manifest as the
+ * workspace Config editor loads it (mirrors `ManifestDocument` plus the serve's
+ * one rider).
+ *
+ * `content` is the literal document — the raw pane's text and what a save posts
+ * back — and `fingerprint` is the hash of those exact bytes, which the save must
+ * carry so the server can refuse to clobber an edit made on disk since the load.
+ */
+export interface WorkspaceManifestDocument {
+  /** `logos.workspace.toml`, relative to the workspace root. */
+  path: string;
+  content: string;
+  fingerprint: string;
+  /** `null` when `content` does not parse; `error` then carries why. */
+  parsed: WorkspaceManifest | null;
+  error: string | null;
+  /** Whether the `[governance]` on disk is the family the running serve loaded —
+   *  the one `GET /api/v1/workspace/check` evaluates. The serve never re-reads
+   *  the manifest, so this is `false` after a save that changes the rules, until
+   *  the next `logos serve` (and whenever the file does not parse). */
+  governance_in_effect: boolean;
+}
+
+/** What `POST /api/v1/workspace/manifest/save` did (mirrors `ManifestSaveOutcome`,
+ *  internally tagged on `outcome`). Every arm names the fingerprint the editor
+ *  must hold from then on. */
+export type ManifestSaveOutcome =
+  | { outcome: "written"; path: string; bytes_written: number; fingerprint: string }
+  /** Byte-identical to disk: nothing was written. */
+  | { outcome: "unchanged"; path: string; fingerprint: string }
+  /** The manifest changed on disk since the load: nothing was written (HTTP 409). */
+  | {
+      outcome: "conflict";
+      path: string;
+      loaded_fingerprint: string;
+      disk_fingerprint: string;
+      disk_content: string;
+    };
+
 /**
  * Why one workspace member contributed nothing to the statistics aggregate
  * (mirrors `UnreadReason`, [FR-UI-37], kebab-case on the wire).

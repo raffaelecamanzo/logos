@@ -6,7 +6,11 @@
 //! on-disk artefact federation reads — the overlay itself is never persisted
 //! ([ADR-52]). This module owns the schema ([`Manifest`]) and the parse
 //! ([`parse`]); the up-tree location + member resolution live in the parent
-//! [`super`] module.
+//! [`super`] module. It also owns the manifest's two writers, which differ in
+//! what they may change: [`upsert`] rewrites **only** `members` for
+//! `logos init --workspace` ([FR-WS-02]), and [`save_document`] replaces the
+//! **whole** document for the workspace Config editor ([FR-UI-38]) — validated
+//! first, written verbatim, and refused when the file moved since it was read.
 //!
 //! # Failure posture
 //! Parsing mirrors the checked-in policy files ([config component], [FR-CF-01]):
@@ -31,6 +35,8 @@
 //! [config component]: ../../../docs/specs/architecture/components/config.md
 //! [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
 //! [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
+//! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+//! [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
 //! [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
@@ -458,7 +464,17 @@ pub fn parse(path: &Path) -> Result<Manifest, ConfigError> {
         path: path.to_path_buf(),
         source,
     })?;
-    let manifest: Manifest = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+    parse_text(&text, path)
+}
+
+/// The body of [`parse`] over text already in hand: the `deny_unknown_fields`
+/// deserialise, then [`Manifest::validate`]. `path` only labels the error.
+///
+/// Split out so [`save_document`] validates a candidate through **this** code
+/// rather than a second spelling of it: a candidate the editor may write is
+/// exactly one [`discover`](super::discover) will accept on the next command.
+fn parse_text(text: &str, path: &Path) -> Result<Manifest, ConfigError> {
+    let manifest: Manifest = toml::from_str(text).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
     })?;
@@ -559,6 +575,193 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
             InitAction::Updated
         },
         detail: String::new(),
+    })
+}
+
+// ── The whole-manifest write path (S-430, FR-UI-38) ────────────────────────
+
+/// The load-time fingerprint of the manifest's on-disk bytes — the token that
+/// makes a save **refuse to clobber** an edit it never saw ([FR-UI-38]).
+///
+/// A content hash, not an mtime: two writes inside one filesystem timestamp tick
+/// (a `logos init --workspace` re-run racing a save) leave the mtime where it was,
+/// and a touch without a change moves it. Only the bytes decide whether the file
+/// the editor loaded is still the file on disk.
+///
+/// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+#[must_use]
+pub fn fingerprint(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+/// The manifest as the editor loads it ([FR-UI-38]): the literal document, the
+/// [`fingerprint`] of those exact bytes, and the parse verdict over them.
+///
+/// `content` is what the raw pane shows and what a save posts back — never a
+/// re-serialisation of `parsed`, which would drop the operator's comments and
+/// key order on the first save.
+///
+/// A manifest that no longer parses (a hand edit went wrong while the serve was
+/// running) is **not** an error here: it is reported as `parsed = None` with the
+/// parser's own message in `error`, because the editor is the repair path and it
+/// cannot repair a document it was refused.
+///
+/// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+#[derive(Debug, Clone, Serialize)]
+pub struct ManifestDocument {
+    /// The manifest's filename relative to the workspace root ([`MANIFEST_FILENAME`]).
+    pub path: String,
+    /// The literal on-disk document.
+    pub content: String,
+    /// [`fingerprint`] of `content`'s bytes — posted back with a save.
+    pub fingerprint: String,
+    /// The parsed manifest, or `None` when `content` does not parse.
+    pub parsed: Option<Manifest>,
+    /// Why `content` does not parse — `None` exactly when `parsed` is `Some`.
+    pub error: Option<String>,
+}
+
+/// What a [`save_document`] did. Each arm names the fingerprint the editor must
+/// hold from now on, so the next save is compared against the right bytes.
+///
+/// Internally tagged on `outcome` for the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ManifestSaveOutcome {
+    /// The candidate replaced the manifest atomically.
+    Written {
+        /// The manifest's filename relative to the workspace root.
+        path: String,
+        /// The size of the document now on disk.
+        bytes_written: u64,
+        /// [`fingerprint`] of the document now on disk.
+        fingerprint: String,
+    },
+    /// The candidate is byte-identical to the manifest on disk, so **nothing was
+    /// written** — `upsert`'s write-if-different posture, carried in.
+    Unchanged {
+        /// The manifest's filename relative to the workspace root.
+        path: String,
+        /// [`fingerprint`] of the (untouched) document on disk.
+        fingerprint: String,
+    },
+    /// The manifest changed on disk since the editor loaded it, so the save was
+    /// **refused** and nothing was written. Carries what is on disk now, so the
+    /// editor can show it and let the user choose which copy wins.
+    Conflict {
+        /// The manifest's filename relative to the workspace root.
+        path: String,
+        /// The fingerprint the save was made against (the editor's load).
+        loaded_fingerprint: String,
+        /// [`fingerprint`] of the document on disk now.
+        disk_fingerprint: String,
+        /// The document on disk now.
+        disk_content: String,
+    },
+}
+
+/// Read the manifest at `root` for the workspace Config editor ([FR-UI-38]).
+///
+/// # Errors
+/// [`ConfigError::Io`] if the manifest cannot be read. A manifest that reads but
+/// does not parse is **not** an error — see [`ManifestDocument`].
+///
+/// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+pub fn read_document(root: &Path) -> Result<ManifestDocument, ConfigError> {
+    let path = root.join(MANIFEST_FILENAME);
+    let content = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let (parsed, error) = match parse_text(&content, &path) {
+        Ok(manifest) => (Some(manifest), None),
+        Err(err) => (None, Some(err.to_string())),
+    };
+    Ok(ManifestDocument {
+        path: MANIFEST_FILENAME.to_string(),
+        fingerprint: fingerprint(content.as_bytes()),
+        content,
+        parsed,
+        error,
+    })
+}
+
+/// Replace the whole manifest at `root` with `candidate` — the write path the
+/// workspace Config editor saves through ([FR-UI-38]), **beside** [`upsert`],
+/// which owns only `members`.
+///
+/// `loaded_fingerprint` is the [`ManifestDocument::fingerprint`] the editor
+/// loaded. In order, and each step decides before the next one runs:
+///
+/// 1. **Validate the candidate** through [`parse`]'s own body — the posture
+///    `upsert` holds by reading through [`parse`], carried in rather than
+///    re-invented. A candidate it rejects is an error and the file is not
+///    touched, so the editor can never write a manifest that would fail every
+///    command in the workspace on its next [`discover`](super::discover).
+/// 2. **Byte-identical to disk ⇒ [`Unchanged`](ManifestSaveOutcome::Unchanged)**,
+///    nothing written — `upsert`'s write-if-different. This is decided before the
+///    fingerprint: a candidate equal to what is on disk overwrites nobody's edit,
+///    whoever made it.
+/// 3. **The disk moved since the load ⇒ [`Conflict`](ManifestSaveOutcome::Conflict)**,
+///    nothing written. The manifest is routinely edited by hand and by
+///    `logos init --workspace` while a tab is open; a save made against a
+///    document the user never saw is refused, not merged.
+/// 4. Otherwise the candidate replaces the manifest **verbatim** through the
+///    shared atomic publish ([NFR-RA-07]). Verbatim is what keeps
+///    [NFR-RA-05]: nothing is re-serialised, so no undeclared table, default or
+///    reordering is invented, and the operator's comments survive.
+///
+/// Steps 3 and 4 are a compare-then-swap without a lock: a write landing between
+/// the read and the rename is not detected. The window is the few microseconds
+/// between them, and no other manifest writer (`upsert`, a text editor) takes a
+/// lock either.
+///
+/// # Errors
+/// The [`ConfigError`] [`parse`] raises for a candidate it rejects;
+/// [`ConfigError::Io`] reading the current manifest; [`ConfigError::Write`] if
+/// the atomic replace fails (the manifest is then unchanged).
+///
+/// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
+pub fn save_document(
+    root: &Path,
+    candidate: &str,
+    loaded_fingerprint: &str,
+) -> Result<ManifestSaveOutcome, ConfigError> {
+    let path = root.join(MANIFEST_FILENAME);
+    parse_text(candidate, &path)?;
+
+    let current = std::fs::read(&path).map_err(|source| ConfigError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let disk_fingerprint = fingerprint(&current);
+    if current == candidate.as_bytes() {
+        return Ok(ManifestSaveOutcome::Unchanged {
+            path: MANIFEST_FILENAME.to_string(),
+            fingerprint: disk_fingerprint,
+        });
+    }
+    if disk_fingerprint != loaded_fingerprint {
+        return Ok(ManifestSaveOutcome::Conflict {
+            path: MANIFEST_FILENAME.to_string(),
+            loaded_fingerprint: loaded_fingerprint.to_string(),
+            disk_fingerprint,
+            disk_content: String::from_utf8_lossy(&current).into_owned(),
+        });
+    }
+
+    crate::config::atomic::publish(&path, candidate.as_bytes(), None).map_err(|source| {
+        ConfigError::Write {
+            path: path.clone(),
+            source,
+        }
+    })?;
+    Ok(ManifestSaveOutcome::Written {
+        path: MANIFEST_FILENAME.to_string(),
+        bytes_written: candidate.len() as u64,
+        fingerprint: fingerprint(candidate.as_bytes()),
     })
 }
 
@@ -1215,5 +1418,196 @@ mod tests {
             m.workspace.warm.is_some(),
             "the declared table is carried through"
         );
+    }
+
+    // ── the whole-manifest write path (S-430, FR-UI-38) ──────────────────
+
+    /// A manifest declaring every optional table, with operator comments — the
+    /// shape a hand-tuned workspace actually has, and the one a re-serialising
+    /// writer would damage first.
+    const EVERY_TABLE: &str = "# the estate's manifest — hand-tuned\n\
+        [workspace]\nname = \"pec\"\nmembers = [\"api\", \"web\"] # sorted by hand\ndefault = \"api\"\n\n\
+        [workspace.autodiscover]\nenabled = false\n\n\
+        [workspace.warm]\nconcurrency = 2\n\n\
+        [[links]]\nrelation = \"http_call\"\nfrom = \"web::c\"\nto = \"api::h\"\n\n\
+        # layers first, then the rules over them\n\
+        [[governance.service_layers]]\nname = \"core\"\nmembers = [\"api\"]\n\n\
+        [[governance.service_layers]]\nname = \"edge\"\nmembers = [\"web\"]\n\n\
+        [[governance.boundaries]]\nfrom = \"edge\"\nto = \"core\"\nreason = \"edge talks to core through the gateway\"\n\n\
+        [[governance.no_cross_service_callers]]\nsymbol = \"*legacy*\"\n";
+
+    /// Pin the manifest's mtime to a fixed instant in the past, so "no write
+    /// happened" is an observable fact: any write moves it to now.
+    fn backdate(path: &std::path::Path) -> std::time::SystemTime {
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), past, "backdated");
+        past
+    }
+
+    /// The editor loads the literal document with the fingerprint of its bytes
+    /// and the parse verdict over them.
+    #[test]
+    fn read_document_returns_the_literal_bytes_their_fingerprint_and_the_parse() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(&tmp, EVERY_TABLE);
+        let doc = read_document(tmp.path()).expect("reads");
+        assert_eq!(doc.path, MANIFEST_FILENAME);
+        assert_eq!(doc.content, EVERY_TABLE, "the literal document, comments included");
+        assert_eq!(doc.fingerprint, fingerprint(EVERY_TABLE.as_bytes()));
+        let parsed = doc.parsed.expect("a valid manifest parses");
+        assert_eq!(parsed.governance.boundaries.len(), 1);
+        assert!(doc.error.is_none());
+    }
+
+    /// A manifest broken on disk is reported, not refused: the editor is the
+    /// repair path, so it must still receive the document and a fingerprint.
+    #[test]
+    fn read_document_reports_an_unparsable_manifest_rather_than_refusing_it() {
+        let tmp = TempDir::new().unwrap();
+        let broken = "[workspace]\nname = \"a\"\nmembrs = [\"typo\"]\n";
+        write_manifest(&tmp, broken);
+        let doc = read_document(tmp.path()).expect("an unparsable manifest still reads");
+        assert_eq!(doc.content, broken);
+        assert!(doc.parsed.is_none());
+        let error = doc.error.expect("the parse fault is named");
+        assert!(error.contains("membrs"), "the parser's own message: {error}");
+
+        // …and a save against its fingerprint repairs it.
+        let fixed = "[workspace]\nname = \"a\"\nmembers = [\"typo\"]\n";
+        let out = save_document(tmp.path(), fixed, &doc.fingerprint).expect("repairs");
+        assert!(matches!(out, ManifestSaveOutcome::Written { .. }), "{out:?}");
+        assert!(parse(&tmp.path().join(MANIFEST_FILENAME)).is_ok());
+    }
+
+    /// A workspace whose manifest vanished is an I/O fault, not an empty editor.
+    #[test]
+    fn read_document_of_a_missing_manifest_is_an_io_error() {
+        let tmp = TempDir::new().unwrap();
+        assert!(matches!(read_document(tmp.path()), Err(ConfigError::Io { .. })));
+    }
+
+    /// **Validate before write.** Every candidate `parse` rejects — bad TOML, an
+    /// unknown key, a missing required key, an out-of-range value — is refused
+    /// with the parser's error and exit code 2, and the manifest on disk is
+    /// byte-identical afterwards (and was not even rewritten: mtime unmoved).
+    #[test]
+    fn save_document_refuses_a_candidate_parse_rejects_and_leaves_the_file_byte_identical() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, EVERY_TABLE);
+        let loaded = read_document(tmp.path()).unwrap().fingerprint;
+        let past = backdate(&path);
+
+        for candidate in [
+            "this is not toml = = =",
+            "[workspace]\nname = \"pec\"\nmembrs = [\"api\"]\n",
+            "[workspace]\nmembers = [\"api\"]\n",
+            "[workspace]\nname = \"pec\"\n\n[workspace.warm]\nconcurrency = 0\n",
+            "[workspace]\nname = \"pec\"\n\n[[governance.boundaries]]\nfrom = \"a\"\n",
+        ] {
+            let err = save_document(tmp.path(), candidate, &loaded)
+                .expect_err("a candidate parse rejects is refused");
+            assert!(
+                matches!(err, ConfigError::Parse { .. } | ConfigError::InvalidValue { .. }),
+                "refused as a config fault, not an I/O one: {err:?}"
+            );
+            assert_eq!(err.exit_code(), 2);
+            assert_eq!(fs::read(&path).unwrap(), EVERY_TABLE.as_bytes(), "byte-identical");
+            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), past, "not rewritten");
+        }
+    }
+
+    /// **Byte-identical ⇒ unchanged, without writing** — `upsert`'s posture.
+    #[test]
+    fn save_document_reports_unchanged_without_writing_on_an_identical_candidate() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, EVERY_TABLE);
+        let loaded = read_document(tmp.path()).unwrap().fingerprint;
+        let past = backdate(&path);
+
+        let out = save_document(tmp.path(), EVERY_TABLE, &loaded).expect("a no-op save");
+        assert_eq!(
+            out,
+            ManifestSaveOutcome::Unchanged {
+                path: MANIFEST_FILENAME.to_string(),
+                fingerprint: loaded,
+            }
+        );
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), past, "no write (mtime unmoved)");
+    }
+
+    /// **Nothing is invented on save** ([NFR-RA-05]). The candidate is written
+    /// verbatim — never re-serialised — so a manifest declaring no optional table
+    /// gains none, and one declaring all of them keeps every comment, key order
+    /// and table exactly as the operator wrote them. `upsert`, which rebuilds the
+    /// struct, cannot say either.
+    #[test]
+    fn save_document_writes_the_candidate_verbatim_and_invents_no_undeclared_table() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, EVERY_TABLE);
+
+        // Every table declared; one value changed by the editor.
+        let edited = EVERY_TABLE.replace("concurrency = 2", "concurrency = 3");
+        let loaded = read_document(tmp.path()).unwrap().fingerprint;
+        let out = save_document(tmp.path(), &edited, &loaded).expect("writes");
+        assert_eq!(
+            out,
+            ManifestSaveOutcome::Written {
+                path: MANIFEST_FILENAME.to_string(),
+                bytes_written: edited.len() as u64,
+                fingerprint: fingerprint(edited.as_bytes()),
+            }
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "verbatim, comments included");
+
+        // No optional table declared: none appears on disk.
+        let bare = "[workspace]\nname = \"pec\"\n";
+        let loaded = read_document(tmp.path()).unwrap().fingerprint;
+        save_document(tmp.path(), bare, &loaded).expect("writes");
+        assert_eq!(fs::read_to_string(&path).unwrap(), bare, "no table invented");
+        let m = parse(&path).unwrap();
+        assert!(m.governance.is_unset() && m.workspace.warm.is_none() && m.links.is_empty());
+    }
+
+    /// **No silent clobber.** The manifest is changed on disk after the editor
+    /// loaded it — by `upsert`, the `logos init --workspace` writer that really
+    /// does run while a tab is open — so a save against the stale fingerprint is
+    /// refused with a conflict carrying what is on disk now, and writes nothing.
+    /// Re-saving against the conflict's own fingerprint is the explicit overwrite.
+    #[test]
+    fn save_document_refuses_a_stale_fingerprint_with_a_conflict_and_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, EVERY_TABLE);
+        let loaded = read_document(tmp.path()).unwrap().fingerprint;
+
+        upsert(tmp.path(), "ignored", &["api".into(), "web".into(), "worker".into()])
+            .expect("a concurrent init --workspace re-run");
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert_ne!(on_disk, EVERY_TABLE, "the fixture really did change under the editor");
+        let past = backdate(&path);
+
+        let mine = EVERY_TABLE.replace("concurrency = 2", "concurrency = 3");
+        let out = save_document(tmp.path(), &mine, &loaded).expect("a conflict is an outcome");
+        let disk_fingerprint = fingerprint(on_disk.as_bytes());
+        assert_eq!(
+            out,
+            ManifestSaveOutcome::Conflict {
+                path: MANIFEST_FILENAME.to_string(),
+                loaded_fingerprint: loaded.clone(),
+                disk_fingerprint: disk_fingerprint.clone(),
+                disk_content: on_disk.clone(),
+            }
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), on_disk, "the other writer's edit survives");
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), past, "nothing was written");
+
+        let out = save_document(tmp.path(), &mine, &disk_fingerprint).expect("explicit overwrite");
+        assert!(matches!(out, ManifestSaveOutcome::Written { .. }), "{out:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), mine);
     }
 }

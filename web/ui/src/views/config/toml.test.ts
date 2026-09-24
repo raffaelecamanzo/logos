@@ -79,3 +79,60 @@ describe("patch — typed field into the raw candidate (S-191, FR-UI-12)", () =>
     expect(cleared).toBe(raw);
   });
 });
+
+describe("patch — a multi-line array value is one value (S-430, FR-UI-38)", () => {
+  // The exact shape `logos init --workspace` writes (`toml::to_string_pretty`):
+  // the dominant real-world `members`, so it is the fixture, not a tidy one-liner.
+  const INIT_WRITTEN = [
+    "[workspace]",
+    'name = "shop"',
+    "members = [",
+    '    "api",',
+    '    "web",',
+    "]",
+    'default = "api"',
+    "",
+    "[workspace.warm]",
+    "concurrency = 2",
+  ].join("\n");
+
+  it("replaces every line of the array, leaving no dangling tail", () => {
+    const out = patch(INIT_WRITTEN, "workspace", "members", "list", "api\nweb\nworker");
+    expect(out).toBe(
+      [
+        "[workspace]",
+        'name = "shop"',
+        'members = ["api", "web", "worker"]',
+        'default = "api"',
+        "",
+        "[workspace.warm]",
+        "concurrency = 2",
+      ].join("\n"),
+    );
+  });
+
+  it("removes every line of the array when the field is cleared", () => {
+    const out = patch(INIT_WRITTEN, "workspace", "members", "list", "");
+    expect(out.split("\n").slice(0, 3)).toEqual(["[workspace]", 'name = "shop"', 'default = "api"']);
+  });
+
+  it("does not count a bracket inside a string or a comment", () => {
+    const raw = ["[workspace]", 'members = [ # a [ comment', '    "a]b",', "]", 'default = "x"'].join("\n");
+    const out = patch(raw, "workspace", "members", "list", "c");
+    expect(out).toBe(["[workspace]", 'members = ["c"]', 'default = "x"'].join("\n"));
+  });
+
+  it("leaves a one-line array a one-line replacement", () => {
+    const raw = ["[workspace]", 'members = ["a"]', 'default = "a"'].join("\n");
+    expect(patch(raw, "workspace", "members", "list", "b")).toBe(
+      ["[workspace]", 'members = ["b"]', 'default = "a"'].join("\n"),
+    );
+  });
+
+  it("touches only the key's own line when an array is never closed", () => {
+    const raw = ["[workspace]", "members = [", '"a",'].join("\n");
+    expect(patch(raw, "workspace", "members", "list", "b")).toBe(
+      ["[workspace]", 'members = ["b"]', '"a",'].join("\n"),
+    );
+  });
+});

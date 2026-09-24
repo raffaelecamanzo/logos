@@ -105,6 +105,43 @@ function regionBounds(lines: string[], table: string): RegionBounds {
 }
 
 /**
+ * How many lines the `key = value` beginning at `lines[at]` occupies: `1`, unless
+ * its value is an array still open at the end of that line — the multi-line shape
+ * `toml::to_string_pretty` writes, which is how `logos init --workspace` writes a
+ * manifest's `members` — in which case every line through the one that closes it.
+ *
+ * Without this, patching such a key replaced only its first line and left the
+ * array's tail dangling: invalid TOML the server then (correctly) refused, so the
+ * typed field could not edit the shape the tool itself writes. Brackets inside a
+ * quoted string or after a `#` are not counted. An array never closed before EOF
+ * spans only its own line, which is what the patcher did before this existed.
+ */
+function valueSpan(lines: string[], at: number): number {
+  let depth = 0;
+  for (let i = at; i < lines.length; i++) {
+    const text = i === at ? lines[i].slice(lines[i].indexOf("=") + 1) : lines[i];
+    let quote: string | null = null;
+    for (let j = 0; j < text.length; j++) {
+      const c = text[j];
+      if (quote !== null) {
+        if (c === "\\" && quote === '"') j++;
+        else if (c === quote) quote = null;
+      } else if (c === '"' || c === "'") {
+        quote = c;
+      } else if (c === "#") {
+        break;
+      } else if (c === "[") {
+        depth++;
+      } else if (c === "]") {
+        depth--;
+      }
+    }
+    if (depth <= 0) return i - at + 1;
+  }
+  return 1;
+}
+
+/**
  * Patch (replace / insert / remove) `key` in `table` of the raw TOML document
  * `raw`, returning the updated document. `table === ""` addresses a top-level key.
  * An empty field value (`tomlValue` ⇒ `null`) removes the key; a non-empty value
@@ -130,12 +167,12 @@ export function patch(
     }
   }
   if (serialised === null) {
-    if (found >= 0) lines.splice(found, 1);
+    if (found >= 0) lines.splice(found, valueSpan(lines, found));
     return lines.join("\n");
   }
   const newLine = `${key} = ${serialised}`;
   if (found >= 0) {
-    lines[found] = newLine;
+    lines.splice(found, valueSpan(lines, found), newLine);
   } else if (table !== "" && region.headerIdx >= 0) {
     lines.splice(region.start, 0, newLine); // right after the existing header
   } else if (table !== "") {

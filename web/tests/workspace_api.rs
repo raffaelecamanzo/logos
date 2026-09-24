@@ -102,13 +102,14 @@ fn workspace_with_openapi(openapi: &str) -> TempDir {
     // Index each member so `workspace status` reports index freshness.
     Engine::start(root.join("api")).expect("api engine").index();
     Engine::start(root.join("web")).expect("web engine").index();
-    std::fs::write(
-        root.join("logos.workspace.toml"),
-        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
-    )
-    .unwrap();
+    std::fs::write(root.join("logos.workspace.toml"), FIXTURE_MANIFEST).unwrap();
     tmp
 }
+
+/// The fixture's workspace manifest, verbatim — named so the manifest editor's
+/// tests (S-430) can compare against, and post back, the exact bytes on disk.
+const FIXTURE_MANIFEST: &str =
+    "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n";
 
 /// Build a two-member workspace: `api` (OpenAPI consumer) + `web` (axum provider),
 /// each an indexed git repo, with the manifest at the parent naming `api` default.
@@ -170,15 +171,27 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // the rest, so the same three loops walk it — and the write-free loop is the
     // one that matters most here, because its two write twins below live beside it.
     "/api/v1/workspace/config",
+    // S-430 / [FR-UI-38]: the manifest read the workspace Config editor loads. It
+    // must be write-free and engine-free like every GET here; its save twin sits
+    // in the write list below.
+    "/api/v1/workspace/manifest",
 ];
 
-/// The two **mutating** workspace routes (S-450, [FR-WS-30], [NFR-SE-06]) with a
-/// well-formed body each. Kept apart from [`WORKSPACE_ENDPOINTS`] because every
+/// The **mutating** workspace routes — S-450's two config-root writes
+/// ([FR-WS-30]) and S-430's manifest save ([FR-UI-38]), all under [NFR-SE-06] —
+/// with a well-formed body each. Kept apart from [`WORKSPACE_ENDPOINTS`] because every
 /// loop over that list issues a `GET`, which these answer `405`; the route-table
 /// guard reads the union of the two lists.
 const WORKSPACE_WRITE_ENDPOINTS: &[(&str, &str)] = &[
     ("/api/v1/workspace/config/save", "content=%5Bchat%5D%0Amodel%20%3D%20%22ws%2Fsaved%22%0A"),
     ("/api/v1/workspace/config/secret", "api_key=sk-workspace-written-key-wr42"),
+    // S-430 / [FR-UI-38]: posts the fixture's own manifest back byte-identical,
+    // so the well-formed save is the no-op `unchanged` — a `200` that writes
+    // nothing whatever the fingerprint (identity is decided before staleness).
+    (
+        "/api/v1/workspace/manifest/save",
+        "content=%5Bworkspace%5D%0Aname%20%3D%20%22shop%22%0Amembers%20%3D%20%5B%22api%22%2C%20%22web%22%5D%0Adefault%20%3D%20%22api%22%0A&fingerprint=never-loaded",
+    ),
 ];
 
 fn ws_router(tmp: &TempDir) -> axum::Router {
@@ -1279,6 +1292,15 @@ to = \"core\"
 reason = \"edge services must not call core services directly\"
 ";
 
+/// A member's gated verdict over its OWN `rules.toml`: whether it loaded one,
+/// whether it passed, and how many violations it found. What ADR-56 says no
+/// workspace governance — reported or saved — may ever move.
+fn member_gate_verdict(root: &Path, member: &str) -> (bool, Option<bool>, usize) {
+    let engine = Engine::start(root.join(member)).expect("member engine");
+    let report = engine.check_rules(None, false).expect("the member evaluates its contract");
+    (report.rules_present, report.passed, report.violations.len())
+}
+
 /// Append a `[governance]` section to the fixture's workspace manifest.
 fn declare_rules(root: &Path, rules: &str) {
     let manifest = root.join("logos.workspace.toml");
@@ -1488,11 +1510,7 @@ async fn a_governance_violation_is_reported_at_200_and_moves_no_member_gate() {
     std::fs::create_dir_all(tmp.path().join("web/.logos")).unwrap();
     std::fs::write(tmp.path().join("web/.logos/rules.toml"), "[constraints]\nmax_cc = 0\n").unwrap();
 
-    let member_verdict = |tmp: &TempDir| {
-        let engine = Engine::start(tmp.path().join("web")).expect("member engine");
-        let report = engine.check_rules(None, false).expect("the member evaluates its contract");
-        (report.rules_present, report.passed, report.violations.len())
-    };
+    let member_verdict = |tmp: &TempDir| member_gate_verdict(tmp.path(), "web");
     let before = member_verdict(&tmp);
     assert!(before.0, "the member loaded its own rules.toml");
     assert_eq!(before.1, Some(false), "and its gated verdict is a real FAIL, not an absent one");
@@ -1862,7 +1880,7 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// [`WORKSPACE_ENDPOINTS`] is what the `200`+CSP loop, the single-root `404` loop
 /// and the write-free loop all walk, so a route missing from it is unguarded on all
 /// three — and silently, which is the failure mode an enumerated list has instead of
-/// a wildcard. The two `POST` routes live in [`WORKSPACE_WRITE_ENDPOINTS`] instead
+/// a wildcard. The `POST` routes live in [`WORKSPACE_WRITE_ENDPOINTS`] instead
 /// (those loops issue `GET`s), and are walked by the S-450 tests. This asserts the
 /// union of the two lists and the router's own route table name exactly the same
 /// set, read out of `src/lib.rs` at compile time. Set equality in both
@@ -1940,10 +1958,10 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
 // federation root the backing already holds. No engine is constructed there
 // ([ADR-40]'s exception) and no apply route exists at this scope.
 
-/// A single-root serve answers all three routes with the family's own
-/// not-a-workspace `404` — the writes included, and they write nothing
-/// ([FR-WS-30], [ADR-52]). The `GET` is also walked by
-/// `single_root_workspace_endpoints_are_404`; the two `POST`s can only be walked
+/// A single-root serve answers the config read and every workspace write — the
+/// S-430 manifest save included — with the family's own not-a-workspace `404`,
+/// and the writes write nothing ([FR-WS-30], [ADR-52]). The `GET` is also walked
+/// by `single_root_workspace_endpoints_are_404`; the `POST`s can only be walked
 /// here, with a valid intent token, so the `404` is the handler's and not a
 /// guard's `403`/`405`.
 #[tokio::test]
@@ -1977,7 +1995,7 @@ async fn single_root_answers_the_workspace_config_routes_with_the_not_a_workspac
     assert_eq!(walk(tmp.path()), before, "a refused workspace write wrote nothing");
 }
 
-/// **Both writes are registered in the enumerated config-write allow-list**
+/// **Every workspace write is registered in the enumerated config-write allow-list**
 /// ([NFR-SE-06]). The method guard matches on exact path equality, so a route
 /// missing from [`web::CONFIG_POST_ROUTES`] is `405` before it routes: this reds
 /// on the list, on the handler being reachable through the whole guard stack, and
@@ -1987,7 +2005,7 @@ async fn single_root_answers_the_workspace_config_routes_with_the_not_a_workspac
 /// listed — is `every_post_mounted_route_is_admitted_by_the_method_guard` in
 /// `src/lib.rs`, which can reach the guard's private predicate.
 #[tokio::test]
-async fn both_workspace_writes_are_in_the_config_write_allow_list_and_nothing_near_them_is() {
+async fn every_workspace_write_is_in_the_config_write_allow_list_and_nothing_near_them_is() {
     let tmp = workspace();
     let (router, intent) = ws_router_with_intent(&tmp);
     for (path, form) in WORKSPACE_WRITE_ENDPOINTS {
@@ -2335,4 +2353,241 @@ async fn a_credential_written_under_a_hand_written_manifest_at_a_tracked_root_is
         .expect("git is on PATH");
     let status = String::from_utf8_lossy(&status.stdout);
     assert!(!status.contains("secrets.toml"), "`git add -A` would not pick the key up: {status}");
+}
+
+// ── S-430 / FR-UI-38: the workspace manifest is an editable document ──────────
+//
+// One read and one intent-guarded save over `logos.workspace.toml` itself, through
+// core's whole-manifest write path. The contract asserted here is what makes it
+// safe to put a file that governs N repositories behind a Save button: it
+// validates before it writes, writes nothing for a no-op, refuses to clobber an
+// edit it never saw, and touches no member.
+
+/// Every file under `<root>/<member>/.logos/` with its size and mtime — the
+/// evidence a reindex, a gate run or a store write leaves behind. A member store
+/// that is merely *opened* read-only moves none of these.
+fn member_logos_stat(root: &Path, member: &str) -> Vec<(String, u64, std::time::SystemTime)> {
+    let dir = root.join(member).join(".logos");
+    let mut out: Vec<_> = walk(&dir)
+        .into_iter()
+        .map(|rel| {
+            let meta = std::fs::metadata(dir.join(&rel)).expect("a walked file has metadata");
+            (format!("{member}/.logos/{rel}"), meta.len(), meta.modified().expect("an mtime"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Save `content` against `fingerprint` through the intent-guarded route.
+async fn save_manifest(
+    router: &axum::Router,
+    intent: &IntentToken,
+    content: &str,
+    fingerprint: &str,
+) -> (StatusCode, String, axum::http::HeaderMap) {
+    let body = format!("{}&{}", form_field("content", content), form_field("fingerprint", fingerprint));
+    let resp = router
+        .clone()
+        .oneshot(post_form("/api/v1/workspace/manifest/save", body, intent))
+        .await
+        .expect("route responds");
+    body_string(resp).await
+}
+
+/// The read is the literal document, the fingerprint of its exact bytes — the one
+/// a save must post back — and the parse verdict. The fingerprint is core's own
+/// function over the bytes on disk, not a figure this test re-derives.
+#[tokio::test]
+async fn the_manifest_read_is_the_literal_document_and_the_fingerprint_a_save_posts_back() {
+    let tmp = workspace();
+    let router = ws_router(&tmp);
+    let resp = router.clone().oneshot(get("/api/v1/workspace/manifest")).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/manifest");
+
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["path"], "logos.workspace.toml", "{body}");
+    assert_eq!(v["content"], FIXTURE_MANIFEST, "the literal bytes, never a re-serialisation: {body}");
+    assert_eq!(
+        v["fingerprint"],
+        logos_core::federation::manifest::fingerprint(FIXTURE_MANIFEST.as_bytes()),
+        "{body}"
+    );
+    assert_eq!(v["parsed"]["workspace"]["name"], "shop", "{body}");
+    assert!(v["error"].is_null(), "{body}");
+    assert_eq!(v["governance_in_effect"], true, "the serve loaded exactly this file: {body}");
+}
+
+/// A manifest broken on disk while the serve runs is still delivered — with the
+/// parser's message — so the editor can repair it; it is not a `500`.
+#[tokio::test]
+async fn a_manifest_broken_on_disk_is_delivered_with_its_fault_for_repair() {
+    let tmp = workspace();
+    // The serve started over a valid manifest; the break happens under it.
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let broken = format!("{FIXTURE_MANIFEST}bogus_key = 1\n");
+    std::fs::write(tmp.path().join("logos.workspace.toml"), &broken).unwrap();
+
+    let v = json_body(&router, "/api/v1/workspace/manifest").await;
+    assert_eq!(v["content"], broken.as_str(), "{v}");
+    assert!(v["parsed"].is_null(), "{v}");
+    assert!(v["error"].as_str().is_some_and(|e| e.contains("bogus_key")), "{v}");
+    assert_eq!(v["governance_in_effect"], false, "an unparsable file governs nothing: {v}");
+
+    let fingerprint = v["fingerprint"].as_str().unwrap();
+    let (status, body, _h) = save_manifest(&router, &intent, FIXTURE_MANIFEST, fingerprint).await;
+    assert_eq!(status, StatusCode::OK, "the save is the repair path: {body}");
+    assert_eq!(std::fs::read_to_string(tmp.path().join("logos.workspace.toml")).unwrap(), FIXTURE_MANIFEST);
+}
+
+/// **A governance save is advisory, and touches no member** ([ADR-56],
+/// [FR-UI-38]). A real `[governance]` family is saved through the intent-guarded
+/// route: the manifest holds exactly the posted bytes, every file under every
+/// member's `.logos/` keeps its size and mtime (no reindex, no gate output, no
+/// store write), both stores' full contents are unchanged, and each member's gated
+/// verdict over its own rules — a real FAIL for `web` — is identical before and
+/// after.
+///
+/// It also pins the one thing the save does NOT do: the running serve keeps the
+/// rules it started with, so the read now says `governance_in_effect: false` and
+/// the view can state that the findings beside it predate the save.
+#[tokio::test]
+async fn a_governance_save_writes_the_manifest_verbatim_and_moves_no_member() {
+    let tmp = workspace();
+    let root = tmp.path();
+    // `max_cc = 0` always fires, so "unmoved" compares a real FAIL, not two absences.
+    std::fs::create_dir_all(root.join("web/.logos")).unwrap();
+    std::fs::write(root.join("web/.logos/rules.toml"), "[constraints]\nmax_cc = 0\n").unwrap();
+    let verdict_before = [member_gate_verdict(root, "api"), member_gate_verdict(root, "web")];
+    assert_eq!(verdict_before[1].1, Some(false), "web's gated verdict is a real FAIL");
+
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/manifest").await;
+    let fingerprint = loaded["fingerprint"].as_str().expect("a fingerprint").to_string();
+
+    // Digest first, stat second — and the reverse after the save. Opening a WAL
+    // store even read-only touches its `-shm`, so a digest taken between the two
+    // stats would be the thing that moved it.
+    let digests_before = [member_digests(root, "api"), member_digests(root, "web")];
+    let stat_before = [member_logos_stat(root, "api"), member_logos_stat(root, "web")];
+    assert!(
+        stat_before.iter().all(|files| files.iter().any(|(p, ..)| p.ends_with("logos.db"))),
+        "both members were indexed, so the stat comparison watches real stores: {stat_before:?}"
+    );
+
+    let candidate = format!("{FIXTURE_MANIFEST}{GOVERNANCE_RULES}");
+    let (status, body, headers) = save_manifest(&router, &intent, &candidate, &fingerprint).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/manifest/save");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["outcome"], "written", "{body}");
+    assert_eq!(
+        v["fingerprint"],
+        logos_core::federation::manifest::fingerprint(candidate.as_bytes()),
+        "{body}"
+    );
+    assert_eq!(std::fs::read_to_string(root.join("logos.workspace.toml")).unwrap(), candidate);
+
+    assert_eq!(
+        [member_logos_stat(root, "api"), member_logos_stat(root, "web")],
+        stat_before,
+        "no member's .logos/ moved: no reindex, no gate output, no store write"
+    );
+    assert_eq!(
+        [member_digests(root, "api"), member_digests(root, "web")],
+        digests_before,
+        "no member store's contents changed"
+    );
+
+    let reread = json_body(&router, "/api/v1/workspace/manifest").await;
+    assert_eq!(reread["content"], candidate.as_str(), "{reread}");
+    assert_eq!(reread["fingerprint"], v["fingerprint"], "{reread}");
+    assert_eq!(
+        reread["governance_in_effect"], false,
+        "the serve still evaluates the rules it started with: {reread}"
+    );
+
+    assert_eq!(
+        [member_gate_verdict(root, "api"), member_gate_verdict(root, "web")],
+        verdict_before,
+        "no member's gated signal moved (ADR-56)"
+    );
+}
+
+/// **No silent clobber.** The manifest is edited on disk after the editor loaded
+/// it; a save against the stale fingerprint is a `409` carrying what is on disk
+/// now, and writes nothing. Re-saving against the conflict's own fingerprint is
+/// the explicit overwrite the user chose.
+#[tokio::test]
+async fn a_save_against_a_manifest_changed_since_load_is_a_409_that_writes_nothing() {
+    let tmp = workspace();
+    let path = tmp.path().join("logos.workspace.toml");
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/manifest").await;
+    let fingerprint = loaded["fingerprint"].as_str().unwrap().to_string();
+
+    let by_hand = format!("# edited in a terminal while the tab was open\n{FIXTURE_MANIFEST}");
+    std::fs::write(&path, &by_hand).unwrap();
+
+    let mine = FIXTURE_MANIFEST.replace("default = \"api\"", "default = \"web\"");
+    let (status, body, headers) = save_manifest(&router, &intent, &mine, &fingerprint).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/manifest/save");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["outcome"], "conflict", "{body}");
+    assert_eq!(v["loaded_fingerprint"], fingerprint.as_str(), "{body}");
+    assert_eq!(v["disk_content"], by_hand.as_str(), "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), by_hand, "the hand edit survives");
+
+    let disk = v["disk_fingerprint"].as_str().unwrap();
+    let (status, body, _h) = save_manifest(&router, &intent, &mine, disk).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), mine, "the explicit overwrite");
+}
+
+/// **Validate, then write.** A candidate the parser rejects is a `422` naming the
+/// fault and the manifest is byte-identical; a save with no fingerprint is a `400`
+/// that is not attempted; a byte-identical save is `unchanged` and writes nothing
+/// (mtime unmoved).
+#[tokio::test]
+async fn a_rejected_fingerprintless_or_identical_manifest_save_writes_nothing() {
+    let tmp = workspace();
+    let path = tmp.path().join("logos.workspace.toml");
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/manifest").await;
+    let fingerprint = loaded["fingerprint"].as_str().unwrap().to_string();
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(past).unwrap();
+    let unmoved = |why: &str| {
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), FIXTURE_MANIFEST, "{why}: byte-identical");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), past, "{why}: not rewritten");
+    };
+
+    let typo = FIXTURE_MANIFEST.replace("members", "membrs");
+    let (status, body, _h) = save_manifest(&router, &intent, &typo, &fingerprint).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(api_error(&body).contains("membrs"), "the refusal names the offending key: {body}");
+    unmoved("a rejected candidate");
+
+    let resp = router
+        .clone()
+        .oneshot(post_form(
+            "/api/v1/workspace/manifest/save",
+            form_field("content", "[workspace]\nname = \"other\"\n"),
+            &intent,
+        ))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(api_error(&body).contains("fingerprint"), "{body}");
+    unmoved("a fingerprint-less save");
+
+    let (status, body, _h) = save_manifest(&router, &intent, FIXTURE_MANIFEST, &fingerprint).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["outcome"], "unchanged", "{body}");
+    unmoved("an identical save");
 }

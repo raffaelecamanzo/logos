@@ -49,10 +49,13 @@ export class ConfigMutateError extends Error {
   }
 }
 
-const FORM_HEADERS = { "Content-Type": "application/x-www-form-urlencoded" };
+/** The content type every mutating config route accepts ([ADR-31]). Exported
+ *  with {@link formBody} so the workspace-root writes (`workspaceClient.ts`)
+ *  encode their bodies through the same two lines rather than a second copy. */
+export const FORM_HEADERS = { "Content-Type": "application/x-www-form-urlencoded" };
 
 /** Encode a flat record as an `application/x-www-form-urlencoded` body. */
-function formBody(params: Record<string, string>): string {
+export function formBody(params: Record<string, string>): string {
   return Object.entries(params)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join("&");
