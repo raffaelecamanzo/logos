@@ -885,6 +885,36 @@ async fn config_endpoint_resolves_the_slice_against_the_backings_workspace_root(
     }
 }
 
+/// The workspace root is the one the **backing** holds, not a member's parent
+/// directory ([ADR-52]: taken, never discovered). With a nested member
+/// (`services/web`) the two differ, so a handler that walked up from the member
+/// would miss the root's `[chat]` and key entirely.
+#[tokio::test]
+async fn config_endpoint_resolves_a_nested_member_against_the_federation_root() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    init_repo(&root.join("api"), "api/openapi.yaml", OPENAPI_YAML);
+    init_repo(&root.join("services/web"), "src/main.rs", AXUM_MAIN);
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"services/web\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    write(root, ".logos/config.toml", "[chat]\nmodel = \"ws/model\"\n");
+    write(root, ".logos/secrets.toml", "[chat]\napi_key = \"sk-federation-root-key-nr81\"\n");
+    let router = ws_router(&tmp);
+
+    let resp = router.oneshot(get("/api/v1/config?repo=services%2Fweb")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let slice = &v["effective_chat"];
+    assert_eq!(slice["policy_origin"], "workspace", "the nested member inherits the root's policy: {body}");
+    assert_eq!(slice["policy"]["model"], "ws/model", "{body}");
+    assert_eq!(slice["credential_origin"], "workspace", "{body}");
+    assert_eq!(slice["credential"]["last4"], "nr81", "{body}");
+}
+
 /// A fault at the workspace root is an honest `500` naming that file for a member
 /// that inherits from it — never a silent `unset` ([NFR-RA-05]) — and it echoes no
 /// key material ([NFR-SE-07]); a member declaring both halves never reads it and
