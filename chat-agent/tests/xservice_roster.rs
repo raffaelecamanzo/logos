@@ -627,3 +627,46 @@ async fn a_subagent_cap_halts_the_step_honestly_and_keeps_the_readings() {
     );
     assert_eq!(orchestrator.budget().global_used(), 1, "the refused call charged nothing");
 }
+
+/// The other two soft close-outs carry the readings too: a run of tool errors
+/// (out-of-domain requests after the reading was gathered), and a spent global
+/// ceiling. Each is named in the marker, and the UNRESOLVED reading survives.
+#[tokio::test]
+async fn the_tool_error_and_global_ceiling_close_outs_keep_the_readings() {
+    for (budget, misroutes, marker) in [
+        (BudgetTree::new(48, 16, 3), 3, "[bounded — hit 3 consecutive tool errors"),
+        (BudgetTree::new(1, 16, 3), 1, "[bounded — reached the turn's 1-tool-call ceiling"),
+    ] {
+        let ws = workspace(true);
+        let mut navigator = vec![MockTurn::tool_call(
+            "x0",
+            "xservice_callers",
+            serde_json::json!({ "symbol": ws.shared }),
+        )];
+        for i in 0..misroutes {
+            // `read` is a source tool, outside the Graph-Navigator's domain.
+            navigator.push(MockTurn::tool_call(
+                format!("m{i}"),
+                "read",
+                serde_json::json!({ "path": "src/lib.rs" }),
+            ));
+        }
+        navigator.push(MockTurn::text("partial summary"));
+        let orchestrator = Orchestrator::new(
+            MockCompletionModel::new([plan("which services call shared?"), finalize()]),
+            federated_roster(&ws, navigator),
+            budget,
+        );
+        let sink = CapturingSink::new();
+        let _ = orchestrator.run("which services call shared?", &sink).await;
+
+        let observations = navigator_observations(&sink);
+        assert_eq!(observations.len(), 1, "{marker}: {observations:?}");
+        let observation = &observations[0];
+        assert!(observation.starts_with(marker), "the bound is named: {observation}");
+        assert!(
+            observation.contains("— cross-service: UNRESOLVED"),
+            "{marker}: the reading survives the close-out: {observation}"
+        );
+    }
+}
