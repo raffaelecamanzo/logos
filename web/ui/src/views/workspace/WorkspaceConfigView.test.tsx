@@ -228,6 +228,44 @@ describe("the hybrid editor over the manifest (FR-UI-38 AC1)", () => {
   });
 });
 
+describe("the typed [workspace.autodiscover] and [workspace.warm] fields", () => {
+  const TUNED = [
+    "[workspace]",
+    'name = "shop"',
+    "",
+    "[workspace.autodiscover]",
+    "enabled = false",
+    "",
+    "[workspace.warm]",
+    "concurrency = 2",
+    "",
+  ].join("\n");
+  const tuned = () =>
+    doc({
+      content: TUNED,
+      parsed: { workspace: { name: "shop", autodiscover: { enabled: false }, warm: { concurrency: 2 } } },
+    });
+
+  it("pre-fill from the parse and patch their own tables", async () => {
+    await mount({ manifests: [tuned()] });
+    expect(screen.getByLabelText("enabled")).toHaveValue("false");
+    expect(screen.getByLabelText("concurrency")).toHaveValue(2);
+    const user = userEvent.setup();
+    await user.clear(screen.getByLabelText("concurrency"));
+    await user.type(screen.getByLabelText("concurrency"), "3");
+    await user.selectOptions(screen.getByLabelText("enabled"), "true");
+    expect(rawPane().value).toBe(TUNED.replace("concurrency = 2", "concurrency = 3").replace("enabled = false", "enabled = true"));
+  });
+
+  it("'(not declared — off)' removes the table, so an explicit OFF is never saved as a bare ON table", async () => {
+    await mount({ manifests: [tuned()] });
+    await userEvent.setup().selectOptions(screen.getByLabelText("enabled"), "");
+    expect(rawPane().value).not.toContain("[workspace.autodiscover]");
+    expect(rawPane().value).not.toContain("enabled");
+    expect(rawPane().value).toContain("[workspace.warm]\nconcurrency = 2");
+  });
+});
+
 describe("validate, then write (FR-UI-38 AC2)", () => {
   it("renders the parser's refusal inline and says nothing was written", async () => {
     await mount({

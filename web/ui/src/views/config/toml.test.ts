@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { patch, tomlValue } from "./toml.ts";
+import { dropEmptyTable, patch, tomlValue } from "./toml.ts";
 
 describe("tomlValue — typed-field serialisation (S-191, FR-UI-12)", () => {
   it("encodes a non-empty list, and removes the key when cleared", () => {
@@ -148,5 +148,25 @@ describe("patch — a multi-line array value is one value (S-430, FR-UI-38)", ()
     expect(patch(raw, "workspace", "members", "list", "b")).toBe(
       ["[workspace]", 'members = ["b"]', '"a",'].join("\n"),
     );
+  });
+});
+
+describe("dropEmptyTable — a table whose presence is a value (S-430, FR-UI-38)", () => {
+  it("removes a header left holding no key, and nothing else", () => {
+    const raw = ["[workspace]", 'name = "a"', "", "[workspace.autodiscover]", "", "[workspace.warm]", "concurrency = 2"].join("\n");
+    expect(dropEmptyTable(raw, "workspace.autodiscover")).toBe(
+      ["[workspace]", 'name = "a"', "", "", "[workspace.warm]", "concurrency = 2"].join("\n"),
+    );
+  });
+
+  it("treats a comment as no key: the header goes, the operator's comment stays", () => {
+    const raw = ["[workspace.autodiscover]", "# turned off while api/ is split", "[workspace.warm]"].join("\n");
+    expect(dropEmptyTable(raw, "workspace.autodiscover")).toBe(["# turned off while api/ is split", "[workspace.warm]"].join("\n"));
+  });
+
+  it("keeps a table that still declares a key, and leaves an absent one alone", () => {
+    const raw = ["[workspace.autodiscover]", "# why", "enabled = true"].join("\n");
+    expect(dropEmptyTable(raw, "workspace.autodiscover")).toBe(raw);
+    expect(dropEmptyTable('[workspace]\nname = "a"', "workspace.autodiscover")).toBe('[workspace]\nname = "a"');
   });
 });

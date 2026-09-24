@@ -215,3 +215,24 @@ export function patch(
   }
   return lines.join("\n");
 }
+
+/**
+ * Remove the `[table]` header from `raw` when the table no longer holds any key —
+ * only blank and comment lines between it and the next header. Returns `raw`
+ * unchanged when the table is absent or still declares a key.
+ *
+ * For a table whose mere PRESENCE means something: a bare
+ * `[workspace.autodiscover]` turns discovery ON (its `enabled` defaults to
+ * `true`), so clearing `enabled` must take the header with it, or "not declared"
+ * would save the opposite of an operator's `enabled = false`. Pure, like
+ * {@link patch}.
+ */
+export function dropEmptyTable(raw: string, table: string): string {
+  const lines = raw.split("\n");
+  const region = regionBounds(lines, table);
+  if (region.headerIdx < 0) return raw;
+  const holdsKey = lines.slice(region.start, region.end).some((l) => l.trim() !== "" && !l.trim().startsWith("#"));
+  if (holdsKey) return raw;
+  lines.splice(region.headerIdx, 1);
+  return lines.join("\n");
+}

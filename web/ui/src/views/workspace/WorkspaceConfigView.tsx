@@ -83,7 +83,7 @@ import {
   TextareaField,
 } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
-import { patch, type TomlFieldType } from "../config/toml.ts";
+import { dropEmptyTable, patch, type TomlFieldType } from "../config/toml.ts";
 import styles from "../config/ConfigView.module.css";
 
 // ── The group frame (shared by every group this view will hold) ───────────────
@@ -141,7 +141,7 @@ function manifestFields(m: WorkspaceManifest): { legend: string; fields: Manifes
     {
       legend: "[workspace.autodiscover]",
       fields: [
-        { table: "workspace.autodiscover", key: "enabled", type: "bool", initial: autodiscover, help: "Union immediate child git repositories with the members above. A bare [workspace.autodiscover] table turns this on; enabled = false keeps it declared but off." },
+        { table: "workspace.autodiscover", key: "enabled", type: "bool", initial: autodiscover, help: "Union immediate child git repositories with the members above. \"(not declared)\" removes the [workspace.autodiscover] table, which leaves discovery off; enabled = false keeps it declared but off." },
       ],
     },
     {
@@ -181,7 +181,7 @@ function FieldControl({
   if (field.type === "bool") {
     return (
       <SelectField label={field.key} hint={field.help} value={value} onChange={handle}>
-        <option value="">(not declared)</option>
+        <option value="">(not declared — off)</option>
         <option value="true">true</option>
         <option value="false">false</option>
       </SelectField>
@@ -467,7 +467,12 @@ function ManifestEditor({
 
   function onFieldChange(f: ManifestField, value: string) {
     setValues((prev) => ({ ...prev, [fieldId(f)]: value }));
-    setRaw((prev) => patch(prev, f.table, f.key, f.type, value));
+    setRaw((prev) => {
+      const next = patch(prev, f.table, f.key, f.type, value);
+      // A bare `[workspace.autodiscover]` means ON: an undeclared key must take
+      // its table with it (see `dropEmptyTable`).
+      return value === "" && f.table === "workspace.autodiscover" ? dropEmptyTable(next, f.table) : next;
+    });
   }
 
   async function save(against: string, overwrote: boolean) {
