@@ -2591,3 +2591,35 @@ async fn a_rejected_fingerprintless_or_identical_manifest_save_writes_nothing() 
     assert_eq!(v["outcome"], "unchanged", "{body}");
     unmoved("an identical save");
 }
+
+/// **`governance_in_effect` compares the rules, not their presence.** The serve
+/// starts WITH rules: a save that edits something else leaves it `true`, and a
+/// save that edits only one rule's `reason` turns it `false` — the view must not
+/// present findings over the old rule as the verdict on the new one ([NFR-CC-04]).
+#[tokio::test]
+async fn governance_in_effect_tracks_an_edit_to_one_rule_when_the_serve_started_with_rules() {
+    let tmp = workspace();
+    declare_rules(tmp.path(), GOVERNANCE_RULES);
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/manifest").await;
+    assert_eq!(loaded["governance_in_effect"], true, "{loaded}");
+    let content = loaded["content"].as_str().unwrap().to_string();
+
+    let elsewhere = content.replace("default = \"api\"", "default = \"web\"");
+    let (status, body, _h) =
+        save_manifest(&router, &intent, &elsewhere, loaded["fingerprint"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after = json_body(&router, "/api/v1/workspace/manifest").await;
+    assert_eq!(after["governance_in_effect"], true, "a non-governance edit leaves the rules in effect: {after}");
+
+    let reworded = elsewhere.replace(
+        "edge services must not call core services directly",
+        "edge goes through the gateway",
+    );
+    assert_ne!(reworded, elsewhere, "the fixture declares the reason being edited");
+    let (status, body, _h) =
+        save_manifest(&router, &intent, &reworded, after["fingerprint"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reread = json_body(&router, "/api/v1/workspace/manifest").await;
+    assert_eq!(reread["governance_in_effect"], false, "one reworded rule is a different family: {reread}");
+}
