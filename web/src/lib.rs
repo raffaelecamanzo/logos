@@ -581,17 +581,29 @@ pub fn workspace_router_with_intent(
 /// resolved engine instead. `Arc::ptr_eq` is the test: same engine ⇒ the injected service
 /// (mock seams preserved); a different engine ⇒ a service for that member, resolving its
 /// inherited chat halves against the same `workspace_root` ([ADR-67]).
+///
+/// A scoped member's service keeps the workspace's cross-service reach: it is built over
+/// the router's own `backing` and `bridge` ([S-431]) — none under single-root, where
+/// [`XserviceBacking::federated`](agent_core::XserviceBacking::federated) refuses.
+///
+/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
 #[cfg(feature = "agents")]
 fn chat_for(
     injected: &Arc<dyn chat::ChatService>,
     default: &Arc<Engine>,
     scoped: Arc<Engine>,
-    workspace_root: Option<std::path::PathBuf>,
+    backing: &Arc<Backing<Engine>>,
+    bridge: &Arc<ContractBridge>,
 ) -> Arc<dyn chat::ChatService> {
     if Arc::ptr_eq(default, &scoped) {
         Arc::clone(injected)
     } else {
-        Arc::new(chat::ConfiguredChatService::new(scoped, workspace_root))
+        let xservice =
+            agent_core::XserviceBacking::federated(Arc::clone(backing), Arc::clone(bridge));
+        Arc::new(
+            chat::ConfiguredChatService::new(scoped, workspace_root_of(backing))
+                .with_xservice(xservice),
+        )
     }
 }
 
@@ -626,10 +638,14 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
     #[cfg(feature = "agents")]
     {
         let workspace_root = workspace_root_of(&backing);
-        let chat: Arc<dyn chat::ChatService> = Arc::new(chat::ConfiguredChatService::new(
-            Arc::clone(&engine),
-            workspace_root.clone(),
-        ));
+        // Cross-service reach for the chat turn ([S-431]): `Some` only over a
+        // federated backing, over the same bridge the workspace endpoints stitch.
+        let xservice =
+            agent_core::XserviceBacking::federated(Arc::clone(&backing), Arc::clone(&bridge));
+        let chat: Arc<dyn chat::ChatService> = Arc::new(
+            chat::ConfiguredChatService::new(Arc::clone(&engine), workspace_root.clone())
+                .with_xservice(xservice),
+        );
         let wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(
             wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine), workspace_root),
         );
@@ -956,13 +972,15 @@ async fn chat_turn(
     State(chat): State<Arc<dyn chat::ChatService>>,
     State(default): State<Arc<Engine>>,
     State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
     MemberEngine(engine): MemberEngine,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     // Answer from the member the user is actually reading (S-250), resolving its
-    // chat halves against the workspace root it may inherit them from ([ADR-67]).
-    let chat = chat_for(&chat, &default, engine, workspace_root_of(&backing));
+    // chat halves against the workspace root it may inherit them from ([ADR-67]),
+    // with the workspace's cross-service reach when there is one ([S-431]).
+    let chat = chat_for(&chat, &default, engine, &backing, &bridge);
     let question = form
         .get("q")
         .or_else(|| form.get("message"))
@@ -1728,10 +1746,13 @@ mod tests {
             wikigen::ConfiguredWikiRunService::new(Arc::clone(&default), None),
         );
 
+        let single = Arc::new(Backing::Single(Arc::clone(&default)));
+        let bridge = Arc::new(ContractBridge::new());
+
         // Unscoped (or single-root): the injected service is used verbatim — the mock
         // seam the chat/wiki carve-out tests inject is never bypassed.
         assert!(Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&default), None),
+            &chat_for(&injected_chat, &default, Arc::clone(&default), &single, &bridge),
             &injected_chat
         ));
         assert!(Arc::ptr_eq(
@@ -1742,13 +1763,60 @@ mod tests {
         // Scoped to another member: a DIFFERENT service, bound to that member's engine —
         // so the turn is answered from, and the wiki written into, the member on screen.
         assert!(!Arc::ptr_eq(
-            &chat_for(&injected_chat, &default, Arc::clone(&other), None),
+            &chat_for(&injected_chat, &default, Arc::clone(&other), &single, &bridge),
             &injected_chat
         ));
         assert!(!Arc::ptr_eq(
             &wiki_for(&injected_wiki, &default, Arc::clone(&other), None),
             &injected_wiki
         ));
+    }
+
+    /// [S-431]: the router hands its federated backing to the chat service — the
+    /// default member's (built in `make_state`) and a `?repo=`-scoped member's
+    /// (built in `chat_for`) — and a single-root router hands none.
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    #[cfg(feature = "agents")]
+    #[test]
+    fn the_chat_service_gets_cross_service_reach_exactly_under_a_federated_backing() {
+        use logos_core::federation::{EngineRegistry, Federation, Member, RegistryMode};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let members: Vec<Member> = ["api", "web"]
+            .into_iter()
+            .map(|name| {
+                std::fs::create_dir_all(tmp.path().join(name)).unwrap();
+                Member { name: name.to_string(), root: tmp.path().join(name) }
+            })
+            .collect();
+        let federation = Federation {
+            name: "shop".to_string(),
+            root: tmp.path().to_path_buf(),
+            members,
+            default: None,
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+        };
+        let federated: Arc<Backing<Engine>> = Arc::new(Backing::Federated(Box::new(
+            EngineRegistry::new(federation, RegistryMode::Lazy),
+        )));
+        let default = Arc::new(Engine::start(tmp.path().join("api")).expect("default engine"));
+        let other = Arc::new(Engine::start(tmp.path().join("web")).expect("member engine"));
+
+        let state = make_state(Arc::clone(&default), Arc::clone(&federated), IntentToken::generate());
+        assert!(state.chat.cross_service_reach(), "the default member's chat reaches across");
+        let scoped = chat_for(&state.chat, &default, Arc::clone(&other), &federated, &state.bridge);
+        assert!(!Arc::ptr_eq(&scoped, &state.chat));
+        assert!(scoped.cross_service_reach(), "a ?repo= member's chat reaches across too");
+
+        let single = Arc::new(Backing::Single(Arc::clone(&default)));
+        let state = make_state(Arc::clone(&default), Arc::clone(&single), IntentToken::generate());
+        assert!(!state.chat.cross_service_reach(), "single-root: no xservice tools");
+        let scoped = chat_for(&state.chat, &default, other, &single, &state.bridge);
+        assert!(!scoped.cross_service_reach());
     }
 
     /// The [`bridge`] installs the boundary scope its caller names, and

@@ -193,3 +193,29 @@ async fn the_same_member_served_single_root_is_configure_first() {
         "and names no second tier: {body}"
     );
 }
+
+/// [S-431]: workspace serving now hands the chat turn a federated backing, and
+/// that adds no error path — a workspace declaring no provider anywhere renders
+/// the existing configure-first state, for the default member and a scoped one.
+///
+/// [S-431]: ../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_workspace_with_no_provider_is_configure_first_for_every_member() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    init_repo(&root.join("api"));
+    init_repo(&root.join("web"));
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    for uri in [CHAT_POST_ROUTE.to_string(), format!("{CHAT_POST_ROUTE}?repo=web")] {
+        let (router, intent) = ws_router(&tmp);
+        let body = send(router, post(&uri, &intent, "q=hello")).await;
+        assert!(
+            body.contains("event: error") && body.contains("Chat is not configured yet"),
+            "{uri}: the existing configure-first frame: {body}",
+        );
+    }
+}

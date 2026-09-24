@@ -55,9 +55,10 @@ pub use db::{
 };
 pub use memory::{MemoryGrounding, MemoryStore, ScratchpadEntry, ScratchpadSink};
 pub use orchestrator::{
-    BudgetBound, BudgetTree, CapturingSink, EventSink, FanOut, Orchestrator, OrchestratorError,
-    OrchestratorEvent, PlanStep, Planner, PlannerDecision, RoleModels, StepContext, StepError,
-    StepExecutor, StepObservation, StepRole, SubagentRoster, SynthesizerGrounding, TurnOutcome,
-    GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE, SOURCE_READER_PREAMBLE,
-    SYNTHESIZER_PREAMBLE,
+    workspace_planner_preamble, BudgetBound, BudgetTree, CapturingSink, EventSink, FanOut,
+    Orchestrator, OrchestratorError, OrchestratorEvent, PlanStep, Planner, PlannerDecision,
+    RoleModels, StepContext, StepError, StepExecutor, StepObservation, StepRole, SubagentRoster,
+    SynthesizerGrounding, TurnOutcome, GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE,
+    GRAPH_NAVIGATOR_XSERVICE_ADDENDUM, SOURCE_READER_PREAMBLE, SYNTHESIZER_PREAMBLE,
+    SYNTHESIZER_XSERVICE_ADDENDUM, WORKSPACE_PLANNER_ADDENDUM,
 };

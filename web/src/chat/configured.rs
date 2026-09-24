@@ -18,6 +18,14 @@
 //! half from the workspace produces a turn, and the tab and the turn cannot
 //! disagree about whether chat is usable.
 //!
+//! # Cross-service reach under workspace serving ([S-431], [ADR-52])
+//! A service built over a federated backing carries its [`XserviceBacking`], and
+//! hands it to the roster ([`SubagentRoster::with_xservice`]) and the workspace
+//! planner preamble to the orchestrator. Single-root serving supplies none, so its
+//! roster, planner and turn are exactly what they were. Nothing here opens a
+//! member: the backing is the registry the router already holds, and its engines
+//! start only when a dispatched `xservice_*` call reaches them ([NFR-PE-10]).
+//!
 //! # Blocking setup is offloaded ([ADR-03])
 //! Reading `config.toml`/`secrets.toml`, opening the `chat.db` stores, and walking
 //! the sandbox root are synchronous filesystem/SQLite operations. Like every other
@@ -31,6 +39,9 @@
 //! [ADR-40]: ../../../docs/specs/architecture/decisions/ADR-40.md
 //! [ADR-41]: ../../../docs/specs/architecture/decisions/ADR-41.md
 //! [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+//! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+//! [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+//! [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 //! [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
 //! [FR-UI-18]: ../../../docs/specs/requirements/FR-UI-18.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -44,10 +55,10 @@ use agent_core::rig::completion::CompletionModel;
 use agent_core::{
     anthropic_completion_model, openai_compatible_completion_model, ProviderConfig, RetryPolicy,
 };
-use agent_core::Sandbox;
+use agent_core::{Sandbox, XserviceBacking};
 use chat_agent::{
-    BudgetTree, ChatRole, ChatStore, MemoryGrounding, MemoryStore, Orchestrator, SubagentRoster,
-    SynthesizerGrounding,
+    BudgetTree, ChatRole, ChatStore, MemoryGrounding, MemoryStore, Orchestrator, Planner,
+    SubagentRoster, SynthesizerGrounding,
 };
 use logos_core::config::{resolve_chat, ChatProvider};
 use logos_core::Engine;
@@ -66,6 +77,13 @@ pub(crate) struct ConfiguredChatService {
     /// The federation's workspace root, or `None` in single-root mode — passed in
     /// from the backing that already resolved it, never discovered here.
     workspace_root: Option<PathBuf>,
+    /// The federated query backing behind the Graph-Navigator's `xservice_*`
+    /// tools ([S-431]); `None` under single-root backing, where the roster stays
+    /// the eight graph tools ([ADR-52]).
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    xservice: Option<XserviceBacking>,
 }
 
 impl ConfiguredChatService {
@@ -75,7 +93,19 @@ impl ConfiguredChatService {
         Self {
             engine,
             workspace_root,
+            xservice: None,
         }
+    }
+
+    /// Give the turn cross-service reach over `xservice` — what
+    /// [`XserviceBacking::federated`] returned for the router's backing, so
+    /// `None` (single-root) is a no-op ([S-431], [ADR-52]).
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    pub(crate) fn with_xservice(mut self, xservice: Option<XserviceBacking>) -> Self {
+        self.xservice = xservice;
+        self
     }
 }
 
@@ -171,11 +201,17 @@ fn build_setup(
 }
 
 impl ChatService for ConfiguredChatService {
+    #[cfg(test)]
+    fn cross_service_reach(&self) -> bool {
+        self.xservice.is_some()
+    }
+
     fn start_turn(&self, question: String, thread_id: Option<i64>) -> ChatStream {
         let (tx, rx) = unbounded_chat_channel();
         let engine = Arc::clone(&self.engine);
         let root = engine.root().to_path_buf();
         let workspace_root = self.workspace_root.clone();
+        let xservice = self.xservice.clone();
         let setup_question = question.clone();
 
         let turn_root = root.clone();
@@ -251,7 +287,7 @@ impl ChatService for ConfiguredChatService {
             match provider {
                 ChatProvider::Anthropic => match anthropic_completion_model(&cfg, retry) {
                     Ok(model) => {
-                        launch(engine, sandbox, model, grounding, budget, temperature,
+                        launch(engine, sandbox, xservice, model, grounding, budget, temperature,
                             max_tokens, question, memory, target, tx).await
                     }
                     Err(e) => {
@@ -262,7 +298,7 @@ impl ChatService for ConfiguredChatService {
                 },
                 ChatProvider::OpenAi => match openai_compatible_completion_model(&cfg, retry) {
                     Ok(model) => {
-                        launch(engine, sandbox, model, grounding, budget, temperature,
+                        launch(engine, sandbox, xservice, model, grounding, budget, temperature,
                             max_tokens, question, memory, target, tx).await
                     }
                     Err(e) => {
@@ -283,10 +319,19 @@ impl ChatService for ConfiguredChatService {
 /// families share one code path. The fixed roster shares the top-level model across
 /// all four roles; per-role `[chat.models]` overrides ([FR-CF-06]) are a deferred
 /// refinement.
+///
+/// Under a federated backing (`xservice` is `Some`) the Graph-Navigator gains the
+/// `xservice_*` tools and the planner the workspace addendum that routes a
+/// cross-repository question to them; otherwise both are exactly today's
+/// ([S-431], [ADR-52]).
+///
+/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 #[allow(clippy::too_many_arguments)]
 async fn launch<M>(
     engine: Arc<Engine>,
     sandbox: Arc<Sandbox>,
+    xservice: Option<XserviceBacking>,
     model: M,
     grounding: Arc<dyn SynthesizerGrounding>,
     budget: BudgetTree,
@@ -300,10 +345,13 @@ async fn launch<M>(
     M: CompletionModel + Clone + Send + Sync + 'static,
 {
     let roster = SubagentRoster::new(engine, sandbox, model.clone())
+        .with_xservice(xservice)
         .with_temperature(temperature)
         .with_max_tokens(max_tokens)
         .with_synthesizer_grounding(grounding);
-    let orchestrator = Orchestrator::new(model, roster, budget);
+    // The roster names the planner preamble that matches its tools.
+    let planner = Planner::with_preamble(model, roster.planner_preamble());
+    let orchestrator = Orchestrator::with_planner(planner, roster, budget);
     run_orchestrated(orchestrator, question, memory, target, tx).await;
 }
 
@@ -945,5 +993,153 @@ mod tests {
             !m.contains("sk-LEAKME-DEADBEEF"),
             "never echoes the key (NFR-SE-07): {m}"
         );
+    }
+
+    /// [S-431]: `launch` — the seam every production turn goes through — hands
+    /// the federated backing to the roster, so a turn over a workspace dispatches
+    /// `xservice_*` and its observation carries the reading; the single-root twin
+    /// gets no such tool, and the same scripted call is refused as out-of-domain.
+    /// Mock provider throughout: nothing dials.
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    mod xservice_launch {
+        use std::sync::Arc;
+
+        use agent_core::{MockCompletionModel, MockTurn, Sandbox, XserviceBacking};
+        use chat_agent::{
+            BudgetTree, ChatStore, MemoryGrounding, MemoryStore, OrchestratorEvent, StepRole,
+            SynthesizerGrounding,
+        };
+        use logos_core::federation::{
+            Backing, ContractBridge, EngineRegistry, Federation, Member, RegistryMode,
+        };
+        use logos_core::Engine;
+        use tempfile::TempDir;
+
+        use super::super::launch;
+        use crate::chat::{unbounded_chat_channel, ChatFrame, TurnTarget};
+
+        /// A two-member workspace backing over empty member directories — enough
+        /// to prove the wiring: the reading names the fan-out's member count.
+        fn federated(root: &std::path::Path) -> Option<XserviceBacking> {
+            let members = ["api", "web"]
+                .into_iter()
+                .map(|name| {
+                    std::fs::create_dir_all(root.join(name)).unwrap();
+                    Member { name: name.to_string(), root: root.join(name) }
+                })
+                .collect();
+            let federation = Federation {
+                name: "shop".to_string(),
+                root: root.to_path_buf(),
+                members,
+                default: None,
+                links: Vec::new(),
+                governance: Default::default(),
+                warm_concurrency: None,
+            };
+            let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
+            XserviceBacking::federated(
+                Arc::new(Backing::Federated(Box::new(registry))),
+                Arc::new(ContractBridge::new()),
+            )
+        }
+
+        /// Run one scripted turn through `launch` — over a federated backing or a
+        /// single root — and return the Graph-Navigator's observation.
+        async fn navigator_observation(workspace: bool) -> (String, Vec<Option<String>>) {
+            let tmp = TempDir::new().unwrap();
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(project.join("src")).unwrap();
+            std::fs::write(project.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+            let xservice = if workspace { federated(tmp.path()) } else { None };
+            assert_eq!(xservice.is_some(), workspace);
+
+            let engine = Arc::new(Engine::start(&project).expect("engine"));
+            let sandbox = Arc::new(Sandbox::new(&project, std::iter::empty()).expect("sandbox"));
+            let mut store = ChatStore::open(&project).expect("chat store");
+            let thread = store.create_thread_from_message("q").expect("thread");
+            drop(store);
+            let memory = Arc::new(MemoryStore::open(&project).expect("memory"));
+            let turn = memory.next_turn(thread).expect("turn");
+            let grounding: Arc<dyn SynthesizerGrounding> =
+                Arc::new(MemoryGrounding::new(Arc::clone(&memory), thread, turn));
+
+            // One model backs the planner and all four roles, consumed in order:
+            // plan → the navigator's tool call → its summary → final → answer.
+            let model = MockCompletionModel::new([
+                MockTurn::text(
+                    r#"{"action":"plan","steps":[{"role":"graph_navigator","instruction":"find alpha across services"}]}"#,
+                ),
+                MockTurn::tool_call("x1", "xservice_search", serde_json::json!({ "query": "alpha" })),
+                MockTurn::text("searched."),
+                MockTurn::text(r#"{"action":"final","grounded":true}"#),
+                MockTurn::text("answer"),
+            ]);
+            let (tx, mut rx) = unbounded_chat_channel();
+            let recorder = model.clone();
+            launch(
+                engine,
+                sandbox,
+                xservice,
+                model,
+                grounding,
+                BudgetTree::new(48, 16, 3),
+                None,
+                None,
+                "find alpha across services".to_string(),
+                memory,
+                TurnTarget::new(project, thread, turn),
+                tx,
+            )
+            .await;
+
+            let mut observation = None;
+            while let Ok(frame) = rx.try_recv() {
+                if let ChatFrame::Event(OrchestratorEvent::StepObserved {
+                    role: StepRole::GraphNavigator,
+                    summary,
+                    ..
+                }) = frame
+                {
+                    observation = Some(summary);
+                }
+            }
+            (observation.expect("the navigator step was observed"), recorder.system_prompts())
+        }
+
+        #[tokio::test]
+        async fn a_workspace_turn_dispatches_xservice_through_launch() {
+            let (observation, prompts) = navigator_observation(true).await;
+            // The planner ran under the workspace preamble, the Synthesizer (the
+            // last request) under its cross-service addendum.
+            assert_eq!(
+                prompts.first().cloned().flatten().as_deref(),
+                Some(chat_agent::workspace_planner_preamble().as_str())
+            );
+            let synthesizer = prompts.last().cloned().flatten().unwrap_or_default();
+            assert!(
+                synthesizer.ends_with(chat_agent::SYNTHESIZER_XSERVICE_ADDENDUM),
+                "{synthesizer}"
+            );
+            assert!(
+                observation.contains("xservice_search \"alpha\" over 2 member(s)"),
+                "{observation}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_single_root_turn_through_launch_has_no_xservice_tool() {
+            let (observation, prompts) = navigator_observation(false).await;
+            assert_eq!(
+                prompts.first().cloned().flatten().as_deref(),
+                Some(chat_agent::orchestrator::DEFAULT_PLANNER_PREAMBLE)
+            );
+            assert_eq!(
+                prompts.last().cloned().flatten().as_deref(),
+                Some(chat_agent::SYNTHESIZER_PREAMBLE)
+            );
+            assert_eq!(observation, "searched.", "no reading: the call was out-of-domain");
+        }
     }
 }

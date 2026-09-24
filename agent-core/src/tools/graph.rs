@@ -21,7 +21,7 @@ use super::{run_engine, ToolCallError};
 /// Resolve the optional node-kind filter against the exact wire names; an
 /// unknown token is the caller's fault, surfaced with the valid set so the
 /// model can retry (mirrors the MCP `parse_kind`).
-fn parse_kind(kind: Option<&str>) -> Result<Option<NodeKind>, ToolCallError> {
+pub(super) fn parse_kind(kind: Option<&str>) -> Result<Option<NodeKind>, ToolCallError> {
     match kind {
         None => Ok(None),
         Some(token) => NodeKind::from_wire(token).map(Some).ok_or_else(|| {

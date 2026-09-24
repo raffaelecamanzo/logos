@@ -11,6 +11,12 @@
 //! - **source** — net-new, path-sandboxed `read` / `grep` / `glob` confined to
 //!   the project root and honoring `ignored_dirs` ([NFR-SE-04]).
 //!
+//! Under a **federated** backing only, the Graph-Navigator's graph set is joined
+//! by the four read-only `xservice` tools (S-431, [FR-WS-29]) over the
+//! workspace member registry — an addition to the graph domain, not a fourth
+//! domain: no subagent owns them alone, and a single-root roster never sees them
+//! ([ADR-52]).
+//!
 //! Every Engine-backed tool is a thin adapter ([ADR-01]): it deserializes its
 //! arguments, runs **one** existing read-model on the blocking pool
 //! ([`run_engine`] / [`run_engine_result`], the ADR-03 submit-and-await
@@ -27,6 +33,8 @@
 //! [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
 //! [ADR-03]: ../../../docs/specs/architecture/decisions/ADR-03.md
 //! [ADR-41]: the `rig` decision + tool layer + budget primitives.
+//! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+//! [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
 
 use std::sync::Arc;
 
@@ -37,9 +45,11 @@ pub mod budget;
 mod governance;
 mod graph;
 mod source;
+mod xservice;
 
 pub use budget::{BoundedDispatcher, BudgetExhausted, DispatchError, ToolBudget};
 pub use source::{Sandbox, SandboxError};
+pub use xservice::{xservice_reading, XserviceAnswer, XserviceBacking, XSERVICE_TOOL_NAMES};
 
 /// The error every Engine-backed tool surfaces.
 ///
@@ -87,11 +97,12 @@ where
 
 /// Attribute everything `call` emits to [`Surface::Chat`] ([FR-OB-10]).
 ///
-/// This function — together with its twin in [`run_engine_result`] — is the
-/// **entire** chat-surface seam: the two places every agent tool reaches the
-/// engine through. Resolution therefore happens once per tool call at this
-/// adapter boundary, never inside a chokepoint, so the engine stays unaware the
-/// agent exists ([ADR-01]) and the hot path is unchanged ([NFR-OO-02]).
+/// This function — together with its twin in [`run_engine_result`] and the
+/// federated `run_federated` in `xservice` — is the **entire** chat-surface
+/// seam: the three places every agent tool reaches an engine through.
+/// Resolution therefore happens once per tool call at this adapter boundary,
+/// never inside a chokepoint, so the engine stays unaware the agent exists
+/// ([ADR-01]) and the hot path is unchanged ([NFR-OO-02]).
 ///
 /// It must run *inside* the `spawn_blocking` closure, not around the `await`:
 /// [`logos_core::observability::in_surface`] scopes per thread, and the blocking
@@ -143,7 +154,11 @@ where
 }
 
 /// The three least-privilege tool domains the subagent roster partitions over
-/// (S-174). Each subagent is built from exactly one domain's [`ToolSet`].
+/// (S-174). Each subagent is built from exactly one domain's [`ToolSet`] — with
+/// one extension: under a federated backing the Graph-Navigator's set is
+/// [`ToolDomain::Graph`] followed by [`XSERVICE_TOOL_NAMES`]
+/// ([`xservice_toolset`], S-431). No other role gains a tool, and a single-root
+/// roster is exactly its one domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolDomain {
     /// Code-graph navigation tools (Graph-Navigator subagent).
@@ -165,7 +180,9 @@ impl ToolDomain {
     /// The exact tool-name subset this domain exposes, in registration order.
     ///
     /// These are the `Tool::NAME` constants of the domain's tools; the partition
-    /// suite asserts each built [`ToolSet`] contains exactly this subset.
+    /// suite asserts each built [`ToolSet`] contains exactly this subset. The
+    /// federated Graph-Navigator's additions are [`XSERVICE_TOOL_NAMES`], not a
+    /// fourth domain.
     pub const fn tool_names(self) -> &'static [&'static str] {
         match self {
             ToolDomain::Graph => &[
@@ -226,6 +243,22 @@ pub fn governance_toolset(engine: Arc<Engine>) -> ToolSet {
         .static_tool(governance::Evolution::new(engine.clone()))
         .static_tool(governance::DocGaps::new(engine.clone()))
         .static_tool(governance::Health::new(engine))
+        .build()
+}
+
+/// Build the four read-only `xservice_*` tools over a federated backing
+/// (S-431, [FR-WS-29]) — composed onto [`graph_toolset`] for the Graph-Navigator,
+/// in [`XSERVICE_TOOL_NAMES`] order, and only when an [`XserviceBacking`] exists,
+/// which it never does under a single root ([ADR-52]).
+///
+/// [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub fn xservice_toolset(xs: XserviceBacking) -> ToolSet {
+    ToolSet::builder()
+        .static_tool(xservice::XserviceRouteProvidersTool::new(xs.clone()))
+        .static_tool(xservice::XserviceCallersTool::new(xs.clone()))
+        .static_tool(xservice::XserviceImpactTool::new(xs.clone()))
+        .static_tool(xservice::XserviceSearchTool::new(xs))
         .build()
 }
 
