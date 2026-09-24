@@ -39,7 +39,7 @@ use agent_core::{
 };
 use chat_agent::orchestrator::{
     BudgetTree, CapturingSink, Orchestrator, OrchestratorEvent, RoleModels, StepRole,
-    SubagentRoster, TurnOutcome, GRAPH_NAVIGATOR_PREAMBLE,
+    SubagentRoster, TurnOutcome, GRAPH_NAVIGATOR_PREAMBLE, SYNTHESIZER_PREAMBLE,
 };
 use logos_core::config::ChatConfig;
 use logos_core::federation::{
@@ -290,6 +290,7 @@ async fn a_single_backing_registers_todays_graph_tools_byte_for_byte() {
         serde_json::to_string(&graph_only).unwrap()
     );
     assert_eq!(roster.preamble(StepRole::GraphNavigator), GRAPH_NAVIGATOR_PREAMBLE);
+    assert_eq!(roster.preamble(StepRole::Synthesizer), SYNTHESIZER_PREAMBLE);
 }
 
 #[tokio::test]
@@ -312,6 +313,14 @@ async fn a_federated_backing_adds_the_four_xservice_tools_after_the_graph_tools(
     let preamble = roster.preamble(StepRole::GraphNavigator);
     assert!(preamble.starts_with(GRAPH_NAVIGATOR_PREAMBLE), "{preamble}");
     assert!(preamble.contains("xservice_callers") && preamble.contains("UNRESOLVED"));
+    // The Synthesizer writes the answer from the readings, so it is told that an
+    // UNRESOLVED reading beats a subagent's "none".
+    let synthesizer = roster.preamble(StepRole::Synthesizer);
+    assert!(synthesizer.starts_with(SYNTHESIZER_PREAMBLE), "{synthesizer}");
+    assert!(
+        synthesizer.contains("the reading wins") && synthesizer.contains("UNRESOLVED"),
+        "{synthesizer}"
+    );
 }
 
 // ── 2. Repo-qualified results ────────────────────────────────────────────────

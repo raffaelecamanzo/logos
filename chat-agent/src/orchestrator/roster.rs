@@ -167,6 +167,21 @@ gathered (provided in your instruction), compose the final, grounded answer to \
 the user's question in clear prose. Ground every claim in those observations; if \
 they are insufficient, say so honestly rather than inventing facts.";
 
+/// What the Synthesizer's preamble gains under a **federated** backing ([S-431],
+/// [BR-53]): it writes the user-facing answer, so it is the role that must turn
+/// an `UNRESOLVED`/`NOT CHECKED` reading into an unresolved answer — even when a
+/// subagent's own prose summary beside that reading says "none".
+///
+/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+/// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
+pub const SYNTHESIZER_XSERVICE_ADDENDUM: &str = "\
+This codebase is one member of a multi-repository workspace. Observations may end with \
+\"Cross-service readings\" — verbatim tool results. Where a reading and a subagent's \
+prose disagree, the reading wins. A reading marked UNRESOLVED or NOT CHECKED means the \
+cross-service answer is incomplete: say so, with its count and reasons, and never \
+answer \"none\" or \"no other service\" from it. Name the member with every \
+cross-service result, and never merge the same symbol from two members into one.";
+
 /// Supplies the grounding context the tool-less **Synthesizer** composes its
 /// final answer from — the seam that wires S-175's persisted scratchpad into the
 /// Synthesizer's prompt in production ([FR-UI-20], [S-175] AC1: "the Synthesizer
@@ -366,12 +381,17 @@ where
         }
     }
 
-    /// The system preamble `role` runs under: [`preamble_for`], plus the
-    /// cross-service addendum for the Graph-Navigator under a federated backing.
+    /// The system preamble `role` runs under: [`preamble_for`], plus — under a
+    /// federated backing only — the cross-service addendum of the two roles that
+    /// read the `xservice_*` results: the Graph-Navigator, which calls them, and
+    /// the Synthesizer, which writes the answer from their readings.
     pub fn preamble(&self, role: StepRole) -> String {
         match (role, &self.xservice) {
             (StepRole::GraphNavigator, Some(_)) => {
                 format!("{GRAPH_NAVIGATOR_PREAMBLE}\n\n{GRAPH_NAVIGATOR_XSERVICE_ADDENDUM}")
+            }
+            (StepRole::Synthesizer, Some(_)) => {
+                format!("{SYNTHESIZER_PREAMBLE}\n\n{SYNTHESIZER_XSERVICE_ADDENDUM}")
             }
             _ => preamble_for(role).to_string(),
         }

@@ -45,7 +45,7 @@ pub use planner::{
 pub use roster::{
     RoleModels, SubagentRoster, SynthesizerGrounding, GOVERNANCE_ANALYST_PREAMBLE,
     GRAPH_NAVIGATOR_PREAMBLE, GRAPH_NAVIGATOR_XSERVICE_ADDENDUM, SOURCE_READER_PREAMBLE,
-    SYNTHESIZER_PREAMBLE,
+    SYNTHESIZER_PREAMBLE, SYNTHESIZER_XSERVICE_ADDENDUM,
 };
 pub use step::{AnswerSink, StepContext, StepError, StepExecutor, StepObservation};
 
