@@ -1015,6 +1015,10 @@ describe("a broken tier file opens the repair editor (S-451 T2, FR-UI-38)", () =
     ["a null parse with no fault", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, parsed: null } })],
     ["a null key with no fault", (t: WorkspaceTierDocument) => ({ ...t, chat_key: null })],
     ["no load fingerprint", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, fingerprint: undefined } })],
+    ["a parse with no error field", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, error: undefined } })],
+    ["a parse AND a fault", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, error: "x" } })],
+    ["a key with no chat_key_error field", (t: WorkspaceTierDocument) => ({ ...t, chat_key_error: undefined })],
+    ["no exists flag", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, exists: undefined } })],
   ])("refuses %s rather than open an editor that could save it", async (_label, make) => {
     await mountTier({ tiers: [JSON.stringify(make(tier()))] });
     expect(await screen.findByText(/The workspace chat tier could not be loaded/)).toBeInTheDocument();

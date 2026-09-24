@@ -191,16 +191,24 @@ export async function fetchWorkspaceConfig(): Promise<WorkspaceTierDocument> {
   // Every field the editor reads to seed itself: the raw pane and its load
   // fingerprint, the typed [chat] fields (or the fault that stands for them), and
   // the masked key badge (or the fault that stands for it).
+  // Each half is a parse and no fault, or no parse and its fault — never both,
+  // never neither, since the editor renders a fault wherever one is not `null`.
   const config = model?.config;
   const parseState =
     config?.parsed === null
       ? typeof config.error === "string"
-      : typeof config?.parsed?.chat?.provider === "string";
+      : typeof config?.parsed?.chat?.provider === "string" && config.error === null;
   const keyState =
     model?.chat_key === null
       ? typeof model.chat_key_error === "string"
-      : typeof model?.chat_key?.present === "boolean";
-  if (typeof config?.content !== "string" || typeof config.fingerprint !== "string" || !parseState || !keyState) {
+      : typeof model?.chat_key?.present === "boolean" && model.chat_key_error === null;
+  if (
+    typeof config?.content !== "string" ||
+    typeof config.fingerprint !== "string" ||
+    typeof config.exists !== "boolean" ||
+    !parseState ||
+    !keyState
+  ) {
     throw new Error("GET /api/v1/workspace/config answered without a config document or key state.");
   }
   return model;
