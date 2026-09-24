@@ -754,6 +754,33 @@ describe("the workspace credential is masked and write-only (S-451 AC1, NFR-SE-0
   });
 });
 
+describe("the key route's replies never reach the page (S-451, NFR-SE-07)", () => {
+  it("a non-JSON 2xx is 'saved, format not understood' — the body is never rendered and the badge is unmoved", async () => {
+    const raw = "sk-in-an-html-reply-hh22";
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/secret": { status: 200, body: `<html>stored ${raw}</html>` } },
+    });
+    const user = userEvent.setup();
+    await user.type(within(card).getByLabelText("api_key"), raw);
+    await user.click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByText("Key saved (unexpected response format).")).toBeInTheDocument();
+    expect(within(card).getByText("set · ends …ab12")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(raw);
+  });
+
+  it("a 5xx carries the fixed detail, never its body, exactly as a 422 does", async () => {
+    const raw = "sk-echoed-in-a-500-ff33";
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/secret": { status: 500, body: { error: `writing secrets.toml near ${raw}` } } },
+    });
+    const user = userEvent.setup();
+    await user.type(within(card).getByLabelText("api_key"), raw);
+    await user.click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent("Save failed (500): the server rejected the key write");
+    expect(document.body.textContent).not.toContain(raw);
+  });
+});
+
 describe("the tier's reach is stated on the surface (S-451 AC2, AC3)", () => {
   it("names each file beside its group", async () => {
     const { card } = await mountedTier();
