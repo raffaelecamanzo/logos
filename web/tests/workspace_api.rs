@@ -2099,6 +2099,18 @@ async fn a_workspace_save_then_read_round_trips_and_leaves_no_graph_store_at_the
     assert_eq!(names, ["api", "web"], "the member set is unchanged by a workspace-root .logos/");
 }
 
+/// The `/api/v1` family's error body: a JSON object whose `error` is a string —
+/// the shape the workspace-tier routes promise their consumer, unlike the member
+/// `/config/*` routes' plain text. Panics (naming the body) on any other shape.
+fn api_error(body: &str) -> String {
+    let v: serde_json::Value =
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("the error body is JSON ({e}): {body}"));
+    v["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the error body carries an `error` string: {body}"))
+        .to_string()
+}
+
 /// A refused save leaves its target **byte-identical** ([NFR-RA-07]): an invalid
 /// document is a `422` over the existing workspace file, and a credential write
 /// over an unparsable store is a `422` that neither overwrites it nor echoes the
@@ -2124,7 +2136,7 @@ async fn a_refused_workspace_save_leaves_the_target_byte_identical() {
         .unwrap();
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "an invalid document is the client's fault: {body}");
-    assert!(body.contains("modle"), "the refusal names the offending key: {body}");
+    assert!(api_error(&body).contains("modle"), "the refusal names the offending key: {body}");
     assert_eq!(std::fs::read_to_string(root.join(".logos/config.toml")).unwrap(), config);
 
     let resp = router
@@ -2135,6 +2147,7 @@ async fn a_refused_workspace_save_leaves_the_target_byte_identical() {
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert!(!body.contains("handed-in-key") && !body.contains("unquoted-stays-put"), "no key echoed: {body}");
+    assert!(!api_error(&body).is_empty(), "the refusal is the family's JSON error: {body}");
     assert_eq!(std::fs::read_to_string(root.join(".logos/secrets.toml")).unwrap(), secrets);
 }
 
@@ -2186,6 +2199,7 @@ async fn the_workspace_save_accepts_the_config_document_only() {
         .unwrap();
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(api_error(&body).contains("file=config"), "the refusal says what is accepted: {body}");
     assert!(!tmp.path().join(".logos/rules.toml").exists(), "no rules file at the workspace root");
     assert!(!tmp.path().join(".logos").exists(), "a refused save creates nothing");
 
