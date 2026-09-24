@@ -800,6 +800,27 @@ mod tests {
         }
     }
 
+    /// A fault that quotes no file content keeps its detail: an invalid value in
+    /// the workspace policy an inheriting member relies on names the key, under the
+    /// configuration wording — never reclassified as a secret fault.
+    #[test]
+    fn a_validation_fault_keeps_its_detail() {
+        let e = estate(Half::Absent, Half::Absent, Half::Absent, Half::Declared);
+        write(
+            &e.ws,
+            "config.toml",
+            "[chat]\nmodel = \"m\"\nbase_url = \"\"\n",
+        );
+        let m = build_setup(&e.member, Some(&e.ws), None, "q")
+            .err()
+            .expect("a fault");
+        assert!(
+            m.starts_with("could not read the chat configuration: "),
+            "{m}"
+        );
+        assert!(m.contains("chat.base_url"), "names the offending key: {m}");
+    }
+
     /// Known consequence (b) of [S-447], kept: the seam always reads the member's
     /// `secrets.toml`, so an invalid one with no model reports the parse fault
     /// (fail loud) rather than "not configured" — and never echoes the key.
