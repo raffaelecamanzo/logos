@@ -39,7 +39,8 @@ use agent_core::{
 };
 use chat_agent::orchestrator::{
     BudgetTree, CapturingSink, Orchestrator, OrchestratorEvent, RoleModels, StepRole,
-    SubagentRoster, TurnOutcome, GRAPH_NAVIGATOR_PREAMBLE, SYNTHESIZER_PREAMBLE,
+    SubagentRoster, TurnOutcome, GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE,
+    SOURCE_READER_PREAMBLE, SYNTHESIZER_PREAMBLE,
 };
 use logos_core::config::ChatConfig;
 use logos_core::federation::{
@@ -313,6 +314,9 @@ async fn a_federated_backing_adds_the_four_xservice_tools_after_the_graph_tools(
     let preamble = roster.preamble(StepRole::GraphNavigator);
     assert!(preamble.starts_with(GRAPH_NAVIGATOR_PREAMBLE), "{preamble}");
     assert!(preamble.contains("xservice_callers") && preamble.contains("UNRESOLVED"));
+    // The roles that never see an xservice result keep today's preamble exactly.
+    assert_eq!(roster.preamble(StepRole::GovernanceAnalyst), GOVERNANCE_ANALYST_PREAMBLE);
+    assert_eq!(roster.preamble(StepRole::SourceReader), SOURCE_READER_PREAMBLE);
     // The Synthesizer writes the answer from the readings, so it is told that an
     // UNRESOLVED reading beats a subagent's "none".
     let synthesizer = roster.preamble(StepRole::Synthesizer);
