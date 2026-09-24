@@ -97,7 +97,8 @@ function stubApi({
   saves = [],
   probeStatus = 200,
 }: {
-  manifests?: WorkspaceManifestDocument[];
+  /** `null` answers that read with a `500`. */
+  manifests?: (WorkspaceManifestDocument | null)[];
   check?: WorkspaceGovernanceAnswer;
   saves?: { status: number; body: unknown }[];
   probeStatus?: number;
@@ -127,7 +128,10 @@ function stubApi({
       }
       gets.push(url);
       if (url.startsWith("/api/v1/workspace/roster")) return respond(ROSTER, probeStatus);
-      if (url.startsWith("/api/v1/workspace/manifest")) return respond(manifests[Math.min(m++, manifests.length - 1)]);
+      if (url.startsWith("/api/v1/workspace/manifest")) {
+        const next = manifests[Math.min(m++, manifests.length - 1)];
+        return next === null ? respond({ error: "boom" }, 500) : respond(next);
+      }
       if (url.startsWith("/api/v1/workspace/check")) return respond(check);
       return respond({});
     }),
@@ -357,6 +361,50 @@ describe("governance is advisory, beside its findings (FR-UI-38 AC4, ADR-56)", (
     expect(screen.queryByText(/this serve loaded when it started/)).toBeNull();
     await userEvent.setup().click(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ }));
     expect(await screen.findByText(/this serve loaded when it started/)).toBeInTheDocument();
+  });
+});
+
+describe("after a save, the page describes only the disk it has read (NFR-CC-04)", () => {
+  const WRITTEN = { status: 200, body: { outcome: "written", path: "logos.workspace.toml", bytes_written: 1, fingerprint: "fp-saved" } };
+  const save = () => userEvent.setup().click(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ }));
+
+  it("a repair save re-seeds the editor: typed fields up, the fault gone, the save still stated", async () => {
+    const broken = doc({ content: "[workspace]\nname = \"shop\"\nmembrs = []\n", parsed: null, error: "unknown field `membrs`" });
+    await mount({ manifests: [broken, doc({ fingerprint: "fp-saved" })], saves: [WRITTEN] });
+    expect(screen.queryByLabelText("name")).toBeNull();
+    await save();
+    expect(await screen.findByLabelText("name")).toHaveValue("shop");
+    expect(screen.getByText(/Saved logos\.workspace\.toml/)).toBeInTheDocument();
+    expect(screen.getByText("parses")).toBeInTheDocument();
+    expect(screen.queryByText(/does not parse/)).toBeNull();
+  });
+
+  it("a re-read that finds bytes this editor did not write is 'unknown', never 'does not parse'", async () => {
+    await mount({ manifests: [doc(), doc({ fingerprint: "fp-someone-else" })], saves: [WRITTEN] });
+    await save();
+    expect(await screen.findByText(/could not be re-read after this save, or changed again since/)).toBeInTheDocument();
+    expect(screen.getByText("on disk: unknown")).toBeInTheDocument();
+    expect(screen.getByText(/Whether these findings reflect the manifest on disk could not be established/)).toBeInTheDocument();
+    expect(screen.queryByText(/does not parse/)).toBeNull();
+  });
+
+  it("a re-read that fails drops the claims the same way", async () => {
+    await mount({ manifests: [doc(), null], saves: [WRITTEN] });
+    await save();
+    expect(await screen.findByText(/could not be re-read after this save/)).toBeInTheDocument();
+    expect(screen.queryByText("edge → core")).toBeNull();
+  });
+
+  it("the declared rules listing is the re-read's, not the load's", async () => {
+    const edited = doc({
+      fingerprint: "fp-saved",
+      parsed: { ...doc().parsed!, governance: { boundaries: [{ from: "edge", to: "billing", reason: null }] } },
+    });
+    await mount({ manifests: [doc(), edited], saves: [WRITTEN] });
+    expect(screen.getByText("edge → core")).toBeInTheDocument();
+    await save();
+    expect(await screen.findByText("edge → billing")).toBeInTheDocument();
+    expect(screen.queryByText("edge → core")).toBeNull();
   });
 });
 

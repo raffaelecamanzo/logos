@@ -212,9 +212,30 @@ function GovernanceAdvisory() {
   );
 }
 
+/**
+ * What this page knows about the manifest on disk now: the parse of the bytes it
+ * last read, or `null` when it no longer knows — a post-save re-read failed, or
+ * found bytes this editor did not write. "Unknown" is its own state, never
+ * rendered as "does not parse" (NFR-CC-04).
+ */
+type DiskView = { parsed: WorkspaceManifest | null; error: string | null; inEffect: boolean } | null;
+
+function diskViewOf(doc: WorkspaceManifestDocument): DiskView {
+  return { parsed: doc.parsed, error: doc.error, inEffect: doc.governance_in_effect };
+}
+
 /** The `[governance]` family as the manifest on disk declares it — read-only; the
  *  rules are edited in the raw pane. Renders nothing it was not sent. */
-function DeclaredGovernance({ parsed }: { parsed: WorkspaceManifest | null }) {
+function DeclaredGovernance({ disk }: { disk: DiskView }) {
+  if (disk === null) {
+    return (
+      <p className={styles.help}>
+        The manifest on disk could not be re-read after this save, or changed again since, so its
+        rules are not listed here.
+      </p>
+    );
+  }
+  const parsed = disk.parsed;
   if (parsed === null) {
     return <p className={styles.help}>The manifest on disk does not parse, so its rules cannot be listed.</p>;
   }
@@ -441,7 +462,7 @@ function ManifestEditor({
   const [saving, setSaving] = useState(false);
   // What the governance read-back and the findings rider describe: the document
   // as last known to be on disk. Refreshed after a write; never from local edits.
-  const [onDisk, setOnDisk] = useState({ parsed: doc.parsed, inEffect: doc.governance_in_effect as boolean | null });
+  const [onDisk, setOnDisk] = useState<DiskView>(() => diskViewOf(doc));
   const governance = useApiResource<WorkspaceGovernanceAnswer>(() => fetchWorkspaceGovernance(), []);
 
   function onFieldChange(f: ManifestField, value: string) {
@@ -462,17 +483,19 @@ function ManifestEditor({
       setConflict(null);
       setFingerprint(outcome.fingerprint);
       if (outcome.outcome === "written") {
-        // Re-read only what the read-back and the rider state. A fingerprint that
-        // no longer matches means the disk moved again: drop the claims rather
-        // than describe a document this editor did not write (NFR-CC-04).
+        const saved = describeOutcome(outcome, overwrote);
+        // Re-read only what the badge, the read-back and the rider state. A
+        // fingerprint that no longer matches means the disk moved again: the page
+        // stops describing it rather than describe bytes it did not write.
         fetchWorkspaceManifest().then(
-          (fresh) =>
-            setOnDisk(
-              fresh.fingerprint === outcome.fingerprint
-                ? { parsed: fresh.parsed, inEffect: fresh.governance_in_effect }
-                : { parsed: null, inEffect: null },
-            ),
-          () => setOnDisk({ parsed: null, inEffect: null }),
+          (fresh) => {
+            if (fresh.fingerprint !== outcome.fingerprint) return setOnDisk(null);
+            // A repair of an unparsable load has no typed state worth keeping, and
+            // only a re-seed brings its typed fields up: reload with the message.
+            if (doc.parsed === null) return onReload(saved);
+            setOnDisk(diskViewOf(fresh));
+          },
+          () => setOnDisk(null),
         );
       }
     } catch (e) {
@@ -487,12 +510,18 @@ function ManifestEditor({
   return (
     <>
       <div className={styles.fileHead}>
-        {doc.error === null ? <Badge tone="green">parses</Badge> : <Badge tone="red">does not parse</Badge>}
+        {onDisk === null ? (
+          <Badge tone="muted">on disk: unknown</Badge>
+        ) : onDisk.error === null ? (
+          <Badge tone="green">parses</Badge>
+        ) : (
+          <Badge tone="red">does not parse</Badge>
+        )}
       </div>
-      {doc.error !== null && (
+      {onDisk !== null && onDisk.error !== null && (
         <ErrorPanel>
           The manifest on disk does not parse — every command in this workspace fails on it until it
-          is repaired. Fix it in the raw pane below: {doc.error}
+          is repaired. Fix it in the raw pane below: {onDisk.error}
         </ErrorPanel>
       )}
 
@@ -517,10 +546,10 @@ function ManifestEditor({
           Service layers, boundaries and no-cross-service-callers contracts are repeated tables:
           edit them in the raw pane below. Declared on disk now:
         </p>
-        <DeclaredGovernance parsed={onDisk.parsed} />
+        <DeclaredGovernance disk={onDisk} />
         <h4 className={styles.legend}>Findings (GET /api/v1/workspace/check)</h4>
         <AsyncResource resource={governance} loadingLabel="Checking workspace governance…">
-          {(answer) => <GovernanceFindings answer={answer} inEffect={onDisk.inEffect} />}
+          {(answer) => <GovernanceFindings answer={answer} inEffect={onDisk?.inEffect ?? null} />}
         </AsyncResource>
       </fieldset>
 
