@@ -1610,4 +1610,34 @@ mod tests {
         assert!(matches!(out, ManifestSaveOutcome::Written { .. }), "{out:?}");
         assert_eq!(fs::read_to_string(&path).unwrap(), mine);
     }
+
+    /// The fingerprint is a content hash of the exact bytes — pinned to BLAKE3's
+    /// published digest of the empty input, so a cheaper stand-in (a length, an
+    /// mtime) cannot pass for it.
+    #[test]
+    fn fingerprint_is_the_blake3_hex_of_the_exact_bytes() {
+        assert_eq!(
+            fingerprint(b""),
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+        assert_ne!(fingerprint(b"concurrency = 2"), fingerprint(b"concurrency = 3"));
+    }
+
+    /// **No silent clobber, same-length edit.** The concurrent change most likely
+    /// to slip past a weak check is one that keeps the file's size — a hand-tuned
+    /// digit — so that is what changes on disk here.
+    #[test]
+    fn a_same_length_edit_on_disk_since_the_load_is_still_a_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, EVERY_TABLE);
+        let loaded = read_document(tmp.path()).unwrap().fingerprint;
+        let theirs = EVERY_TABLE.replace("concurrency = 2", "concurrency = 3");
+        assert_eq!(theirs.len(), EVERY_TABLE.len(), "the edit keeps the size");
+        fs::write(&path, &theirs).unwrap();
+
+        let mine = EVERY_TABLE.replace("concurrency = 2", "concurrency = 4");
+        let out = save_document(tmp.path(), &mine, &loaded).expect("a conflict is an outcome");
+        assert!(matches!(out, ManifestSaveOutcome::Conflict { .. }), "{out:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), theirs, "their edit survives");
+    }
 }
