@@ -369,22 +369,39 @@ describe("configureFirstCopy (S-452) — the rendered claim, composed off the ve
       "Chat is not configured yet for billing-service — no API key is declared by the workspace root.",
     );
     expect(c.present).toBe("The provider model is inherited from the workspace root.");
-    expect(c.withheld).toBe(
+    expect(c.memberKeyNote).toBe(
       "The API key billing-service declares is not used with the inherited workspace endpoint — setting a [chat] model on billing-service makes it use its own key.",
     );
     expect(c.action).toBe("Choose a provider model");
-    expect(c.workspaceLead).toBe("Or declare it once for every member of the workspace, in");
+    // The alternative names what goes in the workspace file — a key, not the model
+    // the action just named.
+    expect(c.workspaceLead).toBe("Or declare an API key once for every member of the workspace, in");
+  });
 
-    // The same origins with no withheld key keep the pre-HF-1 copy, and say nothing of one.
-    const plain = copy("workspace", "unset", WS);
-    expect(plain.withheld).toBeNull();
-    expect(plain.summary).toMatch(/no API key is declared by billing-service or by the workspace root\.$/);
-    expect(plain.action).toBe("Add an API key");
+  it("under an inherited policy with no key anywhere, never advises a member key alone (HF-1)", () => {
+    // No member key to withhold, but one added to the member would be withheld too:
+    // only the workspace root is named, and the member route needs its own model.
+    const c = copy("workspace", "unset", WS);
+    expect(c.summary).toBe(
+      "Chat is not configured yet for billing-service — no API key is declared by the workspace root.",
+    );
+    expect(c.memberKeyNote).toBe(
+      "An API key added to billing-service is not used with the inherited workspace endpoint — it is used once billing-service declares its own [chat] model.",
+    );
+    expect(c.action).toBe("Choose a provider model and add an API key");
+    expect(c.workspaceLead).toBe("Or declare an API key once for every member of the workspace, in");
+
+    // A member-owned policy keeps the member-first copy and no note.
+    const own = copy("member", "unset", WS);
+    expect(own.memberKeyNote).toBeNull();
+    expect(own.summary).toMatch(/no API key is declared by billing-service or by the workspace root\.$/);
+    expect(own.action).toBe("Add an API key");
+    expect(own.workspaceLead).toBe("Or declare it once for every member of the workspace, in");
   });
 
   it("refers to an unnamed default member's withheld key without a name", () => {
     const c = copy("workspace", "unset", { mode: "workspace", member: null }, true);
-    expect(c.withheld).toBe(
+    expect(c.memberKeyNote).toBe(
       "The API key that member declares is not used with the inherited workspace endpoint — setting a [chat] model on that member makes it use its own key.",
     );
   });

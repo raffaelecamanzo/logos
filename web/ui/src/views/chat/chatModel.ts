@@ -260,9 +260,10 @@ export interface ConfigureFirstCopy {
   summary: string;
   /** Where the present half came from, or `null` when both are absent. */
   present: string | null;
-  /** The member's own key is withheld from the inherited workspace endpoint, and
-   *  how to use it instead — or `null` when no key is withheld. */
-  withheld: string | null;
+  /** Under an inherited policy with no workspace key: why a member key does not
+   *  help (a declared one is withheld; a new one would be) and how to use one — or
+   *  `null` when the member's policy or no policy is in effect. */
+  memberKeyNote: string | null;
   /** What to do, e.g. "Add an API key" — the view links the Config tab after it. */
   action: string;
   /** Trails the Config-tab link: " for billing-service", or "" in single-root. */
@@ -283,8 +284,11 @@ export function configureFirstCopy(state: ConfigureFirst): ConfigureFirstCopy {
         ? "that member"
         : "this repository";
   const withheld = state.memberKeyWithheld;
-  // A withheld member key leaves only the workspace root able to supply the key.
-  const whereLooked = withheld
+  // The key is absent under a policy inherited from the workspace: that endpoint
+  // takes the workspace root's key alone (HF-1, ADR-67 §2), so only the workspace
+  // root can supply it — a member key, declared or added, is not used.
+  const inheritedPolicy = absent === "key" && present?.origin === "workspace";
+  const whereLooked = inheritedPolicy
     ? " by the workspace root"
     : root.kind === "repository"
       ? ""
@@ -306,19 +310,25 @@ export function configureFirstCopy(state: ConfigureFirst): ConfigureFirstCopy {
       ? "Choose a provider model and add an API key"
       : absent === "model" || withheld
         ? "Choose a provider model"
-        : "Add an API key";
+        : inheritedPolicy
+          ? "Choose a provider model and add an API key"
+          : "Add an API key";
   return {
     summary: `Chat is not configured yet for ${root.label} — ${absentPhrase}${whereLooked}.`,
     present: presentLine,
-    withheld: withheld
+    memberKeyNote: withheld
       ? `The API key ${memberRef} declares is not used with the inherited workspace endpoint — setting a [chat] model on ${memberRef} makes it use its own key.`
-      : null,
+      : inheritedPolicy
+        ? `An API key added to ${memberRef} is not used with the inherited workspace endpoint — it is used once ${memberRef} declares its own [chat] model.`
+        : null,
     action,
     actionScope: root.kind === "member" ? ` for ${root.label}` : "",
     workspaceLead:
       state.workspaceFiles.length === 0
         ? null
-        : `Or declare ${absent === "both" ? "them" : "it"} once for every member of the workspace, in`,
+        : inheritedPolicy
+          ? "Or declare an API key once for every member of the workspace, in"
+          : `Or declare ${absent === "both" ? "them" : "it"} once for every member of the workspace, in`,
   };
 }
 

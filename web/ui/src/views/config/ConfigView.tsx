@@ -667,10 +667,22 @@ function SecretEditor({
       </p>
       {/* S-452: an inherited key is disclosed, never shown — not even its last-4,
           which belongs to the workspace root's secret, not this member's. */}
-      {inherited && !masked.present && (
+      {/* HF-1: under an inherited policy only the workspace root's key is dialled,
+          so the card says so even when neither root holds a key. */}
+      {(inherited || policyInherited) && !masked.present && (
         <p className={styles.inherited}>
-          No key is set for this member, so the key is inherited from the workspace root (
-          <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>).{" "}
+          {inherited ? (
+            <>
+              No key is set for this member, so the key is inherited from the workspace root (
+              <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>).
+            </>
+          ) : (
+            <>
+              No key is set for this member, and the workspace root (
+              <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>) declares none for the
+              inherited <code>[chat]</code> table.
+            </>
+          )}{" "}
           {policyInherited
             ? "A key saved here is not used while this member inherits the workspace [chat] table; set a [chat] model above for this member to use its own key."
             : "Saving a key here overrides it for this member only."}

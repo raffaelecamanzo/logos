@@ -697,7 +697,8 @@ mod tests {
     #[test]
     fn every_refusal_shape_names_exactly_its_facts() {
         use Half::{Absent, Declared};
-        // (member model, member key, ws model, ws key, pass ws, absent, present, action)
+        // (member model, member key, ws model, ws key, pass ws, absent, present, action,
+        //  the inherited-policy member-key note)
         let rows = [
             (
                 Absent,
@@ -708,6 +709,7 @@ mod tests {
                 "neither a provider model nor an API key is declared",
                 None,
                 "Choose a provider model and add an API key",
+                None,
             ),
             (
                 Absent,
@@ -718,6 +720,7 @@ mod tests {
                 "no provider model is declared",
                 Some(("API key", false)),
                 "Choose a provider model",
+                None,
             ),
             (
                 Absent,
@@ -728,6 +731,7 @@ mod tests {
                 "no provider model is declared",
                 Some(("API key", true)),
                 "Choose a provider model",
+                None,
             ),
             (
                 Declared,
@@ -738,7 +742,10 @@ mod tests {
                 "no API key is declared",
                 Some(("provider model", false)),
                 "Add an API key",
+                None,
             ),
+            // HF-1: under an inherited policy only the workspace root can supply
+            // the key — a member key would not be used, so none is advised alone.
             (
                 Absent,
                 Absent,
@@ -747,7 +754,27 @@ mod tests {
                 true,
                 "no API key is declared",
                 Some(("provider model", true)),
-                "Add an API key",
+                "Choose a provider model and add an API key",
+                Some(
+                    "an API key added to this member is not used with the inherited \
+                     workspace endpoint — it is used once this member declares its own \
+                     [chat] model",
+                ),
+            ),
+            // HF-1: the same shape with a member key, which is withheld.
+            (
+                Absent,
+                Declared,
+                Declared,
+                Absent,
+                true,
+                "no API key is declared",
+                Some(("provider model", true)),
+                "Choose a provider model",
+                Some(
+                    "this member's own API key is not used with the inherited workspace \
+                     endpoint — setting a [chat] model on this member makes it use its own key",
+                ),
             ),
             (
                 Absent,
@@ -758,6 +785,7 @@ mod tests {
                 "neither a provider model nor an API key is declared",
                 None,
                 "Choose a provider model and add an API key",
+                None,
             ),
             (
                 Absent,
@@ -768,6 +796,7 @@ mod tests {
                 "no provider model is declared",
                 Some(("API key", false)),
                 "Choose a provider model",
+                None,
             ),
             (
                 Declared,
@@ -778,16 +807,23 @@ mod tests {
                 "no API key is declared",
                 Some(("provider model", false)),
                 "Add an API key",
+                None,
             ),
         ];
-        for (mm, mk, wm, wk, pass_ws, absent, present, action) in rows {
+        for (mm, mk, wm, wk, pass_ws, absent, present, action, note) in rows {
             let e = estate(mm, mk, wm, wk);
             let ws = pass_ws.then_some(e.ws.as_path());
             let member = e.member.display();
-            let looked = match ws {
-                Some(ws) => format!(" by this member or by the workspace root {}", ws.display()),
-                None => String::new(),
+            // Under an inherited policy only the workspace root is named as a place
+            // the key could come from (HF-1).
+            let looked = match (ws, note) {
+                (Some(ws), Some(_)) => format!(" by the workspace root {}", ws.display()),
+                (Some(ws), None) => {
+                    format!(" by this member or by the workspace root {}", ws.display())
+                }
+                (None, _) => String::new(),
             };
+            let note = note.map(|n| format!("; {n}")).unwrap_or_default();
             let present = match present {
                 None => String::new(),
                 Some((half, true)) => {
@@ -799,8 +835,8 @@ mod tests {
                 Some((half, false)) => format!("; the {half} is declared by {member}"),
             };
             let expected = format!(
-                "Chat is not configured yet for {member} — {absent}{looked}{present}. {action} \
-                 in the Config tab before starting a turn."
+                "Chat is not configured yet for {member} — {absent}{looked}{present}{note}. \
+                 {action} in the Config tab before starting a turn."
             );
             let actual = build_setup(&e.member, ws, None, "q")
                 .err()

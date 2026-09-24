@@ -576,6 +576,20 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     );
   });
 
+  it("says a key saved here is not used when the policy is inherited and no root holds a key (HF-1)", async () => {
+    const keyless = inheriting();
+    keyless.effective_chat = { ...keyless.effective_chat, credential: { present: false }, credential_origin: "unset" };
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(keyless) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    const card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
+    expect(card).toHaveTextContent(
+      "No key is set for this member, and the workspace root (<workspace-root>/.logos/secrets.toml) declares none for the inherited [chat] table.",
+    );
+    expect(card).toHaveTextContent("A key saved here is not used while this member inherits the workspace [chat] table");
+    expect(card).not.toHaveTextContent("key is inherited from the workspace root");
+  });
+
   it("does not promise a saved key overrides the inherited one while the policy is inherited", async () => {
     mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }) });
     const first = renderView();

@@ -316,6 +316,9 @@ describe("ChatView — configure-first names the root, the absent half and the o
     const advisory = summary.closest("section");
     expect(advisory).toHaveTextContent("Choose a provider model in the Config tab for web");
     expect(advisory).not.toHaveTextContent("Add an API key");
+    expect(advisory).toHaveTextContent(
+      "Or declare an API key once for every member of the workspace, in <workspace-root>/.logos/secrets.toml.",
+    );
     expect(screen.getByText("<workspace-root>/.logos/secrets.toml").tagName).toBe("CODE");
   });
 
