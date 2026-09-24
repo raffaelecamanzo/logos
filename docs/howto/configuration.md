@@ -53,7 +53,9 @@ directories documented above — a member keeps its own `.logos/` and its own
 | `logos.workspace.toml` | The manifest: approved members plus your hand-written `default` / `autodiscover` / `[workspace.warm]` / `[[links]]` / `[governance]`. Re-running `init --workspace` preserves them verbatim. | Yes |
 | `.logos.workspace.warm.json` | Machine-written record of the last background warm's per-member outcome. Derived, host-local, safe to delete. | No |
 | `.mcp.json` | Gains a single `logos-workspace` server key, deliberately distinct from a member's own `logos` key so neither shadows the other. | Yes |
-| `.gitignore` | A managed block ignoring the warm sidecar, maintained **only when the root is a git working tree** — a parent-of-repos root that is not a repository gains no file. | Yes |
+| `.logos/config.toml` | *(optional)* The **workspace-level** `[chat]` policy (and `[wiki].model`) that every member declaring none inherits — see [Workspace-level chat configuration](#workspace-level-chat-configuration). Never a member: a `.logos/` at the root is not admitted. | Yes |
+| `.logos/secrets.toml` | *(optional)* The **workspace-level** chat API key, inherited the same way. `0600`, masked everywhere. | **No** — covered by the managed ignore |
+| `.gitignore` | A managed block ignoring the warm sidecar and `.logos/secrets.toml`, maintained **only when the root is a git working tree** — a parent-of-repos root that is not a repository gains no file (and `init --workspace` reports the ignore step as skipped). | Yes |
 
 **Unknown keys in the manifest fail loud.** It parses under `deny_unknown_fields`,
 so a typo rejects the whole file rather than being silently ignored — the same
@@ -534,6 +536,68 @@ empty to clear it. The field shows the masked presence of an existing key but
 never reveals it. See
 [usage.md](usage.md#interacting-with-the-dashboard).
 
+### Workspace-level chat configuration
+
+In a [workspace](#workspace-federation-files--the-manifest-and-the-warm-sidecar),
+the Chat tab and wiki generation run against the **selected member**, so without a
+workspace tier every member would need its own `[chat]` and its own key. Instead,
+declare them **once at the workspace root**, in the same two files and the same
+format as a member:
+
+```text
+<workspace-root>/.logos/config.toml     # [chat] model / provider / base_url / budgets, [wiki].model
+<workspace-root>/.logos/secrets.toml    # [chat] api_key   (gitignored, 0600)
+```
+
+**Inheritance is per half, and the member wins wherever it declares:**
+
+| Member declares… | Policy (`[chat]` table) comes from | Key comes from |
+|---|---|---|
+| neither | workspace | workspace |
+| `[chat] model` only | member (**the whole table** — no field is taken from the workspace) | workspace |
+| a key only | workspace | member |
+| both | member | member |
+
+- **The policy half is atomic, keyed on `model`.** A member that declares a non-blank
+  `[chat] model` uses its own table *entire* — its `base_url`, provider and budgets —
+  and draws nothing from the workspace table. A member with no `model` inherits the
+  workspace table *entire*. A blank `model = ""` counts as undeclared.
+- **Credential and endpoint are resolved independently.** A member that declares its
+  own `model` + `base_url` but no key sends the **workspace** key to **its own**
+  endpoint; a member that declares a key but no `model` sends **its** key to the
+  **workspace** endpoint. Declare both halves on a member whose endpoint must not
+  receive the shared key.
+- **Wiki generation inherits the same way**: `[wiki].model` (member first) still
+  wins over the effective chat model, and the provider, endpoint and key come from the
+  effective chat resolution above.
+- **Single-root projects are unchanged**: with no workspace there is no inherited
+  tier, and nothing reads above the project root.
+- **Fail-loud:** an invalid workspace-root `config.toml` or `secrets.toml` makes the
+  Config read (`GET /api/v1/config`) of every member that would inherit from it
+  answer `500`, naming the file. Repair it by saving a valid document through the
+  workspace-tier write route below — a save validates the **new** content and never
+  reads the broken file — or by editing the file by hand. A broken workspace
+  `secrets.toml` has no in-app repair: the key writer refuses it (`422`) and leaves it
+  byte-identical, so fix or delete that file by hand.
+
+**Where you see the effective values.** The member Config tab shows an inherited
+chat value as a read-only note and still edits and saves **only the member's own
+document** — saving never copies an inherited value into the member's
+`config.toml`. There is no Config view for the workspace tier yet: declare it by
+editing the two files, or through the web API while `logos serve --ui` is running
+at the workspace root:
+
+| Route | Does |
+|---|---|
+| `GET /api/v1/workspace/config` | Reads the workspace tier (same shape as `GET /api/v1/config`; `effective_chat` origins read `member` = declared at this root, `unset` = not declared). |
+| `POST /api/v1/workspace/config/save` | Writes `<workspace-root>/.logos/config.toml` (form `content=`). Validated before write, atomic replace; `rules` is refused (workspace governance lives in the manifest). |
+| `POST /api/v1/workspace/config/secret` | Writes `<workspace-root>/.logos/secrets.toml` (form `api_key=`, blank clears), `0600`, response masked. |
+
+The two POST routes carry the same same-origin + intent-token guard as every
+mutating route (a bare `curl` gets `403`), all three answer `404 not a workspace`
+under a single-root server, and none offers an apply/reindex action — saving at the
+workspace root starts no member engine and triggers no reindex.
+
 ## `[wiki]` — the source-wiki generation model
 
 The `[wiki]` table selects a **dedicated model for source-wiki generation**,
@@ -551,7 +615,9 @@ hook anymore (see [usage.md](usage.md#the-wiki-tab) and
 
 The model settings — `provider`, `base_url`, and the API key — are **inherited
 from `[chat]` / `.logos/secrets.toml`**: there is no separate wiki provider,
-endpoint, or secret. When `[wiki].model` is omitted, wiki generation falls back
+endpoint, or secret. In a workspace they come from the *effective* chat
+resolution, so a member inheriting the workspace `[chat]` and key can generate
+its wiki too (see [Workspace-level chat configuration](#workspace-level-chat-configuration)). When `[wiki].model` is omitted, wiki generation falls back
 to `[chat].model`.
 
 ```toml

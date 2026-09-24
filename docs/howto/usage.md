@@ -551,7 +551,11 @@ each view's cache key, so switching re-fetches).
 **Every view declares the scope it answers for**, and the sidebar is split to match:
 a **Workspace** section for the views that answer for the whole workspace, and a
 **Service** section whose header carries the member selector — so the control sits
-inside the boundary it governs and nothing outside that section is scoped by it.
+inside the boundary it governs and nothing outside that section is scoped by it. The
+Service header is a column — the section label on its own row, the selector at full
+width beneath it — so the label stays readable however long the member name is. The
+Workspace section reads as one list (no divider between its groups), so the workspace
+Statistics entry sits visibly with the other workspace views.
 Scope is a declared field on each navigation entry, not a path-prefix guess, so a
 view cannot silently fall into the wrong scope by being named differently.
 
@@ -1004,10 +1008,19 @@ first turn, gitignored, never in the default binary).
    the **chat API key** field (stored in the gitignored `.logos/secrets.toml`).
    See [configuration.md](configuration.md#chat--the-agentic-chat-tab) for the
    keys, defaults, and the budget tree.
-2. **Open the Chat tab.** Until a provider model **and** an API key are both set,
-   the tab shows an honest **configure-first** state — a muted callout linking to
-   the Config tab, and **no composer**. This is a state, not an error: until you
-   configure it, no outbound call is possible.
+   In a workspace you can instead declare both **once at the workspace root** and
+   let every member inherit them — see
+   [configuration.md](configuration.md#workspace-level-chat-configuration).
+2. **Open the Chat tab.** Until an effective provider model **and** an effective API
+   key both resolve (declared on the member or inherited from the workspace), the
+   tab shows an honest **configure-first** state and **no composer**. The state says
+   exactly what it checked: the **root it inspected** (the member by name in a
+   workspace, "this repository" otherwise), **which half is missing** (model, key or
+   both), and **where any present half came from** (the member or the workspace). It
+   links to the member Config tab, and in a workspace also names the
+   workspace-root file the missing half would go in (`<workspace-root>/.logos/config.toml`
+   or `secrets.toml`). This is a state, not an error: until you configure it, no
+   outbound call is possible. A request sent anyway is refused with the same facts.
 3. **Acknowledge the consent banner.** Once configured, the first thing the tab
    shows is a **consent banner** naming the exact configured **endpoint host**
    (e.g. `openrouter.ai`, or `api.anthropic.com` for the Anthropic provider) and
