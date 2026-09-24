@@ -118,31 +118,59 @@ function regionBounds(lines: string[], table: string): RegionBounds {
  */
 function valueSpan(lines: string[], at: number): number {
   let depth = 0;
+  let open: MultilineQuote | null = null;
   for (let i = at; i < lines.length; i++) {
-    depth += bracketDelta(i === at ? lines[i].slice(lines[i].indexOf("=") + 1) : lines[i]);
-    if (depth <= 0) return i - at + 1;
+    const scan = bracketDelta(i === at ? lines[i].slice(lines[i].indexOf("=") + 1) : lines[i], open);
+    depth += scan.delta;
+    open = scan.open;
+    if (depth <= 0 && open === null) return i - at + 1;
   }
   return 1;
 }
 
+/** A TOML multi-line string delimiter — the one quoting that spans lines. */
+type MultilineQuote = '"""' | "'''";
+
+/** Where the string opened by `quote` closes in `text` from index `from`: the
+ *  index just past its closing delimiter, or `-1` when it runs past the line.
+ *  Only basic strings (`"`, `"""`) honour a backslash escape. */
+function closeOf(text: string, from: number, quote: string): number {
+  for (let j = from; j < text.length; j++) {
+    if (text[j] === "\\" && quote.startsWith('"')) j++;
+    else if (text.startsWith(quote, j)) return j + quote.length;
+  }
+  return -1;
+}
+
 /** The net `[` minus `]` count on one line of TOML, skipping brackets inside a
- *  quoted string and everything after a `#` comment. */
-function bracketDelta(text: string): number {
+ *  quoted string and everything after a `#` comment — and carrying a multi-line
+ *  string `open` at the line's end into the next line, whose brackets are string
+ *  content until it closes (a line never ends inside a one-line string). */
+function bracketDelta(
+  text: string,
+  open: MultilineQuote | null,
+): { delta: number; open: MultilineQuote | null } {
   let delta = 0;
-  let quote: string | null = null;
-  for (let j = 0; j < text.length; j++) {
+  let j = 0;
+  if (open !== null) {
+    j = closeOf(text, 0, open);
+    if (j < 0) return { delta, open };
+  }
+  while (j < text.length) {
     const c = text[j];
-    if (quote !== null) {
-      if (c === "\\" && quote === '"') j++;
-      else if (c === quote) quote = null;
+    if (c === "#") break;
+    if (c === '"' || c === "'") {
+      const quote = text.startsWith(c.repeat(3), j) ? c.repeat(3) : c;
+      const after = closeOf(text, j + quote.length, quote);
+      if (after < 0) return { delta, open: quote.length === 3 ? (quote as MultilineQuote) : null };
+      j = after;
       continue;
     }
-    if (c === "#") break;
-    if (c === '"' || c === "'") quote = c;
-    else if (c === "[") delta++;
+    if (c === "[") delta++;
     else if (c === "]") delta--;
+    j++;
   }
-  return delta;
+  return { delta, open: null };
 }
 
 /**

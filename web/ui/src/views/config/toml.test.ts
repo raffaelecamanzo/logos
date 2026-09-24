@@ -122,6 +122,20 @@ describe("patch — a multi-line array value is one value (S-430, FR-UI-38)", ()
     expect(out).toBe(["[workspace]", 'members = ["c"]', 'default = "x"'].join("\n"));
   });
 
+  it("does not count brackets inside a multi-line string, and never cuts past its array", () => {
+    // Valid TOML (checked with tomllib) whose `]` and `[` sit inside `"""`/`'''`
+    // strings. Scanning each line afresh deleted `default` and `name` on the first,
+    // and left a dangling `[''', "y"]` on the second.
+    const basic = ["[workspace]", 'members = ["""', 'api""", "web"]', 'default = "api"', 'name = """', ']shop"""'].join("\n");
+    expect(patch(basic, "workspace", "members", "list", "api\nweb")).toBe(
+      ["[workspace]", 'members = ["api", "web"]', 'default = "api"', 'name = """', ']shop"""'].join("\n"),
+    );
+    const literal = ["[workspace]", "members = ['''x", "[''', \"y\"]", 'default = "x"'].join("\n");
+    expect(patch(literal, "workspace", "members", "list", "z")).toBe(
+      ["[workspace]", 'members = ["z"]', 'default = "x"'].join("\n"),
+    );
+  });
+
   it("leaves a one-line array a one-line replacement", () => {
     const raw = ["[workspace]", 'members = ["a"]', 'default = "a"'].join("\n");
     expect(patch(raw, "workspace", "members", "list", "b")).toBe(
