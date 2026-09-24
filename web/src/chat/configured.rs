@@ -445,6 +445,55 @@ mod tests {
         );
     }
 
+    /// An inheriting member dials with the workspace's **whole** `[chat]` table
+    /// ([ADR-67] §3): provider, endpoint, sampling, budget tree and retry policy all
+    /// come from the root that declared `model` — none from the member's own
+    /// model-less table, whose every value here differs from the workspace's.
+    ///
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    #[test]
+    fn an_inheriting_member_dials_with_the_whole_workspace_table() {
+        use agent_core::RetryPolicy;
+        use logos_core::config::ChatProvider;
+
+        let e = estate(Half::Absent, Half::Absent, Half::Absent, Half::Declared);
+        write(
+            &e.ws,
+            "config.toml",
+            &format!(
+                "[chat]\nprovider = \"anthropic\"\nmodel = \"{WS_MODEL}\"\n\
+                 base_url = \"https://workspace.example/v1\"\ntemperature = 0.3\n\
+                 max_tokens = 777\nmax_tool_calls = 11\nmax_subagent_tool_calls = 5\n\
+                 max_replans = 2\nmax_provider_retries = 4\nprovider_retry_base_ms = 321\n"
+            ),
+        );
+        write(
+            &e.member,
+            "config.toml",
+            "[chat]\nprovider = \"openai\"\nbase_url = \"https://member.example/v1\"\n\
+             temperature = 0.9\nmax_tokens = 99\nmax_tool_calls = 40\n\
+             max_subagent_tool_calls = 20\nmax_replans = 6\nmax_provider_retries = 1\n\
+             provider_retry_base_ms = 50\n",
+        );
+
+        let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
+        assert_eq!(setup.model_id, WS_MODEL);
+        assert_eq!(setup.api_key, WS_KEY);
+        assert_eq!(setup.provider, ChatProvider::Anthropic);
+        assert_eq!(setup.base_url, "https://workspace.example/v1");
+        assert_eq!(setup.temperature, Some(0.3));
+        assert_eq!(setup.max_tokens, Some(777));
+        assert_eq!(
+            (
+                setup.budget.global_limit(),
+                setup.budget.max_subagent_tool_calls(),
+                setup.budget.max_replans()
+            ),
+            (11, 5, 2)
+        );
+        assert_eq!(setup.retry, RetryPolicy::new(4, 321));
+    }
+
     /// AC-2: tab verdict == turn verdict, asserted as ONE equality over the whole
     /// matrix — every member shape (absent / blank / declared, per half) × every
     /// workspace shape × with and without the workspace root passed.
