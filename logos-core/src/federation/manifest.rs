@@ -1640,4 +1640,19 @@ mod tests {
         assert!(matches!(out, ManifestSaveOutcome::Conflict { .. }), "{out:?}");
         assert_eq!(fs::read_to_string(&path).unwrap(), theirs, "their edit survives");
     }
+
+    /// A manifest removed after the editor loaded it is an I/O fault — never an
+    /// empty "disk" that a conflict would then offer to overwrite, recreating a
+    /// workspace someone deliberately took down.
+    #[test]
+    fn a_manifest_removed_since_the_load_is_an_io_error_and_nothing_is_written() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(&tmp, EVERY_TABLE);
+        let loaded = read_document(tmp.path()).unwrap().fingerprint;
+        fs::remove_file(&path).unwrap();
+
+        let err = save_document(tmp.path(), EVERY_TABLE, &loaded).expect_err("no manifest to save over");
+        assert!(matches!(err, ConfigError::Io { .. }), "{err:?}");
+        assert!(!path.exists(), "the manifest was not recreated");
+    }
 }

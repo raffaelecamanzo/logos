@@ -2623,3 +2623,20 @@ async fn governance_in_effect_tracks_an_edit_to_one_rule_when_the_serve_started_
     let reread = json_body(&router, "/api/v1/workspace/manifest").await;
     assert_eq!(reread["governance_in_effect"], false, "one reworded rule is a different family: {reread}");
 }
+
+/// A manifest removed while the tab was open answers the save `500` — the fault is
+/// the server's disk, not the edit — and is not recreated.
+#[tokio::test]
+async fn a_save_over_a_manifest_removed_since_load_is_a_500_that_recreates_nothing() {
+    let tmp = workspace();
+    let path = tmp.path().join("logos.workspace.toml");
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/manifest").await;
+    std::fs::remove_file(&path).unwrap();
+
+    let (status, body, _h) =
+        save_manifest(&router, &intent, FIXTURE_MANIFEST, loaded["fingerprint"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(!api_error(&body).is_empty(), "{body}");
+    assert!(!path.exists(), "the manifest was not recreated");
+}
