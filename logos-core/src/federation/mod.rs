@@ -613,9 +613,12 @@ mod tests {
             fs::write(tier.join("secrets.toml"), "[chat]\napi_key = \"sk-x\"\n").unwrap();
             fs::write(tier.join("logos.db"), b"db").unwrap();
             fs::write(tier.join(".logos").join("logos.db"), b"db").unwrap();
+            // A repository INSIDE the tier directory: the exclusion is anything
+            // under `.logos/`, not only the directory itself.
+            init_repo(&tier.join("inner"));
             write_manifest(
                 root,
-                "[workspace]\nname = \"w\"\nmembers = [\"api\", \".logos-api\", \".\", \".logos\", \".logos/\"]\n\
+                "[workspace]\nname = \"w\"\nmembers = [\"api\", \".logos-api\", \".\", \".logos\", \".logos/\", \".logos/inner\"]\n\
                  default = \".logos\"\n\n[workspace.autodiscover]\n",
             );
 
