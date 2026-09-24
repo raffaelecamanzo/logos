@@ -525,6 +525,38 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
   });
 
+  it("drops the key note the moment the member saves its own key, before any re-read", async () => {
+    // The re-read after the write is held PENDING, so only the member's own masked
+    // state can hide the note — an inherited-key note under a "set" badge is false.
+    let reads = 0;
+    const json = (body: unknown) =>
+      ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string | URL, init?: RequestInit) => {
+        const path = String(url);
+        if ((init?.method ?? "GET").toUpperCase() === "POST" && path === "/config/secret") {
+          return Promise.resolve(json({ path: ".logos/secrets.toml", chat_key: { present: true, last4: "ab12" } }));
+        }
+        if (path === "/api/v1/config") {
+          return reads++ === 0 ? Promise.resolve(json(inheriting())) : new Promise<Response>(() => {});
+        }
+        return Promise.resolve({ ok: false, status: 500, text: async () => "no route" } as Response);
+      }),
+    );
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    const card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
+    expect(card).toHaveTextContent(/key is inherited from the workspace root/);
+
+    fireEvent.change(screen.getByLabelText("api_key"), { target: { value: "sk-own-ab12" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    await screen.findByText(/Key saved \(ends …ab12\)/);
+    expect(within(card).getByText(/set · ends …ab12/)).toBeInTheDocument();
+    expect(card).not.toHaveTextContent(/inherited/);
+    expect(reads).toBe(2);
+  });
+
   it("shows no inheritance note when the member declares its own halves", async () => {
     mockFetch({});
     renderView();
