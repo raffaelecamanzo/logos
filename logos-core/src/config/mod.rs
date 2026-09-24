@@ -47,6 +47,7 @@ mod rules;
 mod secrets;
 mod settings;
 mod wiki;
+mod workspace_tier;
 mod writeback;
 
 pub use admission::AdmissionAuthority;
@@ -88,11 +89,17 @@ pub use rules::{
     Layer, MaxDead, MaxDeadBaseline, MetricThresholds, RequireDocumented, RequireTested, Rules,
 };
 pub use secrets::{load_secrets_from_root, ChatSecrets, MaskedSecret, Secrets};
+/// The credential store's path relative to a config root — also the entry the
+/// managed workspace-root `.gitignore` carries for the workspace tier ([FR-WS-30]).
+///
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+pub(crate) use secrets::SECRETS_RELPATH;
 pub use settings::{
     BindingPolicy, Config, ConfigArtifacts, CoverageIngest, Documentation, EffectiveCoverageIngest,
     Resolution, Semantics, TypedEnrichment, Watcher, DEFAULT_MAX_FILE_SIZE,
 };
 pub use wiki::{EffectiveWikiModel, WikiConfig};
+pub use workspace_tier::{read_workspace_documents, write_workspace_config, write_workspace_secret};
 pub use writeback::{
     read_documents, write_config, write_rules, write_secret, ConfigApplyOutcome, ConfigDefaults,
     ConfigFileView, ConfigReadModel, ConfigWriteOutcome, EffectiveChat, FileView,

@@ -80,15 +80,17 @@ pub struct WorkspaceEnableReport {
     pub members: Vec<MemberReport>,
     pub manifest: InitStep,
     pub mcp: InitStep,
-    /// The workspace-root managed ignore entry for the [FR-WS-17] warm-outcome
-    /// sidecar ([CR-104]) — `Skipped`, carrying the reason, at a root that is
-    /// not a git working tree.
+    /// The workspace-root managed ignore entries for the [FR-WS-17] warm-outcome
+    /// sidecar ([CR-104]) and the workspace chat credential ([FR-WS-30]) —
+    /// `Skipped`, carrying the reason, at a root that is not the top level of a
+    /// git repository.
     ///
     /// Reported as a step rather than omitted so the skip is *visible*: the
     /// canonical parent-of-repos root is deliberately not a repository, and an
     /// absent field would read as a write that silently failed.
     ///
     /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+    /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
     /// [CR-104]: ../../../docs/requests/CR-104-managed-workspace-root-ignore-for-the-warm-sidecar.md
     pub root_ignore: InitStep,
     /// What enabling this workspace did to the members' working trees
@@ -505,8 +507,9 @@ pub fn candidates_for_approval(
         .collect())
 }
 
-/// Maintain the workspace-root ignore entry for the [FR-WS-17] warm-outcome
-/// sidecar — **only where it means something** ([FR-WS-02], [CR-104]).
+/// Maintain the workspace-root ignore entries for the [FR-WS-17] warm-outcome
+/// sidecar and the workspace chat credential — **only where they mean
+/// something** ([FR-WS-02], [FR-WS-30], [CR-104]).
 ///
 /// The sidecar is host-local machine state written beside `logos.workspace.toml`,
 /// which is checked-in configuration; a workspace root can therefore legitimately
@@ -517,6 +520,9 @@ pub fn candidates_for_approval(
 ///
 /// The pattern is [`warm_state::OUTCOME_FILENAME`] itself, not a literal spelled
 /// again here: the name of the file and the entry that ignores it are one fact.
+/// The same holds for the second entry, the workspace chat credential
+/// ([FR-WS-30]): the root is an ordinary config root, so its `secrets.toml` sits
+/// at the credential store's own relative path, and that path is what is passed.
 ///
 /// # The gate is tri-state, deliberately
 /// [`git_root_known`] rather than [`is_git_root`](crate::workspace::is_git_root):
@@ -532,18 +538,23 @@ pub fn candidates_for_approval(
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
 /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 /// [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
 /// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
 /// [CR-104]: ../../../docs/requests/CR-104-managed-workspace-root-ignore-for-the-warm-sidecar.md
 fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
     if git_root_known(root) == Some(true) {
-        return init::workspace_root_gitignore(root, warm_state::OUTCOME_FILENAME);
+        return init::workspace_root_gitignore(
+            root,
+            &[warm_state::OUTCOME_FILENAME, crate::config::SECRETS_RELPATH],
+        );
     }
     Ok(InitStep {
         target: ".gitignore".to_string(),
         action: InitAction::Skipped,
-        detail: "workspace root is not a git working tree — nothing to keep out of version control"
+        detail: "workspace root is not the top level of a git repository — no root .gitignore \
+                 written (the workspace credential is kept out by its own .logos/.gitignore)"
             .to_string(),
     })
 }
@@ -1043,6 +1054,48 @@ mod tests {
         );
     }
 
+    /// The same managed entry keeps the **workspace credential** out of version
+    /// control ([FR-WS-30], [NFR-SE-07]): at a tracked root, a key written through
+    /// the real writer ([`crate::config::write_secret`]) leaves the tree clean,
+    /// while the workspace chat policy beside it still travels.
+    ///
+    /// Asserted through git's own verdict on the file the writer actually
+    /// created, not on the text of the entry — and root-anchored: a DB-only
+    /// member shares this repository, and its `.logos/secrets.toml` is its own
+    /// managed ignore's business ([FR-IN-04]), not this one's. The entry is the
+    /// store's relative path, and git anchors any pattern with an inner slash,
+    /// so the leading `/` is belt-and-braces here; what the member-path
+    /// assertion guards against is a bare `secrets.toml` basename, which would
+    /// match at every depth.
+    #[test]
+    fn a_tracked_workspace_root_ignores_the_workspace_credential() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+
+        let report = enable(root, "shop", &[]).expect("enables");
+        assert_eq!(report.root_ignore.action, InitAction::Created);
+        sh_git(root, &["add", "-A"]);
+        sh_git(root, &["commit", "-q", "-m", "enable"]);
+
+        crate::config::write_secret(root, "sk-workspace-credential-cr01").expect("the writer writes");
+        assert_eq!(porcelain(root), "", "a workspace credential leaves the root clean");
+
+        let ignores = |rel: &str| {
+            git_cmd(root)
+                .args(["check-ignore", "-q", "--no-index", rel])
+                .status()
+                .expect("git is on PATH")
+                .success()
+        };
+        assert!(ignores(".logos/secrets.toml"), "the credential is ignored");
+        assert!(!ignores(".logos/config.toml"), "the workspace chat policy still travels");
+        assert!(
+            !ignores("member/.logos/secrets.toml"),
+            "anchored to the workspace root, not matched at every depth"
+        );
+    }
+
     /// A tracked root **with members**: the two named ACs that no other test
     /// reaches in combination ([FR-WS-02], [CR-104]).
     ///
@@ -1112,6 +1165,21 @@ mod tests {
             !tmp.path().join(".gitignore").exists(),
             "no .gitignore is written at a root that is not a working tree"
         );
+
+        // The workspace credential does not change that ([FR-WS-30]): with a key
+        // already written at the root, a re-run still reports the step as a
+        // skip WITH its reason — present in the machine report, never omitted.
+        crate::config::write_secret(tmp.path(), "sk-untracked-root-key-nt02").expect("writes");
+        let again = enable(tmp.path(), "shop", &members).expect("re-enables");
+        assert_eq!(again.root_ignore.action, InitAction::Skipped);
+        assert!(
+            again.root_ignore.detail.contains("not the top level of a git repository"),
+            "the skip says why: {:?}",
+            again.root_ignore.detail
+        );
+        let json = serde_json::to_value(&again).expect("the report serialises");
+        assert_eq!(json["root_ignore"]["target"], ".gitignore", "reported, not omitted: {json}");
+        assert!(!tmp.path().join(".gitignore").exists(), "still nothing written");
     }
 
     /// The workspace root is a shared, human-authored directory in a way a

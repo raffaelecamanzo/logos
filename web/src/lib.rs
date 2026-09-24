@@ -66,6 +66,8 @@ use logos_core::observability::{in_surface, Surface};
 use logos_core::Engine;
 
 use crate::member::MemberEngine;
+#[cfg(feature = "agents")]
+use crate::member::workspace_root_of;
 
 mod api_v1;
 // The chat and wiki-**generation** surfaces are the LLM egress carve-out
@@ -264,21 +266,46 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 
 // ── Router skeleton (FR-UI-03, ADR-31) ──────────────────────────────────────
 
-/// The **enumerated** mutating routes — the *only* paths on which [`method_guard`]
-/// admits a `POST` (ADR-31, NFR-SE-06). Every other path/method stays GET-only
-/// (`405`). Both bridge to the [`api-facade`]'s mutating config seam, and both
-/// are additionally gated by [`intent_guard`] (same-origin + per-session token).
+/// The **enumerated** config-write routes on which [`method_guard`] admits a
+/// `POST` (ADR-31, NFR-SE-06) — the chat, wiki-generation and verify constants
+/// below are the only other admitted `POST`s; every other path/method stays
+/// GET-only (`405`). The three member routes bridge to the [`api-facade`]'s
+/// mutating config seam; the two workspace routes reach the same writers without
+/// an engine (below). All five are additionally gated by [`intent_guard`]
+/// (same-origin + per-session token).
 ///
 /// - `/config/save` → [`Engine::config_write`] (validated atomic write).
 /// - `/config/apply` → [`Engine::config_apply`] (explicit reconcile/re-eval).
 /// - `/config/secret` → [`Engine::config_write_secret`] (the masked chat-key
 ///   write to the gitignored `secrets.toml`, S-169, [FR-CF-06], [NFR-SE-07]).
+/// - `/api/v1/workspace/config/save` and `/api/v1/workspace/config/secret` → the
+///   **same** two writers, [`write_config`] and [`write_secret`], pointed at the
+///   workspace root the backing holds (S-450, [FR-WS-30]). They reach the writers
+///   directly rather than through an [`Engine`] because none may be constructed
+///   at the workspace root ([ADR-40]); that is also why the workspace tier has
+///   **no** apply route here.
+///
+/// The match is exact path equality, so a route mounted with `post(` and missing
+/// from this list is refused `405` before it routes. The unit test
+/// `every_post_mounted_route_is_admitted_by_the_method_guard` fails for exactly
+/// that route, so the omission is caught at build time rather than as a dead
+/// Save button ([NFR-SE-06]).
 ///
 /// [`api-facade`]: ../../../docs/specs/architecture/components/api-facade.md
+/// [`write_config`]: logos_core::config::write_config
+/// [`write_secret`]: logos_core::config::write_secret
 /// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+/// [ADR-40]: ../../../docs/specs/architecture/decisions/ADR-40.md
+/// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
-pub const CONFIG_POST_ROUTES: &[&str] =
-    &["/config/save", "/config/apply", "/config/secret"];
+pub const CONFIG_POST_ROUTES: &[&str] = &[
+    "/config/save",
+    "/config/apply",
+    "/config/secret",
+    "/api/v1/workspace/config/save",
+    "/api/v1/workspace/config/secret",
+];
 
 /// The enumerated chat `POST` route (S-170, [FR-UI-19], [NFR-SE-06]): the only
 /// **non**-config path on which [`method_guard`] admits a `POST`. It carries a
@@ -561,21 +588,6 @@ fn chat_for(
     }
 }
 
-/// The workspace root the agent services resolve their chat policy and credential
-/// against ([ADR-67], [FR-WS-30]): the federation's already-resolved root under
-/// [`Backing::Federated`], and `None` under [`Backing::Single`] — so single-root
-/// consults no second tier by construction ([ADR-52]). Never discovered here.
-///
-/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-/// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
-/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
-#[cfg(feature = "agents")]
-fn agent_workspace_root(backing: &Backing<Engine>) -> Option<std::path::PathBuf> {
-    backing
-        .as_federated()
-        .map(|registry| registry.federation().root.clone())
-}
-
 /// The wiki-generation service for this request's member scope (S-250, [FR-UI-29]).
 ///
 /// The load-bearing case is a **write**: the Wiki tab's read-models are member-scoped, so
@@ -606,7 +618,7 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
     let bridge = Arc::new(ContractBridge::new());
     #[cfg(feature = "agents")]
     {
-        let workspace_root = agent_workspace_root(&backing);
+        let workspace_root = workspace_root_of(&backing);
         let chat: Arc<dyn chat::ChatService> = Arc::new(chat::ConfiguredChatService::new(
             Arc::clone(&engine),
             workspace_root.clone(),
@@ -824,6 +836,13 @@ fn build_router(state: WebState) -> Router {
         // through `Engine::stats`, so a view load constructs no member engine
         // and the resident count is what a `workspace status` already paid.
         .route("/api/v1/workspace/statistics", get(api_v1::workspace_statistics_aggregate))
+        // ── The workspace root as a config root (S-450, [FR-WS-30], [ADR-40]):
+        // the read half. The workspace root's own `config.toml`/`secrets.toml`
+        // read-model — a filesystem read at a root that holds no graph, so no
+        // engine is constructed and no member is warmed. Its two write twins are
+        // mounted with the other enumerated POSTs below; single-root answers all
+        // three with the family's `404`.
+        .route("/api/v1/workspace/config", get(api_v1::workspace_config))
         // The one intent-guarded read-model POST (S-206, FR-UI-25, ADR-46): the
         // deep graph-consistency check the Config tab (S-207) posts to. It rides
         // the mutating-method slot so it keeps the same-origin + intent-token proof
@@ -874,6 +893,11 @@ fn build_router(state: WebState) -> Router {
         .route("/config/apply", post(config_apply))
         // S-169 / FR-CF-06: the masked chat-key write to gitignored secrets.toml.
         .route("/config/secret", post(config_save_secret))
+        // S-450 / FR-WS-30: the same two writers at the workspace root — the
+        // policy document and the credential. Listed in `CONFIG_POST_ROUTES`
+        // like the three above; deliberately no apply twin (ADR-40).
+        .route("/api/v1/workspace/config/save", post(api_v1::workspace_config_save))
+        .route("/api/v1/workspace/config/secret", post(api_v1::workspace_config_secret))
         // The SPA history fallback (ADR-43): an unmatched **HTML navigation** GET
         // returns the shell so a client-side route survives a refresh, and a
         // root-level embedded asset (e.g. `/theme-init.js`) resolves from the
@@ -923,7 +947,7 @@ async fn chat_turn(
 ) -> Response {
     // Answer from the member the user is actually reading (S-250), resolving its
     // chat halves against the workspace root it may inherit them from ([ADR-67]).
-    let chat = chat_for(&chat, &default, engine, agent_workspace_root(&backing));
+    let chat = chat_for(&chat, &default, engine, workspace_root_of(&backing));
     let question = form
         .get("q")
         .or_else(|| form.get("message"))
@@ -1010,7 +1034,7 @@ async fn wiki_generate(
     // Generate INTO the member whose pages the tab is showing — never the default's
     // wiki.db (S-250; the Wiki read-models are member-scoped) — inheriting its chat
     // provider and key through the same seam the turn reads ([ADR-67], [ADR-42]).
-    let wiki = wiki_for(&wiki, &default, engine, agent_workspace_root(&backing));
+    let wiki = wiki_for(&wiki, &default, engine, workspace_root_of(&backing));
     let streaming = wants_event_stream(&headers);
     // The single-run lock ([FR-WK-18]): begin → own the one connection-independent
     // background run. The run's lifetime is owned by `run_state`, not this response
@@ -1419,7 +1443,7 @@ async fn config_save(
 /// Map a `config_write` error to its HTTP status: an I/O fault
 /// ([`ConfigError::Io`]/[`ConfigError::Write`]) is a server-side `500`; every
 /// validation fault (and any non-[`ConfigError`]) is a client-side `422`.
-fn config_write_status(e: &anyhow::Error) -> StatusCode {
+pub(crate) fn config_write_status(e: &anyhow::Error) -> StatusCode {
     match e.downcast_ref::<ConfigError>() {
         Some(ConfigError::Io { .. } | ConfigError::Write { .. }) => {
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1626,11 +1650,30 @@ where
     F: FnOnce(&Engine) -> T + Send + 'static,
     T: Send + 'static,
 {
+    run_blocking(view, surface, move || call(&engine)).await
+}
+
+/// The blocking hop the handler adapters share — [`bridge`], the workspace
+/// fan-out and the workspace config routes: run `call` on the blocking pool ([ADR-03]) inside the [`in_surface`] scope its
+/// caller names, and log the render timing. [`bridge`] hands it an engine call;
+/// the workspace fan-out (`api_v1::workspace_read`) a registry call; the
+/// workspace config routes (S-450) a filesystem call at a root that has no
+/// engine. One body, so the three cannot drift on the scope, the pool or the
+/// panic rule. (Not every hop on this surface: member resolution and the agent
+/// services still cross on a bare `spawn_blocking`, and name their surface — or
+/// need none — on their own.)
+///
+/// [ADR-03]: ../../docs/specs/architecture/decisions/ADR-03.md
+pub(crate) async fn run_blocking<T, F>(view: &'static str, surface: Surface, call: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
     let started = Instant::now();
-    let out = tokio::task::spawn_blocking(move || in_surface(surface, || call(&engine)))
+    let out = tokio::task::spawn_blocking(move || in_surface(surface, call))
         .await
-        // The Engine read-models are infallible at the surface (ADR-14); a
-        // panic crossing the pool is a core bug — re-raise rather than mask it.
+        // A fallible call's errors ride inside `T`; a panic crossing the pool is
+        // a bug — re-raise rather than mask it.
         .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
     tracing::info!(
         target: "logos::web",
@@ -1898,8 +1941,9 @@ mod tests {
 
     #[test]
     fn every_handler_names_its_surface_and_only_status_names_the_shell() {
-        // Three files reach the engine across an adapter boundary: the 23
-        // `bridge` + 6 `workspace_fan` sites in `api_v1.rs`, the 6 `bridge`
+        // Three files cross an adapter boundary: the 23 `bridge`, 8
+        // `workspace_fan` + 1 `workspace_fan_try` sites and the 3 workspace-config
+        // `run_blocking` sites (S-450, no engine) in `api_v1.rs`, the 6 `bridge`
         // sites in `lib.rs` (three of them `/api/v1/chat/*` routes), and the
         // wiki-generation pass in `wikigen/configured.rs`, which crosses on a
         // bare `spawn_blocking` and so names its surface directly ([CR-139]).
@@ -2015,8 +2059,10 @@ mod tests {
     /// [`every_handler_names_its_surface_and_only_status_names_the_shell`]
     /// embeds `api_v1.rs` and `lib.rs` by name — while `bridge` is
     /// `pub(crate)` across a crate with ten other source files. A new module
-    /// naming `Surface::Cli`, or crossing the adapter boundary through `bridge`
-    /// or `workspace_fan`, would be classified by nothing and that census would
+    /// naming `Surface::Cli`, or crossing the adapter boundary through `bridge`,
+    /// `workspace_fan` or the [`run_blocking`] hop beneath both (which takes its
+    /// surface as a parameter, so a caller may hold it in a variable), would be
+    /// classified by nothing and that census would
     /// not notice: its whitelist is exact about the files it reads and silent
     /// about the files it does not.
     ///
@@ -2045,7 +2091,7 @@ mod tests {
     ///
     /// An unclassified engine call that carries **no marker at all** — one that
     /// reaches the engine inside a bare `spawn_blocking`, naming no `Surface`
-    /// and calling neither helper.
+    /// and calling none of the helpers.
     ///
     /// `web/src/wikigen/configured.rs` was that shape, and [CR-139] closed it:
     /// the pass now names [`Surface::WikiGen`], so the file is in `SCANNED`
@@ -2055,7 +2101,7 @@ mod tests {
     /// enumerates every engine-reaching site in that module from a directory
     /// walk and compares it against a declared, classified table, so a marker
     /// is not what makes a site visible there. This guard's reach is still
-    /// exactly "a `Surface`/`bridge`/`workspace_fan` marker in a file the
+    /// exactly "a `Surface`/`bridge`/`workspace_fan`/`run_blocking` marker in a file the
     /// census does not read", and it is stated here so the next audit starts
     /// from that rather than from an assumption.
     ///
@@ -2063,7 +2109,7 @@ mod tests {
     #[test]
     fn no_other_source_under_web_src_carries_a_surface_marker() {
         const SCANNED: [&str; 3] = ["api_v1.rs", "lib.rs", "wikigen/configured.rs"];
-        const MARKERS: [&str; 3] = ["Surface::", "bridge(", "workspace_fan("];
+        const MARKERS: [&str; 4] = ["Surface::", "bridge(", "workspace_fan(", "run_blocking("];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut seen_scanned: Vec<String> = Vec::new();
@@ -2273,6 +2319,103 @@ mod tests {
             snapshot_reads(fn_body(&code, "async fn overview(")),
             ["latest_gate"],
             "the Overview handler still reads the standalone verdict"
+        );
+    }
+
+    /// Every route mounted with `post(` is admitted by [`method_guard`]'s own
+    /// predicate, and every enumerated config-write route is mounted
+    /// ([NFR-SE-06], S-450).
+    ///
+    /// The guard matches on exact path equality, so a `POST` route added to the
+    /// router and not to the allow-list is refused `405` before it routes: safe,
+    /// but a Save button that silently never saves. This reads the router's own
+    /// route table out of this file and asks [`post_route_admitted`] — the very
+    /// function the guard calls — about each `POST` path, so the omission reds
+    /// here instead. The reverse direction catches an allowance left behind by a
+    /// removed route, which would admit a `POST` to a path nothing handles.
+    ///
+    /// Formatting-independent: the scan balances parentheses from each `.route(`
+    /// rather than reading lines, and resolves a path given by constant
+    /// (`VERIFY_POST_ROUTE`) as well as an inline literal. A `:param` segment is
+    /// probed with a value its handler would accept.
+    #[test]
+    fn every_post_mounted_route_is_admitted_by_the_method_guard() {
+        let code = production_code(include_str!("lib.rs"));
+
+        // `(path, is POST-mounted)` for every `.route(` call in the router.
+        let mut routes: Vec<(String, bool)> = Vec::new();
+        for (at, marker) in code.match_indices(".route(") {
+            let rest = &code[at + marker.len()..];
+            let mut depth = 0usize;
+            let end = rest
+                .char_indices()
+                .find(|&(_, c)| match c {
+                    '(' => {
+                        depth += 1;
+                        false
+                    }
+                    ')' if depth == 0 => true,
+                    ')' => {
+                        depth -= 1;
+                        false
+                    }
+                    _ => false,
+                })
+                .map(|(i, _)| i)
+                .expect("every `.route(` call closes");
+            let args = &rest[..end];
+            let first = args.split(',').next().expect("a path argument").trim();
+            let path = match first.strip_prefix('"') {
+                Some(literal) => literal.trim_end_matches('"').to_string(),
+                // A path given by constant: resolve it from its declaration here.
+                None => {
+                    let decl = format!("const {first}: &str = \"");
+                    let from = code
+                        .find(&decl)
+                        .unwrap_or_else(|| panic!("route constant `{first}` is declared in lib.rs"));
+                    let tail = &code[from + decl.len()..];
+                    tail[..tail.find('"').expect("a closing quote")].to_string()
+                }
+            };
+            let probe = path
+                .split('/')
+                .map(|seg| if seg.starts_with(':') { "1" } else { seg })
+                .collect::<Vec<_>>()
+                .join("/");
+            routes.push((probe, args.contains("post(")));
+        }
+
+        let posts: Vec<&str> = routes
+            .iter()
+            .filter(|(_, post)| *post)
+            .map(|(path, _)| path.as_str())
+            .collect();
+        // Anti-vacuity: a scan that matched nothing would pass the loop below.
+        assert!(routes.len() > 20, "the route-table scan found only {} routes", routes.len());
+        for listed in CONFIG_POST_ROUTES {
+            assert!(
+                posts.contains(listed),
+                "`{listed}` is in CONFIG_POST_ROUTES but no `post(` route mounts it — the \
+                 allowance admits a POST that nothing handles"
+            );
+        }
+
+        // Under a listen-only build the agent routes are compiled out of the
+        // router AND out of the guard, so they are the one legitimate exception.
+        #[cfg(not(feature = "agents"))]
+        let agents_only = [CHAT_POST_ROUTE, "/api/v1/chat/threads/1/delete", WIKI_GENERATE_ROUTE];
+        #[cfg(feature = "agents")]
+        let agents_only: [&str; 0] = [];
+        let refused: Vec<&str> = posts
+            .iter()
+            .copied()
+            .filter(|path| !agents_only.contains(path) && !post_route_admitted(path))
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "these routes are mounted with `post(` but the method guard refuses them \
+             (405 before routing) — add each to CONFIG_POST_ROUTES or its own enumerated \
+             constant: {refused:?}"
         );
     }
 
