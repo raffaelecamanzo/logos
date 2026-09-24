@@ -1016,7 +1016,9 @@ first turn, gitignored, never in the default binary).
    tab shows an honest **configure-first** state and **no composer**. The state says
    exactly what it checked: the **root it inspected** (the member by name in a
    workspace, "this repository" otherwise), **which half is missing** (model, key or
-   both), and **where any present half came from** (the member or the workspace). It
+   both), and **where any present half came from** (the member or the workspace). If the
+   member has its own key but inherits the workspace endpoint, the state says that key
+   is not used there, and that setting a `[chat] model` on the member makes it use it. It
    links to the member Config tab, and in a workspace also names the
    workspace-root file the missing half would go in (`<workspace-root>/.logos/config.toml`
    or `secrets.toml`). This is a state, not an error: until you configure it, no

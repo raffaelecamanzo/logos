@@ -549,24 +549,28 @@ format as a member:
 <workspace-root>/.logos/secrets.toml    # [chat] api_key   (gitignored, 0600)
 ```
 
-**Inheritance is per half, and the member wins wherever it declares:**
+**Inheritance is per half, and the member wins wherever it declares — except that a
+member's own key is never sent to a workspace endpoint:**
 
 | Member declares… | Policy (`[chat]` table) comes from | Key comes from |
 |---|---|---|
 | neither | workspace | workspace |
 | `[chat] model` only | member (**the whole table** — no field is taken from the workspace) | workspace |
-| a key only | workspace | member |
+| a key only | workspace | **workspace** — the member's own key is **not used** (withheld); with no workspace key the member is configure-first |
 | both | member | member |
 
 - **The policy half is atomic, keyed on `model`.** A member that declares a non-blank
   `[chat] model` uses its own table *entire* — its `base_url`, provider and budgets —
   and draws nothing from the workspace table. A member with no `model` inherits the
   workspace table *entire*. A blank `model = ""` counts as undeclared.
-- **Credential and endpoint are resolved independently.** A member that declares its
-  own `model` + `base_url` but no key sends the **workspace** key to **its own**
-  endpoint; a member that declares a key but no `model` sends **its** key to the
-  **workspace** endpoint. Declare both halves on a member whose endpoint must not
-  receive the shared key.
+- **Keys cross the boundary in one direction only.** A member that declares its own
+  `model` + `base_url` but no key sends the **workspace** key to **its own** endpoint —
+  declare a key on that member too if its endpoint must not receive the shared key.
+  The reverse never happens: when the policy is inherited from the workspace, the key
+  comes from the workspace or not at all, so a member's own key never reaches a
+  workspace endpoint. The Chat tab, the member Config tab and a refused request say
+  when a member's key is withheld this way; setting a `[chat] model` on the member
+  makes it use its own key.
 - **Wiki generation inherits the same way**: `[wiki].model` (member first) still
   wins over the effective chat model, and the provider, endpoint and key come from the
   effective chat resolution above.
