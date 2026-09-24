@@ -43,7 +43,7 @@
 //! `reading` line — repo-qualified, and carrying the unresolved residue as
 //! `UNRESOLVED` when a cross-service answer is empty over a non-zero residue
 //! ([BR-53]) — is appended **verbatim** to the step's observation
-//! ([`with_xservice_readings`]), so the planner and the Synthesizer read the
+//! (`with_xservice_readings`), so the planner and the Synthesizer read the
 //! qualification whether or not the model's own summary repeats it.
 //!
 //! [S-174]: ../../../docs/planning/journal.md#s-174-specialized-subagent-roster-on-rig
