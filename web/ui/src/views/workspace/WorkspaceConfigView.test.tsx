@@ -295,6 +295,28 @@ describe("no silent clobber (FR-UI-38 AC3)", () => {
     expect(gets.filter((u) => u.startsWith("/api/v1/workspace/manifest"))).toHaveLength(2);
     expect(posts).toHaveLength(1);
   });
+
+  it("re-seeds from disk even when the disk holds the FIRST load's bytes again", async () => {
+    // Save A→B, then `git checkout` puts A back: the next save conflicts with A, and
+    // the reload returns A — the same fingerprint the editor was first mounted with.
+    const toA = { ...conflict, loaded_fingerprint: "fp-B", disk_fingerprint: "fp-loaded", disk_content: CONTENT };
+    await mount({
+      saves: [
+        { status: 200, body: { outcome: "written", path: "logos.workspace.toml", bytes_written: 1, fingerprint: "fp-B" } },
+        { status: 409, body: toA },
+      ],
+      manifests: [doc(), doc({ fingerprint: "fp-B" }), doc()],
+    });
+    const user = userEvent.setup();
+    const save = screen.getByRole("button", { name: /Save logos\.workspace\.toml/ });
+    await user.click(save);
+    await screen.findByText(/Saved logos\.workspace\.toml/);
+    await user.type(rawPane(), "# my later edit\n");
+    await user.click(save);
+    await user.click(await screen.findByRole("button", { name: /Load the version on disk/ }));
+    await waitFor(() => expect(rawPane().value).toBe(CONTENT));
+    expect(screen.queryByText("CONFLICT")).toBeNull();
+  });
 });
 
 describe("governance is advisory, beside its findings (FR-UI-38 AC4, ADR-56)", () => {

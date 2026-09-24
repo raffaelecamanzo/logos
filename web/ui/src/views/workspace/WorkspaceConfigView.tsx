@@ -53,7 +53,7 @@
  * `logos-core/tests/absence_taxonomy_audit.rs`.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 
 import { ConfigMutateError } from "../../api/configClient.ts";
@@ -413,8 +413,8 @@ function ConflictPanel({
 
 // ── The manifest group ─────────────────────────────────────────────────────────
 
-/** The editor over one loaded manifest. Keyed by the loaded fingerprint in
- *  {@link ManifestGroup}, so "load the version on disk" re-seeds it from scratch. */
+/** The editor over one loaded manifest. Keyed by the load in {@link ManifestGroup},
+ *  so "load the version on disk" re-seeds it from scratch. */
 function ManifestEditor({
   doc,
   onReload,
@@ -549,11 +549,19 @@ function ManifestEditor({
 /** The manifest group: load `logos.workspace.toml`, then edit it. */
 function ManifestGroup() {
   const [generation, setGeneration] = useState(0);
-  const doc = useApiResource<WorkspaceManifestDocument>(() => fetchWorkspaceManifest(), [generation]);
+  // Each completed read is its own load, and the editor is keyed on THAT — not on
+  // the fingerprint, which can repeat (a save, then `git checkout` of the file,
+  // brings the first load's bytes back) and would then remount nothing, and not
+  // on `generation`, which changes before the new document has arrived.
+  const loads = useRef(0);
+  const loaded = useApiResource<{ doc: WorkspaceManifestDocument; load: number }>(
+    () => fetchWorkspaceManifest().then((doc) => ({ doc, load: ++loads.current })),
+    [generation],
+  );
   return (
     <ConfigGroup title="Workspace manifest" file="logos.workspace.toml">
-      <AsyncResource resource={doc} loadingLabel="Loading the manifest…">
-        {(d) => <ManifestEditor key={d.fingerprint} doc={d} onReload={() => setGeneration((n) => n + 1)} />}
+      <AsyncResource resource={loaded} loadingLabel="Loading the manifest…">
+        {(l) => <ManifestEditor key={l.load} doc={l.doc} onReload={() => setGeneration((n) => n + 1)} />}
       </AsyncResource>
     </ConfigGroup>
   );
