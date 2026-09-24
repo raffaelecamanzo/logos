@@ -296,7 +296,7 @@ async fn an_empty_answer_over_a_non_zero_residue_reaches_the_observation_as_unre
     let (observation, _) = run_turn(&ws, "which services call shared?", callers_turn()).await;
 
     assert!(
-        observation.contains("cross-service: UNRESOLVED, not an absence — 1 unresolved outbound site(s)"),
+        observation.contains("cross-service: UNRESOLVED, not an absence — no resolved cross-service callers; 1 of 1 captured outbound site"),
         "the empty answer is rendered unresolved, naming the count: {observation}"
     );
     assert!(
@@ -337,7 +337,7 @@ async fn impact_carries_the_residue_the_same_way() {
     )
     .await;
     assert!(
-        observation.contains("xservice_impact \"shared\" — cross-service: UNRESOLVED, not an absence — 1 unresolved"),
+        observation.contains("xservice_impact \"shared\" — cross-service: UNRESOLVED, not an absence — no resolved cross-service impact"),
         "{observation}"
     );
 }

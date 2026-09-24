@@ -219,16 +219,11 @@ fn residue_clause(resolved: usize, noun: &str, residue: Option<&EgressResidue>) 
     match (resolved, residue) {
         // The case the whole requirement exists for: silence here would read as
         // "nothing reaches this", and the graph is missing outbound calls.
-        (0, Some(residue)) => format!(
-            "UNRESOLVED, not an absence — {} unresolved outbound site(s): {}",
-            residue.unresolved_sites, residue.summary
-        ),
+        (0, Some(residue)) => format!("UNRESOLVED, not an absence — {}", residue.summary),
         // A zero residue is the one case in which silence is honest.
         (0, None) => format!("no {noun}s"),
-        (n, Some(residue)) => format!(
-            "{n} {noun}(s), and the answer is incomplete — {} unresolved outbound site(s): {}",
-            residue.unresolved_sites, residue.summary
-        ),
+        // The summary already states the resolved count beside the residue.
+        (_, Some(residue)) => format!("incomplete — {}", residue.summary),
         (n, None) => format!("{n} {noun}(s)"),
     }
 }
@@ -691,13 +686,13 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_answer_over_a_non_zero_residue_reads_unresolved_with_the_count() {
+    fn an_empty_answer_over_a_non_zero_residue_reads_unresolved_with_the_core_summary() {
         let summary = "no resolved cross-service callers; 3 of 4 captured outbound sites in \
                        scope did not resolve across 1 member (base-url-runtime 3)";
         let clause = residue_clause(0, "resolved cross-service caller", Some(&residue(3, summary)));
-        assert!(clause.starts_with("UNRESOLVED"), "{clause}");
-        assert!(clause.contains("3 unresolved outbound site(s)"), "{clause}");
-        assert!(clause.contains("base-url-runtime 3"), "carries the reasons: {clause}");
+        // The verdict word, then the core's one composed line verbatim — the count
+        // and the reasons are the summary's, never recomposed here.
+        assert_eq!(clause, format!("UNRESOLVED, not an absence — {summary}"));
     }
 
     #[test]
@@ -709,10 +704,10 @@ mod tests {
 
     #[test]
     fn a_non_empty_answer_over_a_residue_is_marked_incomplete_not_unresolved() {
-        let clause = residue_clause(2, "cross-service impact", Some(&residue(1, "…")));
-        assert!(clause.starts_with("2 cross-service impact(s)"), "{clause}");
-        assert!(clause.contains("incomplete"), "{clause}");
-        assert!(!clause.starts_with("UNRESOLVED"), "{clause}");
+        let summary = "2 cross-service impacts; 1 of 3 captured outbound sites in scope did \
+                       not resolve across 1 member (ambiguous 1)";
+        let clause = residue_clause(2, "cross-service impact", Some(&residue(1, summary)));
+        assert_eq!(clause, format!("incomplete — {summary}"));
         assert_eq!(residue_clause(2, "cross-service impact", None), "2 cross-service impact(s)");
     }
 
