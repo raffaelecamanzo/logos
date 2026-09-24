@@ -885,6 +885,31 @@ async fn config_endpoint_resolves_the_slice_against_the_backings_workspace_root(
     }
 }
 
+/// A fault at the workspace root is an honest `500` naming that file for a member
+/// that inherits from it — never a silent `unset` ([NFR-RA-05]) — and it echoes no
+/// key material ([NFR-SE-07]); a member declaring both halves never reads it and
+/// still answers `200` ([FR-WS-30], S-448).
+#[tokio::test]
+async fn config_endpoint_fails_loud_on_a_faulty_workspace_tier_only_for_an_inheriting_member() {
+    let tmp = workspace();
+    write(tmp.path(), ".logos/secrets.toml", "[chat]\napi_key = sk-ws-unquoted-secret-qq44\n");
+    write(&tmp.path().join("web"), ".logos/config.toml", "[chat]\nmodel = \"web/own-model\"\n");
+    write(&tmp.path().join("web"), ".logos/secrets.toml", "[chat]\napi_key = \"sk-web-own-key-ww33\"\n");
+    let router = ws_router(&tmp);
+
+    let resp = router.clone().oneshot(get("/api/v1/config?repo=api")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "an inheriting member fails loud: {body}");
+    assert!(body.contains(".logos/secrets.toml"), "the fault names the file: {body}");
+    assert!(!body.contains("unquoted-secret-qq44"), "the malformed key is not echoed: {body}");
+
+    let resp = router.oneshot(get("/api/v1/config?repo=web")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a fully-declaring member never reads the workspace tier: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["effective_chat"]["credential_origin"], "member", "{body}");
+}
+
 // ── S-250: the shell's boot probe, and the member scope on the WRITE seam ─────
 
 /// `workspace roster` carries the manifest — name, default member, member names — and

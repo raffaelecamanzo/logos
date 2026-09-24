@@ -1321,4 +1321,40 @@ mod tests {
         assert!(!own.contains(member_key) && !own.contains("member-secret"), "{own}");
         assert!(!own.contains(WS_KEY), "{own}");
     }
+
+    #[test]
+    fn a_faulty_workspace_tier_fails_loud_only_for_the_half_that_inherits_from_it() {
+        // resolve_chat's contract, carried through the read-model: a fault at the
+        // workspace root fails loud (exit 2, naming the file) for a member that
+        // inherits from it, and is never read for a half the member declares.
+        let (ws, member) = inheriting_member();
+        let ws_config = ws.path().join(CONFIG_RELPATH);
+        let ws_secrets = ws.path().join(".logos/secrets.toml");
+        seed(ws.path(), "config.toml", "bogus = 1\n");
+
+        // Inherits both halves: the broken workspace config.toml is read and fails.
+        let err = read_documents(&member, Some(ws.path())).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { ref path, .. } if *path == ws_config), "{err:?}");
+        assert_eq!(err.exit_code(), 2);
+
+        // Declares its own policy: the broken workspace config.toml is never read,
+        // and the key half still inherits from the (valid) workspace secrets.
+        seed(&member, "config.toml", "[chat]\nmodel = \"m/own\"\n");
+        let docs = read_documents(&member, Some(ws.path())).unwrap();
+        assert_eq!(docs.effective_chat.policy_origin, ChatOrigin::Member);
+        assert_eq!(docs.effective_chat.credential_origin, ChatOrigin::Workspace);
+
+        // A malformed workspace key store fails the inheriting key half, naming
+        // that file and echoing no key material (NFR-SE-07).
+        seed(ws.path(), "secrets.toml", "[chat]\napi_key = sk-ws-unquoted-zz99\n");
+        let err = read_documents(&member, Some(ws.path())).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { ref path, .. } if *path == ws_secrets), "{err:?}");
+        assert!(!format!("{err} {err:?}").contains("unquoted-zz99"), "{err:?}");
+
+        // Declares both halves: neither broken workspace file is read.
+        seed(&member, "secrets.toml", "[chat]\napi_key = \"sk-own-key-mm55\"\n");
+        let docs = read_documents(&member, Some(ws.path())).unwrap();
+        assert_eq!(docs.effective_chat.policy_origin, ChatOrigin::Member);
+        assert_eq!(docs.effective_chat.credential_origin, ChatOrigin::Member);
+    }
 }
