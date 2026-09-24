@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::chat::{ChatConfig, ChatProvider};
+use super::chat::{ChatConfig, ChatProvider, ChatResolution};
 use super::error::ConfigError;
 use super::secrets::{MaskedSecret, Secrets};
 
@@ -103,11 +103,30 @@ impl WikiConfig {
     /// `base_url`, and API key **inherited** from `chat`/`secrets` verbatim (no
     /// separate wiki provider, endpoint, or secret, [ADR-42]).
     pub fn resolve(&self, chat: &ChatConfig, secrets: &Secrets) -> EffectiveWikiModel {
+        self.resolve_parts(chat, secrets.chat_api_key())
+    }
+
+    /// [`resolve`](Self::resolve) over the chat policy and credential the
+    /// [`resolve_chat`](super::resolve_chat) seam resolved ([ADR-67], [ADR-42]):
+    /// the inherited provider, endpoint, retry policy and key are the **effective**
+    /// chat halves — the member's own, or the workspace's where the member leaves
+    /// that half undeclared — while [`WikiConfig::model`] still wins over the chat
+    /// model exactly as in [`resolve`](Self::resolve). The wiki table itself is the
+    /// caller's (the member's); only the inherited chat halves are two-tier.
+    ///
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    pub fn resolve_inherited(&self, chat: &ChatResolution) -> EffectiveWikiModel {
+        self.resolve_parts(&chat.policy, chat.api_key())
+    }
+
+    /// The one spelling of the inheritance rule both resolvers share, so the
+    /// single-root and two-tier paths cannot drift into two precedence rules.
+    fn resolve_parts(&self, chat: &ChatConfig, api_key: Option<&str>) -> EffectiveWikiModel {
         EffectiveWikiModel {
             model: self.model.clone().or_else(|| chat.model.clone()),
             provider: chat.provider,
             base_url: chat.base_url.clone(),
-            api_key: secrets.chat_api_key().map(str::to_string),
+            api_key: api_key.map(str::to_string),
             max_provider_retries: chat.max_provider_retries,
             provider_retry_base_ms: chat.provider_retry_base_ms,
         }

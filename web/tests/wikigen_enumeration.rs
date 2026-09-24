@@ -58,7 +58,7 @@ const DECLARED_SITES: [(&str, &str, &str, usize, &str); 5] = [
         "the module's two ADR-03 bridge hops. (1) the deterministic presented \
          tier — classified, it carries the `Surface::WikiGen` scope below; \
          (2) the config/secrets read, which calls no Engine method and emits no \
-         telemetry (`load_config_from_root` / `load_secrets_from_root` are free \
+         telemetry (`load_config_from_root` / `resolve_chat` are free \
          functions that bypass the Engine chokepoint), so it has nothing to \
          attribute",
     ),

@@ -2,10 +2,14 @@
 //! real `rig` provider, and run the generation pass ([FR-WK-18], [FR-CF-07],
 //! [ADR-42]).
 //!
-//! [`run_configured`] consumes the S-176 [`EffectiveWikiModel`] (produced by
-//! [`Config::effective_wiki_model`](logos_core::config::Config::effective_wiki_model)):
-//! `[wiki].model` if set, else `[chat].model`, with `provider`/`base_url`/the API
-//! key inherited from `[chat]`/`secrets.toml`. It mirrors the chat surface's
+//! [`run_configured`] consumes the S-176 [`EffectiveWikiModel`] — in production
+//! produced by
+//! [`WikiConfig::resolve_inherited`](logos_core::config::WikiConfig::resolve_inherited)
+//! over the [`resolve_chat`](logos_core::config::resolve_chat) seam ([ADR-67]):
+//! `[wiki].model` if set, else the effective `[chat].model`, with
+//! `provider`/`base_url`/the API key inherited from the effective `[chat]` policy
+//! and credential — the member's own, or the workspace's where the member leaves
+//! that half undeclared. It mirrors the chat surface's
 //! provider bridge (`web/src/chat/configured.rs`): a missing model or key is the
 //! honest **configure-first** state ([FR-UI-18], [NFR-CC-04]) — not a crash — and
 //! the deterministic pre-send preflight ([FR-UI-24]) catches a malformed endpoint
@@ -18,6 +22,7 @@
 //! [FR-UI-24]: ../../../docs/specs/requirements/FR-UI-24.md
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
+//! [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
 //! [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
 
 use std::sync::Arc;

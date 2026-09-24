@@ -51,7 +51,7 @@ mod configured;
 
 pub(crate) use configured::ConfiguredChatService;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -67,6 +67,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 
 use agent_core::rig::completion::CompletionModel;
+use logos_core::config::{ChatOrigin, ChatResolution, ConfigError};
 
 /// One frame in a chat turn's stream: an orchestrator transition to relay, or an
 /// honest terminal fault ([NFR-CC-04]) — never a fabricated answer.
@@ -78,6 +79,141 @@ pub enum ChatFrame {
     /// An honest fault (a provider/tool error, or a memory-persistence failure)
     /// surfaced to the client mid- or end-of-stream.
     Error(String),
+}
+
+/// The provider model and raw key a turn dials with, taken from a usable
+/// [`ChatResolution`] — the only way the turn path reaches either value.
+pub(crate) struct TurnProvider {
+    /// The effective `[chat] model` (non-blank by the seam's invariant).
+    pub(crate) model_id: String,
+    /// The effective raw API key — egress only, never rendered ([NFR-SE-07]).
+    ///
+    /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+    pub(crate) api_key: String,
+}
+
+/// The turn's readiness verdict over the one resolution seam ([ADR-67] §6,
+/// [FR-UI-18]): the provider to dial, or the **configure-first** message a refused
+/// turn streams as its single frame ([NFR-CC-04]).
+///
+/// The verdict is read off the two **origins** — exactly the facts the config
+/// read-model serializes for the tab — and never off the file contents, so the
+/// tab and the turn cannot disagree: a half is usable exactly when its origin is
+/// not [`ChatOrigin::Unset`]. There is no second model-or-key check here; the
+/// seam already decided that a blank `model` or a blank key is undeclared.
+///
+/// A refusal names the facts the tab's state names: the `member_root` it
+/// inspected (and the workspace root, when one was consulted), the half or halves
+/// that are absent, and where any present half came from.
+///
+/// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+/// [FR-UI-18]: ../../../docs/specs/requirements/FR-UI-18.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(crate) fn turn_provider(
+    member_root: &Path,
+    workspace_root: Option<&Path>,
+    resolution: &ChatResolution,
+) -> Result<TurnProvider, String> {
+    let policy_set = resolution.policy_origin != ChatOrigin::Unset;
+    let credential_set = resolution.credential_origin != ChatOrigin::Unset;
+    match (resolution.policy.model.as_deref(), resolution.api_key()) {
+        (Some(model_id), Some(api_key)) if policy_set && credential_set => Ok(TurnProvider {
+            model_id: model_id.to_string(),
+            api_key: api_key.to_string(),
+        }),
+        _ => Err(configure_first_message(
+            member_root,
+            workspace_root,
+            resolution,
+        )),
+    }
+}
+
+/// The configure-first frame text: the root inspected, the absent half (or both),
+/// the origin of a present half, and the Config-tab action that fixes it
+/// ([FR-UI-18], [NFR-CC-04]).
+fn configure_first_message(
+    member_root: &Path,
+    workspace_root: Option<&Path>,
+    resolution: &ChatResolution,
+) -> String {
+    let where_looked = match workspace_root {
+        Some(ws) => format!(" by this member or by the workspace root {}", ws.display()),
+        None => String::new(),
+    };
+    let present = |half: &str, origin: ChatOrigin| match (origin, workspace_root) {
+        (ChatOrigin::Workspace, Some(ws)) => {
+            format!(
+                "; the {half} is inherited from the workspace root {}",
+                ws.display()
+            )
+        }
+        _ => format!("; the {half} is declared by {}", member_root.display()),
+    };
+    let (absent, present, action) = match (resolution.policy_origin, resolution.credential_origin) {
+        (ChatOrigin::Unset, ChatOrigin::Unset) => (
+            format!("neither a provider model nor an API key is declared{where_looked}"),
+            String::new(),
+            "Choose a provider model and add an API key",
+        ),
+        (ChatOrigin::Unset, origin) => (
+            format!("no provider model is declared{where_looked}"),
+            present("API key", origin),
+            "Choose a provider model",
+        ),
+        (origin, _) => (
+            format!("no API key is declared{where_looked}"),
+            present("provider model", origin),
+            "Add an API key",
+        ),
+    };
+    format!(
+        "Chat is not configured yet for {} — {absent}{present}. {action} in the Config tab \
+         before starting a turn.",
+        member_root.display()
+    )
+}
+
+/// The honest setup-fault text for a chat-resolution read failure ([NFR-CC-04]),
+/// worded for `subject` (`"chat"` or `"wiki"`) and shared by both agents that
+/// read the seam.
+///
+/// A **parse** fault — of `secrets.toml` *or* `config.toml`, at either root — is
+/// reported by file and position only ([NFR-SE-07]): the TOML error's `Display`
+/// quotes the offending line, and its message may quote a value, so either could
+/// carry an `api_key = "…"` line (a key pasted into `config.toml` is exactly the
+/// line `deny_unknown_fields` rejects), and the frame is rendered verbatim. Only
+/// the leading `TOML parse error at line L, column C` line is kept. The other
+/// faults keep their detailed error: an I/O fault names the path and the OS error,
+/// and a validation fault names the key and its bound, never file content.
+///
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+pub(crate) fn resolution_fault(subject: &str, err: &ConfigError) -> String {
+    match err {
+        ConfigError::Parse { path, .. } => {
+            let what = if path.file_name().is_some_and(|name| name == "secrets.toml") {
+                "secret"
+            } else {
+                "configuration"
+            };
+            // The first line of the TOML error is its position; everything after
+            // it quotes the file.
+            let position = std::error::Error::source(err)
+                .map(ToString::to_string)
+                .and_then(|text| text.lines().next().map(str::to_string))
+                .and_then(|line| {
+                    line.strip_prefix("TOML parse error at ")
+                        .map(|at| format!(" ({at})"))
+                })
+                .unwrap_or_default();
+            format!(
+                "could not read the {subject} {what} — check that {} is valid TOML with only \
+                 known keys{position}",
+                path.display()
+            )
+        }
+        _ => format!("could not read the {subject} configuration: {err}"),
+    }
 }
 
 /// Starts a chat turn and returns its live event stream — the seam that lets the
