@@ -436,11 +436,13 @@ fn the_workspace_tier_seam_emits_the_facade_config_events() {
     let subscriber = tracing_subscriber::registry()
         .with(TelemetryLayer::new(Surface::Mcp, "feature".to_string(), "test-session".to_string(), sink));
 
+    // The load fingerprint of the absent tier: the empty document's (S-451 T2).
+    let absent = crate::federation::manifest::fingerprint(b"");
     tracing::subscriber::with_default(subscriber, || {
-        crate::config::write_workspace_config(root, "[chat]\nmodel = \"ws/m\"\n").expect("writes");
+        crate::config::write_workspace_config(root, "[chat]\nmodel = \"ws/m\"\n", &absent).expect("writes");
         crate::config::write_workspace_secret(root, "sk-seam-key-sm01").expect("writes");
         crate::config::read_workspace_documents(root).expect("reads");
-        assert!(crate::config::write_workspace_config(root, "modle = 1\n").is_err());
+        assert!(crate::config::write_workspace_config(root, "modle = 1\n", &absent).is_err());
     });
 
     let records: Vec<(String, bool)> = rx.try_iter().map(|r| (r.tool, r.ok)).collect();

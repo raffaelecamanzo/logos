@@ -27,13 +27,17 @@
  * follows the same grammar over its own raw pane; its credential is the one field
  * outside it — masked and write-only, never pre-filled (NFR-SE-07).
  *
- * Two properties are specific to the manifest and shape its save:
+ * Two properties shape the manifest's save; the first, and the repair read beside
+ * it, shape the tier's policy save too (S-451 T2 — FR-UI-38's Statement applies
+ * them to both files):
  *
  *   - **No silent clobber.** The read returns a fingerprint of the bytes it
- *     loaded; the save posts it back, and a manifest changed on disk since (by
- *     hand, or by `logos init --workspace`) is refused with a conflict that shows
- *     what is on disk now. The user then chooses — load the disk copy and discard
- *     their edits, or overwrite it with their edits — and is told which happened.
+ *     loaded; the save posts it back, and a file changed on disk since (by hand,
+ *     or — for the manifest — by `logos init --workspace`) is refused with a
+ *     conflict that shows what is on disk now. The user then chooses — load the
+ *     disk copy and discard their edits, or overwrite it with their edits — and
+ *     is told which happened. A file broken on disk still loads, with its fault
+ *     stated, so the editor opens over it as the repair path.
  *   - **Governance is advisory, said where it is edited.** Workspace rules are
  *     reported at the workspace level and can never move a member's gated signal
  *     (ADR-56). The statement sits beside the raw pane the rules are typed into,
@@ -74,7 +78,6 @@ import {
   saveWorkspaceSecret,
 } from "../../api/workspaceClient.ts";
 import type {
-  ConfigReadModel,
   ManifestSaveOutcome,
   MaskedSecret,
   ParsedConfig,
@@ -82,6 +85,8 @@ import type {
   WorkspaceGovernanceAnswer,
   WorkspaceManifest,
   WorkspaceManifestDocument,
+  WorkspaceTierDocument,
+  WorkspaceTierSaveOutcome,
 } from "../../api/types.ts";
 import {
   Badge,
@@ -481,26 +486,28 @@ function ResultPanel({ result }: { result: ResultMessage | null }) {
   );
 }
 
-/** The conflict state: what is on disk now, and the two explicit ways out. */
+/** The conflict state: what is on disk now, and the two explicit ways out. Shared
+ *  by both groups' saves; `children` says which file moved and how it can have. */
 function ConflictPanel({
   disk,
+  diskLabel,
   busy,
   onLoadDisk,
   onOverwrite,
+  children,
 }: {
   disk: string;
+  /** The read-only pane's label, naming the file whose disk copy it shows. */
+  diskLabel: string;
   busy: boolean;
   onLoadDisk: () => void;
   onOverwrite: () => void;
+  children: ReactNode;
 }) {
   return (
     <Callout label="CONFLICT" tone="signal">
-      <p>
-        <code>logos.workspace.toml</code> was changed on disk — by hand, or by{" "}
-        <code>logos init --workspace</code> — after this editor loaded it. Your save was refused so
-        that change is not silently overwritten.
-      </p>
-      <TextareaField label="The manifest on disk now" value={disk} readOnly rows={10} className="mono" spellCheck={false} />
+      <p>{children}</p>
+      <TextareaField label={diskLabel} value={disk} readOnly rows={10} className="mono" spellCheck={false} />
       <div className={styles.actions}>
         <Button onClick={onLoadDisk} disabled={busy}>
           Load the version on disk (discard my edits)
@@ -647,10 +654,15 @@ function ManifestEditor({
       {conflict && (
         <ConflictPanel
           disk={conflict.disk_content}
+          diskLabel="The manifest on disk now"
           busy={saving}
           onLoadDisk={() => onReload(DISCARDED)}
           onOverwrite={() => void save(conflict.disk_fingerprint, true)}
-        />
+        >
+          <code>logos.workspace.toml</code> was changed on disk — by hand, or by{" "}
+          <code>logos init --workspace</code> — after this editor loaded it. Your save was refused so
+          that change is not silently overwritten.
+        </ConflictPanel>
       )}
     </>
   );
@@ -792,6 +804,27 @@ function describeTierSecret(outcome: SecretWriteOutcome | null): string {
   return `Key cleared. ${WORKSPACE_SECRETS_FILE} no longer holds a chat key.`;
 }
 
+/** The credential half when `secrets.toml` cannot be read: named, never shown
+ *  (NFR-SE-07), and not writable here — the key write merges into the existing
+ *  store and refuses an unparsable one rather than overwrite it. */
+function UnreadableTierSecret({ fault }: { fault: string }) {
+  return (
+    <fieldset className={styles.group}>
+      <legend className={styles.legend}>chat API key</legend>
+      <div className={styles.fileHead}>
+        <Badge tone="red">does not parse</Badge>
+        <span className={styles.path}>{WORKSPACE_SECRETS_FILE}</span>
+      </div>
+      <ErrorPanel>
+        The workspace credential store could not be read: {fault} Its contents are never shown on this
+        page. Repair or remove <code>{WORKSPACE_SECRETS_FILE}</code> by hand — the key cannot be
+        replaced here until it parses, because a key save merges into the existing store and refuses
+        to overwrite one it cannot read.
+      </ErrorPanel>
+    </fieldset>
+  );
+}
+
 /** The workspace credential: masked presence, a write-only input that is always
  *  blank on load, and its own save (FR-CF-06, NFR-SE-07). */
 function TierSecret({ initial }: { initial: MaskedSecret }) {
@@ -856,14 +889,59 @@ function TierSecret({ initial }: { initial: MaskedSecret }) {
   );
 }
 
-/** The tier editor over one loaded read-model: typed fields + the authoritative
- *  raw pane over `config.toml`, then the credential. */
-function TierEditor({ model }: { model: ConfigReadModel }) {
-  const groups = tierFields(model.config.parsed);
-  const [raw, setRaw] = useState(model.config.content);
+/** What a tier save did, in the words the manifest group uses for the same arms.
+ *  `exists` is whether the file was on disk before the save: an empty document
+ *  saved over an absent file is `unchanged` too, and must not claim a file. */
+function describeTierOutcome(outcome: WorkspaceTierSaveOutcome, overwrote: boolean, exists: boolean): ResultMessage {
+  switch (outcome.outcome) {
+    case "written":
+      return {
+        kind: "ok",
+        text: `${overwrote ? "Overwrote the changes on disk with your edits — " : ""}Saved ${WORKSPACE_CONFIG_FILE} (${outcome.bytes_written} bytes). Members that inherit it use it from their next chat turn — no restart. No member's .logos/ was written and no member was reindexed.`,
+      };
+    case "unchanged":
+      return {
+        kind: "ok",
+        text: exists
+          ? `No change — ${WORKSPACE_CONFIG_FILE} on disk already matches; nothing was written.`
+          : `No change — the document is empty and ${WORKSPACE_CONFIG_FILE} does not exist; nothing was written.`,
+      };
+    case "conflict":
+      return {
+        kind: "warn",
+        text: `Not saved — ${WORKSPACE_CONFIG_FILE} changed on disk since this editor loaded it. Nothing was written. Choose below which copy wins.`,
+      };
+  }
+}
+
+/** The tier editor over one loaded document: typed fields + the authoritative
+ *  raw pane over `config.toml`, then the credential. Keyed by the load in
+ *  {@link TierGroup}, so "load the version on disk" — and a repair save, whose
+ *  typed fields only a re-seed brings up — re-seeds it from scratch.
+ *
+ *  Over a `config.toml` that does not parse it is the **repair editor**
+ *  (S-451 T2): the literal document in the raw pane, no typed fields, and the
+ *  fault by file and position; the save validates the new document only. */
+function TierEditor({
+  doc,
+  notice,
+  onReload,
+}: {
+  doc: WorkspaceTierDocument;
+  /** What the reload that seeded this editor did, stated on arrival. */
+  notice: ResultMessage | null;
+  /** Re-read the tier and re-seed this editor from it, stating `notice` once the
+   *  new editor is up. */
+  onReload: (notice: ResultMessage) => void;
+}) {
+  const parsed = doc.config.parsed;
+  const groups = parsed === null ? [] : tierFields(parsed);
+  const [raw, setRaw] = useState(doc.config.content);
+  const [fingerprint, setFingerprint] = useState(doc.config.fingerprint);
   const [values, setValues] = useState<Record<string, string>>(() => seedValues(groups));
-  const [exists, setExists] = useState(model.config.exists);
-  const [result, setResult] = useState<ResultMessage | null>(null);
+  const [exists, setExists] = useState(doc.config.exists);
+  const [conflict, setConflict] = useState<Extract<WorkspaceTierSaveOutcome, { outcome: "conflict" }> | null>(null);
+  const [result, setResult] = useState<ResultMessage | null>(notice);
   const [saving, setSaving] = useState(false);
 
   function onFieldChange(f: TypedField, value: string) {
@@ -871,16 +949,24 @@ function TierEditor({ model }: { model: ConfigReadModel }) {
     setRaw((prev) => patch(prev, f.table, f.key, f.type, value));
   }
 
-  async function onSave() {
+  async function save(against: string, overwrote: boolean) {
     setSaving(true);
     setResult(null);
     try {
-      const outcome = await saveWorkspaceConfig(raw);
-      setExists(true);
-      setResult({
-        kind: "ok",
-        text: `Saved ${WORKSPACE_CONFIG_FILE} (${outcome.bytes_written} bytes). Members that inherit it use it from their next chat turn — no restart. No member's .logos/ was written and no member was reindexed.`,
-      });
+      const outcome = await saveWorkspaceConfig(raw, against);
+      const message = describeTierOutcome(outcome, overwrote, exists);
+      if (outcome.outcome === "conflict") {
+        setResult(message);
+        setConflict(outcome);
+        return;
+      }
+      setConflict(null);
+      setFingerprint(outcome.fingerprint);
+      // A repair of an unparsable load has no typed state worth keeping, and only
+      // a re-seed brings its typed fields up: reload, stating the save.
+      if (outcome.outcome === "written" && parsed === null) return onReload(message);
+      if (outcome.outcome === "written") setExists(true);
+      setResult(message);
     } catch (e) {
       setResult(describeError(e));
     } finally {
@@ -892,10 +978,21 @@ function TierEditor({ model }: { model: ConfigReadModel }) {
     <>
       <div className={styles.fileHead}>
         <Badge tone={exists ? "green" : "muted"}>{exists ? "on disk" : "not yet created"}</Badge>
+        {doc.config.error !== null && <Badge tone="red">does not parse</Badge>}
       </div>
+      {doc.config.error !== null && (
+        <ErrorPanel>
+          The workspace tier&apos;s <code>config.toml</code> does not parse — members that inherit from
+          this root cannot resolve their chat until it is repaired. Fix it in the raw pane below:{" "}
+          {doc.config.error}
+        </ErrorPanel>
+      )}
       <InheritanceBanner />
       <NotHere />
       <Fieldsets groups={groups} values={values} onChange={onFieldChange} />
+      {parsed === null && (
+        <p className={styles.help}>Typed fields are unavailable while the document does not parse.</p>
+      )}
       {/* Not labelled "Raw TOML — …" like the manifest's pane: each group's pane is
           named for its own file first, so neither label can be taken for the other. */}
       <TextareaField
@@ -907,18 +1004,34 @@ function TierEditor({ model }: { model: ConfigReadModel }) {
         className="mono"
       />
       <div className={styles.actions}>
-        <Button variant="primary" onClick={() => void onSave()} disabled={saving} aria-busy={saving}>
+        <Button variant="primary" onClick={() => void save(fingerprint, false)} disabled={saving} aria-busy={saving}>
           {saving ? "Saving…" : `Save ${WORKSPACE_CONFIG_FILE}`}
         </Button>
       </div>
       <p className={styles.help}>
         Save validates the whole document with the parser every <code>logos</code> command runs and
-        replaces the file atomically; an invalid edit is refused and the file is left untouched. It
-        writes only under the workspace root&apos;s <code>.logos/</code> — no member&apos;s — and
-        reindexes nothing.
+        replaces the file atomically; an invalid edit is refused and the file is left untouched, and a
+        file changed on disk since this editor loaded it is never silently overwritten. It writes only
+        under the workspace root&apos;s <code>.logos/</code> — no member&apos;s — and reindexes nothing.
       </p>
       <ResultPanel result={result} />
-      <TierSecret initial={model.chat_key} />
+      {conflict && (
+        <ConflictPanel
+          disk={conflict.disk_content}
+          diskLabel={`${WORKSPACE_CONFIG_FILE} on disk now`}
+          busy={saving}
+          onLoadDisk={() => onReload(DISCARDED)}
+          onOverwrite={() => void save(conflict.disk_fingerprint, true)}
+        >
+          <code>{WORKSPACE_CONFIG_FILE}</code> was changed on disk — by hand, or by another tab — after
+          this editor loaded it. Your save was refused so that change is not silently overwritten.
+        </ConflictPanel>
+      )}
+      {doc.chat_key === null ? (
+        <UnreadableTierSecret fault={doc.chat_key_error ?? ""} />
+      ) : (
+        <TierSecret initial={doc.chat_key} />
+      )}
     </>
   );
 }
@@ -926,18 +1039,28 @@ function TierEditor({ model }: { model: ConfigReadModel }) {
 /**
  * The workspace chat tier group: load `<workspace-root>/.logos/`, then edit it.
  *
- * Its failed read is stated INSIDE the group as a `NOT LOADED` status (a
- * `Callout`, `role=status`), in the shared describer's words, and the manifest
- * group stays fully usable beside it. That is a deliberate exception to the
- * design grammar's Error panel (`ErrorPanel`, `role=alert`), which this view's
- * own manifest reads still use, and it is made for one reason: S-430's tests,
- * which must stay unmodified, render this group beside theirs with a stub that
- * answers its read with `{}` and query the page's alert unscoped — a standing
- * alert here would make every such query ambiguous. Moving this state to the
- * Error panel means scoping those queries to the manifest card.
+ * A tier file that does not parse is NOT a failed read (S-451 T2): the read
+ * delivers it for repair and {@link TierEditor} opens over it. What is left as a
+ * failed read — an unreadable file, a transport fault, a reply that is not the
+ * document — is stated INSIDE the group as a `NOT LOADED` status (a `Callout`,
+ * `role=status`), in the shared describer's words, and the manifest group stays
+ * fully usable beside it. That is a deliberate exception to the design grammar's
+ * Error panel (`ErrorPanel`, `role=alert`), which this view's own manifest reads
+ * still use, and it is made for one reason: S-430's tests, which must stay
+ * unmodified, render this group beside theirs with a stub that answers its read
+ * with `{}` and query the page's alert unscoped — a standing alert here would
+ * make every such query ambiguous. Moving this state to the Error panel means
+ * scoping those queries to the manifest card.
  */
 function TierGroup() {
-  const loaded = useApiResource<ConfigReadModel>(() => fetchWorkspaceConfig(), []);
+  const [generation, setGeneration] = useState(0);
+  const [notice, setNotice] = useState<ResultMessage | null>(null);
+  // Keyed on each completed read, as the manifest group's editor is — see there.
+  const loads = useRef(0);
+  const loaded = useApiResource<{ doc: WorkspaceTierDocument; load: number }>(
+    () => fetchWorkspaceConfig().then((doc) => ({ doc, load: ++loads.current })),
+    [generation],
+  );
   return (
     <ConfigGroup title="Workspace chat policy and credential" file={WORKSPACE_CONFIG_FILE}>
       {loaded.status === "loading" && <LoadingState label="Loading the workspace chat tier…" />}
@@ -947,7 +1070,17 @@ function TierGroup() {
           {describeReadError(loaded.error)}
         </Callout>
       )}
-      {loaded.status === "ready" && loaded.data && <TierEditor model={loaded.data} />}
+      {loaded.status === "ready" && loaded.data && (
+        <TierEditor
+          key={loaded.data.load}
+          doc={loaded.data.doc}
+          notice={notice}
+          onReload={(next) => {
+            setNotice(next);
+            setGeneration((n) => n + 1);
+          }}
+        />
+      )}
     </ConfigGroup>
   );
 }

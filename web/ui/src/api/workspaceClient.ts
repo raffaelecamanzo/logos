@@ -19,8 +19,6 @@ import { apiFetch, apiUrl } from "./client.ts";
 import { ConfigMutateError, FORM_HEADERS, detailOf, formBody, writeSecret } from "./configClient.ts";
 import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
-  ConfigReadModel,
-  ConfigWriteOutcome,
   ManifestSaveOutcome,
   SecretWriteOutcome,
   WorkspaceGovernanceAnswer,
@@ -29,6 +27,8 @@ import type {
   WorkspaceRoster,
   WorkspaceStatistics,
   WorkspaceStatus,
+  WorkspaceTierDocument,
+  WorkspaceTierSaveOutcome,
   XserviceImpact,
   XserviceRouteProviders,
 } from "./types.ts";
@@ -166,57 +166,74 @@ export async function saveWorkspaceManifest(
 }
 
 /**
- * `GET /api/v1/workspace/config` (S-450, FR-WS-30) — the workspace root's own
- * config tier, `<workspace-root>/.logos/`, as the workspace Config editor's chat
- * group loads it (S-451). The same {@link ConfigReadModel} `GET /api/v1/config`
- * serves for a member, read at the workspace root: its literal `config.toml`, the
- * **masked** credential (NFR-SE-07), and an effective-chat slice whose origins
- * are relative to that root — `member` means *declared here*, and `workspace`
- * never appears, because nothing above the workspace root is inherited.
+ * `GET /api/v1/workspace/config` (S-450, S-451 T2, FR-WS-30) — the workspace
+ * root's own config tier, `<workspace-root>/.logos/`, as the workspace Config
+ * editor's chat group loads it: the literal `config.toml` with the fingerprint a
+ * save must post back, the **masked** credential (NFR-SE-07), and an
+ * effective-chat slice whose origins are relative to that root.
  *
- * A `2xx` that is not that read-model is refused here rather than handed on: the
+ * Like the manifest read, a tier file broken on disk still loads — `parsed:
+ * null` with the fault in `error`, or `chat_key: null` with it in
+ * `chat_key_error`, by file and position only — because the editor is its repair
+ * path.
+ *
+ * A `2xx` that is not that document is refused here rather than handed on: the
  * editor's Save replaces the whole file with its raw pane, so an editor seeded
  * from a payload with no document in it would offer to overwrite the tier with
- * nothing, and one missing its parse or key state would throw while rendering and
- * take the whole page down with it, the manifest group included (NFR-RA-05).
+ * nothing, and one missing its parse verdict or key state would throw while
+ * rendering and take the whole page down with it, the manifest group included
+ * (NFR-RA-05). A `null` half is accepted only with the fault that explains it.
  *
  * App-level: no `?repo=`, like every `workspace/*` read.
  */
-export async function fetchWorkspaceConfig(): Promise<ConfigReadModel> {
-  const model = await apiFetch<ConfigReadModel>("workspace/config");
-  // Every field the editor reads to seed itself: the raw pane, the typed [chat]
-  // fields, and the masked key badge.
-  if (
-    typeof model?.config?.content !== "string" ||
-    typeof model.config.parsed?.chat?.provider !== "string" ||
-    typeof model.chat_key?.present !== "boolean"
-  ) {
+export async function fetchWorkspaceConfig(): Promise<WorkspaceTierDocument> {
+  const model = await apiFetch<WorkspaceTierDocument>("workspace/config");
+  // Every field the editor reads to seed itself: the raw pane and its load
+  // fingerprint, the typed [chat] fields (or the fault that stands for them), and
+  // the masked key badge (or the fault that stands for it).
+  const config = model?.config;
+  const parseState =
+    config?.parsed === null
+      ? typeof config.error === "string"
+      : typeof config?.parsed?.chat?.provider === "string";
+  const keyState =
+    model?.chat_key === null
+      ? typeof model.chat_key_error === "string"
+      : typeof model?.chat_key?.present === "boolean";
+  if (typeof config?.content !== "string" || typeof config.fingerprint !== "string" || !parseState || !keyState) {
     throw new Error("GET /api/v1/workspace/config answered without a config document or key state.");
   }
   return model;
 }
 
 /**
- * `POST /api/v1/workspace/config/save` (S-450, FR-WS-30) — validate-then-atomic-
- * write of the candidate `content` as `<workspace-root>/.logos/config.toml`,
- * through the intent-guarded {@link apiMutate} seam (ADR-31, NFR-SE-06). The
- * workspace-root twin of `saveConfig`: `file=config` is the only document this
- * root carries (a `rules.toml` here would be read by nothing), and the server
- * reaches no member — it writes only under `<workspace-root>/.logos/` (the file,
- * and the managed `.gitignore` on a first save) and runs no pipeline, because
- * there is no graph at the root to apply to.
+ * `POST /api/v1/workspace/config/save` (S-450, S-451 T2, FR-WS-30) — save the
+ * candidate `content` as `<workspace-root>/.logos/config.toml` against the
+ * `fingerprint` the editor loaded, through the intent-guarded {@link apiMutate}
+ * seam (ADR-31, NFR-SE-06). The workspace-root twin of
+ * {@link saveWorkspaceManifest}: `file=config` is the only document this root
+ * carries (a `rules.toml` here would be read by nothing), and the server reaches
+ * no member — it writes only under `<workspace-root>/.logos/` (the file, and the
+ * managed `.gitignore` on a first save) and runs no pipeline.
  *
- * Throws {@link ConfigMutateError} carrying the server's message on a refused
- * candidate (`422`, file left byte-identical) or an I/O fault (`500`).
+ * Resolves with the {@link WorkspaceTierSaveOutcome} for `written`, `unchanged`
+ * AND `conflict`: a `409` is the server declining to clobber an edit made on disk
+ * since the load, and its body carries what is on disk now. Every other non-2xx
+ * throws a {@link ConfigMutateError} carrying the server's message — `422` for a
+ * refused candidate (file left byte-identical), `400` for a missing fingerprint,
+ * `500` for an I/O fault.
  */
-export async function saveWorkspaceConfig(content: string): Promise<ConfigWriteOutcome> {
+export async function saveWorkspaceConfig(
+  content: string,
+  fingerprint: string,
+): Promise<WorkspaceTierSaveOutcome> {
   const res = await apiMutate(apiUrl("workspace/config/save"), {
     headers: FORM_HEADERS,
-    body: formBody({ file: "config", content }),
+    body: formBody({ file: "config", content, fingerprint }),
     credentials: "same-origin",
   });
-  if (!res.ok) throw new ConfigMutateError(res.status, await workspaceErrorDetail(res));
-  return (await res.json()) as ConfigWriteOutcome;
+  if (res.ok || res.status === 409) return (await res.json()) as WorkspaceTierSaveOutcome;
+  throw new ConfigMutateError(res.status, await workspaceErrorDetail(res));
 }
 
 /**

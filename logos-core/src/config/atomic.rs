@@ -43,6 +43,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// The content fingerprint a **compare-then-swap** publish compares: the load
+/// read's fingerprint is posted back with a save, and the save refuses to publish
+/// over a file whose bytes no longer match it ([FR-UI-38]).
+///
+/// A content hash, not an mtime: two writes inside one filesystem timestamp tick
+/// leave the mtime where it was, and a touch without a change moves it. One
+/// spelling for both editors that save this way — the workspace manifest
+/// ([`federation::manifest::fingerprint`](crate::federation::manifest::fingerprint))
+/// and the workspace config tier — so neither can drift from the other.
+///
+/// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+pub(crate) fn fingerprint(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
 /// Atomically replace `target` with `bytes`.
 ///
 /// `unix_mode` sets the **temp file's** Unix permission bits *at creation*, so

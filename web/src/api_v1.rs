@@ -60,7 +60,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use logos_core::config::{self as core_config, ConfigReadModel};
+use logos_core::config::{self as core_config, ConfigReadModel, TierSaveOutcome};
 use logos_core::federation::{
     app_wide_reachability, open_state, query as fed_query, workspace_governance,
     workspace_statistics, Backing, BoundedReachability, ContractBridge, DegradedRollup,
@@ -1639,9 +1639,9 @@ pub(crate) async fn config(
 // One read and two writes over `<workspace-root>/.logos/`, the second config tier
 // `resolve_chat` inherits from. Each calls core's engine-free workspace-tier seam
 // (`read_workspace_documents`, `write_workspace_config`, `write_workspace_secret`),
-// which reaches the SAME function the member route reaches through its engine —
-// so validate-before-write, the atomic replace and the credential's 0o600 mode
-// come with it unchanged ([NFR-RA-07], [NFR-SE-07]) — and emits the same
+// which reaches the SAME parser and writers the member route reaches through its
+// engine — so validate-before-write, the atomic replace and the credential's 0o600
+// mode come with it unchanged ([NFR-RA-07], [NFR-SE-07]) — and emits the same
 // telemetry event the façade method would, under the `Surface::Web` scope
 // `run_blocking` enters. No `Engine` is involved because constructing one at the
 // workspace root is the fault [ADR-40]'s exception exists to avoid: the root
@@ -1651,22 +1651,28 @@ pub(crate) async fn config(
 // [ADR-40]: ../../docs/specs/architecture/decisions/ADR-40.md
 // [NFR-RA-07]: ../../docs/specs/requirements/NFR-RA-07.md
 
-/// `GET /api/v1/workspace/config` — the workspace root's config read-model
-/// ([FR-WS-30], S-450): the same [`ConfigReadModel`] `GET /api/v1/config` serves
-/// for a member, read at the workspace root — its literal `config.toml`, its
-/// (absent) `rules.toml`, the **masked** credential ([NFR-SE-07]), the defaults
-/// and the effective-chat slice.
+/// `GET /api/v1/workspace/config` — the workspace root's config tier as its editor
+/// group loads it ([FR-WS-30], [FR-UI-38], S-451): the literal `config.toml`, the
+/// fingerprint a save must post back, and its parse verdict; the **masked**
+/// credential ([NFR-SE-07]); and the effective-chat slice
+/// ([`WorkspaceTierDocument`]).
 ///
 /// The slice is resolved with **no** tier above ([`read_workspace_documents`]),
 /// because the workspace root has none. Its origins are therefore relative to
 /// the root this payload reads: `member` means *declared at this root*, `unset`
 /// that it is not, and `workspace` never appears — nothing here is inherited.
 ///
-/// A present-but-invalid file fails loud (`500`), as on the member route; the
-/// save route is the repair path, since it validates the new document only.
+/// Like the manifest read beside it, a file that does not parse is a `200` —
+/// `parsed: null` (or `chat_key: null`) with the fault in `error` (or
+/// `chat_key_error`), by file and position only — not a `500`: the editor is the
+/// repair path, and it needs the document and its fingerprint to repair it. Only
+/// an unreadable `config.toml` is a `500`. A member's `GET /api/v1/config` is
+/// unchanged and stays fail-loud over a broken tier it inherits from.
 ///
 /// [`read_workspace_documents`]: logos_core::config::read_workspace_documents
+/// [`WorkspaceTierDocument`]: logos_core::config::WorkspaceTierDocument
 /// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
+/// [FR-UI-38]: ../../docs/specs/requirements/FR-UI-38.md
 pub(crate) async fn workspace_config(WorkspaceRoot(root): WorkspaceRoot) -> Response {
     let model = run_blocking("api_v1_workspace_config", Surface::Web, move || {
         core_config::read_workspace_documents(&root)
@@ -1675,40 +1681,56 @@ pub(crate) async fn workspace_config(WorkspaceRoot(root): WorkspaceRoot) -> Resp
     respond(model)
 }
 
-/// `POST /api/v1/workspace/config/save` → [`write_workspace_config`], the [`write_config`] writer at the workspace root
-/// ([FR-WS-30], [NFR-RA-07]). Form fields: `content=<toml>`, and optionally
-/// `file=config` — the only document accepted. `file=rules` is a `400`: workspace
-/// governance is declared in the manifest ([FR-WS-13]), so a `rules.toml` here
-/// would be read by nothing.
+/// `POST /api/v1/workspace/config/save` → [`write_workspace_config`], the
+/// workspace root's `config.toml` saved the way the manifest is
+/// ([`workspace_manifest_save`], [FR-UI-38], [FR-WS-30]). Form fields:
+/// `content=<toml>`, `fingerprint=<hex>` (the one the read returned), and
+/// optionally `file=config` — the only document accepted.
 ///
-/// The candidate is validated before anything is written and the existing file
-/// is **not** read, so a save over a broken workspace file — the one that fails
-/// every inheriting member's config read — succeeds and repairs it. A rejected
-/// candidate is `422` and leaves the file byte-identical; an I/O fault is `500`.
+/// - `400` for any `file` other than `config` — workspace governance is declared
+///   in the manifest ([FR-WS-13]), so a `rules.toml` here would be read by
+///   nothing — and `400` when `fingerprint` is missing: a save that cannot say
+///   what it was made against cannot be checked for a clobber.
+/// - `200` with `outcome: "written"`, or `"unchanged"` for a candidate
+///   byte-identical to disk (nothing written).
+/// - `409` with `outcome: "conflict"` and the document on disk now: the file
+///   changed since the load, and nothing was written.
+/// - `422` for a candidate the parser rejects (the file byte-identical), `500` for
+///   an I/O fault.
+///
+/// The candidate is validated, never the file it replaces, so a save over a
+/// broken tier file — the one that fails every inheriting member's config read —
+/// succeeds and repairs it. It writes only under `<workspace-root>/.logos/`.
 ///
 /// [`write_workspace_config`]: logos_core::config::write_workspace_config
-/// [`write_config`]: logos_core::config::write_config
 /// [FR-WS-13]: ../../docs/specs/requirements/FR-WS-13.md
 pub(crate) async fn workspace_config_save(
     WorkspaceRoot(root): WorkspaceRoot,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    let refuse = |error: &str| {
+        (StatusCode::BAD_REQUEST, Json(ApiError { error: error.to_string() })).into_response()
+    };
     if !matches!(form.get("file").map(String::as_str), None | Some("config")) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "the workspace root carries the config document only (expected file=config)"
-                    .to_string(),
-            }),
-        )
-            .into_response();
+        return refuse("the workspace root carries the config document only (expected file=config)");
     }
+    let Some(loaded) = form.get("fingerprint").map(|f| f.trim().to_string()).filter(|f| !f.is_empty())
+    else {
+        return refuse(
+            "a workspace config save must carry the fingerprint its read returned (fingerprint=…)",
+        );
+    };
     let content = form.get("content").cloned().unwrap_or_default();
     let outcome = run_blocking("api_v1_workspace_config_save", Surface::Web, move || {
-        core_config::write_workspace_config(&root, &content)
+        core_config::write_workspace_config(&root, &content, &loaded)
     })
     .await;
-    written(outcome)
+    match outcome {
+        Ok(conflict @ TierSaveOutcome::Conflict { .. }) => {
+            (StatusCode::CONFLICT, Json(conflict)).into_response()
+        }
+        other => written(other),
+    }
 }
 
 /// `POST /api/v1/workspace/config/secret` → [`write_workspace_secret`], the [`write_secret`] writer at the workspace root

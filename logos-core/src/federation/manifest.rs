@@ -591,7 +591,7 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
 /// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
 #[must_use]
 pub fn fingerprint(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex().to_string()
+    crate::config::atomic::fingerprint(bytes)
 }
 
 /// The manifest as the editor loads it ([FR-UI-38]): the literal document, the
