@@ -9,6 +9,44 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 76 — the chat works in a workspace, and its not-ready state says why.
+
+### Added
+
+- **Workspace-level chat configuration.** Declare `[chat]` (and `[wiki].model`)
+  in `<workspace-root>/.logos/config.toml` and the chat API key in
+  `<workspace-root>/.logos/secrets.toml` once, and every member that declares
+  none inherits them. Inheritance is **per half** — the policy table and the key
+  resolve independently — and the member wins wherever it declares; the policy
+  half is atomic on `model`, so a member that sets its own model uses its own
+  table entire. The Chat tab, the chat request path and wiki generation all read
+  one resolution, so they cannot disagree (CR-145, FR-WS-30).
+- **`GET /api/v1/workspace/config`, `POST /api/v1/workspace/config/save`,
+  `POST /api/v1/workspace/config/secret`** — read and write the workspace tier
+  with the existing validated, atomic, `0600` writers. Intent-guarded, `404`
+  under a single-root server, no apply/reindex action, and no engine is started
+  at the workspace root.
+- The config read-model (`GET /api/v1/config`) carries an `effective_chat` slice
+  — the resolved policy, the masked key and the origin of each half (`member`,
+  `workspace`, `unset`) — **beside** the member's literal document, which is
+  unchanged byte for byte. The member Config tab shows inherited values as a
+  read-only note and never writes them back into the member's `config.toml`.
+
+### Fixed
+
+- **The Chat tab's not-ready state now says what it checked**: the root it
+  inspected (the member by name in a workspace, "this repository" otherwise),
+  which half is missing (model, key or both), and where any present half came
+  from. Previously it said only that a provider was needed — on the reference
+  workspace it was reporting on a member other than the one being configured. A
+  refused chat request names the same facts.
+- The Wiki tab's readiness and consent disclosure read the effective resolution,
+  so a member inheriting the workspace key is offered generation instead of a
+  configure-first state.
+- The sidebar Service header is now a column, so its label no longer truncates
+  to `Se…` beside a long member name; the Workspace section renders as one list.
+
+
 ## [1.4.17] — 2026-09-23
 
 ### Fixed
