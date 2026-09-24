@@ -82,7 +82,8 @@ pub struct WorkspaceEnableReport {
     pub mcp: InitStep,
     /// The workspace-root managed ignore entries for the [FR-WS-17] warm-outcome
     /// sidecar ([CR-104]) and the workspace chat credential ([FR-WS-30]) —
-    /// `Skipped`, carrying the reason, at a root that is not a git working tree.
+    /// `Skipped`, carrying the reason, at a root that is not the top level of a
+    /// git repository.
     ///
     /// Reported as a step rather than omitted so the skip is *visible*: the
     /// canonical parent-of-repos root is deliberately not a repository, and an
@@ -552,7 +553,8 @@ fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
     Ok(InitStep {
         target: ".gitignore".to_string(),
         action: InitAction::Skipped,
-        detail: "workspace root is not a git working tree — nothing to keep out of version control"
+        detail: "workspace root is not the top level of a git repository — no root .gitignore \
+                 written (the workspace credential is kept out by its own .logos/.gitignore)"
             .to_string(),
     })
 }
@@ -1171,7 +1173,7 @@ mod tests {
         let again = enable(tmp.path(), "shop", &members).expect("re-enables");
         assert_eq!(again.root_ignore.action, InitAction::Skipped);
         assert!(
-            again.root_ignore.detail.contains("not a git working tree"),
+            again.root_ignore.detail.contains("not the top level of a git repository"),
             "the skip says why: {:?}",
             again.root_ignore.detail
         );

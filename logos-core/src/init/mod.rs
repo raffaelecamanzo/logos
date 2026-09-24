@@ -432,14 +432,7 @@ pub(crate) fn run(root: &Path, options: &InitOptions) -> Result<Vec<InitStep>> {
     let mut steps = vec![
         write_if_absent(root, ".logos/config.toml", CONFIG_TEMPLATE)?,
         write_if_absent(root, ".logos/rules.toml", RULES_TEMPLATE)?,
-        upsert_block_file(
-            root,
-            ".logos/.gitignore",
-            GITIGNORE_HEADER,
-            GI_BEGIN,
-            GI_END,
-            GITIGNORE_BLOCK,
-        )?,
+        logos_dir_gitignore(root)?,
     ];
     if options.inject_mcp {
         steps.push(inject_mcp(root)?);
@@ -681,6 +674,32 @@ fn upsert_block_file(
             "managed-block markers are unbalanced — left untouched",
         )),
     }
+}
+
+/// Maintain `<root>/.logos/.gitignore` — the [`GITIGNORE_BLOCK`] that keeps every
+/// derived artefact and the credential store out of version control ([FR-IN-04],
+/// [NFR-SE-07]). [`run`] writes it for a member; the workspace-tier config
+/// writers write it for the workspace root's own `.logos/` ([FR-WS-30]), because
+/// that directory is created by the first workspace save rather than by `init`,
+/// and the ignore must not depend on whether — or with which build — `logos init
+/// --workspace` last ran. The `.logos/` directory must already exist.
+///
+/// Self-contained on purpose: git honours a nested `.gitignore` whichever
+/// repository encloses it, so it covers a root that is its own repository, one
+/// nested inside an enclosing repository, and a root with no repository at all.
+///
+/// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+pub(crate) fn logos_dir_gitignore(root: &Path) -> Result<InitStep> {
+    upsert_block_file(
+        root,
+        ".logos/.gitignore",
+        GITIGNORE_HEADER,
+        GI_BEGIN,
+        GI_END,
+        GITIGNORE_BLOCK,
+    )
 }
 
 /// Maintain the **workspace-root** `.gitignore` managed block ignoring each of

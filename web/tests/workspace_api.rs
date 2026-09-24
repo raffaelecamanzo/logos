@@ -2076,16 +2076,24 @@ async fn a_workspace_save_then_read_round_trips_and_leaves_no_graph_store_at_the
     }
 
     // ADR-40: no engine was constructed at the workspace root. A graph store is
-    // the evidence one leaves behind, so `.logos/` holds exactly the two files.
+    // the evidence one leaves behind, so `.logos/` holds exactly the two files
+    // written and the managed `.gitignore` the writers keep beside them.
     let mut at_root: Vec<String> = std::fs::read_dir(root.join(".logos"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     at_root.sort();
-    assert_eq!(at_root, ["config.toml", "secrets.toml"], "the workspace root carries only what was written");
+    assert_eq!(
+        at_root,
+        [".gitignore", "config.toml", "secrets.toml"],
+        "the workspace root carries only what was written"
+    );
     assert!(!root.join(".logos/logos.db").exists(), "no graph store at the workspace root");
 
-    // FR-WS-01: the `.logos/` the save created is not admitted as a member.
+    // FR-WS-01, as a regression guard: the member set is unchanged after the
+    // save. (A `.logos/` holding only these files is not admissible anyway — the
+    // exclusion itself is proven by the core fixture
+    // `a_logos_dir_at_the_workspace_root_is_never_a_member`.)
     let federation = discover(root).expect("discovery succeeds").expect("a workspace");
     let names: Vec<&str> = federation.members.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["api", "web"], "the member set is unchanged by a workspace-root .logos/");
@@ -2205,4 +2213,43 @@ async fn there_is_no_workspace_apply_route() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+/// The workspace credential is kept out of version control **whoever authored
+/// the manifest** ([NFR-SE-07], [FR-WS-30]). A hand-written manifest at a root
+/// that is itself a git working tree never ran `logos init --workspace`, so no
+/// managed root `.gitignore` exists — and a credential written through the
+/// route must still be ignored, by the `.logos/.gitignore` the writer keeps
+/// beside it. Asserted through git's own verdict, not the file's text.
+#[tokio::test]
+async fn a_credential_written_under_a_hand_written_manifest_at_a_tracked_root_is_ignored() {
+    let tmp = workspace();
+    let root = tmp.path();
+    sh_git(root, &["init", "-q", "-b", "main"]);
+    assert!(!root.join(".gitignore").exists(), "no enablement ran, so no managed root ignore");
+    let (router, intent) = ws_router_with_intent(&tmp);
+
+    let resp = router
+        .oneshot(post_form("/api/v1/workspace/config/secret", "api_key=sk-hand-written-root-hw05", &intent))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(root.join(".logos/secrets.toml").is_file(), "the credential was written");
+
+    let ignored = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "core.excludesFile=/dev/null", "check-ignore", "-q", ".logos/secrets.toml"])
+        .status()
+        .expect("git is on PATH")
+        .success();
+    assert!(ignored, "git ignores the workspace credential");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "core.excludesFile=/dev/null", "status", "--porcelain", "--untracked-files=all", "--", ".logos"])
+        .output()
+        .expect("git is on PATH");
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(!status.contains("secrets.toml"), "`git add -A` would not pick the key up: {status}");
 }
