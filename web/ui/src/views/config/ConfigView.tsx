@@ -598,7 +598,17 @@ function FileEditor({
  *  NFR-SE-07). The input is never pre-filled (the browser never receives the
  *  stored key); only the masked presence (set + last-4 / not set) is shown, and a
  *  successful write updates that masked state — the secret is never echoed. */
-function SecretEditor({ initial, inherited }: { initial: MaskedSecret; inherited: boolean }) {
+function SecretEditor({
+  initial,
+  inherited,
+  onSaved,
+}: {
+  initial: MaskedSecret;
+  inherited: boolean;
+  /** Called after a successful key write — the credential's resolution may have
+   *  changed (clearing the member's key hands it to the workspace's). */
+  onSaved?: () => void;
+}) {
   const [masked, setMasked] = useState<MaskedSecret>(initial);
   const [value, setValue] = useState("");
   const [result, setResult] = useState<ResultMessage | null>(null);
@@ -613,6 +623,7 @@ function SecretEditor({ initial, inherited }: { initial: MaskedSecret; inherited
       setValue("");
       if (outcome) setMasked(outcome.chat_key);
       setResult({ kind: "ok", text: describeSecret(outcome) });
+      onSaved?.();
     } catch (e) {
       setResult(
         e instanceof ConfigMutateError
@@ -820,6 +831,7 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       <SecretEditor
         initial={model.chat_key}
         inherited={effective?.credential_origin === "workspace"}
+        onSaved={refreshEffective}
       />
       <GraphConsistencyCard />
       <FileEditor

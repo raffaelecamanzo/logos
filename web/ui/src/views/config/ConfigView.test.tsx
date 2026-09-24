@@ -499,6 +499,32 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
   });
 
+  it("discloses the workspace key once the member clears its own", async () => {
+    // Loaded while the member holds its own key: nothing is inherited yet. Clearing it
+    // hands the resolution to the workspace key, and the re-read says so.
+    let reads = 0;
+    const own = model();
+    own.effective_chat = { ...own.effective_chat, policy_origin: "workspace", credential_origin: "member" };
+    const cleared = { ...own, chat_key: { present: false }, effective_chat: { ...own.effective_chat, credential: { present: true, last4: "wk42" }, credential_origin: "workspace" as const } };
+    mockFetch({
+      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(reads++ === 0 ? own : cleared) }),
+      "POST /config/secret": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ path: ".logos/secrets.toml", chat_key: { present: false, last4: null } }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.queryByText(/key is inherited from the workspace root/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    await screen.findByText(/Key cleared\./);
+    const card = screen.getByRole("heading", { name: "chat API key" }).closest("section");
+    await waitFor(() => expect(card).toHaveTextContent(/key is inherited from the workspace root/));
+    expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
+  });
+
   it("shows no inheritance note when the member declares its own halves", async () => {
     mockFetch({});
     renderView();
