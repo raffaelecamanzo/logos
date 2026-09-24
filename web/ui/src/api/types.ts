@@ -905,8 +905,10 @@ export interface ConfigReadModel {
   chat_key: MaskedSecret;
   defaults: ConfigDefaults;
   /** Carried BESIDE `config` and `chat_key`, which stay the member's literal
-   *  document and its own key. The editor never reads it: an inherited value
-   *  must not be posted back into the member's `config.toml` (NFR-RA-05). */
+   *  document and its own key. The Chat tab's readiness verdict reads it (S-452);
+   *  the editor reads it only for its read-only inheritance note, and never
+   *  pre-fills or posts it: an inherited value must not be written back into the
+   *  member's `config.toml` (NFR-RA-05). */
   effective_chat: EffectiveChat;
 }
 

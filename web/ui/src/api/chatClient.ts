@@ -37,8 +37,9 @@ export const CHAT_THREADS_ROUTE = "/api/v1/chat/threads";
 
 /**
  * `GET /api/v1/config` → the chat-relevant slice of the config read-model: the
- * `[chat]` policy (provider/model/endpoint/budget) plus the MASKED key's presence.
- * A pure read — no token, no store mutation ([ADR-28]).
+ * EFFECTIVE `[chat]` policy (provider/model/endpoint/budget) and the credential's
+ * presence, each with the root it resolved from (S-448's `effective_chat`). A pure
+ * read — no token, no store mutation ([ADR-28]).
  */
 export function fetchChatConfig(): Promise<ChatConfigReadModel> {
   return apiFetch<ChatConfigReadModel>("config");

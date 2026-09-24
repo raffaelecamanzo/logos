@@ -30,8 +30,12 @@
  * Everything renders through the S-193 design tokens (`Chat.module.css`); no
  * inline `<style>`/`<script>`, no CSS-in-JS, so the byte-identical self-only CSP
  * holds ([NFR-SE-06]). The masked chat key never reaches this surface (NFR-SE-07):
- * the configured body receives only the `[chat]` policy, and the runtime adapter
- * only ever sends the user message.
+ * the configured body receives only the EFFECTIVE `[chat]` policy and the two
+ * origins, and the runtime adapter only ever sends the user message.
+ *
+ * Whether chat is usable is not decided here. `chatReadiness` (`chatModel.ts`,
+ * S-452) reads it off the read-model's effective-chat origins — the resolution the
+ * turn path dials — and this file renders the verdict.
  */
 
 import { useCallback, useState } from "react";
@@ -48,51 +52,76 @@ import {
 import { fetchChatConfig } from "../../api/chatClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import { Button, Callout } from "../../components/index.ts";
+import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { MarkdownAnswer } from "./MarkdownAnswer.tsx";
 import { ThreadList } from "./ThreadList.tsx";
 import { useChatRuntime } from "./chatRuntime.tsx";
 import {
+  chatReadiness,
+  chatScope,
+  configureFirstCopy,
   endpointHost,
   hasConsent,
-  isConfigured,
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
   type ChatConfigReadModel,
   type ChatPolicy,
+  type ChatReady,
+  type ConfigureFirst as ConfigureFirstState,
   type TurnState,
 } from "./chatModel.ts";
 import styles from "./Chat.module.css";
 
 export function ChatView() {
   const config = useApiResource<ChatConfigReadModel>(() => fetchChatConfig(), []);
+  const { mode, member } = useWorkspace();
   return (
     <div className={styles.view}>
       <AsyncResource resource={config} loadingLabel="Loading chat…">
-        {(model) =>
-          isConfigured(model) ? (
-            // Only the policy slice crosses into the configured body — the masked
-            // key (`model.chat_key`) is deliberately NOT passed (NFR-SE-07).
-            <ChatConfigured chat={model.config.parsed.chat} />
-          ) : (
-            <ConfigureFirst />
-          )
-        }
+        {(model) => {
+          // The verdict is the pure function's (S-452); this view only renders it.
+          const verdict = chatReadiness(model, chatScope(mode, member));
+          // Only the effective policy crosses into the configured body — the
+          // credential is presence-only and never reaches it (NFR-SE-07).
+          return verdict.ready ? <ChatConfigured ready={verdict} /> : <ConfigureFirst state={verdict} />;
+        }}
       </AsyncResource>
     </div>
   );
 }
 
-/** The honest configure-first state ([FR-UI-18]): a muted callout into the Config
- *  tab — NOT an error, and no composer. */
-function ConfigureFirst() {
+/**
+ * The honest configure-first state ([FR-UI-18], [NFR-CC-04]): a muted advisory —
+ * NOT an error, and no composer — that names the root it inspected, the absent
+ * half, and where any present half came from, and links the member's Config tab.
+ *
+ * In workspace mode the workspace-root files that would declare the absent half
+ * for every member are NAMED, not linked: the workspace-tier editor (S-451) is not
+ * built yet, and a link to a control that does not exist would be a false claim.
+ */
+function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
+  const copy = configureFirstCopy(state);
   return (
     <Callout label="CONFIGURE" tone="muted">
+      <p>{copy.summary}</p>
+      {copy.present && <p>{copy.present}</p>}
       <p>
-        The agentic chat needs an LLM provider before it can answer. Set the provider,
-        model, and API key in the <a href="/config">Config</a> tab, then return here to
-        start chatting. Until then no outbound call is possible.
+        {copy.action} in the <a href={state.configHref}>Config</a> tab{copy.actionScope}, then
+        return here to start chatting. Until then no outbound call is possible.
       </p>
+      {copy.workspaceLead && (
+        <p>
+          {copy.workspaceLead}{" "}
+          {state.workspaceFiles.map((file, i) => (
+            <span key={file}>
+              {i > 0 && " and "}
+              <code>{file}</code>
+            </span>
+          ))}
+          .
+        </p>
+      )}
     </Callout>
   );
 }
@@ -100,7 +129,8 @@ function ConfigureFirst() {
 /** The configured chat surface: the conversation-history rail (S-210/S-211), the
  *  consent banner, and the assistant-ui thread. There is no global Clear-history —
  *  deletion is per conversation, in the rail (S-211, [FR-UI-26], [ADR-47]). */
-function ChatConfigured({ chat }: { chat: ChatPolicy }) {
+function ChatConfigured({ ready }: { ready: ChatReady }) {
+  const chat = ready.policy;
   const [consented, setConsented] = useState<boolean>(() => hasConsent());
   // The rail collapses behind a toggle below ~1023px (S-210 AC-3); `railOpen`
   // drives that toggle. At ≥1024px the rail is always shown (CSS), so this state
@@ -134,7 +164,7 @@ function ChatConfigured({ chat }: { chat: ChatPolicy }) {
 
   return (
     <div className={styles.chat}>
-      {!consented && <ConsentBanner chat={chat} onAccept={acceptConsent} />}
+      {!consented && <ConsentBanner ready={ready} onAccept={acceptConsent} />}
 
       <div className={styles.layout}>
         <button
@@ -179,16 +209,29 @@ function ChatConfigured({ chat }: { chat: ChatPolicy }) {
   );
 }
 
-/** The first-use consent disclosure (NFR-SE-07): names the endpoint and what is
- *  sent before any outbound call; the composer is disabled until it is accepted. */
-function ConsentBanner({ chat, onAccept }: { chat: ChatPolicy; onAccept: () => void }) {
+/** The first-use consent disclosure (NFR-SE-07): names the EFFECTIVE endpoint and
+ *  what is sent before any outbound call — and, when the policy or the key is
+ *  inherited, says so, since the endpoint is then one this member's own
+ *  `config.toml` never names. The composer is disabled until it is accepted. */
+function ConsentBanner({ ready, onAccept }: { ready: ChatReady; onAccept: () => void }) {
+  const chat = ready.policy;
   return (
     <Callout label="BEFORE YOU START" tone="warm" className={styles.consent}>
       <p>
         Asking a question sends your message together with{" "}
         <strong>source and graph excerpts</strong> from this project to{" "}
-        <strong>{endpointHost(chat)}</strong> (the configured <code>{chat.provider}</code>{" "}
-        endpoint). Nothing is sent until you ask.
+        <strong>{endpointHost(chat)}</strong>{" "}
+        {ready.policyOrigin === "workspace" ? (
+          <>
+            (the <code>{chat.provider}</code> endpoint inherited from the workspace root)
+          </>
+        ) : (
+          <>
+            (the configured <code>{chat.provider}</code> endpoint)
+          </>
+        )}
+        .{ready.credentialOrigin === "workspace" && " The API key is inherited from the workspace root."}{" "}
+        Nothing is sent until you ask.
       </p>
       <p className={styles.providerLine}>
         {chat.provider} · {endpointHost(chat)} · {chat.model}

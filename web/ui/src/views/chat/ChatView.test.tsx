@@ -34,8 +34,16 @@ import {
   streamChatTurn,
 } from "../../api/chatClient.ts";
 import { ApiError } from "../../api/client.ts";
-import type { ChatConfigReadModel, PersistedChatMessage, ThreadSummary } from "./chatModel.ts";
+import type {
+  ChatConfigReadModel,
+  ChatOrigin,
+  PersistedChatMessage,
+  ThreadSummary,
+} from "./chatModel.ts";
 import { ChatView } from "./ChatView.tsx";
+import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
+import { setScopedMember } from "../../workspace/scope.ts";
+import { stubApi } from "../../workspace/testFixtures.ts";
 
 const mockFetchConfig = vi.mocked(fetchChatConfig);
 const mockStreamTurn = vi.mocked(streamChatTurn);
@@ -74,29 +82,51 @@ function persisted(role: PersistedChatMessage["role"], content: string, id = 1):
   return { id, role, content, created_at: 0, tool_traces: [] };
 }
 
-/** A configured read-model carrying a MASKED key whose last-4 must NEVER render. */
+/** A configured read-model (S-448's effective slice): the member declares both
+ *  halves. The wire's masked last-4 must NEVER render — the chat mirror does not
+ *  even carry it, but a fixture that sends it proves nothing leaks it through. */
 const MASKED_LAST4 = "SECRET4";
-function configuredModel(provider: "anthropic" | "openai" = "openai"): ChatConfigReadModel {
+function configuredModel(
+  provider: "anthropic" | "openai" = "openai",
+  origins: { policy?: ChatOrigin; credential?: ChatOrigin } = {},
+): ChatConfigReadModel {
   return {
-    config: {
-      parsed: {
-        chat: {
-          provider,
-          model: "openrouter/some-model",
-          base_url: "https://openrouter.ai/api/v1",
-          max_tool_calls: 24,
-          max_subagent_tool_calls: 8,
-          max_replans: 3,
-        },
+    effective_chat: {
+      policy: {
+        provider,
+        model: "openrouter/some-model",
+        base_url: "https://openrouter.ai/api/v1",
+        max_tool_calls: 24,
+        max_subagent_tool_calls: 8,
+        max_replans: 3,
       },
+      policy_origin: origins.policy ?? "member",
+      credential: { present: true, last4: MASKED_LAST4 } as { present: boolean },
+      credential_origin: origins.credential ?? "member",
     },
-    chat_key: { present: true, last4: MASKED_LAST4 },
   };
 }
 
-function unconfiguredModel(): ChatConfigReadModel {
+/** A read-model whose resolution found `absent` half(s) undeclared at every root. */
+function unconfiguredModel(
+  absent: "model" | "key" | "both" = "key",
+  presentOrigin: ChatOrigin = "member",
+): ChatConfigReadModel {
   const m = configuredModel();
-  return { ...m, chat_key: { present: false, last4: null } };
+  const e = m.effective_chat;
+  if (absent !== "key") {
+    e.policy = { ...e.policy, model: null };
+    e.policy_origin = "unset";
+  } else {
+    e.policy_origin = presentOrigin;
+  }
+  if (absent !== "model") {
+    e.credential = { present: false };
+    e.credential_origin = "unset";
+  } else {
+    e.credential_origin = presentOrigin;
+  }
+  return m;
 }
 
 /** A streamed SSE Response from wire chunks (real ReadableStream body). */
@@ -170,6 +200,44 @@ describe("ChatView — configured chrome", () => {
     expect((await screen.findAllByText(/api\.anthropic\.com/)).length).toBeGreaterThan(0);
   });
 
+  it("discloses the EFFECTIVE endpoint when the policy and key are inherited", async () => {
+    // The member's own config.toml names no endpoint at all; the banner must name the
+    // one a turn will actually dial, and say where it came from (NFR-SE-07).
+    mockFetchConfig.mockResolvedValue(
+      configuredModel("anthropic", { policy: "workspace", credential: "workspace" }),
+    );
+    render(<ChatView />);
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent(/api\.anthropic\.com \(the anthropic endpoint inherited from the workspace root\)/);
+    expect(banner).toHaveTextContent("The API key is inherited from the workspace root.");
+    expect(banner?.textContent).not.toContain(MASKED_LAST4);
+  });
+
+  it("discloses each half's origin independently when only one is inherited", async () => {
+    // Member policy + workspace key: the endpoint is the member's, the key is not.
+    mockFetchConfig.mockResolvedValue(configuredModel("openai", { policy: "member", credential: "workspace" }));
+    const first = render(<ChatView />);
+    let banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("(the configured openai endpoint)");
+    expect(banner).toHaveTextContent("The API key is inherited from the workspace root.");
+    first.unmount();
+
+    // Workspace policy + member key: the endpoint is inherited, the key is not.
+    mockFetchConfig.mockResolvedValue(configuredModel("openai", { policy: "workspace", credential: "member" }));
+    render(<ChatView />);
+    banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("(the openai endpoint inherited from the workspace root)");
+    expect(banner?.textContent).not.toContain("API key is inherited");
+  });
+
+  it("calls a member-declared endpoint the configured one", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    render(<ChatView />);
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("(the configured openai endpoint)");
+    expect(banner?.textContent).not.toMatch(/inherited/);
+  });
+
   it("enables the composer after consent is acknowledged", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
@@ -183,9 +251,70 @@ describe("ChatView — configure-first", () => {
   it("renders the honest configure-first state with no composer", async () => {
     mockFetchConfig.mockResolvedValue(unconfiguredModel());
     render(<ChatView />);
-    expect(await screen.findByText(/needs an LLM provider/)).toBeInTheDocument();
+    expect(await screen.findByText(/Chat is not configured yet/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Config" })).toHaveAttribute("href", "/config");
     expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatView — configure-first names the root, the absent half and the origin (S-452)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setScopedMember(null);
+    window.history.replaceState({}, "", "/");
+  });
+
+  /** Render under the real shell provider over a stubbed two-member roster, opened
+   *  on `web` — NOT the manifest default (`api`), so a verdict that fell back to
+   *  the default member could not pass. */
+  async function renderInWorkspace(model: ChatConfigReadModel) {
+    stubApi();
+    window.history.replaceState({}, "", "/chat?repo=web");
+    mockFetchConfig.mockResolvedValue(model);
+    render(
+      <WorkspaceProvider>
+        <ChatView />
+      </WorkspaceProvider>,
+    );
+    return screen.findByText(/Chat is not configured yet for web —/);
+  }
+
+  it("single-root: names this repository, never a member, as a muted status advisory", async () => {
+    mockFetchConfig.mockResolvedValue(unconfiguredModel("key"));
+    render(<ChatView />);
+    const summary = await screen.findByText(
+      "Chat is not configured yet for this repository — no API key is declared.",
+    );
+    expect(screen.getByText("The provider model is declared by this repository.")).toBeInTheDocument();
+    // A muted advisory with a status role — not an error (FR-UI-18).
+    const advisory = summary.closest("section");
+    expect(advisory).toHaveAttribute("role", "status");
+    expect(advisory?.className).toMatch(/_muted_/);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(advisory?.textContent).not.toMatch(/workspace/i);
+  });
+
+  it("workspace: names the selected member, the absent half and the inherited origin", async () => {
+    const summary = await renderInWorkspace(unconfiguredModel("model", "workspace"));
+    expect(summary).toHaveTextContent(
+      "Chat is not configured yet for web — no provider model is declared by web or by the workspace root.",
+    );
+    expect(screen.getByText("The API key is inherited from the workspace root.")).toBeInTheDocument();
+    // Never the manifest default member, which is what an unscoped read answers from.
+    expect(summary.closest("section")?.textContent).not.toMatch(/\bapi\b(?! key)/i);
+  });
+
+  it("workspace: links THIS member's Config tab and names the workspace file as text", async () => {
+    await renderInWorkspace(unconfiguredModel("both"));
+    const link = screen.getByRole("link", { name: "Config" });
+    expect(link).toHaveAttribute("href", "/config?repo=web");
+    // The workspace-tier editor (S-451) is not built: the files are named, not linked.
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    const config = screen.getByText("<workspace-root>/.logos/config.toml");
+    const secrets = screen.getByText("<workspace-root>/.logos/secrets.toml");
+    expect(config.tagName).toBe("CODE");
+    expect(secrets.tagName).toBe("CODE");
+    expect(config.closest("a")).toBeNull();
   });
 });
 
