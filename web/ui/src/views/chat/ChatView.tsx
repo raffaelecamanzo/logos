@@ -99,8 +99,8 @@ export function ChatView() {
  * member's Config tab.
  *
  * In workspace mode the workspace-root files that would declare the absent half
- * for every member are NAMED, not linked: the workspace-tier editor (S-451) is not
- * built yet, and a link to a control that does not exist would be a false claim.
+ * for every member are named, and the app-level workspace Config view whose chat
+ * group writes them (S-451) is linked beside them.
  */
 function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
   const copy = configureFirstCopy(state);
@@ -123,6 +123,13 @@ function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
             </span>
           ))}
           .
+          {state.workspaceConfigHref && (
+            <>
+              {" "}
+              The <a href={state.workspaceConfigHref}>workspace Config</a> view edits{" "}
+              {state.workspaceFiles.length === 1 ? "that file" : "both files"}.
+            </>
+          )}
         </p>
       )}
     </Callout>

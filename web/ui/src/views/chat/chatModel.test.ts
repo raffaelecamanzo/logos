@@ -23,7 +23,9 @@ import {
   type ChatScope,
   type SseFrame,
   type TurnState,
+  WORKSPACE_CONFIG_HREF,
 } from "./chatModel.ts";
+import { WORKSPACE_NAV_ITEMS } from "../../nav.ts";
 
 const POLICY: ChatPolicy = {
   provider: "openai",
@@ -316,6 +318,28 @@ describe("chatReadiness (S-452, FR-UI-18) — the full origin matrix, no DOM", (
     ]);
     expect(files("unset", "member")).toEqual(["<workspace-root>/.logos/config.toml"]);
     expect(files("member", "unset")).toEqual(["<workspace-root>/.logos/secrets.toml"]);
+  });
+
+  it("links the workspace Config view in workspace mode, keeping the member on the URL (S-451)", () => {
+    const v = chatReadiness(configModel("unset", "unset"), WORKSPACE);
+    if (v.ready) throw new Error("expected configure-first");
+    // Its own member, so returning from the editor reopens this member's chat.
+    expect(v.workspaceConfigHref).toBe("/workspace-config?repo=billing-service");
+    const none = chatReadiness(configModel("unset", "unset"), { mode: "workspace", member: null });
+    expect(none.ready ? null : none.workspaceConfigHref).toBe("/workspace-config");
+  });
+
+  it("links nothing at the workspace tier in single-root mode, where it does not exist", () => {
+    for (const [p, c] of [["unset", "unset"], ["unset", "member"], ["member", "unset"]] as const) {
+      const v = chatReadiness(configModel(p, c), SINGLE);
+      expect(v.ready ? "ready" : v.workspaceConfigHref).toBeNull();
+    }
+  });
+
+  it("reads the workspace Config route off its nav registration, never a second spelling", () => {
+    const registered = WORKSPACE_NAV_ITEMS.find((i) => i.id === "workspace-config");
+    expect(registered?.scope).toBe("app");
+    expect(WORKSPACE_CONFIG_HREF).toBe(registered?.path);
   });
 });
 

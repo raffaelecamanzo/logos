@@ -15,6 +15,7 @@
  * the effective provider, model, and endpoint host (NFR-SE-07).
  */
 
+import { WORKSPACE_NAV_ITEMS } from "../../nav.ts";
 import { urlWithMember } from "../../workspace/scope.ts";
 import type { WorkspaceMode } from "../../workspace/WorkspaceContext.tsx";
 
@@ -177,9 +178,13 @@ export interface ConfigureFirst {
   /** The member Config tab — the control that writes either half at this root. */
   configHref: string;
   /** Workspace mode only: the workspace-root file each absent half would be
-   *  declared in. Named as TEXT — the workspace-tier editor (S-451) does not exist
-   *  yet, and a link to a control that does not exist is not a link. */
+   *  declared in — named, so the reader knows which file the linked editor writes. */
   workspaceFiles: string[];
+  /** Workspace mode only: the app-level workspace Config view, whose chat group
+   *  writes both of those files (S-451) — carrying the member so returning here
+   *  reopens this member's chat. `null` in single-root mode, which has no
+   *  workspace tier and no such view. */
+  workspaceConfigHref: string | null;
   /** The member declares its own key, withheld from the inherited workspace
    *  endpoint (HF-1) — so the absent key is the WORKSPACE's, and owning the
    *  policy is what lets the member use its own. */
@@ -192,6 +197,16 @@ export type ChatReadiness = ChatReady | ConfigureFirst;
 export const WORKSPACE_CONFIG_FILE = "<workspace-root>/.logos/config.toml";
 /** The workspace-root file that holds the credential half. */
 export const WORKSPACE_SECRETS_FILE = "<workspace-root>/.logos/secrets.toml";
+
+/** The workspace Config view's route, read off its nav registration (S-430) so the
+ *  configure-first link cannot drift from the route the shell mounts it at. */
+export const WORKSPACE_CONFIG_HREF: string = registeredPath("workspace-config");
+
+function registeredPath(id: string): string {
+  const item = WORKSPACE_NAV_ITEMS.find((i) => i.id === id);
+  if (!item) throw new Error(`nav.ts registers no "${id}" view`);
+  return item.path;
+}
 
 function rootInspected(scope: ChatScope): RootInspected {
   if (scope.mode === "single") return { kind: "repository", label: "this repository" };
@@ -239,6 +254,7 @@ export function chatReadiness(model: ChatConfigReadModel, scope: ChatScope): Cha
     present,
     configHref: urlWithMember("/config", member),
     workspaceFiles,
+    workspaceConfigHref: scope.mode === "single" ? null : urlWithMember(WORKSPACE_CONFIG_HREF, member),
     memberKeyWithheld: member_key_withheld,
   };
 }

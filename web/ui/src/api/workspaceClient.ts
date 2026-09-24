@@ -19,7 +19,10 @@ import { apiFetch, apiUrl } from "./client.ts";
 import { ConfigMutateError, FORM_HEADERS, detailOf, formBody } from "./configClient.ts";
 import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
+  ConfigReadModel,
+  ConfigWriteOutcome,
   ManifestSaveOutcome,
+  SecretWriteOutcome,
   WorkspaceGovernanceAnswer,
   WorkspaceManifestDocument,
   WorkspaceReachabilityAnswer,
@@ -160,6 +163,79 @@ export async function saveWorkspaceManifest(
   });
   if (res.ok || res.status === 409) return (await res.json()) as ManifestSaveOutcome;
   throw new ConfigMutateError(res.status, await workspaceErrorDetail(res));
+}
+
+/**
+ * `GET /api/v1/workspace/config` (S-450, FR-WS-30) — the workspace root's own
+ * config tier, `<workspace-root>/.logos/`, as the workspace Config editor's chat
+ * group loads it (S-451). The same {@link ConfigReadModel} `GET /api/v1/config`
+ * serves for a member, read at the workspace root: its literal `config.toml`, the
+ * **masked** credential (NFR-SE-07), and an effective-chat slice whose origins
+ * are relative to that root — `member` means *declared here*, and `workspace`
+ * never appears, because nothing above the workspace root is inherited.
+ *
+ * A `2xx` that is not that read-model is refused here rather than handed on: the
+ * editor's Save replaces the whole file with its raw pane, so an editor seeded
+ * from a payload with no document in it would offer to overwrite the tier with
+ * nothing (NFR-RA-05).
+ *
+ * App-level: no `?repo=`, like every `workspace/*` read.
+ */
+export async function fetchWorkspaceConfig(): Promise<ConfigReadModel> {
+  const model = await apiFetch<ConfigReadModel>("workspace/config");
+  if (typeof model?.config?.content !== "string" || typeof model.chat_key?.present !== "boolean") {
+    throw new Error("GET /api/v1/workspace/config answered without a config document or key state.");
+  }
+  return model;
+}
+
+/**
+ * `POST /api/v1/workspace/config/save` (S-450, FR-WS-30) — validate-then-atomic-
+ * write of the candidate `content` as `<workspace-root>/.logos/config.toml`,
+ * through the intent-guarded {@link apiMutate} seam (ADR-31, NFR-SE-06). The
+ * workspace-root twin of `saveConfig`: `file=config` is the only document this
+ * root carries (a `rules.toml` here would be read by nothing), and the server
+ * reaches no member — it writes only under `<workspace-root>/.logos/` (the file,
+ * and the managed `.gitignore` on a first save) and runs no pipeline, because
+ * there is no graph at the root to apply to.
+ *
+ * Throws {@link ConfigMutateError} carrying the server's message on a refused
+ * candidate (`422`, file left byte-identical) or an I/O fault (`500`).
+ */
+export async function saveWorkspaceConfig(content: string): Promise<ConfigWriteOutcome> {
+  const res = await apiMutate(apiUrl("workspace/config/save"), {
+    headers: FORM_HEADERS,
+    body: formBody({ file: "config", content }),
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw new ConfigMutateError(res.status, await workspaceErrorDetail(res));
+  return (await res.json()) as ConfigWriteOutcome;
+}
+
+/**
+ * `POST /api/v1/workspace/config/secret` (S-450, FR-CF-06, NFR-SE-07) — write (or,
+ * with a blank key, clear) the credential every member that declares none
+ * inherits, into the owner-only `<workspace-root>/.logos/secrets.toml`.
+ *
+ * Write-only on the same terms as `saveSecret`: it resolves with the **masked**
+ * {@link SecretWriteOutcome} (presence + last-4) and never returns the response
+ * body — a non-JSON `2xx` resolves to `null`, and a non-`2xx` throws with a fixed,
+ * body-free detail, so no reply from this route can carry key material onto a
+ * SPA surface.
+ */
+export async function saveWorkspaceSecret(apiKey: string): Promise<SecretWriteOutcome | null> {
+  const res = await apiMutate(apiUrl("workspace/config/secret"), {
+    headers: FORM_HEADERS,
+    body: formBody({ api_key: apiKey }),
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw new ConfigMutateError(res.status, "the server rejected the key write");
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as SecretWriteOutcome;
+  } catch {
+    return null;
+  }
 }
 
 /** What the boot-time probe found: a workspace (with its roster) or a plain repo. */
