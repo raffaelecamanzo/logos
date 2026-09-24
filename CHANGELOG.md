@@ -9,6 +9,19 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 76, hotfix round.
+
+### Changed
+
+- **A member's own API key is never sent to a workspace endpoint.** When a
+  member inherits the workspace `[chat]` policy (it declares no `model`), the key
+  now comes from the workspace root or not at all; the member's own key is
+  withheld (`effective_chat.member_key_withheld`). The Chat tab, the member Config
+  tab and a refused chat request say so, and setting a `[chat] model` on the
+  member makes it use its own key. A workspace key still reaches an endpoint a
+  member declares itself (CR-145, FR-WS-30, ADR-67).
+
+
 ## [1.4.18] — 2026-09-24
 
 Sprint 76 — the chat works in a workspace, and its not-ready state says why.
