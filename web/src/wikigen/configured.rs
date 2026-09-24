@@ -222,8 +222,9 @@ mod tests {
         write(
             tmp.path(),
             "config.toml",
-            "[chat]\nprovider = \"openai\"\nmodel = \"workspace/chat\"\n\
-             base_url = \"https://workspace.example/v1\"\nmax_provider_retries = 7\n",
+            "[chat]\nprovider = \"anthropic\"\nmodel = \"workspace/chat\"\n\
+             base_url = \"https://workspace.example/v1\"\nmax_provider_retries = 7\n\
+             provider_retry_base_ms = 321\n",
         );
         write(
             tmp.path(),
@@ -249,6 +250,13 @@ mod tests {
         assert_eq!(effective.api_key.as_deref(), Some("sk-workspace-ws42"));
         assert_eq!(effective.base_url, "https://workspace.example/v1");
         assert_eq!(effective.max_provider_retries, 7);
+        // Both differ from the defaults, so neither can be satisfied by a table
+        // that was not the workspace's.
+        assert_eq!(
+            effective.provider,
+            logos_core::config::ChatProvider::Anthropic
+        );
+        assert_eq!(effective.provider_retry_base_ms, 321);
     }
 
     /// The member's own `[wiki].model` still wins over the (inherited) chat model;
