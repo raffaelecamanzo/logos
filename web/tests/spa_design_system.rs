@@ -1064,6 +1064,110 @@ fn the_service_section_header_gives_width_back_but_stays_a_control() {
     }
 }
 
+/// The Workspace section reads as ONE list (S-454, [FR-UI-35], [FR-UI-37]). Its two
+/// CR-042 groups stay two `<ul>`s — the group says what a tab answers, and the
+/// app-scoped Statistics tab shares its member-scoped twin's group on purpose — but
+/// the hairline between them left that Statistics entry stranded between the
+/// hairline and the Workspace/Service boundary, reading as belonging to neither
+/// scope. So the inter-group hairline and gap are suppressed inside that section
+/// only, by a section-scoped rule.
+///
+/// Four facts, because each alone is a half-applied fix that looks like a working
+/// one: the scoped rule zeroes the border and both inter-group paddings; the
+/// unscoped `.group` border and `.group + .group` gap are still declared (the
+/// Service section's hairlines and gaps are unchanged); the section boundary still
+/// declares its own; and the scoped rule, declared once, comes AFTER every rule it
+/// ties with. `.appSection .group` is two classes, exactly
+/// as `.group:last-child` and `.group + .group` are, so source order decides — placed
+/// above `.group + .group`, the second Workspace group would keep its top gap.
+///
+/// The markup half — that the Workspace region still renders two lists and the
+/// Service region three, and that the Workspace section and only it carries
+/// `appSection` — is asserted in `web/ui/src/shell/Sidebar.test.tsx`; this is the
+/// stylesheet half, which that suite cannot see because it runs with `css: false`.
+#[test]
+fn the_workspace_section_renders_its_groups_as_one_list() {
+    const SCOPED: &str = ".appSection .group";
+    let css = strip_comments(&read("src/shell/Sidebar.module.css"));
+    // The LAST declaration of a property, because that is the one the cascade
+    // applies: `padding-top: 0; padding-top: var(--space-3)` renders the gap.
+    let decl = |sel: &str, prop: &str| -> Option<String> {
+        declarations_of(&rule_body(&css, sel))
+            .into_iter()
+            .rfind(|(name, _)| name == prop)
+            .map(|(_, value)| value)
+    };
+    // `none` zeroes a border but is INVALID for padding — the browser drops the
+    // declaration and the unscoped padding applies — so it counts only for borders.
+    let zero = |prop: &str, v: &str| {
+        length_px(v) == Some(0.0) || (prop.starts_with("border") && v == "none")
+    };
+
+    // The scoped rule zeroes the hairline and the gap on both sides of it. Read as
+    // longhands, so a shorthand in the same body is refused by name: appended after
+    // the longhands it would win, and this read would never see it.
+    let scoped = declarations_of(&rule_body(&css, SCOPED));
+    for shorthand in ["padding", "border", "border-width", "border-style"] {
+        assert!(
+            !scoped.iter().any(|(name, _)| name == shorthand),
+            "`{SCOPED}` declares the shorthand `{shorthand}`; this guard reads longhands, \
+             so spell the zeroed edges as `border-bottom` / `padding-top` / `padding-bottom`",
+        );
+    }
+    for prop in ["border-bottom", "padding-top", "padding-bottom"] {
+        let value = decl(SCOPED, prop)
+            .unwrap_or_else(|| panic!("`{SCOPED}` declares no `{prop}` (as a longhand)"));
+        assert!(
+            zero(prop, &value),
+            "`{SCOPED}` must zero `{prop}` — the Workspace section renders as one list \
+             (FR-UI-35); found `{value}`",
+        );
+    }
+
+    // The unscoped rules still declare the hairline and the top gap the scoped one
+    // suppresses: the Service section keeps both.
+    for (sel, prop) in [(".group", "border-bottom"), (".group + .group", "padding-top")] {
+        let value = decl(sel, prop).unwrap_or_else(|| panic!("`{sel}` declares no `{prop}`"));
+        assert!(
+            !zero(prop, &value),
+            "`{sel}` must still declare a non-zero `{prop}` — the suppression is scoped \
+             to the Workspace section, and the Service section's groups keep it; found \
+             `{value}`",
+        );
+    }
+
+    // The Workspace/Service boundary is its own rule and keeps its own hairline.
+    let boundary = decl(".section + .section", "border-top")
+        .unwrap_or_else(|| panic!("`.section + .section` declares no `border-top`"));
+    assert!(
+        !zero("border-top", &boundary),
+        "the Workspace/Service boundary must keep its hairline; found `{boundary}`",
+    );
+
+    // Source order: the scoped rule wins the specificity tie only by coming later.
+    let order: Vec<String> = top_level_rules(&css).into_iter().map(|(sel, _)| sel).collect();
+    // Declared once: a second `{SCOPED}` later in the file would override this one,
+    // and `rule_body` reads only the first.
+    assert_eq!(
+        order.iter().filter(|s| *s == SCOPED).count(),
+        1,
+        "`{SCOPED}` must be declared exactly once",
+    );
+    let at = |sel: &str| {
+        order
+            .iter()
+            .position(|s| s == sel)
+            .unwrap_or_else(|| panic!("rule `{sel}` not found in the stylesheet"))
+    };
+    for tied in [".group:last-child", ".group + .group"] {
+        assert!(
+            at(SCOPED) > at(tied),
+            "`{SCOPED}` ties with `{tied}` on specificity (two classes each), so it must \
+             come AFTER it in source order to win; it comes before",
+        );
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// A CSS length in px (`rem` resolved at the 16px root), or `None` when the value is

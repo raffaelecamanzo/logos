@@ -29,6 +29,21 @@
   padding-top: var(--space-3);
 }
 
+/* The Workspace section reads as ONE list (S-454, FR-UI-35, FR-UI-37). Its two
+   groups stay two `<ul>`s — the group says what a tab answers, and the app-scoped
+   Statistics tab shares its member-scoped twin's group on purpose — but the hairline
+   between them stranded that Statistics entry between it and the section boundary,
+   reading as belonging to neither scope. So inside THIS section only, the
+   inter-group hairline and gap go; the Service section's group hairlines and the
+   boundary above are untouched. ORDER MATTERS: two classes, the same specificity as
+   `.group:last-child` and `.group + .group`, so this rule wins only by coming after
+   both — asserted in `web/tests/spa_design_system.rs`. */
+.appSection .group {
+  border-bottom: none;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 /* The header is a COLUMN (frontend-design §3, stacked by CR-145): the label on its
    own row, the selector beneath it at the column's full width. The two shared one
    row until then, and on the 232px desktop column a `<select>` sized to a long

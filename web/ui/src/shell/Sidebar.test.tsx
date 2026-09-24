@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StatsInfo } from "../api/types.ts";
 import { NAV_GROUPS, NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
+import styles from "./Sidebar.module.css";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
 
 // PARTIAL, not whole: the shell calls more of the router than this spec overrides
@@ -189,6 +190,39 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     // single-root sidebar: the CR-042 A/B/C groups survive INSIDE the section
     // rather than being re-ordered by it.
     expect(names("Service")).toEqual(NAV_ITEMS.map((i) => i.label));
+  });
+
+  it("keeps each section's CR-042 groups as separate lists in the markup (S-454)", async () => {
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /Workspace/ });
+
+    // The Workspace section READS as one list, and that is the stylesheet's doing
+    // alone (`.appSection .group`, guarded in `web/tests/spa_design_system.rs`). The
+    // grouping itself survives: one `<ul>` per non-empty group, per section — today
+    // two in Workspace and three in Service. Derived from the registry, so a new
+    // view does not stale it; a component that collapsed the groups does.
+    const lists = (scope: string) =>
+      within(region(scope))
+        .getAllByRole("list")
+        .map((ul) => within(ul).getAllByRole("listitem").length);
+    const groupSizes = (items: readonly { group: string }[]) =>
+      NAV_GROUPS.map((g) => items.filter((i) => i.group === g).length).filter((n) => n > 0);
+
+    expect(lists("Workspace")).toEqual(groupSizes(WORKSPACE_NAV_ITEMS));
+    expect(lists("Service")).toEqual(groupSizes(NAV_ITEMS));
+    // Not pinned as 2/3 (see the single-root snapshot below for why), but the
+    // property needs a seam to exist: one Workspace group would make it vacuous.
+    expect(lists("Workspace").length).toBeGreaterThan(1);
+
+    // And the scoped class lands on the Workspace section and ONLY there. Under
+    // `css: false` a CSS-Module import is a proxy that names every key, so this
+    // reads the rendered class, not the stylesheet: whether the key is DEFINED is
+    // the Rust suite's job (`every_module_style_key_a_view_uses_is_defined_in_the_…`).
+    // On the Service section it would erase that section's group hairlines.
+    expect(region("Workspace").classList).toContain(styles.section);
+    expect(region("Workspace").classList).toContain(styles.appSection);
+    expect(region("Service").classList).toContain(styles.section);
+    expect(region("Service").classList).not.toContain(styles.appSection);
   });
 
   it("renders the member selector in the Service section header and NOWHERE else", async () => {
