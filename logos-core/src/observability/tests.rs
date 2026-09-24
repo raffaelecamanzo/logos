@@ -421,6 +421,42 @@ fn traced_emits_one_record_through_the_layer() {
     assert_eq!(records[1].origin, "feature");
 }
 
+/// The workspace-tier config seam (S-450, [ADR-67]) books each call exactly as
+/// the façade method it stands in for: one `config_read` / `config_write` /
+/// `config_write_secret` record per call, `ok` tracking the result — so a
+/// workspace-root save is as visible to `logos stats` as a member's, with no
+/// engine constructed to emit it.
+///
+/// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+#[test]
+fn the_workspace_tier_seam_emits_the_facade_config_events() {
+    let dir = tempfile::tempdir().expect("temp workspace root");
+    let root = dir.path();
+    let (sink, rx) = TelemetrySink::with_capacity(16);
+    let subscriber = tracing_subscriber::registry()
+        .with(TelemetryLayer::new(Surface::Mcp, "feature".to_string(), "test-session".to_string(), sink));
+
+    tracing::subscriber::with_default(subscriber, || {
+        crate::config::write_workspace_config(root, "[chat]\nmodel = \"ws/m\"\n").expect("writes");
+        crate::config::write_workspace_secret(root, "sk-seam-key-sm01").expect("writes");
+        crate::config::read_workspace_documents(root).expect("reads");
+        assert!(crate::config::write_workspace_config(root, "modle = 1\n").is_err());
+    });
+
+    let records: Vec<(String, bool)> = rx.try_iter().map(|r| (r.tool, r.ok)).collect();
+    assert_eq!(
+        records,
+        [
+            ("config_write".to_string(), true),
+            ("config_write_secret".to_string(), true),
+            ("config_read".to_string(), true),
+            ("config_write".to_string(), false),
+        ],
+        "one façade-named record per workspace-tier call"
+    );
+    assert!(!root.join(".logos/logos.db").exists(), "and no graph store behind them");
+}
+
 /// The S-022 watcher attribution: a telemetry event carrying the sanctioned
 /// `surface = "watcher"` override records under that surface (the watcher
 /// runs *inside* the `serve --mcp` process, whose default is `mcp`), while

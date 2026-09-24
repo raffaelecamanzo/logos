@@ -60,7 +60,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use logos_core::config::{self as core_config, ConfigError, ConfigReadModel};
+use logos_core::config::{self as core_config, ConfigReadModel};
 use logos_core::federation::{
     app_wide_reachability, open_state, query as fed_query, workspace_governance,
     workspace_statistics, Backing, BoundedReachability, ContractBridge, DegradedRollup,
@@ -1635,18 +1635,16 @@ pub(crate) async fn config(
 // ── The workspace root as a config root ([FR-WS-30], S-450, [ADR-40]) ─────────
 //
 // One read and two writes over `<workspace-root>/.logos/`, the second config tier
-// `resolve_chat` inherits from. Each reaches the SAME function the member route
-// reaches through its engine — `read_documents`, `write_config`, `write_secret` —
+// `resolve_chat` inherits from. Each calls core's engine-free workspace-tier seam
+// (`read_workspace_documents`, `write_workspace_config`, `write_workspace_secret`),
+// which reaches the SAME function the member route reaches through its engine —
 // so validate-before-write, the atomic replace and the credential's 0o600 mode
-// come with it unchanged ([NFR-RA-07], [NFR-SE-07]). They reach it directly, not
-// through an `Engine`, because constructing one at the workspace root is the fault
-// [ADR-40]'s exception exists to avoid: the root holds no graph, and an engine
-// would open a store there. That is also why no apply route exists at this scope.
-//
-// Unlike `Engine::config_*` these calls emit no façade telemetry event: that event
-// is the engine's, and attributing a workspace-root write to whichever member
-// happens to be the default would misstate who did it ([NFR-RA-05]). The render
-// log line below each is the trace they leave.
+// come with it unchanged ([NFR-RA-07], [NFR-SE-07]) — and emits the same
+// telemetry event the façade method would, under the `Surface::Web` scope
+// `run_blocking` enters. No `Engine` is involved because constructing one at the
+// workspace root is the fault [ADR-40]'s exception exists to avoid: the root
+// holds no graph, and an engine would open a store there. That is also why no
+// apply route exists at this scope.
 //
 // [ADR-40]: ../../docs/specs/architecture/decisions/ADR-40.md
 // [NFR-RA-07]: ../../docs/specs/requirements/NFR-RA-07.md
@@ -1657,7 +1655,7 @@ pub(crate) async fn config(
 /// (absent) `rules.toml`, the **masked** credential ([NFR-SE-07]), the defaults
 /// and the effective-chat slice.
 ///
-/// The slice is resolved with **no** tier above ([`read_documents`] with `None`),
+/// The slice is resolved with **no** tier above ([`read_workspace_documents`]),
 /// because the workspace root has none. Its origins are therefore relative to
 /// the root this payload reads: `member` means *declared at this root*, `unset`
 /// that it is not, and `workspace` never appears — nothing here is inherited.
@@ -1665,17 +1663,17 @@ pub(crate) async fn config(
 /// A present-but-invalid file fails loud (`500`), as on the member route; the
 /// save route is the repair path, since it validates the new document only.
 ///
-/// [`read_documents`]: logos_core::config::read_documents
+/// [`read_workspace_documents`]: logos_core::config::read_workspace_documents
 /// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
 pub(crate) async fn workspace_config(WorkspaceRoot(root): WorkspaceRoot) -> Response {
     let model = run_blocking("api_v1_workspace_config", Surface::Web, move || {
-        core_config::read_documents(&root, None).map_err(anyhow::Error::from)
+        core_config::read_workspace_documents(&root)
     })
     .await;
     respond(model)
 }
 
-/// `POST /api/v1/workspace/config/save` → [`write_config`] at the workspace root
+/// `POST /api/v1/workspace/config/save` → [`write_workspace_config`], the [`write_config`] writer at the workspace root
 /// ([FR-WS-30], [NFR-RA-07]). Form fields: `content=<toml>`, and optionally
 /// `file=config` — the only document accepted. `file=rules` is a `400`: workspace
 /// governance is declared in the manifest ([FR-WS-13]), so a `rules.toml` here
@@ -1686,6 +1684,7 @@ pub(crate) async fn workspace_config(WorkspaceRoot(root): WorkspaceRoot) -> Resp
 /// every inheriting member's config read — succeeds and repairs it. A rejected
 /// candidate is `422` and leaves the file byte-identical; an I/O fault is `500`.
 ///
+/// [`write_workspace_config`]: logos_core::config::write_workspace_config
 /// [`write_config`]: logos_core::config::write_config
 /// [FR-WS-13]: ../../docs/specs/requirements/FR-WS-13.md
 pub(crate) async fn workspace_config_save(
@@ -1704,13 +1703,13 @@ pub(crate) async fn workspace_config_save(
     }
     let content = form.get("content").cloned().unwrap_or_default();
     let outcome = run_blocking("api_v1_workspace_config_save", Surface::Web, move || {
-        core_config::write_config(&root, &content)
+        core_config::write_workspace_config(&root, &content)
     })
     .await;
     written(outcome)
 }
 
-/// `POST /api/v1/workspace/config/secret` → [`write_secret`] at the workspace root
+/// `POST /api/v1/workspace/config/secret` → [`write_workspace_secret`], the [`write_secret`] writer at the workspace root
 /// ([FR-WS-30], [NFR-SE-07]): write (or, blank, clear) the credential every member
 /// that declares none inherits. Form field: `api_key=<raw>`.
 ///
@@ -1720,6 +1719,7 @@ pub(crate) async fn workspace_config_save(
 /// writer merges into the existing store, so an unparsable one is a `422` that
 /// leaves it byte-identical rather than being silently overwritten.
 ///
+/// [`write_workspace_secret`]: logos_core::config::write_workspace_secret
 /// [`write_secret`]: logos_core::config::write_secret
 /// [NFR-SE-07]: ../../docs/specs/requirements/NFR-SE-07.md
 pub(crate) async fn workspace_config_secret(
@@ -1728,7 +1728,7 @@ pub(crate) async fn workspace_config_secret(
 ) -> Response {
     let api_key = form.get("api_key").cloned().unwrap_or_default();
     let outcome = run_blocking("api_v1_workspace_config_secret", Surface::Web, move || {
-        core_config::write_secret(&root, &api_key)
+        core_config::write_workspace_secret(&root, &api_key)
     })
     .await;
     written(outcome)
@@ -1737,11 +1737,10 @@ pub(crate) async fn workspace_config_secret(
 /// Render a workspace-root write: the outcome on success, else the [`ApiError`]
 /// at the status the member routes map the same fault to — `422` for a
 /// validation fault, `500` for an I/O one ([`config_write_status`]).
-fn written<T: Serialize>(outcome: Result<T, ConfigError>) -> Response {
+fn written<T: Serialize>(outcome: anyhow::Result<T>) -> Response {
     match outcome {
         Ok(outcome) => ok(outcome),
         Err(err) => {
-            let err = anyhow::Error::from(err);
             (config_write_status(&err), Json(ApiError { error: format!("{err:#}") })).into_response()
         }
     }

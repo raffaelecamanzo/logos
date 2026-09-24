@@ -47,6 +47,7 @@ mod rules;
 mod secrets;
 mod settings;
 mod wiki;
+mod workspace_tier;
 mod writeback;
 
 pub use admission::AdmissionAuthority;
@@ -98,6 +99,7 @@ pub use settings::{
     Resolution, Semantics, TypedEnrichment, Watcher, DEFAULT_MAX_FILE_SIZE,
 };
 pub use wiki::{EffectiveWikiModel, WikiConfig};
+pub use workspace_tier::{read_workspace_documents, write_workspace_config, write_workspace_secret};
 pub use writeback::{
     read_documents, write_config, write_rules, write_secret, ConfigApplyOutcome, ConfigDefaults,
     ConfigFileView, ConfigReadModel, ConfigWriteOutcome, EffectiveChat, FileView,
