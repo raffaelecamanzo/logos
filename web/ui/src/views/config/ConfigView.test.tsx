@@ -389,9 +389,14 @@ describe("ConfigView round-trips only the literal document (S-448, NFR-RA-05)", 
     renderView();
     await screen.findByText(/CONFIG EDITOR/);
 
-    // The typed [chat] fields pre-fill from the literal document, not the slice.
+    // The typed [chat] fields pre-fill from the literal document, not the slice…
     expect((screen.getByLabelText("model") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("provider") as HTMLSelectElement).value).toBe("openai");
+    expect((screen.getByLabelText("base_url") as HTMLInputElement).value).toBe("https://openrouter.ai/api/v1");
     expect(configRaw().value).toBe(model().config.content);
+    // …and the key panel shows the member's own (absent) key, never the inherited one.
+    expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/set · ends/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
     expect(await screen.findByText(/Saved \.logos\/config\.toml \(120 bytes\)/)).toBeInTheDocument();
