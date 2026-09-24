@@ -320,19 +320,26 @@ describe("ChatView — configure-first names the root, the absent half and the o
       "Or declare an API key once for every member of the workspace, in <workspace-root>/.logos/secrets.toml.",
     );
     expect(screen.getByText("<workspace-root>/.logos/secrets.toml").tagName).toBe("CODE");
+    expect(advisory).toHaveTextContent("The workspace Config view edits that file.");
   });
 
-  it("workspace: links THIS member's Config tab and names the workspace file as text", async () => {
+  it("workspace: links THIS member's Config tab, and the workspace Config view for the workspace half", async () => {
     await renderInWorkspace(unconfiguredModel("both"));
     const link = screen.getByRole("link", { name: "Config" });
     expect(link).toHaveAttribute("href", "/config?repo=web");
-    // The workspace-tier editor (S-451) is not built: the files are named, not linked.
-    expect(screen.getAllByRole("link")).toHaveLength(1);
+    // S-451 built the workspace-tier editor, so the workspace half is a link to it —
+    // carrying this member, so coming back reopens this member's chat.
+    const workspace = screen.getByRole("link", { name: "workspace Config" });
+    expect(workspace).toHaveAttribute("href", "/workspace-config?repo=web");
+    expect(screen.getAllByRole("link")).toHaveLength(2);
+    // The files that editor writes are still named beside it.
     const config = screen.getByText("<workspace-root>/.logos/config.toml");
     const secrets = screen.getByText("<workspace-root>/.logos/secrets.toml");
     expect(config.tagName).toBe("CODE");
     expect(secrets.tagName).toBe("CODE");
-    expect(config.closest("a")).toBeNull();
+    expect(workspace.closest("p")).toHaveTextContent(
+      "Or declare them once for every member of the workspace, in <workspace-root>/.logos/config.toml and <workspace-root>/.logos/secrets.toml. The workspace Config view edits both files.",
+    );
   });
 });
 

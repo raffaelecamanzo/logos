@@ -2640,3 +2640,102 @@ async fn a_save_over_a_manifest_removed_since_load_is_a_500_that_recreates_nothi
     assert!(!api_error(&body).is_empty(), "{body}");
     assert!(!path.exists(), "the manifest was not recreated");
 }
+
+// ── The workspace chat tier as a group of the app-level Config view (S-451) ───
+//
+// The view's second group saves `<workspace-root>/.logos/config.toml` and the
+// credential beside it through the S-450 routes. What S-451 adds to their
+// contract is the property the manifest group already carries: the save reaches
+// no member.
+
+/// **A workspace-tier save moves no member** ([FR-UI-38], [FR-WS-30]). The two
+/// writes the group makes — the `[chat]`/`[wiki]` document and the credential —
+/// land at the workspace root, and every file under every member's `.logos/`
+/// keeps its size and mtime (no reindex, no gate output, no store write) while
+/// both stores' full contents are unchanged. Each member's gated verdict is
+/// identical before and after.
+///
+/// The stat is compared BEFORE any member read: resolving a member's config
+/// opens its engine, and that is a read the save did not make. Only then is the
+/// save shown to have reached the members the way the ADR-67 tier promises —
+/// through resolution, with the member's own files untouched.
+#[tokio::test]
+async fn a_workspace_tier_save_moves_no_member_and_reindexes_nothing() {
+    let tmp = workspace();
+    let root = tmp.path();
+    // `max_cc = 0` always fires, so "unmoved" compares a real FAIL, not two absences.
+    std::fs::create_dir_all(root.join("web/.logos")).unwrap();
+    std::fs::write(root.join("web/.logos/rules.toml"), "[constraints]\nmax_cc = 0\n").unwrap();
+    let verdict_before = [member_gate_verdict(root, "api"), member_gate_verdict(root, "web")];
+    assert_eq!(verdict_before[1].1, Some(false), "web's gated verdict is a real FAIL");
+
+    let (router, intent) = ws_router_with_intent(&tmp);
+    // The group's own load, as the view makes it, before anything is watched.
+    let loaded = json_body(&router, "/api/v1/workspace/config").await;
+    assert_eq!(loaded["config"]["exists"], false, "the tier starts undeclared: {loaded}");
+
+    // Digest first, stat second — and the reverse after the save (see
+    // `a_governance_save_writes_the_manifest_verbatim_and_moves_no_member`).
+    let digests_before = [member_digests(root, "api"), member_digests(root, "web")];
+    let stat_before = [member_logos_stat(root, "api"), member_logos_stat(root, "web")];
+    assert!(
+        stat_before.iter().all(|files| files.iter().any(|(p, ..)| p.ends_with("logos.db"))),
+        "both members were indexed, so the stat comparison watches real stores: {stat_before:?}"
+    );
+
+    let document = "[chat]\nprovider = \"anthropic\"\nmodel = \"ws/tier-group\"\n\n[wiki]\nmodel = \"ws/tier-wiki\"\n";
+    let resp = router
+        .clone()
+        .oneshot(post_form(
+            "/api/v1/workspace/config/save",
+            format!("file=config&{}", form_field("content", document)),
+            &intent,
+        ))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let resp = router
+        .clone()
+        .oneshot(post_form(
+            "/api/v1/workspace/config/secret",
+            form_field("api_key", "sk-workspace-tier-group-tg51"),
+            &intent,
+        ))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(std::fs::read_to_string(root.join(".logos/config.toml")).unwrap(), document);
+
+    assert_eq!(
+        [member_logos_stat(root, "api"), member_logos_stat(root, "web")],
+        stat_before,
+        "no member's .logos/ moved: no reindex, no gate output, no store write"
+    );
+    assert_eq!(
+        [member_digests(root, "api"), member_digests(root, "web")],
+        digests_before,
+        "no member store's contents changed"
+    );
+    for member in ["api", "web"] {
+        assert!(
+            !root.join(member).join(".logos/config.toml").exists()
+                && !root.join(member).join(".logos/secrets.toml").exists(),
+            "the tier was not written into {member}'s .logos/"
+        );
+    }
+
+    // The save reached the members through the tier, not through their files.
+    let v = json_body(&router, "/api/v1/config?repo=web").await;
+    assert_eq!(v["effective_chat"]["policy"]["model"], "ws/tier-group", "{v}");
+    assert_eq!(v["effective_chat"]["policy_origin"], "workspace", "{v}");
+    assert_eq!(v["effective_chat"]["credential_origin"], "workspace", "{v}");
+    assert_eq!(v["config"]["exists"], false, "web's own document is still undeclared: {v}");
+
+    assert_eq!(
+        [member_gate_verdict(root, "api"), member_gate_verdict(root, "web")],
+        verdict_before,
+        "no member's gated signal moved"
+    );
+}

@@ -12,7 +12,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  ConfigReadModel,
   ManifestSaveOutcome,
+  MaskedSecret,
   WorkspaceGovernanceAnswer,
   WorkspaceManifestDocument,
   WorkspaceRoster,
@@ -482,5 +484,444 @@ describe("app-scoped (FR-UI-38 AC5, ADR-66)", () => {
     const { gets } = await mount({ probeStatus: 404 });
     expect(await screen.findByText(/Not a workspace/)).toBeInTheDocument();
     expect(gets.some((u) => u.includes("workspace/manifest"))).toBe(false);
+  });
+});
+
+// ── S-451: the workspace chat tier, a sibling group of the same view ──────────
+//
+// `<workspace-root>/.logos/config.toml` ([chat], [wiki].model) and the credential
+// beside it, over the S-450 routes. The stub below serves the manifest group too,
+// so every assertion here is made with S-430's group mounted beside this one.
+
+/** The shape a workspace tier is declared in on the reference estate: a `[chat]`
+ *  table naming a model, plus a dedicated wiki model. */
+const TIER_CONTENT = [
+  "# the estate's one chat policy",
+  "[chat]",
+  'provider = "anthropic"',
+  'model = "claude-ws"',
+  "",
+  "[wiki]",
+  'model = "claude-wiki"',
+  "",
+].join("\n");
+
+const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
+
+function tier(over: { content?: string; exists?: boolean; model?: string | null; wiki?: string | null; key?: MaskedSecret } = {}): ConfigReadModel {
+  const model = over.model === undefined ? "claude-ws" : over.model;
+  const wiki = over.wiki === undefined ? "claude-wiki" : over.wiki;
+  const key = over.key ?? { present: true, last4: "ab12" };
+  const chat = { provider: "anthropic" as const, model, base_url: DEFAULT_BASE_URL };
+  return {
+    config: {
+      path: ".logos/config.toml",
+      exists: over.exists ?? true,
+      content: over.content ?? TIER_CONTENT,
+      parsed: { languages: [], include: [], exclude: [], max_file_size: 1048576, framework_hints: [], chat, wiki: { model: wiki } },
+    },
+    rules: { path: ".logos/rules.toml", exists: false, content: "", parsed: { constraints: {}, metric_thresholds: {} } },
+    chat_key: key,
+    effective_chat: {
+      policy: chat,
+      policy_origin: model ? "member" : "unset",
+      credential: key,
+      credential_origin: key.present ? "member" : "unset",
+      member_key_withheld: false,
+    },
+  } as unknown as ConfigReadModel;
+}
+
+/** Stub `fetch` for both groups. `tiers` is served in turn (the last repeats;
+ *  `null` answers a `500`, a string answers that literal JSON); `replies` answers
+ *  each POST by its route. */
+function stubTier({
+  tiers = [tier()],
+  replies = {},
+  probeStatus = 200,
+}: {
+  tiers?: (ConfigReadModel | null | string)[];
+  replies?: Record<string, { status: number; body: unknown }>;
+  probeStatus?: number;
+} = {}) {
+  const gets: string[] = [];
+  const posts: Posted[] = [];
+  let t = 0;
+  const respond = (body: unknown, status = 200) =>
+    Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(typeof body === "string" ? JSON.parse(body) : body),
+      text: () => Promise.resolve(typeof body === "string" ? body : JSON.stringify(body)),
+    } as Response);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posts.push({
+          url,
+          form: new URLSearchParams(String(init.body)),
+          intent: new Headers(init.headers).get("x-logos-intent"),
+        });
+        const reply = replies[url] ?? { status: 599, body: { error: `unstubbed POST ${url}` } };
+        return respond(reply.body, reply.status);
+      }
+      gets.push(url);
+      if (url.startsWith("/api/v1/workspace/roster")) return respond(ROSTER, probeStatus);
+      if (url.startsWith("/api/v1/workspace/manifest")) return respond(doc());
+      if (url.startsWith("/api/v1/workspace/check")) return respond(CLEAN_CHECK);
+      if (url.startsWith("/api/v1/workspace/config")) {
+        const next = tiers[Math.min(t++, tiers.length - 1)];
+        return next === null ? respond({ error: "boom" }, 500) : respond(next);
+      }
+      return respond({ error: `unstubbed GET ${url}` }, 599);
+    }),
+  );
+  return { gets, posts };
+}
+
+async function mountTier(opts: Parameters<typeof stubTier>[0] = {}) {
+  const api = stubTier(opts);
+  render(
+    <WorkspaceProvider>
+      <CaptureSwitch />
+      <WorkspaceConfigView />
+    </WorkspaceProvider>,
+  );
+  if ((opts.probeStatus ?? 200) === 200) await screen.findByLabelText(/^Raw TOML/);
+  return api;
+}
+
+/** The tier group's card — the nearest ancestor of its raw pane that holds its
+ *  title. Every query below is scoped to it, so a match can never be the
+ *  manifest group's. */
+function tierCard(): HTMLElement {
+  const raw = screen.getByLabelText(/^Workspace tier — raw TOML/);
+  let el: HTMLElement | null = raw;
+  while (el && !within(el).queryByText("Workspace chat policy and credential")) el = el.parentElement;
+  return el as HTMLElement;
+}
+
+async function mountedTier(opts: Parameters<typeof stubTier>[0] = {}) {
+  const api = await mountTier(opts);
+  await screen.findByLabelText(/^Workspace tier — raw TOML/);
+  return { ...api, card: tierCard() };
+}
+
+const TIER_RAW = /^Workspace tier — raw TOML/;
+const SAVE_TIER = /^Save <workspace-root>\/\.logos\/config\.toml$/;
+const SAVE_KEY = /^Save the workspace API key$/;
+
+describe("the workspace chat tier round-trips in the manifest group's grammar (S-451 AC1)", () => {
+  it("loads the literal document into its own raw pane and pre-fills [chat]/[wiki] from the parse", async () => {
+    const { card } = await mountedTier();
+    expect((within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement).value).toBe(TIER_CONTENT);
+    expect(within(card).getByLabelText("provider")).toHaveValue("anthropic");
+    expect(within(card).getByLabelText("model")).toHaveValue("claude-ws");
+    expect(within(card).getByLabelText("base_url")).toHaveValue(DEFAULT_BASE_URL);
+    expect(within(card).getByLabelText("wiki model")).toHaveValue("claude-wiki");
+    // The manifest group is still there, unchanged, beside it.
+    expect(rawPane().value).toBe(CONTENT);
+  });
+
+  it("patches typed edits into the raw pane and posts it VERBATIM to the workspace route", async () => {
+    const written = { file: "config", path: ".logos/config.toml", bytes_written: 77, provenance_stamped: false };
+    const { card, posts } = await mountedTier({
+      replies: { "/api/v1/workspace/config/save": { status: 200, body: written } },
+    });
+    const user = userEvent.setup();
+    const model = within(card).getByLabelText("model");
+    await user.clear(model);
+    await user.type(model, "claude-next");
+    await user.clear(within(card).getByLabelText("wiki model"));
+    const raw = within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement;
+    // Each typed edit patched its own table, and nothing else moved.
+    const [chatTable, wikiTable] = raw.value.split("[wiki]");
+    expect(chatTable).toContain('model = "claude-next"');
+    expect(chatTable).toContain('provider = "anthropic"');
+    expect(chatTable).not.toContain("claude-ws");
+    expect(raw.value.startsWith("# the estate's one chat policy\n[chat]\n")).toBe(true);
+    // A blanked wiki model removes the key rather than declaring `model = ""`.
+    expect(wikiTable.trim()).toBe("");
+
+    await user.click(within(card).getByRole("button", { name: SAVE_TIER }));
+    const status = await within(card).findByText(/Saved <workspace-root>\/\.logos\/config\.toml \(77 bytes\)/);
+    expect(status).toHaveTextContent(/next chat turn/);
+    expect(status).toHaveTextContent(/No member's \.logos\/ was written and no member was reindexed/);
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/v1/workspace/config/save");
+    expect(posts[0].form.get("file")).toBe("config");
+    expect(posts[0].form.get("content")).toBe(raw.value);
+    expect(posts[0].intent).toBe("test-intent-token");
+  });
+
+  it("patches the [chat] provider select and base_url into [chat], and only there", async () => {
+    const { card } = await mountedTier();
+    const user = userEvent.setup();
+    await user.selectOptions(within(card).getByLabelText("provider"), "openai");
+    const base = within(card).getByLabelText("base_url");
+    await user.clear(base);
+    await user.type(base, "https://llm.example/v1");
+    const [chatTable, wikiTable] = (within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement).value.split("[wiki]");
+    expect(chatTable).toContain('provider = "openai"');
+    expect(chatTable).not.toContain("anthropic");
+    expect(chatTable).toContain('base_url = "https://llm.example/v1"');
+    expect(wikiTable).toBe('\nmodel = "claude-wiki"\n');
+  });
+
+  it("renders the server's refusal inline and says nothing was written", async () => {
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/save": { status: 422, body: { error: "unknown field `languags`" } } },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_TIER }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent(
+      "Validation error — nothing was written: unknown field `languags`",
+    );
+  });
+
+  it("states a tier that is not yet created, and stops saying so once a save creates it", async () => {
+    const written = { file: "config", path: ".logos/config.toml", bytes_written: 1, provenance_stamped: false };
+    const { card } = await mountedTier({
+      tiers: [tier({ content: "", exists: false, model: null, wiki: null, key: { present: false } })],
+      replies: { "/api/v1/workspace/config/save": { status: 200, body: written } },
+    });
+    expect(within(card).getByText("not yet created")).toBeInTheDocument();
+    // Undeclared: blank, never a value the tier did not state.
+    expect(within(card).getByLabelText("model")).toHaveValue("");
+    expect(within(card).getByLabelText("wiki model")).toHaveValue("");
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_TIER }));
+    await within(card).findByText(/Saved/);
+    expect(within(card).queryByText("not yet created")).toBeNull();
+    expect(within(card).getByText("on disk")).toBeInTheDocument();
+  });
+
+  it("a failed first save is a failed save: the tier is still not created, and says so", async () => {
+    const { card } = await mountedTier({
+      tiers: [tier({ content: "", exists: false, model: null, wiki: null, key: { present: false } })],
+      replies: { "/api/v1/workspace/config/save": { status: 500, body: { error: "writing .logos/config.toml: disk full" } } },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_TIER }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent("Save failed (500): writing .logos/config.toml: disk full");
+    expect(within(card).getByText("not yet created")).toBeInTheDocument();
+    expect(within(card).queryByText("on disk")).toBeNull();
+  });
+
+  it("keeps the two groups' saves apart: neither posts to the other's route", async () => {
+    const written = { file: "config", path: ".logos/config.toml", bytes_written: 1, provenance_stamped: false };
+    const { card, posts } = await mountedTier({
+      replies: { "/api/v1/workspace/config/save": { status: 200, body: written } },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_TIER }));
+    await within(card).findByText(/Saved/);
+    expect(posts.map((p) => p.url)).toEqual(["/api/v1/workspace/config/save"]);
+    expect(screen.queryByText(/Saved logos\.workspace\.toml/)).toBeNull();
+  });
+});
+
+describe("the workspace credential is masked and write-only (S-451 AC1, NFR-SE-07)", () => {
+  it("is never pre-filled and shows only presence and the last 4", async () => {
+    const { card } = await mountedTier();
+    const input = within(card).getByLabelText("api_key") as HTMLInputElement;
+    expect(input.type).toBe("password");
+    expect(input.value).toBe("");
+    expect(within(card).getByText("set · ends …ab12")).toBeInTheDocument();
+  });
+
+  it("posts the typed key to the workspace route, clears it, and shows only the masked outcome", async () => {
+    const raw = "sk-typed-workspace-key-zz99";
+    const { card, posts } = await mountedTier({
+      replies: {
+        "/api/v1/workspace/config/secret": {
+          status: 200,
+          body: { path: ".logos/secrets.toml", chat_key: { present: true, last4: "zz99" } },
+        },
+      },
+    });
+    const user = userEvent.setup();
+    const input = within(card).getByLabelText("api_key") as HTMLInputElement;
+    await user.type(input, raw);
+    await user.click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByText(/Key saved \(ends …zz99\)/)).toHaveTextContent(
+      /<workspace-root>\/\.logos\/secrets\.toml/,
+    );
+    expect(input.value).toBe("");
+    expect(within(card).getByText("set · ends …zz99")).toBeInTheDocument();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/v1/workspace/config/secret");
+    expect(posts[0].form.get("api_key")).toBe(raw);
+    expect(posts[0].intent).toBe("test-intent-token");
+    expect(document.body.textContent).not.toContain(raw);
+  });
+
+  it("a blank save clears the key, and says so", async () => {
+    const { card, posts } = await mountedTier({
+      replies: {
+        "/api/v1/workspace/config/secret": { status: 200, body: { path: ".logos/secrets.toml", chat_key: { present: false } } },
+      },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByText(/Key cleared/)).toBeInTheDocument();
+    expect(within(card).getByText("not set")).toBeInTheDocument();
+    expect(posts[0].form.get("api_key")).toBe("");
+  });
+
+  it("never renders the key route's error body, which could carry key material", async () => {
+    const raw = "sk-echoed-by-a-bad-server-ee11";
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/secret": { status: 422, body: { error: `bad store near ${raw}` } } },
+    });
+    const user = userEvent.setup();
+    await user.type(within(card).getByLabelText("api_key"), raw);
+    await user.click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent("the server rejected the key write");
+    expect(document.body.textContent).not.toContain(raw);
+  });
+});
+
+describe("the key route's replies never reach the page (S-451, NFR-SE-07)", () => {
+  it("a non-JSON 2xx is 'saved, format not understood' — the body is never rendered and the badge is unmoved", async () => {
+    const raw = "sk-in-an-html-reply-hh22";
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/secret": { status: 200, body: `<html>stored ${raw}</html>` } },
+    });
+    const user = userEvent.setup();
+    await user.type(within(card).getByLabelText("api_key"), raw);
+    await user.click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByText("Key saved (unexpected response format).")).toBeInTheDocument();
+    expect(within(card).getByText("set · ends …ab12")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(raw);
+  });
+
+  it("a 5xx carries the fixed detail, never its body, exactly as a 422 does", async () => {
+    const raw = "sk-echoed-in-a-500-ff33";
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/secret": { status: 500, body: { error: `writing secrets.toml near ${raw}` } } },
+    });
+    const user = userEvent.setup();
+    await user.type(within(card).getByLabelText("api_key"), raw);
+    await user.click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent("Save failed (500): the server rejected the key write");
+    expect(document.body.textContent).not.toContain(raw);
+  });
+});
+
+describe("the tier's reach is stated on the surface (S-451 AC2, AC3)", () => {
+  it("names each file beside its group", async () => {
+    const { card } = await mountedTier();
+    expect(within(card).getByText("<workspace-root>/.logos/config.toml", { selector: "span" })).toBeInTheDocument();
+    expect(within(card).getByText("<workspace-root>/.logos/secrets.toml", { selector: "span" })).toBeInTheDocument();
+  });
+
+  it("states that members inherit each half they do not declare (ADR-67)", async () => {
+    const { card } = await mountedTier();
+    const banner = within(card).getByText("INHERITED PER HALF").closest("section") as HTMLElement;
+    // The policy half is conditional on THIS root declaring a model (ADR-67 §3)…
+    expect(banner).toHaveTextContent(
+      /When this root declares a \[chat\] model, a member whose own \.logos\/config\.toml declares none inherits this whole \[chat\] table/,
+    );
+    expect(banner).toHaveTextContent(/with no model here, nothing is inherited/);
+    // …and the credential reaches every member that does not inherit the policy,
+    // including one whose policy is unset at both roots (ADR-67 §2).
+    expect(banner).toHaveTextContent(/does not inherit this root's \[chat\] table — it declares its own, or neither root declares one/);
+    expect(banner).toHaveTextContent(/holds no key .* uses the key saved here/);
+    // HF-1: the direction a member key never travels is stated, not left implied.
+    expect(banner).toHaveTextContent(/with this root's key only/);
+  });
+
+  it("does not claim members inherit the [wiki] model, which no member reads from this root", async () => {
+    const { card } = await mountedTier();
+    const wiki = within(card).getByText("[wiki]", { selector: "legend" }).closest("fieldset") as HTMLElement;
+    expect(wiki).toHaveTextContent(/Not inherited/);
+    expect(wiki).toHaveTextContent(/its own \[wiki\] model, else its effective \[chat\] model/);
+    const banner = within(card).getByText("INHERITED PER HALF").closest("section") as HTMLElement;
+    expect(banner).not.toHaveTextContent(/\[wiki\]/);
+  });
+
+  it("says there is no indexing key, no rules document and no apply action here", async () => {
+    const { card } = await mountedTier();
+    const notHere = within(card).getByText("NOT HERE").closest("section") as HTMLElement;
+    expect(notHere).toHaveTextContent(/no indexing key/);
+    expect(notHere).toHaveTextContent(/languages, include, exclude, max_file_size, framework_hints/);
+    expect(notHere).toHaveTextContent(/no rules document/);
+    expect(notHere).toHaveTextContent(/no Apply action/);
+    // …and the absence it states is real.
+    for (const key of ["languages", "include", "exclude", "max_file_size", "framework_hints"]) {
+      expect(within(card).queryByLabelText(key)).toBeNull();
+    }
+    expect(screen.queryByRole("button", { name: /Apply/ })).toBeNull();
+    // No rules editor in this group: no rules.toml named anywhere in it, and no
+    // control labelled for rules. (The page-level callout legitimately names the
+    // member's rules.toml, so the check is scoped to the group.)
+    expect(within(card).queryByText(/rules\.toml/)).toBeNull();
+    expect(within(card).queryByLabelText(/rules/i)).toBeNull();
+  });
+});
+
+describe("the tier group's own read (S-451, NFR-RA-05)", () => {
+  it("a failed read is stated inside the group, offers no Save, and leaves the manifest group working", async () => {
+    await mountTier({ tiers: [null] });
+    expect(await screen.findByText(/The workspace chat tier could not be loaded/)).toHaveTextContent(/HTTP 500/);
+    expect(screen.queryByRole("button", { name: SAVE_TIER })).toBeNull();
+    expect(screen.queryByRole("button", { name: SAVE_KEY })).toBeNull();
+    expect(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ })).toBeInTheDocument();
+  });
+
+  it("a 2xx that is not the read-model is refused, never seeded into an editor that could save it", async () => {
+    await mountTier({ tiers: ["{}"] });
+    expect(await screen.findByText(/The workspace chat tier could not be loaded/)).toHaveTextContent(
+      /without a config document/,
+    );
+    expect(screen.queryByLabelText(TIER_RAW)).toBeNull();
+    expect(screen.queryByRole("button", { name: SAVE_TIER })).toBeNull();
+  });
+});
+
+describe("a malformed 2xx is stated in the group, never a crash of the page (S-451, NFR-RA-05)", () => {
+  const valid = () => JSON.parse(JSON.stringify(tier())) as Record<string, Record<string, unknown>>;
+
+  it.each([
+    ["no key state", () => { const m = valid(); delete m.chat_key; return m; }],
+    ["no parsed document", () => { const m = valid(); m.config.parsed = null; return m; }],
+    ["no parsed [chat]", () => { const m = valid(); m.config.parsed = { languages: [] }; return m; }],
+  ])("a read-model with %s is refused and the manifest group stays usable", async (_label, make) => {
+    await mountTier({ tiers: [JSON.stringify(make())] });
+    expect(await screen.findByText(/The workspace chat tier could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(TIER_RAW)).toBeNull();
+    expect(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ })).toBeInTheDocument();
+  });
+
+  it("a key reply with no key state is 'format not understood', and the badge is unmoved", async () => {
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/secret": { status: 200, body: { path: ".logos/secrets.toml" } } },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByText("Key saved (unexpected response format).")).toBeInTheDocument();
+    expect(within(card).getByText("set · ends …ab12")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ })).toBeInTheDocument();
+  });
+});
+
+describe("the tier group is app-scoped and workspace-only (S-451 AC5)", () => {
+  it("re-issues no tier read on a member switch, and never carries ?repo=", async () => {
+    const { gets } = await mountedTier();
+    const reads = () => gets.filter((u) => u.startsWith("/api/v1/workspace/config"));
+    expect(reads()).toHaveLength(1);
+    // Two switches, so at least one is a real change whichever member the URL an
+    // earlier test left behind opened on — a switch to the current member moves
+    // nothing and would prove nothing.
+    for (const name of ["api", "web"]) {
+      await act(async () => switcher.current?.(name));
+      await act(async () => new Promise((r) => setTimeout(r, 20)));
+    }
+    expect(reads()).toHaveLength(1);
+    expect(reads().every((u) => !u.includes("repo="))).toBe(true);
+  });
+
+  it("is neither rendered nor read in single-root mode", async () => {
+    const { gets } = await mountTier({ probeStatus: 404 });
+    expect(await screen.findByText(/Not a workspace/)).toBeInTheDocument();
+    expect(screen.queryByText("Workspace chat policy and credential")).toBeNull();
+    expect(gets.some((u) => u.includes("workspace/config"))).toBe(false);
   });
 });
