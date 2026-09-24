@@ -696,6 +696,17 @@ describe("the workspace chat tier round-trips in the manifest group's grammar (S
     expect(within(card).getByText("on disk")).toBeInTheDocument();
   });
 
+  it("a failed first save is a failed save: the tier is still not created, and says so", async () => {
+    const { card } = await mountedTier({
+      tiers: [tier({ content: "", exists: false, model: null, wiki: null, key: { present: false } })],
+      replies: { "/api/v1/workspace/config/save": { status: 500, body: { error: "writing .logos/config.toml: disk full" } } },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_TIER }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent("Save failed (500): writing .logos/config.toml: disk full");
+    expect(within(card).getByText("not yet created")).toBeInTheDocument();
+    expect(within(card).queryByText("on disk")).toBeNull();
+  });
+
   it("keeps the two groups' saves apart: neither posts to the other's route", async () => {
     const written = { file: "config", path: ".logos/config.toml", bytes_written: 1, provenance_stamped: false };
     const { card, posts } = await mountedTier({
