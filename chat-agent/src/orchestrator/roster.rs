@@ -122,7 +122,10 @@ services call an endpoint, what another service breaks, where a symbol lives acr
 the workspace — use the cross-service tools: xservice_search, xservice_callers, \
 xservice_impact, xservice_route_providers. Pass `repo` to xservice_search when you \
 already know the member, so only that member is opened; the other three read every \
-member's contracts whatever `repo` says. Cross-service results are repo-qualified: \
+member's contracts whatever `repo` says. Do not scope xservice_callers or \
+xservice_impact to the provider's own member: their residue would then cover only \
+that member's outbound calls, not the consumers that might reach it. Pass a hit's \
+canonical `symbol` to them, never a bare name. Cross-service results are repo-qualified: \
 name the member with every result, and never merge the same symbol from two members \
 into one. An xservice reading that says UNRESOLVED is not an absence — report it as \
 unresolved, with its count, never as \"none\".";

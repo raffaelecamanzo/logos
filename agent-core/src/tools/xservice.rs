@@ -248,13 +248,29 @@ fn is_canonical(query: &str) -> bool {
 ///
 /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+///
+/// Under a `repo` scope the residue is that member's **own** outbound egress
+/// ([FR-WS-05]), while the cross-service tier stays workspace-wide — so for a
+/// provider's callers the unresolved sites that might reach it live in the
+/// *other* members. An empty scoped answer over a zero scoped residue therefore
+/// says whose residue it measured, rather than standing as a workspace-wide
+/// absence.
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 fn cross_service_verdict(
     query: &str,
+    scope: Option<&str>,
     resolved: usize,
     noun: &str,
     residue: Option<&EgressResidue>,
 ) -> String {
-    let clause = residue_clause(resolved, noun, residue);
+    let mut clause = residue_clause(resolved, noun, residue);
+    if let (0, None, Some(member)) = (resolved, residue, scope) {
+        clause.push_str(&format!(
+            " (residue measured over {member}'s own outbound calls only — unscoped, other \
+             members' unresolved calls may reach it)"
+        ));
+    }
     if resolved == 0 && !is_canonical(query) {
         format!(
             "NOT CHECKED, not an absence — {query:?} is not a canonical symbol, and the \
@@ -296,6 +312,7 @@ fn read_search(answer: &XserviceSearch) -> String {
 fn read_callers(answer: &XserviceCallers) -> String {
     let cross = cross_service_verdict(
         &answer.query,
+        answer.scope.as_deref(),
         answer.cross_service.len(),
         "resolved cross-service caller",
         answer.unresolved_egress.as_ref(),
@@ -330,6 +347,7 @@ fn read_callers(answer: &XserviceCallers) -> String {
 fn read_impact(answer: &XserviceImpact) -> String {
     let cross = cross_service_verdict(
         &answer.query,
+        answer.scope.as_deref(),
         answer.cross_service.len(),
         "cross-service impact",
         answer.unresolved_egress.as_ref(),
@@ -774,14 +792,23 @@ mod tests {
         assert!(!is_canonical("GET /users/{user_id}"));
         assert!(is_canonical("local get_user"));
 
-        let bare = cross_service_verdict("get_user", 0, "resolved cross-service caller", None);
+        let bare = cross_service_verdict("get_user", None, 0, "resolved cross-service caller", None);
         assert!(bare.starts_with("NOT CHECKED, not an absence"), "{bare}");
         let canonical =
-            cross_service_verdict("local get_user", 0, "resolved cross-service caller", None);
+            cross_service_verdict("local get_user", None, 0, "resolved cross-service caller", None);
         assert_eq!(canonical, "no resolved cross-service callers");
+        // A scoped empty answer names whose residue it measured.
+        let scoped = cross_service_verdict(
+            "local get_user",
+            Some("api"),
+            0,
+            "resolved cross-service caller",
+            None,
+        );
+        assert!(scoped.starts_with("no resolved cross-service callers (residue measured over api's own"), "{scoped}");
         // A resolved answer is never re-labelled, whatever the query looked like.
         assert_eq!(
-            cross_service_verdict("get_user", 1, "resolved cross-service caller", None),
+            cross_service_verdict("get_user", None, 1, "resolved cross-service caller", None),
             "1 resolved cross-service caller(s)"
         );
     }

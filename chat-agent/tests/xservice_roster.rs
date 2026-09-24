@@ -398,6 +398,32 @@ async fn impact_carries_the_residue_the_same_way() {
     );
 }
 
+/// The residue lives in `api` (its runtime-composed call); scoped to `web`, the
+/// empty answer must say it measured only web's residue — never a clean absence.
+#[tokio::test]
+async fn a_scoped_empty_answer_names_whose_residue_it_measured() {
+    let ws = workspace(true);
+    let (observation, _) = run_turn(
+        &ws,
+        "who calls shared from web?",
+        vec![
+            MockTurn::tool_call(
+                "x1",
+                "xservice_callers",
+                serde_json::json!({ "symbol": ws.shared, "repo": "web" }),
+            ),
+            MockTurn::text("nobody."),
+        ],
+    )
+    .await;
+    assert!(
+        observation.contains(
+            "cross-service: no resolved cross-service callers (residue measured over web's own outbound calls only"
+        ),
+        "{observation}"
+    );
+}
+
 #[tokio::test]
 async fn a_bare_name_is_reported_not_checked_never_as_an_absence() {
     let ws = workspace(false);
