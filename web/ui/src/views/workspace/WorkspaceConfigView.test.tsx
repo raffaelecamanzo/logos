@@ -656,6 +656,20 @@ describe("the workspace chat tier round-trips in the manifest group's grammar (S
     expect(posts[0].intent).toBe("test-intent-token");
   });
 
+  it("patches the [chat] provider select and base_url into [chat], and only there", async () => {
+    const { card } = await mountedTier();
+    const user = userEvent.setup();
+    await user.selectOptions(within(card).getByLabelText("provider"), "openai");
+    const base = within(card).getByLabelText("base_url");
+    await user.clear(base);
+    await user.type(base, "https://llm.example/v1");
+    const [chatTable, wikiTable] = (within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement).value.split("[wiki]");
+    expect(chatTable).toContain('provider = "openai"');
+    expect(chatTable).not.toContain("anthropic");
+    expect(chatTable).toContain('base_url = "https://llm.example/v1"');
+    expect(wikiTable).toBe('\nmodel = "claude-wiki"\n');
+  });
+
   it("renders the server's refusal inline and says nothing was written", async () => {
     const { card } = await mountedTier({
       replies: { "/api/v1/workspace/config/save": { status: 422, body: { error: "unknown field `languags`" } } },
