@@ -140,6 +140,9 @@ pub struct EffectiveChat {
     pub credential: MaskedSecret,
     /// Where [`credential`](Self::credential) came from.
     pub credential_origin: ChatOrigin,
+    /// The member's own key is withheld from the inherited workspace endpoint
+    /// (see [`ChatResolution::member_key_withheld`]).
+    pub member_key_withheld: bool,
 }
 
 impl From<ChatResolution> for EffectiveChat {
@@ -151,6 +154,7 @@ impl From<ChatResolution> for EffectiveChat {
             policy_origin,
             credential,
             credential_origin,
+            member_key_withheld,
             ..
         } = resolution;
         EffectiveChat {
@@ -158,6 +162,7 @@ impl From<ChatResolution> for EffectiveChat {
             policy_origin,
             credential,
             credential_origin,
+            member_key_withheld,
         }
     }
 }
@@ -1314,9 +1319,21 @@ mod tests {
         assert!(inherited.contains("\"credential\":{\"present\":true,\"last4\":\"wk42\"}"), "{inherited}");
         assert!(!inherited.contains(WS_KEY) && !inherited.contains("workspace-secret"), "{inherited}");
 
+        // A member key under the inherited policy is withheld (HF-1, ADR-67 §2):
+        // the slice still carries the workspace's masked key and states the
+        // withheld one without any form of it.
         seed(&member, "secrets.toml", &format!("[chat]\napi_key = \"{member_key}\"\n"));
+        let withheld = serde_json::to_string(&read_documents(&member, Some(ws.path())).unwrap())
+            .unwrap();
+        assert!(withheld.contains("\"credential\":{\"present\":true,\"last4\":\"wk42\"}"), "{withheld}");
+        assert!(withheld.contains("\"member_key_withheld\":true"), "{withheld}");
+        assert!(!withheld.contains(member_key) && !withheld.contains("member-secret"), "{withheld}");
+
+        // Owning its policy, the member's own key is the credential.
+        seed(&member, "config.toml", "[chat]\nmodel = \"m/own\"\n");
         let own = serde_json::to_string(&read_documents(&member, Some(ws.path())).unwrap()).unwrap();
         assert!(own.contains("\"credential\":{\"present\":true,\"last4\":\"mb77\"}"), "{own}");
+        assert!(own.contains("\"member_key_withheld\":false"), "{own}");
         assert!(own.contains("\"credential_origin\":\"member\""), "{own}");
         assert!(!own.contains(member_key) && !own.contains("member-secret"), "{own}");
         assert!(!own.contains(WS_KEY), "{own}");

@@ -37,13 +37,18 @@ const POLICY: ChatPolicy = {
 /** The effective-chat read-model slice (S-448) with the two origins the readiness
  *  verdict is read off. `policy` is the effective table; a half the resolution
  *  found no declaration for carries `unset`. */
-function configModel(policyOrigin: ChatOrigin, credentialOrigin: ChatOrigin): ChatConfigReadModel {
+function configModel(
+  policyOrigin: ChatOrigin,
+  credentialOrigin: ChatOrigin,
+  memberKeyWithheld = false,
+): ChatConfigReadModel {
   return {
     effective_chat: {
       policy: policyOrigin === "unset" ? { ...POLICY, model: null } : POLICY,
       policy_origin: policyOrigin,
       credential: { present: credentialOrigin !== "unset" },
       credential_origin: credentialOrigin,
+      member_key_withheld: memberKeyWithheld,
     },
   };
 }
@@ -221,13 +226,17 @@ describe("chatReadiness (S-452, FR-UI-18) — the full origin matrix, no DOM", (
   const SINGLE: ChatScope = { mode: "single" };
   const WORKSPACE: ChatScope = { mode: "workspace", member: "billing-service" };
 
-  // The nine origin pairs S-447's resolution matrix produces, named by the shape
-  // that yields each. A single-root payload never carries `workspace`, but the
-  // verdict must not depend on the mode for readiness, so every pair runs in both.
+  // The origin pairs S-447's resolution matrix produces, named by the shape that
+  // yields each, with HF-1's withheld flag. `workspace` policy + `member` key is not
+  // among them: an inherited policy takes the workspace key only (ADR-67 §2), so the
+  // member-key-only shapes under a workspace policy appear as withheld rows. A
+  // single-root payload never carries `workspace`, but the verdict must not depend
+  // on the mode for readiness, so every row runs in both.
   const MATRIX: {
     shape: string;
     policy: ChatOrigin;
     credential: ChatOrigin;
+    withheld?: boolean;
     ready: boolean;
     absent?: "model" | "key" | "both";
     present?: { half: "model" | "key"; origin: "member" | "workspace" } | null;
@@ -235,18 +244,19 @@ describe("chatReadiness (S-452, FR-UI-18) — the full origin matrix, no DOM", (
     { shape: "member declares both", policy: "member", credential: "member", ready: true },
     { shape: "workspace declares both", policy: "workspace", credential: "workspace", ready: true },
     { shape: "member policy, workspace key", policy: "member", credential: "workspace", ready: true },
-    { shape: "workspace policy, member key", policy: "workspace", credential: "member", ready: true },
+    { shape: "member key only, workspace declares both", policy: "workspace", credential: "workspace", withheld: true, ready: true },
     { shape: "nothing anywhere", policy: "unset", credential: "unset", ready: false, absent: "both", present: null },
     { shape: "member key only", policy: "unset", credential: "member", ready: false, absent: "model", present: { half: "key", origin: "member" } },
     { shape: "workspace key only", policy: "unset", credential: "workspace", ready: false, absent: "model", present: { half: "key", origin: "workspace" } },
     { shape: "member model only", policy: "member", credential: "unset", ready: false, absent: "key", present: { half: "model", origin: "member" } },
     { shape: "workspace model only", policy: "workspace", credential: "unset", ready: false, absent: "key", present: { half: "model", origin: "workspace" } },
+    { shape: "member key only, workspace declares only the model", policy: "workspace", credential: "unset", withheld: true, ready: false, absent: "key", present: { half: "model", origin: "workspace" } },
   ];
 
   for (const scope of [SINGLE, WORKSPACE]) {
     for (const row of MATRIX) {
       it(`${scope.mode}: ${row.shape} → ${row.ready ? "ready" : `configure-first (${row.absent})`}`, () => {
-        const verdict = chatReadiness(configModel(row.policy, row.credential), scope);
+        const verdict = chatReadiness(configModel(row.policy, row.credential, row.withheld), scope);
         expect(verdict.ready).toBe(row.ready);
         if (verdict.ready) {
           // The configured surface receives the EFFECTIVE policy, not the member literal.
@@ -255,6 +265,7 @@ describe("chatReadiness (S-452, FR-UI-18) — the full origin matrix, no DOM", (
         } else {
           expect(verdict.absent).toBe(row.absent);
           expect(verdict.present).toEqual(row.present);
+          expect(verdict.memberKeyWithheld).toBe(row.withheld ?? false);
         }
       });
     }
@@ -309,8 +320,8 @@ describe("chatReadiness (S-452, FR-UI-18) — the full origin matrix, no DOM", (
 });
 
 describe("configureFirstCopy (S-452) — the rendered claim, composed off the verdict", () => {
-  const copy = (p: ChatOrigin, c: ChatOrigin, scope: ChatScope) => {
-    const v = chatReadiness(configModel(p, c), scope);
+  const copy = (p: ChatOrigin, c: ChatOrigin, scope: ChatScope, withheld = false) => {
+    const v = chatReadiness(configModel(p, c, withheld), scope);
     if (v.ready) throw new Error("expected configure-first");
     return configureFirstCopy(v);
   };
@@ -349,6 +360,50 @@ describe("configureFirstCopy (S-452) — the rendered claim, composed off the ve
     expect(c.present).toBeNull();
     expect(c.action).toBe("Choose a provider model and add an API key");
     expect(c.workspaceLead).toMatch(/^Or declare them once/);
+  });
+
+  it("names a withheld member key, and makes the member's own model the action (HF-1)", () => {
+    const c = copy("workspace", "unset", WS, true);
+    // Only the workspace root can supply a key for its endpoint, so only it is named.
+    expect(c.summary).toBe(
+      "Chat is not configured yet for billing-service — no API key is declared by the workspace root.",
+    );
+    expect(c.present).toBe("The provider model is inherited from the workspace root.");
+    expect(c.memberKeyNote).toBe(
+      "The API key billing-service declares is not used with the inherited workspace endpoint — setting a [chat] model on billing-service makes it use its own key.",
+    );
+    expect(c.action).toBe("Choose a provider model");
+    // The alternative names what goes in the workspace file — a key, not the model
+    // the action just named.
+    expect(c.workspaceLead).toBe("Or declare an API key once for every member of the workspace, in");
+  });
+
+  it("under an inherited policy with no key anywhere, never advises a member key alone (HF-1)", () => {
+    // No member key to withhold, but one added to the member would be withheld too:
+    // only the workspace root is named, and the member route needs its own model.
+    const c = copy("workspace", "unset", WS);
+    expect(c.summary).toBe(
+      "Chat is not configured yet for billing-service — no API key is declared by the workspace root.",
+    );
+    expect(c.memberKeyNote).toBe(
+      "An API key added to billing-service is not used with the inherited workspace endpoint — it is used once billing-service declares its own [chat] model.",
+    );
+    expect(c.action).toBe("Choose a provider model and add an API key");
+    expect(c.workspaceLead).toBe("Or declare an API key once for every member of the workspace, in");
+
+    // A member-owned policy keeps the member-first copy and no note.
+    const own = copy("member", "unset", WS);
+    expect(own.memberKeyNote).toBeNull();
+    expect(own.summary).toMatch(/no API key is declared by billing-service or by the workspace root\.$/);
+    expect(own.action).toBe("Add an API key");
+    expect(own.workspaceLead).toBe("Or declare it once for every member of the workspace, in");
+  });
+
+  it("refers to an unnamed default member's withheld key without a name", () => {
+    const c = copy("workspace", "unset", { mode: "workspace", member: null }, true);
+    expect(c.memberKeyNote).toBe(
+      "The API key that member declares is not used with the inherited workspace endpoint — setting a [chat] model on that member makes it use its own key.",
+    );
   });
 
   it("an unselected workspace member is referred to without a name", () => {

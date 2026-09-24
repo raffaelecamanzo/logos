@@ -410,8 +410,16 @@ pub struct ChatResolution {
     /// The masked effective credential (presence + last-4).
     pub credential: MaskedSecret,
     /// Where the credential came from; [`ChatOrigin::Unset`] exactly when no
-    /// root holds a (non-blank) key.
+    /// root the credential may come from holds a (non-blank) key — under an
+    /// inherited policy that is the workspace root alone (see [`resolve_chat`]).
     pub credential_origin: ChatOrigin,
+    /// The member declares its own (non-blank) key, and it is **not used**
+    /// because the policy is inherited from the workspace: a member key never
+    /// reaches a workspace endpoint ([ADR-67] §2). A stated fact, so a surface
+    /// names the withheld key rather than inferring it from the member's own
+    /// masked key; always `false` unless
+    /// [`policy_origin`](Self::policy_origin) is [`ChatOrigin::Workspace`].
+    pub member_key_withheld: bool,
     /// The secret store the credential was resolved from — the raw key's only
     /// holder, never serialized.
     #[serde(skip)]
@@ -435,6 +443,7 @@ impl fmt::Debug for ChatResolution {
             .field("policy_origin", &self.policy_origin)
             .field("credential", &self.credential)
             .field("credential_origin", &self.credential_origin)
+            .field("member_key_withheld", &self.member_key_withheld)
             .finish_non_exhaustive()
     }
 }
@@ -443,8 +452,16 @@ impl fmt::Debug for ChatResolution {
 /// the origin of each half ([FR-WS-30], [ADR-67]) — the **one seam** the Chat
 /// tab's usability gate and the turn path both read, so they cannot disagree.
 ///
-/// - **Per half, member wins.** The policy half and the credential half resolve
-///   independently; the member's declaration wins wherever it makes one.
+/// - **Per half, member wins — except that a member key never reaches a
+///   workspace endpoint.** The member's declaration wins wherever it makes one,
+///   with one trust-boundary exception ([ADR-67] §2): when the policy is
+///   inherited ([`ChatOrigin::Workspace`]) the credential resolves from the
+///   **workspace root only**. The member's own key is withheld (reported as
+///   [`member_key_withheld`](ChatResolution::member_key_withheld)) and the
+///   credential is the workspace's key, or [`ChatOrigin::Unset`] when it holds
+///   none. The other direction stays open: a member that owns its policy takes
+///   the workspace key when it holds none of its own. With the policy unset the
+///   credential resolves member-first as before.
 /// - **The policy half is atomic, keyed on `model`** — the only `[chat]` field
 ///   without a default, hence the only sound discriminator on the parsed
 ///   document. A member declaring a non-blank `model` owns its whole table;
@@ -457,7 +474,10 @@ impl fmt::Debug for ChatResolution {
 ///   (`<member>/.logos/config.toml` and `<member>/.logos/secrets.toml`) and no
 ///   [`ChatOrigin::Workspace`] is reachable ([ADR-52]).
 /// - **The workspace tier is read lazily**, per half, only when the member does
-///   not declare that half — so a member that declares both never reads it.
+///   not declare that half — or, for the credential, when the policy is
+///   inherited — so a member that declares both never reads it. The member's
+///   own `secrets.toml` is always read, so an invalid one fails loud even when
+///   its key would be withheld.
 ///
 /// # Errors
 /// A present-but-invalid file at either root fails loud through the ordinary
@@ -499,17 +519,35 @@ fn resolve_chat_with(
                 .is_some_and(|m| !m.trim().is_empty())
         },
     )?;
-    let (secrets, credential_origin) = resolve_half(
-        member_root,
-        workspace_root,
-        &mut load_secrets,
-        |secrets: &Secrets| secrets.chat_api_key().is_some(),
-    )?;
+    let holds_key = |secrets: &Secrets| secrets.chat_api_key().is_some();
+    let (secrets, credential_origin, member_key_withheld) = match (policy_origin, workspace_root)
+    {
+        // An inherited policy dials the workspace endpoint, so only the
+        // workspace's key may go with it ([ADR-67] §2). The member's store is
+        // still read: it states whether a key is withheld, and an invalid one
+        // fails loud rather than being masked by inheritance.
+        (ChatOrigin::Workspace, Some(workspace_root)) => {
+            let withheld = holds_key(&load_secrets(member_root)?);
+            let workspace = load_secrets(workspace_root)?;
+            let origin = if holds_key(&workspace) {
+                ChatOrigin::Workspace
+            } else {
+                ChatOrigin::Unset
+            };
+            (workspace, origin, withheld)
+        }
+        _ => {
+            let (secrets, origin) =
+                resolve_half(member_root, workspace_root, &mut load_secrets, holds_key)?;
+            (secrets, origin, false)
+        }
+    };
     Ok(ChatResolution {
         policy,
         policy_origin,
         credential: secrets.chat_key_masked(),
         credential_origin,
+        member_key_withheld,
         secrets,
     })
 }
@@ -897,19 +935,112 @@ mod resolution_tests {
         assert_eq!(r.credential.last4.as_deref(), Some("BEEF"));
     }
 
-    /// The mirror image: a member holding its own key but no policy inherits the
-    /// workspace policy and keeps its own credential.
+    /// The mirror image is closed ([ADR-67] §2, HF-1): a member holding its own
+    /// key but no policy inherits the workspace policy **and the workspace key**
+    /// — its own key never reaches the workspace endpoint, and it is reported
+    /// withheld.
     #[test]
-    fn member_keeps_its_credential_while_inheriting_the_policy() {
+    fn an_inherited_policy_takes_the_workspace_key_and_withholds_the_member_key() {
         let e = Estate::new();
         Estate::key(&e.member, MEMBER_KEY);
         Estate::policy(&e.workspace, WORKSPACE_CHAT);
         Estate::key(&e.workspace, WORKSPACE_KEY);
 
         let r = e.resolve();
-        assert_eq!(origins(&r), (ChatOrigin::Workspace, ChatOrigin::Member));
+        assert_eq!(origins(&r), (ChatOrigin::Workspace, ChatOrigin::Workspace));
         assert_eq!(r.policy, parsed(WORKSPACE_CHAT));
+        assert_eq!(r.api_key(), Some(WORKSPACE_KEY), "the member key is not dialled");
+        assert_eq!(r.credential.last4.as_deref(), Some("BEEF"));
+        assert!(r.member_key_withheld);
+    }
+
+    /// Under a workspace declaring the policy but no key, a member's own key does
+    /// not fill the gap: the credential is unset (configure-first) and the
+    /// withheld member key is stated, never dialled.
+    #[test]
+    fn an_inherited_policy_without_a_workspace_key_is_unset_despite_a_member_key() {
+        let e = Estate::new();
+        Estate::key(&e.member, MEMBER_KEY);
+        Estate::policy(&e.workspace, WORKSPACE_CHAT);
+
+        let r = e.resolve();
+        assert_eq!(origins(&r), (ChatOrigin::Workspace, ChatOrigin::Unset));
+        assert_eq!(r.api_key(), None, "no key may go to the workspace endpoint");
+        assert!(!r.credential.present);
+        assert!(r.member_key_withheld);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains(MEMBER_KEY) && !json.contains("1111"), "{json}");
+    }
+
+    /// A blank workspace key is no key under an inherited policy too: the
+    /// credential is unset (so the tab and the turn agree it is configure-first),
+    /// never `Workspace` with nothing to dial, and the member key still stays out.
+    #[test]
+    fn a_blank_workspace_key_under_an_inherited_policy_is_unset() {
+        let e = Estate::new();
+        Estate::key(&e.member, MEMBER_KEY);
+        Estate::policy(&e.workspace, WORKSPACE_CHAT);
+        Estate::key(&e.workspace, "   ");
+
+        let r = e.resolve();
+        assert_eq!(origins(&r), (ChatOrigin::Workspace, ChatOrigin::Unset));
+        assert_eq!(r.api_key(), None);
+        assert!(!r.credential.present);
+        assert!(r.member_key_withheld);
+    }
+
+    /// `member_key_withheld` is set only when a member key is actually withheld:
+    /// never with a member-owned or unset policy, never without a member key, and
+    /// a blank member key is no key.
+    #[test]
+    fn member_key_withheld_is_set_only_for_a_member_key_under_an_inherited_policy() {
+        let cases = [
+            ("own policy, own key", Some(MEMBER_CHAT), Some(MEMBER_KEY), true, false),
+            ("own policy, no key", Some(MEMBER_CHAT), None, true, false),
+            ("inherited, own key", None, Some(MEMBER_KEY), true, true),
+            ("inherited, blank key", None, Some("   "), true, false),
+            ("inherited, no key", None, None, true, false),
+            ("unset policy, own key", None, Some(MEMBER_KEY), false, false),
+        ];
+        for (label, policy, key, ws_policy, withheld) in cases {
+            let e = Estate::new();
+            Estate::key(&e.workspace, WORKSPACE_KEY);
+            if ws_policy {
+                Estate::policy(&e.workspace, WORKSPACE_CHAT);
+            }
+            if let Some(text) = policy {
+                Estate::policy(&e.member, text);
+            }
+            if let Some(k) = key {
+                Estate::key(&e.member, k);
+            }
+            let r = e.resolve();
+            assert_eq!(r.member_key_withheld, withheld, "{label}");
+            assert_eq!(
+                serde_json::to_value(&r).unwrap()["member_key_withheld"],
+                withheld,
+                "{label}: serialized beside the origins"
+            );
+            assert!(!e.resolve_single_root().member_key_withheld, "{label}: single-root");
+        }
+    }
+
+    /// With the policy unset everywhere, the credential keeps its member-first
+    /// resolution: the member's key, else the workspace's.
+    #[test]
+    fn an_unset_policy_keeps_the_member_first_credential() {
+        let e = Estate::new();
+        Estate::key(&e.member, MEMBER_KEY);
+        Estate::key(&e.workspace, WORKSPACE_KEY);
+        let r = e.resolve();
+        assert_eq!(origins(&r), (ChatOrigin::Unset, ChatOrigin::Member));
         assert_eq!(r.api_key(), Some(MEMBER_KEY));
+
+        let e = Estate::new();
+        Estate::key(&e.workspace, WORKSPACE_KEY);
+        let r = e.resolve();
+        assert_eq!(origins(&r), (ChatOrigin::Unset, ChatOrigin::Workspace));
+        assert_eq!(r.api_key(), Some(WORKSPACE_KEY));
     }
 
     /// [ADR-67] §3: a member declaring `model` draws **no field** from the
@@ -1065,7 +1196,10 @@ mod resolution_tests {
 
     /// [ADR-52] by construction: `None` performs exactly the two member reads,
     /// declared or not; a workspace root adds a read only for a half the member
-    /// leaves undeclared, and never any path but the one passed.
+    /// leaves undeclared — or, for the secrets, under a policy inherited from it,
+    /// even over a member key (HF-1: pinned by
+    /// `an_inherited_policy_reads_the_workspace_secrets_even_over_a_member_key`) —
+    /// and never any path but the one passed.
     #[test]
     fn read_set_is_two_member_reads_plus_only_the_workspace_halves_needed() {
         let member = Path::new("/estate/svc-a");
@@ -1087,6 +1221,49 @@ mod resolution_tests {
                 ("secrets", ws.to_path_buf()),
             ]
         );
+    }
+
+    /// Under an inherited policy the credential reads the member's store (to
+    /// state a withheld key) and then the workspace's — even when the member
+    /// holds a key, because that key cannot be the one dialled.
+    #[test]
+    fn an_inherited_policy_reads_the_workspace_secrets_even_over_a_member_key() {
+        let member = Path::new("/estate/svc-a");
+        let ws = Path::new("/estate");
+        let log = RefCell::new(Vec::new());
+        let r = resolve_chat_with(
+            member,
+            Some(ws),
+            |root: &Path| {
+                log.borrow_mut().push(("config", root.to_path_buf()));
+                Ok(if root == ws {
+                    parsed(MEMBER_CHAT)
+                } else {
+                    ChatConfig::default()
+                })
+            },
+            |root: &Path| {
+                log.borrow_mut().push(("secrets", root.to_path_buf()));
+                let mut s = Secrets::default();
+                if root == member {
+                    s.chat.api_key = Some(MEMBER_KEY.to_string());
+                }
+                Ok(s)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            log.into_inner(),
+            vec![
+                ("config", member.to_path_buf()),
+                ("config", ws.to_path_buf()),
+                ("secrets", member.to_path_buf()),
+                ("secrets", ws.to_path_buf()),
+            ]
+        );
+        assert_eq!(origins(&r), (ChatOrigin::Workspace, ChatOrigin::Unset));
+        assert_eq!(r.api_key(), None);
+        assert!(r.member_key_withheld);
     }
 
     /// An invalid workspace file fails loud, naming the workspace path, when

@@ -130,7 +130,8 @@ pub(crate) fn turn_provider(
 }
 
 /// The configure-first frame text: the root inspected, the absent half (or both),
-/// the origin of a present half, and the Config-tab action that fixes it
+/// the origin of a present half, a member key withheld from the inherited
+/// workspace endpoint ([ADR-67] §2), and the Config-tab action that fixes it
 /// ([FR-UI-18], [NFR-CC-04]).
 fn configure_first_message(
     member_root: &Path,
@@ -160,6 +161,32 @@ fn configure_first_message(
             format!("no provider model is declared{where_looked}"),
             present("API key", origin),
             "Choose a provider model",
+        ),
+        // The policy is inherited, so its endpoint takes the workspace root's key
+        // alone ([ADR-67] §2): only the workspace root can supply the absent key,
+        // and a member key — declared (withheld) or yet to be added — is used only
+        // once the member owns its policy.
+        (ChatOrigin::Workspace, _) => (
+            match workspace_root {
+                Some(ws) => format!("no API key is declared by the workspace root {}", ws.display()),
+                None => "no API key is declared".to_string(),
+            },
+            format!(
+                "{}; {}",
+                present("provider model", ChatOrigin::Workspace),
+                if resolution.member_key_withheld {
+                    "this member's own API key is not used with the inherited workspace \
+                     endpoint — setting a [chat] model on this member makes it use its own key"
+                } else {
+                    "an API key added to this member is not used with the inherited workspace \
+                     endpoint — it is used once this member declares its own [chat] model"
+                }
+            ),
+            if resolution.member_key_withheld {
+                "Choose a provider model"
+            } else {
+                "Choose a provider model and add an API key"
+            },
         ),
         (origin, _) => (
             format!("no API key is declared{where_looked}"),

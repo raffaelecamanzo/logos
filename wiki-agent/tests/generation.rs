@@ -745,6 +745,8 @@ async fn run_configured_is_configure_first_without_a_model_or_key() {
         api_key: Some("sk-test".to_string()),
         max_provider_retries: 2,
         provider_retry_base_ms: 200,
+        chat_policy_inherited: false,
+        member_key_withheld: false,
     };
     let result = run_configured(Arc::clone(&engine), no_model, 256, no_op)
         .await
@@ -762,14 +764,53 @@ async fn run_configured_is_configure_first_without_a_model_or_key() {
         api_key: None,
         max_provider_retries: 2,
         provider_retry_base_ms: 200,
+        chat_policy_inherited: false,
+        member_key_withheld: false,
     };
     let result = run_configured(Arc::clone(&engine), no_key, 256, no_op)
         .await
         .expect("configure-first is not an error");
     assert!(
-        matches!(result, ConfiguredRun::ConfigureFirst(_)),
+        matches!(result, ConfiguredRun::ConfigureFirst(ref m) if m.contains("add an API key in the Config tab")),
         "a missing inherited key → configure-first, no run"
     );
+
+    // HF-1 (ADR-67 §2): under an inherited `[chat]` policy the text never advises a
+    // member key alone — a declared one is withheld, and one added would be.
+    let message = |chat_policy_inherited, member_key_withheld| {
+        let effective = EffectiveWikiModel {
+            model: Some("workspace/model".to_string()),
+            provider: ChatProvider::OpenAi,
+            base_url: "https://workspace.example/v1".to_string(),
+            api_key: None,
+            max_provider_retries: 2,
+            provider_retry_base_ms: 200,
+            chat_policy_inherited,
+            member_key_withheld,
+        };
+        let engine = Arc::clone(&engine);
+        async move {
+            match run_configured(engine, effective, 256, |_p: WikiProgress| {}).await {
+                Ok(ConfiguredRun::ConfigureFirst(m)) => m,
+                _ => panic!("a keyless run is configure-first"),
+            }
+        }
+    };
+    let withheld = message(true, true).await;
+    assert!(withheld.contains("the workspace root declares no API key"), "{withheld}");
+    assert!(
+        withheld.contains("this member's own API key is not used with the inherited workspace endpoint"),
+        "{withheld}"
+    );
+    assert!(withheld.contains("Declare a [chat] model on this member"), "{withheld}");
+    assert!(!withheld.contains("add an API key"), "{withheld}");
+    let keyless = message(true, false).await;
+    assert!(
+        keyless.contains("an API key added to this member is not used with the inherited workspace endpoint"),
+        "{keyless}"
+    );
+    assert!(keyless.contains("Declare a [chat] model and an API key on this member"), "{keyless}");
+    assert!(!keyless.contains("add an API key"), "{keyless}");
 }
 
 /// S-238 dogfood/acceptance ([CR-059], [FR-WK-18], [FR-WK-19]): the pre-S-236

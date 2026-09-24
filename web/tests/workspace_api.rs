@@ -966,6 +966,41 @@ async fn config_endpoint_fails_loud_on_a_faulty_workspace_tier_only_for_an_inher
     assert_eq!(v["effective_chat"]["credential_origin"], "member", "{body}");
 }
 
+/// HF-1 ([ADR-67] §2) on the wire: a member holding its own key but inheriting the
+/// workspace policy is served the WORKSPACE credential — or none, when the workspace
+/// holds no key — and `member_key_withheld` states the withheld key. The member's own
+/// masked key still rides `chat_key` (its literal document), never the slice.
+#[tokio::test]
+async fn config_endpoint_withholds_a_member_key_from_an_inherited_workspace_policy() {
+    let tmp = workspace();
+    write(tmp.path(), ".logos/config.toml", "[chat]\nmodel = \"ws/model\"\n");
+    write(tmp.path(), ".logos/secrets.toml", "[chat]\napi_key = \"sk-workspace-held-key-ws99\"\n");
+    write(&tmp.path().join("api"), ".logos/secrets.toml", "[chat]\napi_key = \"sk-api-own-key-ap12\"\n");
+    let router = ws_router(&tmp);
+
+    let resp = router.clone().oneshot(get("/api/v1/config?repo=api")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let slice = &v["effective_chat"];
+    assert_eq!(slice["policy_origin"], "workspace", "{body}");
+    assert_eq!(slice["credential_origin"], "workspace", "{body}");
+    assert_eq!(slice["credential"], serde_json::json!({"present": true, "last4": "ws99"}), "{body}");
+    assert_eq!(slice["member_key_withheld"], true, "{body}");
+    assert_eq!(v["chat_key"], serde_json::json!({"present": true, "last4": "ap12"}), "{body}");
+    assert!(!body.contains("sk-api-own-key") && !body.contains("sk-workspace-held"), "{body}");
+
+    std::fs::remove_file(tmp.path().join(".logos/secrets.toml")).unwrap();
+    let resp = router.oneshot(get("/api/v1/config?repo=api")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let slice = &v["effective_chat"];
+    assert_eq!(slice["credential_origin"], "unset", "the member key does not fill the gap: {body}");
+    assert_eq!(slice["credential"], serde_json::json!({"present": false}), "{body}");
+    assert_eq!(slice["member_key_withheld"], true, "{body}");
+}
+
 // ── S-250: the shell's boot probe, and the member scope on the WRITE seam ─────
 
 /// `workspace roster` carries the manifest — name, default member, member names — and

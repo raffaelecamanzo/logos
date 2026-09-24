@@ -274,6 +274,36 @@ mod tests {
         );
     }
 
+    /// HF-1 ([ADR-67] §2): wiki generation holds the same trust boundary as the
+    /// turn. A member's own key never goes to the inherited workspace endpoint —
+    /// the workspace key does, and with none there, no key at all — while a
+    /// member owning its `[chat]` policy uses its own key.
+    ///
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    #[test]
+    fn a_member_key_never_reaches_the_inherited_workspace_endpoint() {
+        let member_key = "[chat]\napi_key = \"sk-member-mb77\"\n";
+
+        let (tmp, member) = inheriting_estate();
+        write(&member, "secrets.toml", member_key);
+        let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
+        assert_eq!(effective.base_url, "https://workspace.example/v1");
+        assert_eq!(effective.api_key.as_deref(), Some("sk-workspace-ws42"));
+
+        fs::remove_file(tmp.path().join(".logos/secrets.toml")).unwrap();
+        let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
+        assert_eq!(effective.model.as_deref(), Some("workspace/chat"));
+        assert_eq!(effective.api_key, None, "the withheld member key is not dialled");
+        // …and the run's configure-first text is told why (the policy is inherited,
+        // the member's key withheld), so it does not advise adding a key.
+        assert!(effective.chat_policy_inherited && effective.member_key_withheld);
+
+        write(&member, "config.toml", "[chat]\nmodel = \"member/chat\"\n");
+        let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
+        assert_eq!(effective.api_key.as_deref(), Some("sk-member-mb77"));
+        assert!(!effective.chat_policy_inherited && !effective.member_key_withheld);
+    }
+
     /// Single-root (`None`): the enclosing workspace files are never consulted.
     #[test]
     fn single_root_consults_no_second_tier() {

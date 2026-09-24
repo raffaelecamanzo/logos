@@ -893,6 +893,10 @@ export interface EffectiveChat {
   policy_origin: ChatOrigin;
   credential: MaskedSecret;
   credential_origin: ChatOrigin;
+  /** The member's own key is withheld from the inherited workspace endpoint
+   *  (HF-1, ADR-67 §2): `true` only when the policy is inherited and the member
+   *  declares a key of its own. */
+  member_key_withheld: boolean;
 }
 
 /** `GET /api/v1/config` — both policy files, the masked chat key, the

@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::chat::{ChatConfig, ChatProvider, ChatResolution};
+use super::chat::{ChatConfig, ChatOrigin, ChatProvider, ChatResolution};
 use super::error::ConfigError;
 use super::secrets::{MaskedSecret, Secrets};
 
@@ -103,25 +103,37 @@ impl WikiConfig {
     /// `base_url`, and API key **inherited** from `chat`/`secrets` verbatim (no
     /// separate wiki provider, endpoint, or secret, [ADR-42]).
     pub fn resolve(&self, chat: &ChatConfig, secrets: &Secrets) -> EffectiveWikiModel {
-        self.resolve_parts(chat, secrets.chat_api_key())
+        self.resolve_parts(chat, secrets.chat_api_key(), false, false)
     }
 
     /// [`resolve`](Self::resolve) over the chat policy and credential the
     /// [`resolve_chat`](super::resolve_chat) seam resolved ([ADR-67], [ADR-42]):
     /// the inherited provider, endpoint, retry policy and key are the **effective**
     /// chat halves — the member's own, or the workspace's where the member leaves
-    /// that half undeclared — while [`WikiConfig::model`] still wins over the chat
+    /// that half undeclared, and the workspace's key alone under an inherited
+    /// policy ([ADR-67] §2) — while [`WikiConfig::model`] still wins over the chat
     /// model exactly as in [`resolve`](Self::resolve). The wiki table itself is the
     /// caller's (the member's); only the inherited chat halves are two-tier.
     ///
     /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
     pub fn resolve_inherited(&self, chat: &ChatResolution) -> EffectiveWikiModel {
-        self.resolve_parts(&chat.policy, chat.api_key())
+        self.resolve_parts(
+            &chat.policy,
+            chat.api_key(),
+            chat.policy_origin == ChatOrigin::Workspace,
+            chat.member_key_withheld,
+        )
     }
 
     /// The one spelling of the inheritance rule both resolvers share, so the
     /// single-root and two-tier paths cannot drift into two precedence rules.
-    fn resolve_parts(&self, chat: &ChatConfig, api_key: Option<&str>) -> EffectiveWikiModel {
+    fn resolve_parts(
+        &self,
+        chat: &ChatConfig,
+        api_key: Option<&str>,
+        chat_policy_inherited: bool,
+        member_key_withheld: bool,
+    ) -> EffectiveWikiModel {
         EffectiveWikiModel {
             model: self.model.clone().or_else(|| chat.model.clone()),
             provider: chat.provider,
@@ -129,6 +141,8 @@ impl WikiConfig {
             api_key: api_key.map(str::to_string),
             max_provider_retries: chat.max_provider_retries,
             provider_retry_base_ms: chat.provider_retry_base_ms,
+            chat_policy_inherited,
+            member_key_withheld,
         }
     }
 
@@ -173,6 +187,16 @@ pub struct EffectiveWikiModel {
     /// The provider-retry base backoff in milliseconds, inherited from
     /// [`ChatConfig::provider_retry_base_ms`] ([CR-060], [S-240]).
     pub provider_retry_base_ms: u32,
+    /// The `[chat]` policy is inherited from the workspace root
+    /// ([`ChatOrigin::Workspace`]), so its endpoint takes the workspace key alone
+    /// ([ADR-67] §2) — the configure-first text then names the workspace root,
+    /// never a member key, as the missing key's source. `false` single-root.
+    ///
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    pub chat_policy_inherited: bool,
+    /// The member's own key is withheld from that endpoint
+    /// ([`ChatResolution::member_key_withheld`]).
+    pub member_key_withheld: bool,
 }
 
 /// `Debug` that **redacts** the key ([NFR-SE-07]) — presence + last-4 only, the
@@ -186,6 +210,8 @@ impl std::fmt::Debug for EffectiveWikiModel {
             .field("api_key", &MaskedSecret::from_key(self.api_key.as_deref()))
             .field("max_provider_retries", &self.max_provider_retries)
             .field("provider_retry_base_ms", &self.provider_retry_base_ms)
+            .field("chat_policy_inherited", &self.chat_policy_inherited)
+            .field("member_key_withheld", &self.member_key_withheld)
             .finish()
     }
 }
@@ -370,6 +396,8 @@ mod tests {
             api_key: Some("sk-secret-DEADBEEF".to_string()),
             max_provider_retries: 2,
             provider_retry_base_ms: 200,
+            chat_policy_inherited: false,
+            member_key_withheld: false,
         };
         let dbg = format!("{resolved:?}");
         assert!(

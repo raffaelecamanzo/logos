@@ -187,6 +187,10 @@ function constraintHint(recommended: unknown): string {
  * fields and the raw pane above it keep showing — and posting — only the member's
  * literal document. Pre-filling a field from the slice would materialise the
  * inherited value in the member's file on the next save (NFR-RA-05).
+ *
+ * An inherited policy dials the workspace endpoint with the workspace key only
+ * (HF-1, ADR-67 §2), so a key this member declares is withheld — stated off the
+ * slice's `member_key_withheld`, never inferred from the member's own `chat_key`.
  */
 function inheritedPolicyNote(effective: EffectiveChat | null): ReactNode {
   if (effective?.policy_origin !== "workspace") return undefined;
@@ -203,6 +207,13 @@ function inheritedPolicyNote(effective: EffectiveChat | null): ReactNode {
       )}
       . The fields above show only this member&apos;s own document; setting a model here overrides the
       inherited table as a whole.
+      {effective.member_key_withheld && (
+        <>
+          {" "}
+          This member&apos;s own API key is not used with the inherited workspace endpoint — setting a{" "}
+          <code>[chat] model</code> here makes this member use its own key.
+        </>
+      )}
     </p>
   );
 }
@@ -601,10 +612,14 @@ function FileEditor({
 function SecretEditor({
   initial,
   inherited,
+  policyInherited,
   onSaved,
 }: {
   initial: MaskedSecret;
   inherited: boolean;
+  /** The `[chat]` policy is inherited from the workspace, so a key saved here is
+   *  not used until this member declares its own model (HF-1, ADR-67 §2). */
+  policyInherited: boolean;
   /** Called after a successful key write — the credential's resolution may have
    *  changed (clearing the member's key hands it to the workspace's). */
   onSaved?: () => void;
@@ -652,11 +667,25 @@ function SecretEditor({
       </p>
       {/* S-452: an inherited key is disclosed, never shown — not even its last-4,
           which belongs to the workspace root's secret, not this member's. */}
-      {inherited && !masked.present && (
+      {/* HF-1: under an inherited policy only the workspace root's key is dialled,
+          so the card says so even when neither root holds a key. */}
+      {(inherited || policyInherited) && !masked.present && (
         <p className={styles.inherited}>
-          No key is set for this member, so the key is inherited from the workspace root (
-          <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>). Saving a key here overrides it for
-          this member only.
+          {inherited ? (
+            <>
+              No key is set for this member, so the key is inherited from the workspace root (
+              <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>).
+            </>
+          ) : (
+            <>
+              No key is set for this member, and the workspace root (
+              <code>&lt;workspace-root&gt;/.logos/secrets.toml</code>) declares none for the
+              inherited <code>[chat]</code> table.
+            </>
+          )}{" "}
+          {policyInherited
+            ? "A key saved here is not used while this member inherits the workspace [chat] table; set a [chat] model above for this member to use its own key."
+            : "Saving a key here overrides it for this member only."}
         </p>
       )}
       <TextField
@@ -831,6 +860,7 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       <SecretEditor
         initial={model.chat_key}
         inherited={effective?.credential_origin === "workspace"}
+        policyInherited={effective?.policy_origin === "workspace"}
         onSaved={refreshEffective}
       />
       <GraphConsistencyCard />
