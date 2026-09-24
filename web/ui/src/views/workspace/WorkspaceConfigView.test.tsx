@@ -1099,6 +1099,18 @@ describe("a tier save never silently clobbers (S-451 T2, FR-UI-38 AC3)", () => {
     expect(screen.getAllByText("CONFLICT")).toHaveLength(1);
   });
 
+  it("a plain Save after a conflict is refused again — only the explicit overwrite uses the disk's fingerprint", async () => {
+    const { card, posts } = await mountedTier({ replies: { [TIER_SAVE]: { status: 409, body: conflict } } });
+    const user = userEvent.setup();
+    const save = within(card).getByRole("button", { name: SAVE_TIER });
+    await user.click(save);
+    await within(card).findByText("CONFLICT");
+    await user.click(save);
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts.map((p) => p.form.get("fingerprint"))).toEqual(["tier-fp-loaded", "tier-fp-loaded"]);
+    expect(await within(card).findByText("CONFLICT")).toBeInTheDocument();
+  });
+
   it("overwrites only on the explicit choice, against the disk's fingerprint, and says so", async () => {
     const { card, posts } = await mountedTier({
       replies: {
