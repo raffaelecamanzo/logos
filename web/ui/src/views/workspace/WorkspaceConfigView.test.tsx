@@ -994,6 +994,27 @@ describe("a broken tier file opens the repair editor (S-451 T2, FR-UI-38)", () =
     expect(within(after).queryByRole("alert")).toBeNull();
   });
 
+  it("a repair save whose re-read fails still states the save, and drops the fault it replaced", async () => {
+    const { card } = await mountedTier({
+      tiers: [brokenTier(), null],
+      replies: {
+        [TIER_SAVE]: { status: 200, body: { outcome: "written", path: ".logos/config.toml", bytes_written: 9, fingerprint: "tier-fp-saved" } },
+      },
+    });
+    const raw = within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.clear(raw);
+    await user.type(raw, TIER_CONTENT.replace(/\[/g, "[["));
+    await user.click(within(card).getByRole("button", { name: SAVE_TIER }));
+    expect(
+      await within(card).findByText(/Saved <workspace-root>\/\.logos\/config\.toml \(9 bytes\).*could not be re-read after this save/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/The workspace chat tier could not be loaded/)).toBeNull();
+    expect(within(card).queryByText("invalid")).toBeNull();
+    expect(within(card).queryByRole("alert")).toBeNull();
+    expect(within(card).getByText("on disk")).toBeInTheDocument();
+  });
+
   it("names a broken secrets.toml by file and position, shows none of it, and offers no key input", async () => {
     const t = tier();
     const fault = ".logos/secrets.toml is not valid TOML with only known keys (at line 2, column 11). The parser's detail is not shown, because it can quote the file.";

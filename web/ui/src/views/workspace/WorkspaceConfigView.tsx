@@ -940,6 +940,8 @@ function TierEditor({
   const [fingerprint, setFingerprint] = useState(doc.config.fingerprint);
   const [values, setValues] = useState<Record<string, string>>(() => seedValues(groups));
   const [exists, setExists] = useState(doc.config.exists);
+  // The load's fault, until a save replaces the document it describes.
+  const [fault, setFault] = useState(doc.config.error);
   const [conflict, setConflict] = useState<Extract<WorkspaceTierSaveOutcome, { outcome: "conflict" }> | null>(null);
   const [result, setResult] = useState<ResultMessage | null>(notice);
   const [saving, setSaving] = useState(false);
@@ -962,10 +964,24 @@ function TierEditor({
       }
       setConflict(null);
       setFingerprint(outcome.fingerprint);
-      // A repair of an unparsable load has no typed state worth keeping, and only
-      // a re-seed brings its typed fields up: reload, stating the save.
-      if (outcome.outcome === "written" && parsed === null) return onReload(message);
-      if (outcome.outcome === "written") setExists(true);
+      if (outcome.outcome === "written") {
+        setExists(true);
+        setFault(null);
+      }
+      // A repair of an invalid load has no typed state worth keeping, and only a
+      // re-seed brings its typed fields up. As in the manifest group, the re-seed
+      // follows a re-read that succeeded; one that fails still states the save.
+      if (outcome.outcome === "written" && parsed === null) {
+        fetchWorkspaceConfig().then(
+          () => onReload(message),
+          () =>
+            setResult({
+              kind: "warn",
+              text: `${message.text} The tier could not be re-read after this save, so its typed fields are not shown; reload the page to edit them.`,
+            }),
+        );
+        return;
+      }
       setResult(message);
     } catch (e) {
       setResult(describeError(e));
@@ -980,19 +996,19 @@ function TierEditor({
         <Badge tone={exists ? "green" : "muted"}>{exists ? "on disk" : "not yet created"}</Badge>
         {/* "invalid", not "does not parse": the fault may be a value the
             validator refuses in a document that parses. */}
-        {doc.config.error !== null && <Badge tone="red">invalid</Badge>}
+        {fault !== null && <Badge tone="red">invalid</Badge>}
       </div>
-      {doc.config.error !== null && (
+      {fault !== null && (
         <ErrorPanel>
           The workspace tier&apos;s <code>config.toml</code> is invalid — members that inherit from this
           root cannot resolve their chat until it is repaired. Fix it in the raw pane below:{" "}
-          {doc.config.error}
+          {fault}
         </ErrorPanel>
       )}
       <InheritanceBanner />
       <NotHere />
       <Fieldsets groups={groups} values={values} onChange={onFieldChange} />
-      {parsed === null && (
+      {parsed === null && fault !== null && (
         <p className={styles.help}>Typed fields are unavailable while the document is invalid.</p>
       )}
       {/* Not labelled "Raw TOML — …" like the manifest's pane: each group's pane is
