@@ -277,6 +277,25 @@ describe("validate, then write (FR-UI-38 AC2)", () => {
     expect(alert).toHaveTextContent(/Validation error — nothing was written: unknown field `membrs`/);
   });
 
+  it("states an I/O fault as a failed save, not as a validation error", async () => {
+    await mount({ saves: [{ status: 500, body: { error: "writing logos.workspace.toml: disk full" } }] });
+    await userEvent.setup().click(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Save failed (500): writing logos.workspace.toml: disk full");
+    expect(alert).not.toHaveTextContent(/Validation error/);
+  });
+
+  it("renders a manifest that cannot be read as the honest error panel, with no editor", async () => {
+    stubApi({ manifests: [null] });
+    render(
+      <WorkspaceProvider>
+        <WorkspaceConfigView />
+      </WorkspaceProvider>,
+    );
+    expect(await screen.findByText(/The request to \/api\/v1\/workspace\/manifest failed \(HTTP 500\)/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Raw TOML/)).toBeNull();
+  });
+
   it("delivers a manifest broken on disk for repair: the fault named, no fabricated typed fields", async () => {
     const broken = "[workspace]\nname = \"shop\"\nmembrs = []\n";
     await mount({ manifests: [doc({ content: broken, parsed: null, error: "unknown field `membrs`" })] });
