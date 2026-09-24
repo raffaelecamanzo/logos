@@ -397,6 +397,20 @@ where
         }
     }
 
+    /// The planner preamble that matches this roster: the workspace one — which
+    /// routes a cross-repository question to the Graph-Navigator's `xservice_*`
+    /// tools — exactly when those tools are registered, the default otherwise
+    /// ([S-431]). Owned here so the planner can never be told about a tool the
+    /// roster does not carry, or left ignorant of one it does.
+    ///
+    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    pub fn planner_preamble(&self) -> String {
+        match self.xservice {
+            Some(_) => super::planner::workspace_planner_preamble(),
+            None => super::planner::DEFAULT_PLANNER_PREAMBLE.to_string(),
+        }
+    }
+
     /// Set the sampling temperature applied to every subagent request
     /// (`[chat].temperature`, [FR-CF-06]).
     pub fn with_temperature(mut self, temperature: Option<f64>) -> Self {

@@ -126,6 +126,8 @@ impl GetTokenUsage for MockRawResponse {
 struct MockState {
     turns: Mutex<VecDeque<MockTurn>>,
     requests: AtomicUsize,
+    /// Each served request's system prompt, in order (`None` when it had none).
+    system_prompts: Mutex<Vec<Option<String>>>,
 }
 
 /// A cloneable, scripted [`CompletionModel`] for offline tests.
@@ -142,6 +144,7 @@ impl MockCompletionModel {
             state: Arc::new(MockState {
                 turns: Mutex::new(turns.into_iter().collect()),
                 requests: AtomicUsize::new(0),
+                system_prompts: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -158,6 +161,17 @@ impl MockCompletionModel {
         self.state.requests.load(Ordering::SeqCst)
     }
 
+    /// The system prompt of every request served so far, in order — what a
+    /// caller composed as the preamble, so a test can assert which preamble a
+    /// role actually ran under (the scripted replies never read it).
+    pub fn system_prompts(&self) -> Vec<Option<String>> {
+        self.state
+            .system_prompts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     fn next_turn(&self) -> Option<MockTurn> {
         self.state
             .turns
@@ -166,8 +180,19 @@ impl MockCompletionModel {
             .pop_front()
     }
 
-    fn record_request(&self) {
+    fn record_request(&self, request: &CompletionRequest) {
         self.state.requests.fetch_add(1, Ordering::SeqCst);
+        // `rig` folds a builder preamble into a leading system message at build
+        // time; the legacy `preamble` field is read as a fallback.
+        let system = match request.chat_history.first() {
+            rig_core::completion::Message::System { content } => Some(content.clone()),
+            _ => request.preamble.clone(),
+        };
+        self.state
+            .system_prompts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(system);
     }
 }
 
@@ -182,9 +207,9 @@ impl CompletionModel for MockCompletionModel {
 
     async fn completion(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        self.record_request();
+        self.record_request(&request);
         let Some(turn) = self.next_turn() else {
             return Err(CompletionError::ProviderError(
                 "mock completion model exhausted: no scripted turn remaining".to_string(),
@@ -208,9 +233,9 @@ impl CompletionModel for MockCompletionModel {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
-        self.record_request();
+        self.record_request(&request);
         let Some(turn) = self.next_turn() else {
             return Err(CompletionError::ProviderError(
                 "mock completion model exhausted: no scripted streaming turn remaining".to_string(),

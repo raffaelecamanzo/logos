@@ -292,6 +292,7 @@ async fn a_single_backing_registers_todays_graph_tools_byte_for_byte() {
     );
     assert_eq!(roster.preamble(StepRole::GraphNavigator), GRAPH_NAVIGATOR_PREAMBLE);
     assert_eq!(roster.preamble(StepRole::Synthesizer), SYNTHESIZER_PREAMBLE);
+    assert_eq!(roster.planner_preamble(), chat_agent::orchestrator::DEFAULT_PLANNER_PREAMBLE);
 }
 
 #[tokio::test]
@@ -314,6 +315,7 @@ async fn a_federated_backing_adds_the_four_xservice_tools_after_the_graph_tools(
     let preamble = roster.preamble(StepRole::GraphNavigator);
     assert!(preamble.starts_with(GRAPH_NAVIGATOR_PREAMBLE), "{preamble}");
     assert!(preamble.contains("xservice_callers") && preamble.contains("UNRESOLVED"));
+    assert_eq!(roster.planner_preamble(), chat_agent::workspace_planner_preamble());
     // The roles that never see an xservice result keep today's preamble exactly.
     assert_eq!(roster.preamble(StepRole::GovernanceAnalyst), GOVERNANCE_ANALYST_PREAMBLE);
     assert_eq!(roster.preamble(StepRole::SourceReader), SOURCE_READER_PREAMBLE);

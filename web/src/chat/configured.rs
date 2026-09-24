@@ -57,8 +57,8 @@ use agent_core::{
 };
 use agent_core::{Sandbox, XserviceBacking};
 use chat_agent::{
-    workspace_planner_preamble, BudgetTree, ChatRole, ChatStore, MemoryGrounding, MemoryStore,
-    Orchestrator, Planner, SubagentRoster, SynthesizerGrounding,
+    BudgetTree, ChatRole, ChatStore, MemoryGrounding, MemoryStore, Orchestrator, Planner,
+    SubagentRoster, SynthesizerGrounding,
 };
 use logos_core::config::{resolve_chat, ChatProvider};
 use logos_core::Engine;
@@ -339,21 +339,14 @@ async fn launch<M>(
 ) where
     M: CompletionModel + Clone + Send + Sync + 'static,
 {
-    let federated = xservice.is_some();
     let roster = SubagentRoster::new(engine, sandbox, model.clone())
         .with_xservice(xservice)
         .with_temperature(temperature)
         .with_max_tokens(max_tokens)
         .with_synthesizer_grounding(grounding);
-    let orchestrator = if federated {
-        Orchestrator::with_planner(
-            Planner::with_preamble(model, workspace_planner_preamble()),
-            roster,
-            budget,
-        )
-    } else {
-        Orchestrator::new(model, roster, budget)
-    };
+    // The roster names the planner preamble that matches its tools.
+    let planner = Planner::with_preamble(model, roster.planner_preamble());
+    let orchestrator = Orchestrator::with_planner(planner, roster, budget);
     run_orchestrated(orchestrator, question, memory, target, tx).await;
 }
 
@@ -1049,7 +1042,7 @@ mod tests {
 
         /// Run one scripted turn through `launch` — over a federated backing or a
         /// single root — and return the Graph-Navigator's observation.
-        async fn navigator_observation(workspace: bool) -> String {
+        async fn navigator_observation(workspace: bool) -> (String, Vec<Option<String>>) {
             let tmp = TempDir::new().unwrap();
             let project = tmp.path().join("project");
             std::fs::create_dir_all(project.join("src")).unwrap();
@@ -1079,6 +1072,7 @@ mod tests {
                 MockTurn::text("answer"),
             ]);
             let (tx, mut rx) = unbounded_chat_channel();
+            let recorder = model.clone();
             launch(
                 engine,
                 sandbox,
@@ -1106,12 +1100,23 @@ mod tests {
                     observation = Some(summary);
                 }
             }
-            observation.expect("the navigator step was observed")
+            (observation.expect("the navigator step was observed"), recorder.system_prompts())
         }
 
         #[tokio::test]
         async fn a_workspace_turn_dispatches_xservice_through_launch() {
-            let observation = navigator_observation(true).await;
+            let (observation, prompts) = navigator_observation(true).await;
+            // The planner ran under the workspace preamble, the Synthesizer (the
+            // last request) under its cross-service addendum.
+            assert_eq!(
+                prompts.first().cloned().flatten().as_deref(),
+                Some(chat_agent::workspace_planner_preamble().as_str())
+            );
+            let synthesizer = prompts.last().cloned().flatten().unwrap_or_default();
+            assert!(
+                synthesizer.ends_with(chat_agent::SYNTHESIZER_XSERVICE_ADDENDUM),
+                "{synthesizer}"
+            );
             assert!(
                 observation.contains("xservice_search \"alpha\" over 2 member(s)"),
                 "{observation}"
@@ -1120,7 +1125,15 @@ mod tests {
 
         #[tokio::test]
         async fn a_single_root_turn_through_launch_has_no_xservice_tool() {
-            let observation = navigator_observation(false).await;
+            let (observation, prompts) = navigator_observation(false).await;
+            assert_eq!(
+                prompts.first().cloned().flatten().as_deref(),
+                Some(chat_agent::orchestrator::DEFAULT_PLANNER_PREAMBLE)
+            );
+            assert_eq!(
+                prompts.last().cloned().flatten().as_deref(),
+                Some(chat_agent::SYNTHESIZER_PREAMBLE)
+            );
             assert_eq!(observation, "searched.", "no reading: the call was out-of-domain");
         }
     }
