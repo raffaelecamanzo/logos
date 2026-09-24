@@ -926,11 +926,15 @@ function TierEditor({ model }: { model: ConfigReadModel }) {
 /**
  * The workspace chat tier group: load `<workspace-root>/.logos/`, then edit it.
  *
- * Its failed read is stated INSIDE the group as a status, not through
- * {@link AsyncResource}'s alert: the groups load independently, and the page's
- * assertive region belongs to the outcome of a save the user just made — a load
- * failure here must not be announced over, or read as, the manifest group's
- * refusal. The manifest group stays fully usable beside it.
+ * Its failed read is stated INSIDE the group as a `NOT LOADED` status (a
+ * `Callout`, `role=status`), in the shared describer's words, and the manifest
+ * group stays fully usable beside it. That is a deliberate exception to the
+ * design grammar's Error panel (`ErrorPanel`, `role=alert`), which this view's
+ * own manifest reads still use, and it is made for one reason: S-430's tests,
+ * which must stay unmodified, render this group beside theirs with a stub that
+ * answers its read with `{}` and query the page's alert unscoped — a standing
+ * alert here would make every such query ambiguous. Moving this state to the
+ * Error panel means scoping those queries to the manifest card.
  */
 function TierGroup() {
   const loaded = useApiResource<ConfigReadModel>(() => fetchWorkspaceConfig(), []);
