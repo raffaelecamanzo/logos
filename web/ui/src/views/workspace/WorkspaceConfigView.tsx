@@ -358,6 +358,12 @@ function describeOutcome(outcome: ManifestSaveOutcome, overwrote: boolean): Resu
   }
 }
 
+/** The other resolution of a conflict, stated as plainly as the overwrite is. */
+const DISCARDED: ResultMessage = {
+  kind: "ok",
+  text: "Loaded the version on disk — your unsaved edits were discarded and nothing was written.",
+};
+
 function describeError(e: unknown): ResultMessage {
   if (e instanceof ConfigMutateError) {
     const label = e.status === 422 ? "Validation error — nothing was written" : `Save failed (${e.status})`;
@@ -417,17 +423,21 @@ function ConflictPanel({
  *  so "load the version on disk" re-seeds it from scratch. */
 function ManifestEditor({
   doc,
+  notice,
   onReload,
 }: {
   doc: WorkspaceManifestDocument;
-  /** Re-read the manifest from disk and re-seed this editor from it. */
-  onReload: () => void;
+  /** What the reload that seeded this editor did, stated on arrival. */
+  notice: ResultMessage | null;
+  /** Re-read the manifest from disk and re-seed this editor from it, stating
+   *  `notice` once the new editor is up. */
+  onReload: (notice: ResultMessage) => void;
 }) {
   const [raw, setRaw] = useState(doc.content);
   const [fingerprint, setFingerprint] = useState(doc.fingerprint);
   const [values, setValues] = useState<Record<string, string>>(() => initialValues(doc.parsed));
   const [conflict, setConflict] = useState<Extract<ManifestSaveOutcome, { outcome: "conflict" }> | null>(null);
-  const [result, setResult] = useState<ResultMessage | null>(null);
+  const [result, setResult] = useState<ResultMessage | null>(notice);
   const [saving, setSaving] = useState(false);
   // What the governance read-back and the findings rider describe: the document
   // as last known to be on disk. Refreshed after a write; never from local edits.
@@ -538,7 +548,7 @@ function ManifestEditor({
         <ConflictPanel
           disk={conflict.disk_content}
           busy={saving}
-          onLoadDisk={onReload}
+          onLoadDisk={() => onReload(DISCARDED)}
           onOverwrite={() => void save(conflict.disk_fingerprint, true)}
         />
       )}
@@ -549,6 +559,7 @@ function ManifestEditor({
 /** The manifest group: load `logos.workspace.toml`, then edit it. */
 function ManifestGroup() {
   const [generation, setGeneration] = useState(0);
+  const [notice, setNotice] = useState<ResultMessage | null>(null);
   // Each completed read is its own load, and the editor is keyed on THAT — not on
   // the fingerprint, which can repeat (a save, then `git checkout` of the file,
   // brings the first load's bytes back) and would then remount nothing, and not
@@ -561,7 +572,17 @@ function ManifestGroup() {
   return (
     <ConfigGroup title="Workspace manifest" file="logos.workspace.toml">
       <AsyncResource resource={loaded} loadingLabel="Loading the manifest…">
-        {(l) => <ManifestEditor key={l.load} doc={l.doc} onReload={() => setGeneration((n) => n + 1)} />}
+        {(l) => (
+          <ManifestEditor
+            key={l.load}
+            doc={l.doc}
+            notice={notice}
+            onReload={(next) => {
+              setNotice(next);
+              setGeneration((n) => n + 1);
+            }}
+          />
+        )}
       </AsyncResource>
     </ConfigGroup>
   );

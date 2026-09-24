@@ -292,6 +292,8 @@ describe("no silent clobber (FR-UI-38 AC3)", () => {
     await user.click(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ }));
     await user.click(await screen.findByRole("button", { name: /Load the version on disk/ }));
     await waitFor(() => expect(rawPane().value).toBe(conflict.disk_content));
+    // …and it says which resolution happened, as the overwrite path does (AC3).
+    expect(await screen.findByText(/Loaded the version on disk — your unsaved edits were discarded/)).toBeInTheDocument();
     expect(gets.filter((u) => u.startsWith("/api/v1/workspace/manifest"))).toHaveLength(2);
     expect(posts).toHaveLength(1);
   });
