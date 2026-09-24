@@ -805,9 +805,12 @@ function TierSecret({ initial }: { initial: MaskedSecret }) {
     setSaving(true);
     setResult(null);
     try {
-      const outcome = await saveWorkspaceSecret(value);
+      const reply = await saveWorkspaceSecret(value);
       // Drop the typed secret the moment it is persisted.
       setValue("");
+      // A 2xx without the masked state is "saved, format not understood", never
+      // a new badge state this page was not sent.
+      const outcome = typeof reply?.chat_key?.present === "boolean" ? reply : null;
       if (outcome) setMasked(outcome.chat_key);
       setResult({ kind: "ok", text: describeTierSecret(outcome) });
     } catch (e) {

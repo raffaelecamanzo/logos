@@ -177,13 +177,20 @@ export async function saveWorkspaceManifest(
  * A `2xx` that is not that read-model is refused here rather than handed on: the
  * editor's Save replaces the whole file with its raw pane, so an editor seeded
  * from a payload with no document in it would offer to overwrite the tier with
- * nothing (NFR-RA-05).
+ * nothing, and one missing its parse or key state would throw while rendering and
+ * take the whole page down with it, the manifest group included (NFR-RA-05).
  *
  * App-level: no `?repo=`, like every `workspace/*` read.
  */
 export async function fetchWorkspaceConfig(): Promise<ConfigReadModel> {
   const model = await apiFetch<ConfigReadModel>("workspace/config");
-  if (typeof model?.config?.content !== "string" || typeof model.chat_key?.present !== "boolean") {
+  // Every field the editor reads to seed itself: the raw pane, the typed [chat]
+  // fields, and the masked key badge.
+  if (
+    typeof model?.config?.content !== "string" ||
+    typeof model.config.parsed?.chat?.provider !== "string" ||
+    typeof model.chat_key?.present !== "boolean"
+  ) {
     throw new Error("GET /api/v1/workspace/config answered without a config document or key state.");
   }
   return model;

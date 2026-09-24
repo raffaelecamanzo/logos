@@ -848,6 +848,31 @@ describe("the tier group's own read (S-451, NFR-RA-05)", () => {
   });
 });
 
+describe("a malformed 2xx is stated in the group, never a crash of the page (S-451, NFR-RA-05)", () => {
+  const valid = () => JSON.parse(JSON.stringify(tier())) as Record<string, Record<string, unknown>>;
+
+  it.each([
+    ["no key state", () => { const m = valid(); delete m.chat_key; return m; }],
+    ["no parsed document", () => { const m = valid(); m.config.parsed = null; return m; }],
+    ["no parsed [chat]", () => { const m = valid(); m.config.parsed = { languages: [] }; return m; }],
+  ])("a read-model with %s is refused and the manifest group stays usable", async (_label, make) => {
+    await mountTier({ tiers: [JSON.stringify(make())] });
+    expect(await screen.findByText(/The workspace chat tier could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(TIER_RAW)).toBeNull();
+    expect(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ })).toBeInTheDocument();
+  });
+
+  it("a key reply with no key state is 'format not understood', and the badge is unmoved", async () => {
+    const { card } = await mountedTier({
+      replies: { "/api/v1/workspace/config/secret": { status: 200, body: { path: ".logos/secrets.toml" } } },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_KEY }));
+    expect(await within(card).findByText("Key saved (unexpected response format).")).toBeInTheDocument();
+    expect(within(card).getByText("set · ends …ab12")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Save logos\.workspace\.toml/ })).toBeInTheDocument();
+  });
+});
+
 describe("the tier group is app-scoped and workspace-only (S-451 AC5)", () => {
   it("re-issues no tier read on a member switch, and never carries ?repo=", async () => {
     const { gets } = await mountedTier();
