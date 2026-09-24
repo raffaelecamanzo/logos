@@ -2057,8 +2057,10 @@ mod tests {
     /// [`every_handler_names_its_surface_and_only_status_names_the_shell`]
     /// embeds `api_v1.rs` and `lib.rs` by name — while `bridge` is
     /// `pub(crate)` across a crate with ten other source files. A new module
-    /// naming `Surface::Cli`, or crossing the adapter boundary through `bridge`
-    /// or `workspace_fan`, would be classified by nothing and that census would
+    /// naming `Surface::Cli`, or crossing the adapter boundary through `bridge`,
+    /// `workspace_fan` or the [`run_blocking`] hop beneath both (which takes its
+    /// surface as a parameter, so a caller may hold it in a variable), would be
+    /// classified by nothing and that census would
     /// not notice: its whitelist is exact about the files it reads and silent
     /// about the files it does not.
     ///
@@ -2087,7 +2089,7 @@ mod tests {
     ///
     /// An unclassified engine call that carries **no marker at all** — one that
     /// reaches the engine inside a bare `spawn_blocking`, naming no `Surface`
-    /// and calling neither helper.
+    /// and calling none of the helpers.
     ///
     /// `web/src/wikigen/configured.rs` was that shape, and [CR-139] closed it:
     /// the pass now names [`Surface::WikiGen`], so the file is in `SCANNED`
@@ -2097,7 +2099,7 @@ mod tests {
     /// enumerates every engine-reaching site in that module from a directory
     /// walk and compares it against a declared, classified table, so a marker
     /// is not what makes a site visible there. This guard's reach is still
-    /// exactly "a `Surface`/`bridge`/`workspace_fan` marker in a file the
+    /// exactly "a `Surface`/`bridge`/`workspace_fan`/`run_blocking` marker in a file the
     /// census does not read", and it is stated here so the next audit starts
     /// from that rather than from an assumption.
     ///
@@ -2105,7 +2107,7 @@ mod tests {
     #[test]
     fn no_other_source_under_web_src_carries_a_surface_marker() {
         const SCANNED: [&str; 3] = ["api_v1.rs", "lib.rs", "wikigen/configured.rs"];
-        const MARKERS: [&str; 3] = ["Surface::", "bridge(", "workspace_fan("];
+        const MARKERS: [&str; 4] = ["Surface::", "bridge(", "workspace_fan(", "run_blocking("];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut seen_scanned: Vec<String> = Vec::new();
