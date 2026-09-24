@@ -578,23 +578,27 @@ member's own key is never sent to a workspace endpoint:**
   tier, and nothing reads above the project root.
 - **Fail-loud:** an invalid workspace-root `config.toml` or `secrets.toml` makes the
   Config read (`GET /api/v1/config`) of every member that would inherit from it
-  answer `500`, naming the file. Repair it by saving a valid document through the
-  workspace-tier write route below — a save validates the **new** content and never
-  reads the broken file — or by editing the file by hand. A broken workspace
-  `secrets.toml` has no in-app repair: the key writer refuses it (`422`) and leaves it
-  byte-identical, so fix or delete that file by hand.
+  answer `500`, naming the file. The workspace tier's own read does **not** fail: it
+  delivers the broken `config.toml` for repair — the literal document, `parsed: null`
+  and a fault naming the file and the line/column (or the offending key), never a
+  fragment of the file. Repair it in the workspace Config view, or by saving a valid
+  document through the write route below — a save validates the **new** content,
+  never the broken one — or by editing the file by hand. A broken workspace
+  `secrets.toml` is named the same way and its contents are never shown, but it has
+  no in-app repair: the key writer refuses it (`422`) and leaves it byte-identical, so
+  fix or delete that file by hand.
 
 **Where you see the effective values.** The member Config tab shows an inherited
 chat value as a read-only note and still edits and saves **only the member's own
 document** — saving never copies an inherited value into the member's
-`config.toml`. There is no Config view for the workspace tier yet: declare it by
-editing the two files, or through the web API while `logos serve --ui` is running
-at the workspace root:
+`config.toml`. The workspace tier is edited in the workspace **Config** view (the
+Workspace section of the sidebar, beside the manifest), by editing the two files, or
+through the web API while `logos serve --ui` is running at the workspace root:
 
 | Route | Does |
 |---|---|
-| `GET /api/v1/workspace/config` | Reads the workspace tier (same shape as `GET /api/v1/config`; `effective_chat` origins read `member` = declared at this root, `unset` = not declared). |
-| `POST /api/v1/workspace/config/save` | Writes `<workspace-root>/.logos/config.toml` (form `content=`). Validated before write, atomic replace; `rules` is refused (workspace governance lives in the manifest). |
+| `GET /api/v1/workspace/config` | Reads the workspace tier: `config` (the literal `content`, its load `fingerprint`, `exists`, `parsed` — `null` with an `error` when the file is invalid), the masked `chat_key` (`null` with a `chat_key_error` when `secrets.toml` cannot be read) and `effective_chat` (origins read `member` = declared at this root, `unset` = not declared; `null` when either file is invalid). No `rules.toml` is read at this root. |
+| `POST /api/v1/workspace/config/save` | Writes `<workspace-root>/.logos/config.toml` (form `content=` and `fingerprint=` — the one the read returned; `400` without it). Validated before write (`422`, file untouched), atomic replace; a document identical to disk is `unchanged` and writes nothing; a file changed on disk since the read is refused `409` with the document now on disk, and nothing is written. `rules` is refused (workspace governance lives in the manifest). |
 | `POST /api/v1/workspace/config/secret` | Writes `<workspace-root>/.logos/secrets.toml` (form `api_key=`, blank clears), `0600`, response masked. |
 
 The two POST routes carry the same same-origin + intent-token guard as every
