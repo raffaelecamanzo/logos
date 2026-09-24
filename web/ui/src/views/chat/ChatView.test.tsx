@@ -103,6 +103,7 @@ function configuredModel(
       policy_origin: origins.policy ?? "member",
       credential: { present: true, last4: MASKED_LAST4 } as { present: boolean },
       credential_origin: origins.credential ?? "member",
+      member_key_withheld: false,
     },
   };
 }
@@ -213,21 +214,15 @@ describe("ChatView — configured chrome", () => {
     expect(banner?.textContent).not.toContain(MASKED_LAST4);
   });
 
-  it("discloses each half's origin independently when only one is inherited", async () => {
-    // Member policy + workspace key: the endpoint is the member's, the key is not.
+  it("discloses the key's origin on its own when only the key is inherited", async () => {
+    // Member policy + workspace key: the endpoint is the member's, the key is not. The
+    // mirror (workspace policy + member key) is no longer a shape the seam produces:
+    // an inherited policy takes the workspace key only (HF-1, ADR-67 §2).
     mockFetchConfig.mockResolvedValue(configuredModel("openai", { policy: "member", credential: "workspace" }));
-    const first = render(<ChatView />);
-    let banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    render(<ChatView />);
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
     expect(banner).toHaveTextContent("(the configured openai endpoint)");
     expect(banner).toHaveTextContent("The API key is inherited from the workspace root.");
-    first.unmount();
-
-    // Workspace policy + member key: the endpoint is inherited, the key is not.
-    mockFetchConfig.mockResolvedValue(configuredModel("openai", { policy: "workspace", credential: "member" }));
-    render(<ChatView />);
-    banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
-    expect(banner).toHaveTextContent("(the openai endpoint inherited from the workspace root)");
-    expect(banner?.textContent).not.toContain("API key is inherited");
   });
 
   it("calls a member-declared endpoint the configured one", async () => {
@@ -302,6 +297,26 @@ describe("ChatView — configure-first names the root, the absent half and the o
     expect(screen.getByText("The API key is inherited from the workspace root.")).toBeInTheDocument();
     // Never the manifest default member, which is what an unscoped read answers from.
     expect(summary.closest("section")?.textContent).not.toMatch(/\bapi\b(?! key)/i);
+  });
+
+  it("workspace: names a member key withheld from the inherited endpoint, and how to use it (HF-1)", async () => {
+    const m = unconfiguredModel("key", "workspace");
+    m.effective_chat.member_key_withheld = true;
+    const summary = await renderInWorkspace(m);
+    expect(summary).toHaveTextContent(
+      "Chat is not configured yet for web — no API key is declared by the workspace root.",
+    );
+    expect(screen.getByText("The provider model is inherited from the workspace root.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The API key web declares is not used with the inherited workspace endpoint — setting a [chat] model on web makes it use its own key.",
+      ),
+    ).toBeInTheDocument();
+    // The action is the member's own model — adding a member key would still be withheld.
+    const advisory = summary.closest("section");
+    expect(advisory).toHaveTextContent("Choose a provider model in the Config tab for web");
+    expect(advisory).not.toHaveTextContent("Add an API key");
+    expect(screen.getByText("<workspace-root>/.logos/secrets.toml").tagName).toBe("CODE");
   });
 
   it("workspace: links THIS member's Config tab and names the workspace file as text", async () => {

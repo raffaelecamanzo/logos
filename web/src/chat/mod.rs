@@ -130,7 +130,8 @@ pub(crate) fn turn_provider(
 }
 
 /// The configure-first frame text: the root inspected, the absent half (or both),
-/// the origin of a present half, and the Config-tab action that fixes it
+/// the origin of a present half, a member key withheld from the inherited
+/// workspace endpoint ([ADR-67] §2), and the Config-tab action that fixes it
 /// ([FR-UI-18], [NFR-CC-04]).
 fn configure_first_message(
     member_root: &Path,
@@ -159,6 +160,21 @@ fn configure_first_message(
         (ChatOrigin::Unset, origin) => (
             format!("no provider model is declared{where_looked}"),
             present("API key", origin),
+            "Choose a provider model",
+        ),
+        // The member's own key exists but may not go to the workspace endpoint:
+        // only the workspace root could supply this key, and owning the policy is
+        // what lets the member use its own.
+        (origin, _) if resolution.member_key_withheld => (
+            match workspace_root {
+                Some(ws) => format!("no API key is declared by the workspace root {}", ws.display()),
+                None => "no API key is declared".to_string(),
+            },
+            format!(
+                "{}; this member's own API key is not used with the inherited workspace \
+                 endpoint — setting a [chat] model on this member makes it use its own key",
+                present("provider model", origin)
+            ),
             "Choose a provider model",
         ),
         (origin, _) => (

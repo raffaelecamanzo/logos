@@ -401,10 +401,20 @@ mod tests {
     }
 
     /// The turn's verdict: does `build_setup` produce a turn? A refusal must be the
-    /// configure-first state, never a setup fault.
+    /// configure-first state, never a setup fault. A produced turn must also hold
+    /// the trust boundary ([ADR-67] §2): a turn dialling the inherited workspace
+    /// model dials the workspace key, never the member's.
     fn turn_verdict(member: &Path, ws: Option<&Path>) -> bool {
         match build_setup(member, ws, None, "what is here?") {
-            Ok(_) => true,
+            Ok(setup) => {
+                if setup.model_id == WS_MODEL {
+                    assert_eq!(
+                        setup.api_key, WS_KEY,
+                        "a member key reached the workspace endpoint"
+                    );
+                }
+                true
+            }
             Err(message) => {
                 assert!(
                     message.starts_with("Chat is not configured yet"),
@@ -426,22 +436,69 @@ mod tests {
         assert_eq!(setup.api_key, WS_KEY);
     }
 
-    /// Per-half inheritance reaches the turn: a member's own model with the
-    /// workspace's key, and the mirror.
+    /// Per-half inheritance reaches the turn in the one allowed direction: a
+    /// member's own model dials with the workspace's key.
     #[test]
-    fn each_half_is_dialled_from_the_root_that_declares_it() {
+    fn a_member_owned_policy_dials_with_the_inherited_workspace_key() {
         let e = estate(Half::Declared, Half::Absent, Half::Declared, Half::Declared);
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
         assert_eq!(
             (setup.model_id.as_str(), setup.api_key.as_str()),
             (MEMBER_MODEL, WS_KEY)
         );
+    }
 
+    /// HF-1 ([ADR-67] §2): the mirror is closed. A member holding only its own
+    /// key, under a workspace declaring both halves, dials the workspace model
+    /// with the **workspace** key — its own key never reaches that endpoint.
+    #[test]
+    fn a_member_key_is_never_dialled_with_the_inherited_workspace_policy() {
         let e = estate(Half::Absent, Half::Declared, Half::Declared, Half::Declared);
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
         assert_eq!(
             (setup.model_id.as_str(), setup.api_key.as_str()),
-            (WS_MODEL, MEMBER_KEY)
+            (WS_MODEL, WS_KEY)
+        );
+    }
+
+    /// HF-1: under a workspace declaring the policy but no key, the member's own
+    /// key does not fill the gap — the turn is refused, and the refusal names
+    /// the withheld key and the action that lets the member use it.
+    #[test]
+    fn a_member_key_under_a_keyless_workspace_policy_is_refused_and_named() {
+        let e = estate(Half::Absent, Half::Declared, Half::Declared, Half::Absent);
+        let m = build_setup(&e.member, Some(&e.ws), None, "q")
+            .err()
+            .expect("no key may be dialled with the workspace policy");
+        let ws = e.ws.display().to_string();
+        assert!(
+            m.contains(&format!("no API key is declared by the workspace root {ws}")),
+            "{m}"
+        );
+        assert!(
+            m.contains(&format!("the provider model is inherited from the workspace root {ws}")),
+            "{m}"
+        );
+        assert!(
+            m.contains(
+                "this member's own API key is not used with the inherited workspace endpoint"
+            ),
+            "{m}"
+        );
+        assert!(
+            m.contains("setting a [chat] model on this member makes it use its own key"),
+            "{m}"
+        );
+        assert!(m.contains("Choose a provider model in the Config tab"), "{m}");
+        assert!(!m.contains(MEMBER_KEY) && !m.contains("mb77"), "never echoes the key: {m}");
+        assert!(!tab_verdict(&e.member, Some(&e.ws)), "and the gate agrees");
+
+        // Owning the policy is what makes the member use its own key.
+        write(&e.member, "config.toml", &format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\n"));
+        let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
+        assert_eq!(
+            (setup.model_id.as_str(), setup.api_key.as_str()),
+            (MEMBER_MODEL, MEMBER_KEY)
         );
     }
 
@@ -496,7 +553,10 @@ mod tests {
 
     /// AC-2: tab verdict == turn verdict, asserted as ONE equality over the whole
     /// matrix — every member shape (absent / blank / declared, per half) × every
-    /// workspace shape × with and without the workspace root passed.
+    /// workspace shape × with and without the workspace root passed. The matrix
+    /// holds the HF-1 rows (a member key alone under a workspace declaring both
+    /// halves, and under one declaring only the policy), and every turn it
+    /// produces is checked against the trust boundary in `turn_verdict`.
     #[test]
     fn tab_verdict_equals_turn_verdict_over_the_whole_fixture_matrix() {
         let shapes = [Half::Absent, Half::Blank, Half::Declared];
@@ -547,10 +607,13 @@ mod tests {
         );
         assert!(!tab_verdict(&e.member, None), "and the gate agrees");
 
-        let e = estate(Half::Blank, Half::Declared, Half::Declared, Half::Absent);
+        // The workspace policy it inherits takes the workspace key (HF-1): a
+        // blank model does not make the member's key eligible for that endpoint.
+        let e = estate(Half::Blank, Half::Declared, Half::Declared, Half::Declared);
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
         assert_eq!(
-            setup.model_id, WS_MODEL,
+            (setup.model_id.as_str(), setup.api_key.as_str()),
+            (WS_MODEL, WS_KEY),
             "a blank member model does not shadow the workspace's"
         );
     }

@@ -56,6 +56,7 @@ function model(): ConfigReadModel {
       policy_origin: "unset",
       credential: { present: true, last4: "9f3a" },
       credential_origin: "member",
+      member_key_withheld: false,
     },
     // The CR-067/BR-37 defaults projection: config.toml real defaults, plus
     // rules.toml real [metric_thresholds] defaults / [constraints] recommended
@@ -373,6 +374,7 @@ describe("ConfigView round-trips only the literal document (S-448, NFR-RA-05)", 
         policy_origin: "workspace",
         credential: { present: true, last4: "wk42" },
         credential_origin: "workspace",
+        member_key_withheld: false,
       },
     };
   }
@@ -421,6 +423,7 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
         policy_origin: "workspace",
         credential: { present: true, last4: "wk42" },
         credential_origin: "workspace",
+        member_key_withheld: false,
       },
     };
   }
@@ -519,12 +522,13 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
   });
 
   it("discloses the workspace key once the member clears its own", async () => {
-    // Loaded while the member holds its own key: nothing is inherited yet. Clearing it
-    // hands the resolution to the workspace key, and the re-read says so.
+    // Loaded while the member holds its own key under the inherited policy: that key is
+    // withheld (HF-1) and the badge is the member's own. Clearing it leaves the
+    // workspace key as the inherited credential, and the re-read says so.
     let reads = 0;
     const own = model();
-    own.effective_chat = { ...own.effective_chat, policy_origin: "workspace", credential_origin: "member" };
-    const cleared = { ...own, chat_key: { present: false }, effective_chat: { ...own.effective_chat, credential: { present: true, last4: "wk42" }, credential_origin: "workspace" as const } };
+    own.effective_chat = { ...own.effective_chat, policy_origin: "workspace", credential: { present: true, last4: "wk42" }, credential_origin: "workspace", member_key_withheld: true };
+    const cleared = { ...own, chat_key: { present: false }, effective_chat: { ...own.effective_chat, member_key_withheld: false } };
     mockFetch({
       "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(reads++ === 0 ? own : cleared) }),
       "POST /config/secret": () => ({
@@ -536,12 +540,59 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     renderView();
     await screen.findByText(/CONFIG EDITOR/);
     expect(screen.queryByText(/key is inherited from the workspace root/)).not.toBeInTheDocument();
+    expect(screen.getByText(/own API key is not used/, { selector: "p" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Save key" }));
     await screen.findByText(/Key cleared\./);
     const card = screen.getByRole("heading", { name: "chat API key" }).closest("section");
     await waitFor(() => expect(card).toHaveTextContent(/key is inherited from the workspace root/));
+    expect(screen.queryByText(/own API key is not used/)).not.toBeInTheDocument();
     expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
+  });
+
+  it("says a withheld member key is not used with the inherited endpoint, and how to use it (HF-1)", async () => {
+    // The member holds its own key but inherits the workspace policy: the note names the
+    // withheld key off the slice's flag — the badge's own key is not the signal.
+    const withheld = inheriting();
+    withheld.chat_key = { present: true, last4: "mb77" };
+    withheld.effective_chat = { ...withheld.effective_chat, member_key_withheld: true };
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(withheld) }) });
+    const first = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    const note = screen.getByText(/table is inherited from the workspace root/, { selector: "p" });
+    expect(note).toHaveTextContent(
+      "This member's own API key is not used with the inherited workspace endpoint — setting a [chat] model here makes this member use its own key.",
+    );
+    first.unmount();
+
+    // Same member key, flag false (the seam did not withhold it): the note says nothing
+    // about it — the SPA does not infer the fact from `chat_key`.
+    const notFlagged = { ...withheld, effective_chat: { ...withheld.effective_chat, member_key_withheld: false } };
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(notFlagged) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).not.toHaveTextContent(
+      /own API key is not used/,
+    );
+  });
+
+  it("does not promise a saved key overrides the inherited one while the policy is inherited", async () => {
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }) });
+    const first = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    let card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
+    expect(card).toHaveTextContent("A key saved here is not used while this member inherits the workspace [chat] table");
+    expect(card).not.toHaveTextContent("overrides it for this member only");
+    first.unmount();
+
+    // A member owning its policy: its own key WOULD override the inherited one.
+    const ownPolicy = inheriting();
+    ownPolicy.effective_chat = { ...ownPolicy.effective_chat, policy: { ...ownPolicy.effective_chat.policy, model: "own-model" }, policy_origin: "member" };
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(ownPolicy) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    card = screen.getByRole("heading", { name: "chat API key" }).closest("section") as HTMLElement;
+    expect(card).toHaveTextContent("Saving a key here overrides it for this member only.");
   });
 
   it("drops the key note the moment the member saves its own key, before any re-read", async () => {

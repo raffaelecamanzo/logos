@@ -94,7 +94,8 @@ export function ChatView() {
 /**
  * The honest configure-first state ([FR-UI-18], [NFR-CC-04]): a muted advisory —
  * NOT an error, and no composer — that names the root it inspected, the absent
- * half, and where any present half came from, and links the member's Config tab.
+ * half, where any present half came from, and a member key withheld from the
+ * inherited workspace endpoint (HF-1), and links the member's Config tab.
  *
  * In workspace mode the workspace-root files that would declare the absent half
  * for every member are NAMED, not linked: the workspace-tier editor (S-451) is not
@@ -106,6 +107,7 @@ function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
     <Callout label="CONFIGURE" tone="muted">
       <p>{copy.summary}</p>
       {copy.present && <p>{copy.present}</p>}
+      {copy.withheld && <p>{copy.withheld}</p>}
       <p>
         {copy.action} in the <a href={state.configHref}>Config</a> tab{copy.actionScope}, then
         return here to start chatting. Until then no outbound call is possible.

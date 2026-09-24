@@ -77,6 +77,7 @@ function config(opts: {
       policy_origin: opts.chatModel ? "member" : "unset",
       credential: opts.keyPresent === false ? { present: false } : { present: true, last4: "9f3a" },
       credential_origin: opts.keyPresent === false ? "unset" : "member",
+      member_key_withheld: false,
     },
   };
 }

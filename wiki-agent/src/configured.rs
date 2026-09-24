@@ -9,8 +9,9 @@
 //! `[wiki].model` if set, else the effective `[chat].model`, with
 //! `provider`/`base_url`/the API key inherited from the effective `[chat]` policy
 //! and credential — the member's own, or the workspace's where the member leaves
-//! that half undeclared. It mirrors the chat surface's
-//! provider bridge (`web/src/chat/configured.rs`): a missing model or key is the
+//! that half undeclared, and the workspace's key alone under an inherited policy
+//! (a member key never reaches a workspace endpoint, [ADR-67] §2). It mirrors the
+//! chat surface's provider bridge (`web/src/chat/configured.rs`): a missing model or key is the
 //! honest **configure-first** state ([FR-UI-18], [NFR-CC-04]) — not a crash — and
 //! the deterministic pre-send preflight ([FR-UI-24]) catches a malformed endpoint
 //! before any connection opens. All agent logic lives in [`WikiAgent`] ([ADR-01]);

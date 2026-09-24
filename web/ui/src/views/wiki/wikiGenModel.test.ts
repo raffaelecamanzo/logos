@@ -59,6 +59,7 @@ function config(opts: {
       policy_origin: opts.chatModel ? "member" : "unset",
       credential: opts.keyPresent === false ? { present: false } : { present: true, last4: "9f3a" },
       credential_origin: opts.keyPresent === false ? "unset" : "member",
+      member_key_withheld: false,
     },
   };
 }
@@ -202,6 +203,7 @@ describe("configure-first + endpoint disclosure (FR-CF-07, NFR-SE-07)", () => {
       policy_origin: "workspace",
       credential: { present: true, last4: "KEY1" },
       credential_origin: "workspace",
+      member_key_withheld: false,
     };
     return c;
   }

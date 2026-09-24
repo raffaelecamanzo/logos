@@ -110,7 +110,8 @@ impl WikiConfig {
     /// [`resolve_chat`](super::resolve_chat) seam resolved ([ADR-67], [ADR-42]):
     /// the inherited provider, endpoint, retry policy and key are the **effective**
     /// chat halves — the member's own, or the workspace's where the member leaves
-    /// that half undeclared — while [`WikiConfig::model`] still wins over the chat
+    /// that half undeclared, and the workspace's key alone under an inherited
+    /// policy ([ADR-67] §2) — while [`WikiConfig::model`] still wins over the chat
     /// model exactly as in [`resolve`](Self::resolve). The wiki table itself is the
     /// caller's (the member's); only the inherited chat halves are two-tier.
     ///
