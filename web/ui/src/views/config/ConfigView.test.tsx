@@ -460,6 +460,25 @@ describe("ConfigView discloses an inherited chat value read-only (S-452, FR-WS-3
     expect(written).not.toContain("api.anthropic.com");
   });
 
+  it("names the inherited endpoint for openai, and none for anthropic, which ignores it", async () => {
+    const openai = inheriting();
+    openai.effective_chat = { ...openai.effective_chat, policy: { provider: "openai", model: "ws/router-model", base_url: "https://llm.example.internal/v1" } };
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(openai) }) });
+    const first = renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).toHaveTextContent(
+      "base_url https://llm.example.internal/v1",
+    );
+    first.unmount();
+
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheriting()) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.getByText(/table is inherited from the workspace root/, { selector: "p" })).not.toHaveTextContent(
+      "base_url",
+    );
+  });
+
   it("drops the policy note once a save makes the member declare its own model", async () => {
     // The note is a claim about the resolution, so it must follow the resolution:
     // after the save, the re-read reports the member's own policy.
