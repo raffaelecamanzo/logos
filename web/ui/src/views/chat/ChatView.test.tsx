@@ -213,6 +213,23 @@ describe("ChatView — configured chrome", () => {
     expect(banner?.textContent).not.toContain(MASKED_LAST4);
   });
 
+  it("discloses each half's origin independently when only one is inherited", async () => {
+    // Member policy + workspace key: the endpoint is the member's, the key is not.
+    mockFetchConfig.mockResolvedValue(configuredModel("openai", { policy: "member", credential: "workspace" }));
+    const first = render(<ChatView />);
+    let banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("(the configured openai endpoint)");
+    expect(banner).toHaveTextContent("The API key is inherited from the workspace root.");
+    first.unmount();
+
+    // Workspace policy + member key: the endpoint is inherited, the key is not.
+    mockFetchConfig.mockResolvedValue(configuredModel("openai", { policy: "workspace", credential: "member" }));
+    render(<ChatView />);
+    banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("(the openai endpoint inherited from the workspace root)");
+    expect(banner?.textContent).not.toContain("API key is inherited");
+  });
+
   it("calls a member-declared endpoint the configured one", async () => {
     mockFetchConfig.mockResolvedValue(configuredModel());
     render(<ChatView />);
