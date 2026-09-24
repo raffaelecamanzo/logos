@@ -79,6 +79,26 @@ pub async fn fetch_dynamic(client: Client, url: String) {
 const API_LIB: &str = "pub fn shared() {}\npub fn api_only() { shared(); }\n";
 const WEB_LIB: &str = "pub fn shared() {}\npub fn render() { shared(); }\n";
 
+/// A literal client call in `web` and the axum route in `api` it binds — one
+/// resolved cross-service edge, so the non-empty path is exercised on real data.
+const WEB_BOUND_CLIENT: &str = r#"
+use reqwest::Client;
+
+pub async fn fetch_user(client: Client) {
+    let _ = client.get("/users/{id}").await;
+}
+"#;
+const API_ROUTE: &str = r#"
+use axum::routing::get;
+use axum::Router;
+
+async fn get_user() {}
+
+fn app() -> Router {
+    Router::new().route("/users/{user_id}", get(get_user))
+}
+"#;
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     std::fs::create_dir_all(path.parent().expect("has parent")).expect("mkdir");
@@ -103,20 +123,56 @@ struct Workspace {
     /// `xservice_*` tools opened.
     engine: Arc<Engine>,
     sandbox: Arc<Sandbox>,
+    /// `api`'s `shared` as its canonical symbol — the form the cross-service
+    /// tier matches on (a bare name reads NOT CHECKED).
+    shared: String,
+}
+
+/// What the fixture's members carry beyond `shared`.
+#[derive(Clone, Copy, PartialEq)]
+enum Shape {
+    /// Nothing cross-service: a zero residue and no edge.
+    Plain,
+    /// `api` makes one runtime-composed call: a non-zero residue, no edge.
+    Residue,
+    /// `web` calls `api`'s route with a literal target: one resolved edge.
+    Bound,
 }
 
 fn workspace(residue: bool) -> Workspace {
+    workspace_of(if residue { Shape::Residue } else { Shape::Plain })
+}
+
+/// The canonical symbol of the function `name` in the (closed) store at `root`.
+fn canonical(root: &Path, name: &str) -> String {
+    let engine = Engine::start(root).expect("engine starts");
+    engine
+        .search(name, Some(logos_core::model::NodeKind::Function), None)
+        .hits
+        .into_iter()
+        .find(|hit| hit.name == name)
+        .unwrap_or_else(|| panic!("{name} is indexed"))
+        .symbol
+}
+
+fn workspace_of(shape: Shape) -> Workspace {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     let api = root.join("api");
     let web = root.join("web");
     write(&api, "src/lib.rs", API_LIB);
-    if residue {
-        write(&api, "src/client.rs", API_RUNTIME_CLIENT);
-    }
     write(&web, "src/lib.rs", WEB_LIB);
+    match shape {
+        Shape::Plain => {}
+        Shape::Residue => write(&api, "src/client.rs", API_RUNTIME_CLIENT),
+        Shape::Bound => {
+            write(&api, "src/main.rs", API_ROUTE);
+            write(&web, "src/client.rs", WEB_BOUND_CLIENT);
+        }
+    }
     index(&api);
     index(&web);
+    let shared = canonical(&api, "shared");
 
     let local = root.join("local");
     write(&local, "src/lib.rs", "pub fn alpha() {}\n");
@@ -141,7 +197,7 @@ fn workspace(residue: bool) -> Workspace {
     ))));
     let xservice = XserviceBacking::federated(backing, Arc::new(ContractBridge::new()))
         .expect("a federated backing mints an xservice backing");
-    Workspace { _tmp: tmp, xservice, engine, sandbox }
+    Workspace { _tmp: tmp, xservice, engine, sandbox, shared }
 }
 
 /// JSON the mock planner returns for a single graph_navigator step.
@@ -283,9 +339,9 @@ async fn a_cross_service_turn_dispatches_xservice_and_cites_each_member_separate
 // ── 3. The residue reaches the answer (BR-53) ────────────────────────────────
 
 /// The model's own summary claims "none"; the observation must not let it stand.
-fn callers_turn() -> Vec<MockTurn> {
+fn callers_turn(symbol: &str) -> Vec<MockTurn> {
     vec![
-        MockTurn::tool_call("x1", "xservice_callers", serde_json::json!({ "symbol": "shared" })),
+        MockTurn::tool_call("x1", "xservice_callers", serde_json::json!({ "symbol": symbol })),
         MockTurn::text("No other service calls shared."),
     ]
 }
@@ -293,7 +349,7 @@ fn callers_turn() -> Vec<MockTurn> {
 #[tokio::test]
 async fn an_empty_answer_over_a_non_zero_residue_reaches_the_observation_as_unresolved() {
     let ws = workspace(true);
-    let (observation, _) = run_turn(&ws, "which services call shared?", callers_turn()).await;
+    let (observation, _) = run_turn(&ws, "which services call shared?", callers_turn(&ws.shared)).await;
 
     assert!(
         observation.contains("cross-service: UNRESOLVED, not an absence — no resolved cross-service callers; 1 of 1 captured outbound site"),
@@ -312,7 +368,7 @@ async fn an_empty_answer_over_a_non_zero_residue_reaches_the_observation_as_unre
 #[tokio::test]
 async fn an_empty_answer_over_a_zero_residue_stands_unqualified() {
     let ws = workspace(false);
-    let (observation, _) = run_turn(&ws, "which services call shared?", callers_turn()).await;
+    let (observation, _) = run_turn(&ws, "which services call shared?", callers_turn(&ws.shared)).await;
 
     assert!(
         observation.contains("cross-service: no resolved cross-service callers |"),
@@ -331,13 +387,67 @@ async fn impact_carries_the_residue_the_same_way() {
         &ws,
         "what breaks across services if shared changes?",
         vec![
-            MockTurn::tool_call("x1", "xservice_impact", serde_json::json!({ "symbol": "shared" })),
+            MockTurn::tool_call("x1", "xservice_impact", serde_json::json!({ "symbol": ws.shared })),
             MockTurn::text("Nothing outside this service."),
         ],
     )
     .await;
     assert!(
-        observation.contains("xservice_impact \"shared\" — cross-service: UNRESOLVED, not an absence — no resolved cross-service impact"),
+        observation.contains("— cross-service: UNRESOLVED, not an absence — no resolved cross-service impact"),
+        "{observation}"
+    );
+}
+
+#[tokio::test]
+async fn a_bare_name_is_reported_not_checked_never_as_an_absence() {
+    let ws = workspace(false);
+    let (observation, _) = run_turn(&ws, "which services call shared?", callers_turn("shared")).await;
+    assert!(
+        observation.contains("cross-service: NOT CHECKED, not an absence — \"shared\" is not a canonical symbol"),
+        "{observation}"
+    );
+}
+
+/// The non-empty path on a real edge: `xservice_route_providers` names the
+/// binding, and `xservice_callers` over the provider's canonical symbol reports
+/// the consumer in the other member — while the bare handler name, which the
+/// cross-service tier cannot match, reads NOT CHECKED rather than "none".
+#[tokio::test]
+async fn a_resolved_edge_is_cited_with_both_members_and_a_bare_name_is_not_an_absence() {
+    let ws = workspace_of(Shape::Bound);
+    let providers = agent_core::xservice_toolset(ws.xservice.clone())
+        .call("xservice_route_providers", "{}".to_string())
+        .await
+        .expect("route providers");
+    let providers: serde_json::Value = serde_json::from_str(&providers).unwrap();
+    let route = providers["providers"][0]["to"]["symbol"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the fixture binds one route: {providers}"))
+        .to_string();
+
+    let (observation, used) = run_turn(
+        &ws,
+        "which services call the users route?",
+        vec![
+            MockTurn::tool_call("x1", "xservice_route_providers", serde_json::json!({})),
+            MockTurn::tool_call("x2", "xservice_callers", serde_json::json!({ "symbol": route })),
+            MockTurn::tool_call("x3", "xservice_callers", serde_json::json!({ "symbol": "get_user" })),
+            MockTurn::text("web calls it."),
+        ],
+    )
+    .await;
+    assert_eq!(used, 3);
+    assert!(
+        observation.contains("xservice_route_providers — 1 resolved cross-service binding(s): web:"),
+        "{observation}"
+    );
+    assert!(
+        observation.contains("cross-service: 1 resolved cross-service caller(s) (web:")
+            && observation.contains(&format!("→ api:{route} [route]")),
+        "the consumer and the provider are each named with their member: {observation}"
+    );
+    assert!(
+        observation.contains("cross-service: NOT CHECKED, not an absence — \"get_user\""),
         "{observation}"
     );
 }
@@ -394,7 +504,7 @@ async fn a_representative_cross_service_turn_stays_well_inside_the_shipped_ceili
         "which services call shared?",
         vec![
             MockTurn::tool_call("x1", "xservice_search", serde_json::json!({ "query": "shared" })),
-            MockTurn::tool_call("x2", "xservice_callers", serde_json::json!({ "symbol": "shared" })),
+            MockTurn::tool_call("x2", "xservice_callers", serde_json::json!({ "symbol": ws.shared })),
             MockTurn::text("shared has no resolved cross-service caller."),
         ],
     )
@@ -423,9 +533,9 @@ async fn a_subagent_cap_halts_the_step_honestly_and_keeps_the_readings() {
         federated_roster(
             &ws,
             vec![
-                MockTurn::tool_call("x1", "xservice_callers", serde_json::json!({ "symbol": "shared" })),
+                MockTurn::tool_call("x1", "xservice_callers", serde_json::json!({ "symbol": ws.shared })),
                 // Over the 1-call cap below: refused, the step soft-closes.
-                MockTurn::tool_call("x2", "xservice_impact", serde_json::json!({ "symbol": "shared" })),
+                MockTurn::tool_call("x2", "xservice_impact", serde_json::json!({ "symbol": ws.shared })),
                 MockTurn::text("partial summary"),
             ],
         ),
@@ -442,7 +552,7 @@ async fn a_subagent_cap_halts_the_step_honestly_and_keeps_the_readings() {
         "the bound is named: {observation}"
     );
     assert!(
-        observation.contains("xservice_callers \"shared\" — cross-service: UNRESOLVED"),
+        observation.contains("— cross-service: UNRESOLVED"),
         "the reading gathered before the bound survives the close-out: {observation}"
     );
     assert_eq!(orchestrator.budget().global_used(), 1, "the refused call charged nothing");

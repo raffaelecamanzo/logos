@@ -46,6 +46,7 @@ use logos_core::federation::query::{
 use logos_core::federation::{
     Backing, BridgeEdge, BridgeEndpoint, ContractBridge, EgressResidue, EngineRegistry,
 };
+use logos_core::model::LogosSymbol;
 use logos_core::models::SymbolRef;
 use logos_core::Engine;
 use rig_core::completion::ToolDefinition;
@@ -228,6 +229,40 @@ fn residue_clause(resolved: usize, noun: &str, residue: Option<&EgressResidue>) 
     }
 }
 
+/// Whether `query` is a canonical symbol string — the only form the
+/// cross-service tier matches a bridge endpoint on (`federation::query` compares
+/// `edge.to.symbol.as_str() == symbol`).
+fn is_canonical(query: &str) -> bool {
+    LogosSymbol::parse(query).is_ok_and(|symbol| symbol.as_str() == query)
+}
+
+/// The cross-service verdict of a `callers`/`impact` reading.
+///
+/// A bare name (`get_user`, a route template) matches no bridge endpoint, so its
+/// empty cross-service tier says nothing about what reaches the symbol: stated
+/// as such rather than as "none", even over a zero residue ([BR-53],
+/// [NFR-CC-04]). A canonical query takes [`residue_clause`] unchanged.
+///
+/// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn cross_service_verdict(
+    query: &str,
+    resolved: usize,
+    noun: &str,
+    residue: Option<&EgressResidue>,
+) -> String {
+    let clause = residue_clause(resolved, noun, residue);
+    if resolved == 0 && !is_canonical(query) {
+        format!(
+            "NOT CHECKED, not an absence — {query:?} is not a canonical symbol, and the \
+             cross-service tier matches canonical symbols only; retry with a hit's `symbol` \
+             (from xservice_search or xservice_route_providers) [{clause}]"
+        )
+    } else {
+        clause
+    }
+}
+
 fn read_search(answer: &XserviceSearch) -> String {
     let members: Vec<String> = answer
         .members
@@ -256,7 +291,8 @@ fn read_search(answer: &XserviceSearch) -> String {
 }
 
 fn read_callers(answer: &XserviceCallers) -> String {
-    let cross = residue_clause(
+    let cross = cross_service_verdict(
+        &answer.query,
         answer.cross_service.len(),
         "resolved cross-service caller",
         answer.unresolved_egress.as_ref(),
@@ -289,7 +325,8 @@ fn read_callers(answer: &XserviceCallers) -> String {
 }
 
 fn read_impact(answer: &XserviceImpact) -> String {
-    let cross = residue_clause(
+    let cross = cross_service_verdict(
+        &answer.query,
         answer.cross_service.len(),
         "cross-service impact",
         answer.unresolved_egress.as_ref(),
@@ -408,6 +445,12 @@ fn repo_property(scoped: &str) -> serde_json::Value {
     })
 }
 
+/// The `symbol` argument of the reachability tools: the cross-service tier
+/// matches the canonical symbol string exactly, never a bare name.
+const SYMBOL_ARGUMENT: &str = "The CANONICAL symbol string — the `symbol` field of an \
+    xservice_search / search hit, or an endpoint of xservice_route_providers. A bare name \
+    matches no cross-service edge (the reading then says NOT CHECKED).";
+
 /// What every reachability tool tells the model about the residue it returns.
 const RESIDUE_CONTRACT: &str = "The `reading` field states the answer in one \
     repo-qualified line. An EMPTY `cross_service` list with an `unresolved_egress` \
@@ -496,7 +539,7 @@ impl Tool for XserviceCallersTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Symbol whose cross-service callers to list." },
+                    "symbol": { "type": "string", "description": SYMBOL_ARGUMENT },
                     "limit": { "type": "integer", "minimum": 1, "description": "Maximum intra-repo callers per member (default 50)." },
                     "repo": repo_property("the intra-repo fan-out and the residue")
                 },
@@ -557,7 +600,7 @@ impl Tool for XserviceImpactTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "symbol": { "type": "string", "description": "Symbol whose cross-service impact to trace." },
+                    "symbol": { "type": "string", "description": SYMBOL_ARGUMENT },
                     "depth": { "type": "integer", "minimum": 1, "description": "Traversal depth bound per member (default 3)." },
                     "repo": repo_property("the seed impact and the residue")
                 },
@@ -709,6 +752,26 @@ mod tests {
         let clause = residue_clause(2, "cross-service impact", Some(&residue(1, summary)));
         assert_eq!(clause, format!("incomplete — {summary}"));
         assert_eq!(residue_clause(2, "cross-service impact", None), "2 cross-service impact(s)");
+    }
+
+    #[test]
+    fn a_bare_name_never_reads_as_a_clean_absence() {
+        // The near miss: a bare name and a route template are not canonical; the
+        // smallest valid symbol is.
+        assert!(!is_canonical("get_user"));
+        assert!(!is_canonical("GET /users/{user_id}"));
+        assert!(is_canonical("local get_user"));
+
+        let bare = cross_service_verdict("get_user", 0, "resolved cross-service caller", None);
+        assert!(bare.starts_with("NOT CHECKED, not an absence"), "{bare}");
+        let canonical =
+            cross_service_verdict("local get_user", 0, "resolved cross-service caller", None);
+        assert_eq!(canonical, "no resolved cross-service callers");
+        // A resolved answer is never re-labelled, whatever the query looked like.
+        assert_eq!(
+            cross_service_verdict("get_user", 1, "resolved cross-service caller", None),
+            "1 resolved cross-service caller(s)"
+        );
     }
 
     #[test]
