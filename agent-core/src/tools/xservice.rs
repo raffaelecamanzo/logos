@@ -726,6 +726,7 @@ mod tests {
 
     use super::*;
     use logos_core::model::{LogosSymbol, NodeKind};
+    use logos_core::federation::CrossServiceImpact;
     use logos_core::models::SearchResult;
 
     fn endpoint(member: &str, symbol: &str) -> BridgeEndpoint {
@@ -837,18 +838,62 @@ mod tests {
         assert!(reading.contains("web:shared (src/lib.rs:1)"), "{reading}");
     }
 
+    fn bound_edge() -> BridgeEdge {
+        BridgeEdge {
+            relation: "route".to_string(),
+            from: endpoint("web", "fetch_user"),
+            to: endpoint("api", "get_user"),
+            intake: logos_core::federation::BridgeIntake::Invocation,
+            from_value: logos_core::resolve::binding::Provenance::Literal,
+            to_value: logos_core::resolve::binding::Provenance::Literal,
+        }
+    }
+
+    #[test]
+    fn a_non_empty_answer_over_a_residue_cites_its_edges_and_reads_incomplete() {
+        let summary = "1 resolved cross-service caller; 2 of 3 captured outbound sites in \
+                       scope did not resolve across 1 member (base-url-runtime 2)";
+        let callers = XserviceCallers {
+            query: "local get_user".to_string(),
+            scope: None,
+            members: Vec::new(),
+            cross_service: vec![bound_edge()],
+            unresolved_egress: Some(residue(2, summary)),
+        };
+        let reading = read_callers(&callers);
+        assert!(
+            reading.contains(&format!(
+                "cross-service: incomplete — {summary} (web:local fetch_user → api:local get_user [route])"
+            )),
+            "{reading}"
+        );
+
+        let impact = XserviceImpact {
+            query: "local get_user".to_string(),
+            scope: None,
+            seed: Vec::new(),
+            cross_service: vec![CrossServiceImpact {
+                via: bound_edge(),
+                member: "web".to_string(),
+                impact: logos_core::models::ImpactResult::default(),
+            }],
+            unresolved_egress: None,
+        };
+        let reading = read_impact(&impact);
+        assert!(
+            reading.contains(
+                "cross-service: 1 cross-service impact(s) (web via web:local fetch_user → \
+                 api:local get_user [route] (0 upstream, 0 downstream))"
+            ),
+            "{reading}"
+        );
+    }
+
     #[test]
     fn route_providers_name_both_endpoints_with_their_member() {
         let answer = XserviceRouteProviders {
             scope: None,
-            providers: vec![BridgeEdge {
-                relation: "route".to_string(),
-                from: endpoint("web", "fetch_user"),
-                to: endpoint("api", "get_user"),
-                intake: logos_core::federation::BridgeIntake::Invocation,
-                from_value: logos_core::resolve::binding::Provenance::Literal,
-                to_value: logos_core::resolve::binding::Provenance::Literal,
-            }],
+            providers: vec![bound_edge()],
         };
         let reading = read_route_providers(&answer);
         assert!(reading.contains("1 resolved cross-service binding(s)"), "{reading}");
