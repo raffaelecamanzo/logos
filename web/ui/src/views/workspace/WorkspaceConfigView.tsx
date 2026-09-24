@@ -812,7 +812,7 @@ function UnreadableTierSecret({ fault }: { fault: string }) {
     <fieldset className={styles.group}>
       <legend className={styles.legend}>chat API key</legend>
       <div className={styles.fileHead}>
-        <Badge tone="red">does not parse</Badge>
+        <Badge tone="red">unreadable</Badge>
         <span className={styles.path}>{WORKSPACE_SECRETS_FILE}</span>
       </div>
       <ErrorPanel>
@@ -978,12 +978,14 @@ function TierEditor({
     <>
       <div className={styles.fileHead}>
         <Badge tone={exists ? "green" : "muted"}>{exists ? "on disk" : "not yet created"}</Badge>
-        {doc.config.error !== null && <Badge tone="red">does not parse</Badge>}
+        {/* "invalid", not "does not parse": the fault may be a value the
+            validator refuses in a document that parses. */}
+        {doc.config.error !== null && <Badge tone="red">invalid</Badge>}
       </div>
       {doc.config.error !== null && (
         <ErrorPanel>
-          The workspace tier&apos;s <code>config.toml</code> does not parse — members that inherit from
-          this root cannot resolve their chat until it is repaired. Fix it in the raw pane below:{" "}
+          The workspace tier&apos;s <code>config.toml</code> is invalid — members that inherit from this
+          root cannot resolve their chat until it is repaired. Fix it in the raw pane below:{" "}
           {doc.config.error}
         </ErrorPanel>
       )}
@@ -991,7 +993,7 @@ function TierEditor({
       <NotHere />
       <Fieldsets groups={groups} values={values} onChange={onFieldChange} />
       {parsed === null && (
-        <p className={styles.help}>Typed fields are unavailable while the document does not parse.</p>
+        <p className={styles.help}>Typed fields are unavailable while the document is invalid.</p>
       )}
       {/* Not labelled "Raw TOML — …" like the manifest's pane: each group's pane is
           named for its own file first, so neither label can be taken for the other. */}

@@ -969,11 +969,11 @@ describe("a broken tier file opens the repair editor (S-451 T2, FR-UI-38)", () =
     });
     const raw = within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement;
     expect(raw.value).toBe(BROKEN_TIER);
-    expect(within(card).getByText("does not parse")).toBeInTheDocument();
-    expect(within(card).getByRole("alert")).toHaveTextContent(/at line 3, column 1/);
+    expect(within(card).getByText("invalid")).toBeInTheDocument();
+    expect(within(card).getByRole("alert")).toHaveTextContent(/config\.toml is invalid.*at line 3, column 1/);
     // No typed state is fabricated for a document with no parse.
     expect(within(card).queryByLabelText("model")).toBeNull();
-    expect(within(card).getByText(/Typed fields are unavailable while the document does not parse/)).toBeInTheDocument();
+    expect(within(card).getByText(/Typed fields are unavailable while the document is invalid/)).toBeInTheDocument();
     // The credential half is readable, so it is still editable.
     expect(within(card).getByLabelText("api_key")).toBeInTheDocument();
 
@@ -990,7 +990,7 @@ describe("a broken tier file opens the repair editor (S-451 T2, FR-UI-38)", () =
     expect(await screen.findByLabelText("model")).toHaveValue("claude-ws");
     const after = tierCard();
     expect(within(after).getByText(/Saved <workspace-root>\/\.logos\/config\.toml \(9 bytes\)/)).toBeInTheDocument();
-    expect(within(after).queryByText("does not parse")).toBeNull();
+    expect(within(after).queryByText("invalid")).toBeNull();
     expect(within(after).queryByRole("alert")).toBeNull();
   });
 
@@ -999,7 +999,10 @@ describe("a broken tier file opens the repair editor (S-451 T2, FR-UI-38)", () =
     const fault = ".logos/secrets.toml is not valid TOML with only known keys (at line 2, column 11). The parser's detail is not shown, because it can quote the file.";
     const { card } = await mountedTier({ tiers: [{ ...t, chat_key: null, chat_key_error: fault, effective_chat: null }] });
     const key = within(card).getByText("chat API key", { selector: "legend" }).closest("fieldset") as HTMLElement;
-    expect(within(key).getByText("does not parse")).toBeInTheDocument();
+    expect(within(key).getByText("unreadable")).toBeInTheDocument();
+    // Each half is reported on its own: the policy half carries no fault badge.
+    expect(within(card).queryByText("invalid")).toBeNull();
+    expect(within(card).queryByText("does not parse")).toBeNull();
     expect(within(key).getByRole("alert")).toHaveTextContent(/secrets\.toml is not valid TOML.*at line 2, column 11/);
     expect(within(key).getByRole("alert")).toHaveTextContent(/never shown on this page/);
     expect(within(card).queryByLabelText("api_key")).toBeNull();
