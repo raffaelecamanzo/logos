@@ -2191,7 +2191,8 @@ async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_
 }
 
 /// The workspace tier carries the chat policy and its credential, and nothing
-/// else: `file=rules` is refused `400` and writes no `rules.toml` there, because
+/// else: `file=rules` — or any `file` other than `config` — is refused `400` and
+/// writes nothing there, because
 /// workspace governance is declared in the manifest ([FR-WS-13]) and a rules file
 /// at the root would be read by nothing.
 #[tokio::test]
@@ -2209,6 +2210,22 @@ async fn the_workspace_save_accepts_the_config_document_only() {
     assert!(api_error(&body).contains("file=config"), "the refusal says what is accepted: {body}");
     assert!(!tmp.path().join(".logos/rules.toml").exists(), "no rules file at the workspace root");
     assert!(!tmp.path().join(".logos").exists(), "a refused save creates nothing");
+
+    // An allow-list, not a deny-list of `rules`: any other spelling — including
+    // the near miss `Config` — is refused too, and writes nothing.
+    for other in ["bogus", "Config", ""] {
+        let resp = router
+            .clone()
+            .oneshot(post_form(
+                "/api/v1/workspace/config/save",
+                format!("file={other}&{}", form_field("content", "[chat]\nmodel = \"ws/m\"\n")),
+                &intent,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "`file={other}` is refused");
+        assert!(!tmp.path().join(".logos").exists(), "`file={other}` wrote nothing");
+    }
 
     let resp = router
         .oneshot(post_form(
