@@ -12,12 +12,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
-  ConfigReadModel,
   ManifestSaveOutcome,
   MaskedSecret,
   WorkspaceGovernanceAnswer,
   WorkspaceManifestDocument,
   WorkspaceRoster,
+  WorkspaceTierDocument,
+  WorkspaceTierSaveOutcome,
 } from "../../api/types.ts";
 import { WorkspaceProvider, useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
@@ -508,20 +509,24 @@ const TIER_CONTENT = [
 
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
-function tier(over: { content?: string; exists?: boolean; model?: string | null; wiki?: string | null; key?: MaskedSecret } = {}): ConfigReadModel {
+function tier(over: { content?: string; exists?: boolean; model?: string | null; wiki?: string | null; key?: MaskedSecret; fingerprint?: string } = {}): WorkspaceTierDocument {
   const model = over.model === undefined ? "claude-ws" : over.model;
   const wiki = over.wiki === undefined ? "claude-wiki" : over.wiki;
   const key = over.key ?? { present: true, last4: "ab12" };
   const chat = { provider: "anthropic" as const, model, base_url: DEFAULT_BASE_URL };
+  // S-451 T2: the read is the tier document (load fingerprint, nullable halves),
+  // no longer a member ConfigReadModel — so no `rules` half either.
   return {
     config: {
       path: ".logos/config.toml",
       exists: over.exists ?? true,
       content: over.content ?? TIER_CONTENT,
+      fingerprint: over.fingerprint ?? "tier-fp-loaded",
       parsed: { languages: [], include: [], exclude: [], max_file_size: 1048576, framework_hints: [], chat, wiki: { model: wiki } },
+      error: null,
     },
-    rules: { path: ".logos/rules.toml", exists: false, content: "", parsed: { constraints: {}, metric_thresholds: {} } },
     chat_key: key,
+    chat_key_error: null,
     effective_chat: {
       policy: chat,
       policy_origin: model ? "member" : "unset",
@@ -529,24 +534,26 @@ function tier(over: { content?: string; exists?: boolean; model?: string | null;
       credential_origin: key.present ? "member" : "unset",
       member_key_withheld: false,
     },
-  } as unknown as ConfigReadModel;
+  } as unknown as WorkspaceTierDocument;
 }
 
 /** Stub `fetch` for both groups. `tiers` is served in turn (the last repeats;
  *  `null` answers a `500`, a string answers that literal JSON); `replies` answers
- *  each POST by its route. */
+ *  each POST by its route — a list answers that route's POSTs in turn (the last
+ *  repeats). */
 function stubTier({
   tiers = [tier()],
   replies = {},
   probeStatus = 200,
 }: {
-  tiers?: (ConfigReadModel | null | string)[];
-  replies?: Record<string, { status: number; body: unknown }>;
+  tiers?: (WorkspaceTierDocument | null | string)[];
+  replies?: Record<string, { status: number; body: unknown } | { status: number; body: unknown }[]>;
   probeStatus?: number;
 } = {}) {
   const gets: string[] = [];
   const posts: Posted[] = [];
   let t = 0;
+  const sent: Record<string, number> = {};
   const respond = (body: unknown, status = 200) =>
     Promise.resolve({
       ok: status >= 200 && status < 300,
@@ -563,7 +570,11 @@ function stubTier({
           form: new URLSearchParams(String(init.body)),
           intent: new Headers(init.headers).get("x-logos-intent"),
         });
-        const reply = replies[url] ?? { status: 599, body: { error: `unstubbed POST ${url}` } };
+        const stubbed = replies[url];
+        const n = (sent[url] = (sent[url] ?? -1) + 1);
+        const reply = Array.isArray(stubbed)
+          ? stubbed[Math.min(n, stubbed.length - 1)]
+          : (stubbed ?? { status: 599, body: { error: `unstubbed POST ${url}` } });
         return respond(reply.body, reply.status);
       }
       gets.push(url);
@@ -625,7 +636,7 @@ describe("the workspace chat tier round-trips in the manifest group's grammar (S
   });
 
   it("patches typed edits into the raw pane and posts it VERBATIM to the workspace route", async () => {
-    const written = { file: "config", path: ".logos/config.toml", bytes_written: 77, provenance_stamped: false };
+    const written: WorkspaceTierSaveOutcome = { outcome: "written", path: ".logos/config.toml", bytes_written: 77, fingerprint: "tier-fp-saved" };
     const { card, posts } = await mountedTier({
       replies: { "/api/v1/workspace/config/save": { status: 200, body: written } },
     });
@@ -681,7 +692,7 @@ describe("the workspace chat tier round-trips in the manifest group's grammar (S
   });
 
   it("states a tier that is not yet created, and stops saying so once a save creates it", async () => {
-    const written = { file: "config", path: ".logos/config.toml", bytes_written: 1, provenance_stamped: false };
+    const written: WorkspaceTierSaveOutcome = { outcome: "written", path: ".logos/config.toml", bytes_written: 1, fingerprint: "tier-fp-saved" };
     const { card } = await mountedTier({
       tiers: [tier({ content: "", exists: false, model: null, wiki: null, key: { present: false } })],
       replies: { "/api/v1/workspace/config/save": { status: 200, body: written } },
@@ -708,7 +719,7 @@ describe("the workspace chat tier round-trips in the manifest group's grammar (S
   });
 
   it("keeps the two groups' saves apart: neither posts to the other's route", async () => {
-    const written = { file: "config", path: ".logos/config.toml", bytes_written: 1, provenance_stamped: false };
+    const written: WorkspaceTierSaveOutcome = { outcome: "written", path: ".logos/config.toml", bytes_written: 1, fingerprint: "tier-fp-saved" };
     const { card, posts } = await mountedTier({
       replies: { "/api/v1/workspace/config/save": { status: 200, body: written } },
     });
@@ -925,3 +936,214 @@ describe("the tier group is app-scoped and workspace-only (S-451 AC5)", () => {
     expect(gets.some((u) => u.includes("workspace/config"))).toBe(false);
   });
 });
+
+// ── S-451 T2: the tier read is the repair path; the tier save refuses a clobber ─
+
+/** A tier whose `config.toml` does not parse, as the read delivers it: the
+ *  literal bytes and their fingerprint, no parse, and the fault by file and
+ *  position only. */
+const BROKEN_TIER = "[chat]\nmodel = \"claude-ws\"\nmodle = \"typo\"\n";
+function brokenTier(): WorkspaceTierDocument {
+  const t = tier({ content: BROKEN_TIER, fingerprint: "tier-fp-broken" });
+  return {
+    ...t,
+    config: {
+      ...t.config,
+      parsed: null,
+      error: ".logos/config.toml is not valid TOML with only known keys (at line 3, column 1). The parser's detail is not shown, because it can quote the file.",
+    },
+    effective_chat: null,
+  };
+}
+
+const TIER_SAVE = "/api/v1/workspace/config/save";
+
+describe("a broken tier file opens the repair editor (S-451 T2, FR-UI-38)", () => {
+  it("opens over the literal document with the fault stated, and a save against its fingerprint repairs it", async () => {
+    const repaired = tier({ fingerprint: "tier-fp-saved" });
+    const { card, posts } = await mountedTier({
+      tiers: [brokenTier(), repaired],
+      replies: {
+        [TIER_SAVE]: { status: 200, body: { outcome: "written", path: ".logos/config.toml", bytes_written: 9, fingerprint: "tier-fp-saved" } },
+      },
+    });
+    const raw = within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement;
+    expect(raw.value).toBe(BROKEN_TIER);
+    expect(within(card).getByText("invalid")).toBeInTheDocument();
+    expect(within(card).getByRole("alert")).toHaveTextContent(/config\.toml is invalid.*at line 3, column 1/);
+    // No typed state is fabricated for a document with no parse.
+    expect(within(card).queryByLabelText("model")).toBeNull();
+    expect(within(card).getByText(/Typed fields are unavailable while the document is invalid/)).toBeInTheDocument();
+    // The credential half is readable, so it is still editable.
+    expect(within(card).getByLabelText("api_key")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.clear(raw);
+    await user.type(raw, TIER_CONTENT.replace(/\[/g, "[["));
+    await user.click(within(card).getByRole("button", { name: SAVE_TIER }));
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe(TIER_SAVE);
+    expect(posts[0].form.get("fingerprint")).toBe("tier-fp-broken");
+    expect(posts[0].form.get("content")).toBe(TIER_CONTENT);
+    // The repair re-seeds the editor from the re-read: typed fields up, the fault gone.
+    expect(await screen.findByLabelText("model")).toHaveValue("claude-ws");
+    const after = tierCard();
+    expect(within(after).getByText(/Saved <workspace-root>\/\.logos\/config\.toml \(9 bytes\)/)).toBeInTheDocument();
+    expect(within(after).queryByText("invalid")).toBeNull();
+    expect(within(after).queryByRole("alert")).toBeNull();
+  });
+
+  it("a repair save whose re-read fails still states the save, and drops the fault it replaced", async () => {
+    const { card } = await mountedTier({
+      tiers: [brokenTier(), null],
+      replies: {
+        [TIER_SAVE]: { status: 200, body: { outcome: "written", path: ".logos/config.toml", bytes_written: 9, fingerprint: "tier-fp-saved" } },
+      },
+    });
+    const raw = within(card).getByLabelText(TIER_RAW) as HTMLTextAreaElement;
+    const user = userEvent.setup();
+    await user.clear(raw);
+    await user.type(raw, TIER_CONTENT.replace(/\[/g, "[["));
+    await user.click(within(card).getByRole("button", { name: SAVE_TIER }));
+    expect(
+      await within(card).findByText(/Saved <workspace-root>\/\.logos\/config\.toml \(9 bytes\).*could not be re-read after this save/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/The workspace chat tier could not be loaded/)).toBeNull();
+    expect(within(card).queryByText("invalid")).toBeNull();
+    expect(within(card).queryByRole("alert")).toBeNull();
+    expect(within(card).getByText("on disk")).toBeInTheDocument();
+  });
+
+  it("names a broken secrets.toml by file and position, shows none of it, and offers no key input", async () => {
+    const t = tier();
+    const fault = ".logos/secrets.toml is not valid TOML with only known keys (at line 2, column 11). The parser's detail is not shown, because it can quote the file.";
+    const { card } = await mountedTier({ tiers: [{ ...t, chat_key: null, chat_key_error: fault, effective_chat: null }] });
+    const key = within(card).getByText("chat API key", { selector: "legend" }).closest("fieldset") as HTMLElement;
+    expect(within(key).getByText("unreadable")).toBeInTheDocument();
+    // Each half is reported on its own: the policy half carries no fault badge.
+    expect(within(card).queryByText("invalid")).toBeNull();
+    expect(within(card).queryByText("does not parse")).toBeNull();
+    expect(within(key).getByRole("alert")).toHaveTextContent(/secrets\.toml is not valid TOML.*at line 2, column 11/);
+    expect(within(key).getByRole("alert")).toHaveTextContent(/never shown on this page/);
+    expect(within(card).queryByLabelText("api_key")).toBeNull();
+    expect(within(card).queryByRole("button", { name: SAVE_KEY })).toBeNull();
+    // The policy half is unaffected.
+    expect(within(card).getByLabelText("model")).toHaveValue("claude-ws");
+  });
+
+  it.each([
+    ["a null parse with no fault", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, parsed: null } })],
+    ["a null key with no fault", (t: WorkspaceTierDocument) => ({ ...t, chat_key: null })],
+    ["no load fingerprint", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, fingerprint: undefined } })],
+    ["a parse with no error field", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, error: undefined } })],
+    ["a parse AND a fault", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, error: "x" } })],
+    ["a key with no chat_key_error field", (t: WorkspaceTierDocument) => ({ ...t, chat_key_error: undefined })],
+    ["no exists flag", (t: WorkspaceTierDocument) => ({ ...t, config: { ...t.config, exists: undefined } })],
+  ])("refuses %s rather than open an editor that could save it", async (_label, make) => {
+    await mountTier({ tiers: [JSON.stringify(make(tier()))] });
+    expect(await screen.findByText(/The workspace chat tier could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(TIER_RAW)).toBeNull();
+  });
+});
+
+describe("a tier save never silently clobbers (S-451 T2, FR-UI-38 AC3)", () => {
+  const conflict: WorkspaceTierSaveOutcome = {
+    outcome: "conflict",
+    path: ".logos/config.toml",
+    loaded_fingerprint: "tier-fp-loaded",
+    disk_fingerprint: "tier-fp-disk",
+    disk_content: "# edited by hand\n[chat]\nmodel = \"claude-by-hand\"\n",
+  };
+
+  it("posts the load fingerprint, then holds the one each save returned", async () => {
+    const { card, posts } = await mountedTier({
+      replies: {
+        [TIER_SAVE]: [
+          { status: 200, body: { outcome: "written", path: ".logos/config.toml", bytes_written: 1, fingerprint: "tier-fp-2" } },
+          { status: 200, body: { outcome: "unchanged", path: ".logos/config.toml", fingerprint: "tier-fp-2" } },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    const save = within(card).getByRole("button", { name: SAVE_TIER });
+    await user.click(save);
+    await within(card).findByText(/Saved/);
+    await user.click(save);
+    expect(
+      await within(card).findByText(/No change — <workspace-root>\/\.logos\/config\.toml on disk already matches; nothing was written/),
+    ).toBeInTheDocument();
+    expect(posts.map((p) => p.form.get("fingerprint"))).toEqual(["tier-fp-loaded", "tier-fp-2"]);
+  });
+
+  it("an empty save over an absent tier is 'unchanged' without claiming a file on disk", async () => {
+    const { card } = await mountedTier({
+      tiers: [tier({ content: "", exists: false, model: null, wiki: null, key: { present: false } })],
+      replies: { [TIER_SAVE]: { status: 200, body: { outcome: "unchanged", path: ".logos/config.toml", fingerprint: "tier-fp-loaded" } } },
+    });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_TIER }));
+    expect(await within(card).findByText(/No change — the document is empty and .* does not exist; nothing was written/)).toBeInTheDocument();
+    expect(within(card).queryByText(/on disk already matches/)).toBeNull();
+    expect(within(card).getByText("not yet created")).toBeInTheDocument();
+  });
+
+  it("renders the conflict and the copy on disk; nothing is written, and the manifest group has no conflict", async () => {
+    const { card } = await mountedTier({ replies: { [TIER_SAVE]: { status: 409, body: conflict } } });
+    await userEvent.setup().click(within(card).getByRole("button", { name: SAVE_TIER }));
+    expect(await within(card).findByText(/Not saved — <workspace-root>\/\.logos\/config\.toml changed on disk/)).toHaveTextContent(
+      /Nothing was written/,
+    );
+    const panel = within(card).getByText("CONFLICT").closest("section") as HTMLElement;
+    expect(within(panel).getByLabelText("<workspace-root>/.logos/config.toml on disk now")).toHaveValue(conflict.disk_content);
+    expect(within(panel).getByText(/Your save was refused/)).toBeInTheDocument();
+    expect(screen.getAllByText("CONFLICT")).toHaveLength(1);
+  });
+
+  it("a plain Save after a conflict is refused again — only the explicit overwrite uses the disk's fingerprint", async () => {
+    const { card, posts } = await mountedTier({ replies: { [TIER_SAVE]: { status: 409, body: conflict } } });
+    const user = userEvent.setup();
+    const save = within(card).getByRole("button", { name: SAVE_TIER });
+    await user.click(save);
+    await within(card).findByText("CONFLICT");
+    await user.click(save);
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts.map((p) => p.form.get("fingerprint"))).toEqual(["tier-fp-loaded", "tier-fp-loaded"]);
+    expect(await within(card).findByText("CONFLICT")).toBeInTheDocument();
+  });
+
+  it("overwrites only on the explicit choice, against the disk's fingerprint, and says so", async () => {
+    const { card, posts } = await mountedTier({
+      replies: {
+        [TIER_SAVE]: [
+          { status: 409, body: conflict },
+          { status: 200, body: { outcome: "written", path: ".logos/config.toml", bytes_written: 5, fingerprint: "tier-fp-mine" } },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    await user.click(within(card).getByRole("button", { name: SAVE_TIER }));
+    await user.click(await within(card).findByRole("button", { name: /Overwrite it with my edits/ }));
+    expect(await within(card).findByText(/Overwrote the changes on disk with your edits — Saved/)).toBeInTheDocument();
+    expect(posts.map((p) => p.form.get("fingerprint"))).toEqual(["tier-fp-loaded", "tier-fp-disk"]);
+    expect(posts[1].form.get("content")).toBe(TIER_CONTENT);
+    expect(within(card).queryByText("CONFLICT")).toBeNull();
+  });
+
+  it("loading the disk copy re-reads the tier and discards the edits, posting nothing", async () => {
+    const onDisk = tier({ content: conflict.disk_content, fingerprint: "tier-fp-disk", model: "claude-by-hand" });
+    const { card, posts, gets } = await mountedTier({
+      tiers: [tier(), onDisk],
+      replies: { [TIER_SAVE]: { status: 409, body: conflict } },
+    });
+    const user = userEvent.setup();
+    await user.type(within(card).getByLabelText(TIER_RAW), "# my edit\n");
+    await user.click(within(card).getByRole("button", { name: SAVE_TIER }));
+    await user.click(await within(card).findByRole("button", { name: /Load the version on disk/ }));
+    await waitFor(() => expect((within(tierCard()).getByLabelText(TIER_RAW) as HTMLTextAreaElement).value).toBe(conflict.disk_content));
+    expect(within(tierCard()).getByLabelText("model")).toHaveValue("claude-by-hand");
+    expect(await within(tierCard()).findByText(/Loaded the version on disk — your unsaved edits were discarded/)).toBeInTheDocument();
+    expect(gets.filter((u) => u.startsWith("/api/v1/workspace/config"))).toHaveLength(2);
+    expect(posts).toHaveLength(1);
+  });
+});
+

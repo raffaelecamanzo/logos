@@ -283,7 +283,8 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 ///   workspace root the backing holds (S-450, [FR-WS-30]). They reach the writers
 ///   directly rather than through an [`Engine`] because none may be constructed
 ///   at the workspace root ([ADR-40]); that is also why the workspace tier has
-///   **no** apply route here.
+///   **no** apply route here. The config save is refused on a stale load
+///   fingerprint exactly as the manifest save below is (S-451).
 /// - `/api/v1/workspace/manifest/save` → [`manifest::save_document`], the
 ///   whole-manifest write path over `logos.workspace.toml` (S-430, [FR-UI-38]):
 ///   validated by the parser discovery runs, refused on a stale load

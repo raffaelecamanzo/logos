@@ -111,6 +111,14 @@ fn workspace_with_openapi(openapi: &str) -> TempDir {
 const FIXTURE_MANIFEST: &str =
     "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n";
 
+/// The load fingerprint of a workspace tier with no `config.toml` yet — the BLAKE3
+/// of the empty document, which is what an absent file reads as (S-451 T2). A
+/// literal, because the static write-endpoint list below needs one; the read
+/// returning exactly this is asserted by
+/// `a_first_tier_save_over_a_file_created_since_load_is_a_409`.
+const EMPTY_DOCUMENT_FINGERPRINT: &str =
+    "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
+
 /// Build a two-member workspace: `api` (OpenAPI consumer) + `web` (axum provider),
 /// each an indexed git repo, with the manifest at the parent naming `api` default.
 fn workspace() -> TempDir {
@@ -183,7 +191,12 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
 /// loop over that list issues a `GET`, which these answer `405`; the route-table
 /// guard reads the union of the two lists.
 const WORKSPACE_WRITE_ENDPOINTS: &[(&str, &str)] = &[
-    ("/api/v1/workspace/config/save", "content=%5Bchat%5D%0Amodel%20%3D%20%22ws%2Fsaved%22%0A"),
+    // S-451 T2: the save carries the load fingerprint — here the absent tier's,
+    // [`EMPTY_DOCUMENT_FINGERPRINT`], since the fixture declares none.
+    (
+        "/api/v1/workspace/config/save",
+        "content=%5Bchat%5D%0Amodel%20%3D%20%22ws%2Fsaved%22%0A&fingerprint=af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+    ),
     ("/api/v1/workspace/config/secret", "api_key=sk-workspace-written-key-wr42"),
     // S-430 / [FR-UI-38]: posts the fixture's own manifest back byte-identical,
     // so the well-formed save is the no-op `unchanged` — a `200` that writes
@@ -2078,13 +2091,18 @@ async fn a_workspace_save_then_read_round_trips_and_leaves_no_graph_store_at_the
 
     let resp = router
         .clone()
-        .oneshot(post_form("/api/v1/workspace/config/save", form_field("content", document), &intent))
+        .oneshot(post_form(
+            "/api/v1/workspace/config/save",
+            format!("{}&fingerprint={EMPTY_DOCUMENT_FINGERPRINT}", form_field("content", document)),
+            &intent,
+        ))
         .await
         .unwrap();
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["path"], ".logos/config.toml", "{body}");
+    assert_eq!(v["outcome"], "written", "{body}");
     bodies.push(body);
 
     let resp = router
@@ -2189,7 +2207,7 @@ async fn a_refused_workspace_save_leaves_the_target_byte_identical() {
         .clone()
         .oneshot(post_form(
             "/api/v1/workspace/config/save",
-            form_field("content", "[chat]\nmodle = \"typo\"\n"),
+            format!("{}&fingerprint=any-load", form_field("content", "[chat]\nmodle = \"typo\"\n")),
             &intent,
         ))
         .await
@@ -2215,6 +2233,10 @@ async fn a_refused_workspace_save_leaves_the_target_byte_identical() {
 /// broken workspace-root `config.toml` makes every inheriting member's config read
 /// a `500`, and a save of a valid document over it succeeds — the writer
 /// validates the NEW content, never the old — after which the member reads again.
+///
+/// The workspace read itself is NOT fail-loud (S-451 T2): it delivers the broken
+/// document with its fingerprint and a `null` parse, which is what the save is
+/// then made against.
 #[tokio::test]
 async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_on() {
     let tmp = workspace();
@@ -2223,23 +2245,14 @@ async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_
 
     let resp = router.clone().oneshot(get("/api/v1/config?repo=web")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "the broken tier fails the inheriting member loud");
-    // …and the workspace read itself: fail-loud, a JSON error naming the key —
-    // never a defaulted read-model standing in for the broken file.
-    let resp = router.clone().oneshot(get("/api/v1/workspace/config")).await.unwrap();
-    let (status, body, _h) = body_string(resp).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert!(api_error(&body).contains("modle"), "the fault names the offending key: {body}");
+    // …while the workspace read delivers the broken file for repair — never a
+    // defaulted read-model standing in for it.
+    let v = json_body(&router, "/api/v1/workspace/config").await;
+    assert!(v["config"]["parsed"].is_null(), "{v}");
+    assert!(v["config"]["error"].as_str().is_some_and(|e| e.contains("line 2, column 1")), "{v}");
+    let fingerprint = v["config"]["fingerprint"].as_str().unwrap().to_string();
 
-    let resp = router
-        .clone()
-        .oneshot(post_form(
-            "/api/v1/workspace/config/save",
-            form_field("content", "[chat]\nmodel = \"ws/repaired\"\n"),
-            &intent,
-        ))
-        .await
-        .unwrap();
-    let (status, body, _h) = body_string(resp).await;
+    let (status, body, _h) = save_tier(&router, &intent, "[chat]\nmodel = \"ws/repaired\"\n", &fingerprint).await;
     assert_eq!(status, StatusCode::OK, "the save validates the new document, not the broken one: {body}");
 
     let resp = router.clone().oneshot(get("/api/v1/config?repo=web")).await.unwrap();
@@ -2248,9 +2261,8 @@ async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["effective_chat"]["policy"]["model"], "ws/repaired", "{body}");
 
-    let resp = router.oneshot(get("/api/v1/workspace/config")).await.unwrap();
-    let (status, body, _h) = body_string(resp).await;
-    assert_eq!(status, StatusCode::OK, "the workspace read recovers too: {body}");
+    let v = json_body(&router, "/api/v1/workspace/config").await;
+    assert_eq!(v["config"]["parsed"]["chat"]["model"], "ws/repaired", "the workspace read parses again: {v}");
 }
 
 /// The workspace tier carries the chat policy and its credential, and nothing
@@ -2293,7 +2305,10 @@ async fn the_workspace_save_accepts_the_config_document_only() {
     let resp = router
         .oneshot(post_form(
             "/api/v1/workspace/config/save",
-            format!("file=config&{}", form_field("content", "[chat]\nmodel = \"ws/m\"\n")),
+            format!(
+                "file=config&{}&fingerprint={EMPTY_DOCUMENT_FINGERPRINT}",
+                form_field("content", "[chat]\nmodel = \"ws/m\"\n")
+            ),
             &intent,
         ))
         .await
@@ -2688,7 +2703,11 @@ async fn a_workspace_tier_save_moves_no_member_and_reindexes_nothing() {
         .clone()
         .oneshot(post_form(
             "/api/v1/workspace/config/save",
-            format!("file=config&{}", form_field("content", document)),
+            format!(
+                "file=config&{}&{}",
+                form_field("content", document),
+                form_field("fingerprint", loaded["config"]["fingerprint"].as_str().unwrap())
+            ),
             &intent,
         ))
         .await
@@ -2739,3 +2758,232 @@ async fn a_workspace_tier_save_moves_no_member_and_reindexes_nothing() {
         "no member's gated signal moved"
     );
 }
+
+// ── S-451 T2: the tier read is the repair path; the tier save refuses a clobber ─
+//
+// FR-UI-38's Statement applies the manifest's two write properties to the
+// workspace tier as well (CR-145): a broken `<workspace-root>/.logos/config.toml`
+// is delivered for repair rather than refused, and a save made against a file
+// that changed on disk since the load is refused rather than written over it. Both
+// mirror S-430's manifest route; neither adds a route or a guard.
+
+/// Save `content` to the workspace tier against `fingerprint`.
+async fn save_tier(
+    router: &axum::Router,
+    intent: &IntentToken,
+    content: &str,
+    fingerprint: &str,
+) -> (StatusCode, String, axum::http::HeaderMap) {
+    let body = format!(
+        "file=config&{}&{}",
+        form_field("content", content),
+        form_field("fingerprint", fingerprint)
+    );
+    let resp = router
+        .clone()
+        .oneshot(post_form("/api/v1/workspace/config/save", body, intent))
+        .await
+        .expect("route responds");
+    body_string(resp).await
+}
+
+/// **A broken tier file opens for repair** ([FR-UI-38], [NFR-RA-05]). The read
+/// is a `200` carrying the literal document, the fingerprint of its bytes and a
+/// `null` parse, with a fault naming the file and the position only — never the
+/// offending line or the key it rejects — and a save of a valid document against
+/// that fingerprint repairs it, after which the read parses again.
+#[tokio::test]
+async fn a_broken_tier_config_is_read_for_repair_and_a_save_against_its_fingerprint_repairs_it() {
+    let tmp = workspace();
+    let broken = "[chat]\nmodel = \"ws/kept\"\nmodle = \"ws/typo\"\n";
+    write(tmp.path(), ".logos/config.toml", broken);
+    let (router, intent) = ws_router_with_intent(&tmp);
+
+    let resp = router.clone().oneshot(get("/api/v1/workspace/config")).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a broken tier file is delivered, not refused: {body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/config");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["config"]["content"], broken, "the literal bytes: {body}");
+    assert_eq!(v["config"]["exists"], true, "{body}");
+    assert!(v["config"]["parsed"].is_null(), "no parse stands in for the broken file: {body}");
+    assert_eq!(
+        v["config"]["fingerprint"],
+        logos_core::federation::manifest::fingerprint(broken.as_bytes()),
+        "{body}"
+    );
+    let error = v["config"]["error"].as_str().unwrap_or_else(|| panic!("the fault is stated: {body}"));
+    assert!(error.contains(".logos/config.toml"), "the fault names the file: {error}");
+    assert!(error.contains("line 3, column 1"), "the fault names the position: {error}");
+    assert!(!error.contains("modle") && !error.contains("ws/typo"), "no snippet of the file: {error}");
+    // The credential half is readable, so it is stated as it is.
+    assert_eq!(v["chat_key"], serde_json::json!({"present": false}), "{body}");
+
+    let fingerprint = v["config"]["fingerprint"].as_str().unwrap().to_string();
+    let repaired = "[chat]\nmodel = \"ws/repaired\"\n";
+    let (status, body, _h) = save_tier(&router, &intent, repaired, &fingerprint).await;
+    assert_eq!(status, StatusCode::OK, "the save is the repair path: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["outcome"], "written", "{body}");
+    assert_eq!(
+        v["fingerprint"],
+        logos_core::federation::manifest::fingerprint(repaired.as_bytes()),
+        "the fingerprint the editor holds from now on: {body}"
+    );
+    assert_eq!(std::fs::read_to_string(tmp.path().join(".logos/config.toml")).unwrap(), repaired);
+
+    let v = json_body(&router, "/api/v1/workspace/config").await;
+    assert_eq!(v["config"]["parsed"]["chat"]["model"], "ws/repaired", "{v}");
+    assert!(v["config"]["error"].is_null(), "{v}");
+}
+
+/// **A broken credential store is named, never shown** ([NFR-SE-07]). Its parse
+/// fault can quote the offending line, and here that line IS the key: the read is
+/// still a `200`, the key half is `null` with a fault naming the file and the
+/// position, and no fragment of the file — not the key, not its line — appears
+/// anywhere in the body. The policy half is unaffected and still editable.
+#[tokio::test]
+async fn a_broken_tier_secret_store_is_reported_by_file_and_position_and_never_echoed() {
+    let tmp = workspace();
+    let key = "sk-unquoted-broken-line-bk07";
+    let secrets = format!("[chat]\napi_key = {key}\n");
+    let policy = "[chat]\nmodel = \"ws/policy\"\n";
+    write(tmp.path(), ".logos/secrets.toml", &secrets);
+    write(tmp.path(), ".logos/config.toml", policy);
+    let router = ws_router(&tmp);
+
+    let resp = router.clone().oneshot(get("/api/v1/workspace/config")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "a broken store does not fail the tier read: {body}");
+    for fragment in [key, "unquoted", "bk07", "api_key = ", secrets.lines().nth(1).unwrap()] {
+        assert!(!body.contains(fragment), "`{fragment}` of secrets.toml reached the body: {body}");
+    }
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["chat_key"].is_null(), "no key state is invented for an unreadable store: {body}");
+    let error = v["chat_key_error"].as_str().unwrap_or_else(|| panic!("the fault is stated: {body}"));
+    assert!(error.contains(".logos/secrets.toml"), "the fault names the file: {error}");
+    assert!(error.contains("line 2, column"), "the fault names the position: {error}");
+    assert_eq!(v["config"]["parsed"]["chat"]["model"], "ws/policy", "the policy half is unaffected: {body}");
+    assert!(v["config"]["error"].is_null(), "{body}");
+}
+
+/// **No silent clobber** ([FR-UI-38], CR-145). A hand edit made while the tab is
+/// open moves the fingerprint; a save against the load's is a `409` carrying the
+/// document on disk now, and the file is byte-identical. Re-saving against the
+/// conflict's own fingerprint is the explicit overwrite.
+#[tokio::test]
+async fn a_tier_save_against_a_file_changed_since_load_is_a_409_that_writes_nothing() {
+    let tmp = workspace();
+    let path = tmp.path().join(".logos/config.toml");
+    write(tmp.path(), ".logos/config.toml", "[chat]\nmodel = \"ws/loaded\"\n");
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/config").await;
+    let fingerprint = loaded["config"]["fingerprint"].as_str().unwrap().to_string();
+
+    let by_hand = "# edited in a terminal while the tab was open\n[chat]\nmodel = \"ws/by-hand\"\n";
+    std::fs::write(&path, by_hand).unwrap();
+
+    let mine = "[chat]\nmodel = \"ws/mine\"\n";
+    let (status, body, headers) = save_tier(&router, &intent, mine, &fingerprint).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/config/save");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["outcome"], "conflict", "{body}");
+    assert_eq!(v["loaded_fingerprint"], fingerprint.as_str(), "{body}");
+    assert_eq!(v["disk_content"], by_hand, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), by_hand, "the hand edit survives byte-identical");
+
+    let disk = v["disk_fingerprint"].as_str().unwrap();
+    let (status, body, _h) = save_tier(&router, &intent, mine, disk).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), mine, "the explicit overwrite");
+}
+
+/// A tier created on disk while the tab showed it absent is a conflict too: the
+/// absent file's fingerprint is the empty document's, and a hand-created file
+/// moves it.
+#[tokio::test]
+async fn a_first_tier_save_over_a_file_created_since_load_is_a_409() {
+    let tmp = workspace();
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/config").await;
+    assert_eq!(loaded["config"]["exists"], false, "{loaded}");
+    let fingerprint = loaded["config"]["fingerprint"].as_str().unwrap().to_string();
+    assert_eq!(fingerprint, EMPTY_DOCUMENT_FINGERPRINT, "an absent tier is the empty document");
+
+    let by_hand = "[chat]\nmodel = \"ws/created-by-hand\"\n";
+    write(tmp.path(), ".logos/config.toml", by_hand);
+    let (status, body, _h) = save_tier(&router, &intent, "[chat]\nmodel = \"ws/mine\"\n", &fingerprint).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(std::fs::read_to_string(tmp.path().join(".logos/config.toml")).unwrap(), by_hand);
+}
+
+/// **The fingerprint is required, and identity writes nothing.** A save with no
+/// fingerprint is a `400` that is not attempted — the file byte-identical and not
+/// rewritten; a candidate byte-identical to disk is `unchanged` and not rewritten;
+/// a rejected candidate is still a `422` that leaves it byte-identical.
+#[tokio::test]
+async fn a_fingerprintless_rejected_or_identical_tier_save_writes_nothing() {
+    let tmp = workspace();
+    let path = tmp.path().join(".logos/config.toml");
+    let on_disk = "[chat]\nmodel = \"ws/kept\"\n";
+    write(tmp.path(), ".logos/config.toml", on_disk);
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/config").await;
+    let fingerprint = loaded["config"]["fingerprint"].as_str().unwrap().to_string();
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(past).unwrap();
+    let unmoved = |why: &str| {
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), on_disk, "{why}: byte-identical");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), past, "{why}: not rewritten");
+    };
+
+    for form in [
+        format!("file=config&{}", form_field("content", "[chat]\nmodel = \"ws/other\"\n")),
+        format!("file=config&{}&fingerprint=%20", form_field("content", "[chat]\nmodel = \"ws/other\"\n")),
+    ] {
+        let resp = router
+            .clone()
+            .oneshot(post_form("/api/v1/workspace/config/save", form, &intent))
+            .await
+            .unwrap();
+        let (status, body, _h) = body_string(resp).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(api_error(&body).contains("fingerprint"), "the refusal says what is missing: {body}");
+        unmoved("a fingerprint-less save");
+    }
+
+    let (status, body, _h) = save_tier(&router, &intent, "[chat]\nmodle = \"typo\"\n", &fingerprint).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    unmoved("a rejected candidate");
+
+    let (status, body, _h) = save_tier(&router, &intent, on_disk, "some-other-load").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["outcome"], "unchanged", "identity is decided before staleness: {body}");
+    assert_eq!(v["fingerprint"], fingerprint.as_str(), "{body}");
+    unmoved("an identical save");
+}
+
+/// **Validation precedes identity** (S-451 T2). Posting the broken document back
+/// unchanged — the first thing a user does who opens the repair editor and
+/// clicks Save — is a `422`, not an `unchanged` `200` that would report success
+/// over a file every inheriting member still fails on; nothing is rewritten.
+#[tokio::test]
+async fn re_saving_the_identical_broken_tier_document_is_a_422_not_unchanged() {
+    let tmp = workspace();
+    let path = tmp.path().join(".logos/config.toml");
+    let broken = "[chat]\nmodle = \"ws/typo\"\n";
+    write(tmp.path(), ".logos/config.toml", broken);
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let loaded = json_body(&router, "/api/v1/workspace/config").await;
+    let fingerprint = loaded["config"]["fingerprint"].as_str().unwrap().to_string();
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options().write(true).open(&path).unwrap().set_modified(past).unwrap();
+
+    let (status, body, _h) = save_tier(&router, &intent, broken, &fingerprint).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "byte-identical");
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), past, "not rewritten");
+}
+

@@ -1901,6 +1901,51 @@ export type ManifestSaveOutcome =
     };
 
 /**
+ * `<workspace-root>/.logos/config.toml` as the workspace Config editor's tier
+ * group loads it (mirrors `TierConfigFile`, S-451 T2, FR-UI-38) — the manifest
+ * document's shape plus `exists`, because this file is routinely absent.
+ *
+ * `content` is the literal document the raw pane shows and a save posts back, and
+ * `fingerprint` the hash of those exact bytes, which the save must carry. An
+ * absent file reads as the empty document (and its fingerprint).
+ */
+export interface WorkspaceTierConfigFile {
+  path: string;
+  exists: boolean;
+  content: string;
+  fingerprint: string;
+  /** `null` when `content` does not parse or validate; `error` then says why. */
+  parsed: ParsedConfig | null;
+  /** The file and the position (a parse fault) or key (a validation fault) only —
+   *  never a fragment of the file (NFR-SE-07). */
+  error: string | null;
+}
+
+/**
+ * `GET /api/v1/workspace/config` (S-450, S-451 T2, FR-WS-30) — the workspace
+ * root's config tier as its editor group loads it (mirrors
+ * `WorkspaceTierDocument`). Not a `ConfigReadModel`: a file that does not parse
+ * is delivered here for repair rather than refused, each half on its own, and no
+ * `rules.toml` is read at this root.
+ */
+export interface WorkspaceTierDocument {
+  config: WorkspaceTierConfigFile;
+  /** The masked credential, presence + last-4 only (NFR-SE-07) — `null` when
+   *  `secrets.toml` cannot be read, and `chat_key_error` then says why. */
+  chat_key: MaskedSecret | null;
+  /** The file and position only — no fragment of the store is ever carried. */
+  chat_key_error: string | null;
+  /** The resolution at this root, with no tier above it (`member` = declared
+   *  here). `null` when either half does not parse. */
+  effective_chat: EffectiveChat | null;
+}
+
+/** What `POST /api/v1/workspace/config/save` did (mirrors `TierSaveOutcome`, S-451
+ *  T2) — the same arms and wire shape as the manifest save's, so one type serves
+ *  both; `conflict` arrives as HTTP 409. */
+export type WorkspaceTierSaveOutcome = ManifestSaveOutcome;
+
+/**
  * Why one workspace member contributed nothing to the statistics aggregate
  * (mirrors `UnreadReason`, [FR-UI-37], kebab-case on the wire).
  *
