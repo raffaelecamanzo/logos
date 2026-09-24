@@ -9,6 +9,8 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.19] — 2026-09-24
+
 Sprint 76, hotfix round.
 
 ### Changed
