@@ -103,15 +103,17 @@ export function AsyncResource<T>({
 }: AsyncResourceProps<T>): ReactNode {
   if (resource.status === "loading") return <LoadingState label={loadingLabel} />;
   if (resource.status === "error") {
-    return <ErrorPanel>{describeError(resource.error)}</ErrorPanel>;
+    return <ErrorPanel>{describeReadError(resource.error)}</ErrorPanel>;
   }
   const data = resource.data as T;
   if (isEmpty?.(data)) return empty ?? <EmptyState message="Nothing to show yet." />;
   return children(data);
 }
 
-/** A human, non-fabricated description of a failed read (NFR-RA-05). */
-function describeError(error: Error | undefined): string {
+/** A human, non-fabricated description of a failed read (NFR-RA-05) — the one
+ *  spelling, exported for a view that states a failed read somewhere other than
+ *  {@link AsyncResource}'s panel. */
+export function describeReadError(error: Error | undefined): string {
   if (error instanceof ApiError) {
     return `The request to ${error.path} failed (HTTP ${error.status}).`;
   }

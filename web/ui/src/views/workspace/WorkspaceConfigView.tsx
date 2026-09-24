@@ -63,9 +63,8 @@
 import { useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 
-import { ApiError } from "../../intent.ts";
 import { ConfigMutateError } from "../../api/configClient.ts";
-import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
+import { AsyncResource, describeReadError, useApiResource } from "../../api/hooks.tsx";
 import {
   fetchWorkspaceConfig,
   fetchWorkspaceGovernance,
@@ -940,10 +939,8 @@ function TierGroup() {
       {loaded.status === "loading" && <LoadingState label="Loading the workspace chat tier…" />}
       {loaded.status === "error" && (
         <Callout label="NOT LOADED" tone="signal">
-          The workspace chat tier could not be loaded, so it cannot be edited here:{" "}
-          {loaded.error instanceof ApiError
-            ? `the request to ${loaded.error.path} failed (HTTP ${loaded.error.status}).`
-            : (loaded.error?.message ?? "the request could not be completed.")}
+          The workspace chat tier could not be loaded, so it cannot be edited here.{" "}
+          {describeReadError(loaded.error)}
         </Callout>
       )}
       {loaded.status === "ready" && loaded.data && <TierEditor model={loaded.data} />}
