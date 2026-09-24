@@ -1920,16 +1920,23 @@ async fn single_root_answers_the_workspace_config_routes_with_the_not_a_workspac
     let router = web::router_with_intent(engine, intent.clone());
     let before = walk(tmp.path());
 
+    // The family's standard refusal, byte for byte: what an existing fan-out
+    // route answers in the same single-root serve.
+    let resp = router.clone().oneshot(get("/api/v1/workspace/statistics")).await.unwrap();
+    let (status, standard, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{standard}");
+    assert!(api_error(&standard).starts_with("not a workspace:"), "{standard}");
+
     let resp = router.clone().oneshot(get("/api/v1/workspace/config")).await.unwrap();
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert!(body.contains("not a workspace"), "{body}");
+    assert_eq!(body, standard, "the read refuses in the family's own words");
 
     for (path, form) in WORKSPACE_WRITE_ENDPOINTS {
         let resp = router.clone().oneshot(post_form(path, *form, &intent)).await.unwrap();
         let (status, body, headers) = body_string(resp).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path} is refused in single-root mode: {body}");
-        assert!(body.contains("not a workspace"), "{path} explains why: {body}");
+        assert_eq!(body, standard, "{path} refuses in the family's own words");
         assert_self_only_csp(&headers, path);
     }
     assert_eq!(walk(tmp.path()), before, "a refused workspace write wrote nothing");
