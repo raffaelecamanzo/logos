@@ -2170,6 +2170,12 @@ async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_
 
     let resp = router.clone().oneshot(get("/api/v1/config?repo=web")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "the broken tier fails the inheriting member loud");
+    // …and the workspace read itself: fail-loud, a JSON error naming the key —
+    // never a defaulted read-model standing in for the broken file.
+    let resp = router.clone().oneshot(get("/api/v1/workspace/config")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(api_error(&body).contains("modle"), "the fault names the offending key: {body}");
 
     let resp = router
         .clone()
@@ -2183,11 +2189,15 @@ async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "the save validates the new document, not the broken one: {body}");
 
-    let resp = router.oneshot(get("/api/v1/config?repo=web")).await.unwrap();
+    let resp = router.clone().oneshot(get("/api/v1/config?repo=web")).await.unwrap();
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "the member reads again: {body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["effective_chat"]["policy"]["model"], "ws/repaired", "{body}");
+
+    let resp = router.oneshot(get("/api/v1/workspace/config")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "the workspace read recovers too: {body}");
 }
 
 /// The workspace tier carries the chat policy and its credential, and nothing
