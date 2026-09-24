@@ -201,6 +201,11 @@ fn build_setup(
 }
 
 impl ChatService for ConfiguredChatService {
+    #[cfg(test)]
+    fn cross_service_reach(&self) -> bool {
+        self.xservice.is_some()
+    }
+
     fn start_turn(&self, question: String, thread_id: Option<i64>) -> ChatStream {
         let (tx, rx) = unbounded_chat_channel();
         let engine = Arc::clone(&self.engine);
