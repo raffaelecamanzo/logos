@@ -455,7 +455,7 @@ async fn a_resolved_edge_is_cited_with_both_members_and_a_bare_name_is_not_an_ab
 // ── 4. Lazy construction (NFR-PE-10) ─────────────────────────────────────────
 
 #[tokio::test]
-async fn the_federated_roster_opens_no_member_and_a_scoped_call_opens_only_that_one() {
+async fn the_federated_roster_opens_no_member_and_only_a_scoped_search_opens_just_one() {
     let ws = workspace(false);
     let registry = ws.xservice.registry();
 
@@ -486,6 +486,35 @@ async fn the_federated_roster_opens_no_member_and_a_scoped_call_opens_only_that_
         vec!["api".to_string()],
         "a repo-scoped call opens exactly that member"
     );
+    assert!(registry.live_read_connections() <= registry.budget().total_read_connections());
+
+    // The bridge-backed tools are NOT lazy per `repo`: the contract bridge reads
+    // every member's sync-stamp whatever the scope, as the MCP twin does. Pinned
+    // so the tool text cannot drift back to promising otherwise — and the
+    // residency still stays inside the registry's budget.
+    let (observation, _) = run_turn(
+        &ws,
+        "who calls shared in api?",
+        vec![
+            MockTurn::tool_call(
+                "x1",
+                "xservice_callers",
+                serde_json::json!({ "symbol": ws.shared, "repo": "api" }),
+            ),
+            MockTurn::text("shared is called in api."),
+        ],
+    )
+    .await;
+    assert!(
+        observation.contains("per member — api:") && !observation.contains("web:"),
+        "`repo` scopes the per-member answer to api: {observation}"
+    );
+    assert_eq!(
+        registry.resident_members(),
+        vec!["api".to_string(), "web".to_string()],
+        "a scoped reachability call still opens every member (the bridge walk)"
+    );
+    assert!(registry.resident_count() <= registry.budget().max_resident_members());
     assert!(registry.live_read_connections() <= registry.budget().total_read_connections());
 }
 

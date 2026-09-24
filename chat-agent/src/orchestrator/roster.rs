@@ -120,8 +120,9 @@ pub const GRAPH_NAVIGATOR_XSERVICE_ADDENDUM: &str = "This codebase is one member
 answer from this member only. For a question that crosses repositories — which \
 services call an endpoint, what another service breaks, where a symbol lives across \
 the workspace — use the cross-service tools: xservice_search, xservice_callers, \
-xservice_impact, xservice_route_providers. Pass `repo` when you already know the \
-member, so only that member is opened. Cross-service results are repo-qualified: \
+xservice_impact, xservice_route_providers. Pass `repo` to xservice_search when you \
+already know the member, so only that member is opened; the other three read every \
+member's contracts whatever `repo` says. Cross-service results are repo-qualified: \
 name the member with every result, and never merge the same symbol from two members \
 into one. An xservice reading that says UNRESOLVED is not an absence — report it as \
 unresolved, with its count, never as \"none\".";

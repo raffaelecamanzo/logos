@@ -13,9 +13,12 @@
 //!
 //! # Lazy, like the registry it wraps ([NFR-PE-10])
 //! Constructing the tools touches no engine. A member is started only when a
-//! dispatched call reaches it: a `repo`-scoped call starts that one member, and
-//! an unscoped call fans the workspace exactly as `logos xservice …` and the MCP
-//! tools do. The resident-engine ceiling stays the registry's own budget.
+//! dispatched call reaches it, and the resident-engine ceiling stays the
+//! registry's own budget. A `repo`-scoped `xservice_search` starts that one
+//! member. The other three read the contract bridge, whose sync-stamp walk
+//! reads **every** member whatever `repo` says (`ContractBridge::edges` /
+//! `reachability_inputs`), exactly as `logos xservice …` and the MCP tools do —
+//! so their `repo` narrows the answer, never what is opened.
 //!
 //! # The residue rides the answer ([BR-53], [NFR-CC-04])
 //! Each output is an [`XserviceAnswer`]: the read-model verbatim, plus one
@@ -433,14 +436,23 @@ pub struct XserviceSearchArgs {
     pub repo: Option<String>,
 }
 
-/// The `repo` property every `xservice_*` schema carries.
-fn repo_property(scoped: &str) -> serde_json::Value {
+/// The `repo` property every `xservice_*` schema carries. `opens_one` is true
+/// only for `xservice_search`: the bridge-backed tools read every member's
+/// sync-stamp regardless, so scoping them saves nothing ([NFR-PE-10]).
+///
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn repo_property(scoped: &str, opens_one: bool) -> serde_json::Value {
+    let cost = if opens_one {
+        "which starts only that member's engine"
+    } else {
+        "which narrows the answer but not what is opened: the cross-service bridge reads \
+         every member either way"
+    };
     json!({
         "type": "string",
         "description": format!(
             "Workspace member name (its workspace-relative path). Scopes {scoped} to that \
-             one member, which starts only that member's engine; omit to fan across the \
-             whole workspace."
+             one member, {cost}; omit to fan across the whole workspace."
         )
     })
 }
@@ -489,7 +501,7 @@ impl Tool for XserviceRouteProvidersTool {
                 .to_string(),
             parameters: json!({
                 "type": "object",
-                "properties": { "repo": repo_property("the bindings") }
+                "properties": { "repo": repo_property("the bindings", false) }
             }),
         }
     }
@@ -541,7 +553,7 @@ impl Tool for XserviceCallersTool {
                 "properties": {
                     "symbol": { "type": "string", "description": SYMBOL_ARGUMENT },
                     "limit": { "type": "integer", "minimum": 1, "description": "Maximum intra-repo callers per member (default 50)." },
-                    "repo": repo_property("the intra-repo fan-out and the residue")
+                    "repo": repo_property("the intra-repo fan-out and the residue", false)
                 },
                 "required": ["symbol"]
             }),
@@ -602,7 +614,7 @@ impl Tool for XserviceImpactTool {
                 "properties": {
                     "symbol": { "type": "string", "description": SYMBOL_ARGUMENT },
                     "depth": { "type": "integer", "minimum": 1, "description": "Traversal depth bound per member (default 3)." },
-                    "repo": repo_property("the seed impact and the residue")
+                    "repo": repo_property("the seed impact and the residue", false)
                 },
                 "required": ["symbol"]
             }),
@@ -663,7 +675,7 @@ impl Tool for XserviceSearchTool {
                     "query": { "type": "string", "description": "Symbol name or free text to search for." },
                     "kind": { "type": "string", "description": "Optional node-kind filter, e.g. \"function\", \"route\"." },
                     "limit": { "type": "integer", "minimum": 1, "description": "Maximum hits per member (default 20)." },
-                    "repo": repo_property("the search")
+                    "repo": repo_property("the search", true)
                 },
                 "required": ["query"]
             }),
