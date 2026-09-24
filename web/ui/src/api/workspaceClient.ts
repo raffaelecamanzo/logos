@@ -174,8 +174,8 @@ export async function saveWorkspaceManifest(
  *
  * Like the manifest read, a tier file broken on disk still loads — `parsed:
  * null` with the fault in `error`, or `chat_key: null` with it in
- * `chat_key_error`, by file and position only — because the editor is its repair
- * path.
+ * `chat_key_error`, by file and position or key only, never a fragment of the
+ * file — because the editor is its repair path.
  *
  * A `2xx` that is not that document is refused here rather than handed on: the
  * editor's Save replaces the whole file with its raw pane, so an editor seeded

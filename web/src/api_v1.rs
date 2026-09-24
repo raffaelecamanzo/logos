@@ -1662,9 +1662,10 @@ pub(crate) async fn config(
 /// the root this payload reads: `member` means *declared at this root*, `unset`
 /// that it is not, and `workspace` never appears — nothing here is inherited.
 ///
-/// Like the manifest read beside it, a file that does not parse is a `200` —
-/// `parsed: null` (or `chat_key: null`) with the fault in `error` (or
-/// `chat_key_error`), by file and position only — not a `500`: the editor is the
+/// Like the manifest read beside it, a file that does not parse or validate is a
+/// `200` — `parsed: null` (or `chat_key: null`) with the fault in `error` (or
+/// `chat_key_error`), by file and position or key only, never a fragment of the
+/// file — not a `500`: the editor is the
 /// repair path, and it needs the document and its fingerprint to repair it. Only
 /// an unreadable `config.toml` is a `500`. A member's `GET /api/v1/config` is
 /// unchanged and stays fail-loud over a broken tier it inherits from.

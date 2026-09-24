@@ -29,11 +29,11 @@
 //!   changed on disk since ([`TierSaveOutcome::Conflict`]), since the file is
 //!   edited by hand while a tab is open.
 //!
-//! A parse fault is stated by **file and position only** ([`read_fault`]),
-//! never with the parser's rendering, which quotes the offending line: in
-//! `secrets.toml` that line can be the key ([NFR-SE-07]), and the rule is kept
-//! uniform so `config.toml` cannot become the exception a pasted key slips
-//! through.
+//! A fault is stated by **file and position (or key) only** ([`read_fault`]),
+//! never with the parser's rendering, which quotes the offending line, nor with a
+//! validation message, which quotes the rejected value: in `secrets.toml` either
+//! can be the key ([NFR-SE-07]). The rule is kept uniform across both files
+//! rather than argued per file.
 //!
 //! Both writers also maintain `<root>/.logos/.gitignore` — the same managed
 //! block `logos init` writes into a member's `.logos/` ([FR-IN-04]) — before
@@ -102,8 +102,9 @@ pub struct TierConfigFile {
     /// The parsed, load-path-validated model, or `None` when `content` does not
     /// parse or validate.
     pub parsed: Option<Config>,
-    /// Why `content` does not parse — file and position only ([`read_fault`]);
-    /// `None` exactly when `parsed` is `Some`.
+    /// Why `content` does not parse or validate — the file and the position or
+    /// key only, never a fragment of it ([`read_fault`]); `None` exactly when
+    /// `parsed` is `Some`.
     pub error: Option<String>,
 }
 
@@ -128,8 +129,8 @@ pub struct WorkspaceTierDocument {
     ///
     /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
     pub chat_key: Option<MaskedSecret>,
-    /// Why `secrets.toml` cannot be read — file and position only, never a
-    /// fragment of the store ([`read_fault`]); `None` exactly when `chat_key` is
+    /// Why `secrets.toml` cannot be read — the file and the position (or the I/O
+    /// error) only, never a fragment of the store ([`read_fault`]); `None` exactly when `chat_key` is
     /// `Some`.
     pub chat_key_error: Option<String>,
     /// The effective chat resolution at this root, with no tier above it, so its
@@ -179,12 +180,17 @@ pub enum TierSaveOutcome {
     },
 }
 
-/// A read fault stated the way a surface may render it: a **parse** fault by the
-/// file (`rel`, relative to the workspace root) and its position only, because
-/// the TOML error's rendering quotes the offending line and its message can
-/// quote a value — in `secrets.toml` either can be the key ([NFR-SE-07]).
-/// Every other fault keeps its own message, which names a key, a bound or a
-/// glob, never a line of the file.
+/// A read fault stated the way a surface may render it — by the file (`rel`,
+/// relative to the workspace root) and where it went wrong, **never a fragment of
+/// the file** ([NFR-SE-07]):
+///
+/// - a **parse** fault by its position only, because the TOML error's rendering
+///   quotes the offending line and its message can quote a value — in
+///   `secrets.toml` either can be the key;
+/// - a **validation** fault by the key it names, because its message carries the
+///   rejected value (`InvalidValue`) or the pattern itself (`BadGlob`,
+///   `EscapingPattern`);
+/// - an **I/O** fault by its own message, which is the path and the OS error.
 ///
 /// The rule `resolution_fault` in the web crate's chat module applies to the
 /// same errors; the position is read from the error's rendering, where both the
@@ -203,7 +209,17 @@ fn read_fault(rel: &str, err: &ConfigError) -> String {
                  shown, because it can quote the file."
             )
         }
-        other => format!("{rel}: {other}"),
+        ConfigError::InvalidValue { key, .. } => format!(
+            "{rel} declares an invalid value for `{key}`. The value is not shown; the raw pane \
+             holds the document."
+        ),
+        ConfigError::BadGlob { .. } | ConfigError::EscapingPattern { .. } => format!(
+            "{rel} declares a glob pattern that does not compile or escapes the project root. The \
+             pattern is not shown; the raw pane holds the document."
+        ),
+        io @ (ConfigError::Io { .. } | ConfigError::Write { .. } | ConfigError::InvalidRoot { .. }) => {
+            format!("{rel}: {io}")
+        }
     }
 }
 
@@ -530,5 +546,28 @@ mod tests {
         seed(root.path(), "config.toml", "[chat]\nmodel = \"ws/by-hand\"\n");
         let outcome = write_workspace_config(root.path(), "[chat]\nmodel = \"ws/mine\"\n", &doc.config.fingerprint).unwrap();
         assert!(matches!(outcome, TierSaveOutcome::Conflict { .. }), "{outcome:?}");
+    }
+
+    /// A document that parses but fails validation is delivered for repair too,
+    /// and its fault names the file and the key — never the rejected value or
+    /// pattern, which is a fragment of the file ([NFR-SE-07]).
+    #[test]
+    fn a_tier_config_failing_validation_is_read_for_repair_without_its_value() {
+        for (document, named, value) in [
+            ("[chat]\nmodel = \"ws/m\"\ntemperature = 7.25\n", "`chat.temperature`", "7.25"),
+            ("exclude = [\"../escape-sk-vf31\"]\n", "glob pattern", "escape-sk-vf31"),
+            ("include = [\"src/[unclosed-sk-vf32\"]\n", "glob pattern", "unclosed-sk-vf32"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            seed(root.path(), "config.toml", document);
+            let doc = read_workspace_documents(root.path()).expect("a validation fault is not a read fault");
+            assert!(doc.config.parsed.is_none(), "{document:?}");
+            assert_eq!(doc.config.content, document);
+            let error = doc.config.error.expect("the fault is stated");
+            assert!(error.starts_with(".logos/config.toml declares"), "{error}");
+            assert!(error.contains(named), "{error}");
+            assert!(!error.contains(value), "the rejected value is not echoed: {error}");
+            assert!(doc.effective_chat.is_none());
+        }
     }
 }

@@ -921,7 +921,7 @@ function describeTierOutcome(outcome: WorkspaceTierSaveOutcome, overwrote: boole
  *
  *  Over a `config.toml` that does not parse it is the **repair editor**
  *  (S-451 T2): the literal document in the raw pane, no typed fields, and the
- *  fault by file and position; the save validates the new document only. */
+ *  fault by file and position or key; the save validates the new document only. */
 function TierEditor({
   doc,
   notice,

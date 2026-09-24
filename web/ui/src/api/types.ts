@@ -1914,9 +1914,10 @@ export interface WorkspaceTierConfigFile {
   exists: boolean;
   content: string;
   fingerprint: string;
-  /** `null` when `content` does not parse; `error` then says why. */
+  /** `null` when `content` does not parse or validate; `error` then says why. */
   parsed: ParsedConfig | null;
-  /** The file and position only — never a snippet of the file (NFR-SE-07). */
+  /** The file and the position (a parse fault) or key (a validation fault) only —
+   *  never a fragment of the file (NFR-SE-07). */
   error: string | null;
 }
 
