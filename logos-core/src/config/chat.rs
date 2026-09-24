@@ -1196,7 +1196,10 @@ mod resolution_tests {
 
     /// [ADR-52] by construction: `None` performs exactly the two member reads,
     /// declared or not; a workspace root adds a read only for a half the member
-    /// leaves undeclared, and never any path but the one passed.
+    /// leaves undeclared — or, for the secrets, under a policy inherited from it,
+    /// even over a member key (HF-1: pinned by
+    /// `an_inherited_policy_reads_the_workspace_secrets_even_over_a_member_key`) —
+    /// and never any path but the one passed.
     #[test]
     fn read_set_is_two_member_reads_plus_only_the_workspace_halves_needed() {
         let member = Path::new("/estate/svc-a");
