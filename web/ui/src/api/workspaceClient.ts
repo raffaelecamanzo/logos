@@ -16,7 +16,7 @@
 
 import { ApiError, apiMutate } from "../intent.ts";
 import { apiFetch, apiUrl } from "./client.ts";
-import { ConfigMutateError, FORM_HEADERS, detailOf, formBody } from "./configClient.ts";
+import { ConfigMutateError, FORM_HEADERS, detailOf, formBody, writeSecret } from "./configClient.ts";
 import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
   ConfigReadModel,
@@ -217,25 +217,15 @@ export async function saveWorkspaceConfig(content: string): Promise<ConfigWriteO
  * with a blank key, clear) the credential every member that declares none
  * inherits, into the owner-only `<workspace-root>/.logos/secrets.toml`.
  *
- * Write-only on the same terms as `saveSecret`: it resolves with the **masked**
+ * Write-only on the same terms as `saveSecret`, through the one {@link writeSecret}
+ * both call: it resolves with the **masked**
  * {@link SecretWriteOutcome} (presence + last-4) and never returns the response
  * body — a non-JSON `2xx` resolves to `null`, and a non-`2xx` throws with a fixed,
  * body-free detail, so no reply from this route can carry key material onto a
  * SPA surface.
  */
-export async function saveWorkspaceSecret(apiKey: string): Promise<SecretWriteOutcome | null> {
-  const res = await apiMutate(apiUrl("workspace/config/secret"), {
-    headers: FORM_HEADERS,
-    body: formBody({ api_key: apiKey }),
-    credentials: "same-origin",
-  });
-  if (!res.ok) throw new ConfigMutateError(res.status, "the server rejected the key write");
-  const text = await res.text();
-  try {
-    return JSON.parse(text) as SecretWriteOutcome;
-  } catch {
-    return null;
-  }
+export function saveWorkspaceSecret(apiKey: string): Promise<SecretWriteOutcome | null> {
+  return writeSecret(apiUrl("workspace/config/secret"), apiKey);
 }
 
 /** What the boot-time probe found: a workspace (with its roster) or a plain repo. */

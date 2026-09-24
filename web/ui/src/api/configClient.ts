@@ -119,8 +119,19 @@ export async function applyConfig(file: PolicyFile): Promise<ConfigApplyOutcome>
  * to `null` ("saved, format not understood") rather than surface a body that could
  * in principle carry key material. Throws {@link ConfigMutateError} on a non-2xx.
  */
-export async function saveSecret(apiKey: string): Promise<SecretWriteOutcome | null> {
-  const res = await apiMutate(withMemberScope("/config/secret"), {
+export function saveSecret(apiKey: string): Promise<SecretWriteOutcome | null> {
+  return writeSecret(withMemberScope("/config/secret"), apiKey);
+}
+
+/**
+ * The one write-only key POST ([NFR-SE-07]) behind {@link saveSecret} and the
+ * workspace root's `saveWorkspaceSecret` (`workspaceClient.ts`): post `api_key`
+ * to `url` through the intent-guarded seam and resolve with the masked outcome
+ * only. Exported so the two routes cannot drift apart on the rule whose drift
+ * would leak key material.
+ */
+export async function writeSecret(url: string, apiKey: string): Promise<SecretWriteOutcome | null> {
+  const res = await apiMutate(url, {
     headers: FORM_HEADERS,
     body: formBody({ api_key: apiKey }),
     credentials: "same-origin",
