@@ -166,6 +166,19 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // the same reason as the two above — the `200`+CSP loop, the single-root
     // `404` loop and the write-free loop all walk this list.
     "/api/v1/workspace/statistics",
+    // S-450 / [FR-WS-30]: the workspace root read as a config root. A GET like
+    // the rest, so the same three loops walk it — and the write-free loop is the
+    // one that matters most here, because its two write twins below live beside it.
+    "/api/v1/workspace/config",
+];
+
+/// The two **mutating** workspace routes (S-450, [FR-WS-30], [NFR-SE-06]) with a
+/// well-formed body each. Kept apart from [`WORKSPACE_ENDPOINTS`] because every
+/// loop over that list issues a `GET`, which these answer `405`; the route-table
+/// guard reads the union of the two lists.
+const WORKSPACE_WRITE_ENDPOINTS: &[(&str, &str)] = &[
+    ("/api/v1/workspace/config/save", "content=%5Bchat%5D%0Amodel%20%3D%20%22ws%2Fsaved%22%0A"),
+    ("/api/v1/workspace/config/secret", "api_key=sk-workspace-written-key-wr42"),
 ];
 
 fn ws_router(tmp: &TempDir) -> axum::Router {
@@ -209,7 +222,7 @@ fn walk(root: &Path) -> Vec<String> {
 }
 
 /// An intent-guarded, same-origin form `POST` — the shape the Config tab sends.
-fn post_form(path: &str, body: &'static str, intent: &IntentToken) -> Request<Body> {
+fn post_form(path: &str, body: impl Into<String>, intent: &IntentToken) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(path)
@@ -217,8 +230,21 @@ fn post_form(path: &str, body: &'static str, intent: &IntentToken) -> Request<Bo
         .header(header::ORIGIN, "http://127.0.0.1:4983")
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .header(INTENT_HEADER, intent.as_str())
-        .body(Body::from(body))
+        .body(Body::from(body.into()))
         .unwrap()
+}
+
+/// `application/x-www-form-urlencoded` for one field — every byte outside the
+/// unreserved set percent-encoded, so a TOML document survives the trip intact.
+fn form_field(name: &str, value: &str) -> String {
+    let encoded: String = value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("{name}={encoded}")
 }
 
 // ── AC1: workspace mode serves the fan-out; plain repo is unchanged ──────────
@@ -1801,8 +1827,10 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// [`WORKSPACE_ENDPOINTS`] is what the `200`+CSP loop, the single-root `404` loop
 /// and the write-free loop all walk, so a route missing from it is unguarded on all
 /// three — and silently, which is the failure mode an enumerated list has instead of
-/// a wildcard. This asserts the list and the router's own route table name exactly
-/// the same set, read out of `src/lib.rs` at compile time. Set equality in both
+/// a wildcard. The two `POST` routes live in [`WORKSPACE_WRITE_ENDPOINTS`] instead
+/// (those loops issue `GET`s), and are walked by the S-450 tests. This asserts the
+/// union of the two lists and the router's own route table name exactly the same
+/// set, read out of `src/lib.rs` at compile time. Set equality in both
 /// directions, so it needs no count to keep up to date.
 ///
 /// # Two blind spots a line-based scan had, both closed
@@ -1837,6 +1865,7 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
     let mut enumerated: Vec<&str> = WORKSPACE_ENDPOINTS
         .iter()
         .map(|e| e.split('?').next().expect("a path before any query string"))
+        .chain(WORKSPACE_WRITE_ENDPOINTS.iter().map(|(path, _)| *path))
         .collect();
     enumerated.sort_unstable();
     enumerated.dedup();
@@ -1847,9 +1876,9 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
     );
     assert_eq!(
         enumerated, declared,
-        "WORKSPACE_ENDPOINTS and the router's /api/v1/workspace/* route table have \
-         drifted: a route in the table but not the list is unguarded by every loop \
-         that walks the list"
+        "WORKSPACE_ENDPOINTS + WORKSPACE_WRITE_ENDPOINTS and the router's \
+         /api/v1/workspace/* route table have drifted: a route in the table but not \
+         the lists is unguarded by every loop that walks them"
     );
 
     // The const form the inline scan cannot see. `VERIFY_POST_ROUTE` is the live
@@ -1867,4 +1896,313 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
          `.route(` call or teach this guard to resolve the constant — do not leave \
          the route enumerable only by hand."
     );
+}
+
+// ── S-450 / FR-WS-30: the workspace root is a config root ─────────────────────
+//
+// One read and two writes in the `/api/v1/workspace/*` family, calling the SAME
+// validate-before-write writers a member's Config tab calls, pointed at the
+// federation root the backing already holds. No engine is constructed there
+// ([ADR-40]'s exception) and no apply route exists at this scope.
+
+/// A single-root serve answers all three routes with the family's own
+/// not-a-workspace `404` — the writes included, and they write nothing
+/// ([FR-WS-30], [ADR-52]). The `GET` is also walked by
+/// `single_root_workspace_endpoints_are_404`; the two `POST`s can only be walked
+/// here, with a valid intent token, so the `404` is the handler's and not a
+/// guard's `403`/`405`.
+#[tokio::test]
+async fn single_root_answers_the_workspace_config_routes_with_the_not_a_workspace_refusal() {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path(), "src/lib.rs", "pub fn f() {}\n");
+    let intent = IntentToken::generate();
+    let engine = Arc::new(Engine::start(tmp.path()).expect("engine starts"));
+    let router = web::router_with_intent(engine, intent.clone());
+    let before = walk(tmp.path());
+
+    let resp = router.clone().oneshot(get("/api/v1/workspace/config")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("not a workspace"), "{body}");
+
+    for (path, form) in WORKSPACE_WRITE_ENDPOINTS {
+        let resp = router.clone().oneshot(post_form(path, *form, &intent)).await.unwrap();
+        let (status, body, headers) = body_string(resp).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path} is refused in single-root mode: {body}");
+        assert!(body.contains("not a workspace"), "{path} explains why: {body}");
+        assert_self_only_csp(&headers, path);
+    }
+    assert_eq!(walk(tmp.path()), before, "a refused workspace write wrote nothing");
+}
+
+/// **Both writes are registered in the enumerated config-write allow-list**
+/// ([NFR-SE-06]). The method guard matches on exact path equality, so a route
+/// missing from [`web::CONFIG_POST_ROUTES`] is `405` before it routes: this reds
+/// on the list, on the handler being reachable through the whole guard stack, and
+/// on the match staying exact (a near-miss path one character off is `405`).
+///
+/// The generic direction — *any* `POST`-mounted route, added later and not
+/// listed — is `every_post_mounted_route_is_admitted_by_the_method_guard` in
+/// `src/lib.rs`, which can reach the guard's private predicate.
+#[tokio::test]
+async fn both_workspace_writes_are_in_the_config_write_allow_list_and_nothing_near_them_is() {
+    let tmp = workspace();
+    let (router, intent) = ws_router_with_intent(&tmp);
+    for (path, form) in WORKSPACE_WRITE_ENDPOINTS {
+        assert!(
+            web::CONFIG_POST_ROUTES.contains(path),
+            "{path} is not in CONFIG_POST_ROUTES, so the method guard refuses it"
+        );
+        let resp = router.clone().oneshot(post_form(path, *form, &intent)).await.unwrap();
+        let (status, body, _h) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "{path} reaches its handler: {body}");
+
+        for near in [format!("{path}/"), format!("{path}x"), path.to_uppercase()] {
+            let resp = router.clone().oneshot(post_form(&near, *form, &intent)).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "POST {near} is not an enumerated route and must stay 405"
+            );
+        }
+    }
+}
+
+/// The writes carry the same same-origin + intent proof as every mutating route
+/// ([NFR-SE-06]): a cross-origin write and a tokenless write are `403` and leave
+/// the workspace root untouched.
+#[tokio::test]
+async fn workspace_writes_are_refused_without_the_intent_proof() {
+    let tmp = workspace();
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let before = walk(tmp.path());
+    for (path, form) in WORKSPACE_WRITE_ENDPOINTS {
+        for (origin, token) in [
+            ("http://evil.example", Some(intent.as_str())),
+            ("http://127.0.0.1:4983", None),
+        ] {
+            let mut req = Request::builder()
+                .method(Method::POST)
+                .uri(*path)
+                .header(header::HOST, "127.0.0.1:4983")
+                .header(header::ORIGIN, origin)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if let Some(token) = token {
+                req = req.header(INTENT_HEADER, token);
+            }
+            let resp = router.clone().oneshot(req.body(Body::from(*form)).unwrap()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path} from {origin}, token {token:?}");
+        }
+    }
+    assert_eq!(walk(tmp.path()), before, "a forged workspace write wrote nothing");
+}
+
+/// A save → read round-trip at the workspace root persists through the existing
+/// writers ([FR-WS-30], [NFR-RA-07]): the literal document reads back byte for
+/// byte, the credential reads back masked only ([NFR-SE-07]) and sits on disk at
+/// mode **0o600**, and a member that declares nothing now inherits both halves
+/// from exactly this tier — the one the seam reads.
+///
+/// And the [ADR-40] fault this exception exists to avoid: after the full cycle
+/// the workspace root holds **no graph store** — `.logos/` carries the two files
+/// written and nothing else — and a re-discovery still names the same two members,
+/// so the `.logos/` the save created is never admitted as one ([FR-WS-01]).
+#[tokio::test]
+async fn a_workspace_save_then_read_round_trips_and_leaves_no_graph_store_at_the_root() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let raw_key = "sk-workspace-round-trip-key-rt77";
+    let document = "# the estate's one chat policy\n[chat]\nprovider = \"anthropic\"\nmodel = \"ws/round-trip\"\n";
+    let (router, intent) = ws_router_with_intent(&tmp);
+    let mut bodies = Vec::new();
+
+    let resp = router
+        .clone()
+        .oneshot(post_form("/api/v1/workspace/config/save", form_field("content", document), &intent))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["path"], ".logos/config.toml", "{body}");
+    bodies.push(body);
+
+    let resp = router
+        .clone()
+        .oneshot(post_form("/api/v1/workspace/config/secret", form_field("api_key", raw_key), &intent))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["chat_key"], serde_json::json!({"present": true, "last4": "rt77"}), "{body}");
+    bodies.push(body);
+
+    // On disk: the literal bytes, and the credential owner-only.
+    assert_eq!(std::fs::read_to_string(root.join(".logos/config.toml")).unwrap(), document);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(root.join(".logos/secrets.toml")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the workspace credential is owner-only, got {:o}", mode & 0o777);
+    }
+
+    // Read back through the workspace route: the literal document, the masked key.
+    let resp = router.clone().oneshot(get("/api/v1/workspace/config")).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/config");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["config"]["content"], document, "{body}");
+    assert_eq!(v["config"]["parsed"]["chat"]["model"], "ws/round-trip", "{body}");
+    assert_eq!(v["chat_key"], serde_json::json!({"present": true, "last4": "rt77"}), "{body}");
+    // The workspace root has no tier above it, so nothing here is inherited.
+    assert_eq!(v["effective_chat"]["policy_origin"], "member", "{body}");
+    assert_eq!(v["effective_chat"]["credential_origin"], "member", "{body}");
+    bodies.push(body);
+
+    // …and the member that declares nothing inherits both halves from this tier.
+    let resp = router.clone().oneshot(get("/api/v1/config?repo=web")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["effective_chat"]["policy"]["model"], "ws/round-trip", "{body}");
+    assert_eq!(v["effective_chat"]["policy_origin"], "workspace", "{body}");
+    assert_eq!(v["effective_chat"]["credential_origin"], "workspace", "{body}");
+    bodies.push(body);
+
+    for body in &bodies {
+        assert!(!body.contains(raw_key) && !body.contains("round-trip-key"), "the raw key leaked: {body}");
+    }
+
+    // ADR-40: no engine was constructed at the workspace root. A graph store is
+    // the evidence one leaves behind, so `.logos/` holds exactly the two files.
+    let mut at_root: Vec<String> = std::fs::read_dir(root.join(".logos"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    at_root.sort();
+    assert_eq!(at_root, ["config.toml", "secrets.toml"], "the workspace root carries only what was written");
+    assert!(!root.join(".logos/logos.db").exists(), "no graph store at the workspace root");
+
+    // FR-WS-01: the `.logos/` the save created is not admitted as a member.
+    let federation = discover(root).expect("discovery succeeds").expect("a workspace");
+    let names: Vec<&str> = federation.members.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["api", "web"], "the member set is unchanged by a workspace-root .logos/");
+}
+
+/// A refused save leaves its target **byte-identical** ([NFR-RA-07]): an invalid
+/// document is a `422` over the existing workspace file, and a credential write
+/// over an unparsable store is a `422` that neither overwrites it nor echoes the
+/// key it was handed ([NFR-SE-07]).
+#[tokio::test]
+async fn a_refused_workspace_save_leaves_the_target_byte_identical() {
+    let tmp = workspace();
+    let root = tmp.path();
+    let config = "[chat]\nmodel = \"ws/kept\"\n";
+    let secrets = "[chat]\napi_key = sk-unquoted-stays-put\n";
+    write(root, ".logos/config.toml", config);
+    write(root, ".logos/secrets.toml", secrets);
+    let (router, intent) = ws_router_with_intent(&tmp);
+
+    let resp = router
+        .clone()
+        .oneshot(post_form(
+            "/api/v1/workspace/config/save",
+            form_field("content", "[chat]\nmodle = \"typo\"\n"),
+            &intent,
+        ))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "an invalid document is the client's fault: {body}");
+    assert!(body.contains("modle"), "the refusal names the offending key: {body}");
+    assert_eq!(std::fs::read_to_string(root.join(".logos/config.toml")).unwrap(), config);
+
+    let resp = router
+        .clone()
+        .oneshot(post_form("/api/v1/workspace/config/secret", "api_key=sk-handed-in-key-hk12", &intent))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(!body.contains("handed-in-key") && !body.contains("unquoted-stays-put"), "no key echoed: {body}");
+    assert_eq!(std::fs::read_to_string(root.join(".logos/secrets.toml")).unwrap(), secrets);
+}
+
+/// The write route is the **repair path** for the fault S-448 keeps fail-loud: a
+/// broken workspace-root `config.toml` makes every inheriting member's config read
+/// a `500`, and a save of a valid document over it succeeds — the writer
+/// validates the NEW content, never the old — after which the member reads again.
+#[tokio::test]
+async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_on() {
+    let tmp = workspace();
+    write(tmp.path(), ".logos/config.toml", "[chat]\nmodle = \"ws/typo\"\n");
+    let (router, intent) = ws_router_with_intent(&tmp);
+
+    let resp = router.clone().oneshot(get("/api/v1/config?repo=web")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR, "the broken tier fails the inheriting member loud");
+
+    let resp = router
+        .clone()
+        .oneshot(post_form(
+            "/api/v1/workspace/config/save",
+            form_field("content", "[chat]\nmodel = \"ws/repaired\"\n"),
+            &intent,
+        ))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "the save validates the new document, not the broken one: {body}");
+
+    let resp = router.oneshot(get("/api/v1/config?repo=web")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "the member reads again: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["effective_chat"]["policy"]["model"], "ws/repaired", "{body}");
+}
+
+/// The workspace tier carries the chat policy and its credential, and nothing
+/// else: `file=rules` is refused `400` and writes no `rules.toml` there, because
+/// workspace governance is declared in the manifest ([FR-WS-13]) and a rules file
+/// at the root would be read by nothing.
+#[tokio::test]
+async fn the_workspace_save_accepts_the_config_document_only() {
+    let tmp = workspace();
+    let (router, intent) = ws_router_with_intent(&tmp);
+
+    let resp = router
+        .clone()
+        .oneshot(post_form("/api/v1/workspace/config/save", "file=rules&content=%23%20rules%0A", &intent))
+        .await
+        .unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!tmp.path().join(".logos/rules.toml").exists(), "no rules file at the workspace root");
+    assert!(!tmp.path().join(".logos").exists(), "a refused save creates nothing");
+
+    let resp = router
+        .oneshot(post_form(
+            "/api/v1/workspace/config/save",
+            format!("file=config&{}", form_field("content", "[chat]\nmodel = \"ws/m\"\n")),
+            &intent,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "`file=config` is the one document accepted");
+}
+
+/// No apply/reconcile route exists at this scope ([ADR-40]): applying a config
+/// runs the pipeline, which needs an engine, which is exactly what the workspace
+/// root must never get. A well-formed `POST` there is `405` — unlisted, unrouted.
+#[tokio::test]
+async fn there_is_no_workspace_apply_route() {
+    let tmp = workspace();
+    let (router, intent) = ws_router_with_intent(&tmp);
+    assert!(!web::CONFIG_POST_ROUTES.iter().any(|r| r.starts_with("/api/v1/workspace/") && r.contains("apply")));
+    let resp = router
+        .oneshot(post_form("/api/v1/workspace/config/apply", "file=config", &intent))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }

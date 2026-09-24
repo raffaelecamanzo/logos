@@ -30,6 +30,7 @@
 //! [ADR-52]: ../../docs/specs/architecture/decisions/ADR-52.md
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -42,7 +43,7 @@ use axum::{
 use logos_core::federation::Backing;
 use logos_core::Engine;
 
-use crate::api_v1::ApiError;
+use crate::api_v1::{not_a_workspace, ApiError};
 
 /// The query param the SPA's member selector rides on — shared verbatim with the
 /// `/api/v1/workspace/*` fan-out's own `?repo=` scoping (S-249).
@@ -138,6 +139,55 @@ where
         resolved
             .map(Self)
             .map_err(|err| member_unavailable(&member, &err))
+    }
+}
+
+/// The workspace root a request resolves the second config tier against
+/// ([FR-WS-30], [ADR-67]): the federation's already-resolved root under
+/// [`Backing::Federated`], and `None` under [`Backing::Single`] — so single-root
+/// has no second tier by construction ([ADR-52]). Taken from the backing, never
+/// discovered: no manifest parse, no up-tree walk.
+///
+/// The **one** spelling of that derivation. The member config read, the chat and
+/// wiki-generation services, and the [`WorkspaceRoot`] extractor all ask here, so
+/// the root the Config tab reports inheriting from, the root a turn dials with,
+/// and the root a workspace save writes to cannot drift apart.
+///
+/// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
+/// [ADR-52]: ../../docs/specs/architecture/decisions/ADR-52.md
+/// [ADR-67]: ../../docs/specs/architecture/decisions/ADR-67.md
+pub(crate) fn workspace_root_of(backing: &Backing<Engine>) -> Option<PathBuf> {
+    backing
+        .as_federated()
+        .map(|registry| registry.federation().root.clone())
+}
+
+/// The workspace root, extracted for the `/api/v1/workspace/config*` routes that
+/// treat it as a config root ([FR-WS-30], S-450) — or, under a single-root
+/// backing, the family's standard not-a-workspace `404`, answered before the
+/// body is read.
+///
+/// Deliberately a **path**, never an [`Engine`]: the workspace root holds no
+/// graph, and constructing an engine there is the fault [ADR-40]'s exception
+/// exists to avoid. It resolves nothing and starts nothing — no member is warmed
+/// ([NFR-PE-10]).
+///
+/// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
+/// [ADR-40]: ../../docs/specs/architecture/decisions/ADR-40.md
+/// [NFR-PE-10]: ../../docs/specs/requirements/NFR-PE-10.md
+pub(crate) struct WorkspaceRoot(pub(crate) PathBuf);
+
+#[async_trait]
+impl<S> FromRequestParts<S> for WorkspaceRoot
+where
+    S: Send + Sync,
+    Arc<Backing<Engine>>: FromRef<S>,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(_parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let backing: Arc<Backing<Engine>> = FromRef::from_ref(state);
+        workspace_root_of(&backing).map(Self).ok_or_else(not_a_workspace)
     }
 }
 

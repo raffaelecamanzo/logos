@@ -53,14 +53,14 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Form, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Serialize;
 
-use logos_core::config::ConfigReadModel;
+use logos_core::config::{self as core_config, ConfigError, ConfigReadModel};
 use logos_core::federation::{
     app_wide_reachability, open_state, query as fed_query, workspace_governance,
     workspace_statistics, Backing, BoundedReachability, ContractBridge, DegradedRollup,
@@ -68,7 +68,7 @@ use logos_core::federation::{
 };
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
 use logos_core::model::NodeKind;
-use logos_core::observability::{in_surface, Surface};
+use logos_core::observability::Surface;
 use logos_core::models::navigation::{
     BranchOverlapResult, GraphElements, ImpactIntersectionResult, ImpactResult,
     LanguageComposition, NodeInfo, PrecedentResult, SearchResult, StatusInfo,
@@ -80,10 +80,11 @@ use logos_core::models::quality::{
 use logos_core::wiki::{AnchorProvenance, DocCategory, WikiHit, WikiPage, WikiStatus};
 use logos_core::Engine;
 
-use crate::member::MemberEngine;
+use crate::member::{workspace_root_of, MemberEngine, WorkspaceRoot};
 use crate::query::QueryResponse;
 use crate::{
-    bridge, parse_edge_types, parse_granularity, parse_intent, parse_layers, query,
+    bridge, config_write_status, parse_edge_types, parse_granularity, parse_intent, parse_layers,
+    query, run_blocking,
 };
 
 /// The honest error body ([NFR-RA-05]): a fallible read-model that genuinely
@@ -674,7 +675,9 @@ pub(crate) fn opt_param(q: &HashMap<String, String>, key: &str) -> Option<String
 
 /// The single-root `404` for the workspace surface: honest, machine-clean, and
 /// self-describing — this is not a workspace, so the fan-out has nothing to answer.
-fn not_a_workspace() -> Response {
+/// Shared with the [`WorkspaceRoot`] extractor, so the config routes (S-450) refuse
+/// in the family's own words rather than a second spelling of them.
+pub(crate) fn not_a_workspace() -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(ApiError {
@@ -696,8 +699,8 @@ fn not_a_workspace() -> Response {
 ///
 /// A fan reaches `Engine` read-models that emit telemetry through the chokepoint
 /// exactly as [`bridge`]'s do, so it takes the same required `surface` parameter
-/// and installs the same [`in_surface`] scope inside the same `spawn_blocking`
-/// closure. Without it the build-failure rule ([BR-42]) would hold for one half
+/// and crosses the same [`run_blocking`] hop, which installs the surface scope
+/// inside the `spawn_blocking` closure. Without it the build-failure rule ([BR-42]) would hold for one half
 /// of this router and not the other — and a workspace route could not declare
 /// itself shell chrome even when it is, because it would have no way to say so.
 ///
@@ -749,9 +752,9 @@ where
     }
 }
 
-/// The shared body of both fan-out adapters: the single-root guard, the [ADR-03]
-/// `spawn_blocking` hop, the [`in_surface`] telemetry scope and the render-timing
-/// log. `None` means the backing is not federated — the one condition on which
+/// The shared body of both fan-out adapters: the single-root guard, then the
+/// [`run_blocking`] hop every adapter on this surface crosses (the [ADR-03]
+/// `spawn_blocking`, the surface scope and the render-timing log). `None` means the backing is not federated — the one condition on which
 /// both adapters answer [`not_a_workspace`], kept here so neither can answer it on
 /// a different test.
 async fn workspace_read<T, F>(
@@ -766,26 +769,16 @@ where
     T: Send + 'static,
 {
     backing.as_federated()?;
-    let started = std::time::Instant::now();
-    let out = tokio::task::spawn_blocking(move || {
+    // The shared hop re-raises a panic crossing the pool, exactly as `bridge`
+    // does. (That says nothing about read-model *errors*: where a read-model has
+    // them they ride inside `T` and `workspace_fan_try` renders them.)
+    let out = run_blocking(view, surface, move || {
         let registry = backing
             .as_federated()
             .expect("federated backing checked before spawn");
-        in_surface(surface, || call(registry, &bridge))
+        call(registry, &bridge)
     })
-    .await
-    // A panic crossing the pool is a core bug — re-raise rather than mask it,
-    // mirroring `bridge`. (This says nothing about read-model *errors*: where a
-    // read-model has them they ride inside `T` and `workspace_fan_try` renders
-    // them. Only the `JoinError` is handled here.)
-    .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()));
-    tracing::info!(
-        target: "logos::web",
-        surface = surface.as_str(),
-        view,
-        duration_ms = started.elapsed().as_millis() as u64,
-        "page render",
-    );
+    .await;
     Some(out)
 }
 
@@ -1631,12 +1624,127 @@ pub(crate) async fn config(
     State(backing): State<Arc<Backing<Engine>>>,
     MemberEngine(engine): MemberEngine,
 ) -> Response {
-    let workspace_root = backing.as_federated().map(|registry| registry.federation().root.clone());
+    let workspace_root = workspace_root_of(&backing);
     let model = bridge(engine, "api_v1_config", Surface::Web, move |e| -> anyhow::Result<ConfigReadModel> {
         e.config_read(workspace_root.as_deref())
     })
     .await;
     respond(model)
+}
+
+// ── The workspace root as a config root ([FR-WS-30], S-450, [ADR-40]) ─────────
+//
+// One read and two writes over `<workspace-root>/.logos/`, the second config tier
+// `resolve_chat` inherits from. Each reaches the SAME function the member route
+// reaches through its engine — `read_documents`, `write_config`, `write_secret` —
+// so validate-before-write, the atomic replace and the credential's 0o600 mode
+// come with it unchanged ([NFR-RA-07], [NFR-SE-07]). They reach it directly, not
+// through an `Engine`, because constructing one at the workspace root is the fault
+// [ADR-40]'s exception exists to avoid: the root holds no graph, and an engine
+// would open a store there. That is also why no apply route exists at this scope.
+//
+// Unlike `Engine::config_*` these calls emit no façade telemetry event: that event
+// is the engine's, and attributing a workspace-root write to whichever member
+// happens to be the default would misstate who did it ([NFR-RA-05]). The render
+// log line below each is the trace they leave.
+//
+// [ADR-40]: ../../docs/specs/architecture/decisions/ADR-40.md
+// [NFR-RA-07]: ../../docs/specs/requirements/NFR-RA-07.md
+
+/// `GET /api/v1/workspace/config` — the workspace root's config read-model
+/// ([FR-WS-30], S-450): the same [`ConfigReadModel`] `GET /api/v1/config` serves
+/// for a member, read at the workspace root — its literal `config.toml`, its
+/// (absent) `rules.toml`, the **masked** credential ([NFR-SE-07]), the defaults
+/// and the effective-chat slice.
+///
+/// The slice is resolved with **no** tier above ([`read_documents`] with `None`),
+/// because the workspace root has none. Its origins are therefore relative to
+/// the root this payload reads: `member` means *declared at this root*, `unset`
+/// that it is not, and `workspace` never appears — nothing here is inherited.
+///
+/// A present-but-invalid file fails loud (`500`), as on the member route; the
+/// save route is the repair path, since it validates the new document only.
+///
+/// [`read_documents`]: logos_core::config::read_documents
+/// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
+pub(crate) async fn workspace_config(WorkspaceRoot(root): WorkspaceRoot) -> Response {
+    let model = run_blocking("api_v1_workspace_config", Surface::Web, move || {
+        core_config::read_documents(&root, None).map_err(anyhow::Error::from)
+    })
+    .await;
+    respond(model)
+}
+
+/// `POST /api/v1/workspace/config/save` → [`write_config`] at the workspace root
+/// ([FR-WS-30], [NFR-RA-07]). Form fields: `content=<toml>`, and optionally
+/// `file=config` — the only document accepted. `file=rules` is a `400`: workspace
+/// governance is declared in the manifest ([FR-WS-13]), so a `rules.toml` here
+/// would be read by nothing.
+///
+/// The candidate is validated before anything is written and the existing file
+/// is **not** read, so a save over a broken workspace file — the one that fails
+/// every inheriting member's config read — succeeds and repairs it. A rejected
+/// candidate is `422` and leaves the file byte-identical; an I/O fault is `500`.
+///
+/// [`write_config`]: logos_core::config::write_config
+/// [FR-WS-13]: ../../docs/specs/requirements/FR-WS-13.md
+pub(crate) async fn workspace_config_save(
+    WorkspaceRoot(root): WorkspaceRoot,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if !matches!(form.get("file").map(String::as_str), None | Some("config")) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "the workspace root carries the config document only (expected file=config)"
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    }
+    let content = form.get("content").cloned().unwrap_or_default();
+    let outcome = run_blocking("api_v1_workspace_config_save", Surface::Web, move || {
+        core_config::write_config(&root, &content)
+    })
+    .await;
+    written(outcome)
+}
+
+/// `POST /api/v1/workspace/config/secret` → [`write_secret`] at the workspace root
+/// ([FR-WS-30], [NFR-SE-07]): write (or, blank, clear) the credential every member
+/// that declares none inherits. Form field: `api_key=<raw>`.
+///
+/// Write-only: the response carries the masked outcome (presence + last-4), the
+/// file is written owner-only (0o600), and the managed workspace-root `.gitignore`
+/// keeps it out of version control where the root is a git working tree. The
+/// writer merges into the existing store, so an unparsable one is a `422` that
+/// leaves it byte-identical rather than being silently overwritten.
+///
+/// [`write_secret`]: logos_core::config::write_secret
+/// [NFR-SE-07]: ../../docs/specs/requirements/NFR-SE-07.md
+pub(crate) async fn workspace_config_secret(
+    WorkspaceRoot(root): WorkspaceRoot,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let api_key = form.get("api_key").cloned().unwrap_or_default();
+    let outcome = run_blocking("api_v1_workspace_config_secret", Surface::Web, move || {
+        core_config::write_secret(&root, &api_key)
+    })
+    .await;
+    written(outcome)
+}
+
+/// Render a workspace-root write: the outcome on success, else the [`ApiError`]
+/// at the status the member routes map the same fault to — `422` for a
+/// validation fault, `500` for an I/O one ([`config_write_status`]).
+fn written<T: Serialize>(outcome: Result<T, ConfigError>) -> Response {
+    match outcome {
+        Ok(outcome) => ok(outcome),
+        Err(err) => {
+            let err = anyhow::Error::from(err);
+            (config_write_status(&err), Json(ApiError { error: format!("{err:#}") })).into_response()
+        }
+    }
 }
 
 // ── Deep verify (the one intent-guarded read-model POST, [FR-UI-25]/[FR-GV-19]) ─

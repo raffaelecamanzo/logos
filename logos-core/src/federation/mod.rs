@@ -431,19 +431,31 @@ fn validate_member(workspace_root: &Path, resolved: &Path) -> Option<Member> {
 /// The canonical member name for a path resolved within the workspace: its
 /// symlink-canonical form relativised to `workspace_root`, with `/` separators.
 /// Returns `None` when the path cannot be canonicalised, escapes the workspace,
-/// or *is* the workspace root (the parent folder is not one of its own members).
+/// *is* the workspace root (the parent folder is not one of its own members), or
+/// lies inside the workspace root's own `.logos/` — the second config tier its
+/// chat policy and credential live in ([FR-WS-30]), which is state *of* the
+/// workspace and never a member *in* it, whatever it happens to contain.
 ///
 /// This is the single normalisation both member resolution ([`validate_member`])
 /// and `default` matching ([`discover`]) share, so a `default` written
-/// non-canonically still binds the member it names ([FR-WS-01], [NFR-SE-04]).
+/// non-canonically still binds the member it names ([FR-WS-01], [NFR-SE-04]) —
+/// and so the `.logos/` exclusion holds on every admission path at once.
+///
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
 fn member_name(workspace_root: &Path, path: &Path) -> Option<String> {
     let canon = path.canonicalize().ok()?;
     let rel = canon.strip_prefix(workspace_root).ok()?;
-    if rel.as_os_str().is_empty() {
+    if rel.as_os_str().is_empty() || rel.starts_with(WORKSPACE_CONFIG_DIR) {
         return None;
     }
     Some(rel.to_string_lossy().replace('\\', "/"))
 }
+
+/// The workspace root's own config directory ([FR-WS-30]) — the one child
+/// [`member_name`] refuses to name.
+///
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+const WORKSPACE_CONFIG_DIR: &str = ".logos";
 
 #[cfg(test)]
 mod tests {
@@ -574,6 +586,50 @@ mod tests {
         let fed = discover(root).unwrap().unwrap();
         // Explicit "api" first; then autodiscovered, sorted: legacy, web.
         assert_eq!(names(&fed), ["api", "legacy", "web"]);
+    }
+
+    /// The workspace root's own `.logos/` — where its chat policy and credential
+    /// live ([FR-WS-30]) — is never admitted as a member, however it is reached:
+    /// autodiscovered, named explicitly, named as `.`, or chosen as `default`
+    /// ([FR-WS-01]). Asserted at a root that is a git working tree and at one that
+    /// is not, and with the worst-case contents: the tier's two files, a stray
+    /// `logos.db`, and a nested `.logos/logos.db` that would otherwise satisfy the
+    /// DB-only admission rule for a child directory. The near miss `.logos-api`
+    /// is an ordinary member: the exclusion is the directory, not a prefix.
+    #[test]
+    fn a_logos_dir_at_the_workspace_root_is_never_a_member() {
+        for tracked in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            if tracked {
+                init_repo(root);
+            }
+            init_repo(&root.join("api"));
+            // The near miss: a member whose name merely STARTS with `.logos`.
+            init_repo(&root.join(".logos-api"));
+            let tier = root.join(".logos");
+            fs::create_dir_all(tier.join(".logos")).unwrap();
+            fs::write(tier.join("config.toml"), "[chat]\nmodel = \"ws/m\"\n").unwrap();
+            fs::write(tier.join("secrets.toml"), "[chat]\napi_key = \"sk-x\"\n").unwrap();
+            fs::write(tier.join("logos.db"), b"db").unwrap();
+            fs::write(tier.join(".logos").join("logos.db"), b"db").unwrap();
+            write_manifest(
+                root,
+                "[workspace]\nname = \"w\"\nmembers = [\"api\", \".logos-api\", \".\", \".logos\", \".logos/\"]\n\
+                 default = \".logos\"\n\n[workspace.autodiscover]\n",
+            );
+
+            let fed = discover(root).unwrap().unwrap();
+            assert_eq!(names(&fed), ["api", ".logos-api"], "tracked root: {tracked}");
+            assert_eq!(fed.default, None, "`.logos` is no member, so it cannot be the default");
+            let candidates: Vec<String> =
+                discover_candidates(root).into_iter().map(|m| m.name).collect();
+            assert_eq!(
+                candidates,
+                [".logos-api", "api"],
+                "nor an enablement candidate (tracked root: {tracked})"
+            );
+        }
     }
 
     /// A disabled autodiscover section falls back to explicit members only.

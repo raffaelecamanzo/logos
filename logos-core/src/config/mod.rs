@@ -88,6 +88,11 @@ pub use rules::{
     Layer, MaxDead, MaxDeadBaseline, MetricThresholds, RequireDocumented, RequireTested, Rules,
 };
 pub use secrets::{load_secrets_from_root, ChatSecrets, MaskedSecret, Secrets};
+/// The credential store's path relative to a config root — also the entry the
+/// managed workspace-root `.gitignore` carries for the workspace tier ([FR-WS-30]).
+///
+/// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+pub(crate) use secrets::SECRETS_RELPATH;
 pub use settings::{
     BindingPolicy, Config, ConfigArtifacts, CoverageIngest, Documentation, EffectiveCoverageIngest,
     Resolution, Semantics, TypedEnrichment, Watcher, DEFAULT_MAX_FILE_SIZE,
