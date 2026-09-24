@@ -54,8 +54,8 @@ directories documented above — a member keeps its own `.logos/` and its own
 | `.logos.workspace.warm.json` | Machine-written record of the last background warm's per-member outcome. Derived, host-local, safe to delete. | No |
 | `.mcp.json` | Gains a single `logos-workspace` server key, deliberately distinct from a member's own `logos` key so neither shadows the other. | Yes |
 | `.logos/config.toml` | *(optional)* The **workspace-level** `[chat]` policy (and `[wiki].model`) that every member declaring none inherits — see [Workspace-level chat configuration](#workspace-level-chat-configuration). Never a member: a `.logos/` at the root is not admitted. | Yes |
-| `.logos/secrets.toml` | *(optional)* The **workspace-level** chat API key, inherited the same way. `0600`, masked everywhere. | **No** — covered by the managed ignore |
-| `.gitignore` | A managed block ignoring the warm sidecar and `.logos/secrets.toml`, maintained **only when the root is a git working tree** — a parent-of-repos root that is not a repository gains no file (and `init --workspace` reports the ignore step as skipped). | Yes |
+| `.logos/secrets.toml` | *(optional)* The **workspace-level** chat API key, inherited the same way. `0600`, masked everywhere. | **No** — ignored by the root's own managed `.logos/.gitignore` (written with the first workspace-tier save), and by the root `.gitignore` block when the root is a git working tree |
+| `.gitignore` | A managed block ignoring the warm sidecar and `.logos/secrets.toml`, maintained **only when the root is a git working tree** — a parent-of-repos root that is not a repository gains no file (`init --workspace` then reports `root_ignore: skipped`, and the credential stays out through `.logos/.gitignore`). | Yes |
 
 **Unknown keys in the manifest fail loud.** It parses under `deny_unknown_fields`,
 so a typo rejects the whole file rather than being silently ignored — the same
