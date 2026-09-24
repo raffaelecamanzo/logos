@@ -972,6 +972,23 @@ mod resolution_tests {
         assert!(!json.contains(MEMBER_KEY) && !json.contains("1111"), "{json}");
     }
 
+    /// A blank workspace key is no key under an inherited policy too: the
+    /// credential is unset (so the tab and the turn agree it is configure-first),
+    /// never `Workspace` with nothing to dial, and the member key still stays out.
+    #[test]
+    fn a_blank_workspace_key_under_an_inherited_policy_is_unset() {
+        let e = Estate::new();
+        Estate::key(&e.member, MEMBER_KEY);
+        Estate::policy(&e.workspace, WORKSPACE_CHAT);
+        Estate::key(&e.workspace, "   ");
+
+        let r = e.resolve();
+        assert_eq!(origins(&r), (ChatOrigin::Workspace, ChatOrigin::Unset));
+        assert_eq!(r.api_key(), None);
+        assert!(!r.credential.present);
+        assert!(r.member_key_withheld);
+    }
+
     /// `member_key_withheld` is set only when a member key is actually withheld:
     /// never with a member-owned or unset policy, never without a member key, and
     /// a blank member key is no key.
