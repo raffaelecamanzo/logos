@@ -49,6 +49,14 @@ function model(): ConfigReadModel {
       parsed: { constraints: {}, metric_thresholds: {} },
     },
     chat_key: { present: true, last4: "9f3a" },
+    // The single-root effective slice for this document (S-448): no model is
+    // declared, so the policy half is unset; the member's own key is present.
+    effective_chat: {
+      policy: { provider: "openai", model: null, base_url: "https://openrouter.ai/api/v1" },
+      policy_origin: "unset",
+      credential: { present: true, last4: "9f3a" },
+      credential_origin: "member",
+    },
     // The CR-067/BR-37 defaults projection: config.toml real defaults, plus
     // rules.toml real [metric_thresholds] defaults / [constraints] recommended
     // baselines — mirroring what the server's Config::default() /
@@ -349,6 +357,54 @@ describe("ConfigView validate-then-write Save (FR-UI-12, NFR-SE-06)", () => {
     // …and posts the full raw candidate as `content` (no partial document).
     expect(save?.body).toContain("file=config");
     expect(save?.body).toContain(encodeURIComponent("max_file_size = 1048576"));
+  });
+});
+
+describe("ConfigView round-trips only the literal document (S-448, NFR-RA-05)", () => {
+  /** A member that declares no model and holds no key, inheriting both halves
+   *  from its workspace — carried only in the `effective_chat` slice. */
+  function inheritingModel(): ConfigReadModel {
+    const m = model();
+    return {
+      ...m,
+      chat_key: { present: false },
+      effective_chat: {
+        policy: { provider: "anthropic", model: "ws/inherited-model", base_url: "https://api.anthropic.com" },
+        policy_origin: "workspace",
+        credential: { present: true, last4: "wk42" },
+        credential_origin: "workspace",
+      },
+    };
+  }
+
+  it("saves an inheriting member's own bytes and nothing it inherited", async () => {
+    const calls = mockFetch({
+      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheritingModel()) }),
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "config", path: ".logos/config.toml", bytes_written: 120, provenance_stamped: false }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    // The typed [chat] fields pre-fill from the literal document, not the slice…
+    expect((screen.getByLabelText("model") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("provider") as HTMLSelectElement).value).toBe("openai");
+    expect((screen.getByLabelText("base_url") as HTMLInputElement).value).toBe("https://openrouter.ai/api/v1");
+    expect(configRaw().value).toBe(model().config.content);
+    // …and the key panel shows the member's own (absent) key, never the inherited one.
+    expect(screen.queryByText(/wk42/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/set · ends/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save config.toml" }));
+    expect(await screen.findByText(/Saved \.logos\/config\.toml \(120 bytes\)/)).toBeInTheDocument();
+
+    const save = calls.find((c) => c.url === "/config/save");
+    expect(new URLSearchParams(save?.body).get("content")).toBe(model().config.content);
+    expect(save?.body).not.toContain("inherited-model");
+    expect(calls.some((c) => c.url === "/config/secret")).toBe(false);
   });
 });
 

@@ -66,6 +66,18 @@ function config(opts: {
     rules: { path: ".logos/rules.toml", exists: false, content: "", parsed: { constraints: {}, metric_thresholds: {} } },
     chat_key: { present: opts.keyPresent ?? true, last4: opts.keyPresent === false ? null : "9f3a" },
     defaults: DEFAULTS_FIXTURE,
+    // The single-root slice for the same document (S-448): each half is the
+    // member's own when declared, else unset.
+    effective_chat: {
+      policy: {
+        provider: opts.provider ?? "openai",
+        model: opts.chatModel ?? null,
+        base_url: opts.baseUrl ?? "https://openrouter.ai/api/v1",
+      },
+      policy_origin: opts.chatModel ? "member" : "unset",
+      credential: opts.keyPresent === false ? { present: false } : { present: true, last4: "9f3a" },
+      credential_origin: opts.keyPresent === false ? "unset" : "member",
+    },
   };
 }
 

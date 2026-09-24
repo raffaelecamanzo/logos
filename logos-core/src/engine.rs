@@ -2847,6 +2847,11 @@ impl Engine {
     /// `exists = false` with the effective default model, not an error
     /// ([NFR-DM-04]).
     ///
+    /// `workspace_root` is the federation root the caller already resolved —
+    /// `None` in single-root mode, never a discovered one. It reaches only the
+    /// read-model's [`effective_chat`](crate::config::ConfigReadModel::effective_chat)
+    /// slice ([FR-WS-30], S-448); the literal documents are this root's alone.
+    ///
     /// # Errors
     /// A present-but-invalid policy file fails loud through the load path — an
     /// unknown key, a non-compiling glob, or an out-of-range value is a
@@ -2855,9 +2860,13 @@ impl Engine {
     /// [FR-UI-12]: ../../../docs/specs/requirements/FR-UI-12.md
     /// [CR-025]: ../../../docs/requests/CR-025-interactive-config-editing.md
     /// [NFR-DM-04]: ../../../docs/specs/requirements/NFR-DM-04.md
-    pub fn config_read(&self) -> Result<crate::config::ConfigReadModel> {
+    /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+    pub fn config_read(
+        &self,
+        workspace_root: Option<&Path>,
+    ) -> Result<crate::config::ConfigReadModel> {
         crate::observability::traced(Tool::ConfigRead, || {
-            Ok(crate::config::read_documents(&self.root)?)
+            Ok(crate::config::read_documents(&self.root, workspace_root)?)
         })
     }
 
@@ -3506,7 +3515,7 @@ mod tests {
         engine
             .config_write(PolicyFile::Config, "max_file_size = 4096\n")
             .expect("a valid config write succeeds");
-        let docs = engine.config_read().expect("config_read");
+        let docs = engine.config_read(None).expect("config_read");
         assert_eq!(docs.config.parsed.max_file_size, 4096);
         assert!(docs.config.content.contains("max_file_size = 4096"));
 
@@ -3515,7 +3524,7 @@ mod tests {
             .config_write(PolicyFile::Rules, "[constraints]\nmax_cc = 9\n")
             .expect("a valid rules write succeeds");
         assert!(written.provenance_stamped);
-        let docs = engine.config_read().expect("config_read after rules write");
+        let docs = engine.config_read(None).expect("config_read after rules write");
         assert_eq!(docs.rules.parsed.constraints.max_cc, Some(9));
         assert!(docs.rules.content.contains("CR-025"));
 

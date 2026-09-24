@@ -971,6 +971,40 @@ async fn config_endpoint_returns_the_masked_key_never_the_raw_secret() {
     assert!(!body.contains("supersecret"), "no fragment of the raw secret leaks: {body}");
 }
 
+// ── Acceptance: the effective-chat slice, single-root (S-448) ────────────────
+
+/// Single-root `GET /api/v1/config` carries the effective-chat slice and reaches
+/// **no** `workspace` origin ([FR-WS-30], S-448 AC2/AC4, [ADR-52]) — even with the
+/// served root beneath a workspace manifest and a chat-declaring `.logos/` that a
+/// *discovery* would find. The handler passes no workspace root, so its body is
+/// byte-for-byte the core read-model with none.
+#[tokio::test]
+async fn config_endpoint_single_root_reaches_no_workspace_origin() {
+    let tmp = TempDir::new().unwrap();
+    let above = tmp.path();
+    std::fs::write(above.join("logos.workspace.toml"), "[workspace]\nname = \"w\"\n").unwrap();
+    std::fs::create_dir_all(above.join(".logos")).unwrap();
+    std::fs::write(above.join(".logos/config.toml"), "[chat]\nmodel = \"above/model\"\n").unwrap();
+    let above_key = "sk-above-the-root-ab12";
+    std::fs::write(above.join(".logos/secrets.toml"), format!("[chat]\napi_key = \"{above_key}\"\n"))
+        .unwrap();
+    let served = above.join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    let engine = Arc::new(Engine::open(&served));
+
+    let resp = web::router(Arc::clone(&engine)).oneshot(get("/api/v1/config")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "config-read answers 200");
+
+    assert!(body.contains("\"effective_chat\":{"), "the slice is served: {body}");
+    assert!(body.contains("\"policy_origin\":\"unset\""), "nothing above was inherited: {body}");
+    assert!(body.contains("\"credential_origin\":\"unset\""), "no key above was inherited: {body}");
+    assert!(!body.contains("\"workspace\""), "a single-root payload names no workspace origin: {body}");
+    assert!(!body.contains("above/model") && !body.contains(above_key), "{body}");
+    let core = serde_json::to_string(&engine.config_read(None).expect("core read")).unwrap();
+    assert_eq!(body, core, "the single-root handler serves the core read-model with no workspace root");
+}
+
 // ── Acceptance: the CR-067/BR-37 `defaults` projection ────────────────────────
 
 /// `GET /api/v1/config` serializes the code-sourced `defaults` projection

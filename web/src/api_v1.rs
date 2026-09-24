@@ -1620,9 +1620,20 @@ pub(crate) async fn wiki_nav(MemberEngine(engine): MemberEngine) -> Response {
 /// last-4 only — masked by construction in [`ConfigReadModel`], the raw secret is
 /// never serialized; [FR-CF-06], [NFR-SE-07]). A pure filesystem read — it touches
 /// no graph store, so a load mutates nothing ([FR-UI-03], [ADR-28]).
-pub(crate) async fn config(MemberEngine(engine): MemberEngine) -> Response {
-    let model = bridge(engine, "api_v1_config", Surface::Web, |e| -> anyhow::Result<ConfigReadModel> {
-        e.config_read()
+///
+/// Beside those it carries the **effective** chat resolution and each half's
+/// origin ([FR-WS-30], S-448). Its workspace root is the one the backing already
+/// holds — a federated backing's resolved root, never a discovered one — and a
+/// single-root backing supplies none, so no `workspace` origin is reachable there.
+///
+/// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
+pub(crate) async fn config(
+    State(backing): State<Arc<Backing<Engine>>>,
+    MemberEngine(engine): MemberEngine,
+) -> Response {
+    let workspace_root = backing.as_federated().map(|registry| registry.federation().root.clone());
+    let model = bridge(engine, "api_v1_config", Surface::Web, move |e| -> anyhow::Result<ConfigReadModel> {
+        e.config_read(workspace_root.as_deref())
     })
     .await;
     respond(model)

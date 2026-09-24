@@ -878,14 +878,36 @@ export interface ConfigDefaults {
   rules: RulesDefaults;
 }
 
-/** `GET /api/v1/config` — both policy files, the masked chat key, and the
- *  code-sourced `defaults` projection (mirrors `ConfigReadModel`, FR-UI-12/
- *  FR-CF-06). A pure read; loading mutates nothing. */
+/** Where one half of the effective chat resolution came from (mirrors
+ *  `ChatOrigin`, FR-WS-30/ADR-67). `workspace` is reachable only under a
+ *  federated server; a single-root payload never carries it. */
+export type ChatOrigin = "member" | "workspace" | "unset";
+
+/** The effective chat policy and masked credential with each half's origin
+ *  (mirrors `EffectiveChat`, S-448/FR-WS-30) — the resolution the Chat tab's
+ *  gate reads. `policy` mirrors the typed subset of `ChatConfig`, as
+ *  `ParsedChatConfig` does; the credential is presence + last-4 only
+ *  (NFR-SE-07). */
+export interface EffectiveChat {
+  policy: ParsedChatConfig;
+  policy_origin: ChatOrigin;
+  credential: MaskedSecret;
+  credential_origin: ChatOrigin;
+}
+
+/** `GET /api/v1/config` — both policy files, the masked chat key, the
+ *  code-sourced `defaults` projection, and the effective chat resolution
+ *  (mirrors `ConfigReadModel`, FR-UI-12/FR-CF-06/FR-WS-30). A pure read;
+ *  loading mutates nothing. */
 export interface ConfigReadModel {
   config: FileView<ParsedConfig>;
   rules: FileView<ParsedRules>;
   chat_key: MaskedSecret;
   defaults: ConfigDefaults;
+  /** Carried BESIDE `config` and `chat_key`, which stay the member's literal
+   *  document and its own key. The editor never reads it: an inherited value
+   *  must not be posted back into the member's `config.toml` (NFR-RA-05). */
+  effective_chat: EffectiveChat;
 }
 
 /** The outcome of a validated atomic `POST /config/save` (mirrors
