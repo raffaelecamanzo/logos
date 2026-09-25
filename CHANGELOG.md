@@ -9,6 +9,16 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 77, second hotfix round.
+
+### Performance
+
+- **A workspace's first load is about 5× faster.** Compiled tree-sitter queries are now shared
+  across member engines in one process instead of being recompiled at every member start. On
+  the 84-member reference workspace, the Workspace Dashboard's first load after `logos serve`
+  starts dropped from ~46 s to ~9.4 s, with identical answers. A per-root
+  `.logos/plugins/<language>/` override still compiles its own copy (ADR-04 amended).
+
 ## [1.4.21] — 2026-09-25
 
 Sprint 77, hotfix round.
