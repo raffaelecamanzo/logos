@@ -3322,9 +3322,15 @@ fn each_classified_result_type_names_its_outcome() {
     };
     assert_eq!(downstream.outcome(), Outcome::Answered);
 
-    // precedent — found, then every closed empty code.
+    // precedent — the shapes `navigate::precedent` actually builds: a delivered
+    // list, then every closed empty code with nothing delivered.
     let found = PrecedentResult {
         total_found: 2,
+        precedents: vec![crate::models::navigation::Precedent {
+            symbol: sym(),
+            rank: crate::models::navigation::PrecedentRank::default(),
+            reasons: Vec::new(),
+        }],
         ..PrecedentResult::default()
     };
     assert_eq!(found.outcome(), Outcome::Answered);
@@ -3340,10 +3346,18 @@ fn each_classified_result_type_names_its_outcome() {
         EmptyPrecedentCode::GraphEmpty,
         EmptyPrecedentCode::TargetAbsentFromView,
         EmptyPrecedentCode::QueryFailed,
-        EmptyPrecedentCode::ResultsUnavailable,
     ] {
         assert_eq!(empty_because(code).outcome(), Outcome::Unresolved, "{code:?}");
     }
+    // `results_unavailable` is only ever built with candidates FOUND and none
+    // delivered (`navigate::precedent`'s materialisation guard): found is not
+    // answered.
+    let vanished = PrecedentResult {
+        total_found: 3,
+        elided: 3,
+        ..empty_because(EmptyPrecedentCode::ResultsUnavailable)
+    };
+    assert_eq!(vanished.outcome(), Outcome::Unresolved);
     for code in [
         EmptyPrecedentCode::NoStructuralAnchors,
         EmptyPrecedentCode::AnchorsAreUnshared,

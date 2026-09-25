@@ -799,15 +799,26 @@ impl CallOutcome for crate::models::ImpactResult {
     }
 }
 
-/// `precedent` ([FR-NV-12]): answered when any precedent was found; otherwise
-/// the answer's own closed [`EmptyPrecedentCode`] decides which absence it is.
+/// `precedent` ([FR-NV-12]): answered when the answer **delivered** a
+/// precedent; otherwise the answer's own closed [`EmptyPrecedentCode`] decides
+/// which absence it is.
+///
+/// Keyed on the delivered list, not on `total_found`. The two differ in exactly
+/// one reachable state — `results_unavailable`, where every ranked candidate
+/// vanished before its row could be fetched (`limit` is clamped to at least 1,
+/// so truncation never empties the list) — and that answer gave the caller
+/// nothing to act on. Counting its `total_found` as an answer is what would
+/// record a call that answered nothing as one that did.
 ///
 /// The split follows what each code establishes. The target named nothing, the
-/// graph is empty, the target fell out of the compared view, or the query
-/// itself degraded — the call **could not** answer (`unresolved`). The target
-/// resolved and was compared, and nothing matched (no anchors, unshared
-/// anchors, only ubiquitous anchors) — `empty`. [S-442]'s resolution
-/// denominator will refine that second group; this impl is where it will.
+/// graph is empty, the target fell out of the compared view, or the results
+/// could not be read back — the call **could not** answer (`unresolved`). The
+/// target resolved and was compared, and nothing matched (no anchors, unshared
+/// anchors, only ubiquitous anchors) — `empty`. `query_failed` is mapped for
+/// exhaustiveness only: it is built by the `Err` fallback, which
+/// [`traced_with`](super::traced_with) has already recorded as `failed` before
+/// the fallback runs. [S-442]'s resolution denominator will refine the `empty`
+/// group; this impl is where it will.
 ///
 /// [`EmptyPrecedentCode`]: crate::models::navigation::EmptyPrecedentCode
 /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
@@ -815,7 +826,7 @@ impl CallOutcome for crate::models::ImpactResult {
 impl CallOutcome for crate::models::PrecedentResult {
     fn outcome(&self) -> Outcome {
         use crate::models::navigation::EmptyPrecedentCode as Code;
-        if self.total_found > 0 || !self.precedents.is_empty() {
+        if !self.precedents.is_empty() {
             return Outcome::Answered;
         }
         match self.empty_reason.as_ref().map(|reason| reason.code) {
