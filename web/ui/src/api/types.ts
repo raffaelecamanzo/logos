@@ -2083,12 +2083,12 @@ export interface UnreadMember {
  * stores reads every one of them and still has nothing to show, and rendering
  * zeros there is the failure NFR-CC-04 names.
  *
- * The wire also carries an `attribution_coverage` rider and the `calls_by_tool_origin`
- * / `calls_by_class` cross-tab, as {@link StatsInfo} now types for the member-scoped
- * Statistics tab ([S-306]) — none of the three is typed here, because the workspace
- * aggregate does not compute them (the federation fold sums `calls_by_tool`,
- * `activity_by_day` and `calls_by_origin` only): this file mirrors the read-models
- * the SPA consumes, not every field the server sends.
+ * The wire also carries an `attribution_coverage` rider, which is left untyped here
+ * because the workspace view does not render it: this file mirrors the read-models
+ * the SPA consumes, not every field the server sends. The `calls_by_tool_origin` /
+ * `calls_by_class` cross-tab that {@link StatsInfo} types for the member-scoped
+ * Statistics tab ([S-306]) is **not** on this wire at all — the federation fold sums
+ * `calls_by_tool`, `activity_by_day` and `calls_by_origin` only.
  *
  * [S-306]: ../views/statistics/StatisticsView.tsx
  */
