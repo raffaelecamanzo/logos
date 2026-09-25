@@ -3389,6 +3389,14 @@ fn each_classified_result_type_names_its_outcome() {
         ..AffectedResult::default()
     };
     assert_eq!(seeded().outcome(), Outcome::Empty);
+    // The Unresolved rule is "no path resolved", not "some path did not": a
+    // mixed input still had a seed, and an empty input had none.
+    let mixed = AffectedResult {
+        unknown: vec!["nope.rs".to_string()],
+        ..seeded()
+    };
+    assert_eq!(mixed.outcome(), Outcome::Empty);
+    assert_eq!(AffectedResult::default().outcome(), Outcome::Unresolved);
     let reached = AffectedResult {
         affected: vec![AffectedFile {
             file: "main.rs".to_string(),
