@@ -1287,6 +1287,13 @@ mod tests {
         let inherited = read_documents(&member, Some(ws.path())).unwrap();
         assert_eq!(inherited.effective_wiki.model.as_deref(), Some("workspace/wiki"));
         assert_eq!(inherited.config.parsed.wiki.model, None, "the literal document declares none");
+        // The wire shape the Wiki tab reads (`effective_wiki.model`, wikiGenModel.ts):
+        // pinned on the serialized payload, since the SPA's fixtures are hand-built.
+        let payload = serde_json::to_string(&inherited).unwrap();
+        assert!(
+            payload.ends_with(",\"effective_wiki\":{\"model\":\"workspace/wiki\"}}"),
+            "{payload}"
+        );
 
         let alone = read_documents(&member, None).unwrap();
         assert_eq!(alone.effective_wiki.model, None, "single-root consults no second tier");
