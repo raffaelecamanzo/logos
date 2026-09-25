@@ -9,6 +9,45 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 77: the workspace is configured from the app, and the chat answers cross-service
+questions.
+
+### Added
+
+- **The workspace Config view.** In workspace mode the sidebar's Workspace section
+  gains **Config** (`/workspace-config`), which edits `logos.workspace.toml` in the
+  same typed-fields + raw-TOML grammar as the member Config tab: `[workspace]`,
+  `[workspace.warm]` and the full `[governance]` family, shown beside the advisory
+  findings. It says at the point of editing that workspace governance never moves a
+  member's gated signal. A save is validated before anything is written. A document
+  identical to disk writes nothing, and fields the manifest does not declare are never
+  added. A manifest changed on disk since the view loaded it is **not overwritten
+  silently**: the view shows the disk copy and lets you load it or overwrite it, and
+  says which happened. New routes: `GET /api/v1/workspace/manifest` and
+  `POST /api/v1/workspace/manifest/save` (CR-137, FR-UI-38).
+- **Workspace chat settings in the same view.** A second group edits the workspace
+  `[chat]` policy and the masked, write-only chat key at the workspace root, names both
+  files, and states how members inherit each half (CR-145).
+- **Cross-service tools in the chat.** In a workspace the chat's Graph-Navigator can call
+  `xservice_route_providers`, `xservice_callers`, `xservice_impact` and
+  `xservice_search`. Answers are qualified by member, and an empty answer over an
+  unresolved residue is reported as unresolved, never as "none". A plain single repo's
+  tool list is unchanged (CR-137, FR-WS-29).
+
+### Changed
+
+- **The workspace chat tier's read is the repair path, and its save is clobber-safe.**
+  `GET /api/v1/workspace/config` now returns the literal `config.toml`, a load
+  fingerprint and `parsed: null` when the file is broken (a `200`, not a `500`). A fault
+  in either file is named by file and line/column only, and nothing from
+  `secrets.toml` is ever echoed. `POST /api/v1/workspace/config/save` requires that
+  fingerprint (`400` without it) and answers `409` with the disk copy when the file
+  changed since the read.
+- **The Chat tab's configure-first state links the workspace Config view** for the
+  workspace half, instead of naming the file as text.
+- **A `[wiki].model` at the workspace root is documented as not read** by any member;
+  the workspace Config view labels it *Not inherited*.
+
 ## [1.4.19] — 2026-09-24
 
 Sprint 76, hotfix round.
