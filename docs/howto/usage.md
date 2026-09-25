@@ -603,7 +603,9 @@ live validation. It holds two groups, each naming the file it writes:
 - **Workspace chat** — `<workspace-root>/.logos/config.toml` (`[chat]`, `[wiki].model`)
   and the masked, write-only chat key in `.logos/secrets.toml`, with a banner stating how
   members inherit each half (see
-  [configuration.md](configuration.md#workspace-level-chat-configuration)). The group
+  [configuration.md](configuration.md#workspace-level-chat-configuration)). Its
+  `[wiki].model` is used by a member that inherits this chat policy and declares no wiki
+  model of its own. The group
   says outright that it has no indexing key, no rules document and no apply action.
 
 Both groups share three properties. **A save is validated before anything is written**
