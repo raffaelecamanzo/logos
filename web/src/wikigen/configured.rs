@@ -1,7 +1,8 @@
 //! The production [`WikiRunService`]: run the CR-062 deterministic presented
 //! tier ([`Engine::wiki_materialize`], [FR-WK-20]) ahead of the LLM queue, then
-//! resolve the effective wiki model ([`[wiki].model`], else `[chat].model`,
-//! inheriting provider/key from `[chat]`) and drive the [`wiki-agent`]
+//! resolve the effective wiki model ([`[wiki].model`], else the workspace root's
+//! under an inherited chat policy, else `[chat].model`, inheriting provider/key
+//! from `[chat]` — see below) and drive the [`wiki-agent`]
 //! generation pass, streaming its [`WikiProgress`] ([S-178], [ADR-42],
 //! [FR-WK-18], [FR-CF-07]).
 //!

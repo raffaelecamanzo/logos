@@ -804,8 +804,10 @@ export interface ParsedChatConfig {
 }
 
 /** The parsed `[wiki]` projection (mirrors `WikiConfig`, FR-CF-07): the optional
- *  dedicated wiki model. Absent/blank ⇒ the wiki inherits `[chat].model`. The
- *  section always serializes as an object; `model` is omitted when unset. */
+ *  dedicated wiki model, as this root declares it. Absent ⇒ the workspace root's
+ *  `[wiki].model` under an inherited workspace `[chat]` table, else the effective
+ *  `[chat].model` — resolved server-side into `effective_wiki` (Sprint 77 HF-1).
+ *  The section always serializes as an object; `model` is omitted when unset. */
 export interface ParsedWikiConfig {
   model?: string | null;
 }
