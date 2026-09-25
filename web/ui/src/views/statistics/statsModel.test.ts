@@ -205,6 +205,18 @@ describe("answeredLabel (FR-OB-14)", () => {
       answeredLabel({ answered_calls: 0, classified_calls: 0, outcome_absence: "none recorded" }),
     ).toBe("none recorded");
   });
+
+  it("falls back to the figure, never blank, if the absence invariant is ever violated", () => {
+    // The backend derives `outcome_absence` from `classified_calls` at
+    // serialisation (`OutcomeCounts::absence`), so the two can never actually
+    // disagree — but nothing in this type pins that here, so a defensive input
+    // that pairs `classified_calls: 0` with a `null` absence is still pinned to
+    // an honest answer ("0 of 0 answered") rather than an empty string or a
+    // silently different rendering.
+    expect(
+      answeredLabel({ answered_calls: 0, classified_calls: 0, outcome_absence: null }),
+    ).toBe("0 of 0 answered");
+  });
 });
 
 describe("attributionByClass (FR-OB-11)", () => {
