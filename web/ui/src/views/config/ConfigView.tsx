@@ -916,7 +916,9 @@ function ConfigReadRepairNote({ href }: { href: string }) {
       This can be an invalid file at this member&apos;s own root, or at the workspace root (
       <code>{WORKSPACE_CONFIG_FILE}</code> or <code>{WORKSPACE_SECRETS_FILE}</code>) — every member
       inheriting from a broken workspace-root file fails the same read. The{" "}
-      <a href={href}>workspace Config</a> view can inspect and repair the workspace-root files.
+      <a href={href}>workspace Config</a> view says whether either workspace-root file is at fault
+      and repairs an invalid <code>{WORKSPACE_CONFIG_FILE}</code> in place; an unreadable{" "}
+      <code>{WORKSPACE_SECRETS_FILE}</code> is repaired by hand.
     </p>
   );
 }

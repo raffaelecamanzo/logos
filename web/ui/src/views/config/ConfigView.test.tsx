@@ -1134,5 +1134,12 @@ describe("ConfigView load failure names the repair surface (HF-2, Sprint 77 revi
     expect(panel).toHaveTextContent(/the workspace root/);
     expect(panel).toHaveTextContent("<workspace-root>/.logos/config.toml");
     expect(panel).toHaveTextContent("<workspace-root>/.logos/secrets.toml");
+    // The linked view repairs an invalid config.toml in place but NOT an unreadable
+    // secrets.toml (`UnreadableTierSecret`: "Repair or remove … by hand"), so the
+    // note must not promise it repairs both (S-451 story re-review).
+    expect(panel).toHaveTextContent(
+      "repairs an invalid <workspace-root>/.logos/config.toml in place; an unreadable <workspace-root>/.logos/secrets.toml is repaired by hand.",
+    );
+    expect(panel).not.toHaveTextContent(/repair the workspace-root files/);
   });
 });
