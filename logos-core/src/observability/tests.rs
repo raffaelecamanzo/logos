@@ -3321,6 +3321,18 @@ fn each_classified_result_type_names_its_outcome() {
         ..resolved()
     };
     assert_eq!(downstream.outcome(), Outcome::Answered);
+    let documented_only = ImpactResult {
+        docs: vec![crate::models::navigation::TraceLink {
+            symbol: sym(),
+            via: crate::model::EdgeKind::DocReference,
+        }],
+        ..resolved()
+    };
+    assert_eq!(
+        documented_only.outcome(),
+        Outcome::Answered,
+        "the doc trace answers on its own"
+    );
 
     // precedent — the shapes `navigate::precedent` actually builds: a delivered
     // list, then every closed empty code with nothing delivered.
