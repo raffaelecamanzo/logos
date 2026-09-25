@@ -126,7 +126,9 @@ pub struct ColdStartPhases {
     /// query compilation: ABI assertion, override-dir resolution, and
     /// plugin/extension/filename bookkeeping.
     pub registry_construction: Duration,
-    /// Resolving and compiling every capability's query.
+    /// Resolving and compiling every capability's query. Compiled queries are
+    /// shared process-wide (HF-3), so this is the compile only on the
+    /// process's first registry load; a later one times cache hits.
     pub query_compilation: Duration,
     /// Opening the writer store's file and applying the pragma contract.
     pub store_open: Duration,

@@ -174,6 +174,11 @@ fn cold_start_phase_attribution_child_sample() {
     let uninstrumented_registry_len = engine.registry().map(|r| r.len());
     drop(engine);
     drop(root);
+    // Compiled queries are shared process-wide (HF-3), so without this the
+    // instrumented arm would time cache hits where the uninstrumented one
+    // compiled — and the paired delta would measure the cache, not the
+    // instrumentation. Both arms stay cold starts.
+    logos_core::plugin::queries::clear_compiled_cache();
 
     let root = TempDir::new().expect("temp root");
     let t = Instant::now();

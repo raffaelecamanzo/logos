@@ -12,13 +12,27 @@
 //! name) is threaded into a compile error so the message always points at the
 //! source the operator can actually edit ([FR-PL-02]).
 //!
+//! Compiling is the expensive half — the bulk of a [`LanguageRegistry`] load —
+//! so [`compile_shared`] compiles each distinct query **once per process** and
+//! hands every later load the same [`Arc<Query>`]. A workspace starts one engine
+//! (and so one registry load) per member, and before this every member start
+//! recompiled every built-in query from scratch (HF-3). The cache key is the
+//! grammar, the capability and a content hash of the *resolved* source, so a
+//! root's own override compiles to its own entry and is never served a
+//! neighbour's, while byte-identical sources — the embedded default above all —
+//! share one. Only successful compiles are cached: a query that fails still
+//! fails every load that resolves it, naming its file.
+//!
+//! [`LanguageRegistry`]: super::LanguageRegistry
 //! [FR-PL-02]: ../../../docs/specs/requirements/FR-PL-02.md
 //! [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 //! [FR-PL-05]: ../../../docs/specs/requirements/FR-PL-05.md
 //! [UAT-PL-03]: ../../../docs/specs/requirements/UAT-PL-03.md
 //! [NFR-MA-05]: ../../../docs/specs/requirements/NFR-MA-05.md
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use tree_sitter::{Language, Query};
 
@@ -91,6 +105,62 @@ pub fn compile(language: &Language, resolved: &ResolvedQuery) -> Result<Query, P
         file: resolved.file_label.clone(),
         detail: e.to_string(),
     })
+}
+
+/// A compiled query's identity: the `Language` it is bound to (its node-kind
+/// ids are that grammar's), the grammar and capability it backs, and the
+/// blake3 hash of the source it was compiled from.
+type CompiledKey = (Language, String, String, [u8; 32]);
+
+/// Every query this process has compiled successfully. Bounded by
+/// construction: one entry per distinct (grammar, capability, source) — the
+/// built-in queries plus each distinct override text seen — however many
+/// loads resolve them.
+static COMPILED: LazyLock<Mutex<HashMap<CompiledKey, Arc<Query>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// [`compile`], once per process for each distinct source: every call that
+/// resolves the same `grammar`/capability to byte-identical text shares one
+/// compiled [`Query`] (HF-3).
+///
+/// The cache lock is not held while compiling, so two first loads racing on
+/// one query may both compile it; the first to finish is kept and both get
+/// that one, so sharing holds either way.
+///
+/// # Errors
+/// As [`compile`]. A failed compile is never cached, so every later call that
+/// resolves the same text fails again, naming its own file.
+pub fn compile_shared(
+    language: &Language,
+    grammar: &str,
+    resolved: &ResolvedQuery,
+) -> Result<Arc<Query>, PluginError> {
+    let key: CompiledKey = (
+        language.clone(),
+        grammar.to_string(),
+        resolved.capability.clone(),
+        *blake3::hash(resolved.source.as_bytes()).as_bytes(),
+    );
+    if let Some(hit) = compiled_cache().get(&key) {
+        return Ok(Arc::clone(hit));
+    }
+    let query = Arc::new(compile(language, resolved)?);
+    Ok(Arc::clone(compiled_cache().entry(key).or_insert(query)))
+}
+
+/// Forget every query [`compile_shared`] has cached, so the next load compiles
+/// cold. For measurement harnesses that time several cold starts in one
+/// process; production never calls it. Queries already handed out stay valid —
+/// their holders keep them alive.
+#[doc(hidden)]
+pub fn clear_compiled_cache() {
+    compiled_cache().clear();
+}
+
+/// The cache, locked. A poisoned lock is recovered: the map is only ever
+/// inserted into whole, so no panic can leave it half-written.
+fn compiled_cache() -> std::sync::MutexGuard<'static, HashMap<CompiledKey, Arc<Query>>> {
+    COMPILED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]

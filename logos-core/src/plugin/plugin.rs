@@ -13,6 +13,7 @@
 //! [ADR-09]: ../../../docs/specs/architecture/decisions/ADR-09.md
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tree_sitter::{Language, Query};
 
@@ -202,6 +203,11 @@ pub trait LanguagePlugin {
     }
 }
 
+/// Capability → compiled query, each shared with every other plugin in the
+/// process whose resolved source for it is byte-identical (HF-3; see
+/// [`crate::plugin::queries::compile_shared`]).
+pub(crate) type CompiledQueries = BTreeMap<String, Arc<Query>>;
+
 /// A grammar compiled in via a cargo feature, fully loaded and ready to parse.
 ///
 /// All ABI assertion and query compilation happens *before* a `CompiledPlugin`
@@ -215,7 +221,7 @@ pub struct CompiledPlugin {
     semantics: Semantics,
     capabilities: Vec<String>,
     /// Capability → compiled query.
-    queries: BTreeMap<String, Query>,
+    queries: CompiledQueries,
     /// Capabilities whose query came from an on-disk override (observability).
     overridden: Vec<String>,
 }
@@ -229,7 +235,7 @@ impl CompiledPlugin {
     pub(crate) fn new(
         manifest: PluginManifest,
         language: Language,
-        queries: BTreeMap<String, Query>,
+        queries: CompiledQueries,
         overridden: Vec<String>,
     ) -> Self {
         let semantics = Semantics {
@@ -286,7 +292,7 @@ impl LanguagePlugin for CompiledPlugin {
     }
 
     fn query(&self, capability: &str) -> Option<&Query> {
-        self.queries.get(capability)
+        self.queries.get(capability).map(Arc::as_ref)
     }
 
     fn overridden_capabilities(&self) -> &[String] {
