@@ -881,7 +881,13 @@ curl 127.0.0.1:4983/api/v1/workspace/reachability    # app-wide reachability, pr
 curl '127.0.0.1:4983/api/v1/workspace/reachability?repo=<member>'   # scope it to one member
 curl 127.0.0.1:4983/api/v1/workspace/check           # workspace governance findings (advisory)
 curl 127.0.0.1:4983/api/v1/workspace/statistics      # telemetry summed over members, engine-free
+curl 127.0.0.1:4983/api/v1/workspace/manifest        # the manifest as an editable document (content + fingerprint + parse verdict)
+curl 127.0.0.1:4983/api/v1/workspace/config          # the workspace chat tier (config.toml + masked key)
 ```
+
+The workspace **Config** view writes the manifest and the workspace chat tier through
+intent-guarded `POST /api/v1/workspace/manifest/save`, `…/config/save` and
+`…/config/secret` — see [configuration.md](configuration.md#editing-the-manifest-from-the-app).
 
 ---
 

@@ -540,8 +540,8 @@ honest empty state naming the producing command:
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 - **Workspace scope (workspace mode only):** Workspace `/workspace`, Workspace Dashboard
   `/workspace-dashboard`, Workspace Health `/workspace-health`, Workspace Statistics
-  `/workspace-statistics`. These answer for the **whole workspace**, not for the selected
-  member, and the member selector does not govern them.
+  `/workspace-statistics`, Config `/workspace-config`. These answer for the **whole
+  workspace**, not for the selected member, and the member selector does not govern them.
 
 **Workspace mode.** When `logos serve --ui` starts at a workspace parent (a
 `logos.workspace.toml` is discovered up-tree), the app shell renders a **member
@@ -587,6 +587,34 @@ the resident-engine count unchanged — which is why it omits `artifact_bindings
 latency percentiles: both are `Engine`-bound, and the ceiling is the point.
 No workspace-level quality score is rendered anywhere, and no per-member signal is
 aggregated into one.
+
+The workspace **Config** view (`/workspace-config`, labelled *Config* in the Workspace
+section, beside Statistics) edits the files that configure the workspace itself, in the
+same hybrid grammar as the member Config tab — typed fields plus a raw TOML pane, with
+live validation. It holds two groups, each naming the file it writes:
+
+- **Workspace manifest** — `logos.workspace.toml`: `[workspace]` (members, `default`,
+  `autodiscover`), `[workspace.warm]` and the full `[governance]` family, shown beside
+  the advisory findings `GET /api/v1/workspace/check` reports. The panel states **at the
+  point of editing** that workspace governance is advisory and never moves a member's
+  gated signal. The running serve keeps the manifest it started with, so after a save
+  that changes members, warm concurrency or the rules the view says so; they take effect
+  after `logos serve` is restarted.
+- **Workspace chat** — `<workspace-root>/.logos/config.toml` (`[chat]`, `[wiki].model`)
+  and the masked, write-only chat key in `.logos/secrets.toml`, with a banner stating how
+  members inherit each half (see
+  [configuration.md](configuration.md#workspace-level-chat-configuration)). The group
+  says outright that it has no indexing key, no rules document and no apply action.
+
+Both groups share three properties. **A save is validated before anything is written**
+(a rejected document leaves the file byte-identical, and a document identical to disk
+writes nothing). **A file changed on disk since the view loaded it** — by hand, or by
+`logos init --workspace` — is **not overwritten silently**: the save is refused and the
+view shows what is on disk now, offering to load that copy (your edits are discarded) or
+to overwrite it with your edits, and says which happened. **A file broken on disk still
+opens**, with its fault named by file and line/column, so the view is the repair path.
+Saving touches no member's `.logos/` and reindexes nothing. In a plain single repo the
+view does not exist.
 
 Alongside the per-member views it
 exposes the cross-service surfaces: an **app-level service map** — the ECharts
@@ -986,7 +1014,13 @@ decomposes the question, dispatches
 specialized read-only **subagents** over the existing Logos tools, and streams
 back a synthesized answer:
 
-- **Graph-Navigator** — structural navigation (callers, callees, impact, search).
+- **Graph-Navigator** — structural navigation (callers, callees, impact, search). In a
+  workspace it also carries the four cross-service tools — `xservice_route_providers`,
+  `xservice_callers`, `xservice_impact` and `xservice_search` — so a question such as
+  "which services call this endpoint?" is answered across members, with every result
+  qualified by the member it belongs to. An empty cross-service answer over a non-zero
+  **unresolved** residue is reported as unresolved, with the count and its reasons,
+  never as "none". In a plain single repo the tool list is exactly what it was.
 - **Governance-Analyst** — the quality/governance read-models (gate, gaps, hotspots).
 - **Source-Reader** — sandboxed read/grep/glob over the project source.
 - **Synthesizer** — a tool-less subagent that writes the final answer from what the others found.
@@ -1021,7 +1055,7 @@ first turn, gitignored, never in the default binary).
    is not used there, and that setting a `[chat] model` on the member makes it use it. It
    links to the member Config tab, and in a workspace also names the
    workspace-root file the missing half would go in (`<workspace-root>/.logos/config.toml`
-   or `secrets.toml`). This is a state, not an error: until you configure it, no
+   or `secrets.toml`) and links to the workspace **Config** view that writes it. This is a state, not an error: until you configure it, no
    outbound call is possible. A request sent anyway is refused with the same facts.
 3. **Acknowledge the consent banner.** Once configured, the first thing the tab
    shows is a **consent banner** naming the exact configured **endpoint host**
