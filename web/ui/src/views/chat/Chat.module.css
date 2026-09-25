@@ -348,6 +348,28 @@
   color: var(--text-2);
 }
 
+/* ── Per-round grouping (S-303, CR-090) — a replanned turn only ──────────────
+   A single-round turn never renders `.activityRounds`; it keeps the flat
+   `.activityBody` layout above, unchanged. On a replan, each round's plan and
+   its OWN steps are grouped in one block, with a hairline rule between rounds
+   (the same `--border-subtle` the fold and each step already use) so the
+   plan-to-steps association reads as one round without adding a second visual
+   language. */
+.activityRounds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.activityRound {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.activityRound + .activityRound {
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+}
+
 /* ── Plan (inside the fold) ───────────────────────────────────────────────── */
 .plan {
   display: flex;

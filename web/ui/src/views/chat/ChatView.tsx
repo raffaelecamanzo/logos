@@ -398,6 +398,7 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
   };
 
   if (planStepCount(turn.plan) === 0 && turn.chips.length === 0) return null;
+  const rounds = activityRounds(turn);
   return (
     <details className={styles.activity} open={open} onToggle={syncNativeToggle}>
       <summary className={styles.activitySummary} onClick={toggle}>
@@ -405,10 +406,45 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
         <span className={styles.activityMeta}>{activityMeta(turn)}</span>
       </summary>
       <div className={styles.activityBody}>
-        <PlanList plan={turn.plan} />
-        <ActivitySteps chips={turn.chips} />
+        {rounds.length > 1 ? (
+          <ActivityByRound turn={turn} rounds={rounds} />
+        ) : (
+          <>
+            <PlanList plan={turn.plan} />
+            <ActivitySteps chips={turn.chips} />
+          </>
+        )}
       </div>
     </details>
+  );
+}
+
+/** Every round this turn has touched — every `plan` frame's round union every
+ *  chip's round, ascending and deduplicated. Length 1 for a single-round turn
+ *  (the common case, and the CR-089 baseline this fold must render identically
+ *  to), so the grouped branch below is reached only on an actual replan. */
+function activityRounds(turn: TurnState): number[] {
+  const rounds = new Set<number>();
+  for (const p of turn.plans) rounds.add(p.round);
+  for (const c of turn.chips) rounds.add(c.round);
+  return [...rounds].sort((a, b) => a - b);
+}
+
+/** A replanned turn's fold: each round's plan grouped with that round's OWN
+ *  steps, so the plan-to-steps association stays unambiguous even though the
+ *  orchestrator restarts `index` at 0 every round (S-303, CR-090). Only reached
+ *  for a multi-round turn — a single round renders the flat, ungrouped layout
+ *  above, unchanged from the CR-089 baseline. */
+function ActivityByRound({ turn, rounds }: { turn: TurnState; rounds: number[] }) {
+  return (
+    <div className={styles.activityRounds}>
+      {rounds.map((round) => (
+        <div key={round} className={styles.activityRound}>
+          <PlanList plan={turn.plans.find((p) => p.round === round) ?? null} />
+          <ActivitySteps chips={turn.chips.filter((c) => c.round === round)} />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -460,7 +496,11 @@ function ActivitySteps({ chips }: { chips: TurnState["chips"] }) {
   return (
     <ol className={styles.activitySteps}>
       {chips.map((c) => (
-        <li key={c.index} className={styles.activityStep}>
+        // Keyed by the (round, index) PAIR, never `index` alone: the orchestrator
+        // restarts `index` at 0 every replan round, so on a replanned turn two
+        // chips can share an index — a bare `c.index` key collides and React
+        // warns / misrenders (S-303, CR-090).
+        <li key={`${c.round}-${c.index}`} className={styles.activityStep}>
           <p className={styles.activityStepHead}>
             <span
               className={c.done ? styles.activityDone : styles.activityRunning}
