@@ -397,8 +397,10 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
     if (event.currentTarget.open !== open) setUserOpen(event.currentTarget.open);
   };
 
-  if (planStepCount(turn.plan) === 0 && turn.chips.length === 0) return null;
+  // Nothing renderable in ANY round, not merely in the latest plan: a replan to
+  // zero steps must not hide an earlier round's plan (sprint-78 review).
   const rounds = activityRounds(turn);
+  if (rounds.length === 0) return null;
   return (
     <details className={styles.activity} open={open} onToggle={syncNativeToggle}>
       <summary className={styles.activitySummary} onClick={toggle}>
@@ -410,7 +412,7 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
           <ActivityByRound turn={turn} rounds={rounds} />
         ) : (
           <>
-            <PlanList plan={turn.plan} />
+            <PlanList plan={turn.plans.find((p) => p.round === rounds[0]) ?? turn.plan} />
             <ActivitySteps chips={turn.chips} />
           </>
         )}
@@ -422,7 +424,9 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
 /** Every round this turn has touched — every `plan` frame's round union every
  *  chip's round, ascending and deduplicated. Length 1 for a single-round turn
  *  (the common case, and the CR-089 baseline this fold must render identically
- *  to), so the grouped branch below is reached only on an actual replan.
+ *  to), so the grouped branch below is reached only on an actual replan. The
+ *  flat branch renders the plan of `rounds[0]`, not the latest plan: after a
+ *  replan to zero steps the one renderable round is the earlier one.
  *
  *  A round whose plan carries zero steps (a malformed `plan` frame guards to
  *  `steps: []`, same as `PlanList`'s own guard) and that started no chip
