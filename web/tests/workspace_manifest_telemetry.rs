@@ -8,11 +8,16 @@
 //! core unit test (`the_workspace_manifest_seam_emits_the_facade_config_events`)
 //! proves the seam emits; only this proves the shipped routes call it.
 //!
-//! It also pins where the events land: the serve root's own store, which in a
-//! workspace is `<workspace-root>/.logos/` — never a member's. Every file under
-//! each member's `.logos/` keeps its size and mtime across the read and the save,
-//! so the S-430 "no member moved" property survives the telemetry the routes now
-//! emit.
+//! It also pins where the events land: the serve root's own store, which for a
+//! serve started **at the workspace root** is `<workspace-root>/.logos/`, not a
+//! member's. Every file under each member's `.logos/` keeps its size and mtime
+//! across the read and the save, so in that mode the S-430 "no member moved"
+//! property survives the telemetry the routes now emit.
+//!
+//! A serve started **inside a member** also discovers the workspace up-tree, but
+//! its telemetry root is that member's git root, so these events — like every
+//! other route's, and the workspace-tier config routes' since S-450 — land in
+//! that member's `.logos/telemetry.db`. This test does not cover that mode.
 //!
 //! One test function, for the reason `wikigen_surface.rs` records: `init`
 //! installs the *global* subscriber, so a second test in this binary would book
@@ -190,7 +195,7 @@ async fn the_manifest_routes_book_config_events_in_the_serve_roots_store_and_mov
     assert_eq!(
         [member_logos_stat(root, "api"), member_logos_stat(root, "web")],
         stat_before,
-        "no member's .logos/ moved: the events land in the serve root's store, never a member's"
+        "no member's .logos/ moved: the events land in the serve root's store — the workspace root here"
     );
     for name in ["api", "web"] {
         assert!(
