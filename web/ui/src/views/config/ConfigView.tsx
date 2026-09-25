@@ -46,6 +46,13 @@ import {
   type PolicyFile,
 } from "../../api/configClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
+import {
+  chatScope,
+  workspaceConfigRepairHref,
+  WORKSPACE_CONFIG_FILE,
+  WORKSPACE_SECRETS_FILE,
+} from "../chat/chatModel.ts";
+import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import type {
   ConfigApplyOutcome,
   ConfigReadModel,
@@ -879,9 +886,35 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
  *  surfaces the fault rather than a fabricated form (NFR-RA-05). */
 export function ConfigView() {
   const model = useApiResource<ConfigReadModel>(() => fetchConfig(), []);
+  const { mode, member } = useWorkspace();
+  const repairHref = workspaceConfigRepairHref(chatScope(mode, member));
   return (
-    <AsyncResource resource={model} loadingLabel="Loading the config…">
+    <AsyncResource
+      resource={model}
+      loadingLabel="Loading the config…"
+      errorNote={repairHref && <ConfigReadRepairNote href={repairHref} />}
+    >
       {(m) => <ConfigEditor model={m} />}
     </AsyncResource>
+  );
+}
+
+/**
+ * Workspace mode only (HF-2, Sprint 77 review option 4i): appended to the
+ * shared error panel when this read fails. Identical to the Chat tab's note
+ * over the same read (`ChatView.tsx`) — the fault could be this member's own
+ * `config.toml`/`secrets.toml`, or the inherited workspace-tier file at the
+ * workspace root, and the 500 body cannot reliably say which
+ * (`workspaceConfigRepairHref`), so this names both rather than guess wrong.
+ * Renders no file content (NFR-SE-07): only the two workspace-root paths by name.
+ */
+function ConfigReadRepairNote({ href }: { href: string }) {
+  return (
+    <p>
+      This can be an invalid file at this member&apos;s own root, or at the workspace root (
+      <code>{WORKSPACE_CONFIG_FILE}</code> or <code>{WORKSPACE_SECRETS_FILE}</code>) — every member
+      inheriting from a broken workspace-root file fails the same read. The{" "}
+      <a href={href}>workspace Config</a> view can inspect and repair the workspace-root files.
+    </p>
   );
 }

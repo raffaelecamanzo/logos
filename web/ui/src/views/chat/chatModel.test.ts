@@ -17,6 +17,7 @@ import {
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
+  workspaceConfigRepairHref,
   type ChatConfigReadModel,
   type ChatOrigin,
   type ChatPolicy,
@@ -443,6 +444,22 @@ describe("chatScope", () => {
     expect(chatScope("workspace", "api")).toEqual({ mode: "workspace", member: "api" });
     expect(chatScope("single", null)).toEqual({ mode: "single" });
     expect(chatScope("loading", null)).toEqual({ mode: "single" });
+  });
+});
+
+describe("workspaceConfigRepairHref (HF-2, Sprint 77 review option 4i)", () => {
+  it("single-root: no workspace tier, no link", () => {
+    expect(workspaceConfigRepairHref({ mode: "single" })).toBeNull();
+  });
+
+  it("workspace: the workspace Config view, carrying the selected member", () => {
+    expect(workspaceConfigRepairHref({ mode: "workspace", member: "billing-service" })).toBe(
+      "/workspace-config?repo=billing-service",
+    );
+  });
+
+  it("workspace with no member selected: the bare route, exactly as chatReadiness's own link", () => {
+    expect(workspaceConfigRepairHref({ mode: "workspace", member: null })).toBe("/workspace-config");
   });
 });
 

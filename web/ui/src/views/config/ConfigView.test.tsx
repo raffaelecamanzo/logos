@@ -15,7 +15,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ToastProvider } from "../../components/index.ts";
 import type { ConfigReadModel, VerifyReport } from "../../api/types.ts";
+import type { WorkspaceRoster } from "../../api/types.ts";
 import { ConfigView } from "./ConfigView.tsx";
+import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
+import { setScopedMember } from "../../workspace/scope.ts";
 
 afterEach(() => {
   cleanup();
@@ -1068,5 +1071,53 @@ describe("ConfigView load failure (NFR-RA-05)", () => {
     await waitFor(() => expect(screen.getByText(/HTTP 500/)).toBeInTheDocument());
     // No editor is rendered over a failed load (no fabricated form).
     expect(screen.queryByText(/CONFIG EDITOR/)).not.toBeInTheDocument();
+  });
+});
+
+describe("ConfigView load failure names the repair surface (HF-2, Sprint 77 review option 4i)", () => {
+  const ROSTER: WorkspaceRoster = { workspace: "shop", default: "api", members: ["api", "web"] };
+
+  afterEach(() => {
+    setScopedMember(null);
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("single-root: no workspace link, text unchanged", async () => {
+    mockFetch({ "GET /api/v1/config": () => ({ ok: false, status: 500, body: "invalid policy file" }) });
+    renderView();
+    expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "workspace Config" })).not.toBeInTheDocument();
+  });
+
+  it("workspace mode: links the workspace Config view, preserving ?repo=, naming both a member-file and a workspace-file fault", async () => {
+    // The read fails identically whether the fault is this member's own file or the
+    // inherited workspace-tier file (S-450) — the 500 body carries no field
+    // distinguishing the two, so the note names both (`workspaceConfigRepairHref`).
+    //
+    // `ConfigView`'s own resource fetches on mount with no dependency on the
+    // workspace probe settling first (unlike the real shell, which holds every view
+    // back until it does — `WorkspaceContext.tsx`), so the scope is set directly
+    // here rather than raced against the provider's async roster resolution.
+    setScopedMember("web");
+    window.history.replaceState({}, "", "/config?repo=web");
+    mockFetch({
+      "GET /api/v1/workspace/roster": () => ({ ok: true, status: 200, body: JSON.stringify(ROSTER) }),
+      "GET /api/v1/config?repo=web": () => ({ ok: false, status: 500, body: "invalid policy file" }),
+    });
+    render(
+      <ToastProvider>
+        <WorkspaceProvider>
+          <ConfigView />
+        </WorkspaceProvider>
+      </ToastProvider>,
+    );
+    expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
+    const link = await screen.findByRole("link", { name: "workspace Config" });
+    expect(link).toHaveAttribute("href", "/workspace-config?repo=web");
+    const panel = screen.getByRole("alert");
+    expect(panel).toHaveTextContent(/this member.s own root/);
+    expect(panel).toHaveTextContent(/the workspace root/);
+    expect(panel).toHaveTextContent("<workspace-root>/.logos/config.toml");
+    expect(panel).toHaveTextContent("<workspace-root>/.logos/secrets.toml");
   });
 });

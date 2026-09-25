@@ -266,6 +266,26 @@ export function chatScope(mode: WorkspaceMode, member: string | null): ChatScope
   return mode === "workspace" ? { mode: "workspace", member } : { mode: "single" };
 }
 
+/**
+ * Workspace mode only: the workspace Config view's href for the member Chat and
+ * Config tabs' failed `GET /api/v1/config` read (HF-2, Sprint 77 review option
+ * 4i) — `null` in single-root mode, which has no workspace tier and no such
+ * view.
+ *
+ * That read fails the same fail-loud `500` (S-450) whether the fault is THIS
+ * member's own `config.toml`/`secrets.toml` or the workspace-tier file it may
+ * inherit from at the workspace root — every member inheriting from a broken
+ * workspace-root file fails identically. The `500` body (`web/src/api_v1.rs`'s
+ * `fail`) carries only the façade's flattened error chain, which names an
+ * absolute filesystem path this surface has no baseline to compare against (no
+ * root path is ever sent to the client) — it cannot reliably say which root
+ * faulted, so the caller's wording names both possibilities rather than guess
+ * wrong (NFR-SE-07 forbids rendering the body itself regardless).
+ */
+export function workspaceConfigRepairHref(scope: ChatScope): string | null {
+  return scope.mode === "single" ? null : urlWithMember(WORKSPACE_CONFIG_HREF, scope.member);
+}
+
 /** The configure-first state's sentences, composed from the verdict alone so the
  *  view only lays them out. Worded to match the turn path's refusal
  *  (`configure_first_message`, `web/src/chat/mod.rs`): same halves, same origins. */

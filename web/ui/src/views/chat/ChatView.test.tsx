@@ -343,6 +343,54 @@ describe("ChatView — configure-first names the root, the absent half and the o
   });
 });
 
+describe("ChatView — config read failure names the repair surface (HF-2, Sprint 77 review option 4i)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setScopedMember(null);
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("single-root: an honest error panel with no workspace link", async () => {
+    mockFetchConfig.mockRejectedValue(new ApiError("config", 500));
+    render(<ChatView />);
+    expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "workspace Config" })).not.toBeInTheDocument();
+  });
+
+  it("workspace mode, the workspace-tier file broken: links the workspace Config view, preserving ?repo=", async () => {
+    stubApi();
+    window.history.replaceState({}, "", "/chat?repo=web");
+    mockFetchConfig.mockRejectedValue(new ApiError("config", 500));
+    render(
+      <WorkspaceProvider>
+        <ChatView />
+      </WorkspaceProvider>,
+    );
+    expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
+    const link = await screen.findByRole("link", { name: "workspace Config" });
+    expect(link).toHaveAttribute("href", "/workspace-config?repo=web");
+  });
+
+  it("workspace mode, a member-file fault: the same link and wording — the 500 body cannot tell the two apart", async () => {
+    // The read fails identically whether the fault is this member's own file or the
+    // inherited workspace-tier file (S-450); `ApiError` carries no body at all, so
+    // there is no field to branch on either way (see `workspaceConfigRepairHref`).
+    stubApi();
+    window.history.replaceState({}, "", "/chat?repo=web");
+    mockFetchConfig.mockRejectedValue(new ApiError("config", 500));
+    render(
+      <WorkspaceProvider>
+        <ChatView />
+      </WorkspaceProvider>,
+    );
+    const panel = await screen.findByRole("alert");
+    expect(panel).toHaveTextContent(/this member.s own root/);
+    expect(panel).toHaveTextContent(/the workspace root/);
+    expect(panel).toHaveTextContent("<workspace-root>/.logos/config.toml");
+    expect(panel).toHaveTextContent("<workspace-root>/.logos/secrets.toml");
+  });
+});
+
 describe("ChatView — a streamed turn", () => {
   it("renders plan, subagent activity, streamed tokens, and the final answer", async () => {
     const user = userEvent.setup();

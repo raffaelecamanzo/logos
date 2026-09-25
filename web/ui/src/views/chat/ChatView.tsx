@@ -65,6 +65,9 @@ import {
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
+  workspaceConfigRepairHref,
+  WORKSPACE_CONFIG_FILE,
+  WORKSPACE_SECRETS_FILE,
   type ChatConfigReadModel,
   type ChatPolicy,
   type ChatReady,
@@ -76,18 +79,45 @@ import styles from "./Chat.module.css";
 export function ChatView() {
   const config = useApiResource<ChatConfigReadModel>(() => fetchChatConfig(), []);
   const { mode, member } = useWorkspace();
+  const scope = chatScope(mode, member);
+  const repairHref = workspaceConfigRepairHref(scope);
   return (
     <div className={styles.view}>
-      <AsyncResource resource={config} loadingLabel="Loading chat…">
+      <AsyncResource
+        resource={config}
+        loadingLabel="Loading chat…"
+        errorNote={repairHref && <ConfigReadRepairNote href={repairHref} />}
+      >
         {(model) => {
           // The verdict is the pure function's (S-452); this view only renders it.
-          const verdict = chatReadiness(model, chatScope(mode, member));
+          const verdict = chatReadiness(model, scope);
           // Only the effective policy crosses into the configured body — the
           // credential is presence-only and never reaches it (NFR-SE-07).
           return verdict.ready ? <ChatConfigured ready={verdict} /> : <ConfigureFirst state={verdict} />;
         }}
       </AsyncResource>
     </div>
+  );
+}
+
+/**
+ * Workspace mode only (HF-2, Sprint 77 review option 4i): appended to the
+ * shared error panel (`AsyncResource`, `describeReadError`) when the config read
+ * this tab and the member Config tab both make fails. The fault could be this
+ * member's own `config.toml`/`secrets.toml`, or the inherited workspace-tier
+ * file at the workspace root — the 500 body cannot reliably say which
+ * (`workspaceConfigRepairHref`), so this names both rather than guess wrong.
+ * Renders no file content (NFR-SE-07): only the two workspace-root paths by
+ * name, exactly as the configure-first state already does.
+ */
+function ConfigReadRepairNote({ href }: { href: string }) {
+  return (
+    <p>
+      This can be an invalid file at this member&apos;s own root, or at the workspace root (
+      <code>{WORKSPACE_CONFIG_FILE}</code> or <code>{WORKSPACE_SECRETS_FILE}</code>) — every member
+      inheriting from a broken workspace-root file fails the same read. The{" "}
+      <a href={href}>workspace Config</a> view can inspect and repair the workspace-root files.
+    </p>
   );
 }
 

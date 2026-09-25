@@ -84,6 +84,11 @@ export interface AsyncResourceProps<T> {
   isEmpty?: (data: T) => boolean;
   /** What to show when `isEmpty` holds (a design-system `EmptyState`, typically). */
   empty?: ReactNode;
+  /** Appended inside the error panel, after {@link describeReadError}'s text
+   *  (e.g. a workspace-mode repair link, HF-2). The caller supplies static copy —
+   *  never the raw response body, so this can never become the new body-rendering
+   *  path NFR-SE-07 forbids. Omit for the plain error text every other caller gets. */
+  errorNote?: ReactNode;
   /** The success renderer — receives the non-empty data. */
   children: (data: T) => ReactNode;
 }
@@ -99,11 +104,17 @@ export function AsyncResource<T>({
   loadingLabel,
   isEmpty,
   empty,
+  errorNote,
   children,
 }: AsyncResourceProps<T>): ReactNode {
   if (resource.status === "loading") return <LoadingState label={loadingLabel} />;
   if (resource.status === "error") {
-    return <ErrorPanel>{describeReadError(resource.error)}</ErrorPanel>;
+    return (
+      <ErrorPanel>
+        {describeReadError(resource.error)}
+        {errorNote}
+      </ErrorPanel>
+    );
   }
   const data = resource.data as T;
   if (isEmpty?.(data)) return empty ?? <EmptyState message="Nothing to show yet." />;
