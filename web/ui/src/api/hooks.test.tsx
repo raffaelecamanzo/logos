@@ -52,6 +52,48 @@ describe("AsyncResource", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("503");
   });
 
+  it("appends errorNote after the error text, inside the same panel (HF-2)", () => {
+    render(
+      <AsyncResource
+        resource={{
+          status: "error",
+          data: undefined,
+          error: new ApiError("/api/v1/config", 500),
+          reload: () => {},
+        }}
+        errorNote={<a href="/workspace-config">workspace Config</a>}
+      >
+        {() => <div>body</div>}
+      </AsyncResource>,
+    );
+    const panel = screen.getByRole("alert");
+    // Both the existing describeReadError text and the caller-supplied note
+    // render inside the one panel — never a second alert region.
+    expect(panel).toHaveTextContent("/api/v1/config");
+    expect(panel).toHaveTextContent("500");
+    const link = screen.getByRole("link", { name: "workspace Config" });
+    expect(panel).toContainElement(link);
+  });
+
+  it("never renders errorNote outside the error state, even if a caller passed one", () => {
+    const { rerender } = render(
+      <AsyncResource
+        resource={{ status: "loading", data: undefined, error: undefined, reload: () => {} }}
+        errorNote={<a href="/workspace-config">workspace Config</a>}
+      >
+        {() => <div>body</div>}
+      </AsyncResource>,
+    );
+    expect(screen.queryByRole("link", { name: "workspace Config" })).not.toBeInTheDocument();
+
+    rerender(
+      <AsyncResource resource={ready(1)} errorNote={<a href="/workspace-config">workspace Config</a>}>
+        {(d) => <div>count {d}</div>}
+      </AsyncResource>,
+    );
+    expect(screen.queryByRole("link", { name: "workspace Config" })).not.toBeInTheDocument();
+  });
+
   it("renders the empty slot when the view's isEmpty predicate holds", () => {
     render(
       <AsyncResource resource={ready<number[]>([])} isEmpty={(d) => d.length === 0} empty={<p>nothing</p>}>
