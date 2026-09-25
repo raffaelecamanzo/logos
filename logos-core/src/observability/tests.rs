@@ -3731,6 +3731,13 @@ fn every_usage_cell_ships_answered_and_classified_and_no_rate() {
         callers_json["outcome_absence"].is_null(),
         "a classified cell carries no absence: {callers_json}"
     );
+    // The VALUES on the wire, not only the keys: a serialiser that swapped the
+    // two would ship answered > classified with every key still present.
+    assert_eq!(
+        (&callers_json["answered_calls"], &callers_json["classified_calls"]),
+        (&serde_json::json!(2), &serde_json::json!(4)),
+        "{callers_json}"
+    );
 }
 
 /// The version the read-model gates the outcome columns on is the ledger entry
