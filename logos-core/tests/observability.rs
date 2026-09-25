@@ -75,6 +75,11 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
         assert_eq!(answered.total, 1, "alpha calls beta: {answered:?}");
         let unresolved = engine.callers("no_such_symbol_anywhere", None);
         assert!(unresolved.resolved.is_none(), "{unresolved:?}");
+        // The other three classified chokepoints, once each: whatever each one
+        // answers here, it must be recorded WITH an outcome.
+        let _ = engine.impact("beta", None);
+        let _ = engine.precedent("lib.rs", None);
+        let _ = engine.affected(&["lib.rs".to_string()], false);
     }
     // Flush the last telemetry batch exactly as a process exit would.
     drop(guard);
@@ -125,6 +130,21 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
         (2, 1, 2),
         "{callers:?}"
     );
+    // Every classified chokepoint records an outcome on every call — a
+    // chokepoint put back on plain `traced` would record NULL and read here as
+    // `classified_calls == 0`.
+    for tool in ["impact", "precedent", "affected"] {
+        let cell = stats
+            .calls_by_tool
+            .iter()
+            .find(|u| u.tool == tool)
+            .unwrap_or_else(|| panic!("the {tool} chokepoint recorded"));
+        assert_eq!(
+            (cell.calls, cell.outcomes.classified_calls),
+            (1, 1),
+            "{tool} is classified through the engine: {cell:?}"
+        );
+    }
     let search = stats
         .calls_by_tool
         .iter()
