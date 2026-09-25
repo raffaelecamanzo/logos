@@ -3796,3 +3796,44 @@ fn a_pre_outcome_store_reads_as_unclassified_not_unreadable() {
         info.activity_by_day
     );
 }
+
+/// A second prune into a day already in `daily_rollup` **adds** its outcome
+/// counts to the day's, exactly as it adds `calls` — the `ON CONFLICT` path,
+/// which is the normal case for the day straddling the retention cutoff.
+#[test]
+fn a_second_prune_into_a_rolled_up_day_adds_its_outcome_counts() {
+    let mut conn = db::open_in_memory();
+    let day = NOW - 100 * 86_400;
+    db::write_batch(
+        &mut conn,
+        &[
+            with_outcome("precedent", true, day, Some(Outcome::Answered)),
+            with_outcome("precedent", true, day, Some(Outcome::Empty)),
+        ],
+    )
+    .unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+    db::write_batch(
+        &mut conn,
+        &[
+            with_outcome("precedent", true, day + 60, Some(Outcome::Answered)),
+            with_outcome("precedent", false, day + 60, Some(Outcome::Failed)),
+            with_outcome("precedent", true, day + 60, None),
+        ],
+    )
+    .unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+
+    let rows: Vec<(i64, i64, i64)> = conn
+        .prepare("SELECT calls, answered_calls, classified_calls FROM daily_rollup")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [(5, 2, 4)],
+        "one day, both prunes summed: 5 calls, 4 classified, 2 answered"
+    );
+}
