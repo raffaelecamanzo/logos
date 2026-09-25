@@ -254,7 +254,10 @@ export function chatReadiness(model: ChatConfigReadModel, scope: ChatScope): Cha
     present,
     configHref: urlWithMember("/config", member),
     workspaceFiles,
-    workspaceConfigHref: scope.mode === "single" ? null : urlWithMember(WORKSPACE_CONFIG_HREF, member),
+    // Delegates to `workspaceConfigRepairHref` (HF-2) rather than repeating its
+    // `scope.mode === "single" ? null : urlWithMember(...)` — same target view,
+    // same member-carrying semantics, one implementation (review-fix, HF-2).
+    workspaceConfigHref: workspaceConfigRepairHref(scope),
     memberKeyWithheld: member_key_withheld,
   };
 }
