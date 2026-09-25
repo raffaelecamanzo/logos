@@ -1617,7 +1617,8 @@ pub(crate) async fn wiki_nav(MemberEngine(engine): MemberEngine) -> Response {
 /// no graph store, so a load mutates nothing ([FR-UI-03], [ADR-28]).
 ///
 /// Beside those it carries the **effective** chat resolution and each half's
-/// origin ([FR-WS-30], S-448). Its workspace root is the one the backing already
+/// origin ([FR-WS-30], S-448), and the effective wiki model the wiki run resolves
+/// (`effective_wiki`, Sprint 77 HF-1). Its workspace root is the one the backing already
 /// holds — a federated backing's resolved root, never a discovered one — and a
 /// single-root backing supplies none, so no `workspace` origin is reachable there.
 ///
