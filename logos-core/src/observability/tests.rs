@@ -3837,3 +3837,33 @@ fn a_second_prune_into_a_rolled_up_day_adds_its_outcome_counts() {
         "one day, both prunes summed: 5 calls, 4 classified, 2 answered"
     );
 }
+
+/// The read-model **sums** the rolled-up outcome counts across days: two aged
+/// days whose counts differ read as their total, which a `max` could not.
+#[test]
+fn the_rolled_up_outcome_counts_sum_across_days() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(
+        &mut conn,
+        &[
+            with_outcome("callers", true, NOW - 100 * 86_400, Some(Outcome::Answered)),
+            with_outcome("callers", true, NOW - 100 * 86_400, Some(Outcome::Empty)),
+            with_outcome("callers", true, NOW - 110 * 86_400, Some(Outcome::Answered)),
+        ],
+    )
+    .unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+    let info = stats_from(&conn, 365, NOW).unwrap();
+    let callers = info.calls_by_tool.iter().find(|u| u.tool == "callers").unwrap();
+    assert_eq!(
+        (callers.calls, callers.outcomes),
+        (
+            3,
+            OutcomeCounts {
+                answered_calls: 2,
+                classified_calls: 3
+            }
+        ),
+        "day one (1 of 2) plus day two (1 of 1)"
+    );
+}
