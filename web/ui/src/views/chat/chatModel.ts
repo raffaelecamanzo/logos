@@ -477,8 +477,14 @@ export async function readSseStream(
 
 // ── Per-turn state machine ────────────────────────────────────────────────────
 
-/** One subagent-activity chip's lifecycle (running → done) in a turn. */
+/** One subagent-activity chip's lifecycle (running → done) in a turn. `round` is
+ *  stamped from the turn's latest `plan` frame at the moment `step_started`
+ *  arrives — `step_started`/`step_observed` carry no round on the wire, because
+ *  the orchestrator restarts `index` at 0 every replan round (S-303, CR-090).
+ *  Completion is matched on the `(round, index)` pair, never `index` alone, so a
+ *  later round's observation cannot mark an earlier round's step done. */
 export interface ActivityChip {
+  round: number;
   index: number;
   role: StepRole;
   instruction: string;
@@ -486,10 +492,17 @@ export interface ActivityChip {
   summary?: string;
 }
 
+/** One round's plan (mirrors the `plan` frame that produced it). */
+export type RoundPlan = { round: number; steps: PlanStep[] };
+
 /** The accumulated render state of one assistant turn, folded from its SSE frames. */
 export interface TurnState {
   /** The latest plan (a replan supersedes the prior plan), or `null` before one. */
-  plan: { round: number; steps: PlanStep[] } | null;
+  plan: RoundPlan | null;
+  /** Every round's plan seen this turn, in arrival order — the S-303 grouping
+   *  source, so the expanded fold can show each round's plan with its own steps.
+   *  A single-round turn carries exactly one entry, identical to `[plan]`. */
+  plans: RoundPlan[];
   /** The subagent-activity chips, in start order. */
   chips: ActivityChip[];
   /** The answer text — streamed token-by-token, reconciled by `final_answer`. */
@@ -506,7 +519,16 @@ export interface TurnState {
 
 /** A fresh, empty turn. */
 export function initialTurn(): TurnState {
-  return { plan: null, chips: [], answer: "", streaming: false, halt: null, error: null, finalized: false };
+  return {
+    plan: null,
+    plans: [],
+    chips: [],
+    answer: "",
+    streaming: false,
+    halt: null,
+    error: null,
+    finalized: false,
+  };
 }
 
 /**
@@ -532,10 +554,14 @@ export function applyFrame(state: TurnState, frame: SseFrame): TurnState {
     // array must not crash the render's `.map` (consistent with the type guards on
     // the other event payloads below) — drop to an empty plan instead.
     const steps = Array.isArray(data.steps) ? (data.steps as PlanStep[]) : [];
-    return { ...state, plan: { round: Number(data.round) || 0, steps } };
+    const round: RoundPlan = { round: Number(data.round) || 0, steps };
+    return { ...state, plan: round, plans: [...state.plans, round] };
   }
   if (frame.name === "step_started") {
+    // Stamped from the round already held in client state (this turn's latest
+    // `plan` frame) — `step_started` carries no round on the wire.
     const chip: ActivityChip = {
+      round: state.plan?.round ?? 0,
       index: Number(data.index),
       role: data.role as StepRole,
       instruction: typeof data.instruction === "string" ? data.instruction : "",
@@ -544,11 +570,16 @@ export function applyFrame(state: TurnState, frame: SseFrame): TurnState {
     return { ...state, chips: [...state.chips, chip] };
   }
   if (frame.name === "step_observed") {
+    // Matched on the (round, index) pair — the same round the wire's `index`
+    // restarted from — so a later round's observation cannot mark an earlier
+    // round's colliding index done (S-303, CR-090).
+    const round = state.plan?.round ?? 0;
+    const index = Number(data.index);
     const summary = typeof data.summary === "string" ? data.summary : undefined;
     return {
       ...state,
       chips: state.chips.map((c) =>
-        c.index === Number(data.index) ? { ...c, done: true, summary } : c,
+        c.round === round && c.index === index ? { ...c, done: true, summary } : c,
       ),
     };
   }

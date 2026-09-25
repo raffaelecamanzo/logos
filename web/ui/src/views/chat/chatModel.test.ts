@@ -110,6 +110,36 @@ describe("applyFrame — incremental turn rendering", () => {
     expect(t.chips[0]).toMatchObject({ index: 0, role: "graph_navigator", done: true, summary: "found 3 callers" });
   });
 
+  it("stamps each chip with its round and matches step_observed on the (round, index) PAIR, not index alone (S-303, CR-090)", () => {
+    // The orchestrator restarts `index` at 0 every replan round: round 1's step 0
+    // collides with round 0's step 0. A round-blind reducer would let round 1's
+    // observation mark BOTH chips done, or attribute round 1's summary to round
+    // 0's chip.
+    const t = fold([
+      { name: "plan", data: '{"round":0,"steps":[{"role":"graph_navigator","instruction":"map callers"}]}' },
+      { name: "step_started", data: '{"index":0,"role":"graph_navigator","instruction":"map callers"}' },
+      { name: "plan", data: '{"round":1,"steps":[{"role":"source_reader","instruction":"read file"}]}' },
+      { name: "step_started", data: '{"index":0,"role":"source_reader","instruction":"read file"}' },
+      { name: "step_observed", data: '{"index":0,"role":"source_reader","summary":"round 1 result"}' },
+    ]);
+
+    expect(t.chips).toHaveLength(2);
+    const [roundZeroChip, roundOneChip] = t.chips;
+
+    // Round 0's step never ran to observation — it must stay running, with no
+    // summary borrowed from round 1's observation of the SAME index.
+    expect(roundZeroChip).toMatchObject({ round: 0, index: 0, done: false });
+    expect(roundZeroChip.summary).toBeUndefined();
+    // Round 1's step is the one actually observed, and carries its OWN summary.
+    expect(roundOneChip).toMatchObject({ round: 1, index: 0, done: true, summary: "round 1 result" });
+
+    // Grouping source: every round's plan is retained, not just the latest.
+    expect(t.plans).toEqual([
+      { round: 0, steps: [{ role: "graph_navigator", instruction: "map callers" }] },
+      { round: 1, steps: [{ role: "source_reader", instruction: "read file" }] },
+    ]);
+  });
+
   it("streams answer deltas then reconciles to the authoritative final answer", () => {
     const t = fold([
       { name: "answer_delta", data: '{"delta":"Hel"}' },

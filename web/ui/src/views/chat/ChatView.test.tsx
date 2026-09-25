@@ -1632,4 +1632,114 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     expect(spoken).toEqual(["done:", "running:"]);
     pending.close();
   });
+
+  it("renders the flat, ungrouped layout for a single round — no grouping wrapper (AC4, CR-089 baseline, review-fix S-303)", async () => {
+    // A text-content assertion alone cannot tell "the flat layout" apart from "the
+    // grouped-by-round layout rendering identical text for one round" — both would
+    // pass every OTHER test in this describe block. This one checks the STRUCTURE:
+    // with `css: false` hiding class names, the flat layout nests the plan's `<ol>`
+    // two `<div>`s below the fold (`.activityBody` → `.plan`); the grouped layout
+    // (ActivityByRound) would nest it FOUR deep (adding `.activityRounds` and
+    // `.activityRound`). Counting div ancestors between the `<ol>` and the fold is
+    // therefore a structural proof that no grouping chrome renders for one round,
+    // not just that the same words happen to appear either way.
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const pending = pendingSseResponse(STREAMING_FRAMES);
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    await waitFor(() => expect(container.textContent).toContain("Synthesizer"));
+
+    const activity = fold(container)!;
+    const planOl = activity.querySelector("ol")!; // the plan's <ol>, rendered before the steps' <ol>
+    let divAncestors = 0;
+    for (let el = planOl.parentElement; el && el !== activity; el = el.parentElement) {
+      if (el.tagName === "DIV") divAncestors++;
+    }
+    expect(divAncestors).toBe(2);
+    pending.close();
+  });
+
+  it("shows a round's plan even when replanned before any of its steps started, and never drops it from the grouped fold (S-303, CR-090)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Round 0 is planned and then immediately superseded — no step of round 0 ever
+    // starts, so round 0 has a real (non-empty) plan but ZERO chips. Only round 1
+    // actually runs.
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":[{"role":"graph_navigator","instruction":"map callers"}]}\n\n',
+        'event: plan\ndata: {"round":1,"steps":[{"role":"source_reader","instruction":"read file"}]}\n\n',
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read file"}\n\n',
+        'event: step_observed\ndata: {"index":0,"role":"source_reader","summary":"read"}\n\n',
+        'event: final_answer\ndata: {"answer":"done"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("done")).toBeInTheDocument();
+
+    const activity = fold(container)!;
+    // Round 0's plan renders on the strength of `turn.plans` ALONE — it has no
+    // chip to contribute its round via `turn.chips`. Dropping the `plans` half of
+    // `activityRounds()`'s round union would silently drop this whole group.
+    expect(activity.textContent).toContain("Plan");
+    expect(activity.textContent).toContain("Graph-Navigator");
+    expect(activity.textContent).toContain("map callers");
+    expect(activity.textContent).toContain("Revised plan");
+  });
+
+  it("groups a replanned turn's fold by round, keeps colliding indices apart, and renders no duplicate-key warning (S-303, CR-090)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // React's duplicate-key warning goes to console.error — silence it (jsdom would
+    // otherwise print it as test noise) while still asserting it never fired.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Round 0 plans one step (index 0) and starts it, but a replan supersedes it
+    // BEFORE it is observed. Round 1 restarts `index` at 0 — the orchestrator's
+    // per-round indexing (CR-090) — plans and starts ITS OWN index-0 step, and
+    // that one alone is observed.
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":[{"role":"graph_navigator","instruction":"map callers"}]}\n\n',
+        'event: step_started\ndata: {"index":0,"role":"graph_navigator","instruction":"map callers"}\n\n',
+        'event: plan\ndata: {"round":1,"steps":[{"role":"source_reader","instruction":"read file"}]}\n\n',
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read file"}\n\n',
+        'event: step_observed\ndata: {"index":0,"role":"source_reader","summary":"read file contents"}\n\n',
+        'event: final_answer\ndata: {"answer":"done"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("done")).toBeInTheDocument();
+
+    const activity = fold(container)!;
+    // Each round's OWN plan renders — grouped, not flattened into one list: round
+    // 0's caption ("Plan") and round 1's ("Revised plan") both appear.
+    expect(activity.textContent).toContain("Plan");
+    expect(activity.textContent).toContain("Revised plan");
+    expect(activity.textContent).toContain("Graph-Navigator");
+    expect(activity.textContent).toContain("Source-Reader");
+
+    // Round 0's step was never observed — it stays running, and round 1's
+    // observation of the SAME index does not mark it done or lend it a summary.
+    const glyphs = [...activity.querySelectorAll('[aria-hidden="true"]')].map((g) => g.textContent);
+    expect(glyphs).toEqual(["▸", "✓"]);
+    // The observed summary is attributed to round 1's step alone — exactly one
+    // rendering of it, not two (which a round-blind match would produce by
+    // updating both colliding-index chips).
+    expect(activity.textContent!.split("read file contents")).toHaveLength(2);
+
+    // No React "two children with the same key" warning — the (round, index)
+    // keying keeps round 0's and round 1's index-0 chips distinct.
+    const keyWarning = errorSpy.mock.calls.some((call) =>
+      call.some((arg) => typeof arg === "string" && arg.includes("same key")),
+    );
+    expect(keyWarning).toBe(false);
+    errorSpy.mockRestore();
+  });
 });
