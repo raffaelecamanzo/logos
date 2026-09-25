@@ -35,8 +35,8 @@ use super::error::ConfigError;
 use super::secrets::SECRETS_RELPATH;
 use super::{
     load_config_from_root, load_rules_from_root, load_secrets_from_root, parse_config, parse_rules,
-    resolve_chat, ChatConfig, ChatOrigin, ChatResolution, Config, Constraints, MaskedSecret,
-    MetricThresholds, Rules, CONFIG_RELPATH, RULES_RELPATH,
+    resolve_chat, ChatConfig, ChatOrigin, ChatResolution, Config, Constraints, EffectiveWikiModel,
+    MaskedSecret, MetricThresholds, Rules, CONFIG_RELPATH, RULES_RELPATH,
 };
 
 /// Which checked-in policy file a [`read_documents`]/write targets.
@@ -109,13 +109,49 @@ pub struct ConfigReadModel {
     /// [`chat_key`](Self::chat_key), never merged into them: those stay the
     /// member's literal document and its own masked key, which the Config
     /// editor round-trips, so an inherited value can never be posted back into
-    /// the member's `config.toml` on save ([NFR-RA-05]). Declared **last**, so
-    /// the fields before it serialize to the same bytes they always did.
+    /// the member's `config.toml` on save ([NFR-RA-05]). Declared **after** the
+    /// literal fields (only [`effective_wiki`](Self::effective_wiki) follows it),
+    /// so the fields before it serialize to the same bytes they always did.
     ///
     /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
     /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     pub effective_chat: EffectiveChat,
+
+    /// The **effective** wiki generation model, as the wiki run resolves it
+    /// ([FR-CF-07], [ADR-67], Sprint 77 HF-1): the member's own `[wiki].model`,
+    /// else the workspace root's — only when the member inherits the chat policy
+    /// half — else the effective chat model. The Wiki tab's readiness verdict and
+    /// consent disclosure read this rather than re-deriving the rule, so the tab
+    /// and the run cannot disagree.
+    ///
+    /// Beside the literal document for the reason
+    /// [`effective_chat`](Self::effective_chat) is, and declared after it, so every
+    /// field before it serializes to the same bytes it always did.
+    ///
+    /// [FR-CF-07]: ../../../docs/specs/requirements/FR-CF-07.md
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    pub effective_wiki: EffectiveWiki,
+}
+
+/// The read-model projection of an [`EffectiveWikiModel`] (Sprint 77 HF-1): the
+/// effective wiki model and nothing else. The provider, endpoint and credential
+/// the run inherits are [`EffectiveChat`]'s, already beside it; the raw key the
+/// resolution holds is dropped here, never copied ([NFR-SE-07]).
+///
+/// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EffectiveWiki {
+    /// The model the wiki run uses, or `None` in the configure-first state.
+    pub model: Option<String>,
+}
+
+impl From<EffectiveWikiModel> for EffectiveWiki {
+    fn from(resolved: EffectiveWikiModel) -> Self {
+        EffectiveWiki {
+            model: resolved.model,
+        }
+    }
 }
 
 /// The read-model projection of a [`ChatResolution`] ([FR-WS-30], S-448): the
@@ -411,18 +447,23 @@ pub enum ConfigApplyOutcome {
 /// model ([NFR-DM-04]) — not an error.
 ///
 /// `workspace_root` is the already-resolved federation root, or `None` in
-/// single-root mode; it is handed to [`resolve_chat`] for the
-/// [`effective_chat`](ConfigReadModel::effective_chat) slice **only**. Every
+/// single-root mode; it is handed to [`resolve_chat`] and
+/// [`WikiConfig::resolve_in_workspace`] for the
+/// [`effective_chat`](ConfigReadModel::effective_chat) and
+/// [`effective_wiki`](ConfigReadModel::effective_wiki) slices **only**. Every
 /// other field is read from `root` alone, so it is the same whatever
 /// `workspace_root` is, and with `None` no [`ChatOrigin::Workspace`] is
 /// reachable.
+///
+/// [`WikiConfig::resolve_in_workspace`]: super::WikiConfig::resolve_in_workspace
 ///
 /// # Errors
 /// A present-but-invalid file fails loud through the load path
 /// ([`load_config_from_root`] / [`load_rules_from_root`]): an unknown key, a
 /// non-compiling glob, or an out-of-range value is a [`ConfigError`] (exit 2),
-/// exactly as the CLI would report it. That includes an invalid chat file at
-/// `workspace_root` when the member inherits from it ([`resolve_chat`]).
+/// exactly as the CLI would report it. That includes an invalid `config.toml`
+/// or `secrets.toml` at `workspace_root` when the member inherits from it
+/// ([`resolve_chat`]).
 pub fn read_documents(
     root: &Path,
     workspace_root: Option<&Path>,
@@ -460,13 +501,22 @@ pub fn read_documents(
     };
     // The effective slice is resolved separately and set beside the literal
     // fields above, which it never feeds (S-448, NFR-RA-05).
-    let effective_chat = resolve_chat(root, workspace_root)?.into();
+    let chat = resolve_chat(root, workspace_root)?;
+    // The wiki run's own composition ([`WikiConfig::resolve_in_workspace`]), so
+    // the tab's verdict and the run cannot disagree (Sprint 77 HF-1).
+    let effective_wiki = config
+        .parsed
+        .wiki
+        .resolve_in_workspace(&chat, workspace_root)?
+        .into();
+    let effective_chat = chat.into();
     Ok(ConfigReadModel {
         config,
         rules,
         chat_key,
         defaults,
         effective_chat,
+        effective_wiki,
     })
 }
 
@@ -1202,21 +1252,59 @@ mod tests {
     fn the_effective_slice_is_appended_after_the_literal_fields_and_never_inside_them() {
         // S-448 AC1: the slice sits BESIDE content/exists/parsed/chat_key — the
         // payload is exactly the four pre-existing fields, in their pre-existing
-        // order, followed by the slice as its last key.
+        // order, followed by the effective slices: `effective_chat`, then
+        // `effective_wiki` (Sprint 77 HF-1) as the last key.
         let (ws, member) = inheriting_member();
         let docs = read_documents(&member, Some(ws.path())).unwrap();
         fn json<T: Serialize>(value: &T) -> String {
             serde_json::to_string(value).unwrap()
         }
         let expected = format!(
-            "{{\"config\":{},\"rules\":{},\"chat_key\":{},\"defaults\":{},\"effective_chat\":{}}}",
+            "{{\"config\":{},\"rules\":{},\"chat_key\":{},\"defaults\":{},\"effective_chat\":{},\"effective_wiki\":{}}}",
             json(&docs.config),
             json(&docs.rules),
             json(&docs.chat_key),
             json(&docs.defaults),
             json(&docs.effective_chat),
+            json(&docs.effective_wiki),
         );
         assert_eq!(serde_json::to_string(&docs).unwrap(), expected);
+    }
+
+    /// Sprint 77 HF-1: the `effective_wiki` slice is the wiki run's model under
+    /// the two-tier rule — the workspace `[wiki].model` reaches a member that
+    /// inherits the chat policy, never one that owns its `[chat]` model, and
+    /// never a single-root read — and the literal document still declares none.
+    #[test]
+    fn the_effective_wiki_slice_inherits_the_workspace_wiki_model_only_under_an_inherited_policy() {
+        let (ws, member) = inheriting_member();
+        seed(
+            ws.path(),
+            "config.toml",
+            &format!("[chat]\nmodel = \"{WS_MODEL}\"\n[wiki]\nmodel = \"workspace/wiki\"\n"),
+        );
+
+        let inherited = read_documents(&member, Some(ws.path())).unwrap();
+        assert_eq!(inherited.effective_wiki.model.as_deref(), Some("workspace/wiki"));
+        assert_eq!(inherited.config.parsed.wiki.model, None, "the literal document declares none");
+        // The wire shape the Wiki tab reads (`effective_wiki.model`, wikiGenModel.ts):
+        // pinned on the serialized payload, since the SPA's fixtures are hand-built.
+        let payload = serde_json::to_string(&inherited).unwrap();
+        assert!(
+            payload.ends_with(",\"effective_wiki\":{\"model\":\"workspace/wiki\"}}"),
+            "{payload}"
+        );
+
+        let alone = read_documents(&member, None).unwrap();
+        assert_eq!(alone.effective_wiki.model, None, "single-root consults no second tier");
+
+        seed(&member, "config.toml", "[chat]\nmodel = \"member/chat\"\n");
+        let owned = read_documents(&member, Some(ws.path())).unwrap();
+        assert_eq!(owned.effective_wiki.model.as_deref(), Some("member/chat"));
+
+        seed(&member, "config.toml", "[wiki]\nmodel = \"member/wiki\"\n");
+        let own_wiki = read_documents(&member, Some(ws.path())).unwrap();
+        assert_eq!(own_wiki.effective_wiki.model.as_deref(), Some("member/wiki"));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The production [`WikiRunService`]: run the CR-062 deterministic presented
 //! tier ([`Engine::wiki_materialize`], [FR-WK-20]) ahead of the LLM queue, then
-//! resolve the effective wiki model ([`[wiki].model`], else `[chat].model`,
-//! inheriting provider/key from `[chat]`) and drive the [`wiki-agent`]
+//! resolve the effective wiki model ([`[wiki].model`], else the workspace root's
+//! under an inherited chat policy, else `[chat].model`, inheriting provider/key
+//! from `[chat]` — see below) and drive the [`wiki-agent`]
 //! generation pass, streaming its [`WikiProgress`] ([S-178], [ADR-42],
 //! [FR-WK-18], [FR-CF-07]).
 //!
@@ -39,9 +40,16 @@
 //! [`resolve_chat`] over the member root and the already-resolved federation
 //! workspace root — the same resolution the chat turn and the tab read — so a
 //! member that inherits its credential (or its whole chat policy) from the
-//! workspace gets wiki generation as well as chat. The member's own
-//! `[wiki].model` still wins over the effective chat model, exactly as before;
-//! the `[wiki]` table itself is read from the member alone.
+//! workspace gets wiki generation as well as chat.
+//!
+//! The model is [`WikiConfig::resolve_in_workspace`]'s (Sprint 77 HF-1): the
+//! member's own `[wiki].model`, else the workspace root's — only when the member
+//! inherits the chat policy half, since a member owning its `[chat]` model owns
+//! its endpoint — else the effective chat model. The read-model's
+//! `effective_wiki` slice is resolved by the same function, so the Wiki tab and
+//! the run cannot disagree.
+//!
+//! [`WikiConfig::resolve_in_workspace`]: logos_core::config::WikiConfig::resolve_in_workspace
 //!
 //! # Blocking setup is offloaded ([ADR-03])
 //! Reading `config.toml`/`secrets.toml` are synchronous filesystem operations; like
@@ -77,9 +85,9 @@ use wiki_agent::{run_configured, ConfiguredRun, DEFAULT_RUN_BUDGET};
 use super::{spawn_run, WikiRunGuard, WikiRunService, WikiSink};
 use crate::chat::resolution_fault;
 
-/// The production wiki-generation service over the live [`Engine`], the member's
-/// `[wiki]` policy, and the `[chat]` policy + `secrets.toml` key resolved against
-/// the member and workspace roots ([FR-CF-07], [ADR-67]).
+/// The production wiki-generation service over the live [`Engine`], and the
+/// `[wiki]` model, `[chat]` policy and `secrets.toml` key resolved against the
+/// member and workspace roots ([FR-CF-07], [ADR-67]).
 pub(crate) struct ConfiguredWikiRunService {
     engine: Arc<Engine>,
     /// The federation's workspace root, or `None` in single-root mode — passed in
@@ -98,8 +106,9 @@ impl ConfiguredWikiRunService {
     }
 }
 
-/// Resolve the effective wiki model — the member's `[wiki]` table over the chat
-/// halves [`resolve_chat`] resolved — the **blocking** half of a run's setup
+/// Resolve the effective wiki model — the member's `[wiki]` table, and the
+/// workspace root's under an inherited chat policy, over the chat halves
+/// [`resolve_chat`] resolved — the **blocking** half of a run's setup
 /// ([ADR-03]). Returns an honest setup-fault message on a config/secret read
 /// failure ([NFR-CC-04]); a missing model/key is **not** decided here — it is
 /// [`run_configured`](wiki_agent::run_configured)'s configure-first state, so the
@@ -116,7 +125,10 @@ fn resolve_effective_model(
 ) -> Result<EffectiveWikiModel, String> {
     let config = load_config_from_root(root).map_err(|e| resolution_fault("wiki", &e))?;
     let chat = resolve_chat(root, workspace_root).map_err(|e| resolution_fault("wiki", &e))?;
-    Ok(config.wiki.resolve_inherited(&chat))
+    config
+        .wiki
+        .resolve_in_workspace(&chat, workspace_root)
+        .map_err(|e| resolution_fault("wiki", &e))
 }
 
 impl WikiRunService for ConfiguredWikiRunService {
@@ -272,6 +284,92 @@ mod tests {
             Some("sk-workspace-ws42"),
             "key inherited"
         );
+    }
+
+    /// Sprint 77 HF-1, the decided `[wiki].model` rule over the run's own
+    /// resolution: the member's `[wiki].model`, else the workspace root's — only
+    /// when the member inherits the chat policy half — else the effective chat
+    /// model. The endpoint and key stay the effective chat resolution's in every
+    /// row.
+    #[test]
+    fn the_workspace_wiki_model_reaches_only_a_member_inheriting_the_chat_policy() {
+        let ws_wiki = "[chat]\nprovider = \"anthropic\"\nmodel = \"workspace/chat\"\n\
+                       base_url = \"https://workspace.example/v1\"\n\
+                       [wiki]\nmodel = \"workspace/wiki\"\n";
+        // (member config.toml, workspace root handed in, expected model, expected endpoint)
+        let rows: [(&str, bool, Option<&str>, &str); 5] = [
+            // the member declares its own wiki model
+            ("[wiki]\nmodel = \"member/wiki\"\n", true, Some("member/wiki"), "https://workspace.example/v1"),
+            // the member inherits the policy; the workspace declares a wiki model
+            ("", true, Some("workspace/wiki"), "https://workspace.example/v1"),
+            // the member owns its [chat] model: must NOT inherit the workspace wiki model
+            (
+                "[chat]\nmodel = \"member/chat\"\nbase_url = \"https://member.example/v1\"\n",
+                true,
+                Some("member/chat"),
+                "https://member.example/v1",
+            ),
+            // no workspace root: the enclosing files are never consulted
+            ("", false, None, logos_core::config::DEFAULT_CHAT_BASE_URL),
+            ("[chat]\nmodel = \"member/chat\"\n", false, Some("member/chat"), logos_core::config::DEFAULT_CHAT_BASE_URL),
+        ];
+        for (member_config, federated, model, base_url) in rows {
+            let (tmp, member) = inheriting_estate();
+            write(tmp.path(), "config.toml", ws_wiki);
+            write(&member, "config.toml", member_config);
+            let workspace_root = federated.then(|| tmp.path());
+            let effective = resolve_effective_model(&member, workspace_root).expect("resolves");
+            let label = format!("{member_config:?} federated={federated}");
+            assert_eq!(effective.model.as_deref(), model, "{label}");
+            assert_eq!(effective.base_url, base_url, "{label}");
+        }
+
+        // Neither root declares a wiki model: the effective (inherited) chat model.
+        let (tmp, member) = inheriting_estate();
+        let effective = resolve_effective_model(&member, Some(tmp.path())).expect("resolves");
+        assert_eq!(effective.model.as_deref(), Some("workspace/chat"));
+    }
+
+    /// Sprint 77 HF-1, server↔SPA agreement: the read-model's `effective_wiki`
+    /// slice — the only thing the Wiki tab reads for its model, readiness and
+    /// disclosure (`web/ui/src/views/wiki/wikiGenModel.ts`) — is the model this
+    /// run resolves, in every state of the matrix and at both tiers.
+    #[test]
+    fn the_read_model_slice_is_the_model_the_run_resolves() {
+        let workspace_configs = [
+            "[chat]\nmodel = \"workspace/chat\"\n[wiki]\nmodel = \"workspace/wiki\"\n",
+            "[chat]\nmodel = \"workspace/chat\"\n",
+            "[wiki]\nmodel = \"workspace/wiki\"\n",
+        ];
+        let member_configs = [
+            "",
+            "[wiki]\nmodel = \"member/wiki\"\n",
+            "[chat]\nmodel = \"member/chat\"\n",
+            "[chat]\nmodel = \"member/chat\"\n[wiki]\nmodel = \"member/wiki\"\n",
+        ];
+        let mut distinct = std::collections::BTreeSet::new();
+        for ws_config in workspace_configs {
+            for member_config in member_configs {
+                for federated in [true, false] {
+                    let (tmp, member) = inheriting_estate();
+                    write(tmp.path(), "config.toml", ws_config);
+                    write(&member, "config.toml", member_config);
+                    let workspace_root = federated.then(|| tmp.path());
+                    let run = resolve_effective_model(&member, workspace_root).expect("resolves");
+                    let slice = logos_core::config::read_documents(&member, workspace_root)
+                        .expect("reads")
+                        .effective_wiki;
+                    assert_eq!(
+                        slice.model, run.model,
+                        "ws={ws_config:?} member={member_config:?} federated={federated}"
+                    );
+                    distinct.insert(run.model);
+                }
+            }
+        }
+        // The matrix reaches every source of the model, so agreement is not
+        // agreement over one value.
+        assert_eq!(distinct.len(), 5, "{distinct:?}");
     }
 
     /// HF-1 ([ADR-67] §2): wiki generation holds the same trust boundary as the

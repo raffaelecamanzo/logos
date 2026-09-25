@@ -840,11 +840,17 @@ describe("the tier's reach is stated on the surface (S-451 AC2, AC3)", () => {
     expect(banner).toHaveTextContent(/with this root's key only/);
   });
 
-  it("does not claim members inherit the [wiki] model, which no member reads from this root", async () => {
+  it("states the one condition under which members inherit the [wiki] model (HF-1)", async () => {
     const { card } = await mountedTier();
     const wiki = within(card).getByText("[wiki]", { selector: "legend" }).closest("fieldset") as HTMLElement;
-    expect(wiki).toHaveTextContent(/Not inherited/);
-    expect(wiki).toHaveTextContent(/its own \[wiki\] model, else its effective \[chat\] model/);
+    // Inherited — but only by a member that also inherits this root's [chat] table
+    // (`WikiConfig::resolve_inherited`): the policy half is the condition.
+    expect(wiki).not.toHaveTextContent(/Not inherited/);
+    expect(wiki).toHaveTextContent(/Inherited with the \[chat\] table/);
+    expect(wiki).toHaveTextContent(/declares no \[wiki\] model of its own uses this one only while it inherits this root's \[chat\] table/);
+    // …and the member that owns its [chat] model is told why it does not.
+    expect(wiki).toHaveTextContent(/declares its own \[chat\] model owns its endpoint/);
+    expect(wiki).toHaveTextContent(/its own \[wiki\] model, else its own \[chat\] model/);
     const banner = within(card).getByText("INHERITED PER HALF").closest("section") as HTMLElement;
     expect(banner).not.toHaveTextContent(/\[wiki\]/);
   });

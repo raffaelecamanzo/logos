@@ -252,8 +252,10 @@ function configGroups(c: ParsedConfig, d: ParsedConfig, effective: EffectiveChat
           control: "str",
           label: "wiki model",
           initial: c.wiki?.model ?? "",
-          placeholder: "leave blank to inherit [chat].model",
-          help: "The model used for wiki page synthesis, distinct from the chat model. Leave blank to fall back to [chat].model.",
+          placeholder: "leave blank to inherit",
+          // Static prose, not a second spelling of the rule: the value is resolved
+          // server-side into `effective_wiki` (Sprint 77 HF-1, ADR-67 §8).
+          help: "The model used for wiki page synthesis, distinct from the chat model. Leave blank to use the workspace root's [wiki] model while this member inherits the workspace [chat] table, else the effective [chat] model.",
           defaultHint: defaultHint(d.wiki?.model),
         },
       ],

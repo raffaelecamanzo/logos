@@ -2850,7 +2850,9 @@ impl Engine {
     /// `workspace_root` is the federation root the caller already resolved —
     /// `None` in single-root mode, never a discovered one. It reaches only the
     /// read-model's [`effective_chat`](crate::config::ConfigReadModel::effective_chat)
-    /// slice ([FR-WS-30], S-448); the literal documents are this root's alone.
+    /// and [`effective_wiki`](crate::config::ConfigReadModel::effective_wiki)
+    /// slices ([FR-WS-30], S-448, Sprint 77 HF-1); the literal documents are this
+    /// root's alone.
     ///
     /// # Errors
     /// A present-but-invalid policy file fails loud through the load path — an

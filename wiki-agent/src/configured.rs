@@ -4,9 +4,10 @@
 //!
 //! [`run_configured`] consumes the S-176 [`EffectiveWikiModel`] — in production
 //! produced by
-//! [`WikiConfig::resolve_inherited`](logos_core::config::WikiConfig::resolve_inherited)
+//! [`WikiConfig::resolve_in_workspace`](logos_core::config::WikiConfig::resolve_in_workspace)
 //! over the [`resolve_chat`](logos_core::config::resolve_chat) seam ([ADR-67]):
-//! `[wiki].model` if set, else the effective `[chat].model`, with
+//! the member's `[wiki].model` if set, else the workspace root's when the member
+//! inherits the chat policy half, else the effective `[chat].model`, with
 //! `provider`/`base_url`/the API key inherited from the effective `[chat]` policy
 //! and credential — the member's own, or the workspace's where the member leaves
 //! that half undeclared, and the workspace's key alone under an inherited policy

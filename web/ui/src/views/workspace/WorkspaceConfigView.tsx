@@ -732,18 +732,21 @@ function tierFields(c: ParsedConfig): FieldGroup[] {
     {
       legend: "[wiki]",
       fields: [
-        { table: "wiki", key: "model", type: "str", label: "wiki model", initial: c.wiki?.model ?? "", placeholder: "leave blank to declare none", help: "A dedicated wiki-synthesis model, distinct from the chat model." },
+        { table: "wiki", key: "model", type: "str", label: "wiki model", initial: c.wiki?.model ?? "", placeholder: "leave blank to declare none", help: "A dedicated wiki-synthesis model, distinct from the chat model, for every member that inherits this [chat] table and declares no wiki model of its own." },
       ],
-      // Stated because the banner above is about inheritance, and this key is the
-      // one it does not cover: the wiki service reads `[wiki]` from the member's
-      // root only (`web/src/wikigen/configured.rs`); only the chat halves are
-      // two-tier (NFR-CC-04).
+      // Stated because the banner above is about inheritance per half, and this
+      // key rides the policy half under a condition of its own: a member inherits
+      // it only while it inherits this root's `[chat]` table, since a member that
+      // owns its `[chat]` model owns its endpoint, where a model named for this
+      // root's endpoint may not exist (`WikiConfig::resolve_inherited`, Sprint 77
+      // HF-1, NFR-CC-04).
       note: (
         <p className={styles.inherited}>
-          <strong>Not inherited.</strong> A member&apos;s wiki model is its own <code>[wiki] model</code>,
-          else its effective <code>[chat]</code> model — which is the model above for a member that
-          inherits this <code>[chat]</code> table. No member reads a <code>[wiki] model</code> from the
-          workspace root.
+          <strong>Inherited with the <code>[chat]</code> table.</strong> A member that declares no{" "}
+          <code>[wiki] model</code> of its own uses this one only while it inherits this root&apos;s{" "}
+          <code>[chat]</code> table; with none here, it uses its effective <code>[chat]</code> model. A
+          member that declares its own <code>[chat] model</code> owns its endpoint, where this model may
+          not exist, so it uses its own <code>[wiki] model</code>, else its own <code>[chat]</code> model.
         </p>
       ),
     },

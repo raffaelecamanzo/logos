@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigError;
 use crate::models::pipeline::{InitAction, InitStep};
+use crate::observability::{traced, Tool};
 
 /// The manifest filename discovered by the up-tree walk ([`super::discover`]).
 ///
@@ -762,6 +763,43 @@ pub fn save_document(
         path: MANIFEST_FILENAME.to_string(),
         bytes_written: candidate.len() as u64,
         fingerprint: fingerprint(candidate.as_bytes()),
+    })
+}
+
+/// [`read_document`] as the workspace Config editor's read — booked as the one
+/// `config_read` telemetry event the S-450 workspace-tier read
+/// ([`read_workspace_documents`](crate::config::read_workspace_documents)) emits,
+/// through the one emission point (`observability::traced`).
+///
+/// No engine stands behind this route to emit the façade's event (the manifest
+/// is a file at the workspace root, where none may be constructed, [ADR-67]), so
+/// the event is emitted here, under whatever surface the caller entered — a
+/// manifest read is as visible to `logos stats` as a member's config read.
+///
+/// # Errors
+/// As [`read_document`].
+///
+/// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+pub fn read_workspace_manifest(root: &Path) -> anyhow::Result<ManifestDocument> {
+    traced(Tool::ConfigRead, || Ok(read_document(root)?))
+}
+
+/// [`save_document`] as the workspace Config editor's save — booked as the one
+/// `config_write` telemetry event the S-450 workspace-tier save
+/// ([`write_workspace_config`](crate::config::write_workspace_config)) emits,
+/// `ok` tracking the result. A conflict or an unchanged candidate is an `Ok`
+/// outcome, as it is there.
+///
+/// # Errors
+/// As [`save_document`]; the [`ConfigError`] stays the root of the `anyhow`
+/// chain, so a caller can still map validation vs I/O faults.
+pub fn save_workspace_manifest(
+    root: &Path,
+    candidate: &str,
+    loaded_fingerprint: &str,
+) -> anyhow::Result<ManifestSaveOutcome> {
+    traced(Tool::ConfigWrite, || {
+        Ok(save_document(root, candidate, loaded_fingerprint)?)
     })
 }
 

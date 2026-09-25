@@ -58,6 +58,8 @@ function model(): ConfigReadModel {
       credential_origin: "member",
       member_key_withheld: false,
     },
+    // The single-root wiki resolution: the member's own `[wiki].model` (HF-1).
+    effective_wiki: { model: "claude-wiki" },
     // The CR-067/BR-37 defaults projection: config.toml real defaults, plus
     // rules.toml real [metric_thresholds] defaults / [constraints] recommended
     // baselines — mirroring what the server's Config::default() /
@@ -191,6 +193,19 @@ describe("ConfigView [wiki] model field (S-224, FR-CF-07, FR-UI-12)", () => {
 
     expect(screen.getByText("[wiki]")).toBeInTheDocument();
     expect((screen.getByLabelText("wiki model") as HTMLInputElement).value).toBe("claude-wiki");
+  });
+
+  it("states the three-step fallback a blank wiki model resolves through (Sprint 77 HF-1)", async () => {
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    const fieldset = screen.getByText("[wiki]").closest("fieldset")!;
+    // A blank field no longer means "the [chat] model" for a member that inherits
+    // the workspace [chat] table: the workspace root's [wiki] model comes first.
+    expect(fieldset).toHaveTextContent(/the workspace root's \[wiki\] model while this member inherits the workspace \[chat\] table, else the effective \[chat\] model/);
+    expect(fieldset).not.toHaveTextContent(/Leave blank to fall back to \[chat\]\.model/);
+    expect(within(fieldset).getByLabelText("wiki model")).toHaveAttribute("placeholder", "leave blank to inherit");
   });
 
   it("carries no key or provider control — only the model field (no new secret surface, NFR-SE-07)", async () => {

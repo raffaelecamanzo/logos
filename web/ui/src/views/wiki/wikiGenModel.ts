@@ -172,15 +172,18 @@ export function hostOf(url: string): string {
   return host === "" ? url.trim() : host;
 }
 
-/** The effective wiki model ([FR-CF-07]): the member's `[wiki].model` if set, else
- *  the **effective** chat model — the member's own or the one it inherits from the
- *  workspace root (`effective_chat`, [ADR-67]); `null` when neither resolves (the
- *  configure-first state). Mirrors the server's `WikiConfig::resolve_inherited`. */
+/** The effective wiki model ([FR-CF-07]): the member's `[wiki].model`, else the
+ *  workspace root's — only when the member inherits the chat policy half — else the
+ *  effective chat model; `null` when none resolves (the configure-first state).
+ *
+ *  Read from the server's `effective_wiki` slice, never re-derived here: the slice
+ *  is resolved by the wiki run's own function (`WikiConfig::resolve_in_workspace`),
+ *  and the workspace `[wiki].model` a member inherits appears nowhere else in this
+ *  read-model — so a second spelling of the rule in the SPA could only disagree
+ *  with the run (Sprint 77 HF-1, [ADR-67]). */
 export function effectiveWikiModel(config: ConfigReadModel): string | null {
-  const wikiModel = config.config.parsed.wiki?.model?.trim();
-  if (wikiModel) return wikiModel;
-  const chatModel = config.effective_chat.policy.model?.trim();
-  return chatModel && chatModel !== "" ? chatModel : null;
+  const model = config.effective_wiki.model?.trim();
+  return model ? model : null;
 }
 
 /** Is wiki generation usable? An effective model AND an effective key — declared on

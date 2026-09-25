@@ -17,10 +17,13 @@
 //! [FR-WK-17]: ../../../docs/specs/requirements/FR-WK-17.md
 //! [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use super::chat::{ChatConfig, ChatOrigin, ChatProvider, ChatResolution};
 use super::error::ConfigError;
+use super::load_config_from_root;
 use super::secrets::{MaskedSecret, Secrets};
 
 /// The default revision-stale re-queue threshold ([FR-WK-17]): an
@@ -47,7 +50,9 @@ fn default_revision_stale_threshold() -> u64 {
 pub struct WikiConfig {
     /// The model identifier for wiki page synthesis, distinct from
     /// [`ChatConfig::model`]. Optional — an absent value falls back to the chat
-    /// model ([`resolve`](Self::resolve)).
+    /// model ([`resolve`](Self::resolve)), or, under an inherited workspace chat
+    /// policy, first to the workspace root's `model`
+    /// ([`resolve_inherited`](Self::resolve_inherited)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
@@ -103,7 +108,7 @@ impl WikiConfig {
     /// `base_url`, and API key **inherited** from `chat`/`secrets` verbatim (no
     /// separate wiki provider, endpoint, or secret, [ADR-42]).
     pub fn resolve(&self, chat: &ChatConfig, secrets: &Secrets) -> EffectiveWikiModel {
-        self.resolve_parts(chat, secrets.chat_api_key(), false, false)
+        self.resolve_parts(chat, None, secrets.chat_api_key(), false, false)
     }
 
     /// [`resolve`](Self::resolve) over the chat policy and credential the
@@ -111,31 +116,81 @@ impl WikiConfig {
     /// the inherited provider, endpoint, retry policy and key are the **effective**
     /// chat halves — the member's own, or the workspace's where the member leaves
     /// that half undeclared, and the workspace's key alone under an inherited
-    /// policy ([ADR-67] §2) — while [`WikiConfig::model`] still wins over the chat
-    /// model exactly as in [`resolve`](Self::resolve). The wiki table itself is the
-    /// caller's (the member's); only the inherited chat halves are two-tier.
+    /// policy ([ADR-67] §2).
+    ///
+    /// `self` is the member's `[wiki]` table and `workspace` the workspace root's
+    /// (`None` single-root). The model resolves in three steps (Sprint 77 HF-1):
+    ///
+    /// 1. the member's own [`WikiConfig::model`];
+    /// 2. else the workspace's [`WikiConfig::model`] — **only** when the member
+    ///    inherits the chat policy half ([`ChatOrigin::Workspace`]). A member that
+    ///    declares its own `[chat] model` owns its endpoint, and a model named for
+    ///    the workspace's endpoint may not exist at the member's, so it never
+    ///    receives the workspace wiki model;
+    /// 3. else the effective chat model.
     ///
     /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
-    pub fn resolve_inherited(&self, chat: &ChatResolution) -> EffectiveWikiModel {
+    pub fn resolve_inherited(
+        &self,
+        workspace: Option<&WikiConfig>,
+        chat: &ChatResolution,
+    ) -> EffectiveWikiModel {
+        let policy_inherited = chat.policy_origin == ChatOrigin::Workspace;
+        let inherited_model = workspace
+            .filter(|_| policy_inherited)
+            .and_then(|w| w.model.as_deref());
         self.resolve_parts(
             &chat.policy,
+            inherited_model,
             chat.api_key(),
-            chat.policy_origin == ChatOrigin::Workspace,
+            policy_inherited,
             chat.member_key_withheld,
         )
     }
 
-    /// The one spelling of the inheritance rule both resolvers share, so the
+    /// [`resolve_inherited`](Self::resolve_inherited) with the workspace root's
+    /// `[wiki]` table read from `workspace_root` — the already-resolved federation
+    /// root, never discovered here. The workspace `config.toml` is read **only**
+    /// when the member inherits the chat policy half, the one case its `[wiki]`
+    /// can apply; otherwise this performs no read at all, so single-root (`None`)
+    /// behaviour is byte-identical to [`resolve_inherited`](Self::resolve_inherited)
+    /// over no workspace table ([ADR-52]).
+    ///
+    /// # Errors
+    /// The [`ConfigError`] [`load_config_from_root`] raises for the workspace
+    /// root's `config.toml`.
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    pub fn resolve_in_workspace(
+        &self,
+        chat: &ChatResolution,
+        workspace_root: Option<&Path>,
+    ) -> Result<EffectiveWikiModel, ConfigError> {
+        let workspace = match (chat.policy_origin, workspace_root) {
+            (ChatOrigin::Workspace, Some(root)) => Some(load_config_from_root(root)?.wiki),
+            _ => None,
+        };
+        Ok(self.resolve_inherited(workspace.as_ref(), chat))
+    }
+
+    /// The one spelling of the inheritance rule every resolver shares, so the
     /// single-root and two-tier paths cannot drift into two precedence rules.
+    /// `inherited_model` is the workspace `[wiki].model`, already gated on an
+    /// inherited chat policy by the caller; `None` on every single-root path.
     fn resolve_parts(
         &self,
         chat: &ChatConfig,
+        inherited_model: Option<&str>,
         api_key: Option<&str>,
         chat_policy_inherited: bool,
         member_key_withheld: bool,
     ) -> EffectiveWikiModel {
         EffectiveWikiModel {
-            model: self.model.clone().or_else(|| chat.model.clone()),
+            model: self
+                .model
+                .clone()
+                .or_else(|| inherited_model.map(str::to_string))
+                .or_else(|| chat.model.clone()),
             provider: chat.provider,
             base_url: chat.base_url.clone(),
             api_key: api_key.map(str::to_string),
@@ -169,8 +224,8 @@ impl WikiConfig {
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
 #[derive(Clone, PartialEq, Eq)]
 pub struct EffectiveWikiModel {
-    /// The resolved model id, or `None` when neither `[wiki].model` nor
-    /// `[chat].model` is set (the configure-first state).
+    /// The resolved model id, or `None` when no `[wiki].model` applies and no
+    /// effective `[chat].model` is set (the configure-first state).
     pub model: Option<String>,
     /// The provider family, inherited from [`ChatConfig::provider`].
     pub provider: ChatProvider,
@@ -384,6 +439,177 @@ mod tests {
         let resolved = wiki.resolve(&chat, &Secrets::default());
         assert_eq!(resolved.max_provider_retries, 4);
         assert_eq!(resolved.provider_retry_base_ms, 125);
+    }
+
+    // ── The two-tier `[wiki].model` rule (Sprint 77 HF-1, [ADR-67]) ──────────
+
+    /// A workspace root declaring a whole `[chat]` table, a key and a
+    /// `[wiki].model`, with one member nested inside it — the real layout, so a
+    /// resolution that walked up the tree would find the tier.
+    struct Estate {
+        _dir: tempfile::TempDir,
+        workspace: std::path::PathBuf,
+        member: std::path::PathBuf,
+    }
+
+    const WS_CHAT_MODEL: &str = "workspace/chat";
+    const WS_WIKI_MODEL: &str = "workspace/wiki";
+    const WS_BASE_URL: &str = "https://workspace.example/v1";
+
+    impl Estate {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = dir.path().to_path_buf();
+            let member = workspace.join("svc");
+            std::fs::create_dir_all(member.join(".logos")).unwrap();
+            let e = Estate { _dir: dir, workspace, member };
+            e.workspace_config(&format!(
+                "[chat]\nmodel = \"{WS_CHAT_MODEL}\"\nbase_url = \"{WS_BASE_URL}\"\n\
+                 [wiki]\nmodel = \"{WS_WIKI_MODEL}\"\n"
+            ));
+            std::fs::write(
+                e.workspace.join(".logos/secrets.toml"),
+                "[chat]\napi_key = \"sk-workspace-ws42\"\n",
+            )
+            .unwrap();
+            e
+        }
+
+        fn workspace_config(&self, text: &str) {
+            std::fs::create_dir_all(self.workspace.join(".logos")).unwrap();
+            std::fs::write(self.workspace.join(".logos/config.toml"), text).unwrap();
+        }
+
+        fn member_config(&self, text: &str) {
+            std::fs::write(self.member.join(".logos/config.toml"), text).unwrap();
+        }
+
+        /// The production composition: the member's `[wiki]` over the chat
+        /// resolution, with the workspace root handed in (or not).
+        fn resolve(&self, workspace_root: Option<&std::path::Path>) -> EffectiveWikiModel {
+            let member = crate::config::load_config_from_root(&self.member).unwrap().wiki;
+            let chat = crate::config::resolve_chat(&self.member, workspace_root).unwrap();
+            member.resolve_in_workspace(&chat, workspace_root).unwrap()
+        }
+    }
+
+    /// (1) The member's own `[wiki].model` wins over the workspace's, even under
+    /// an inherited chat policy.
+    #[test]
+    fn the_member_wiki_model_wins_over_the_workspace_wiki_model() {
+        let e = Estate::new();
+        e.member_config("[wiki]\nmodel = \"member/wiki\"\n");
+        let r = e.resolve(Some(&e.workspace));
+        assert_eq!(r.model.as_deref(), Some("member/wiki"));
+        assert_eq!(r.base_url, WS_BASE_URL, "the endpoint is still the inherited one");
+    }
+
+    /// (2) A member inheriting the chat policy half inherits the workspace
+    /// `[wiki].model` — over the effective chat model — and dials the
+    /// workspace endpoint with the workspace key.
+    #[test]
+    fn a_member_inheriting_the_chat_policy_inherits_the_workspace_wiki_model() {
+        let e = Estate::new();
+        let r = e.resolve(Some(&e.workspace));
+        assert_eq!(r.model.as_deref(), Some(WS_WIKI_MODEL));
+        assert_eq!(r.base_url, WS_BASE_URL);
+        assert_eq!(r.api_key.as_deref(), Some("sk-workspace-ws42"));
+        assert!(r.chat_policy_inherited);
+    }
+
+    /// (3) A member owning its `[chat]` model owns its endpoint, so it must NOT
+    /// receive the workspace wiki model (a model named for the workspace's
+    /// endpoint may not exist at the member's): its wiki model is its own chat
+    /// model.
+    #[test]
+    fn a_member_owning_its_chat_policy_never_receives_the_workspace_wiki_model() {
+        let e = Estate::new();
+        e.member_config(
+            "[chat]\nmodel = \"member/chat\"\nbase_url = \"https://member.example/v1\"\n",
+        );
+        let r = e.resolve(Some(&e.workspace));
+        assert_eq!(r.model.as_deref(), Some("member/chat"));
+        assert_eq!(r.base_url, "https://member.example/v1");
+        assert!(!r.chat_policy_inherited);
+    }
+
+    /// (4) Neither root declares a `[wiki].model`: the effective chat model —
+    /// here the inherited workspace one.
+    #[test]
+    fn with_no_wiki_model_anywhere_the_effective_chat_model_is_used() {
+        let e = Estate::new();
+        e.workspace_config(&format!("[chat]\nmodel = \"{WS_CHAT_MODEL}\"\n"));
+        let r = e.resolve(Some(&e.workspace));
+        assert_eq!(r.model.as_deref(), Some(WS_CHAT_MODEL));
+    }
+
+    /// Neither root declares a `[chat] model` (policy `unset`): the workspace
+    /// `[wiki].model` is not inherited — the rule is keyed on an inherited
+    /// policy, not on an absent member one.
+    #[test]
+    fn an_unset_chat_policy_does_not_inherit_the_workspace_wiki_model() {
+        let e = Estate::new();
+        e.workspace_config(&format!("[wiki]\nmodel = \"{WS_WIKI_MODEL}\"\n"));
+        let r = e.resolve(Some(&e.workspace));
+        assert_eq!(r.model, None);
+    }
+
+    /// (5) No workspace root ([ADR-52]): the enclosing tier is never consulted —
+    /// the result equals the single-root resolver's over the member alone.
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    #[test]
+    fn without_a_workspace_root_the_resolution_is_the_single_root_one() {
+        for member in ["", "[chat]\nmodel = \"member/chat\"\n", "[wiki]\nmodel = \"member/wiki\"\n"] {
+            let e = Estate::new();
+            e.member_config(member);
+            let config = crate::config::load_config_from_root(&e.member).unwrap();
+            let secrets = crate::config::load_secrets_from_root(&e.member).unwrap();
+            assert_eq!(e.resolve(None), config.effective_wiki_model(&secrets), "{member:?}");
+        }
+    }
+
+    /// [`WikiConfig::resolve_inherited`] holds the policy gate on its own, not only
+    /// through [`WikiConfig::resolve_in_workspace`]'s read gate: handed a
+    /// workspace table directly, it applies it under an inherited policy and
+    /// ignores it under an owned or unset one.
+    #[test]
+    fn resolve_inherited_applies_a_workspace_table_only_under_an_inherited_policy() {
+        let workspace = WikiConfig {
+            model: Some(WS_WIKI_MODEL.to_string()),
+            ..Default::default()
+        };
+        for (member, expected) in [
+            ("", Some(WS_WIKI_MODEL)),
+            ("[chat]\nmodel = \"member/chat\"\n", Some("member/chat")),
+        ] {
+            let e = Estate::new();
+            e.member_config(member);
+            let chat = crate::config::resolve_chat(&e.member, Some(&e.workspace)).unwrap();
+            let r = WikiConfig::default().resolve_inherited(Some(&workspace), &chat);
+            assert_eq!(r.model.as_deref(), expected, "{member:?}");
+        }
+        let e = Estate::new();
+        e.workspace_config("");
+        let unset = crate::config::resolve_chat(&e.member, Some(&e.workspace)).unwrap();
+        assert_eq!(unset.policy_origin, ChatOrigin::Unset);
+        let r = WikiConfig::default().resolve_inherited(Some(&workspace), &unset);
+        assert_eq!(r.model, None, "an unset policy inherits no workspace wiki model");
+    }
+
+    /// The workspace `config.toml` is read only when its `[wiki]` can apply: a
+    /// member owning its policy resolves even over a workspace file that no
+    /// longer parses, because nothing reads it.
+    #[test]
+    fn the_workspace_config_is_not_read_unless_the_policy_is_inherited() {
+        let e = Estate::new();
+        e.member_config("[chat]\nmodel = \"member/chat\"\n");
+        let chat = crate::config::resolve_chat(&e.member, Some(&e.workspace)).unwrap();
+        e.workspace_config("[wiki]\nmodle = 1\n");
+        let r = WikiConfig::default()
+            .resolve_in_workspace(&chat, Some(&e.workspace))
+            .expect("no read of the broken workspace file");
+        assert_eq!(r.model.as_deref(), Some("member/chat"));
     }
 
     /// [NFR-SE-07]: `Debug` never renders the raw key, only presence + last-4.

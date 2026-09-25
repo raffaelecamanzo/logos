@@ -18,14 +18,20 @@ function frame(name: string, data: string): SseFrame {
   return { name, data };
 }
 
-/** A config read-model with the given chat/wiki model + key presence. */
+/** A config read-model with the given chat/wiki model + key presence. The
+ *  `effective_wiki` slice is the server's single-root resolution of the same
+ *  document unless `effectiveWiki` states it (the server owns the rule —
+ *  `WikiConfig::resolve_in_workspace`, pinned against the run by
+ *  `the_read_model_slice_is_the_model_the_run_resolves`). */
 function config(opts: {
   chatModel?: string | null;
   wikiModel?: string | null;
+  effectiveWiki?: string | null;
   provider?: "openai" | "anthropic";
   baseUrl?: string;
   keyPresent?: boolean;
 }): ConfigReadModel {
+  const singleRootWiki = opts.wikiModel?.trim() || opts.chatModel || null;
   return {
     config: {
       path: ".logos/config.toml",
@@ -61,6 +67,7 @@ function config(opts: {
       credential_origin: opts.keyPresent === false ? "unset" : "member",
       member_key_withheld: false,
     },
+    effective_wiki: { model: opts.effectiveWiki === undefined ? singleRootWiki : opts.effectiveWiki },
   };
 }
 
@@ -165,12 +172,14 @@ describe("applyWikiFrame — per-run reducer (S-178, FR-WK-18, NFR-CC-04)", () =
 });
 
 describe("configure-first + endpoint disclosure (FR-CF-07, NFR-SE-07)", () => {
-  it("prefers the dedicated [wiki].model, else falls back to [chat].model", () => {
-    expect(effectiveWikiModel(config({ wikiModel: "wiki/m", chatModel: "chat/m" }))).toBe("wiki/m");
-    expect(effectiveWikiModel(config({ wikiModel: null, chatModel: "chat/m" }))).toBe("chat/m");
-    expect(effectiveWikiModel(config({ wikiModel: null, chatModel: null }))).toBeNull();
-    // A blank wiki model falls through to the chat model.
-    expect(effectiveWikiModel(config({ wikiModel: "  ", chatModel: "chat/m" }))).toBe("chat/m");
+  it("is the server's effective_wiki model, never re-derived from the literal document", () => {
+    // The literal document and the chat slice would say "chat/m"; the server's
+    // resolution says otherwise, and the server's resolution is what the run uses.
+    const c = config({ wikiModel: null, chatModel: "chat/m", effectiveWiki: "resolved/m" });
+    expect(effectiveWikiModel(c)).toBe("resolved/m");
+    expect(effectiveWikiModel(config({ wikiModel: "wiki/m", chatModel: "chat/m", effectiveWiki: null }))).toBeNull();
+    // A blank slice is no model (configure-first), not an empty-string model.
+    expect(effectiveWikiModel(config({ chatModel: "chat/m", effectiveWiki: "  " }))).toBeNull();
   });
 
   it("is configured only with an effective model AND a present key", () => {
@@ -205,6 +214,9 @@ describe("configure-first + endpoint disclosure (FR-CF-07, NFR-SE-07)", () => {
       credential_origin: "workspace",
       member_key_withheld: false,
     };
+    // The server's resolution for this state: no wiki model anywhere, so the
+    // effective (inherited) chat model.
+    c.effective_wiki = { model: "ws-model" };
     return c;
   }
 
@@ -219,7 +231,31 @@ describe("configure-first + endpoint disclosure (FR-CF-07, NFR-SE-07)", () => {
   it("the member's own [wiki].model still wins over the inherited chat model", () => {
     const c = inherited();
     c.config.parsed.wiki = { model: "member-wiki-model" };
+    c.effective_wiki = { model: "member-wiki-model" };
     expect(effectiveWikiModel(c)).toBe("member-wiki-model");
+  });
+
+  // Sprint 77 HF-1, server↔SPA agreement: a member inheriting the chat policy
+  // inherits the workspace [wiki].model, which appears in NEITHER the member's
+  // literal document NOR the chat slice — only in the server's effective_wiki
+  // slice. The tab's model, readiness and disclosure must name it, as the run does.
+  it("names the inherited workspace [wiki].model the run uses (HF-1)", () => {
+    const c = inherited();
+    c.effective_wiki = { model: "ws-wiki-model" };
+    expect(c.config.parsed.wiki?.model ?? null).toBeNull();
+    expect(c.effective_chat.policy.model).toBe("ws-model");
+    expect(effectiveWikiModel(c)).toBe("ws-wiki-model");
+    expect(isWikiConfigured(c)).toBe(true);
+    const d = wikiDisclosure(c);
+    expect(d.model).toBe("ws-wiki-model");
+    expect(d.endpointHost).toBe("llm.example.org");
+  });
+
+  it("with no effective wiki model the tab is configure-first even with a key", () => {
+    const c = inherited();
+    c.effective_wiki = { model: null };
+    expect(isWikiConfigured(c)).toBe(false);
+    expect(wikiDisclosure(c).model).toBe("(no model)");
   });
 
   it("discloses the inherited endpoint host, never the member literal's", () => {

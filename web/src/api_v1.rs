@@ -1617,7 +1617,8 @@ pub(crate) async fn wiki_nav(MemberEngine(engine): MemberEngine) -> Response {
 /// no graph store, so a load mutates nothing ([FR-UI-03], [ADR-28]).
 ///
 /// Beside those it carries the **effective** chat resolution and each half's
-/// origin ([FR-WS-30], S-448). Its workspace root is the one the backing already
+/// origin ([FR-WS-30], S-448), and the effective wiki model the wiki run resolves
+/// (`effective_wiki`, Sprint 77 HF-1). Its workspace root is the one the backing already
 /// holds — a federated backing's resolved root, never a discovered one — and a
 /// single-root backing supplies none, so no `workspace` origin is reachable there.
 ///
@@ -1763,7 +1764,9 @@ pub(crate) async fn workspace_config_secret(
 //
 // One read and one write over `logos.workspace.toml` itself — the file that
 // governs N repositories — through core's whole-manifest write path
-// (`manifest::read_document` / `manifest::save_document`), which validates the
+// (`manifest::read_workspace_manifest` / `manifest::save_workspace_manifest`),
+// which books one `config_read` / `config_write` telemetry event per call as the
+// workspace config routes above do, validates the
 // candidate with the parser `discover` runs, writes nothing for a byte-identical
 // result, refuses a save made against a manifest that changed on disk since the
 // load, and otherwise writes the candidate verbatim through the shared atomic
@@ -1794,7 +1797,7 @@ pub(crate) async fn workspace_manifest(
         Surface::Web,
         |registry, _bridge| -> anyhow::Result<WorkspaceManifestAnswer> {
             let federation = registry.federation();
-            let document = manifest::read_document(&federation.root)?;
+            let document = manifest::read_workspace_manifest(&federation.root)?;
             let governance_in_effect = document
                 .parsed
                 .as_ref()
@@ -1825,8 +1828,8 @@ pub(crate) struct WorkspaceManifestAnswer {
     governance_in_effect: bool,
 }
 
-/// `POST /api/v1/workspace/manifest/save` → [`manifest::save_document`]
-/// ([FR-UI-38]). Form fields: `content=<toml>` (the whole candidate manifest) and
+/// `POST /api/v1/workspace/manifest/save` → [`manifest::save_workspace_manifest`]
+/// ([FR-UI-38]), booked as one `config_write` telemetry event. Form fields: `content=<toml>` (the whole candidate manifest) and
 /// `fingerprint=<hex>` (the one the editor's read returned).
 ///
 /// - `200` with `outcome: "written"` or `"unchanged"` (nothing written).
@@ -1862,7 +1865,7 @@ pub(crate) async fn workspace_manifest_save(
     };
     let content = form.get("content").cloned().unwrap_or_default();
     let outcome = run_blocking("api_v1_workspace_manifest_save", Surface::Web, move || {
-        manifest::save_document(&root, &content, &loaded).map_err(anyhow::Error::from)
+        manifest::save_workspace_manifest(&root, &content, &loaded)
     })
     .await;
     match outcome {

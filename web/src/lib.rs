@@ -285,7 +285,7 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 ///   at the workspace root ([ADR-40]); that is also why the workspace tier has
 ///   **no** apply route here. The config save is refused on a stale load
 ///   fingerprint exactly as the manifest save below is (S-451).
-/// - `/api/v1/workspace/manifest/save` → [`manifest::save_document`], the
+/// - `/api/v1/workspace/manifest/save` → [`manifest::save_workspace_manifest`], the
 ///   whole-manifest write path over `logos.workspace.toml` (S-430, [FR-UI-38]):
 ///   validated by the parser discovery runs, refused on a stale load
 ///   fingerprint, written verbatim. Engine-free for the same reason.
@@ -302,7 +302,7 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 /// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
 /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
 /// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
-/// [`manifest::save_document`]: logos_core::federation::manifest::save_document
+/// [`manifest::save_workspace_manifest`]: logos_core::federation::manifest::save_workspace_manifest
 /// [ADR-40]: ../../../docs/specs/architecture/decisions/ADR-40.md
 /// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md

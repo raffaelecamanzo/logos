@@ -804,8 +804,10 @@ export interface ParsedChatConfig {
 }
 
 /** The parsed `[wiki]` projection (mirrors `WikiConfig`, FR-CF-07): the optional
- *  dedicated wiki model. Absent/blank ⇒ the wiki inherits `[chat].model`. The
- *  section always serializes as an object; `model` is omitted when unset. */
+ *  dedicated wiki model, as this root declares it. Absent ⇒ the workspace root's
+ *  `[wiki].model` under an inherited workspace `[chat]` table, else the effective
+ *  `[chat].model` — resolved server-side into `effective_wiki` (Sprint 77 HF-1).
+ *  The section always serializes as an object; `model` is omitted when unset. */
 export interface ParsedWikiConfig {
   model?: string | null;
 }
@@ -899,10 +901,20 @@ export interface EffectiveChat {
   member_key_withheld: boolean;
 }
 
+/** The effective wiki generation model (mirrors `EffectiveWiki`, FR-CF-07,
+ *  ADR-67, Sprint 77 HF-1): the member's own `[wiki].model`, else the workspace
+ *  root's — only when the member inherits the chat policy half — else the
+ *  effective chat model; `null` in the configure-first state. Resolved by the
+ *  server with the wiki run's own function, so the Wiki tab reads it rather than
+ *  re-deriving the rule. */
+export interface EffectiveWiki {
+  model: string | null;
+}
+
 /** `GET /api/v1/config` — both policy files, the masked chat key, the
- *  code-sourced `defaults` projection, and the effective chat resolution
- *  (mirrors `ConfigReadModel`, FR-UI-12/FR-CF-06/FR-WS-30). A pure read;
- *  loading mutates nothing. */
+ *  code-sourced `defaults` projection, and the effective chat and wiki
+ *  resolutions (mirrors `ConfigReadModel`, FR-UI-12/FR-CF-06/FR-WS-30). A pure
+ *  read; loading mutates nothing. */
 export interface ConfigReadModel {
   config: FileView<ParsedConfig>;
   rules: FileView<ParsedRules>;
@@ -914,6 +926,9 @@ export interface ConfigReadModel {
    *  pre-fills or posts it: an inherited value must not be written back into the
    *  member's `config.toml` (NFR-RA-05). */
   effective_chat: EffectiveChat;
+  /** Beside the literal document for the same reason; the Wiki tab's model,
+   *  readiness verdict and consent disclosure read it (Sprint 77 HF-1). */
+  effective_wiki: EffectiveWiki;
 }
 
 /** The outcome of a validated atomic `POST /config/save` (mirrors

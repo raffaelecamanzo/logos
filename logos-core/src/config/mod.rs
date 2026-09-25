@@ -105,7 +105,7 @@ pub use workspace_tier::{
 };
 pub use writeback::{
     read_documents, write_config, write_rules, write_secret, ConfigApplyOutcome, ConfigDefaults,
-    ConfigFileView, ConfigReadModel, ConfigWriteOutcome, EffectiveChat, FileView,
+    ConfigFileView, ConfigReadModel, ConfigWriteOutcome, EffectiveChat, EffectiveWiki, FileView,
     MetricThresholdDefaults, PolicyFile, RulesDefaults, RulesFileView, SecretWriteOutcome, RULES_PROVENANCE_STAMP,
 };
 
