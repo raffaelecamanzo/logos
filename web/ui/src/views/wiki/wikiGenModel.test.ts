@@ -171,6 +171,75 @@ describe("applyWikiFrame — per-run reducer (S-178, FR-WK-18, NFR-CC-04)", () =
   });
 });
 
+describe("applyWikiFrame — live-scope denominator (CR-093, S-310, FR-UI-19, NFR-CC-04)", () => {
+  const started = (total: number) => frame("started", JSON.stringify({ total, synthesis_timeout_secs: 180 }));
+  const pageStarted = (slug: string, index: number, total: number) =>
+    frame("page-started", JSON.stringify({ slug, title: slug, index, total }));
+  const pageWritten = (slug: string) =>
+    frame("page-written", JSON.stringify({ slug, anchor_count: 0, replaced: false }));
+  const fold = (frames: SseFrame[], from = initialWikiGenState()) => frames.reduce(applyWikiFrame, from);
+
+  /** A budget-1 run that opened on two pages (a, b): the re-read after page a
+   *  surfaced b, c and d (1 attempted + 3 surfaced = 4); the re-read after page b
+   *  found d gone from the work-list unattempted (2 + 1 = 3). */
+  const GROWN_RUN: SseFrame[] = [
+    started(2),
+    pageStarted("a", 1, 2),
+    pageWritten("a"),
+    pageStarted("b", 2, 4),
+    pageWritten("b"),
+    pageStarted("c", 3, 3),
+    pageWritten("c"),
+    frame("completed", JSON.stringify({ pages_written: 3, pages_failed: 0 })),
+  ];
+
+  it("adopts the per-page total as a monotonic maximum, keeping the opening size", () => {
+    let s = fold([started(5), pageStarted("a", 1, 5)]);
+    expect(s.total).toBe(5);
+    expect(s.initialTotal).toBe(5);
+
+    s = applyWikiFrame(s, pageStarted("b", 2, 7));
+    expect(s.total).toBe(7);
+
+    // An item left the work-list unattempted: the agent's total shrank, the
+    // rendered denominator does not walk backwards.
+    s = applyWikiFrame(s, pageStarted("c", 3, 6));
+    expect(s.total).toBe(7);
+    expect(s.initialTotal).toBe(5);
+  });
+
+  it("never renders a numerator above its denominator on a run whose scope grew", () => {
+    let s = initialWikiGenState();
+    for (const f of GROWN_RUN) {
+      s = applyWikiFrame(s, f);
+      expect(s.written.length).toBeLessThanOrEqual(s.total);
+    }
+    expect(s.total).toBe(4);
+    expect(s.written).toEqual(["a", "b", "c"]);
+  });
+
+  it("converges a mid-run re-attach on the same denominator, at every join point", () => {
+    const live = fold(GROWN_RUN);
+    for (let k = 1; k <= GROWN_RUN.length; k++) {
+      // A re-attach at frame k: a FRESH state (a remounted hook) replays the retained
+      // history, the boundary frame arriving twice at the replay/live handoff, then
+      // the live tail — the fold is idempotent, so it lands where the live one did.
+      const replayed = fold([...GROWN_RUN.slice(0, k), GROWN_RUN[k - 1], ...GROWN_RUN.slice(k)]);
+      expect({ total: replayed.total, initial: replayed.initialTotal, written: replayed.written }).toEqual({
+        total: live.total,
+        initial: live.initialTotal,
+        written: live.written,
+      });
+    }
+  });
+
+  it("leaves an unchanged-scope run's denominator exactly at the started size", () => {
+    const s = fold([started(2), pageStarted("a", 1, 2), pageWritten("a"), pageStarted("b", 2, 2), pageWritten("b")]);
+    expect(s.total).toBe(2);
+    expect(s.initialTotal).toBe(2);
+  });
+});
+
 describe("configure-first + endpoint disclosure (FR-CF-07, NFR-SE-07)", () => {
   it("is the server's effective_wiki model, never re-derived from the literal document", () => {
     // The literal document and the chat slice would say "chat/m"; the server's

@@ -12,7 +12,9 @@
 //!   ([FR-WK-03] content, [FR-WK-12] revision);
 //! - the pass records **zero real outbound connections** (a loopback tripwire);
 //! - an **empty work-list starts no run** and makes no model call;
-//! - a **spent per-run budget halts** the pass honestly.
+//! - a **spent per-run budget halts** the pass honestly;
+//! - a work-list that **grows between auto-continued chunks** reports a
+//!   scope-accurate progress denominator, never `written > total` ([CR-093]).
 //!
 //! The real-`Engine` fixture helpers mirror `logos-core/tests/wiki_store.rs`; the
 //! tripwire mirrors `agent-core/tests/zero_egress.rs`.
@@ -23,7 +25,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_core::{MockCompletionModel, MockTurn};
+use agent_core::rig::completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+};
+use agent_core::rig::streaming::StreamingCompletionResponse;
+use agent_core::{MockCompletionModel, MockRawResponse, MockTurn};
 use logos_core::config::{ChatProvider, EffectiveWikiModel};
 use logos_core::wiki::{revision_pending, GenerationCategory};
 use logos_core::Engine;
@@ -407,6 +413,168 @@ async fn a_small_per_chunk_budget_auto_continues_to_drain_the_work_list() {
     );
 }
 
+/// The one-shot hook [`MutatingModel`] fires, taken on first use.
+type OnceHook = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+/// A [`MockCompletionModel`] decorator that runs `on_first_request` exactly once,
+/// on the **first** completion/stream call, before delegating to the mock — so a
+/// test can change the repository at a known point in the run (inside the first
+/// page's synthesis turn, i.e. before the first chunk's queue re-read) with no
+/// timer and no parallel task ([CR-093] risk register). Every call is otherwise
+/// the inner mock's, so its scripted turns and request count are unchanged.
+#[derive(Clone)]
+struct MutatingModel {
+    inner: MockCompletionModel,
+    on_first_request: OnceHook,
+}
+
+impl MutatingModel {
+    fn new(inner: MockCompletionModel, on_first_request: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            inner,
+            on_first_request: Arc::new(std::sync::Mutex::new(Some(Box::new(on_first_request)))),
+        }
+    }
+
+    fn fire_once(&self) {
+        let hook = self.on_first_request.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+impl CompletionModel for MutatingModel {
+    type Response = MockRawResponse;
+    type StreamingResponse = MockRawResponse;
+    type Client = ();
+
+    fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+        Self::new(MockCompletionModel::default(), || {})
+    }
+
+    async fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+        self.fire_once();
+        self.inner.completion(request).await
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+        self.fire_once();
+        self.inner.stream(request).await
+    }
+}
+
+/// A run whose work-list **grows between auto-continued chunks** reports a
+/// scope-accurate denominator ([CR-093], [S-310], [FR-UI-19], [NFR-CC-04]).
+///
+/// The first page's synthesis turn drops an ADR into `docs/specs/architecture/
+/// decisions/` — a local-filesystem presence read the queue makes on every re-read
+/// — so the chunk re-read after page one surfaces a consolidated-doc item the
+/// opening read did not contain, and the run writes more pages than `Started`
+/// announced. The frozen denominator re-sent the opening size on every
+/// `PageStarted`, so the surface read `written/initial` with `written > initial`
+/// (the observed `7/5`); the live denominator (attempted + surfaced after each
+/// re-read) ends at the pages the run actually wrote. `Started` still carries the
+/// opening size and is emitted exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_work_list_that_grows_between_chunks_reports_a_scope_accurate_denominator() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().to_path_buf();
+    let engine = indexed_engine(&repo);
+    let queue = engine.wiki_generate().expect("generate queue");
+    let k = queue.items.len();
+    assert!(k > 1, "the fixture yields more than one queued page");
+    const ADRS: &str = "architecture/adrs";
+    assert!(
+        !queue.items.iter().any(|i| i.slug == ADRS),
+        "the opening work-list has no ADR item — there is no ADR source yet",
+    );
+
+    // Generous scripted turns: the grown run needs more than `k`; unused turns are
+    // simply never consumed.
+    let turns: Vec<_> = (0..k + 8)
+        .map(|i| {
+            MockTurn::text(format!(
+                "# Page {i}\n\nBody {i}, with enough prose to clear the write-path guard."
+            ))
+        })
+        .collect();
+    let mock = MockCompletionModel::new(turns);
+    let adr_root = repo.clone();
+    let model = MutatingModel::new(mock.clone(), move || {
+        let adr = adr_root.join("docs/specs/architecture/decisions/ADR-01.md");
+        std::fs::create_dir_all(adr.parent().unwrap()).unwrap();
+        std::fs::write(&adr, "# ADR-01: Use a graph\n\nWe index code as a graph.\n").unwrap();
+    });
+
+    // Budget 1: the run re-reads the queue after every page, so the ADR written
+    // during page one's turn is visible to the very next re-read.
+    let (events, sink) = recording_sink();
+    let outcome = WikiAgent::new(model, "skill", "mock-model")
+        .with_budget(1)
+        .run(Arc::clone(&engine), sink)
+        .await
+        .expect("run ok")
+        .expect("a run started");
+
+    assert!(outcome.halted.is_none(), "a drained run does not halt: {:?}", outcome.halted);
+    assert!(outcome.pages_failed.is_empty(), "no page failed: {:?}", outcome.pages_failed);
+    assert!(
+        outcome.pages_written.iter().any(|s| s == ADRS),
+        "the re-read surfaced the ADR item and the run absorbed it: {:?}",
+        outcome.pages_written,
+    );
+    let written = outcome.pages_written.len();
+    assert!(
+        written > k,
+        "the work-list genuinely grew mid-run ({written} written vs {k} announced)"
+    );
+
+    let events = events.lock().unwrap();
+    let started: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            WikiProgress::Started { total, .. } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![k], "exactly one Started, carrying the opening work-list size");
+
+    // Fold the stream the way the surface does — the denominator is the maximum
+    // per-page total seen so far, the numerator the pages written so far — and
+    // require the fraction be possible at EVERY point, not only at the end.
+    let mut denominator = k;
+    let mut numerator = 0usize;
+    for event in events.iter() {
+        match event {
+            WikiProgress::PageStarted { index, total, slug, .. } => {
+                denominator = denominator.max(*total);
+                assert!(
+                    index <= total,
+                    "page {slug} at index {index} exceeds its own denominator {total}",
+                );
+            }
+            WikiProgress::PageWritten { .. } => numerator += 1,
+            _ => {}
+        }
+        assert!(
+            numerator <= denominator,
+            "the fraction read {numerator}/{denominator} after {event:?}",
+        );
+    }
+    assert_eq!(
+        denominator, written,
+        "the terminal denominator is the run's actual scope ({written} written), not the \
+         opening {k}",
+    );
+}
+
 /// `Started` carries the configured per-page synthesis liveness timeout ([CR-059],
 /// [S-239], [FR-UI-24]): the default and an explicit override both flow through
 /// unchanged, so the surface can make the 180s liveness guard VISIBLE instead of
@@ -552,7 +720,7 @@ async fn a_persistent_write_rejection_does_not_spin_the_auto_continue_loop() {
     // Budget 1 forces a re-read after every page; the persistently-failing pages
     // re-appear in each re-read, so this is exactly the spin the guards must prevent.
     // The outer timeout fails the test if the loop ever hangs.
-    let (_events, sink) = recording_sink();
+    let (events, sink) = recording_sink();
     let outcome = tokio::time::timeout(
         Duration::from_secs(10),
         WikiAgent::new(mock.clone(), "skill", "mock-model")
@@ -575,6 +743,24 @@ async fn a_persistent_write_rejection_does_not_spin_the_auto_continue_loop() {
         outcome.halted.is_none(),
         "a per-page rejection is neither a ceiling nor a provider halt: {:?}",
         outcome.halted,
+    );
+    // The scope never changed: every re-read re-surfaces only already-attempted
+    // (failed) slugs, which are counted once, in `attempted` — so the per-page
+    // denominator stays at the opening size and the surface names no growth
+    // ([CR-093], [NFR-CC-04]).
+    let totals: Vec<usize> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            WikiProgress::PageStarted { total, .. } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        totals,
+        vec![k; k],
+        "a re-appearing failed slug must not inflate the denominator",
     );
 }
 
