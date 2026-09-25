@@ -375,9 +375,10 @@ export interface AttributionCoverage {
   /** `true` when `covered_window_days < requested_window_days`. */
   truncated_by_retention: boolean;
   /** Always `true`: rows predating the [FR-OB-08] origin stamp have
-   *  `origin IS NULL` and fold into `"main"`, inflating the historical bucket —
-   *  and, since that period also predates the web and chat surfaces, it is
-   *  CLI+MCP-only (see `notes`). */
+   *  `origin IS NULL` and fold into `"main"`, inflating the historical bucket.
+   *  Those rows came from every surface of the time (cli, mcp, web, watcher),
+   *  so the period is a distinct population, not a CLI+MCP-only one (see
+   *  `notes`). */
   legacy_null_origin_folds_into_main: boolean;
   /** The coverage limits in prose, exactly as the read-model states them —
    *  rendered verbatim so the tab and `logos stats --json` never disagree. */

@@ -26,7 +26,7 @@ function coverage(overrides: Partial<AttributionCoverage> = {}): AttributionCove
     covered_window_days: 7,
     truncated_by_retention: false,
     legacy_null_origin_folds_into_main: true,
-    notes: ["raw events only", "CLI+MCP-only before the origin stamp"],
+    notes: ["raw events only", "every surface of the time before the origin stamp"],
     ...overrides,
   };
 }

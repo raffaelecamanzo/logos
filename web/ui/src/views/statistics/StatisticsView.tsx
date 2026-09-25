@@ -15,8 +15,8 @@
  * state — never fabricated zeros — and the sidebar nav item is muted in step (see
  * `useStatisticsAvailability`). The value figures are labeled estimates, never
  * measured truth. The cross-tab's coverage limits — raw-events-only, the legacy
- * `NULL`-origin caveat, and the CLI+MCP-only label for the period that predates
- * it — render beside the figures from the read-model's own `attribution_coverage`
+ * `NULL`-origin caveat, and the label for the period that predates the origin
+ * stamp (every surface of the time, dev/main unknown) — render beside the figures from the read-model's own `attribution_coverage`
  * (FR-OB-11), not a separate help page. The answered/classified pair on each cell
  * (FR-OB-14) renders as "N of M answered" or the read-model's own named absence,
  * never a rate. Every read is GET-only; viewing the tab mutates no store and adds
@@ -273,7 +273,7 @@ function OriginCard({ origins }: { origins: OriginRow[] }) {
 /** Tool attribution by class (FR-OB-11) — the tool × origin cross-tab grouped by
  *  tool class, with its coverage limits rendered beside the figures rather than
  *  in a separate help page (NFR-CC-04): raw-events-only, the legacy-`NULL`-origin
- *  caveat, and the CLI+MCP-only label for the period that predates it — the
+ *  caveat, and the label for the period that predates the origin stamp — the
  *  read-model's own `attribution_coverage.notes`, rendered verbatim so the tab
  *  and `logos stats --json` can never disagree. */
 function AttributionCard({ stats }: { stats: StatsInfo }) {
