@@ -644,10 +644,12 @@ pub(crate) fn traced<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> Result<T> 
 /// [`traced`] for a call whose result knows what it answered ([FR-OB-14]):
 /// the same single seam, with `classify` recording the call's [`Outcome`].
 ///
-/// `classify` is almost always `CallOutcome::outcome`; taking it as an argument
-/// rather than bounding `T: CallOutcome` is what keeps [`traced`] generic and
-/// unbounded, so every tool that does not opt in records `NULL` with no change
-/// at its call site.
+/// `classify` is `CallOutcome::outcome` at every production call site. Opting
+/// in is choosing this function over [`traced`], which stays generic and
+/// unbounded, so a tool that does not opt in records `NULL` with no change at
+/// its call site. The classifier is an argument rather than a `T: CallOutcome`
+/// bound so a test can hand it any verdict — including one that panics, to
+/// prove it never sees an `Err`.
 ///
 /// `classify` is run only on `Ok`. An `Err(_)` records [`Outcome::Failed`], so
 /// a classified tool never writes `NULL` and a `NULL` outcome means only "no
