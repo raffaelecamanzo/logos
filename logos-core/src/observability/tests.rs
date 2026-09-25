@@ -2397,7 +2397,7 @@ fn stats_without_a_telemetry_db_degrades_with_a_warning() {
     assert!(info.attribution_coverage.legacy_null_origin_folds_into_main);
     assert_eq!(info.attribution_coverage.requested_window_days, 7);
     assert_eq!(info.attribution_coverage.covered_window_days, 7);
-    assert_eq!(info.attribution_coverage.notes.len(), 3);
+    assert_eq!(info.attribution_coverage.notes.len(), 4);
 }
 
 // ── Shared telemetry-store resolution (ADR-50, FR-OB-07) ───────────────────
@@ -2973,6 +2973,7 @@ fn the_attribution_projections_state_their_coverage_limits() {
     assert!(prose.contains("raw events only"), "got {:?}", coverage.notes);
     assert!(prose.contains("daily_rollup"), "got {:?}", coverage.notes);
     assert!(prose.contains("origin IS NULL"), "got {:?}", coverage.notes);
+    assert!(prose.contains("CLI+MCP-only"), "got {:?}", coverage.notes);
 
     // The behaviour the claim describes: the rollup day is in the totals…
     assert_eq!(info.calls_total, 5, "1 raw + 4 rolled up");
@@ -3027,7 +3028,7 @@ fn a_window_past_retention_reports_the_window_it_actually_covers() {
 
     // A window inside retention says so without the extra caveat.
     let inside = stats_from(&conn, 7, NOW).unwrap().attribution_coverage;
-    assert_eq!(inside.notes.len(), 3, "no truncation note: {:?}", inside.notes);
+    assert_eq!(inside.notes.len(), 4, "no truncation note: {:?}", inside.notes);
 }
 
 /// Legacy `NULL` origins fold into `"main"` in the cross-tab exactly as they do
@@ -3056,6 +3057,11 @@ fn the_cross_tab_folds_legacy_null_origins_into_main() {
     assert!(
         info.attribution_coverage.legacy_null_origin_folds_into_main,
         "and the payload says the historical main bucket is inflated"
+    );
+    assert!(
+        info.attribution_coverage.notes.iter().any(|n| n.contains("CLI+MCP-only")),
+        "and that the same legacy period is CLI+MCP-only: {:?}",
+        info.attribution_coverage.notes
     );
 }
 
@@ -3174,7 +3180,7 @@ fn a_degraded_read_model_still_states_its_coverage_limits() {
     assert!(coverage.legacy_null_origin_folds_into_main);
     assert_eq!(coverage.requested_window_days, 30);
     assert_eq!(coverage.covered_window_days, 30);
-    assert_eq!(coverage.notes.len(), 3, "the prose survives degradation");
+    assert_eq!(coverage.notes.len(), 4, "the prose survives degradation");
 
     // The `Default` backstop: `Engine::stats` builds its fallback with
     // `..StatsInfo::default()`, so a derived `Default` would answer

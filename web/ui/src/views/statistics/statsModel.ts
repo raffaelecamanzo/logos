@@ -12,7 +12,13 @@
  * sum to `calls_total` (the read-model warns it can be less).
  */
 
-import type { DailyActivity, OriginUsage, ToolUsage } from "../../api/types.ts";
+import type {
+  DailyActivity,
+  OriginUsage,
+  OutcomeCounts,
+  StatsInfo,
+  ToolUsage,
+} from "../../api/types.ts";
 
 /**
  * The usage projections every transform below reads — and nothing else.
@@ -148,6 +154,65 @@ export function originSplit(stats: Pick<UsageProjections, "calls_by_origin">): O
       isMain: o.origin === "main",
     }))
     .sort((a, b) => b.calls - a.calls || a.origin.localeCompare(b.origin));
+}
+
+// ── Tool × origin attribution, grouped by class (FR-OB-11, FR-OB-14) ────────────
+
+/** The answered/classified pair rendered as prose, never a rate: "N of M
+ *  answered" once anything is classified, or the read-model's own named absence
+ *  when nothing is ([FR-OB-14]). Driven entirely by `outcome_absence` — the
+ *  payload's own derived field — so this can never disagree with it, and a
+ *  caller can never divide by `calls` by construction: no ratio is computed
+ *  here at all. */
+export function answeredLabel(cell: OutcomeCounts): string {
+  return cell.outcome_absence ?? `${cell.answered_calls} of ${cell.classified_calls} answered`;
+}
+
+/** One row of the tool × origin cross-tab, with its answered pair pre-rendered. */
+export interface AttributionRow {
+  tool: string;
+  origin: string;
+  calls: number;
+  ok_calls: number;
+  answered: string;
+}
+
+/** One tool-class group of the cross-tab (FR-OB-11): "the tab groups tools by
+ *  class". */
+export interface AttributionClassGroup {
+  class: string;
+  rows: AttributionRow[];
+}
+
+/**
+ * The tool × origin cross-tab ([FR-OB-11]), grouped by tool class. Each group's
+ * rows keep the read-model's own `(tool, origin)` order ("dev" before "main",
+ * [NFR-RA-06]); groups are sorted by class name rather than a hardcoded order,
+ * because a fixed class list is exactly the closed-list failure the backend's
+ * exhaustiveness check exists to prevent — an unclassified tool fails the build
+ * server-side, so nothing here can silently omit a class that shows up.
+ *
+ * Raw events only, per `attribution_coverage` — the caller renders that limit
+ * beside these rows, not fabricated here.
+ */
+export function attributionByClass(
+  stats: Pick<StatsInfo, "calls_by_tool_origin">,
+): AttributionClassGroup[] {
+  const byClass = new Map<string, AttributionRow[]>();
+  for (const cell of stats.calls_by_tool_origin) {
+    const rows = byClass.get(cell.class) ?? [];
+    rows.push({
+      tool: cell.tool,
+      origin: cell.origin,
+      calls: cell.calls,
+      ok_calls: cell.ok_calls,
+      answered: answeredLabel(cell),
+    });
+    byClass.set(cell.class, rows);
+  }
+  return [...byClass.entries()]
+    .map(([cls, rows]): AttributionClassGroup => ({ class: cls, rows }))
+    .sort((a, b) => a.class.localeCompare(b.class));
 }
 
 // ── ECharts option builders (pure objects; the seam renders them) ───────────────

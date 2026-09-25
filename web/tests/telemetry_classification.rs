@@ -20,12 +20,21 @@
 //! required to be counted, so a filter that excluded the surface wholesale
 //! would fail this test rather than pass it.
 //!
+//! The same store also proves [S-306]'s own AC — opening the Statistics tab
+//! does not change the navigation counts it displays — end to end from the
+//! route the tab actually calls: `GET /api/v1/statistics` is hit three times
+//! (as three renders/re-queries would), and the search call's count is read
+//! only from the flushed store afterwards, never from a live response body, so
+//! the assertion cannot race the background writer ([FR-OB-09] AC 3).
+//!
 //! Everything lives in **one** test function: `init` installs the *global*
 //! subscriber, so a second parallel test in this binary would record its own
 //! calls into the same store and perturb the counts.
 //!
 //! [CR-091]: ../../docs/requests/CR-091-telemetry-surface-classification-and-usage-attribution.md
 //! [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
+//! [S-306]: ../../docs/planning/journal.md#s-306-statistics-tab-attribution-view-with-stated-coverage-limits
+//! [FR-OB-09]: ../../docs/specs/requirements/FR-OB-09.md
 
 use std::fs;
 use std::path::Path;
@@ -97,6 +106,23 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
         assert_eq!(resp.status(), StatusCode::OK, "the status endpoint answers");
     }
 
+    // Opening the Statistics tab, three times over (an initial render plus two
+    // re-queries) — the route the tab actually calls, over the same session
+    // ([S-306] AC 3, [FR-OB-09] AC 1 widened). The response bodies are not
+    // inspected here: the endpoint reads through the same live `Engine`, so its
+    // own answer can race the background writer that has not yet persisted this
+    // request's own event. The counts this AC is about are read once, from the
+    // flushed store, below.
+    const STATISTICS_OPENS: usize = 3;
+    for _ in 0..STATISTICS_OPENS {
+        let resp = router
+            .clone()
+            .oneshot(get("/api/v1/statistics"))
+            .await
+            .expect("route responds");
+        assert_eq!(resp.status(), StatusCode::OK, "the statistics endpoint answers");
+    }
+
     // Flush the last telemetry batch exactly as a process exit would.
     drop(guard);
 
@@ -138,6 +164,11 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
         1,
         "and so is the user's own query, attributed to the web surface"
     );
+    assert_eq!(
+        count_events(&telemetry_db, "surface = 'web' AND tool = 'stats'"),
+        STATISTICS_OPENS as i64,
+        "every Statistics-tab open is recorded too, attributed to the web surface"
+    );
 
     // ── …only attributed out of the figures ([FR-OB-09], [FR-UI-27]) ────────
     let stats = Engine::open(root).stats(None);
@@ -157,6 +188,10 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
     assert!(
         !counted.iter().any(|(_, tool)| *tool == "status"),
         "and the status read counts on no surface at all: {counted:?}"
+    );
+    assert!(
+        !counted.iter().any(|(_, tool)| *tool == "stats"),
+        "and opening the Statistics tab counts on no surface at all: {counted:?}"
     );
     // The surface arm, isolated: `search` is counted by the tool arm, so the
     // only thing that can keep the chrome-issued one out of this figure is the
@@ -186,5 +221,33 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
     assert_eq!(
         by_origin, counted_calls,
         "and so does the origin breakdown"
+    );
+
+    // ── [S-306] AC 3: opening the tab does not change the counts IT displays ──
+    //
+    // The tool × origin cross-tab ([FR-OB-11]) is the projection the Statistics
+    // tab's own attribution card renders, so the exclusion is asserted there
+    // too, not only in the pre-existing `calls_by_tool`. Three opens of the tab
+    // happened between the one real search and this read; the search's own
+    // count must be exactly as it was regardless.
+    let cross_tab: Vec<(&str, &str)> = stats
+        .calls_by_tool_origin
+        .iter()
+        .map(|c| (c.tool.as_str(), c.origin.as_str()))
+        .collect();
+    assert!(
+        !cross_tab.iter().any(|(tool, _)| *tool == "stats"),
+        "opening the tab never appears in its own cross-tab: {cross_tab:?}"
+    );
+    let search_cross_tab_calls: u64 = stats
+        .calls_by_tool_origin
+        .iter()
+        .filter(|c| c.tool == "search")
+        .map(|c| c.calls)
+        .sum();
+    assert_eq!(
+        search_cross_tab_calls, 1,
+        "the genuine search still reads as exactly one call in the cross-tab, \
+         unmoved by the three intervening Statistics-tab opens: {cross_tab:?}"
     );
 }

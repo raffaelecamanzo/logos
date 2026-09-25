@@ -319,6 +319,71 @@ export interface OriginUsage {
   ok_calls: number;
 }
 
+/** What a usage cell reports about what its calls **answered** (mirrors
+ *  `OutcomeCounts`, [FR-OB-14]), flattened onto the cells that carry it below.
+ *  `outcome_absence` is `null` once `classified_calls > 0`, and the lexicon's
+ *  "none recorded" when it is `0` — the named absence a consumer renders in
+ *  place of a rate. Never divide `answered_calls` by `calls`, and never render
+ *  a percentage: divide by `classified_calls`, or show the absence. */
+export interface OutcomeCounts {
+  answered_calls: number;
+  classified_calls: number;
+  outcome_absence: string | null;
+}
+
+/** One cell of the tool × origin cross-tab (mirrors `ToolOriginUsage`,
+ *  [FR-OB-11]): one tool's calls within one dev-vs-`main` bucket, carrying the
+ *  tool's class. Raw events only — see {@link StatsInfo.attribution_coverage}. */
+export interface ToolOriginUsage extends OutcomeCounts {
+  tool: string;
+  /** The tool's class: `"navigation"`, `"quality-gate"`, `"session-gate"`,
+   *  `"engine-internal"`, `"read-model"`, or `"unregistered"` for a name today's
+   *  registry no longer knows. */
+  class: string;
+  /** The dev-vs-`main` bucket — `"dev"` (all worktree branches) or `"main"`. */
+  origin: string;
+  calls: number;
+  ok_calls: number;
+}
+
+/** One cell of the class × origin rollup (mirrors `ClassUsage`, [FR-OB-11]) —
+ *  the cross-tab folded up to {@link ToolOriginUsage.class}. Raw events only,
+ *  as the cross-tab it derives from. */
+export interface ClassUsage extends OutcomeCounts {
+  class: string;
+  origin: string;
+  calls: number;
+  ok_calls: number;
+}
+
+/**
+ * What {@link StatsInfo.calls_by_tool_origin} and {@link StatsInfo.calls_by_class}
+ * actually cover (mirrors `AttributionCoverage`, [FR-OB-11], [NFR-CC-04]) — every
+ * field is a statement the payload makes about itself, so the Statistics tab can
+ * render the limit beside the figures without consulting documentation.
+ */
+export interface AttributionCoverage {
+  /** Always `true`: `daily_rollup` carries no `origin` column, so a rolled-up
+   *  day contributes to `calls_total`/`activity_by_day` but is absent from both
+   *  attribution projections rather than mis-attributed. */
+  raw_events_only: boolean;
+  /** The window requested, echoing {@link StatsInfo.window_days}. */
+  requested_window_days: number;
+  /** The window the two projections are **guaranteed** to cover — a floor, not
+   *  a measurement (pruning is flush-triggered, so it may cover more). */
+  covered_window_days: number;
+  /** `true` when `covered_window_days < requested_window_days`. */
+  truncated_by_retention: boolean;
+  /** Always `true`: rows predating the [FR-OB-08] origin stamp have
+   *  `origin IS NULL` and fold into `"main"`, inflating the historical bucket —
+   *  and, since that period also predates the web and chat surfaces, it is
+   *  CLI+MCP-only (see `notes`). */
+  legacy_null_origin_folds_into_main: boolean;
+  /** The coverage limits in prose, exactly as the read-model states them —
+   *  rendered verbatim so the tab and `logos stats --json` never disagree. */
+  notes: string[];
+}
+
 /**
  * Usage telemetry (mirrors `StatsInfo`, [FR-OB-04], [FR-OB-08]) — the enriched
  * read-model the Statistics tab and the Dashboard's Activity card both read. All
@@ -353,6 +418,15 @@ export interface StatsInfo {
   /** Dev-vs-`main` usage split: at most two buckets (`"dev"` = all worktree branches
    *  combined, `"main"` = primary checkout), `"dev"` first. */
   calls_by_origin: OriginUsage[];
+  /** The tool × origin cross-tab ([FR-OB-11]): per-`(tool, origin)` usage,
+   *  carrying each tool's class. Raw events only — see `attribution_coverage`. */
+  calls_by_tool_origin: ToolOriginUsage[];
+  /** The class × origin rollup ([FR-OB-11]) — the cross-tab folded up to class.
+   *  Raw events only, as the cross-tab it derives from. */
+  calls_by_class: ClassUsage[];
+  /** What `calls_by_tool_origin` and `calls_by_class` actually cover, stated in
+   *  the payload rather than in documentation ([FR-OB-11], [NFR-CC-04]). */
+  attribution_coverage: AttributionCoverage;
   /** Degradations (e.g. "no telemetry recorded yet"), never an error. */
   warnings: string[];
 }
@@ -2008,9 +2082,14 @@ export interface UnreadMember {
  * stores reads every one of them and still has nothing to show, and rendering
  * zeros there is the failure NFR-CC-04 names.
  *
- * As with {@link StatsInfo}, the wire also carries an `attribution_coverage`
- * rider that is not typed here because nothing renders it — this file mirrors the
- * read-models the SPA consumes, not every field the server sends.
+ * The wire also carries an `attribution_coverage` rider and the `calls_by_tool_origin`
+ * / `calls_by_class` cross-tab, as {@link StatsInfo} now types for the member-scoped
+ * Statistics tab ([S-306]) — none of the three is typed here, because the workspace
+ * aggregate does not compute them (the federation fold sums `calls_by_tool`,
+ * `activity_by_day` and `calls_by_origin` only): this file mirrors the read-models
+ * the SPA consumes, not every field the server sends.
+ *
+ * [S-306]: ../views/statistics/StatisticsView.tsx
  */
 export interface WorkspaceStatistics {
   /** The workspace name from the manifest. */

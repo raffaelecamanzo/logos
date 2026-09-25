@@ -209,6 +209,16 @@ function memberStats(): StatsInfo {
     artifact_bindings: {},
     activity_by_day: agg.activity_by_day,
     calls_by_origin: agg.calls_by_origin,
+    calls_by_tool_origin: [],
+    calls_by_class: [],
+    attribution_coverage: {
+      raw_events_only: true,
+      requested_window_days: agg.window_days,
+      covered_window_days: agg.window_days,
+      truncated_by_retention: false,
+      legacy_null_origin_folds_into_main: true,
+      notes: [],
+    },
     warnings: [],
   };
 }
