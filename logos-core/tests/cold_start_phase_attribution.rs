@@ -83,9 +83,11 @@ use tempfile::TempDir;
 use logos_core::Engine;
 
 const DEFAULT_SAMPLES: usize = 8;
-/// Prefix marking the one line of stdout
+/// Marker on the one line of stdout
 /// [`cold_start_phase_attribution_child_sample`] emits, so its parent can find
-/// that line amid the test harness's own banner output.
+/// that line amid the test harness's own banner output. Matched anywhere in a
+/// line, not as a prefix: a single-threaded harness (`RUST_TEST_THREADS=1`,
+/// which the child inherits) prints `test <name> ... ` on the same line first.
 const CHILD_MARKER: &str = "COLD_START_CHILD_SAMPLE: ";
 
 fn samples() -> usize {
@@ -174,6 +176,11 @@ fn cold_start_phase_attribution_child_sample() {
     let uninstrumented_registry_len = engine.registry().map(|r| r.len());
     drop(engine);
     drop(root);
+    // Compiled queries are shared process-wide (HF-3), so without this the
+    // instrumented arm would time cache hits where the uninstrumented one
+    // compiled — and the paired delta would measure the cache, not the
+    // instrumentation. Both arms stay cold starts.
+    logos_core::plugin::queries::clear_compiled_cache();
 
     let root = TempDir::new().expect("temp root");
     let t = Instant::now();
@@ -280,11 +287,11 @@ fn cold_start_phase_attribution() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout
+        let json = stdout
             .lines()
-            .find(|l| l.starts_with(CHILD_MARKER))
+            .find_map(|l| l.split_once(CHILD_MARKER).map(|(_, json)| json))
             .unwrap_or_else(|| panic!("child sample {i} printed no {CHILD_MARKER} line: {stdout}"));
-        let record: serde_json::Value = serde_json::from_str(&line[CHILD_MARKER.len()..])
+        let record: serde_json::Value = serde_json::from_str(json)
             .unwrap_or_else(|err| panic!("child sample {i} record did not parse: {err}"));
 
         let get = |key: &str| record[key].as_f64().expect("child record field is a number");

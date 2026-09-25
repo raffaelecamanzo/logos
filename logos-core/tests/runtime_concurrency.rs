@@ -176,20 +176,76 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
     // The per-phase distribution behind those figures is re-runnable:
     //   cargo test -p logos-core --test cold_start_phase_attribution \
     //       cold_start_phase_attribution -- --exact --nocapture
-    let root = TempDir::new().expect("temp root");
-
-    let start = Instant::now();
-    let engine = Engine::start(root.path()).expect("engine starts");
-    let elapsed = start.elapsed();
+    //
+    // MEASURED IN A FRESH CHILD PROCESS since 2026-09-25 (HF-3). Compiled
+    // queries are now shared process-wide, so an `Engine::start` timed after a
+    // sibling test in this binary had loaded a registry would time cache hits
+    // and could no longer see a query-compilation regression. A fresh process
+    // is the cold start NFR-PE-05 bounds — every CLI invocation is one. The
+    // budget and the tolerance are unchanged.
+    let elapsed = cold_start_in_a_fresh_process();
 
     let budget = Duration::from_millis(600).mul_f64(perf_tolerance());
-    assert!(engine.runtime().is_some(), "engine is ready to serve");
     assert!(
         elapsed < budget,
         "cold start to a ready Engine took {elapsed:?}, over the NFR-PE-05 ≤600ms total budget \
          (tolerance-scaled to {budget:?}); re-run cold_start_phase_attribution to see which \
          phase moved"
     );
+}
+
+/// Marker on the one stdout line [`pe05_budget_cold_start_child_sample`]
+/// prints, so its parent can find it amid the harness's own output. Matched
+/// anywhere in a line, not as a prefix: a single-threaded harness
+/// (`RUST_TEST_THREADS=1`, which the child inherits) prints `test <name> ... `
+/// on the same line before the test body runs.
+const COLD_START_MARKER: &str = "PE05_COLD_START_NANOS: ";
+
+/// Spawn [`pe05_budget_cold_start_child_sample`] as a subprocess of this test
+/// binary and return the cold start it measured — the same shape as
+/// `cold_start_phase_attribution`'s per-sample child.
+fn cold_start_in_a_fresh_process() -> Duration {
+    let exe = std::env::current_exe().expect("this test binary's own path");
+    let output = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "--nocapture",
+            "pe05_budget_cold_start_child_sample",
+        ])
+        .output()
+        .expect("spawning the cold-start child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the cold-start child failed: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let nanos = stdout
+        .lines()
+        .find_map(|l| l.split_once(COLD_START_MARKER).map(|(_, nanos)| nanos))
+        .unwrap_or_else(|| {
+            panic!("the cold-start child printed no {COLD_START_MARKER} line: {stdout}")
+        })
+        .trim()
+        .parse::<u64>()
+        .expect("the child's measurement is a whole number of nanoseconds");
+    Duration::from_nanos(nanos)
+}
+
+/// The measured half of [`cold_start_to_ready_engine_is_within_pe05_budget`]:
+/// one `Engine::start` to a ready engine, timed in whatever process runs it.
+/// The guard spawns it so that process is fresh; run directly it is just
+/// another passing test. The budget is the parent's to assert, not this one's.
+#[test]
+fn pe05_budget_cold_start_child_sample() {
+    let root = TempDir::new().expect("temp root");
+
+    let start = Instant::now();
+    let engine = Engine::start(root.path()).expect("engine starts");
+    let elapsed = start.elapsed();
+
+    assert!(engine.runtime().is_some(), "engine is ready to serve");
+    println!("{COLD_START_MARKER}{}", elapsed.as_nanos());
 }
 
 /// Multiplier applied to every wall-clock budget so a loaded CI host can widen

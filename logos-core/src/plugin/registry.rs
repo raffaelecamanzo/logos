@@ -8,10 +8,14 @@
 //!    is skipped-and-warned, never fatal ([FR-PL-03], [NFR-PC-03]);
 //! 3. resolves each capability's query (on-disk override shadows embedded) and
 //!    compiles it, failing fast and naming the file on error ([FR-PL-02],
-//!    [FR-PL-04]);
+//!    [FR-PL-04]) — once per process for each distinct source, so a later load
+//!    that resolves the same text shares the compiled query (HF-3,
+//!    [`queries::compile_shared`]);
 //! 4. indexes the loaded grammar by extension for `for_extension` lookups.
 //!
-//! Built once per process ([ADR-04]); thereafter every lookup is a hash probe.
+//! Built once per engine ([ADR-04]) — a workspace process builds one per member,
+//! over queries compiled once per process — and thereafter every lookup is a
+//! hash probe.
 //!
 //! [plugin-registry]: ../../../docs/specs/architecture/components/plugin-registry.md
 //! [ADR-09]: ../../../docs/specs/architecture/decisions/ADR-09.md
@@ -31,7 +35,7 @@ use super::abi::{assert_abi, AbiRange};
 use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
 use super::manifest::PluginManifest;
-use super::plugin::{CompiledPlugin, LanguagePlugin};
+use super::plugin::{CompiledPlugin, CompiledQueries, LanguagePlugin};
 use super::queries;
 
 /// The in-memory registry of loaded language grammars.
@@ -385,7 +389,9 @@ impl LanguageRegistry {
 pub(crate) struct RegistryLoadTimings {
     /// Parsing every grammar's embedded `plugin.toml`.
     pub manifest_parse: Duration,
-    /// Resolving and compiling every capability's query.
+    /// Resolving and compiling every capability's query — or, for a query this
+    /// process already compiled, fetching it from the cache (HF-3), so only a
+    /// process's first load times the compile itself.
     pub query_compile: Duration,
     /// Everything else the load loop does: ABI assertion, override-dir
     /// resolution, plugin/extension/filename bookkeeping — the
@@ -398,13 +404,14 @@ pub(crate) struct RegistryLoadTimings {
 /// Resolve and compile every capability's query for one grammar.
 ///
 /// Returns the capability → compiled query map and the list of query keys whose
-/// source was an on-disk override.
+/// source was an on-disk override. Each query comes from the process-wide
+/// cache when this grammar's capability already compiled to the same text.
 fn compile_capabilities(
     entry: &GrammarEntry,
     manifest: &PluginManifest,
     language: &Language,
     override_dir: Option<&Path>,
-) -> Result<(BTreeMap<String, tree_sitter::Query>, Vec<String>), PluginError> {
+) -> Result<(CompiledQueries, Vec<String>), PluginError> {
     let mut compiled = BTreeMap::new();
     let mut overridden = Vec::new();
 
@@ -435,7 +442,7 @@ fn compile_capabilities(
         if resolved.overridden {
             overridden.push(key.to_string());
         }
-        let query = queries::compile(language, &resolved)?;
+        let query = queries::compile_shared(language, &manifest.name, &resolved)?;
         compiled.insert(key.to_string(), query);
     }
 
@@ -913,6 +920,177 @@ mod tests {
         assert!(reg.is_empty());
         assert_eq!(reg.skipped().len(), grammars::compiled().len());
         assert!(!warnings.is_empty());
+    }
+
+    /// Write `source` as the on-disk override of Rust's `capability` query under
+    /// `root`, returning the override file's path.
+    fn write_rust_override(root: &Path, capability: &str, source: &str) -> std::path::PathBuf {
+        let dir = override_dir_for(root, "rust").join("queries");
+        std::fs::create_dir_all(&dir).expect("override dir");
+        let file = dir.join(format!("{capability}.scm"));
+        std::fs::write(&file, source).expect("override file");
+        file
+    }
+
+    /// The compiled `capability` query Rust carries in `reg`, as an address —
+    /// two registries share a compiled query exactly when these are equal.
+    fn rust_query(reg: &LanguageRegistry, capability: &str) -> *const tree_sitter::Query {
+        reg.for_extension("rs")
+            .expect("rust claims .rs")
+            .query(capability)
+            .unwrap_or_else(|| panic!("rust compiles a `{capability}` query"))
+    }
+
+    /// HF-3: two loads over two roots with no overrides share each compiled
+    /// query rather than recompiling it — the cost a workspace's member engine
+    /// starts paid once per member.
+    #[test]
+    fn loads_over_two_roots_without_overrides_share_every_compiled_query() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let reg_a = LanguageRegistry::load(a.path()).expect("root a loads");
+        let reg_b = LanguageRegistry::load(b.path()).expect("root b loads");
+
+        let mut compared = 0;
+        for plugin in reg_a.iter() {
+            let other = reg_b
+                .for_extension(&plugin.extensions()[0])
+                .expect("both roots load the same grammars");
+            for cap in plugin.capabilities() {
+                assert!(
+                    std::ptr::eq(plugin.query(cap).unwrap(), other.query(cap).unwrap()),
+                    "{}/{cap}: two roots compiled the same query twice",
+                    plugin.name()
+                );
+                compared += 1;
+            }
+        }
+        assert!(compared > 0, "no capability query was compared");
+    }
+
+    /// HF-3: a root overriding one capability gets its own compiled query for
+    /// that capability — never a neighbour's — and the shared one for the rest.
+    #[test]
+    fn an_override_gets_its_own_query_and_shares_the_rest() {
+        let (plain, tuned) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write_rust_override(
+            tuned.path(),
+            "symbols",
+            "; HF-3 override, own entry\n(function_item name: (identifier) @symbol.function)",
+        );
+        let reg_plain = LanguageRegistry::load(plain.path()).expect("plain root loads");
+        let reg_tuned = LanguageRegistry::load(tuned.path()).expect("tuned root loads");
+
+        let tuned_rust = reg_tuned.for_extension("rs").unwrap();
+        assert_eq!(tuned_rust.overridden_capabilities(), ["symbols"]);
+        assert!(
+            !std::ptr::eq(rust_query(&reg_plain, "symbols"), rust_query(&reg_tuned, "symbols")),
+            "the overriding root must not be served the embedded `symbols` query"
+        );
+        assert_eq!(
+            tuned_rust.query("symbols").unwrap().capture_names(),
+            ["symbol.function"],
+            "the overriding root runs its own query text"
+        );
+        assert!(
+            std::ptr::eq(
+                rust_query(&reg_plain, "references"),
+                rust_query(&reg_tuned, "references")
+            ),
+            "a capability the root does not override is shared"
+        );
+    }
+
+    /// HF-3: the cache is keyed on the query's content, not on where it came
+    /// from — two roots carrying byte-identical overrides share one compiled
+    /// query, so repeated loads grow nothing per root.
+    #[test]
+    fn identical_overrides_at_two_roots_share_one_compiled_query() {
+        let source = "; HF-3 identical override\n(function_item name: (identifier) @f)";
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write_rust_override(a.path(), "symbols", source);
+        write_rust_override(b.path(), "symbols", source);
+        let reg_a = LanguageRegistry::load(a.path()).expect("root a loads");
+        let reg_b = LanguageRegistry::load(b.path()).expect("root b loads");
+        assert!(std::ptr::eq(
+            rust_query(&reg_a, "symbols"),
+            rust_query(&reg_b, "symbols")
+        ));
+    }
+
+    /// HF-3: an override that fails to compile still fails the load naming its
+    /// file, every time, and leaves nothing behind that a later load could be
+    /// served: a valid root loads, and the same file fixed in place compiles
+    /// its new text.
+    #[test]
+    fn a_failing_override_fails_loud_and_does_not_poison_the_cache() {
+        let (bad, good) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let file = write_rust_override(bad.path(), "symbols", "(no_such_node_kind) @x");
+
+        for attempt in 1..=2 {
+            match LanguageRegistry::load(bad.path()) {
+                Err(PluginError::QueryCompile { file: named, .. }) => {
+                    assert_eq!(named, file.display().to_string(), "attempt {attempt}")
+                }
+                other => panic!("attempt {attempt}: expected QueryCompile, got {other:?}"),
+            }
+        }
+
+        LanguageRegistry::load(good.path()).expect("a valid root still loads");
+
+        std::fs::write(
+            &file,
+            "; HF-3 fixed override\n(function_item name: (identifier) @fixed)",
+        )
+        .unwrap();
+        let fixed = LanguageRegistry::load(bad.path()).expect("the fixed override loads");
+        assert_eq!(
+            fixed.for_extension("rs").unwrap().query("symbols").unwrap().capture_names(),
+            ["fixed"],
+            "the fixed file's text is what runs"
+        );
+
+        // Editing a valid override again recompiles it: the entry is the text's,
+        // never the path's, so a load is never served the file's previous text.
+        std::fs::write(
+            &file,
+            "; HF-3 edited override\n(function_item name: (identifier) @edited)",
+        )
+        .unwrap();
+        let edited = LanguageRegistry::load(bad.path()).expect("the edited override loads");
+        assert_eq!(
+            edited.for_extension("rs").unwrap().query("symbols").unwrap().capture_names(),
+            ["edited"],
+            "the edited file's text is what runs, not the one it replaced"
+        );
+    }
+
+    /// HF-3 measurement, not a guard: times `N` consecutive
+    /// [`load`](LanguageRegistry::load)s over `N` fresh roots. Run it alone so
+    /// the first load is the process's first:
+    /// `cargo test -p logos-core --lib measure_consecutive_registry_loads -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement: run alone with --ignored --nocapture"]
+    fn measure_consecutive_registry_loads() {
+        const N: usize = 20;
+        let roots: Vec<_> = (0..N).map(|_| tempfile::tempdir().unwrap()).collect();
+        let times: Vec<Duration> = roots
+            .iter()
+            .map(|root| {
+                let t = Instant::now();
+                LanguageRegistry::load(root.path()).expect("load");
+                t.elapsed()
+            })
+            .collect();
+        let rest = &times[1..];
+        let total: Duration = times.iter().sum();
+        eprintln!(
+            "HF-3 {N} loads: first {:?}; loads 2..={N} mean {:?} (min {:?}, max {:?}); total {:?}",
+            times[0],
+            rest.iter().sum::<Duration>() / rest.len() as u32,
+            rest.iter().min().unwrap(),
+            rest.iter().max().unwrap(),
+            total
+        );
     }
 
     /// [`load_with_timings`](LanguageRegistry::load_with_timings) is a
