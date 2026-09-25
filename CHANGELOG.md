@@ -9,6 +9,8 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.20] — 2026-09-25
+
 Sprint 77: the workspace is configured from the app, and the chat answers cross-service
 questions.
 
