@@ -184,6 +184,14 @@ function WikiGenerationStatus({ state }: { state: WikiGenState }) {
   } else {
     detailParts.push(`${state.written.length} page(s) refreshed`);
   }
+  // A chunk re-read surfaced work the opening read did not contain, so the
+  // denominator grew past `started`'s size: name it rather than silently landing on
+  // a larger number ([CR-093], [NFR-CC-04]). A detail part composed after the
+  // headline decision above, so the halted-before-completed fold is untouched; an
+  // unchanged-scope run adds nothing.
+  if (state.initialTotal > 0 && state.total > state.initialTotal) {
+    detailParts.push(`scope grew from ${state.initialTotal} as new work surfaced during the run`);
+  }
   if (state.failed.length > 0) detailParts.push(`${state.failed.length} failed`);
   if (halted) detailParts.push(`halted: ${state.halted}`);
   return (

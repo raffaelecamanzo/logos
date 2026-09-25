@@ -59,9 +59,11 @@ pub const DEFAULT_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(180);
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum WikiProgress {
-    /// The run started over a non-empty work-list of `total` pages.
+    /// The run started over a non-empty work-list of `total` pages. Emitted
+    /// exactly once per run; a scope that grows later is carried on
+    /// [`PageStarted`](Self::PageStarted)'s `total`, never by a second `Started`.
     Started {
-        /// The number of queued pages this run will attempt, in order.
+        /// The opening work-list size — the run's initial scope estimate.
         total: usize,
         /// The configured per-page synthesis liveness timeout, in whole seconds
         /// ([`DEFAULT_SYNTHESIS_TIMEOUT`], [`WikiAgent::with_synthesis_timeout`]) —
@@ -78,7 +80,11 @@ pub enum WikiProgress {
         title: String,
         /// The 1-based position of this page in the queue.
         index: usize,
-        /// The total queued page count.
+        /// The run's scope as of this page: the pages attempted so far plus the
+        /// unattempted items the latest queue re-read surfaced ([CR-093]). Equal to
+        /// `Started`'s total until a re-read surfaces work the opening read did not
+        /// contain; it may also shrink when an item leaves the work-list unattempted,
+        /// so a surface folds it as a monotonic maximum. Never below `index`.
         total: usize,
     },
     /// One page was synthesized and persisted via [`wiki write`](Engine::wiki_write).
@@ -212,7 +218,7 @@ where
     /// Reads the queue (a cheap, pure read on the blocking pool, [ADR-03]);
     /// **an empty work-list starts no run** (`Ok(None)`) and makes no model call
     /// ([NFR-CC-04]). Otherwise it emits `Started { total, synthesis_timeout_secs }` with the initial
-    /// work-list size (the cumulative denominator for progress, [FR-UI-19]) and,
+    /// work-list size (the opening cumulative denominator for progress, [FR-UI-19]) and,
     /// for each queued page in order: synthesizes the body with a fresh tool-less
     /// agent, resolves the write-time anchors, and persists via the unchanged
     /// [`wiki write`](Engine::wiki_write) contract. Every [`WikiProgress`] transition
@@ -222,7 +228,11 @@ where
     /// the run **re-reads** the deterministic queue — which now reflects the pages
     /// just written (they are fresh, so they leave the work-list, [NFR-RA-06]) — and
     /// auto-continues into the next chunk, with **no** manual re-trigger, until the
-    /// re-read yields an empty work-list (drained). Two invariants keep the loop
+    /// re-read yields an empty work-list (drained). A re-read may also surface work
+    /// the opening read did not contain (the work-list is recomputed from live
+    /// inputs); the run absorbs it and recomputes the denominator it carries on each
+    /// `PageStarted` as pages attempted plus unattempted items surfaced ([CR-093]).
+    /// Two invariants keep the loop
     /// honest and finite ([NFR-CC-04]):
     ///
     /// - a **hard safety ceiling** ([`with_ceiling`](Self::with_ceiling)) on total
@@ -250,11 +260,15 @@ where
             return Ok(None);
         }
 
-        // The cumulative denominator: the whole initial work-list, so progress reads
-        // "N of M" across every auto-continued chunk ([FR-UI-19]). Generation never
-        // *adds* page-worthy entities (it does not change the graph revision), so the
-        // work-list only shrinks — this total stays honest across re-reads.
-        let total = queue.items.len();
+        // The cumulative denominator, so progress reads "N of M" across every
+        // auto-continued chunk ([FR-UI-19]). It opens as the initial work-list size
+        // (the only value `Started` ever carries) and is recomputed after each
+        // re-read: the work-list is recomputed from live inputs, so a re-read may
+        // surface work the opening read did not contain — an entity a watcher sync
+        // indexed, a section re-armed past the FR-WK-17 threshold, a doc source that
+        // appeared ([CR-093]). The run absorbs that work, so a frozen total would let
+        // the numerator walk past it.
+        let mut total = queue.items.len();
         // The hard safety ceiling on total pages attempted this run — the honest-halt
         // primitive ([NFR-CC-04], [ADR-42]) that bounds the auto-continue loop.
         let ceiling = ToolBudget::new(self.ceiling);
@@ -387,6 +401,18 @@ where
             if queue.items.is_empty() {
                 break;
             }
+            // The run's live scope: the pages attempted so far plus the unattempted
+            // items this re-read surfaced ([CR-093]). An already-attempted item that
+            // re-appears (a persistent per-page failure) is counted once, in
+            // `attempted`. Carried on the next `PageStarted`; the surface adopts it as
+            // a monotonic maximum, so an item that leaves the work-list unattempted
+            // never walks the rendered denominator backwards.
+            let surfaced = queue
+                .items
+                .iter()
+                .filter(|item| !attempted.contains(&item.slug))
+                .count();
+            total = attempted.len() + surfaced;
         }
 
         sink(WikiProgress::Completed {

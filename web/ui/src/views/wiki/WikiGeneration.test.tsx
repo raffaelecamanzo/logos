@@ -364,6 +364,79 @@ describe("Wiki-tab generation trigger (S-178, FR-WK-18, FR-UI-19, NFR-SE-07)", (
     expect(screen.getByText(/halted: hard safety ceiling reached/i)).toBeInTheDocument();
   });
 
+  it("names a run whose scope grew and never renders a numerator above its denominator (CR-093, S-310, NFR-CC-04)", async () => {
+    window.localStorage.setItem("logos.wiki.consent", "1");
+    vi.mocked(fetchWikiConfig).mockResolvedValue(config({ chatModel: "gpt-x", keyPresent: true }));
+    // The observed 7/5 shape, scaled down: the run opened on two pages, and the
+    // re-read after page a surfaced a third, carried on the next page-started.
+    vi.mocked(streamWikiGeneration).mockResolvedValue({
+      ok: true,
+      body: sseBody(
+        'event: started\ndata: {"event":"started","total":2,"synthesis_timeout_secs":180}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"overview/a","title":"A","index":1,"total":2}\n\n' +
+          'event: page-written\ndata: {"event":"page-written","slug":"overview/a","anchor_count":0,"replaced":false}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"overview/b","title":"B","index":2,"total":3}\n\n' +
+          'event: page-written\ndata: {"event":"page-written","slug":"overview/b","anchor_count":0,"replaced":false}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"architecture/adrs","title":"ADRs","index":3,"total":3}\n\n' +
+          'event: page-written\ndata: {"event":"page-written","slug":"architecture/adrs","anchor_count":0,"replaced":false}\n\n' +
+          'event: completed\ndata: {"event":"completed","pages_written":3,"pages_failed":0}\n\n',
+      ),
+    } as Response);
+
+    renderWiki();
+    expect(await screen.findByText(/Generation complete/i)).toBeInTheDocument();
+    expect(screen.getByText(/3\/3 page\(s\) refreshed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/3\/2 page\(s\)/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/scope grew from 2 as new work surfaced during the run/i)).toBeInTheDocument();
+  });
+
+  it("reads an unchanged-scope run exactly as before — no growth clause (CR-093, S-310)", async () => {
+    window.localStorage.setItem("logos.wiki.consent", "1");
+    vi.mocked(fetchWikiConfig).mockResolvedValue(config({ chatModel: "gpt-x", keyPresent: true }));
+    vi.mocked(streamWikiGeneration).mockResolvedValue({
+      ok: true,
+      body: sseBody(
+        'event: started\ndata: {"event":"started","total":2,"synthesis_timeout_secs":180}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"overview/a","title":"A","index":1,"total":2}\n\n' +
+          'event: page-written\ndata: {"event":"page-written","slug":"overview/a","anchor_count":0,"replaced":false}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"overview/b","title":"B","index":2,"total":2}\n\n' +
+          'event: page-written\ndata: {"event":"page-written","slug":"overview/b","anchor_count":0,"replaced":false}\n\n' +
+          'event: completed\ndata: {"event":"completed","pages_written":2,"pages_failed":0}\n\n',
+      ),
+    } as Response);
+
+    renderWiki();
+    const headline = await screen.findByText(/Generation complete/i);
+    // The whole banner line, byte for byte: the pre-CR-093 wording with nothing added.
+    expect(headline.parentElement?.textContent).toBe("Generation complete · 2/2 page(s) refreshed");
+  });
+
+  it("keeps the halted-before-completed fold when a grown run halts (S-239, CR-093)", async () => {
+    window.localStorage.setItem("logos.wiki.consent", "1");
+    vi.mocked(fetchWikiConfig).mockResolvedValue(config({ chatModel: "gpt-x", keyPresent: true }));
+    vi.mocked(streamWikiGeneration).mockResolvedValue({
+      ok: true,
+      body: sseBody(
+        'event: started\ndata: {"event":"started","total":1,"synthesis_timeout_secs":180}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"overview/a","title":"A","index":1,"total":1}\n\n' +
+          'event: page-written\ndata: {"event":"page-written","slug":"overview/a","anchor_count":0,"replaced":false}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"overview/b","title":"B","index":2,"total":3}\n\n' +
+          'event: halted\ndata: {"event":"halted","reason":"hard safety ceiling reached"}\n\n',
+        // No `completed` frame: the halted-before-completed beat S-239 pins.
+      ),
+    } as Response);
+
+    renderWiki();
+    const headline = await screen.findByText(/Generation halted/i);
+    expect(screen.queryByText(/Generating…/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/writing overview\/b/i)).not.toBeInTheDocument();
+    // The growth clause is a detail part composed AFTER the headline decision: it
+    // sits between the fraction and the halt reason, never re-opening "Generating…".
+    expect(headline.parentElement?.textContent).toBe(
+      "Generation halted · 1/3 page(s) refreshed · scope grew from 1 as new work surfaced during the run · halted: hard safety ceiling reached",
+    );
+  });
+
   it("surfaces an already-in-progress run honestly as a busy notice", async () => {
     window.localStorage.setItem("logos.wiki.consent", "1");
     vi.mocked(fetchWikiConfig).mockResolvedValue(config({ chatModel: "gpt-x", keyPresent: true }));
@@ -424,6 +497,39 @@ describe("Wiki-tab re-attach to an in-flight run (S-223, FR-UI-19, FR-WK-18, NFR
     // Cumulative across the reopen: 2 of 2 written, not reset to 1 of 2 or 0 of 2.
     expect(screen.getByText(/2\/2 page\(s\) refreshed/i)).toBeInTheDocument();
     expect(screen.queryByText(/already in progress/i)).not.toBeInTheDocument();
+  });
+
+  it("a mid-run re-attach lands on the same grown denominator as the first observer (CR-093, S-310)", async () => {
+    window.localStorage.setItem("logos.wiki.consent", "1");
+    vi.mocked(fetchWikiConfig).mockResolvedValue(config({ chatModel: "gpt-x", keyPresent: true }));
+    const history =
+      'event: started\ndata: {"event":"started","total":2}\n\n' +
+      'event: page-started\ndata: {"event":"page-started","slug":"overview/a","title":"A","index":1,"total":2}\n\n' +
+      'event: page-written\ndata: {"event":"page-written","slug":"overview/a","anchor_count":0,"replaced":false}\n\n' +
+      'event: page-started\ndata: {"event":"page-started","slug":"overview/b","title":"B","index":2,"total":3}\n\n';
+
+    // First open: the run grew its scope to 3 before the tab closed.
+    vi.mocked(streamWikiGeneration).mockResolvedValueOnce({ ok: true, body: sseBody(history) } as Response);
+    const first = renderWiki();
+    expect(await screen.findByText(/1\/3 page\(s\) refreshed/i)).toBeInTheDocument();
+    first.unmount();
+
+    // Reopen: the server replays the retained history, then the live tail.
+    vi.mocked(streamWikiGeneration).mockResolvedValueOnce({
+      ok: true,
+      body: sseBody(
+        history +
+          'event: page-written\ndata: {"event":"page-written","slug":"overview/b","anchor_count":0,"replaced":false}\n\n' +
+          'event: page-started\ndata: {"event":"page-started","slug":"overview/c","title":"C","index":3,"total":3}\n\n' +
+          'event: page-written\ndata: {"event":"page-written","slug":"overview/c","anchor_count":0,"replaced":false}\n\n' +
+          'event: completed\ndata: {"event":"completed","pages_written":3,"pages_failed":0}\n\n',
+      ),
+    } as Response);
+    renderWiki();
+    await waitFor(() => expect(vi.mocked(streamWikiGeneration)).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Generation complete/i)).toBeInTheDocument();
+    expect(screen.getByText(/3\/3 page\(s\) refreshed/i)).toBeInTheDocument();
+    expect(screen.getByText(/scope grew from 2/i)).toBeInTheDocument();
   });
 
   it("surfaces an in-flight run's honest halt on re-attach (NFR-CC-04)", async () => {

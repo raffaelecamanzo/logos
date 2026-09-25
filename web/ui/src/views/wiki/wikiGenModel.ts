@@ -57,8 +57,16 @@ export interface WikiPageFailure {
 /** The accumulated render state of one generation run, folded from its SSE frames. */
 export interface WikiGenState {
   phase: WikiGenPhase;
-  /** The number of queued pages the run will attempt (from `started`). */
+  /** The run's scope — the progress denominator: `started`'s opening size, raised
+   *  to the largest per-page `total` seen since. The agent recomputes that per-page
+   *  total after each auto-continued queue re-read (attempted + surfaced), so it
+   *  grows when a re-read surfaces new work; folding it as a monotonic maximum keeps
+   *  it from walking backwards when an item leaves the work-list unattempted, and
+   *  makes a re-attach replay converge on the same value ([CR-093], [FR-UI-19]). */
   total: number;
+  /** The opening work-list size (`started`'s `total`), kept so the banner can name
+   *  a run whose scope grew past it ([CR-093]); `0` before a `started` frame. */
+  initialTotal: number;
   /** The slugs written this run, in order (each `page-written`). */
   written: string[];
   /** The pages whose write was rejected this run (each `page-failed`). */
@@ -81,6 +89,7 @@ export function initialWikiGenState(): WikiGenState {
   return {
     phase: "idle",
     total: 0,
+    initialTotal: 0,
     written: [],
     failed: [],
     current: null,
@@ -117,16 +126,20 @@ export function applyWikiFrame(state: WikiGenState, frame: SseFrame): WikiGenSta
   switch (frame.name) {
     case "started": {
       const timeout = Number(data.synthesis_timeout_secs);
+      const total = Number(data.total) || 0;
       return {
         ...state,
         phase: "running",
-        total: Number(data.total) || 0,
+        total: Math.max(state.total, total),
+        initialTotal: state.initialTotal || total,
         synthesisTimeoutSecs: Number.isFinite(timeout) && timeout > 0 ? timeout : null,
       };
     }
     case "page-started": {
       const slug = typeof data.slug === "string" ? data.slug : null;
-      return { ...state, phase: "running", current: slug };
+      // The live scope as of this page ([CR-093]), adopted as a monotonic maximum.
+      const total = Number(data.total) || 0;
+      return { ...state, phase: "running", current: slug, total: Math.max(state.total, total) };
     }
     case "page-written": {
       const slug = typeof data.slug === "string" ? data.slug : null;

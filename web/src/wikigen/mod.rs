@@ -46,7 +46,10 @@
 //! client accepts a streamed response ([S-223], [FR-WK-18] as amended by [CR-056]).
 //! A re-attach replays the run's retained frame history before continuing with the
 //! live tail, so the reopened tab's "N of M" is the run's true cumulative progress
-//! from its very first render, never a fresh "page 1 of N" ([FR-UI-19]).
+//! from its very first render, never a fresh "page 1 of N" ([FR-UI-19]). The replay
+//! carries every per-page denominator verbatim, so when a chunk re-read grew the
+//! run's scope ([CR-093]) a re-attached observer folds the same grown denominator
+//! as one present from the first frame; this relay neither computes nor rewrites it.
 //!
 //! # Honesty ([NFR-CC-04])
 //! A setup/provider fault is surfaced as an honest `error` event and a missing
@@ -55,6 +58,7 @@
 //! [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
 //! [ADR-42]: ../../../docs/specs/architecture/decisions/ADR-42.md
 //! [CR-056]: ../../../docs/requests/CR-056-wiki-generation-usability.md
+//! [CR-093]: ../../../docs/requests/CR-093-wiki-progress-denominator-honesty.md
 //! [S-178]: ../../../docs/planning/journal.md#s-178-wiki-tab-trigger-background-generation-sse-streaming-and-first-use-consent
 //! [S-222]: ../../../docs/planning/journal.md#s-222-connection-resilient-auto-continuing-background-generation-run
 //! [S-223]: ../../../docs/planning/journal.md#s-223-wiki-tab-re-attach-to-the-in-flight-run-and-cumulative-progress
@@ -560,6 +564,69 @@ mod tests {
         assert!(
             state.begin().is_some(),
             "the lock is released, so a fresh run can begin",
+        );
+    }
+
+    /// The per-page denominator of a run whose scope grew ([CR-093], [S-310]) reaches
+    /// a mid-run re-attach exactly as it reached the observer present from the first
+    /// frame: the retained history replays every `page-started` total verbatim, in
+    /// order, with the single `started` frame first and never repeated — so a surface
+    /// folding the denominator as a monotonic maximum converges on the same value
+    /// whichever way it joined.
+    #[tokio::test]
+    async fn a_mid_run_reattach_replays_the_grown_per_page_denominator() {
+        fn page(index: usize, total: usize) -> WikiProgress {
+            WikiProgress::PageStarted {
+                slug: format!("p{index}"),
+                title: format!("P{index}"),
+                index,
+                total,
+            }
+        }
+        /// The per-page denominators a stream carries, in order, and its `started`
+        /// count — read off exactly the frames this observer received. Each read is
+        /// bounded: the run's sender stays alive for the whole test, so a frame the
+        /// stream never delivers would otherwise park `next()` forever instead of
+        /// failing.
+        async fn fold(stream: &mut WikiRunStream, frames: usize) -> (Vec<usize>, usize) {
+            let (mut totals, mut started) = (Vec::new(), 0);
+            for i in 0..frames {
+                let next = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                    .await
+                    .unwrap_or_else(|_| panic!("frame {} of {frames} was never delivered", i + 1));
+                match next.expect("a frame was emitted") {
+                    WikiFrame::Progress(WikiProgress::Started { .. }) => started += 1,
+                    WikiFrame::Progress(WikiProgress::PageStarted { total, .. }) => totals.push(total),
+                    other => panic!("unexpected frame {other:?}"),
+                }
+            }
+            (totals, started)
+        }
+
+        let state = WikiRunState::new();
+        let (_guard, sink, mut initiating) = state.begin().expect("the run starts");
+        sink.progress(WikiProgress::Started {
+            total: 2,
+            synthesis_timeout_secs: 180,
+        });
+        sink.progress(page(1, 2));
+        // A chunk re-read surfaced one more item: the next page carries the grown scope.
+        sink.progress(page(2, 3));
+
+        let mut reattached = state.subscribe().expect("a run is in flight");
+        sink.progress(page(3, 3));
+
+        let (live_totals, live_started) = fold(&mut initiating, 4).await;
+        let (replayed_totals, replayed_started) = fold(&mut reattached, 4).await;
+        assert_eq!(live_totals, vec![2, 3, 3], "the initiating observer saw the grown scope");
+        assert_eq!(
+            replayed_totals, live_totals,
+            "the re-attach replays every per-page denominator verbatim, then the live tail",
+        );
+        assert_eq!(
+            (live_started, replayed_started),
+            (1, 1),
+            "each observer receives exactly one started frame — it is never re-emitted",
         );
     }
 }
