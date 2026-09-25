@@ -9,6 +9,8 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.22] — 2026-09-25
+
 Sprint 77, second hotfix round.
 
 ### Performance
