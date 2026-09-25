@@ -462,8 +462,8 @@ fn the_workspace_tier_seam_emits_the_facade_config_events() {
 /// The workspace manifest routes (S-430, Sprint 77 HF-1) book each call as the
 /// S-450 workspace-tier siblings do: one `config_read` per manifest read and one
 /// `config_write` per manifest save, `ok` tracking the result — a refused
-/// candidate records `ok = false`, a conflict is an outcome and records `ok =
-/// true` — with no graph store behind them.
+/// candidate and an unreadable manifest record `ok = false`, a conflict is an
+/// outcome and records `ok = true` — with no graph store behind them.
 #[test]
 fn the_workspace_manifest_seam_emits_the_facade_config_events() {
     use crate::federation::manifest::{
@@ -488,6 +488,8 @@ fn the_workspace_manifest_seam_emits_the_facade_config_events() {
         let out = save_workspace_manifest(root, manifest, &loaded).expect("a conflict is an outcome");
         assert!(matches!(out, ManifestSaveOutcome::Conflict { .. }), "{out:?}");
         assert!(save_workspace_manifest(root, "[workspace]\nnmae = 1\n", &loaded).is_err());
+        let no_manifest = tempfile::tempdir().expect("an empty root");
+        assert!(read_workspace_manifest(no_manifest.path()).is_err(), "an unreadable manifest");
     });
 
     let records: Vec<(String, bool, &str)> =
@@ -499,6 +501,7 @@ fn the_workspace_manifest_seam_emits_the_facade_config_events() {
             ("config_write".to_string(), true, "web"),
             ("config_write".to_string(), true, "web"),
             ("config_write".to_string(), false, "web"),
+            ("config_read".to_string(), false, "web"),
         ],
         "one façade-named record per manifest call, under the caller's surface"
     );
