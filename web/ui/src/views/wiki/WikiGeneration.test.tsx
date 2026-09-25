@@ -79,6 +79,8 @@ function config(opts: {
       credential_origin: opts.keyPresent === false ? "unset" : "member",
       member_key_withheld: false,
     },
+    // The server's single-root wiki resolution of the same document (HF-1).
+    effective_wiki: { model: opts.wikiModel?.trim() || opts.chatModel || null },
   };
 }
 

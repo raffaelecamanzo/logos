@@ -9,6 +9,25 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 77, hotfix round.
+
+### Changed
+
+- **A workspace `[wiki].model` is inherited — by a member that inherits the workspace
+  `[chat]` table.** Wiki generation now takes the member's own `[wiki].model`, else the
+  workspace root's when the member declares no `[chat] model` and the workspace root
+  declares one, else the effective chat model. A member that declares its own
+  `[chat] model` owns its endpoint, where a model named for the workspace endpoint may not
+  exist, so it never receives the workspace wiki model. Provider, endpoint and key are
+  still the effective chat resolution's. This replaces 1.4.20's "documented as not read":
+  the workspace Config view now states the condition instead of *Not inherited*, and the
+  config read-model (`GET /api/v1/config`) carries an `effective_wiki` slice beside
+  `effective_chat`, which the Wiki tab's readiness and consent disclosure read, so the tab
+  names the model the run uses (CR-145, FR-CF-07, ADR-67).
+- **The workspace manifest routes are counted in `logos stats`.** `GET` and
+  `POST /api/v1/workspace/manifest[/save]` each book one `config_read` / `config_write`
+  event, as the workspace config routes already did (FR-UI-38).
+
 ## [1.4.20] — 2026-09-25
 
 Sprint 77: the workspace is configured from the app, and the chat answers cross-service

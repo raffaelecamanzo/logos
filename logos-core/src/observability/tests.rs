@@ -459,6 +459,52 @@ fn the_workspace_tier_seam_emits_the_facade_config_events() {
     assert!(!root.join(".logos/logos.db").exists(), "and no graph store behind them");
 }
 
+/// The workspace manifest routes (S-430, Sprint 77 HF-1) book each call as the
+/// S-450 workspace-tier siblings do: one `config_read` per manifest read and one
+/// `config_write` per manifest save, `ok` tracking the result — a refused
+/// candidate records `ok = false`, a conflict is an outcome and records `ok =
+/// true` — with no graph store behind them.
+#[test]
+fn the_workspace_manifest_seam_emits_the_facade_config_events() {
+    use crate::federation::manifest::{
+        fingerprint, read_workspace_manifest, save_workspace_manifest, ManifestSaveOutcome,
+        MANIFEST_FILENAME,
+    };
+    let dir = tempfile::tempdir().expect("temp workspace root");
+    let root = dir.path();
+    let manifest = "[workspace]\nname = \"shop\"\nmembers = [\"api\"]\n";
+    std::fs::write(root.join(MANIFEST_FILENAME), manifest).unwrap();
+    let (sink, rx) = TelemetrySink::with_capacity(16);
+    let subscriber = tracing_subscriber::registry()
+        .with(TelemetryLayer::new(Surface::Web, "feature".to_string(), "test-session".to_string(), sink));
+
+    let loaded = fingerprint(manifest.as_bytes());
+    tracing::subscriber::with_default(subscriber, || {
+        let doc = read_workspace_manifest(root).expect("reads");
+        assert_eq!(doc.fingerprint, loaded);
+        let edited = format!("{manifest}# a comment\n");
+        let out = save_workspace_manifest(root, &edited, &loaded).expect("writes");
+        assert!(matches!(out, ManifestSaveOutcome::Written { .. }), "{out:?}");
+        let out = save_workspace_manifest(root, manifest, &loaded).expect("a conflict is an outcome");
+        assert!(matches!(out, ManifestSaveOutcome::Conflict { .. }), "{out:?}");
+        assert!(save_workspace_manifest(root, "[workspace]\nnmae = 1\n", &loaded).is_err());
+    });
+
+    let records: Vec<(String, bool, &str)> =
+        rx.try_iter().map(|r| (r.tool, r.ok, r.surface)).collect();
+    assert_eq!(
+        records,
+        [
+            ("config_read".to_string(), true, "web"),
+            ("config_write".to_string(), true, "web"),
+            ("config_write".to_string(), true, "web"),
+            ("config_write".to_string(), false, "web"),
+        ],
+        "one façade-named record per manifest call, under the caller's surface"
+    );
+    assert!(!root.join(".logos").exists(), "and no store — nor any .logos/ — behind them");
+}
+
 /// The S-022 watcher attribution: a telemetry event carrying the sanctioned
 /// `surface = "watcher"` override records under that surface (the watcher
 /// runs *inside* the `serve --mcp` process, whose default is `mcp`), while

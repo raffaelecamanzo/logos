@@ -58,6 +58,8 @@ function model(): ConfigReadModel {
       credential_origin: "member",
       member_key_withheld: false,
     },
+    // The single-root wiki resolution: the member's own `[wiki].model` (HF-1).
+    effective_wiki: { model: "claude-wiki" },
     // The CR-067/BR-37 defaults projection: config.toml real defaults, plus
     // rules.toml real [metric_thresholds] defaults / [constraints] recommended
     // baselines — mirroring what the server's Config::default() /
