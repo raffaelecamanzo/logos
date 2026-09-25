@@ -3628,6 +3628,10 @@ fn every_usage_cell_ships_answered_and_classified_and_no_rate() {
             dev(None),
             // search: unclassified — its cells must name the absence.
             with_outcome("search", true, NOW - 60, None),
+            // impact: classified and never answered — 0 of 2 is a rate the
+            // cell HAS, and must not be rendered as an absence.
+            with_outcome("impact", true, NOW - 60, Some(Outcome::Empty)),
+            with_outcome("impact", true, NOW - 60, Some(Outcome::Unresolved)),
         ],
     )
     .unwrap();
@@ -3653,11 +3657,30 @@ fn every_usage_cell_ships_answered_and_classified_and_no_rate() {
     assert_eq!((class.calls, class.outcomes), (6, classified));
     let dev_bucket = info.calls_by_origin.iter().find(|o| o.origin == "dev").unwrap();
     assert_eq!((dev_bucket.calls, dev_bucket.outcomes), (6, classified));
+    let never_answered = info.calls_by_tool.iter().find(|u| u.tool == "impact").unwrap();
+    assert_eq!(
+        never_answered.outcomes,
+        OutcomeCounts {
+            answered_calls: 0,
+            classified_calls: 2
+        }
+    );
+    assert_eq!(
+        never_answered.outcomes.absence(),
+        None,
+        "0 answered of 2 classified is a figure, not an absence"
+    );
     assert_eq!(info.activity_by_day.len(), 1);
     assert_eq!(
         (info.activity_by_day[0].calls, info.activity_by_day[0].outcomes),
-        (7, classified),
-        "the day holds both tools; only callers classified anything"
+        (
+            9,
+            OutcomeCounts {
+                answered_calls: 2,
+                classified_calls: 6
+            }
+        ),
+        "the day holds all three tools; callers and impact classified"
     );
 
     // The wire: every cell of every projection carries both counts and the
