@@ -422,10 +422,16 @@ function ActivityDisclosure({ turn }: { turn: TurnState }) {
 /** Every round this turn has touched — every `plan` frame's round union every
  *  chip's round, ascending and deduplicated. Length 1 for a single-round turn
  *  (the common case, and the CR-089 baseline this fold must render identically
- *  to), so the grouped branch below is reached only on an actual replan. */
+ *  to), so the grouped branch below is reached only on an actual replan.
+ *
+ *  A round whose plan carries zero steps (a malformed `plan` frame guards to
+ *  `steps: []`, same as `PlanList`'s own guard) and that started no chip
+ *  contributes nothing renderable — excluded here rather than in `ActivityByRound`,
+ *  so it never produces an empty group with only a stray `.activityRound` divider
+ *  (review-fix, S-303). */
 function activityRounds(turn: TurnState): number[] {
   const rounds = new Set<number>();
-  for (const p of turn.plans) rounds.add(p.round);
+  for (const p of turn.plans) if (planStepCount(p) > 0) rounds.add(p.round);
   for (const c of turn.chips) rounds.add(c.round);
   return [...rounds].sort((a, b) => a - b);
 }
