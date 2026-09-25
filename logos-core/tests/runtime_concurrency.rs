@@ -194,8 +194,11 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
     );
 }
 
-/// Prefix of the one stdout line [`pe05_budget_cold_start_child_sample`]
-/// prints, so its parent can find it amid the harness's own output.
+/// Marker on the one stdout line [`pe05_budget_cold_start_child_sample`]
+/// prints, so its parent can find it amid the harness's own output. Matched
+/// anywhere in a line, not as a prefix: a single-threaded harness
+/// (`RUST_TEST_THREADS=1`, which the child inherits) prints `test <name> ... `
+/// on the same line before the test body runs.
 const COLD_START_MARKER: &str = "PE05_COLD_START_NANOS: ";
 
 /// Spawn [`pe05_budget_cold_start_child_sample`] as a subprocess of this test
@@ -219,7 +222,7 @@ fn cold_start_in_a_fresh_process() -> Duration {
     );
     let nanos = stdout
         .lines()
-        .find_map(|l| l.strip_prefix(COLD_START_MARKER))
+        .find_map(|l| l.split_once(COLD_START_MARKER).map(|(_, nanos)| nanos))
         .unwrap_or_else(|| {
             panic!("the cold-start child printed no {COLD_START_MARKER} line: {stdout}")
         })
