@@ -720,7 +720,7 @@ async fn a_persistent_write_rejection_does_not_spin_the_auto_continue_loop() {
     // Budget 1 forces a re-read after every page; the persistently-failing pages
     // re-appear in each re-read, so this is exactly the spin the guards must prevent.
     // The outer timeout fails the test if the loop ever hangs.
-    let (_events, sink) = recording_sink();
+    let (events, sink) = recording_sink();
     let outcome = tokio::time::timeout(
         Duration::from_secs(10),
         WikiAgent::new(mock.clone(), "skill", "mock-model")
@@ -743,6 +743,24 @@ async fn a_persistent_write_rejection_does_not_spin_the_auto_continue_loop() {
         outcome.halted.is_none(),
         "a per-page rejection is neither a ceiling nor a provider halt: {:?}",
         outcome.halted,
+    );
+    // The scope never changed: every re-read re-surfaces only already-attempted
+    // (failed) slugs, which are counted once, in `attempted` — so the per-page
+    // denominator stays at the opening size and the surface names no growth
+    // ([CR-093], [NFR-CC-04]).
+    let totals: Vec<usize> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            WikiProgress::PageStarted { total, .. } => Some(*total),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        totals,
+        vec![k; k],
+        "a re-appearing failed slug must not inflate the denominator",
     );
 }
 
