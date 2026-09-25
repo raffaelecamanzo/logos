@@ -30,6 +30,18 @@
 //! per-tool `class` label rides the existing raw-plus-rollup `calls_by_tool`
 //! counts instead, so **every** tool the read-model reports carries a class.
 //!
+//! # What the calls answered ([FR-OB-14])
+//!
+//! Every usage cell of every projection carries `answered_calls` and
+//! `classified_calls` beside `calls` and `ok_calls`, over the same rows and the
+//! same raw-plus-rollup sources as the cell's `calls` — so the outcome counts
+//! have exactly the coverage of the projection they ride. **No rate is
+//! computed here**: the two counts ship and the consumer divides, and a cell
+//! with `classified_calls == 0` carries a named absence instead of a `0%`
+//! ([`OutcomeCounts`], [NFR-CC-04]).
+//!
+//! [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+//!
 //! The headline **tokens-saved figure is an estimate** — the dogfood metric
 //! that says whether Logos earns its place ([NFR-OO-03]) — and is honestly
 //! labeled as such ([NFR-CC-04]; the constants are SRS OQ-01).
@@ -88,6 +100,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 use super::tool;
+use crate::models::outcome::OutcomeCounts;
 use crate::models::quality::{
     AttributionCoverage, ClassUsage, DailyActivity, OriginUsage, StatsInfo, ToolOriginUsage,
     ToolUsage,
@@ -120,6 +133,57 @@ pub(crate) const NO_TELEMETRY_YET: &str = "no telemetry recorded yet (telemetry.
 
 const ORIGIN_BUCKET: &str =
     "CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END";
+
+/// The four aggregate columns every `daily_rollup` usage query selects, in
+/// [`Tally::read`]'s order. The raw-events twin is built in [`stats_from`] from
+/// [`super::db::ANSWERED_CALLS_SQL`] and [`super::db::CLASSIFIED_CALLS_SQL`] —
+/// the same expressions the rollup folded these columns with ([FR-OB-14]).
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+const ROLLUP_TALLY: &str = "sum(calls), sum(ok_calls), sum(answered_calls), sum(classified_calls)";
+
+/// The counts one usage cell accumulates across the raw and rolled-up halves of
+/// the store: calls, the successful subset, and what they answered
+/// ([FR-OB-14]).
+///
+/// One accumulator for all five projections, so a projection cannot carry
+/// `ok_calls` and forget the outcome counts — which is how the workspace
+/// aggregate would silently zero them, and why its fold uses the same fields.
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+#[derive(Debug, Default, Clone, Copy)]
+struct Tally {
+    calls: u64,
+    ok_calls: u64,
+    outcomes: OutcomeCounts,
+}
+
+impl Tally {
+    /// The four aggregate columns starting at `first`, in the order
+    /// [`ROLLUP_TALLY`] and the raw-events tally select them. A `NULL` sum (an
+    /// empty group) and a negative one both read as `0`.
+    fn read(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tally> {
+        let count = |i: usize| -> rusqlite::Result<u64> {
+            Ok(row.get::<_, Option<i64>>(first + i)?.unwrap_or(0).max(0) as u64)
+        };
+        Ok(Tally {
+            calls: count(0)?,
+            ok_calls: count(1)?,
+            outcomes: OutcomeCounts {
+                answered_calls: count(2)?,
+                classified_calls: count(3)?,
+            },
+        })
+    }
+}
+
+impl std::ops::AddAssign for Tally {
+    fn add_assign(&mut self, other: Tally) {
+        self.calls += other.calls;
+        self.ok_calls += other.ok_calls;
+        self.outcomes += other.outcomes;
+    }
+}
 
 /// Aggregate usage/perf stats for the project rooted at `root`.
 ///
@@ -262,54 +326,48 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // into every query below, raw events and rolled-up days alike, so the two
     // sources can never apply different rules to the same event.
     let engine_query = tool::engine_query_predicate();
+    // The raw-events twin of `ROLLUP_TALLY`: the outcome counts use the very
+    // expressions the rollup folds with, so a day reads the same either side of
+    // the retention horizon ([FR-OB-14]).
+    let raw_tally = format!(
+        "count(*), sum(ok), {}, {}",
+        super::db::ANSWERED_CALLS_SQL,
+        super::db::CLASSIFIED_CALLS_SQL,
+    );
 
     // Usage counts: raw events in the window, plus rollup days the window
     // reaches back into (keyed map so the two sources merge per tool).
-    let mut usage: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    let mut usage: BTreeMap<(String, String), Tally> = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT surface, tool, count(*), sum(ok)
+            "SELECT surface, tool, {raw_tally}
              FROM events WHERE at >= ?1 AND {engine_query} GROUP BY surface, tool",
         ))
         .context("preparing the usage query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, Tally::read(r, 2)?))
         })
         .context("querying raw usage")?;
     for row in rows {
-        let (surface, tool, calls, ok_calls) = row.context("reading a usage row")?;
-        let entry = usage.entry((surface, tool)).or_default();
-        entry.0 += calls.max(0) as u64;
-        entry.1 += ok_calls.max(0) as u64;
+        let (surface, tool, tally) = row.context("reading a usage row")?;
+        *usage.entry((surface, tool)).or_default() += tally;
     }
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT surface, tool, sum(calls), sum(ok_calls)
+            "SELECT surface, tool, {ROLLUP_TALLY}
              FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND {engine_query}
              GROUP BY surface, tool",
         ))
         .context("preparing the rollup usage query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, Tally::read(r, 2)?))
         })
         .context("querying rollup usage")?;
     for row in rows {
-        let (surface, tool, calls, ok_calls) = row.context("reading a rollup row")?;
-        let entry = usage.entry((surface, tool)).or_default();
-        entry.0 += calls.max(0) as u64;
-        entry.1 += ok_calls.max(0) as u64;
+        let (surface, tool, tally) = row.context("reading a rollup row")?;
+        *usage.entry((surface, tool)).or_default() += tally;
     }
 
     // Latency percentiles over the window's raw durations (nearest-rank).
@@ -330,48 +388,41 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // days the window reaches back into — the same dual source as usage above,
     // so aged-out days still contribute. The `BTreeMap<day,_>` key is a
     // `'YYYY-MM-DD'` string, whose lexical order is chronological → oldest first.
-    let mut by_day: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut by_day: BTreeMap<String, Tally> = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT date(at, 'unixepoch'), count(*), sum(ok)
+            "SELECT date(at, 'unixepoch'), {raw_tally}
              FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1",
         ))
         .context("preparing the daily-activity query")?;
     let rows = stmt
-        .query_map([cutoff], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-        })
+        .query_map([cutoff], |r| Ok((r.get::<_, String>(0)?, Tally::read(r, 1)?)))
         .context("querying raw daily activity")?;
     for row in rows {
-        let (day, calls, ok_calls) = row.context("reading a daily-activity row")?;
-        let entry = by_day.entry(day).or_default();
-        entry.0 += calls.max(0) as u64;
-        entry.1 += ok_calls.max(0) as u64;
+        let (day, tally) = row.context("reading a daily-activity row")?;
+        *by_day.entry(day).or_default() += tally;
     }
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT day, sum(calls), sum(ok_calls)
+            "SELECT day, {ROLLUP_TALLY}
              FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND {engine_query}
              GROUP BY day",
         ))
         .context("preparing the rollup daily-activity query")?;
     let rows = stmt
-        .query_map([cutoff], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-        })
+        .query_map([cutoff], |r| Ok((r.get::<_, String>(0)?, Tally::read(r, 1)?)))
         .context("querying rollup daily activity")?;
     for row in rows {
-        let (day, calls, ok_calls) = row.context("reading a rollup daily-activity row")?;
-        let entry = by_day.entry(day).or_default();
-        entry.0 += calls.max(0) as u64;
-        entry.1 += ok_calls.max(0) as u64;
+        let (day, tally) = row.context("reading a rollup daily-activity row")?;
+        *by_day.entry(day).or_default() += tally;
     }
     let activity_by_day: Vec<DailyActivity> = by_day
         .into_iter()
-        .map(|(day, (calls, ok_calls))| DailyActivity {
+        .map(|(day, t)| DailyActivity {
             day,
-            calls,
-            ok_calls,
+            calls: t.calls,
+            ok_calls: t.ok_calls,
+            outcomes: t.outcomes,
         })
         .collect();
 
@@ -381,30 +432,27 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // branch. Raw events only: `daily_rollup` carries no `origin`, so a rolled-up
     // day is deliberately absent here rather than mis-attributed (NFR-CC-04).
     // Legacy NULL rows and the primary checkout both fold into `"main"` via COALESCE.
-    let mut by_origin: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut by_origin: BTreeMap<String, Tally> = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT {ORIGIN_BUCKET}, count(*), sum(ok)
+            "SELECT {ORIGIN_BUCKET}, {raw_tally}
              FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1",
         ))
         .context("preparing the origin-breakdown query")?;
     let rows = stmt
-        .query_map([cutoff], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-        })
+        .query_map([cutoff], |r| Ok((r.get::<_, String>(0)?, Tally::read(r, 1)?)))
         .context("querying origin breakdown")?;
     for row in rows {
-        let (origin, calls, ok_calls) = row.context("reading an origin-breakdown row")?;
-        let entry = by_origin.entry(origin).or_default();
-        entry.0 += calls.max(0) as u64;
-        entry.1 += ok_calls.max(0) as u64;
+        let (origin, tally) = row.context("reading an origin-breakdown row")?;
+        *by_origin.entry(origin).or_default() += tally;
     }
     let calls_by_origin: Vec<OriginUsage> = by_origin
         .into_iter()
-        .map(|(origin, (calls, ok_calls))| OriginUsage {
+        .map(|(origin, t)| OriginUsage {
             origin,
-            calls,
-            ok_calls,
+            calls: t.calls,
+            ok_calls: t.ok_calls,
+            outcomes: t.outcomes,
         })
         .collect();
 
@@ -419,70 +467,68 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // disagree; `attribution_coverage` below states both limits in the payload
     // ([NFR-CC-04]). Keyed `(tool, origin)` so the order is tool-then-origin with
     // `"dev"` before `"main"` ([NFR-RA-06]).
-    let mut by_tool_origin: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    let mut by_tool_origin: BTreeMap<(String, String), Tally> = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT tool, {ORIGIN_BUCKET}, count(*), sum(ok)
+            "SELECT tool, {ORIGIN_BUCKET}, {raw_tally}
              FROM events WHERE at >= ?1 AND {engine_query} GROUP BY 1, 2",
         ))
         .context("preparing the tool-by-origin cross-tab query")?;
     let rows = stmt
         .query_map([cutoff], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, Tally::read(r, 2)?))
         })
         .context("querying the tool-by-origin cross-tab")?;
     for row in rows {
-        let (tool, origin, calls, ok_calls) = row.context("reading a cross-tab row")?;
-        let entry = by_tool_origin.entry((tool, origin)).or_default();
-        entry.0 += calls.max(0) as u64;
-        entry.1 += ok_calls.max(0) as u64;
+        let (tool, origin, tally) = row.context("reading a cross-tab row")?;
+        *by_tool_origin.entry((tool, origin)).or_default() += tally;
     }
 
     let calls_by_tool_origin: Vec<ToolOriginUsage> = by_tool_origin
         .into_iter()
-        .map(|((tool, origin), (calls, ok_calls))| ToolOriginUsage {
+        .map(|((tool, origin), t)| ToolOriginUsage {
             class: tool::class_of_wire(&tool).to_string(),
             tool,
             origin,
-            calls,
-            ok_calls,
+            calls: t.calls,
+            ok_calls: t.ok_calls,
+            outcomes: t.outcomes,
         })
         .collect();
 
     // The class × origin rollup — the dogfood table. Folded in Rust from the
     // cross-tab rather than queried again, so the two cannot disagree and it
     // inherits exactly the cross-tab's coverage.
-    let mut by_class_origin: BTreeMap<(&str, &str), (u64, u64)> = BTreeMap::new();
+    let mut by_class_origin: BTreeMap<(&str, &str), Tally> = BTreeMap::new();
     for cell in &calls_by_tool_origin {
-        let entry = by_class_origin
+        *by_class_origin
             .entry((cell.class.as_str(), cell.origin.as_str()))
-            .or_default();
-        entry.0 += cell.calls;
-        entry.1 += cell.ok_calls;
+            .or_default() += Tally {
+            calls: cell.calls,
+            ok_calls: cell.ok_calls,
+            outcomes: cell.outcomes,
+        };
     }
     let calls_by_class: Vec<ClassUsage> = by_class_origin
         .into_iter()
-        .map(|((class, origin), (calls, ok_calls))| ClassUsage {
+        .map(|((class, origin), t)| ClassUsage {
             class: class.to_string(),
             origin: origin.to_string(),
-            calls,
-            ok_calls,
+            calls: t.calls,
+            ok_calls: t.ok_calls,
+            outcomes: t.outcomes,
         })
         .collect();
 
     let calls_by_tool: Vec<ToolUsage> = usage
         .into_iter()
-        .map(|((surface, tool), (calls, ok_calls))| ToolUsage {
+        .map(|((surface, tool), t)| ToolUsage {
             class: tool::class_of_wire(&tool).to_string(),
             surface,
             tool,
-            calls,
-            ok_calls,
+            calls: t.calls,
+            ok_calls: t.ok_calls,
+            outcomes: t.outcomes,
         })
         .collect();
     let calls_total = calls_by_tool.iter().map(|u| u.calls).sum();

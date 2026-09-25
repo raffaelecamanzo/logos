@@ -797,6 +797,21 @@ long-lived `serve` process may still hold older raw events and cover more.
 Under-stating is deliberate; never read the figure as the coverage actually
 achieved.
 
+**What the calls answered.** Every usage cell — in `calls_by_tool`,
+`calls_by_tool_origin`, `calls_by_class`, `calls_by_origin` and
+`activity_by_day`, and the same cells of the workspace aggregate — carries
+`answered_calls` and `classified_calls` beside `calls` and `ok_calls`. A
+classified call is one whose telemetry event recorded an outcome: `answered`,
+`empty` (resolved, legitimately nothing), `unresolved` (could not answer) or
+`failed`. Today the relational tools `callers`, `impact`, `precedent` and
+`affected` are classified; every other tool records none. **No rate is in the
+payload** — divide `answered_calls` by `classified_calls`, never by `calls`,
+or every unclassified tool drags the figure towards zero. A cell whose
+`classified_calls` is `0` carries `outcome_absence: "none recorded"` (otherwise
+`null`) — render that, never `0%`. The outcome arrives with a forward-only v4
+migration; events and rolled-up days written before it stay unclassified and
+are never back-filled (S-445, FR-OB-14).
+
 **Telemetry is repo-global and durable across worktrees.** The store lives at
 the **primary** repository's `.logos/telemetry.db`, resolved via
 `git --git-common-dir`. A command run inside a linked git worktree writes

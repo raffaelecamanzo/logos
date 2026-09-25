@@ -6,7 +6,8 @@
 //! Nothing in Logos logs directly. The [`Engine`](crate::Engine) chokepoint
 //! methods and the three pipeline passes route through [`traced`], which opens
 //! a span (human-visible context for the stderr layer) and emits **one**
-//! telemetry-tagged completion event (`tool`, `duration_ms`, `ok`). Two layers
+//! telemetry-tagged completion event (`tool`, `duration_ms`, `ok`, and the
+//! call's `outcome` when [`traced_with`] classified it, [FR-OB-14]). Two layers
 //! consume the stream, installed by [`init`]:
 //!
 //! - a `tracing-subscriber` fmt layer rendering human logs to **stderr only**
@@ -25,6 +26,7 @@
 //! [FR-OB-02]: ../../../docs/specs/requirements/FR-OB-02.md
 //! [FR-OB-03]: ../../../docs/specs/requirements/FR-OB-03.md
 //! [FR-OB-04]: ../../../docs/specs/requirements/FR-OB-04.md
+//! [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
 //! [NFR-OO-01]: ../../../docs/specs/requirements/NFR-OO-01.md
 //! [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
 //! [NFR-OO-03]: ../../../docs/specs/requirements/NFR-OO-03.md
@@ -47,7 +49,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
 
 pub use layer::TelemetryGuard;
-pub(crate) use tool::{EventClass, Tool};
+pub(crate) use tool::{CallOutcome, EventClass, Outcome, Tool};
 
 /// The reserved target tagging events for the telemetry layer ([FR-OB-03]).
 /// Everything else on the stream is human-log material for the stderr layer.
@@ -445,6 +447,13 @@ pub(crate) struct EventRecord {
     /// [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
     /// [NFR-CC-03]: ../../../docs/specs/requirements/NFR-CC-03.md
     pub(crate) session_id: String,
+    /// What the call answered ([FR-OB-14]): `Some` for every call of a tool
+    /// traced through [`traced_with`] — [`Outcome::Failed`] when it returned
+    /// `Err(_)` — and `None` for a tool with no outcome vocabulary. Stored in
+    /// `events.outcome` from migration v4; `None` is the column's `NULL`.
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    pub(crate) outcome: Option<Outcome>,
 }
 
 /// The development-increment `origin` stamped onto every event this process
@@ -576,8 +585,8 @@ pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
 
 /// The one span+event body ([NFR-OO-01]): run `f` inside a span named for the
 /// call, measure its wall-clock **once**, emit the single telemetry-tagged
-/// completion event (`tool` / `duration_ms` / `ok`), and return the result
-/// paired with that same measured `duration_ms`.
+/// completion event (`tool` / `duration_ms` / `ok`, and `outcome` when there is
+/// one), and return the result paired with that same measured `duration_ms`.
 ///
 /// This is the sole place a pipeline phase is timed. [`traced`] discards the
 /// duration; [`traced_timed`] hands it back so a caller can assemble the
@@ -585,14 +594,29 @@ pub fn init(surface: ProcessSurface, root: &Path) -> TelemetryGuard {
 /// reached telemetry — never a second, parallel timing path ([FR-OB-01],
 /// [NFR-OO-01]).
 ///
+/// # The outcome ([FR-OB-14])
+///
+/// `classify` runs *inside* the measured span, before the clock is read, so
+/// whatever it costs is billed to the call it classifies rather than hidden
+/// from it; every [`CallOutcome`] impl is a few field reads ([NFR-OO-02]). The
+/// `Err(_)` → [`Outcome::Failed`] rule is [`traced_with`]'s, not this body's:
+/// see there for why a tool with no vocabulary records no outcome even when it
+/// fails.
+///
 /// [FR-OB-06]: ../../../docs/specs/requirements/FR-OB-06.md
 /// [FR-OB-01]: ../../../docs/specs/requirements/FR-OB-01.md
-fn traced_inner<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> (Result<T>, u64) {
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+fn traced_inner<T>(
+    tool: Tool,
+    f: impl FnOnce() -> Result<T>,
+    classify: impl FnOnce(&Result<T>) -> Option<Outcome>,
+) -> (Result<T>, u64) {
     let tool = tool.as_str();
     let span = tracing::info_span!("logos", tool);
     let _enter = span.enter();
     let start = Instant::now();
     let result = f();
+    let outcome = classify(&result);
     let duration_ms = start.elapsed().as_millis() as u64;
     let ok = result.is_ok();
     tracing::info!(
@@ -600,6 +624,8 @@ fn traced_inner<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> (Result<T>, u64
         tool,
         duration_ms,
         ok,
+        // `None` records no field at all, which the layer reads as `NULL`.
+        outcome = outcome.map(Outcome::as_str),
         "call completed"
     );
     (result, duration_ms)
@@ -607,12 +633,45 @@ fn traced_inner<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> (Result<T>, u64
 
 /// The **single emission point** ([NFR-OO-01]): run `f` inside a span named
 /// for the call and emit one telemetry-tagged completion event carrying
-/// `tool` / `duration_ms` / `ok`.
+/// `tool` / `duration_ms` / `ok`. It records no outcome; [`traced_with`] does.
 ///
 /// Every Engine chokepoint method and pipeline pass funnels through here —
 /// sinks differ, call sites don't ([ADR-13]).
 pub(crate) fn traced<T>(tool: Tool, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    traced_inner(tool, f).0
+    traced_inner(tool, f, |_| None).0
+}
+
+/// [`traced`] for a call whose result knows what it answered ([FR-OB-14]):
+/// the same single seam, with `classify` recording the call's [`Outcome`].
+///
+/// `classify` is almost always `CallOutcome::outcome`; taking it as an argument
+/// rather than bounding `T: CallOutcome` is what keeps [`traced`] generic and
+/// unbounded, so every tool that does not opt in records `NULL` with no change
+/// at its call site.
+///
+/// `classify` is run only on `Ok`. An `Err(_)` records [`Outcome::Failed`], so
+/// a classified tool never writes `NULL` and a `NULL` outcome means only "no
+/// outcome vocabulary, or a pre-v4 row". The rule lives **here** and not in
+/// [`traced`] deliberately: a tool with no vocabulary that recorded `failed` on
+/// error would carry a classified count made of nothing but its failures, and
+/// its cell would then read as a `0` answered out of `N` — a rate the tool
+/// never had the vocabulary to earn ([NFR-CC-04]). Its failure is still in
+/// `ok = 0`, where it always was.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+pub(crate) fn traced_with<T>(
+    tool: Tool,
+    f: impl FnOnce() -> Result<T>,
+    classify: impl FnOnce(&T) -> Outcome,
+) -> Result<T> {
+    traced_inner(tool, f, |result| {
+        Some(match result {
+            Ok(value) => classify(value),
+            Err(_) => Outcome::Failed,
+        })
+    })
+    .0
 }
 
 /// [`traced`] that additionally returns the wall-clock it measured, in ms.
@@ -628,7 +687,7 @@ pub(crate) fn traced_timed<T>(
     tool: Tool,
     f: impl FnOnce() -> Result<T>,
 ) -> (Result<T>, u64) {
-    traced_inner(tool, f)
+    traced_inner(tool, f, |_| None)
 }
 
 /// [`traced`] for chokepoint calls that cannot fail (their result type has
@@ -648,7 +707,7 @@ pub(crate) fn traced_infallible<T>(tool: Tool, f: impl FnOnce() -> T) -> T {
 ///
 /// [FR-OB-06]: ../../../docs/specs/requirements/FR-OB-06.md
 pub(crate) fn traced_infallible_timed<T>(tool: Tool, f: impl FnOnce() -> T) -> (T, u64) {
-    let (result, duration_ms) = traced_inner(tool, || Ok(f()));
+    let (result, duration_ms) = traced_inner(tool, || Ok(f()), |_| None);
     match result {
         Ok(value) => (value, duration_ms),
         // The closure above always returns Ok.
@@ -672,11 +731,34 @@ pub(crate) fn seed_store_for_tests(
     logos_dir: &Path,
     events: &[(&'static str, &str, u64, bool, i64, &str)],
 ) -> Result<()> {
+    let events: Vec<_> = events
+        .iter()
+        .map(|&(surface, tool, duration_ms, ok, at, origin)| {
+            (surface, tool, duration_ms, ok, at, origin, None)
+        })
+        .collect();
+    seed_store_with_outcomes_for_tests(logos_dir, &events)
+}
+
+/// One seeded event: `(surface, tool, duration_ms, ok, at, origin, outcome)`.
+#[cfg(test)]
+pub(crate) type SeedEvent<'a> = (&'static str, &'a str, u64, bool, i64, &'a str, Option<Outcome>);
+
+/// [`seed_store_for_tests`] with each event's recorded [`Outcome`] as a seventh
+/// field ([FR-OB-14]) — `None` is a row with no outcome, as an unclassified
+/// tool or a pre-v4 build writes it.
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+#[cfg(test)]
+pub(crate) fn seed_store_with_outcomes_for_tests(
+    logos_dir: &Path,
+    events: &[SeedEvent<'_>],
+) -> Result<()> {
     std::fs::create_dir_all(logos_dir)?;
     let mut conn = db::open(&logos_dir.join(TELEMETRY_DB_FILENAME))?;
     let batch: Vec<EventRecord> = events
         .iter()
-        .map(|&(surface, tool, duration_ms, ok, at, origin)| EventRecord {
+        .map(|&(surface, tool, duration_ms, ok, at, origin, outcome)| EventRecord {
             at,
             surface,
             tool: tool.to_string(),
@@ -684,6 +766,7 @@ pub(crate) fn seed_store_for_tests(
             ok,
             origin: origin.to_string(),
             session_id: "test-session".to_string(),
+            outcome,
         })
         .collect();
     db::write_batch(&mut conn, &batch)

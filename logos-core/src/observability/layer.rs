@@ -35,7 +35,7 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::Context as LayerContext;
 use tracing_subscriber::Layer;
 
-use super::{EventRecord, Surface, TELEMETRY_TARGET};
+use super::{EventRecord, Outcome, Surface, TELEMETRY_TARGET};
 
 /// Queue capacity. Sized for bursts (a full index emits a handful of pass
 /// events; an MCP session a few events per tool call) while bounding memory:
@@ -158,13 +158,14 @@ impl<S: Subscriber> Layer<S> for TelemetryLayer {
 }
 
 /// Field visitor extracting `tool` / `duration_ms` / `ok` (and the optional
-/// `surface` override) from a telemetry-tagged event.
+/// `surface` override and `outcome`) from a telemetry-tagged event.
 #[derive(Default)]
 struct TelemetryVisitor {
     tool: Option<String>,
     duration_ms: Option<u64>,
     ok: Option<bool>,
     surface_override: Option<Surface>,
+    outcome: Option<Outcome>,
 }
 
 impl Visit for TelemetryVisitor {
@@ -186,6 +187,15 @@ impl Visit for TelemetryVisitor {
         // [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
         if field.name() == "surface" {
             self.surface_override = Surface::from_wire(value);
+        }
+        // The call's outcome ([FR-OB-14]), optional: absent for a tool with no
+        // outcome vocabulary. Validated against the closed set exactly as the
+        // surface is — a string outside it records `NULL`, never a fifth value,
+        // and never drops the event (the call still happened).
+        //
+        // [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+        if field.name() == "outcome" {
+            self.outcome = Outcome::from_wire(value);
         }
     }
 
@@ -236,6 +246,7 @@ impl TelemetryVisitor {
             ok: self.ok?,
             origin: origin.to_string(),
             session_id: session_id.to_string(),
+            outcome: self.outcome,
         })
     }
 }

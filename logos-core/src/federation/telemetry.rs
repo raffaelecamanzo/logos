@@ -71,6 +71,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::registry::{EngineRegistry, MemberEngine};
+use crate::models::outcome::OutcomeCounts;
 use crate::models::quality::{
     AttributionCoverage, DailyActivity, OriginUsage, StatsInfo, ToolUsage,
 };
@@ -309,24 +310,33 @@ fn sum_by_tool(read: &[StatsInfo]) -> Vec<ToolUsage> {
     // `class` is a pure function of the tool name (`tool::class_of_wire`), so
     // every member reporting the same tool reports the same class; the first
     // one encountered is therefore not a choice between disagreeing labels.
-    let mut by_tool: BTreeMap<(&str, &str), (String, u64, u64)> = BTreeMap::new();
+    //
+    // Every count the cell carries is summed here — `ok_calls` and both outcome
+    // counts ([FR-OB-14]) alike. A field this fold forgets is not dropped from
+    // the payload: it is serialised as a zero, which is why each has a fixture
+    // in which it differs from every other.
+    //
+    // [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    let mut by_tool: BTreeMap<(&str, &str), (String, u64, u64, OutcomeCounts)> = BTreeMap::new();
     for info in read {
         for usage in &info.calls_by_tool {
             let entry = by_tool
                 .entry((usage.surface.as_str(), usage.tool.as_str()))
-                .or_insert_with(|| (usage.class.clone(), 0, 0));
+                .or_insert_with(|| (usage.class.clone(), 0, 0, OutcomeCounts::default()));
             entry.1 += usage.calls;
             entry.2 += usage.ok_calls;
+            entry.3 += usage.outcomes;
         }
     }
     by_tool
         .into_iter()
-        .map(|((surface, tool), (class, calls, ok_calls))| ToolUsage {
+        .map(|((surface, tool), (class, calls, ok_calls, outcomes))| ToolUsage {
             surface: surface.to_string(),
             tool: tool.to_string(),
             class,
             calls,
             ok_calls,
+            outcomes,
         })
         .collect()
 }
@@ -336,20 +346,22 @@ fn sum_by_tool(read: &[StatsInfo]) -> Vec<ToolUsage> {
 /// `'YYYY-MM-DD'` sorts lexicographically into calendar order, so the
 /// [`BTreeMap`] key gives the oldest-first contract for free.
 fn sum_by_day(read: &[StatsInfo]) -> Vec<DailyActivity> {
-    let mut by_day: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+    let mut by_day: BTreeMap<&str, (u64, u64, OutcomeCounts)> = BTreeMap::new();
     for info in read {
         for day in &info.activity_by_day {
             let entry = by_day.entry(day.day.as_str()).or_default();
             entry.0 += day.calls;
             entry.1 += day.ok_calls;
+            entry.2 += day.outcomes;
         }
     }
     by_day
         .into_iter()
-        .map(|(day, (calls, ok_calls))| DailyActivity {
+        .map(|(day, (calls, ok_calls, outcomes))| DailyActivity {
             day: day.to_string(),
             calls,
             ok_calls,
+            outcomes,
         })
         .collect()
 }
@@ -358,20 +370,22 @@ fn sum_by_day(read: &[StatsInfo]) -> Vec<DailyActivity> {
 /// `"main"` — the order a single member's `calls_by_origin` already uses, which
 /// a [`BTreeMap`] over the two bucket names reproduces.
 fn sum_by_origin(read: &[StatsInfo]) -> Vec<OriginUsage> {
-    let mut by_origin: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+    let mut by_origin: BTreeMap<&str, (u64, u64, OutcomeCounts)> = BTreeMap::new();
     for info in read {
         for origin in &info.calls_by_origin {
             let entry = by_origin.entry(origin.origin.as_str()).or_default();
             entry.0 += origin.calls;
             entry.1 += origin.ok_calls;
+            entry.2 += origin.outcomes;
         }
     }
     by_origin
         .into_iter()
-        .map(|(origin, (calls, ok_calls))| OriginUsage {
+        .map(|(origin, (calls, ok_calls, outcomes))| OriginUsage {
             origin: origin.to_string(),
             calls,
             ok_calls,
+            outcomes,
         })
         .collect()
 }
@@ -764,5 +778,81 @@ mod tests {
             "90 days is inside the raw-retention horizon, so coverage is not truncated"
         );
         assert_eq!(week.attribution_coverage.requested_window_days, 7);
+    }
+
+    /// The workspace aggregate reports the outcome counts **summed**, never
+    /// zeroed ([FR-OB-14] AC 4): the `ok_calls` trap one field later.
+    ///
+    /// Across the two members `precedent` has 5 calls, 4 ok, 3 classified and 2
+    /// answered — four different numbers — and each member contributes to every
+    /// one of them, so a fold that dropped a member's counts, zeroed a field, or
+    /// copied one field into another cannot match. `search` is unclassified in
+    /// both, so its merged cell must still name the absence.
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[test]
+    fn the_aggregate_sums_answered_and_classified_as_their_own_figures() {
+        use crate::models::outcome::{OutcomeCounts, OUTCOME_ABSENCE};
+        use crate::observability::{seed_store_with_outcomes_for_tests, Outcome};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let fed = federation(root, &["api", "web"]);
+        let at = now() - 3_600;
+        seed_store_with_outcomes_for_tests(
+            &logos_dir(root, "api"),
+            &[
+                ("cli", "precedent", 5, true, at, "main", Some(Outcome::Answered)),
+                ("cli", "precedent", 5, true, at, "main", Some(Outcome::Empty)),
+                ("cli", "precedent", 5, true, at, "main", None),
+                ("cli", "search", 5, true, at, "main", None),
+            ],
+        )
+        .expect("api store seeds");
+        seed_store_with_outcomes_for_tests(
+            &logos_dir(root, "web"),
+            &[
+                ("cli", "precedent", 5, true, at, "main", Some(Outcome::Answered)),
+                ("cli", "precedent", 5, false, at, "main", None),
+            ],
+        )
+        .expect("web store seeds");
+
+        let registry = EngineRegistry::<SpyEngine>::new(fed, RegistryMode::Lazy);
+        let agg = workspace_statistics(&registry, None);
+        assert_eq!((agg.members_read, agg.members_total), (2, 2));
+
+        let summed = OutcomeCounts {
+            answered_calls: 2,
+            classified_calls: 3,
+        };
+        let precedent = agg
+            .calls_by_tool
+            .iter()
+            .find(|u| u.tool == "precedent")
+            .expect("precedent merged");
+        assert_eq!(
+            (precedent.calls, precedent.ok_calls, precedent.outcomes),
+            (5, 4, summed),
+            "calls, ok, classified and answered are four figures, merged as four"
+        );
+        let search = agg
+            .calls_by_tool
+            .iter()
+            .find(|u| u.tool == "search")
+            .expect("search merged");
+        assert_eq!(search.outcomes.absence(), Some(OUTCOME_ABSENCE));
+
+        // The day and origin series fold the same counts: 6 calls, 5 ok, of
+        // which precedent's are the only classified ones.
+        assert_eq!(agg.activity_by_day.len(), 1, "{:?}", agg.activity_by_day);
+        let day = &agg.activity_by_day[0];
+        assert_eq!((day.calls, day.ok_calls, day.outcomes), (6, 5, summed));
+        let main = agg
+            .calls_by_origin
+            .iter()
+            .find(|o| o.origin == "main")
+            .expect("main bucket merged");
+        assert_eq!((main.calls, main.ok_calls, main.outcomes), (6, 5, summed));
     }
 }

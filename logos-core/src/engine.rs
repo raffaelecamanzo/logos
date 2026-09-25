@@ -41,7 +41,7 @@ use crate::models::{
         RulesReport, ScanResult, SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
-use crate::observability::Tool;
+use crate::observability::{CallOutcome, Tool};
 use crate::runtime::{Runtime, RuntimeConfig, SharedWorkerPool};
 
 /// Thick-core engine — the single public façade over all Logos operations.
@@ -965,7 +965,11 @@ impl Engine {
 
     /// Direct callers of `symbol`, at most `limit` (default 50) (FR-NV-05).
     pub fn callers(&self, symbol: &str, limit: Option<usize>) -> CallersResult {
-        crate::observability::traced(Tool::Callers, || crate::navigate::callers(self, symbol, limit))
+        crate::observability::traced_with(
+            Tool::Callers,
+            || crate::navigate::callers(self, symbol, limit),
+            CallOutcome::outcome,
+        )
             .unwrap_or_else(|err| {
                 tracing::warn!("callers failed: {err:#}");
                 CallersResult {
@@ -993,7 +997,11 @@ impl Engine {
     /// (FR-NV-06, DL-03): upstream "breaks if changed", downstream
     /// "depends on", bounded by `depth` (default 3).
     pub fn impact(&self, symbol: &str, depth: Option<usize>) -> ImpactResult {
-        crate::observability::traced(Tool::Impact, || crate::navigate::impact(self, symbol, depth))
+        crate::observability::traced_with(
+            Tool::Impact,
+            || crate::navigate::impact(self, symbol, depth),
+            CallOutcome::outcome,
+        )
             .unwrap_or_else(|err| {
                 tracing::warn!("impact failed: {err:#}");
                 ImpactResult {
@@ -1052,9 +1060,11 @@ impl Engine {
     /// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub fn precedent(&self, target: &str, limit: Option<usize>) -> PrecedentResult {
-        crate::observability::traced(Tool::Precedent, || {
-            crate::navigate::precedent(self, target, limit)
-        })
+        crate::observability::traced_with(
+            Tool::Precedent,
+            || crate::navigate::precedent(self, target, limit),
+            CallOutcome::outcome,
+        )
         .unwrap_or_else(|err| {
             tracing::warn!("precedent failed: {err:#}");
             crate::navigate::precedent_degraded(target, format!("precedent failed: {err}"))
@@ -1131,9 +1141,11 @@ impl Engine {
     /// calls/imports/references — on any of `files`. `tests_only` narrows the
     /// closure to test-marked files.
     pub fn affected(&self, files: &[String], tests_only: bool) -> AffectedResult {
-        crate::observability::traced(Tool::Affected, || {
-            crate::navigate::affected(self, files, tests_only)
-        })
+        crate::observability::traced_with(
+            Tool::Affected,
+            || crate::navigate::affected(self, files, tests_only),
+            CallOutcome::outcome,
+        )
         .unwrap_or_else(|err| {
             tracing::warn!("affected failed: {err:#}");
             AffectedResult {

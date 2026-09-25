@@ -53,6 +53,14 @@
 //! occurrences over 41 production rows**, beside 108 in test scope; the delta
 //! is [`S444_ADDITION`], so every earlier reading stays checkable.
 //!
+//! **Addendum, 2026-09-25 ([S-445]) — 1 production row added, 1 occurrence,
+//! conformant; no correction.** Every `stats` usage cell now carries what its
+//! calls answered, and a cell that classified nothing names that absence with
+//! the lexicon's `none recorded` as written — `OUTCOME_ABSENCE` in
+//! `models/outcome.rs` — rather than coining a word or rendering a `0%`. The
+//! census now reads **87 production occurrences over 42 production rows**,
+//! beside the same 108 in test scope; the delta is [`S445_ADDITION`].
+//!
 //! # What is enumerated, and what this cannot catch
 //!
 //! The walk covers [`SURFACES`] in full — every `.rs`, `.ts` and `.tsx` file
@@ -127,6 +135,7 @@
 //! [S-442]: ../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
 //! [S-443]: ../../docs/planning/journal.md#s-443-the-absence-audit-gains-a-structural-arm-over-the-relational-result-types
 //! [S-444]: ../../docs/planning/journal.md#s-444-the-shipped-guidance-states-the-language-scope-its-relational-claims-hold-on
+//! [S-445]: ../../docs/planning/journal.md#s-445-a-telemetry-event-records-what-the-call-answered-with-its-denominator
 //! [FR-EH-04]: ../../docs/specs/requirements/FR-EH-04.md
 //! [FR-UI-04]: ../../docs/specs/requirements/FR-UI-04.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
@@ -309,7 +318,7 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 73] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 74] = [
     (
         "core",
         "logos-core/src/config/discovery.rs",
@@ -525,6 +534,14 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 73] = [
         2,
         0,
         "CONFORMANT — `DenominatorAbsence::Unindexed`, the variant and its one construction in `ResolutionDenominator::measured`, serialised by the kebab-case derive as the lexicon's own spelling. R1: its condition — no anchor of the answer resolved to an indexed node or file — establishes exactly that. R3: names no command, unlike the Health page's `unindexed`, because a misspelt symbol is as likely as an unindexed one and the answer's `suggestions` already speak to it (S-442, FR-NV-14)",
+    ),
+    (
+        "core",
+        "logos-core/src/models/outcome.rs",
+        "none recorded",
+        1,
+        0,
+        "CONFORMANT — `OUTCOME_ABSENCE`, what a `stats` usage cell with `classified_calls == 0` carries in `outcome_absence` in place of an answered rate. R1: the condition establishes that no outcome was recorded and nothing about why — no vocabulary, pre-v4 rows, or rolled-up pre-v4 days — so it names no cause. R4: never a `0%`; the two counts ship and no rate does. R5: derived once, at serialisation, from the count itself (S-445, FR-OB-14)",
     ),
     (
         "core",
@@ -2145,6 +2162,14 @@ const S442_ADDITION: (usize, usize) = (2, 3);
 /// [S-444]: ../../docs/planning/journal.md#s-444-the-shipped-guidance-states-the-language-scope-its-relational-claims-hold-on
 const S444_ADDITION: (usize, usize, usize) = (2, 2, 2);
 
+/// What [S-445] added to the census on 2026-09-25: `(production rows added,
+/// production occurrences added, test occurrences added)` — the one
+/// `models/outcome.rs` row, `OUTCOME_ABSENCE`'s `none recorded`. Its tests name
+/// the constant rather than the literal, so it adds no test-scope occurrence.
+///
+/// [S-445]: ../../docs/planning/journal.md#s-445-a-telemetry-event-records-what-the-call-answered-with-its-denominator
+const S445_ADDITION: (usize, usize, usize) = (1, 1, 0);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
@@ -2152,15 +2177,18 @@ fn the_audit_reports_its_count_with_its_denominator() {
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
-        (86, 41, 108),
-        "the census as it stands after S-444's addendum, 2026-09-23: 86 production \
-         occurrences over 41 production rows, beside 108 test-scope occurrences"
+        (87, 42, 108),
+        "the census as it stands after S-445's addendum, 2026-09-25: 87 production \
+         occurrences over 42 production rows, beside 108 test-scope occurrences"
     );
     // The 2026-09-20 reading the header and the tuple below state.
-    let production_rows = production_rows_now - S444_ADDITION.0 - S442_ADDITION.0;
-    let production_occurrences =
-        production_occurrences_now - S444_ADDITION.1 - S442_ADDITION.1;
-    let test_occurrences = test_occurrences - S444_ADDITION.2;
+    let production_rows =
+        production_rows_now - S445_ADDITION.0 - S444_ADDITION.0 - S442_ADDITION.0;
+    let production_occurrences = production_occurrences_now
+        - S445_ADDITION.1
+        - S444_ADDITION.1
+        - S442_ADDITION.1;
+    let test_occurrences = test_occurrences - S445_ADDITION.2 - S444_ADDITION.2;
     let corrected_files: std::collections::BTreeSet<&str> =
         CORRECTIONS.iter().map(|(file, _, _, _)| *file).collect();
 
