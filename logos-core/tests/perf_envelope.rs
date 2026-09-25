@@ -1311,6 +1311,13 @@ mod configuration_envelope {
     /// `cold_start_to_ready_engine_is_within_pe05_budget` does. Named with
     /// `pe05_budget` so the fast gate tier skips it alongside that guard.
     ///
+    /// Compiled queries are shared process-wide (HF-3), so each cold arm first
+    /// clears that cache — otherwise the second arm, and the first whenever a
+    /// sibling test had already loaded a registry, would time cache hits. A
+    /// sibling loading concurrently can still warm it mid-arm, which only ever
+    /// makes an arm faster; the fresh-process guard in `runtime_concurrency.rs`
+    /// is the one that times a start no other test can have touched.
+    ///
     /// [NFR-PE-05]: ../../docs/specs/requirements/NFR-PE-05.md
     #[test]
     fn cold_start_is_unchanged_by_a_configuration_corpus_within_the_pe05_budget() {
@@ -1322,12 +1329,14 @@ mod configuration_envelope {
         let bare = bare_tmp.path().canonicalize().expect("canonical temp root");
         write_member(&bare, false);
 
+        logos_core::plugin::queries::clear_compiled_cache();
         let t = Instant::now();
         let engine = Engine::start(&full).expect("engine starts");
         let full_cold = t.elapsed();
         assert!(engine.runtime().is_some(), "engine is ready to serve");
         drop(engine);
 
+        logos_core::plugin::queries::clear_compiled_cache();
         let t = Instant::now();
         let engine = Engine::start(&bare).expect("engine starts");
         let bare_cold = t.elapsed();
