@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::history::{DegradedReason, FileTemporal};
+use crate::models::outcome::OutcomeCounts;
 use crate::models::pipeline::RelationCoverage;
 
 /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
@@ -1664,6 +1665,13 @@ pub struct ToolUsage {
     pub class: String,
     pub calls: u64,
     pub ok_calls: u64,
+    /// What these calls answered ([FR-OB-14]): `answered_calls` and
+    /// `classified_calls`, flattened into the cell beside `outcome_absence`.
+    /// Both counts ship and no rate does — see [`OutcomeCounts`].
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[serde(flatten)]
+    pub outcomes: OutcomeCounts,
 }
 
 /// One cell of the tool × origin cross-tab ([FR-OB-11]): a tool's calls within
@@ -1681,6 +1689,13 @@ pub struct ToolOriginUsage {
     pub origin: String,
     pub calls: u64,
     pub ok_calls: u64,
+    /// What these calls answered ([FR-OB-14]): `answered_calls` and
+    /// `classified_calls`, flattened into the cell beside `outcome_absence`.
+    /// Both counts ship and no rate does — see [`OutcomeCounts`].
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[serde(flatten)]
+    pub outcomes: OutcomeCounts,
 }
 
 /// One cell of the class × origin breakdown ([FR-OB-11]) — the cross-tab rolled
@@ -1695,6 +1710,13 @@ pub struct ClassUsage {
     pub origin: String,
     pub calls: u64,
     pub ok_calls: u64,
+    /// What these calls answered ([FR-OB-14]): `answered_calls` and
+    /// `classified_calls`, flattened into the cell beside `outcome_absence`.
+    /// Both counts ship and no rate does — see [`OutcomeCounts`].
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[serde(flatten)]
+    pub outcomes: OutcomeCounts,
 }
 
 /// What [`StatsInfo::calls_by_tool_origin`] and [`StatsInfo::calls_by_class`]
@@ -1777,6 +1799,13 @@ pub struct DailyActivity {
     pub day: String,
     pub calls: u64,
     pub ok_calls: u64,
+    /// What these calls answered ([FR-OB-14]): `answered_calls` and
+    /// `classified_calls`, flattened into the cell beside `outcome_absence`.
+    /// Both counts ship and no rate does — see [`OutcomeCounts`].
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[serde(flatten)]
+    pub outcomes: OutcomeCounts,
 }
 
 /// Calls attributed to one dev-vs-`main` bucket ([FR-OB-08]): `"main"` for the
@@ -1790,6 +1819,13 @@ pub struct OriginUsage {
     pub origin: String,
     pub calls: u64,
     pub ok_calls: u64,
+    /// What these calls answered ([FR-OB-14]): `answered_calls` and
+    /// `classified_calls`, flattened into the cell beside `outcome_absence`.
+    /// Both counts ship and no rate does — see [`OutcomeCounts`].
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[serde(flatten)]
+    pub outcomes: OutcomeCounts,
 }
 
 /// Languages registered in the plugin substrate (FR-PL-06).

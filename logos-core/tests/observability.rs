@@ -69,6 +69,17 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
             "search served: {:?}",
             found.warnings
         );
+        // Two classified calls through the real chokepoint (FR-OB-14): one that
+        // answers — `alpha` calls `beta` — and one naming nothing in the graph.
+        let answered = engine.callers("beta", None);
+        assert_eq!(answered.total, 1, "alpha calls beta: {answered:?}");
+        let unresolved = engine.callers("no_such_symbol_anywhere", None);
+        assert!(unresolved.resolved.is_none(), "{unresolved:?}");
+        // The other three classified chokepoints, once each: whatever each one
+        // answers here, it must be recorded WITH an outcome.
+        let _ = engine.impact("beta", None);
+        let _ = engine.precedent("lib.rs", None);
+        let _ = engine.affected(&["lib.rs".to_string()], false);
     }
     // Flush the last telemetry batch exactly as a process exit would.
     drop(guard);
@@ -101,6 +112,48 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
     assert!(
         stats.tokens_saved_estimate > 0,
         "the search call yields a non-zero tokens-saved estimate"
+    );
+    // What the calls answered, end to end (FR-OB-14): the chokepoint classified
+    // both `callers` calls, one answered; `search` has no outcome vocabulary and
+    // its cell names the absence rather than a rate.
+    let callers = stats
+        .calls_by_tool
+        .iter()
+        .find(|u| u.tool == "callers")
+        .expect("the callers chokepoint recorded");
+    assert_eq!(
+        (
+            callers.calls,
+            callers.outcomes.answered_calls,
+            callers.outcomes.classified_calls
+        ),
+        (2, 1, 2),
+        "{callers:?}"
+    );
+    // Every classified chokepoint records an outcome on every call — a
+    // chokepoint put back on plain `traced` would record NULL and read here as
+    // `classified_calls == 0`.
+    for tool in ["impact", "precedent", "affected"] {
+        let cell = stats
+            .calls_by_tool
+            .iter()
+            .find(|u| u.tool == tool)
+            .unwrap_or_else(|| panic!("the {tool} chokepoint recorded"));
+        assert_eq!(
+            (cell.calls, cell.outcomes.classified_calls),
+            (1, 1),
+            "{tool} is classified through the engine: {cell:?}"
+        );
+    }
+    let search = stats
+        .calls_by_tool
+        .iter()
+        .find(|u| u.tool == "search")
+        .expect("search recorded");
+    assert_eq!(search.outcomes.classified_calls, 0);
+    assert_eq!(
+        search.outcomes.absence(),
+        Some(logos_core::models::OUTCOME_ABSENCE)
     );
 
     // ── the survival contract (NFR-OO-05): wipe logos.db, reindex ──────────

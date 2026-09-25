@@ -33,6 +33,7 @@ fn record(tool: &str, duration_ms: u64, ok: bool, at: i64) -> EventRecord {
         ok,
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     }
 }
 
@@ -64,7 +65,7 @@ fn telemetry_schema_migrates_and_is_idempotent() {
     let versions: i64 = conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(versions, 3, "each ledger migration recorded exactly once");
+    assert_eq!(versions, 4, "each ledger migration recorded exactly once");
     // The v2 `origin` column is present on the events table.
     let has_origin: i64 = conn
         .query_row(
@@ -144,6 +145,7 @@ fn write_batch_persists_the_origin_stamp() {
             ok: true,
             origin: "sprint-40-I2-S1".to_string(),
             session_id: "test-session".to_string(),
+            outcome: None,
         }],
     )
     .expect("batch commits");
@@ -177,12 +179,12 @@ fn v2_migration_over_a_v1_store_reads_legacy_rows_as_main() {
 
     // Apply the forward ledger — the exact production path `db::open` runs.
     // `migrate` applies every pending migration, so a v1 seed now lands on the
-    // current head (v3) in one call, not just v2.
+    // current head (v4) in one call, not just v2.
     db::migrate(&mut conn).expect("the forward ledger applies over a v1 store");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "the store advanced to the ledger head");
+    assert_eq!(version, 4, "the store advanced to the ledger head");
 
     // The legacy row is intact and its NULL origin reads as 'main'.
     let (legacy_origin, coalesced): (Option<String>, String) = conn
@@ -206,6 +208,7 @@ fn v2_migration_over_a_v1_store_reads_legacy_rows_as_main() {
             ok: true,
             origin: "feature".to_string(),
             session_id: "test-session".to_string(),
+            outcome: None,
         }],
     )
     .expect("post-migration write");
@@ -233,6 +236,7 @@ fn write_batch_persists_the_session_id_stamp() {
             ok: true,
             origin: "sprint-40-I2-S1".to_string(),
             session_id: "a1b2c3d4e5f60718".to_string(),
+            outcome: None,
         }],
     )
     .expect("batch commits");
@@ -273,11 +277,13 @@ fn v3_migration_over_a_v2_store_reads_legacy_rows_as_unattributed() {
     assert_eq!(version, 2, "the seeded store is at v2");
 
     // Apply the forward ledger — the exact production path `db::open` runs.
+    // `migrate` applies every pending migration, so this lands on the head
+    // (v4), passing through v3.
     db::migrate(&mut conn).expect("v3 migration applies over a v2 store");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "the store advanced to v3");
+    assert_eq!(version, 4, "the store advanced through v3 to the ledger head");
 
     // The legacy row is intact, its NULL session_id is never coalesced into a
     // real session, and `COALESCE(session_id, 'unattributed')` is how a reader
@@ -311,6 +317,7 @@ fn v3_migration_over_a_v2_store_reads_legacy_rows_as_unattributed() {
             ok: true,
             origin: "main".to_string(),
             session_id: "freshly-generated".to_string(),
+            outcome: None,
         }],
     )
     .expect("post-migration write");
@@ -1178,6 +1185,7 @@ fn spa_navigation_counts_while_self_referential_reads_do_not() {
         ok: true,
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -1267,6 +1275,7 @@ fn shell_chrome_is_excluded_by_the_surface_arm_of_the_classification() {
         ok: true,
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -1478,6 +1487,7 @@ fn the_exclusion_applies_to_every_stats_query() {
             ok: true,
             origin: "some-worktree-branch".to_string(),
             session_id: "test-session".to_string(),
+            outcome: None,
         })
         .collect();
     db::write_batch(&mut conn, &noise).unwrap();
@@ -1566,6 +1576,7 @@ fn a_historical_window_reports_the_navigation_the_store_holds() {
                 ok: true,
                 origin: "main".to_string(),
                 session_id: "test-session".to_string(),
+                outcome: None,
             })
             .collect()
     };
@@ -1862,6 +1873,7 @@ fn chat_agent_calls_are_separable_from_web_and_mcp() {
         ok: true,
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     });
     db::write_batch(&mut conn, &rows).unwrap();
     let info = stats_from(&conn, 7, NOW).unwrap();
@@ -1947,6 +1959,7 @@ fn wiki_generation_calls_are_separable_from_the_surfaces_they_would_be_summed_wi
         ok: true,
         origin: "main".to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     });
     #[cfg(feature = "agents")]
     {
@@ -1959,6 +1972,7 @@ fn wiki_generation_calls_are_separable_from_the_surfaces_they_would_be_summed_wi
             ok: true,
             origin: "main".to_string(),
             session_id: "test-session".to_string(),
+            outcome: None,
         });
     }
     db::write_batch(&mut conn, &rows).unwrap();
@@ -2021,6 +2035,7 @@ fn stats_respects_the_window() {
                 ok: true,
                 origin: "feature".to_string(),
                 session_id: "test-session".to_string(),
+                outcome: None,
             },
         ],
     )
@@ -2115,6 +2130,7 @@ fn stats_reports_daily_activity_and_origin_breakdown() {
         ok: true,
         origin: "feature".to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -2234,6 +2250,7 @@ fn origin_breakdown_collapses_all_branches_into_dev() {
         ok,
         origin: branch.to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -2656,6 +2673,7 @@ fn fraction_of_sessions_with_a_navigation_call_is_derivable() {
         ok: true,
         origin: "main".to_string(),
         session_id: session.to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -2746,6 +2764,7 @@ fn the_cross_tab_splits_each_tool_by_dev_and_main_origin() {
         ok,
         origin: branch.to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -2874,6 +2893,7 @@ fn the_class_breakdown_is_the_dogfood_table() {
         ok,
         origin: branch.to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -3105,6 +3125,7 @@ fn the_exclusion_reaches_the_cross_tab_and_the_class_breakdown() {
         // A distinct origin, so a leak would add a whole `dev` column.
         origin: "some-worktree-branch".to_string(),
         session_id: "test-session".to_string(),
+        outcome: None,
     };
     db::write_batch(
         &mut conn,
@@ -3167,4 +3188,702 @@ fn a_degraded_read_model_still_states_its_coverage_limits() {
     );
     assert_eq!((zeroed.requested_window_days, zeroed.covered_window_days), (0, 0));
     assert!(!zeroed.truncated_by_retention);
+}
+
+// ── The call outcome ([FR-OB-14], S-445) ─────────────────────────────────────
+//
+// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+
+use super::{traced_with, CallOutcome, Outcome};
+use crate::models::outcome::{OutcomeCounts, OUTCOME_ABSENCE};
+
+/// A record carrying `outcome` — the fixture shape every outcome test builds on.
+fn with_outcome(tool: &str, ok: bool, at: i64, outcome: Option<Outcome>) -> EventRecord {
+    EventRecord {
+        outcome,
+        ..record(tool, 5, ok, at)
+    }
+}
+
+/// `SELECT outcome FROM events` in insertion order, as stored.
+fn stored_outcomes(conn: &rusqlite::Connection) -> Vec<Option<String>> {
+    let mut stmt = conn
+        .prepare("SELECT outcome FROM events ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, Option<String>>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The vocabulary is closed four ways over: every value round-trips through its
+/// stored spelling, nothing else parses, the v4 `CHECK` list admits exactly the
+/// four spellings, and the shared `answered` aggregate names the same word.
+#[test]
+fn the_outcome_vocabulary_is_closed_and_the_store_enforces_it() {
+    for outcome in Outcome::ALL {
+        assert_eq!(Outcome::from_wire(outcome.as_str()), Some(outcome));
+    }
+    // Near misses: case, whitespace, a plausible fifth value, the NULL spelling.
+    for stranger in ["Answered", "answered ", "unclassified", "null", ""] {
+        assert_eq!(Outcome::from_wire(stranger), None, "{stranger:?} is not an outcome");
+    }
+
+    let conn = db::open_in_memory();
+    for outcome in Outcome::ALL {
+        conn.execute(
+            "INSERT INTO events (at, surface, tool, duration_ms, ok, outcome)
+             VALUES (1, 'cli', 'callers', 1, 1, ?1)",
+            [outcome.as_str()],
+        )
+        .unwrap_or_else(|e| panic!("{outcome:?} is admitted by the CHECK: {e}"));
+    }
+    let refused = conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, outcome)
+         VALUES (1, 'cli', 'callers', 1, 1, 'unclassified')",
+        [],
+    );
+    assert!(refused.is_err(), "a fifth value is refused by the store itself");
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, outcome)
+         VALUES (1, 'cli', 'callers', 1, 1, NULL)",
+        [],
+    )
+    .expect("NULL — unclassified or legacy — is admitted");
+
+    assert!(
+        db::ANSWERED_CALLS_SQL.contains(&format!("'{}'", Outcome::Answered.as_str())),
+        "the shared aggregate counts the stored spelling of `answered`: {}",
+        db::ANSWERED_CALLS_SQL
+    );
+}
+
+/// The four opted-in result types, one fixture per outcome each can produce.
+/// The classifier reads fields only: nothing here needs a graph.
+#[test]
+fn each_classified_result_type_names_its_outcome() {
+    use crate::model::NodeKind;
+    use crate::models::navigation::{EmptyPrecedent, EmptyPrecedentCode};
+    use crate::models::{
+        AffectedFile, AffectedResult, CallersResult, ImpactEntry, ImpactResult, PrecedentResult,
+        SymbolRef,
+    };
+
+    let sym = || SymbolRef {
+        symbol: "s".to_string(),
+        name: "s".to_string(),
+        kind: NodeKind::Function,
+        file: None,
+        line: None,
+    };
+
+    // callers
+    assert_eq!(CallersResult::default().outcome(), Outcome::Unresolved);
+    let resolved = CallersResult {
+        resolved: Some(sym()),
+        ..CallersResult::default()
+    };
+    assert_eq!(resolved.outcome(), Outcome::Empty);
+    let answered = CallersResult {
+        resolved: Some(sym()),
+        total: 3,
+        callers: vec![sym()],
+        ..CallersResult::default()
+    };
+    assert_eq!(answered.outcome(), Outcome::Answered);
+    // `total` is the full count, so a limit that returned an empty page still
+    // answered.
+    let truncated = CallersResult {
+        resolved: Some(sym()),
+        total: 3,
+        ..CallersResult::default()
+    };
+    assert_eq!(truncated.outcome(), Outcome::Answered);
+
+    // impact — each direction, and the doc trace, answers on its own.
+    assert_eq!(ImpactResult::default().outcome(), Outcome::Unresolved);
+    let resolved = || ImpactResult {
+        resolved: Some(sym()),
+        ..ImpactResult::default()
+    };
+    assert_eq!(resolved().outcome(), Outcome::Empty);
+    let entry = || ImpactEntry {
+        symbol: sym(),
+        distance: 1,
+    };
+    let upstream = ImpactResult {
+        upstream: vec![entry()],
+        ..resolved()
+    };
+    assert_eq!(upstream.outcome(), Outcome::Answered);
+    let downstream = ImpactResult {
+        downstream: vec![entry()],
+        ..resolved()
+    };
+    assert_eq!(downstream.outcome(), Outcome::Answered);
+    let documented_only = ImpactResult {
+        docs: vec![crate::models::navigation::TraceLink {
+            symbol: sym(),
+            via: crate::model::EdgeKind::DocReference,
+        }],
+        ..resolved()
+    };
+    assert_eq!(
+        documented_only.outcome(),
+        Outcome::Answered,
+        "the doc trace answers on its own"
+    );
+
+    // precedent — the shapes `navigate::precedent` actually builds: a delivered
+    // list, then every closed empty code with nothing delivered.
+    let found = PrecedentResult {
+        total_found: 2,
+        precedents: vec![crate::models::navigation::Precedent {
+            symbol: sym(),
+            rank: crate::models::navigation::PrecedentRank::default(),
+            reasons: Vec::new(),
+        }],
+        ..PrecedentResult::default()
+    };
+    assert_eq!(found.outcome(), Outcome::Answered);
+    let empty_because = |code| PrecedentResult {
+        empty_reason: Some(EmptyPrecedent {
+            code,
+            detail: String::new(),
+        }),
+        ..PrecedentResult::default()
+    };
+    for code in [
+        EmptyPrecedentCode::TargetUnresolved,
+        EmptyPrecedentCode::GraphEmpty,
+        EmptyPrecedentCode::TargetAbsentFromView,
+        EmptyPrecedentCode::QueryFailed,
+    ] {
+        assert_eq!(empty_because(code).outcome(), Outcome::Unresolved, "{code:?}");
+    }
+    // `results_unavailable` is only ever built with candidates FOUND and none
+    // delivered (`navigate::precedent`'s materialisation guard): found is not
+    // answered.
+    let vanished = PrecedentResult {
+        total_found: 3,
+        elided: 3,
+        ..empty_because(EmptyPrecedentCode::ResultsUnavailable)
+    };
+    assert_eq!(vanished.outcome(), Outcome::Unresolved);
+    for code in [
+        EmptyPrecedentCode::NoStructuralAnchors,
+        EmptyPrecedentCode::AnchorsAreUnshared,
+        EmptyPrecedentCode::AnchorsAreUbiquitous,
+    ] {
+        assert_eq!(empty_because(code).outcome(), Outcome::Empty, "{code:?}");
+    }
+
+    // affected — no resolved seed, a seed with no dependents, dependents.
+    let unknown_only = AffectedResult {
+        unknown: vec!["nope.rs".to_string()],
+        ..AffectedResult::default()
+    };
+    assert_eq!(unknown_only.outcome(), Outcome::Unresolved);
+    let seeded = || AffectedResult {
+        changed: vec!["lib.rs".to_string()],
+        ..AffectedResult::default()
+    };
+    assert_eq!(seeded().outcome(), Outcome::Empty);
+    // The Unresolved rule is "no path resolved", not "some path did not": a
+    // mixed input still had a seed, and an empty input had none.
+    let mixed = AffectedResult {
+        unknown: vec!["nope.rs".to_string()],
+        ..seeded()
+    };
+    assert_eq!(mixed.outcome(), Outcome::Empty);
+    assert_eq!(AffectedResult::default().outcome(), Outcome::Unresolved);
+    let reached = AffectedResult {
+        affected: vec![AffectedFile {
+            file: "main.rs".to_string(),
+            distance: 1,
+            is_test: false,
+        }],
+        ..seeded()
+    };
+    assert_eq!(reached.outcome(), Outcome::Answered);
+}
+
+/// `traced_with` records the classifier's verdict on `Ok` and `failed` on
+/// `Err` without running the classifier; plain `traced` records no outcome on
+/// either — the pair is the criterion, since `NULL` must mean only "no
+/// vocabulary", never "it errored" and never "it succeeded".
+#[test]
+fn traced_with_records_the_outcome_and_failed_on_err() {
+    let (sink, rx) = TelemetrySink::with_capacity(16);
+    let subscriber = tracing_subscriber::registry().with(TelemetryLayer::new(
+        Surface::Cli,
+        "main".to_string(),
+        "test-session".to_string(),
+        sink,
+    ));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for outcome in [Outcome::Answered, Outcome::Empty, Outcome::Unresolved] {
+            let value = traced_with(Tool::Callers, || Ok(7), |_| outcome).unwrap();
+            assert_eq!(value, 7, "traced_with is transparent to the result");
+        }
+        let err = traced_with(
+            Tool::Precedent,
+            || Err::<u8, _>(anyhow::anyhow!("boom")),
+            |_| panic!("the classifier never sees an Err"),
+        );
+        assert!(err.is_err(), "the error propagates untouched");
+        traced(Tool::Search, || Ok(())).unwrap();
+        let _ = traced(Tool::Index, || Err::<(), _>(anyhow::anyhow!("boom")));
+    });
+
+    let recorded: Vec<(String, bool, Option<Outcome>)> = rx
+        .try_iter()
+        .map(|r| (r.tool, r.ok, r.outcome))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            ("callers".to_string(), true, Some(Outcome::Answered)),
+            ("callers".to_string(), true, Some(Outcome::Empty)),
+            ("callers".to_string(), true, Some(Outcome::Unresolved)),
+            ("precedent".to_string(), false, Some(Outcome::Failed)),
+            ("search".to_string(), true, None),
+            ("index".to_string(), false, None),
+        ]
+    );
+}
+
+/// An `outcome` outside the closed set records `NULL`: the event is kept (the
+/// call happened) and no fifth value reaches the store.
+#[test]
+fn the_layer_records_an_unknown_outcome_as_unclassified() {
+    let (sink, rx) = TelemetrySink::with_capacity(4);
+    let subscriber = tracing_subscriber::registry().with(TelemetryLayer::new(
+        Surface::Cli,
+        "main".to_string(),
+        "test-session".to_string(),
+        sink,
+    ));
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(
+            target: TELEMETRY_TARGET,
+            tool = "callers",
+            duration_ms = 1u64,
+            ok = true,
+            outcome = "maybe",
+            "call completed"
+        );
+        tracing::info!(
+            target: TELEMETRY_TARGET,
+            tool = "callers",
+            duration_ms = 1u64,
+            ok = true,
+            outcome = "empty",
+            "call completed"
+        );
+    });
+    let outcomes: Vec<Option<Outcome>> = rx.try_iter().map(|r| r.outcome).collect();
+    assert_eq!(outcomes, [None, Some(Outcome::Empty)]);
+}
+
+/// `write_batch` stores each outcome's spelling and `NULL` for none.
+#[test]
+fn write_batch_persists_the_outcome() {
+    let mut conn = db::open_in_memory();
+    let mut batch: Vec<EventRecord> = Outcome::ALL
+        .into_iter()
+        .map(|o| with_outcome("callers", o != Outcome::Failed, NOW, Some(o)))
+        .collect();
+    batch.push(with_outcome("search", true, NOW, None));
+    db::write_batch(&mut conn, &batch).expect("batch commits");
+    assert_eq!(
+        stored_outcomes(&conn),
+        [
+            Some("answered".to_string()),
+            Some("empty".to_string()),
+            Some("unresolved".to_string()),
+            Some("failed".to_string()),
+            None,
+        ]
+    );
+}
+
+/// The v4 forward migration over a seeded **v3** store — a raw event and a
+/// rolled-up day, both written before the column existed — leaves both
+/// unclassified and never imputes an outcome to either, while a post-migration
+/// write carries its own ([FR-OB-14] AC 3).
+#[test]
+fn v4_migration_over_a_v3_store_leaves_legacy_rows_unclassified() {
+    let mut conn = db::open_in_memory_v3();
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
+         VALUES (?1, 'cli', 'callers', 12, 1, 'main', 'legacy')",
+        [NOW - 60],
+    )
+    .expect("legacy v3 event");
+    conn.execute(
+        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                   total_duration_ms, max_duration_ms)
+         VALUES (date(?1, 'unixepoch'), 'cli', 'callers', 5, 5, 50, 20)",
+        [NOW - 2 * 86_400],
+    )
+    .expect("legacy v3 rollup day");
+
+    db::migrate(&mut conn).expect("v4 applies over a v3 store");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 4, "the store advanced to v4");
+    assert_eq!(stored_outcomes(&conn), [None], "the legacy event stays NULL");
+    let legacy_day: (i64, i64, i64) = conn
+        .query_row(
+            "SELECT calls, answered_calls, classified_calls FROM daily_rollup",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        legacy_day,
+        (5, 0, 0),
+        "a pre-v4 day counted its calls and classified none of them"
+    );
+
+    db::write_batch(
+        &mut conn,
+        &[with_outcome("callers", true, NOW - 30, Some(Outcome::Answered))],
+    )
+    .expect("post-migration write");
+
+    // The read-model: 7 callers calls, 1 classified, 1 answered — the six legacy
+    // calls are counted as calls and nowhere else.
+    let info = stats_from(&conn, 7, NOW).expect("stats");
+    let callers = info
+        .calls_by_tool
+        .iter()
+        .find(|u| u.tool == "callers")
+        .expect("callers reported");
+    assert_eq!(
+        (callers.calls, callers.outcomes),
+        (
+            7,
+            OutcomeCounts {
+                answered_calls: 1,
+                classified_calls: 1
+            }
+        )
+    );
+}
+
+/// The rollup folds the outcome counts by the same rule the raw read applies,
+/// so a day reads the same before and after it ages out of raw retention.
+#[test]
+fn the_outcome_counts_survive_the_rollup_unchanged() {
+    let mut conn = db::open_in_memory();
+    let old = NOW - 100 * 86_400;
+    db::write_batch(
+        &mut conn,
+        &[
+            with_outcome("precedent", true, old, Some(Outcome::Answered)),
+            with_outcome("precedent", true, old, Some(Outcome::Empty)),
+            with_outcome("precedent", false, old, Some(Outcome::Failed)),
+            with_outcome("precedent", true, old, None),
+        ],
+    )
+    .unwrap();
+    let before = stats_from(&conn, 365, NOW).unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+    let raw: i64 = conn
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(raw, 0, "the four events aged out into the rollup");
+    let after = stats_from(&conn, 365, NOW).unwrap();
+
+    let cell = |info: &crate::models::quality::StatsInfo| {
+        let u = info
+            .calls_by_tool
+            .iter()
+            .find(|u| u.tool == "precedent")
+            .expect("precedent reported");
+        (u.calls, u.ok_calls, u.outcomes)
+    };
+    let expected = (
+        4,
+        3,
+        OutcomeCounts {
+            answered_calls: 1,
+            classified_calls: 3,
+        },
+    );
+    assert_eq!(cell(&before), expected, "raw read");
+    assert_eq!(cell(&after), expected, "rolled-up read");
+    assert_eq!(
+        after.activity_by_day[0].outcomes, expected.2,
+        "the rolled-up day series carries the counts too"
+    );
+}
+
+/// **AC 1 — every usage cell carries both counts, no rate, and a named
+/// absence where nothing was classified.**
+///
+/// The fixture makes `calls`, `ok_calls`, `classified_calls` and
+/// `answered_calls` pairwise different on the classified tool, so a projection
+/// that dropped, zeroed or swapped any of them cannot match.
+#[test]
+fn every_usage_cell_ships_answered_and_classified_and_no_rate() {
+    let mut conn = db::open_in_memory();
+    let dev = |outcome| EventRecord {
+        origin: "sprint-78-I1-S1".to_string(),
+        ..with_outcome("callers", outcome != Some(Outcome::Failed), NOW - 60, outcome)
+    };
+    db::write_batch(
+        &mut conn,
+        &[
+            // callers: 6 calls, 5 ok, 4 classified, 2 answered.
+            dev(Some(Outcome::Answered)),
+            dev(Some(Outcome::Answered)),
+            dev(Some(Outcome::Empty)),
+            dev(Some(Outcome::Failed)),
+            dev(None),
+            dev(None),
+            // search: unclassified — its cells must name the absence.
+            with_outcome("search", true, NOW - 60, None),
+            // impact: classified and never answered — 0 of 2 is a rate the
+            // cell HAS, and must not be rendered as an absence.
+            with_outcome("impact", true, NOW - 60, Some(Outcome::Empty)),
+            with_outcome("impact", true, NOW - 60, Some(Outcome::Unresolved)),
+        ],
+    )
+    .unwrap();
+    let info = stats_from(&conn, 7, NOW).unwrap();
+    let classified = OutcomeCounts {
+        answered_calls: 2,
+        classified_calls: 4,
+    };
+
+    let callers = info.calls_by_tool.iter().find(|u| u.tool == "callers").unwrap();
+    assert_eq!((callers.calls, callers.ok_calls, callers.outcomes), (6, 5, classified));
+    let cross = info
+        .calls_by_tool_origin
+        .iter()
+        .find(|u| u.tool == "callers")
+        .unwrap();
+    assert_eq!((cross.origin.as_str(), cross.calls, cross.outcomes), ("dev", 6, classified));
+    let class = info
+        .calls_by_class
+        .iter()
+        .find(|c| c.class == "navigation" && c.origin == "dev")
+        .unwrap();
+    assert_eq!((class.calls, class.outcomes), (6, classified));
+    let dev_bucket = info.calls_by_origin.iter().find(|o| o.origin == "dev").unwrap();
+    assert_eq!((dev_bucket.calls, dev_bucket.outcomes), (6, classified));
+    let never_answered = info.calls_by_tool.iter().find(|u| u.tool == "impact").unwrap();
+    assert_eq!(
+        never_answered.outcomes,
+        OutcomeCounts {
+            answered_calls: 0,
+            classified_calls: 2
+        }
+    );
+    assert_eq!(
+        never_answered.outcomes.absence(),
+        None,
+        "0 answered of 2 classified is a figure, not an absence"
+    );
+    assert_eq!(info.activity_by_day.len(), 1);
+    assert_eq!(
+        (info.activity_by_day[0].calls, info.activity_by_day[0].outcomes),
+        (
+            9,
+            OutcomeCounts {
+                answered_calls: 2,
+                classified_calls: 6
+            }
+        ),
+        "the day holds all three tools; callers and impact classified"
+    );
+
+    // The wire: every cell of every projection carries both counts and the
+    // absence field, and none carries a rate.
+    let json = serde_json::to_value(&info).unwrap();
+    for projection in [
+        "calls_by_tool",
+        "calls_by_tool_origin",
+        "calls_by_class",
+        "calls_by_origin",
+        "activity_by_day",
+    ] {
+        let cells = json[projection].as_array().expect("an array projection");
+        assert!(!cells.is_empty(), "{projection} has cells to check");
+        for cell in cells {
+            let keys: Vec<&str> = cell.as_object().unwrap().keys().map(String::as_str).collect();
+            for key in ["answered_calls", "classified_calls", "outcome_absence"] {
+                assert!(keys.contains(&key), "{projection} cell lacks {key}: {cell}");
+            }
+            assert!(
+                !keys.iter().any(|k| k.contains("rate") || k.contains("pct")),
+                "{projection} computes a rate in the payload: {cell}"
+            );
+        }
+    }
+    let search = json["calls_by_tool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["tool"] == "search")
+        .unwrap();
+    assert_eq!(search["classified_calls"], 0);
+    assert_eq!(
+        search["outcome_absence"], OUTCOME_ABSENCE,
+        "a cell with nothing classified names the absence, never a 0%"
+    );
+    assert!(
+        crate::models::quality::absence::SENTINELS.contains(&OUTCOME_ABSENCE),
+        "the absence is spelled in the closed lexicon"
+    );
+    let callers_json = json["calls_by_tool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["tool"] == "callers")
+        .unwrap();
+    assert!(
+        callers_json["outcome_absence"].is_null(),
+        "a classified cell carries no absence: {callers_json}"
+    );
+    // The VALUES on the wire, not only the keys: a serialiser that swapped the
+    // two would ship answered > classified with every key still present.
+    assert_eq!(
+        (&callers_json["answered_calls"], &callers_json["classified_calls"]),
+        (&serde_json::json!(2), &serde_json::json!(4)),
+        "{callers_json}"
+    );
+}
+
+/// The version the read-model gates the outcome columns on is the ledger entry
+/// that adds them: a v3 store has no `outcome` column and sits below it, and the
+/// forward migration crosses it.
+#[test]
+fn the_outcome_version_is_the_migration_that_adds_the_column() {
+    let has_outcome = |conn: &rusqlite::Connection| -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('events') WHERE name = 'outcome'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    };
+    let mut conn = db::open_in_memory_v3();
+    assert!(db::user_version(&conn).unwrap() < db::OUTCOME_VERSION);
+    assert!(!has_outcome(&conn), "v3 carries no outcome column");
+    db::migrate(&mut conn).unwrap();
+    assert!(db::user_version(&conn).unwrap() >= db::OUTCOME_VERSION);
+    assert!(has_outcome(&conn), "the gated version carries it");
+}
+
+/// **A pre-v4 store is read, not refused.** The read-only reader never migrates,
+/// so a store at v3 reaches `stats_from` as it is: its calls count, nothing is
+/// classified, and every cell names the absence — an intact store is never
+/// reported unreadable for being older.
+#[test]
+fn a_pre_outcome_store_reads_as_unclassified_not_unreadable() {
+    let conn = db::open_in_memory_v3();
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
+         VALUES (?1, 'cli', 'callers', 12, 1, 'main', 'legacy')",
+        [NOW - 60],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                   total_duration_ms, max_duration_ms)
+         VALUES (date(?1, 'unixepoch'), 'cli', 'callers', 5, 4, 50, 20)",
+        [NOW - 2 * 86_400],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).expect("a v3 store reads");
+    let callers = info.calls_by_tool.iter().find(|u| u.tool == "callers").unwrap();
+    assert_eq!(
+        (callers.calls, callers.ok_calls, callers.outcomes),
+        (6, 5, OutcomeCounts::default())
+    );
+    assert_eq!(callers.outcomes.absence(), Some(OUTCOME_ABSENCE));
+    assert!(
+        info.activity_by_day.iter().all(|d| d.outcomes.classified_calls == 0),
+        "{:?}",
+        info.activity_by_day
+    );
+}
+
+/// A second prune into a day already in `daily_rollup` **adds** its outcome
+/// counts to the day's, exactly as it adds `calls` — the `ON CONFLICT` path,
+/// which is the normal case for the day straddling the retention cutoff.
+#[test]
+fn a_second_prune_into_a_rolled_up_day_adds_its_outcome_counts() {
+    let mut conn = db::open_in_memory();
+    let day = NOW - 100 * 86_400;
+    db::write_batch(
+        &mut conn,
+        &[
+            with_outcome("precedent", true, day, Some(Outcome::Answered)),
+            with_outcome("precedent", true, day, Some(Outcome::Empty)),
+        ],
+    )
+    .unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+    db::write_batch(
+        &mut conn,
+        &[
+            with_outcome("precedent", true, day + 60, Some(Outcome::Answered)),
+            with_outcome("precedent", false, day + 60, Some(Outcome::Failed)),
+            with_outcome("precedent", true, day + 60, None),
+        ],
+    )
+    .unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+
+    let rows: Vec<(i64, i64, i64)> = conn
+        .prepare("SELECT calls, answered_calls, classified_calls FROM daily_rollup")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [(5, 2, 4)],
+        "one day, both prunes summed: 5 calls, 4 classified, 2 answered"
+    );
+}
+
+/// The read-model **sums** the rolled-up outcome counts across days: two aged
+/// days whose counts differ read as their total, which a `max` could not.
+#[test]
+fn the_rolled_up_outcome_counts_sum_across_days() {
+    let mut conn = db::open_in_memory();
+    db::write_batch(
+        &mut conn,
+        &[
+            with_outcome("callers", true, NOW - 100 * 86_400, Some(Outcome::Answered)),
+            with_outcome("callers", true, NOW - 100 * 86_400, Some(Outcome::Empty)),
+            with_outcome("callers", true, NOW - 110 * 86_400, Some(Outcome::Answered)),
+        ],
+    )
+    .unwrap();
+    db::rollup_and_prune(&mut conn, NOW, db::RETENTION_DAYS).unwrap();
+    let info = stats_from(&conn, 365, NOW).unwrap();
+    let callers = info.calls_by_tool.iter().find(|u| u.tool == "callers").unwrap();
+    assert_eq!(
+        (callers.calls, callers.outcomes),
+        (
+            3,
+            OutcomeCounts {
+                answered_calls: 2,
+                classified_calls: 3
+            }
+        ),
+        "day one (1 of 2) plus day two (1 of 1)"
+    );
 }

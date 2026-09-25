@@ -670,3 +670,194 @@ pub(crate) fn compose_predicate(clauses: Vec<String>) -> String {
     }
     clauses.join(" AND ")
 }
+
+// ── The call outcome ([FR-OB-14]) ────────────────────────────────────────────
+//
+// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+
+/// What one traced call **answered** ([FR-OB-14]) — a closed four-value
+/// vocabulary, stored in `events.outcome` from migration v4.
+///
+/// `NULL` in that column is not a fifth value. It means exactly "this tool has
+/// no outcome vocabulary, or this row predates v4", and nothing else: a
+/// classified tool's `Err(_)` records [`Outcome::Failed`] rather than `NULL`
+/// ([`traced_with`](super::traced_with)), so an absent outcome is never a
+/// disguised failure. A pre-v4 row is never imputed one.
+///
+/// Reason codes (`precedent`'s eight [`EmptyPrecedentCode`]s) are deliberately
+/// **not** carried: the column is four values so it stays cheap to aggregate,
+/// and folding the codes in would be a high-cardinality schema decision nobody
+/// has asked for ([CR-144] §3.2).
+///
+/// [`EmptyPrecedentCode`]: crate::models::navigation::EmptyPrecedentCode
+/// [CR-144]: ../../../docs/requests/CR-144-telemetry-records-the-answer-not-only-the-call.md
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// The call returned something to act on.
+    Answered,
+    /// The call resolved its input and there is legitimately nothing to report.
+    Empty,
+    /// The call could not answer: its input named nothing the graph holds, or
+    /// the graph it would have answered over is not there.
+    Unresolved,
+    /// The call returned `Err(_)`. Recorded by [`traced_with`](super::traced_with)
+    /// itself, never by a classifier — the classifier only ever sees an `Ok`
+    /// value.
+    Failed,
+}
+
+impl Outcome {
+    /// Every value, in declaration order — what [`Outcome::from_wire`] searches,
+    /// and what the tests pin the migration's `CHECK` list against.
+    pub(crate) const ALL: [Outcome; 4] = [
+        Outcome::Answered,
+        Outcome::Empty,
+        Outcome::Unresolved,
+        Outcome::Failed,
+    ];
+
+    /// The stored spelling. Exhaustive with no wildcard arm, like
+    /// [`Tool::event_class`], so a fifth value fails the build here first.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Answered => "answered",
+            Outcome::Empty => "empty",
+            Outcome::Unresolved => "unresolved",
+            Outcome::Failed => "failed",
+        }
+    }
+
+    /// The inverse of [`Outcome::as_str`], or `None` for any other string — so
+    /// the telemetry layer cannot record a value outside the closed set, the
+    /// same guard [`Surface::from_wire`](super::Surface::from_wire) gives the
+    /// `surface` field.
+    pub(crate) fn from_wire(value: &str) -> Option<Outcome> {
+        Outcome::ALL.into_iter().find(|o| o.as_str() == value)
+    }
+}
+
+/// A result type that knows what it answered ([FR-OB-14]) — implemented
+/// **only** for the result types that have an outcome to report, and consulted
+/// only by [`traced_with`](super::traced_with).
+///
+/// Opt-in rather than a bound on `traced`: Rust has no specialisation, so a
+/// `T: CallOutcome` bound would force an impl on every one of the ~140 traced
+/// result types, pipeline passes and `()` included. A tool that never calls
+/// [`traced_with`](super::traced_with) records `NULL` by construction.
+///
+/// # The contract every impl keeps
+///
+/// - **O(1) field reads** ([NFR-OO-02]): `is_empty()`, an `Option` test, a
+///   `match` on a code. The call runs inside the measured span, so an impl that
+///   walked its payload would bill the walk to the tool's latency.
+/// - **No payload content** ([NFR-CC-03]): the answer is one of four words;
+///   nothing the result holds — a symbol, a path, a count — leaves it.
+///
+/// [NFR-OO-02]: ../../../docs/specs/requirements/NFR-OO-02.md
+/// [NFR-CC-03]: ../../../docs/specs/requirements/NFR-CC-03.md
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+pub(crate) trait CallOutcome {
+    /// What this `Ok` value answered.
+    fn outcome(&self) -> Outcome;
+}
+
+/// `callers` ([FR-NV-05]): unresolved when the query named no symbol, answered
+/// when at least one caller came back.
+///
+/// Reads `total` rather than the returned page, so a `limit` that truncated
+/// the list to nothing still counts as answered.
+///
+/// [FR-NV-05]: ../../../docs/specs/requirements/FR-NV-05.md
+impl CallOutcome for crate::models::CallersResult {
+    fn outcome(&self) -> Outcome {
+        if self.resolved.is_none() {
+            Outcome::Unresolved
+        } else if self.total > 0 || !self.callers.is_empty() {
+            Outcome::Answered
+        } else {
+            Outcome::Empty
+        }
+    }
+}
+
+/// `impact` ([FR-NV-06]): unresolved when the query named no symbol, answered
+/// when either direction of the closure — or the documentation trace — has an
+/// entry.
+///
+/// [FR-NV-06]: ../../../docs/specs/requirements/FR-NV-06.md
+impl CallOutcome for crate::models::ImpactResult {
+    fn outcome(&self) -> Outcome {
+        if self.resolved.is_none() {
+            Outcome::Unresolved
+        } else if !self.upstream.is_empty() || !self.downstream.is_empty() || !self.docs.is_empty()
+        {
+            Outcome::Answered
+        } else {
+            Outcome::Empty
+        }
+    }
+}
+
+/// `precedent` ([FR-NV-12]): answered when the answer **delivered** a
+/// precedent; otherwise the answer's own closed [`EmptyPrecedentCode`] decides
+/// which absence it is.
+///
+/// Keyed on the delivered list, not on `total_found`. The two differ in exactly
+/// one reachable state — `results_unavailable`, where every ranked candidate
+/// vanished before its row could be fetched (`limit` is clamped to at least 1,
+/// so truncation never empties the list) — and that answer gave the caller
+/// nothing to act on. Counting its `total_found` as an answer is what would
+/// record a call that answered nothing as one that did.
+///
+/// The split follows what each code establishes. The target named nothing, the
+/// graph is empty, the target fell out of the compared view, or the results
+/// could not be read back — the call **could not** answer (`unresolved`). The
+/// target resolved and was compared, and nothing matched (no anchors, unshared
+/// anchors, only ubiquitous anchors) — `empty`. `query_failed` is mapped for
+/// exhaustiveness only: it is built by the `Err` fallback, which
+/// [`traced_with`](super::traced_with) has already recorded as `failed` before
+/// the fallback runs. [S-442]'s resolution denominator will refine the `empty`
+/// group; this impl is where it will.
+///
+/// [`EmptyPrecedentCode`]: crate::models::navigation::EmptyPrecedentCode
+/// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+/// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
+impl CallOutcome for crate::models::PrecedentResult {
+    fn outcome(&self) -> Outcome {
+        use crate::models::navigation::EmptyPrecedentCode as Code;
+        if !self.precedents.is_empty() {
+            return Outcome::Answered;
+        }
+        match self.empty_reason.as_ref().map(|reason| reason.code) {
+            Some(
+                Code::TargetUnresolved
+                | Code::GraphEmpty
+                | Code::TargetAbsentFromView
+                | Code::QueryFailed
+                | Code::ResultsUnavailable,
+            ) => Outcome::Unresolved,
+            Some(
+                Code::NoStructuralAnchors | Code::AnchorsAreUnshared | Code::AnchorsAreUbiquitous,
+            )
+            | None => Outcome::Empty,
+        }
+    }
+}
+
+/// `affected` ([FR-CL-04]): answered when the closure holds a dependent file;
+/// unresolved when none of the changed paths is in the indexed graph (the
+/// closure had no seed to start from); otherwise empty.
+///
+/// [FR-CL-04]: ../../../docs/specs/requirements/FR-CL-04.md
+impl CallOutcome for crate::models::AffectedResult {
+    fn outcome(&self) -> Outcome {
+        if !self.affected.is_empty() {
+            Outcome::Answered
+        } else if self.changed.is_empty() {
+            Outcome::Unresolved
+        } else {
+            Outcome::Empty
+        }
+    }
+}

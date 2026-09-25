@@ -50,8 +50,18 @@ pub(crate) const RETENTION_DAYS: u32 = 90;
 /// belonged to. A reader groups on `COALESCE(session_id, 'unattributed')`, a
 /// sentinel no real session id can ever equal.
 ///
+/// v4 adds what a call **answered** ([FR-OB-14]), on the same proven
+/// `ADD COLUMN` path: a nullable `events.outcome` constrained to the closed
+/// four-value vocabulary ([`super::Outcome`]), and two rollup counts,
+/// `answered_calls` and `classified_calls`, `NOT NULL DEFAULT 0` so the
+/// `daily_rollup` key grain is unchanged and no table is rebuilt. A pre-v4 row
+/// keeps a `NULL` outcome and is **never imputed** one; a pre-v4 rollup day
+/// reads `0` answered of `0` classified, which is what it recorded — nothing —
+/// and never the rate of the calls it did count.
+///
 /// [FR-OB-08]: ../../../docs/specs/requirements/FR-OB-08.md
 /// [FR-OB-12]: ../../../docs/specs/requirements/FR-OB-12.md
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -91,7 +101,64 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // folded into a real session (FR-OB-12).
         "ALTER TABLE events ADD COLUMN session_id TEXT;    -- opaque per-process id (FR-OB-12)",
     ),
+    (
+        4,
+        // Nullable outcome: NULL is "no outcome vocabulary, or pre-v4" and is
+        // never back-filled (FR-OB-14). The CHECK list is `Outcome::ALL`'s
+        // spellings, pinned by a test. The rollup counts default to 0 so an
+        // existing day keeps its PK and reads 0 of 0.
+        "ALTER TABLE events ADD COLUMN outcome TEXT
+             CHECK (outcome IN ('answered', 'empty', 'unresolved', 'failed'));
+         ALTER TABLE daily_rollup ADD COLUMN answered_calls   INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE daily_rollup ADD COLUMN classified_calls INTEGER NOT NULL DEFAULT 0;",
+    ),
 ];
+
+/// The first ledger version whose store carries the outcome columns
+/// ([FR-OB-14]) — `events.outcome` and the two `daily_rollup` counts.
+///
+/// A **reader** needs this, not only the writer. [`open_readonly`] never
+/// migrates — a workspace fan-out must not write into another checkout's
+/// `.logos/` ([ADR-50]) — so a member whose store no v4 process has opened yet is
+/// still at v3 when it is read, and a query naming `outcome` would fail on it
+/// with `no such column` and report an intact store as unreadable. The
+/// read-model asks [`user_version`] and reads such a store as what it is: calls
+/// with no outcome recorded. Pinned to the ledger by
+/// `the_outcome_version_is_the_migration_that_adds_the_column`.
+///
+/// [ADR-50]: ../../../docs/specs/architecture/decisions/ADR-50.md
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+pub(super) const OUTCOME_VERSION: i64 = 4;
+
+/// The store's `user_version` — the ledger position [`apply_migrations`]
+/// advances, and the one fact a read-only reader can use to tell which columns
+/// exist.
+///
+/// # Errors
+/// Returns an error if the pragma cannot be read.
+pub(super) fn user_version(conn: &Connection) -> Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("reading telemetry user_version")
+}
+
+/// The `events` aggregate counting calls that **answered** ([FR-OB-14]).
+///
+/// One definition, interpolated into the rollup below and every raw-events
+/// query in [`super::stats`], so the permanent and the raw halves of a figure
+/// cannot count by two rules. `count(CASE …)` rather than `sum(outcome = …)`:
+/// over a group whose outcomes are all `NULL` the latter is `NULL`, which the
+/// `NOT NULL` rollup column would refuse and the read-model would have to
+/// special-case. A literal, never user input.
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+pub(super) const ANSWERED_CALLS_SQL: &str = "count(CASE WHEN outcome = 'answered' THEN 1 END)";
+
+/// The `events` aggregate counting calls with **any** recorded outcome — the
+/// denominator an answered rate is divided by ([FR-OB-14]). `count(column)`
+/// skips `NULL`, which is exactly "unclassified or pre-v4".
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+pub(super) const CLASSIFIED_CALLS_SQL: &str = "count(outcome)";
 
 /// Open (creating if absent) and migrate `telemetry.db` at `path`.
 ///
@@ -133,9 +200,7 @@ pub(crate) fn open_readonly(path: &Path) -> Result<Connection> {
 /// Apply every embedded migration newer than the store's `user_version` —
 /// one transaction per migration, all or nothing (the graph-store discipline).
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
-    let current: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .context("reading telemetry user_version")?;
+    let current = user_version(conn)?;
 
     for &(version, sql) in MIGRATIONS {
         if version <= current {
@@ -212,6 +277,45 @@ pub(crate) fn open_in_memory_v2() -> Connection {
     conn
 }
 
+/// An in-memory telemetry store migrated **only through v3** — the pre-
+/// `outcome` shape, so a test can drive the v4 forward migration ([FR-OB-14])
+/// over it and prove legacy rows stay unclassified, never imputed.
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+#[cfg(test)]
+pub(crate) fn open_in_memory_v3() -> Connection {
+    let mut conn = Connection::open_in_memory().expect("in-memory telemetry store");
+    migrate_through_v3(&mut conn);
+    conn
+}
+
+/// A **file-backed** store migrated only through v3 — the shape of a member's
+/// `telemetry.db` that no v4 process has opened yet, for proving the read-only
+/// reader ([`open_readonly`], which never migrates) still reads it.
+#[cfg(test)]
+pub(crate) fn open_file_v3(path: &Path) -> Connection {
+    let mut conn = Connection::open(path).expect("file-backed telemetry store");
+    migrate_through_v3(&mut conn);
+    conn
+}
+
+/// Apply exactly the v1..v3 ledger entries — the one body both v3 seams share.
+#[cfg(test)]
+fn migrate_through_v3(conn: &mut Connection) {
+    let tx = conn.transaction().expect("v1..v3 migration transaction");
+    for &(version, sql) in &MIGRATIONS[..3] {
+        tx.execute_batch(sql).expect("v1..v3 schema");
+        tx.execute(
+            "INSERT INTO schema_versions (version, applied_at) VALUES (?1, unixepoch())",
+            [version],
+        )
+        .expect("record v1..v3");
+    }
+    tx.pragma_update(None, "user_version", 3)
+        .expect("set v3 user_version");
+    tx.commit().expect("commit v1..v3");
+}
+
 /// Apply every pending migration to `conn` — the test seam for driving the
 /// forward migration ledger directly ([FR-OB-08]).
 #[cfg(test)]
@@ -235,8 +339,9 @@ pub(crate) fn write_batch(conn: &mut Connection, batch: &[EventRecord]) -> Resul
     {
         let mut stmt = tx
             .prepare_cached(
-                "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id,
+                                     outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )
             .context("preparing the telemetry insert")?;
         for e in batch {
@@ -248,6 +353,7 @@ pub(crate) fn write_batch(conn: &mut Connection, batch: &[EventRecord]) -> Resul
                 e.ok as i64,
                 e.origin,
                 e.session_id,
+                e.outcome.map(super::Outcome::as_str),
             ])
             .context("inserting a telemetry event")?;
         }
@@ -260,7 +366,11 @@ pub(crate) fn write_batch(conn: &mut Connection, batch: &[EventRecord]) -> Resul
 ///
 /// The rollup rows are permanent; conflicts accumulate (a second prune over an
 /// already-rolled-up day adds, never double-counts, because the raw rows it
-/// reads are deleted in the same transaction).
+/// reads are deleted in the same transaction). The outcome counts
+/// ([FR-OB-14]) fold by the same two expressions the read-model applies to raw
+/// events, so a day reads the same before and after it ages out.
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
 ///
 /// # Errors
 /// Returns an error if the rollup transaction cannot commit.
@@ -274,17 +384,23 @@ pub(crate) fn rollup_and_prune(
         .transaction()
         .context("opening the telemetry rollup transaction")?;
     tx.execute(
-        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
-                                   total_duration_ms, max_duration_ms)
-         SELECT date(at, 'unixepoch'), surface, tool,
-                count(*), sum(ok), sum(duration_ms), max(duration_ms)
-         FROM events WHERE at < ?1
-         GROUP BY 1, 2, 3
-         ON CONFLICT (day, surface, tool) DO UPDATE SET
-             calls             = calls + excluded.calls,
-             ok_calls          = ok_calls + excluded.ok_calls,
-             total_duration_ms = total_duration_ms + excluded.total_duration_ms,
-             max_duration_ms   = max(max_duration_ms, excluded.max_duration_ms)",
+        &format!(
+            "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                       total_duration_ms, max_duration_ms,
+                                       answered_calls, classified_calls)
+             SELECT date(at, 'unixepoch'), surface, tool,
+                    count(*), sum(ok), sum(duration_ms), max(duration_ms),
+                    {ANSWERED_CALLS_SQL}, {CLASSIFIED_CALLS_SQL}
+             FROM events WHERE at < ?1
+             GROUP BY 1, 2, 3
+             ON CONFLICT (day, surface, tool) DO UPDATE SET
+                 calls             = calls + excluded.calls,
+                 ok_calls          = ok_calls + excluded.ok_calls,
+                 total_duration_ms = total_duration_ms + excluded.total_duration_ms,
+                 max_duration_ms   = max(max_duration_ms, excluded.max_duration_ms),
+                 answered_calls    = answered_calls + excluded.answered_calls,
+                 classified_calls  = classified_calls + excluded.classified_calls",
+        ),
         [cutoff],
     )
     .context("rolling up aged telemetry events")?;

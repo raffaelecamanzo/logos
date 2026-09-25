@@ -15,9 +15,11 @@
 //! Re-export everything so callers can `use logos_core::models::*`.
 
 pub mod navigation;
+pub mod outcome;
 pub mod pipeline;
 pub mod quality;
 
 pub use navigation::*;
+pub use outcome::*;
 pub use pipeline::*;
 pub use quality::*;
