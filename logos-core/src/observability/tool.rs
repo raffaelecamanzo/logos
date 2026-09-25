@@ -46,6 +46,16 @@
 //! the classification (see [`self_referential_tools`]), so a newly-classified
 //! tool is filtered correctly the moment it exists.
 //!
+//! A fourth thing does need touching, and the compiler cannot enforce it: the
+//! traced-tool classification census ([S-446],
+//! `logos-core/tests/traced_tool_classification_census.rs`) enumerates every
+//! variant above and fails the suite unless it is either classified through
+//! [`CallOutcome`]/[`traced_with`](super::traced_with) or named in that file's
+//! `EXCLUSIONS` with a reason — so a new tool cannot join `Tool::Stats` et al.
+//! in recording `NULL` forever without someone saying why.
+//!
+//! [S-446]: ../../../docs/planning/journal.md#s-446-every-traced-tool-is-classified-or-explicitly-excluded
+//!
 //! # What the classification means
 //!
 //! [`EventClass::EngineQuery`] — the request's subject is **the code Logos
