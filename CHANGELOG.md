@@ -13,6 +13,23 @@ Sprint 77, hotfix round.
 
 ### Changed
 
+- **A workspace `[wiki].model` is inherited.** Wiki generation resolves its model in this
+  order: the member's own `[wiki].model`; else the workspace root's `[wiki].model`, but only
+  while the member inherits the workspace `[chat]` policy; else the effective chat model. A
+  member that declares its own `[chat] model` owns its endpoint and never receives the
+  workspace wiki model. The Wiki tab and the workspace Config view state the same rule, and
+  the config read-model carries it as `effective_wiki` (CR-145, ADR-67, FR-CF-07).
+- **The manifest routes emit telemetry.** `GET /api/v1/workspace/manifest` and
+  `POST /api/v1/workspace/manifest/save` book `config_read` / `config_write` events into the
+  serve's telemetry store, like the workspace config routes.
+- **A broken workspace config file is one click from its repair.** In workspace mode the
+  member Chat and Config tabs' error state links the workspace Config view and names both
+  roots the failure can come from.
+
+Sprint 77, hotfix round.
+
+### Changed
+
 - **A workspace `[wiki].model` is inherited — by a member that inherits the workspace
   `[chat]` table.** Wiki generation now takes the member's own `[wiki].model`, else the
   workspace root's when the member declares no `[chat] model` and the workspace root
