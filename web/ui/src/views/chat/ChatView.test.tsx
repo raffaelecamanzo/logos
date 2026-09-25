@@ -1633,6 +1633,65 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     pending.close();
   });
 
+  it("renders the flat, ungrouped layout for a single round — no grouping wrapper (AC4, CR-089 baseline, review-fix S-303)", async () => {
+    // A text-content assertion alone cannot tell "the flat layout" apart from "the
+    // grouped-by-round layout rendering identical text for one round" — both would
+    // pass every OTHER test in this describe block. This one checks the STRUCTURE:
+    // with `css: false` hiding class names, the flat layout nests the plan's `<ol>`
+    // two `<div>`s below the fold (`.activityBody` → `.plan`); the grouped layout
+    // (ActivityByRound) would nest it FOUR deep (adding `.activityRounds` and
+    // `.activityRound`). Counting div ancestors between the `<ol>` and the fold is
+    // therefore a structural proof that no grouping chrome renders for one round,
+    // not just that the same words happen to appear either way.
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const pending = pendingSseResponse(STREAMING_FRAMES);
+    mockStreamTurn.mockResolvedValue(pending.response);
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "who calls it?");
+    await waitFor(() => expect(container.textContent).toContain("Synthesizer"));
+
+    const activity = fold(container)!;
+    const planOl = activity.querySelector("ol")!; // the plan's <ol>, rendered before the steps' <ol>
+    let divAncestors = 0;
+    for (let el = planOl.parentElement; el && el !== activity; el = el.parentElement) {
+      if (el.tagName === "DIV") divAncestors++;
+    }
+    expect(divAncestors).toBe(2);
+    pending.close();
+  });
+
+  it("shows a round's plan even when replanned before any of its steps started, and never drops it from the grouped fold (S-303, CR-090)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    // Round 0 is planned and then immediately superseded — no step of round 0 ever
+    // starts, so round 0 has a real (non-empty) plan but ZERO chips. Only round 1
+    // actually runs.
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":[{"role":"graph_navigator","instruction":"map callers"}]}\n\n',
+        'event: plan\ndata: {"round":1,"steps":[{"role":"source_reader","instruction":"read file"}]}\n\n',
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read file"}\n\n',
+        'event: step_observed\ndata: {"index":0,"role":"source_reader","summary":"read"}\n\n',
+        'event: final_answer\ndata: {"answer":"done"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("done")).toBeInTheDocument();
+
+    const activity = fold(container)!;
+    // Round 0's plan renders on the strength of `turn.plans` ALONE — it has no
+    // chip to contribute its round via `turn.chips`. Dropping the `plans` half of
+    // `activityRounds()`'s round union would silently drop this whole group.
+    expect(activity.textContent).toContain("Plan");
+    expect(activity.textContent).toContain("Graph-Navigator");
+    expect(activity.textContent).toContain("map callers");
+    expect(activity.textContent).toContain("Revised plan");
+  });
+
   it("groups a replanned turn's fold by round, keeps colliding indices apart, and renders no duplicate-key warning (S-303, CR-090)", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
