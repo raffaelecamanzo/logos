@@ -114,6 +114,33 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
+/// The first ledger version whose store carries the outcome columns
+/// ([FR-OB-14]) — `events.outcome` and the two `daily_rollup` counts.
+///
+/// A **reader** needs this, not only the writer. [`open_readonly`] never
+/// migrates — a workspace fan-out must not write into another checkout's
+/// `.logos/` ([ADR-50]) — so a member whose store no v4 process has opened yet is
+/// still at v3 when it is read, and a query naming `outcome` would fail on it
+/// with `no such column` and report an intact store as unreadable. The
+/// read-model asks [`user_version`] and reads such a store as what it is: calls
+/// with no outcome recorded. Pinned to the ledger by
+/// `the_outcome_version_is_the_migration_that_adds_the_column`.
+///
+/// [ADR-50]: ../../../docs/specs/architecture/decisions/ADR-50.md
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+pub(super) const OUTCOME_VERSION: i64 = 4;
+
+/// The store's `user_version` — the ledger position [`apply_migrations`]
+/// advances, and the one fact a read-only reader can use to tell which columns
+/// exist.
+///
+/// # Errors
+/// Returns an error if the pragma cannot be read.
+pub(super) fn user_version(conn: &Connection) -> Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("reading telemetry user_version")
+}
+
 /// The `events` aggregate counting calls that **answered** ([FR-OB-14]).
 ///
 /// One definition, interpolated into the rollup below and every raw-events
@@ -173,9 +200,7 @@ pub(crate) fn open_readonly(path: &Path) -> Result<Connection> {
 /// Apply every embedded migration newer than the store's `user_version` —
 /// one transaction per migration, all or nothing (the graph-store discipline).
 fn apply_migrations(conn: &mut Connection) -> Result<()> {
-    let current: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .context("reading telemetry user_version")?;
+    let current = user_version(conn)?;
 
     for &(version, sql) in MIGRATIONS {
         if version <= current {
@@ -260,6 +285,23 @@ pub(crate) fn open_in_memory_v2() -> Connection {
 #[cfg(test)]
 pub(crate) fn open_in_memory_v3() -> Connection {
     let mut conn = Connection::open_in_memory().expect("in-memory telemetry store");
+    migrate_through_v3(&mut conn);
+    conn
+}
+
+/// A **file-backed** store migrated only through v3 — the shape of a member's
+/// `telemetry.db` that no v4 process has opened yet, for proving the read-only
+/// reader ([`open_readonly`], which never migrates) still reads it.
+#[cfg(test)]
+pub(crate) fn open_file_v3(path: &Path) -> Connection {
+    let mut conn = Connection::open(path).expect("file-backed telemetry store");
+    migrate_through_v3(&mut conn);
+    conn
+}
+
+/// Apply exactly the v1..v3 ledger entries — the one body both v3 seams share.
+#[cfg(test)]
+fn migrate_through_v3(conn: &mut Connection) {
     let tx = conn.transaction().expect("v1..v3 migration transaction");
     for &(version, sql) in &MIGRATIONS[..3] {
         tx.execute_batch(sql).expect("v1..v3 schema");
@@ -272,7 +314,6 @@ pub(crate) fn open_in_memory_v3() -> Connection {
     tx.pragma_update(None, "user_version", 3)
         .expect("set v3 user_version");
     tx.commit().expect("commit v1..v3");
-    conn
 }
 
 /// Apply every pending migration to `conn` — the test seam for driving the

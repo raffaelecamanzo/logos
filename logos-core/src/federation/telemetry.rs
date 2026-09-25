@@ -855,4 +855,58 @@ mod tests {
             .expect("main bucket merged");
         assert_eq!((main.calls, main.ok_calls, main.outcomes), (6, 5, summed));
     }
+
+    /// A member whose store is still at **v3** — no v4 process has opened it,
+    /// and the fan-out's read-only open never migrates — is read, not named
+    /// unreadable: its calls join the aggregate and it contributes nothing
+    /// classified ([FR-OB-14]).
+    ///
+    /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+    #[test]
+    fn a_member_still_at_v3_is_read_and_contributes_no_outcome() {
+        use crate::models::outcome::OutcomeCounts;
+        use crate::observability::{
+            seed_pre_outcome_store_for_tests, seed_store_with_outcomes_for_tests, Outcome,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let fed = federation(root, &["legacy", "current"]);
+        let at = now() - 3_600;
+        seed_pre_outcome_store_for_tests(
+            &logos_dir(root, "legacy"),
+            &[("precedent", true, at), ("precedent", true, at)],
+        )
+        .expect("v3 store seeds");
+        seed_store_with_outcomes_for_tests(
+            &logos_dir(root, "current"),
+            &[("cli", "precedent", 5, true, at, "main", Some(Outcome::Answered))],
+        )
+        .expect("v4 store seeds");
+
+        let registry = EngineRegistry::<SpyEngine>::new(fed, RegistryMode::Lazy);
+        let agg = workspace_statistics(&registry, None);
+        assert_eq!(
+            (agg.members_read, agg.members_total),
+            (2, 2),
+            "an older store is not an unreadable one: {:?}",
+            agg.unread
+        );
+        let precedent = agg
+            .calls_by_tool
+            .iter()
+            .find(|u| u.tool == "precedent")
+            .expect("precedent merged");
+        assert_eq!(
+            (precedent.calls, precedent.outcomes),
+            (
+                3,
+                OutcomeCounts {
+                    answered_calls: 1,
+                    classified_calls: 1
+                }
+            ),
+            "the v3 member's two calls count; only the v4 member's one is classified"
+        );
+    }
 }

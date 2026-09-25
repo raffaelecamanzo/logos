@@ -740,6 +740,28 @@ pub(crate) fn seed_store_for_tests(
     seed_store_with_outcomes_for_tests(logos_dir, &events)
 }
 
+/// A file-backed store left at **v3** under `logos_dir`, holding one raw event
+/// per `(tool, ok, at)` — a member no v4 process has opened yet ([FR-OB-14]).
+/// Seeded through the real v1..v3 ledger, never a hand-written schema.
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+#[cfg(test)]
+pub(crate) fn seed_pre_outcome_store_for_tests(
+    logos_dir: &Path,
+    events: &[(&str, bool, i64)],
+) -> Result<()> {
+    std::fs::create_dir_all(logos_dir)?;
+    let conn = db::open_file_v3(&logos_dir.join(TELEMETRY_DB_FILENAME));
+    for &(tool, ok, at) in events {
+        conn.execute(
+            "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
+             VALUES (?1, 'cli', ?2, 5, ?3, 'main', 'legacy')",
+            rusqlite::params![at, tool, ok as i64],
+        )?;
+    }
+    Ok(())
+}
+
 /// One seeded event: `(surface, tool, duration_ms, ok, at, origin, outcome)`.
 #[cfg(test)]
 pub(crate) type SeedEvent<'a> = (&'static str, &'a str, u64, bool, i64, &'a str, Option<Outcome>);

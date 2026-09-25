@@ -3695,3 +3695,60 @@ fn every_usage_cell_ships_answered_and_classified_and_no_rate() {
         "a classified cell carries no absence: {callers_json}"
     );
 }
+
+/// The version the read-model gates the outcome columns on is the ledger entry
+/// that adds them: a v3 store has no `outcome` column and sits below it, and the
+/// forward migration crosses it.
+#[test]
+fn the_outcome_version_is_the_migration_that_adds_the_column() {
+    let has_outcome = |conn: &rusqlite::Connection| -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('events') WHERE name = 'outcome'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    };
+    let mut conn = db::open_in_memory_v3();
+    assert!(db::user_version(&conn).unwrap() < db::OUTCOME_VERSION);
+    assert!(!has_outcome(&conn), "v3 carries no outcome column");
+    db::migrate(&mut conn).unwrap();
+    assert!(db::user_version(&conn).unwrap() >= db::OUTCOME_VERSION);
+    assert!(has_outcome(&conn), "the gated version carries it");
+}
+
+/// **A pre-v4 store is read, not refused.** The read-only reader never migrates,
+/// so a store at v3 reaches `stats_from` as it is: its calls count, nothing is
+/// classified, and every cell names the absence — an intact store is never
+/// reported unreadable for being older.
+#[test]
+fn a_pre_outcome_store_reads_as_unclassified_not_unreadable() {
+    let conn = db::open_in_memory_v3();
+    conn.execute(
+        "INSERT INTO events (at, surface, tool, duration_ms, ok, origin, session_id)
+         VALUES (?1, 'cli', 'callers', 12, 1, 'main', 'legacy')",
+        [NOW - 60],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO daily_rollup (day, surface, tool, calls, ok_calls,
+                                   total_duration_ms, max_duration_ms)
+         VALUES (date(?1, 'unixepoch'), 'cli', 'callers', 5, 4, 50, 20)",
+        [NOW - 2 * 86_400],
+    )
+    .unwrap();
+
+    let info = stats_from(&conn, 7, NOW).expect("a v3 store reads");
+    let callers = info.calls_by_tool.iter().find(|u| u.tool == "callers").unwrap();
+    assert_eq!(
+        (callers.calls, callers.ok_calls, callers.outcomes),
+        (6, 5, OutcomeCounts::default())
+    );
+    assert_eq!(callers.outcomes.absence(), Some(OUTCOME_ABSENCE));
+    assert!(
+        info.activity_by_day.iter().all(|d| d.outcomes.classified_calls == 0),
+        "{:?}",
+        info.activity_by_day
+    );
+}

@@ -135,12 +135,44 @@ const ORIGIN_BUCKET: &str =
     "CASE WHEN COALESCE(origin, 'main') = 'main' THEN 'main' ELSE 'dev' END";
 
 /// The four aggregate columns every `daily_rollup` usage query selects, in
-/// [`Tally::read`]'s order. The raw-events twin is built in [`stats_from`] from
+/// [`Tally::read`]'s order. The raw-events twin is built by [`tallies`] from
 /// [`super::db::ANSWERED_CALLS_SQL`] and [`super::db::CLASSIFIED_CALLS_SQL`] —
 /// the same expressions the rollup folded these columns with ([FR-OB-14]).
 ///
 /// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
 const ROLLUP_TALLY: &str = "sum(calls), sum(ok_calls), sum(answered_calls), sum(classified_calls)";
+
+/// [`ROLLUP_TALLY`] over a store older than [`super::db::OUTCOME_VERSION`],
+/// which has no outcome columns to sum: its calls count, and none is
+/// classified.
+const PRE_OUTCOME_ROLLUP_TALLY: &str = "sum(calls), sum(ok_calls), 0, 0";
+
+/// The raw-events and rollup tallies for this store, as `(raw, rollup)`.
+///
+/// Chosen **once**, from the store's own ledger position, so every query in
+/// [`stats_from`] reads the same columns: a store at
+/// [`super::db::OUTCOME_VERSION`] or later counts outcomes, an older one —
+/// read-only, and therefore never migrated by the reader — reads every call as
+/// unclassified. That is what such a store recorded: nothing about outcomes. It
+/// is never an error, and never a reason to call an intact store unreadable
+/// ([FR-OB-14], [NFR-CC-04]).
+///
+/// [FR-OB-14]: ../../../docs/specs/requirements/FR-OB-14.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn tallies(conn: &Connection) -> Result<(String, &'static str)> {
+    if super::db::user_version(conn)? >= super::db::OUTCOME_VERSION {
+        // The raw twin of `ROLLUP_TALLY`: the very expressions the rollup folds
+        // with, so a day reads the same either side of the retention horizon.
+        let raw = format!(
+            "count(*), sum(ok), {}, {}",
+            super::db::ANSWERED_CALLS_SQL,
+            super::db::CLASSIFIED_CALLS_SQL,
+        );
+        Ok((raw, ROLLUP_TALLY))
+    } else {
+        Ok(("count(*), sum(ok), 0, 0".to_string(), PRE_OUTCOME_ROLLUP_TALLY))
+    }
+}
 
 /// The counts one usage cell accumulates across the raw and rolled-up halves of
 /// the store: calls, the successful subset, and what they answered
@@ -326,14 +358,10 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     // into every query below, raw events and rolled-up days alike, so the two
     // sources can never apply different rules to the same event.
     let engine_query = tool::engine_query_predicate();
-    // The raw-events twin of `ROLLUP_TALLY`: the outcome counts use the very
-    // expressions the rollup folds with, so a day reads the same either side of
-    // the retention horizon ([FR-OB-14]).
-    let raw_tally = format!(
-        "count(*), sum(ok), {}, {}",
-        super::db::ANSWERED_CALLS_SQL,
-        super::db::CLASSIFIED_CALLS_SQL,
-    );
+    // The usage tallies, chosen once from the store's ledger position so a
+    // pre-v4 store — which a read-only reader never migrates — reads as calls
+    // with nothing classified rather than failing ([FR-OB-14]).
+    let (raw_tally, rollup_tally) = tallies(conn)?;
 
     // Usage counts: raw events in the window, plus rollup days the window
     // reaches back into (keyed map so the two sources merge per tool).
@@ -355,7 +383,7 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     }
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT surface, tool, {ROLLUP_TALLY}
+            "SELECT surface, tool, {rollup_tally}
              FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND {engine_query}
              GROUP BY surface, tool",
         ))
@@ -404,7 +432,7 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
     }
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT day, {ROLLUP_TALLY}
+            "SELECT day, {rollup_tally}
              FROM daily_rollup WHERE day >= date(?1, 'unixepoch') AND {engine_query}
              GROUP BY day",
         ))
