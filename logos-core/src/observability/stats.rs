@@ -24,11 +24,13 @@
 //! [`tool::ToolClass`] so a sprint dogfood table needs no manual classification.
 //!
 //! Both inherit `calls_by_origin`'s coverage: **raw events only** (no `origin` on
-//! a rollup row) and legacy `NULL` origins folded into `"main"`. Those limits are
-//! stated *in the payload* — `attribution_coverage` — rather than in
-//! documentation, because an unlabelled figure is what [NFR-CC-04] forbids. The
-//! per-tool `class` label rides the existing raw-plus-rollup `calls_by_tool`
-//! counts instead, so **every** tool the read-model reports carries a class.
+//! a rollup row), legacy `NULL` origins folded into `"main"`, and — since a
+//! `NULL`-origin row predates the web and chat surfaces too — that period is
+//! **CLI+MCP-only**. Those limits are stated *in the payload* —
+//! `attribution_coverage` — rather than in documentation, because an unlabelled
+//! figure is what [NFR-CC-04] forbids. The per-tool `class` label rides the
+//! existing raw-plus-rollup `calls_by_tool` counts instead, so **every** tool the
+//! read-model reports carries a class.
 //!
 //! # What the calls answered ([FR-OB-14])
 //!
@@ -619,6 +621,10 @@ pub(crate) fn attribution_coverage(window_days: u32) -> AttributionCoverage {
         ),
         "Events written before the origin stamp existed have origin IS NULL and fold into \
          \"main\", which inflates the historical \"main\" bucket."
+            .to_string(),
+        "Events written before the origin stamp existed also predate the web and chat \
+         surfaces, so that period was necessarily CLI+MCP-only: treat it as a distinct \
+         population rather than mixing it with data recorded after."
             .to_string(),
     ];
     if truncated_by_retention {

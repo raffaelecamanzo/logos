@@ -787,8 +787,11 @@ them to this page: `raw_events_only` (always true — `daily_rollup` is keyed
 `(day, surface, tool)` and carries no `origin`; `calls_by_origin` shares this
 limit, the totals and `activity_by_day` do not), `requested_window_days` vs
 `covered_window_days` with `truncated_by_retention`, and
-`legacy_null_origin_folds_into_main`. `notes` carries the same limits as
-display-ready prose.
+`legacy_null_origin_folds_into_main` — which also means CLI+MCP-only: a row
+with no `origin` predates the same release that introduced the web and chat
+surfaces, so only `cli` and `mcp` could have written it. `notes` carries the
+same limits as display-ready prose, and the Statistics tab renders them beside
+the cross-tab/class figures rather than on a separate help page (S-306).
 
 `covered_window_days` is a **guaranteed floor, not a measurement**: raw events
 are kept ~90 days, so a 365-day request is guaranteed only the most recent 90 in

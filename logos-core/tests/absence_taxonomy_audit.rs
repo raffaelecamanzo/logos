@@ -61,6 +61,15 @@
 //! census now reads **87 production occurrences over 42 production rows**,
 //! beside the same 108 in test scope; the delta is [`S445_ADDITION`].
 //!
+//! **Addendum, 2026-09-26 ([S-306]) — 0 production rows, 0 occurrences; 7
+//! test-scope occurrences, no correction.** The Statistics tab's new
+//! tool-attribution card renders `stats`'s `outcome_absence` string verbatim
+//! (never re-deriving it from `classified_calls`); its fixtures and assertions
+//! spell the same `none recorded` word across `StatisticsView.test.tsx` (3)
+//! and `statsModel.test.ts` (4). The census still reads **87 production
+//! occurrences over 42 production rows**, beside **115** in test scope; the
+//! delta is [`S306_ADDITION`].
+//!
 //! # What is enumerated, and what this cannot catch
 //!
 //! The walk covers [`SURFACES`] in full — every `.rs`, `.ts` and `.tsx` file
@@ -318,7 +327,7 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 74] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
     (
         "core",
         "logos-core/src/config/discovery.rs",
@@ -897,11 +906,27 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 74] = [
     ),
     (
         "spa",
+        "web/ui/src/views/statistics/StatisticsView.test.tsx",
+        "none recorded",
+        0,
+        3,
+        "NO PRODUCTION SITE — 3 test occurrence(s): fixture data for the tool × origin cross-tab's `outcome_absence` cell, plus the assertion that the Attribution card renders the read-model's own named absence verbatim rather than a rate. Added by S-306 (FR-OB-14 SPA rendering)",
+    ),
+    (
+        "spa",
         "web/ui/src/views/statistics/WorkspaceStatisticsView.test.tsx",
         "none recorded",
         0,
         1,
         "NO PRODUCTION SITE — 1 test occurrence(s): the words fall inside a Vitest title, `awaits data when every member IS read but none recorded anything`, describing the fixture the case builds rather than a string the view renders. The view's own awaiting-data wording is `No member recorded any telemetry in this window`, which is not a sentinel. Added by S-429 T2 (CR-137); enumerated, never truncated away",
+    ),
+    (
+        "spa",
+        "web/ui/src/views/statistics/statsModel.test.ts",
+        "none recorded",
+        0,
+        4,
+        "NO PRODUCTION SITE — 4 test occurrence(s): `answeredLabel`'s and `attributionByClass`'s unit tests pin the read-model's `outcome_absence` string verbatim, both as the function's input fixture and its returned label — never a re-derived word. Added by S-306 (FR-OB-14 SPA rendering)",
     ),
     (
         "spa",
@@ -2170,6 +2195,15 @@ const S444_ADDITION: (usize, usize, usize) = (2, 2, 2);
 /// [S-445]: ../../docs/planning/journal.md#s-445-a-telemetry-event-records-what-the-call-answered-with-its-denominator
 const S445_ADDITION: (usize, usize, usize) = (1, 1, 0);
 
+/// What [S-306] added to the census on 2026-09-26: `(production rows added,
+/// production occurrences added, test occurrences added)` — no production
+/// site, only test-scope fixtures/assertions pinning `stats`'s
+/// `OUTCOME_ABSENCE` string verbatim in the new Statistics-tab attribution
+/// card's tests (`StatisticsView.test.tsx` 3, `statsModel.test.ts` 4).
+///
+/// [S-306]: ../../docs/planning/journal.md#s-306-statistics-tab-attribution-view-with-stated-coverage-limits
+const S306_ADDITION: (usize, usize, usize) = (0, 0, 7);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
@@ -2177,18 +2211,20 @@ fn the_audit_reports_its_count_with_its_denominator() {
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
-        (87, 42, 108),
-        "the census as it stands after S-445's addendum, 2026-09-25: 87 production \
-         occurrences over 42 production rows, beside 108 test-scope occurrences"
+        (87, 42, 115),
+        "the census as it stands after S-306's addendum, 2026-09-26: 87 production \
+         occurrences over 42 production rows, beside 115 test-scope occurrences"
     );
     // The 2026-09-20 reading the header and the tuple below state.
     let production_rows =
-        production_rows_now - S445_ADDITION.0 - S444_ADDITION.0 - S442_ADDITION.0;
+        production_rows_now - S445_ADDITION.0 - S444_ADDITION.0 - S442_ADDITION.0 - S306_ADDITION.0;
     let production_occurrences = production_occurrences_now
         - S445_ADDITION.1
         - S444_ADDITION.1
-        - S442_ADDITION.1;
-    let test_occurrences = test_occurrences - S445_ADDITION.2 - S444_ADDITION.2;
+        - S442_ADDITION.1
+        - S306_ADDITION.1;
+    let test_occurrences =
+        test_occurrences - S445_ADDITION.2 - S444_ADDITION.2 - S306_ADDITION.2;
     let corrected_files: std::collections::BTreeSet<&str> =
         CORRECTIONS.iter().map(|(file, _, _, _)| *file).collect();
 

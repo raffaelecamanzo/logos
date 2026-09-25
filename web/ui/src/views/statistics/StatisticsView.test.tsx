@@ -17,6 +17,24 @@ vi.mock("./echarts.ts", () => ({
 
 import { StatisticsView } from "./StatisticsView.tsx";
 
+/** The `attribution_coverage` rider (FR-OB-11): the raw-events-only limit, the
+ *  legacy-`NULL`-origin caveat, and the CLI+MCP-only label, exactly as the
+ *  read-model states them — asserted verbatim, not re-derived by the view. */
+function coverage(): StatsInfo["attribution_coverage"] {
+  return {
+    raw_events_only: true,
+    requested_window_days: 7,
+    covered_window_days: 7,
+    truncated_by_retention: false,
+    legacy_null_origin_folds_into_main: true,
+    notes: [
+      "computed from raw events only",
+      "legacy NULL origins fold into main",
+      "predates the origin stamp: CLI+MCP-only",
+    ],
+  };
+}
+
 /** A populated read-model. `context` calls are `100 + windowDays` (so 107 vs 130)
  *  — a unique per-surface figure that lets a test prove a data-table twin (not just
  *  the callout copy) refreshed when the window changed. */
@@ -44,6 +62,33 @@ function populated(windowDays: number): StatsInfo {
       { origin: "main", calls: 30, ok_calls: 29 },
       { origin: "dev", calls: 12, ok_calls: 12 },
     ],
+    calls_by_tool_origin: [
+      {
+        tool: "search",
+        class: "navigation",
+        origin: "dev",
+        calls: 5,
+        ok_calls: 5,
+        answered_calls: 3,
+        classified_calls: 4,
+        outcome_absence: null,
+      },
+      {
+        tool: "stats",
+        class: "read-model",
+        origin: "main",
+        calls: 6,
+        ok_calls: 6,
+        answered_calls: 0,
+        classified_calls: 0,
+        outcome_absence: "none recorded",
+      },
+    ],
+    calls_by_class: [
+      { class: "navigation", origin: "dev", calls: 5, ok_calls: 5, answered_calls: 3, classified_calls: 4, outcome_absence: null },
+      { class: "read-model", origin: "main", calls: 6, ok_calls: 6, answered_calls: 0, classified_calls: 0, outcome_absence: "none recorded" },
+    ],
+    attribution_coverage: coverage(),
     warnings: [],
   };
 }
@@ -61,6 +106,9 @@ function empty(): StatsInfo {
     artifact_bindings: {},
     activity_by_day: [],
     calls_by_origin: [],
+    calls_by_tool_origin: [],
+    calls_by_class: [],
+    attribution_coverage: coverage(),
     warnings: ["no telemetry recorded yet (telemetry.db not found)"],
   };
 }
@@ -80,6 +128,7 @@ function partial(): StatsInfo {
     })),
     activity_by_day: [], // activity card → empty
     calls_by_origin: [], // origin card → empty
+    calls_by_tool_origin: [], // attribution card → empty
     warnings: [],
   };
 }
@@ -142,7 +191,8 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     expect(screen.getByText("context")).toBeInTheDocument(); // top-tools twin
     expect(screen.getByText("cli")).toBeInTheDocument(); // by-surface twin
     expect(screen.getByText("mcp")).toBeInTheDocument();
-    expect(screen.getByText("dev")).toBeInTheDocument(); // dev-vs-main twin
+    // "dev" appears in both the dev-vs-main twin and the attribution cross-tab.
+    expect(screen.getAllByText("dev").length).toBeGreaterThanOrEqual(2);
 
     // Web (dashboard) activity is excluded server-side, so no "web" surface row.
     expect(screen.queryByText("web")).toBeNull();
@@ -202,7 +252,30 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     // Body renders (calls_total > 0), but the empty sub-series show per-card empties.
     expect(await screen.findByText(/No activity in this window/i)).toBeInTheDocument();
     expect(screen.getByText(/No attributed usage in this window/i)).toBeInTheDocument();
+    expect(screen.getByText(/No attributed tool calls in this window/i)).toBeInTheDocument();
     // The ranked bar caps at TOP_TOOLS_LIMIT and says so.
     expect(screen.getByText(/Showing the top 8 tools/i)).toBeInTheDocument();
+  });
+
+  it("groups the tool × origin cross-tab by class and renders its coverage caveats beside the figures (FR-OB-11)", async () => {
+    stubFetch(populated);
+    render(<StatisticsView />);
+    await screen.findByRole("heading", { name: "Tool attribution by class" });
+
+    // Grouped by class — the class name is a heading, not folded into the row.
+    expect(screen.getByRole("heading", { name: "navigation" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "read-model" })).toBeInTheDocument();
+
+    // The answered/classified pair renders as prose, never a rate.
+    expect(screen.getByText("3 of 4 answered")).toBeInTheDocument();
+    // A cell with nothing classified renders the read-model's own named absence.
+    expect(screen.getByText("none recorded")).toBeInTheDocument();
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+
+    // The coverage limits render beside the figures, not on a separate help page —
+    // exactly the read-model's own `attribution_coverage.notes`, verbatim.
+    expect(screen.getByText(/computed from raw events only/i)).toBeInTheDocument();
+    expect(screen.getByText(/legacy NULL origins fold into main/i)).toBeInTheDocument();
+    expect(screen.getByText(/CLI\+MCP-only/i)).toBeInTheDocument();
   });
 });

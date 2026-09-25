@@ -1,20 +1,28 @@
 /*
- * StatisticsView (S-235, CR-058, FR-UI-27, FR-UI-23, NFR-CC-04) — the in-app usage
- * view over `GET /api/v1/statistics` (S-234). The last read surface; it sits
- * immediately above Config in the sidebar's last group.
+ * StatisticsView (S-235, S-306, CR-058, CR-091, FR-UI-27, FR-OB-11, FR-UI-23,
+ * NFR-CC-04) — the in-app usage view over `GET /api/v1/statistics` (S-234). The
+ * last read surface; it sits immediately above Config in the sidebar's last group.
  *
  * It leads with a value-estimate callout (the dogfood metric, NFR-OO-03), then a
- * daily-activity line, a top-tools & surfaces ranking, and a dev-vs-`main` origin
- * split — every surface rendered with ECharts and paired with an accessible
- * data-table twin (WCAG 2.1 AA). A 7 / 30 / 90-day window selector (default 7)
- * drives `?window=`; changing it re-queries and re-renders every surface via the
- * shared `useApiResource` cache key.
+ * daily-activity line, a top-tools & surfaces ranking, a dev-vs-`main` origin
+ * split, and the tool × origin cross-tab grouped by tool class (FR-OB-11) — every
+ * chart surface paired with an accessible data-table twin (WCAG 2.1 AA); the
+ * cross-tab is table-only (it has no ECharts twin to pair). A 7 / 30 / 90-day
+ * window selector (default 7) drives `?window=`; changing it re-queries and
+ * re-renders every surface via the shared `useApiResource` cache key.
  *
  * Honesty (NFR-CC-04): an empty telemetry store degrades to an awaiting-data empty
  * state — never fabricated zeros — and the sidebar nav item is muted in step (see
  * `useStatisticsAvailability`). The value figures are labeled estimates, never
- * measured truth. Every read is GET-only; viewing the tab mutates no store and adds
- * no external origin (self-only CSP unchanged, UAT-UI-02).
+ * measured truth. The cross-tab's coverage limits — raw-events-only, the legacy
+ * `NULL`-origin caveat, and the CLI+MCP-only label for the period that predates
+ * it — render beside the figures from the read-model's own `attribution_coverage`
+ * (FR-OB-11), not a separate help page. The answered/classified pair on each cell
+ * (FR-OB-14) renders as "N of M answered" or the read-model's own named absence,
+ * never a rate. Every read is GET-only; viewing the tab mutates no store and adds
+ * no external origin (self-only CSP unchanged, UAT-UI-02) — and, since `stats` is
+ * itself a self-referential read-model request (FR-OB-09), opening the tab does
+ * not change the navigation counts it displays.
  */
 
 import { useMemo, useState } from "react";
@@ -34,6 +42,7 @@ import { StatChart } from "./StatChart.tsx";
 import {
   activityLineOption,
   activitySeries,
+  attributionByClass,
   bySurface,
   isStatsEmpty,
   originBarOption,
@@ -41,6 +50,7 @@ import {
   rankedBarOption,
   topTools,
   type ActivityPoint,
+  type AttributionRow,
   type OriginRow,
   type SurfaceRow,
   type ToolRow,
@@ -260,7 +270,48 @@ function OriginCard({ origins }: { origins: OriginRow[] }) {
   );
 }
 
-/** The four surfaces over a non-empty read-model. The derivations are memoised on
+/** Tool attribution by class (FR-OB-11) — the tool × origin cross-tab grouped by
+ *  tool class, with its coverage limits rendered beside the figures rather than
+ *  in a separate help page (NFR-CC-04): raw-events-only, the legacy-`NULL`-origin
+ *  caveat, and the CLI+MCP-only label for the period that predates it — the
+ *  read-model's own `attribution_coverage.notes`, rendered verbatim so the tab
+ *  and `logos stats --json` can never disagree. */
+function AttributionCard({ stats }: { stats: StatsInfo }) {
+  const groups = useMemo(() => attributionByClass(stats), [stats]);
+  const { notes } = stats.attribution_coverage;
+  return (
+    <Card title="Tool attribution by class">
+      {notes.map((note) => (
+        <p key={note} className={styles.capNote}>
+          {note}
+        </p>
+      ))}
+      {groups.length === 0 ? (
+        <EmptyState message="No attributed tool calls in this window." />
+      ) : (
+        groups.map((group) => (
+          <div key={group.class}>
+            <h4 className={styles.subhead}>{group.class}</h4>
+            <DataTable<AttributionRow>
+              columns={[
+                textCol("tool", "Tool", (r) => r.tool),
+                textCol("origin", "Origin", (r) => r.origin),
+                numCol("calls", "Calls", (r) => r.calls),
+                numCol("ok", "OK", (r) => r.ok_calls),
+                textCol("answered", "Answered", (r) => r.answered),
+              ]}
+              rows={group.rows}
+              rowKey={(r) => `${r.tool}:${r.origin}`}
+              caption={`${group.class} tools by origin`}
+            />
+          </div>
+        ))
+      )}
+    </Card>
+  );
+}
+
+/** The five surfaces over a non-empty read-model. The derivations are memoised on
  *  `stats` so each card receives a stable array reference — the option `useMemo`s
  *  downstream then re-fire only on an actual window re-query, not on every render. */
 function StatisticsBody({ stats }: { stats: StatsInfo }) {
@@ -274,6 +325,7 @@ function StatisticsBody({ stats }: { stats: StatsInfo }) {
       <ActivityCard points={points} />
       <ToolsCard tools={tools} truncated={truncated} surfaces={surfaces} />
       <OriginCard origins={origins} />
+      <AttributionCard stats={stats} />
     </div>
   );
 }

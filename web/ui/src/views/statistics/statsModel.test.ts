@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import type { StatsInfo } from "../../api/types.ts";
+import type { AttributionCoverage, StatsInfo } from "../../api/types.ts";
 import {
   NEUTRAL,
   SERIES_WARM,
   activityLineOption,
   activitySeries,
+  answeredLabel,
+  attributionByClass,
   bySurface,
   isStatsEmpty,
   originBarOption,
@@ -13,6 +15,21 @@ import {
   rankedBarOption,
   topTools,
 } from "./statsModel.ts";
+
+/** A populated `attribution_coverage` rider — the shape the endpoint returns
+ *  alongside the cross-tab; tests that don't care about the caveats reuse this
+ *  rather than restating all six fields. */
+function coverage(overrides: Partial<AttributionCoverage> = {}): AttributionCoverage {
+  return {
+    raw_events_only: true,
+    requested_window_days: 7,
+    covered_window_days: 7,
+    truncated_by_retention: false,
+    legacy_null_origin_folds_into_main: true,
+    notes: ["raw events only", "CLI+MCP-only before the origin stamp"],
+    ...overrides,
+  };
+}
 
 /** A zeroed read-model (the shape the endpoint returns for an empty store). */
 function emptyStats(overrides: Partial<StatsInfo> = {}): StatsInfo {
@@ -28,6 +45,9 @@ function emptyStats(overrides: Partial<StatsInfo> = {}): StatsInfo {
     artifact_bindings: {},
     activity_by_day: [],
     calls_by_origin: [],
+    calls_by_tool_origin: [],
+    calls_by_class: [],
+    attribution_coverage: coverage(),
     warnings: ["no telemetry recorded yet (telemetry.db not found)"],
     ...overrides,
   };
@@ -164,6 +184,81 @@ describe("activitySeries", () => {
       { day: "2026-07-01", calls: 2, ok_calls: 1 },
       { day: "2026-07-02", calls: 3, ok_calls: 3 },
     ]);
+  });
+});
+
+describe("answeredLabel (FR-OB-14)", () => {
+  it("renders the answered pair, never a rate, once anything is classified", () => {
+    expect(
+      answeredLabel({ answered_calls: 2, classified_calls: 4, outcome_absence: null }),
+    ).toBe("2 of 4 answered");
+  });
+
+  it("renders 0-of-N as a figure, not an absence", () => {
+    expect(
+      answeredLabel({ answered_calls: 0, classified_calls: 4, outcome_absence: null }),
+    ).toBe("0 of 4 answered");
+  });
+
+  it("renders the read-model's own named absence when nothing is classified", () => {
+    expect(
+      answeredLabel({ answered_calls: 0, classified_calls: 0, outcome_absence: "none recorded" }),
+    ).toBe("none recorded");
+  });
+});
+
+describe("attributionByClass (FR-OB-11)", () => {
+  it("groups the cross-tab by class, classes sorted by name", () => {
+    const stats = emptyStats({
+      calls_by_tool_origin: [
+        {
+          tool: "search",
+          class: "navigation",
+          origin: "dev",
+          calls: 5,
+          ok_calls: 5,
+          answered_calls: 3,
+          classified_calls: 4,
+          outcome_absence: null,
+        },
+        {
+          tool: "config_write",
+          class: "engine-internal",
+          origin: "main",
+          calls: 2,
+          ok_calls: 2,
+          answered_calls: 0,
+          classified_calls: 0,
+          outcome_absence: "none recorded",
+        },
+        {
+          tool: "impact",
+          class: "navigation",
+          origin: "main",
+          calls: 1,
+          ok_calls: 1,
+          answered_calls: 1,
+          classified_calls: 1,
+          outcome_absence: null,
+        },
+      ],
+    });
+    const groups = attributionByClass(stats);
+    expect(groups.map((g) => g.class)).toEqual(["engine-internal", "navigation"]);
+    const navigation = groups.find((g) => g.class === "navigation");
+    // Row order follows the read-model's own (tool, origin) order — not re-sorted.
+    expect(navigation?.rows).toEqual([
+      { tool: "search", origin: "dev", calls: 5, ok_calls: 5, answered: "3 of 4 answered" },
+      { tool: "impact", origin: "main", calls: 1, ok_calls: 1, answered: "1 of 1 answered" },
+    ]);
+    const engineInternal = groups.find((g) => g.class === "engine-internal");
+    expect(engineInternal?.rows).toEqual([
+      { tool: "config_write", origin: "main", calls: 2, ok_calls: 2, answered: "none recorded" },
+    ]);
+  });
+
+  it("is empty when the cross-tab is empty (raw-events-only, honestly)", () => {
+    expect(attributionByClass(emptyStats())).toEqual([]);
   });
 });
 
