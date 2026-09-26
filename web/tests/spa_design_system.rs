@@ -476,13 +476,12 @@ const MEASURE_PROPERTIES: [&str; 4] = ["max-width", "max-inline-size", "width", 
 /// the self-alignment keywords (`justify-self`/`align-self`/`place-self: center`)
 /// that centre a capped box in a grid or flex parent without touching a margin.
 fn centres_a_measure(body: &str) -> bool {
-    let decls = declarations_of(body);
-    let get = |p: &str| decls.iter().rev().find(|(n, _)| n == p).map(|(_, v)| v.as_str());
+    let get = |p: &str| declared(body, p);
     let capped = MEASURE_PROPERTIES
         .iter()
         .filter_map(|p| get(p))
-        .any(|v| !matches!(v, "100%" | "none" | "auto"));
-    let auto = |v: Option<&str>| v == Some("auto");
+        .any(|v| !matches!(v.as_str(), "100%" | "none" | "auto"));
+    let auto = |v: Option<String>| v.as_deref() == Some("auto");
     let shorthand_centres = get("margin").is_some_and(|m| {
         let parts: Vec<&str> = m.split_whitespace().collect();
         match parts.as_slice() {
@@ -496,7 +495,7 @@ fn centres_a_measure(body: &str) -> bool {
         || (auto(get("margin-inline-start")) && auto(get("margin-inline-end")))
         || (auto(get("margin-left")) && auto(get("margin-right")))
         || shorthand_centres
-        || ["justify-self", "align-self", "place-self"].iter().any(|p| get(p) == Some("center"));
+        || ["justify-self", "align-self", "place-self"].iter().any(|p| get(p).as_deref() == Some("center"));
     capped && centred
 }
 
@@ -662,9 +661,7 @@ fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
 fn chat_two_pane_grid_is_the_wiki_rail_track_at_full_column_height() {
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
     let wiki = strip_comments(&read("src/views/wiki/WikiView.module.css"));
-    let prop = |body: &str, p: &str| {
-        declarations_of(body).into_iter().rev().find(|(n, _)| n == p).map(|(_, v)| v)
-    };
+    let prop = declared;
     let (chat_layout, wiki_layout) = (rule_body(&css, ".layout"), rule_body(&wiki, ".layout"));
     for p in ["grid-template-columns", "gap"] {
         let (c, w) = (prop(&chat_layout, p), prop(&wiki_layout, p));
@@ -735,9 +732,8 @@ fn chat_two_pane_grid_is_the_wiki_rail_track_at_full_column_height() {
 #[test]
 fn chat_transcript_is_a_bounded_scroll_box_inside_the_card() {
     let log = rule_body(&strip_comments(&read("src/views/chat/Chat.module.css")), ".log");
-    let decls = declarations_of(&log);
-    let get = |p: &str| decls.iter().rev().find(|(n, _)| n == p).map(|(_, v)| v.as_str());
-    assert_eq!(get("overflow-y"), Some("auto"), "the transcript scrolls internally");
+    let get = |p: &str| declared(&log, p);
+    assert_eq!(get("overflow-y").as_deref(), Some("auto"), "the transcript scrolls internally");
     assert!(
         get("max-height").is_some_and(|v| v != "none") || get("height").is_some_and(|v| v != "auto"),
         "the transcript declares a height bound — without one it grows with the conversation \
@@ -1522,6 +1518,14 @@ fn declarations_of(body: &str) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+/// The value a rule body finally declares for `property` — the LAST declaration of
+/// it, the one that wins the cascade within the rule — normalised as
+/// `declarations_of` does, or `None` when the body never declares it. Unlike
+/// `var_token`, it returns the raw value rather than unwrapping a `var(--…)`.
+fn declared(body: &str, property: &str) -> Option<String> {
+    declarations_of(body).into_iter().rev().find(|(n, _)| n == property).map(|(_, v)| v)
 }
 
 /// Whether a rule body takes its element off the page, by any mechanism in
