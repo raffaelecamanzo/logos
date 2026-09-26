@@ -464,39 +464,136 @@ fn chat_mermaid_fallback_centers_node_labels_like_the_wiki() {
 /// names one spelling guards exactly one spelling.
 const MEASURE_PROPERTIES: [&str; 4] = ["max-width", "max-inline-size", "width", "inline-size"];
 
+/// A declared value's top-level components: split on whitespace only at paren depth
+/// 0, so `0 auto calc(1rem + 2px)` is three values, not five, with any trailing
+/// `!important` dropped (it changes precedence, not the value).
+fn css_values(value: &str) -> Vec<String> {
+    let v = value.trim().trim_end_matches("!important").trim();
+    let (mut out, mut cur, mut depth) = (Vec::new(), String::new(), 0i32);
+    for c in v.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if c.is_whitespace() && depth == 0 {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// Whether a rule body CENTRES A MEASURE: it caps the element's inline size AND
-/// centres the capped box horizontally. That pair — not either half alone — is what
-/// S-300's `--chat-measure` column was (`max-width: var(--chat-measure)` +
-/// `margin-inline: auto`), and what left the 172px void beside the rail. A cap
-/// without centring (`.userBubble`'s `max-width: 80%`) is a bubble, not a measure;
-/// centring without a cap is a no-op; `100%` / `none` / `auto` cap nothing.
+/// centres the capped box horizontally — or derives its inline padding from the
+/// container's width, which centres a measure with no cap at all. The cap-plus-
+/// centring pair — not either half alone — is what S-300's `--chat-measure` column
+/// was (`max-width: var(--chat-measure)` + `margin-inline: auto`), and what left the
+/// 172px void beside the rail. A cap without centring (`.userBubble`'s
+/// `max-width: 80%`) is a bubble, not a measure; centring without a cap is a no-op;
+/// `100%` / `none` / `auto` cap nothing.
 ///
-/// Every centring spelling is read: `margin-inline: auto`, the logical longhands,
-/// the physical pair, the `margin` shorthand in each of its 1–4 value forms, and
-/// the self-alignment keywords (`justify-self`/`align-self`/`place-self: center`)
-/// that centre a capped box in a grid or flex parent without touching a margin.
+/// The inline margins are RESOLVED, in declaration order, the way the cascade does
+/// it: the `margin` shorthand in each of its 1–4 value forms (split at paren depth 0,
+/// so a spaced `calc()` is one value), `margin-inline` in its one- and two-value
+/// forms, and the physical and logical longhands — so `margin: 0 auto; margin-left: 0`
+/// is correctly NOT centred. The self-alignment keywords (`justify-self` /
+/// `align-self` / either half of `place-self: center`) centre a capped box in a grid
+/// or flex parent without touching a margin. A box centred by its PARENT's alignment
+/// is `centres_its_children`' case, and a measure split across several rules is
+/// the caller's (`aggregated_rules`).
 fn centres_a_measure(body: &str) -> bool {
-    let get = |p: &str| declared(body, p);
+    let value = |p: &str| declared(body, p).map(|v| css_values(&v));
     let capped = MEASURE_PROPERTIES
         .iter()
-        .filter_map(|p| get(p))
-        .any(|v| !matches!(v.as_str(), "100%" | "none" | "auto"));
-    let auto = |v: Option<String>| v.as_deref() == Some("auto");
-    let shorthand_centres = get("margin").is_some_and(|m| {
-        let parts: Vec<&str> = m.split_whitespace().collect();
-        match parts.as_slice() {
-            [all] => *all == "auto",
-            [_, inline] | [_, inline, _] => *inline == "auto",
-            [_, right, _, left] => *right == "auto" && *left == "auto",
-            _ => false,
+        .filter_map(|p| value(p))
+        .any(|v| !matches!(v.first().map(String::as_str), Some("100%" | "none" | "auto") | None));
+    let (mut left, mut right) = (String::new(), String::new());
+    for (name, raw) in declarations_of(body) {
+        let v = css_values(&raw);
+        let pick = |i: usize| v.get(i).cloned().unwrap_or_default();
+        match (name.as_str(), v.len()) {
+            ("margin", 1) => (left, right) = (pick(0), pick(0)),
+            ("margin", 2 | 3) => (left, right) = (pick(1), pick(1)),
+            ("margin", 4) => (left, right) = (pick(3), pick(1)),
+            ("margin-inline", 1) => (left, right) = (pick(0), pick(0)),
+            ("margin-inline", 2) => (left, right) = (pick(0), pick(1)),
+            ("margin-left" | "margin-inline-start", _) => left = pick(0),
+            ("margin-right" | "margin-inline-end", _) => right = pick(0),
+            _ => {}
         }
+    }
+    let self_centred = ["justify-self", "align-self", "place-self"]
+        .iter()
+        .filter_map(|p| value(p))
+        .any(|v| v.iter().any(|t| t == "center"));
+    let centred = (left == "auto" && right == "auto") || self_centred;
+    let padding_from_width = declarations_of(body).iter().any(|(n, v)| {
+        n.starts_with("padding") && !n.contains("block") && !n.ends_with("top") && !n.ends_with("bottom")
+            && v.contains("100%")
     });
-    let centred = auto(get("margin-inline"))
-        || (auto(get("margin-inline-start")) && auto(get("margin-inline-end")))
-        || (auto(get("margin-left")) && auto(get("margin-right")))
-        || shorthand_centres
-        || ["justify-self", "align-self", "place-self"].iter().any(|p| get(p).as_deref() == Some("center"));
-    capped && centred
+    (capped && centred) || padding_from_width
+}
+
+/// Whether a rule body makes its element a container that CENTRES ITS CHILDREN on
+/// the inline axis — the other way to centre a capped column, and S-300's own shape
+/// one step removed: a column flexbox with `align-items: center`, a row flexbox with
+/// `justify-content: center`, or a grid with `justify-items` / `place-items` centred.
+/// Row-flex `align-items: center` centres on the BLOCK axis (a toolbar's vertical
+/// alignment) and is not this.
+fn centres_its_children(body: &str) -> bool {
+    let first = |p: &str| declared(body, p).map(|v| css_values(&v));
+    let display = declared(body, "display").unwrap_or_default();
+    let column = declared(body, "flex-direction").is_some_and(|d| d.starts_with("column"));
+    let has = |p: &str, i: usize| first(p).is_some_and(|v| v.get(i).or(v.first()).is_some_and(|t| t == "center"));
+    if display.ends_with("flex") {
+        if column { has("align-items", 0) || has("place-items", 0) } else { has("justify-content", 0) }
+    } else if display.ends_with("grid") {
+        has("justify-items", 0) || has("place-items", 1)
+    } else {
+        false
+    }
+}
+
+/// Every individual selector in a stylesheet with ALL of its declarations, from
+/// every rule that names it — grouped lists split, `@media` rungs included — in
+/// source order, so the last one still wins. A measure split across two rules (the
+/// cap in one, `margin-inline: auto` in a grouped `.composer, .other` rule) is one
+/// measure, and a per-rule scan would never see it.
+fn aggregated_rules(css: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (list, body) in all_style_rules(css) {
+        let (mut depth, mut cur, mut sels) = (0i32, String::new(), Vec::new());
+        for c in list.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    sels.push(std::mem::take(&mut cur));
+                    continue;
+                }
+                _ => {}
+            }
+            cur.push(c);
+        }
+        sels.push(cur);
+        for sel in sels.iter().map(|s| s.trim().to_string()) {
+            match out.iter_mut().find(|(s, _)| *s == sel) {
+                Some((_, acc)) => {
+                    acc.push(';');
+                    acc.push_str(&body);
+                }
+                None => out.push((sel, body.clone())),
+            }
+        }
+    }
+    out
 }
 
 /// Every `(selector, body)` rule in a stylesheet, INCLUDING the rules nested in
@@ -557,6 +654,13 @@ fn centred_measure_detector_admits_every_spelling_and_rejects_its_near_misses() 
         "width: 46rem; justify-self: center",
         "max-width: 46rem; align-self: center",
         "inline-size: 46rem; place-self: center",
+        // Review (S-308): spellings the first detector missed.
+        "max-width: 46rem; margin: calc(var(--space-4) + 2px) auto",
+        "max-width: 46rem; margin: 0 auto calc(1rem + 2px)",
+        "max-width: 46rem; margin-inline: auto !important",
+        "max-width: 46rem; margin-inline: auto auto",
+        "inline-size: 46rem; place-self: center center",
+        "padding-inline: max(0px, calc((100% - 46rem) / 2))",
     ] {
         assert!(centres_a_measure(centred), "a centred measure must be detected: `{centred}`");
     }
@@ -573,9 +677,46 @@ fn centred_measure_detector_admits_every_spelling_and_rejects_its_near_misses() 
         "max-width: 46rem; margin: 0 auto 0 0",
         // A custom property NAMED like a margin is not a margin.
         "max-width: 46rem; --margin-inline: auto",
+        // The cascade: a later longhand un-centres an earlier shorthand.
+        "max-width: 46rem; margin: 0 auto; margin-left: 0",
+        "max-width: 46rem; margin-inline: auto 0",
+        // Block-axis padding is not a measure.
+        "padding-block: calc(100% - 2rem)",
     ] {
         assert!(!centres_a_measure(not_centred), "not a centred measure: `{not_centred}`");
     }
+
+    // The parent's half: a container that centres its children on the inline axis.
+    for centring in [
+        "display: flex; flex-direction: column; align-items: center",
+        "display: flex; flex-direction: column; place-items: center",
+        "display: flex; justify-content: center",
+        "display: inline-flex; justify-content: center",
+        "display: grid; justify-items: center",
+        "display: grid; place-items: start center",
+        "display: grid; place-items: center",
+    ] {
+        assert!(centres_its_children(centring), "a centring container must be detected: `{centring}`");
+    }
+    for not_centring in [
+        // A toolbar: row flex centring on the BLOCK axis only.
+        "display: flex; align-items: center",
+        "display: inline-flex; align-items: center; gap: var(--space-2)",
+        // A column flex centring on the block axis.
+        "display: flex; flex-direction: column; justify-content: center",
+        "display: flex; flex-direction: column; align-items: stretch",
+        "display: grid; place-items: center start",
+        // Not a flex/grid container at all.
+        "display: block; align-items: center",
+    ] {
+        assert!(!centres_its_children(not_centring), "not a centring container: `{not_centring}`");
+    }
+
+    // The caller's half: declarations are aggregated per selector across rules, so a
+    // measure split between a cap and a grouped centring rule is still one measure.
+    let split = "a { max-width: 46rem } .other, a { margin-inline: auto }";
+    let a = aggregated_rules(split).into_iter().find(|(s, _)| s == "a").map(|(_, b)| b).unwrap();
+    assert!(centres_a_measure(&a), "a cap and its centring in two rules are one measure");
 }
 
 /// The retired-grammar guard's replacement (S-308, [FR-UI-33], CR-092): the
@@ -589,13 +730,20 @@ fn centred_measure_detector_admits_every_spelling_and_rejects_its_near_misses() 
 fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
 
-    // (1) No rule anywhere in the chat stylesheet — rungs included — centres a
-    // measure, and the retired measure token is gone rather than left dormant.
-    for (selector, body) in all_style_rules(&css) {
+    // (1) No selector anywhere in the chat stylesheet — its declarations gathered
+    // from every rule and rung that names it — centres a measure, and none is a
+    // container that centres its children (the parent-side spelling of the same
+    // column). The retired measure token is gone rather than left dormant.
+    for (selector, body) in aggregated_rules(&css) {
         assert!(
             !centres_a_measure(&body),
             "`{selector}` centres a capped reading measure. The chat view fills its card \
              (FR-UI-33): a centred measure is what left the 172px void beside the rail",
+        );
+        assert!(
+            !centres_its_children(&body),
+            "`{selector}` centres its children on the inline axis — a capped child inside it \
+             is a centred reading measure by another route (FR-UI-33)",
         );
     }
     assert!(!css.contains("--chat-measure"), "the retired `--chat-measure` token is gone");
