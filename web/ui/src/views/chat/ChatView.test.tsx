@@ -41,6 +41,9 @@ import type {
   ThreadSummary,
 } from "./chatModel.ts";
 import { ChatView } from "./ChatView.tsx";
+import chatStyles from "./Chat.module.css";
+import buttonStyles from "../../components/Button.module.css";
+import cardStyles from "../../components/Card.module.css";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import { stubApi } from "../../workspace/testFixtures.ts";
@@ -897,7 +900,7 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
 
     await user.click(deleteButton("Conv A"));
     expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "+ New chat" }));
+    await user.click(screen.getByRole("button", { name: "New chat" }));
 
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument(),
@@ -1029,7 +1032,7 @@ describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
     await user.click(await screen.findByRole("button", { name: "Conv A" }));
     expect(await screen.findByText("old answer")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "+ New chat" }));
+    await user.click(screen.getByRole("button", { name: "New chat" }));
     // The log is cleared to a fresh composer…
     await waitFor(() => expect(screen.queryByText("old answer")).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
@@ -1137,7 +1140,7 @@ describe("ChatView — rail honest error paths (S-210)", () => {
     // The rail degrades to an honest note (not a silently empty list), and the chat
     // surface still mounts.
     expect(await screen.findByText(/Could not load your conversations/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "+ New chat" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New chat" })).toBeInTheDocument();
   });
 
   it("keeps the open conversation and notes a fault when a restore faults (non-404)", async () => {
@@ -1216,7 +1219,7 @@ describe("ChatView — multi-thread integrity (review-fix regressions)", () => {
     await screen.findByRole("button", { name: "Stop" }); // the turn is in flight on thread 9
 
     // Mid-stream, the user starts a fresh conversation, then the aborted turn settles.
-    await user.click(screen.getByRole("button", { name: "+ New chat" }));
+    await user.click(screen.getByRole("button", { name: "New chat" }));
     pending.close();
 
     // The fresh session must NOT be rebound to thread 9 by the aborted turn's
@@ -1244,14 +1247,14 @@ describe("ChatView — single-thread behaviour unchanged (S-200 regression)", ()
 
 describe("ChatView — transcript column structure (S-300, FR-UI-31)", () => {
   it("nests the user turn's text in a bubble element inside the column row", async () => {
-    // S-300 made the user MessagePrimitive.Root the full-measure column row and
+    // S-300 made the user MessagePrimitive.Root the full-width transcript row and
     // moved the bubble treatment onto an inner element, so the bubble hugs the
-    // COLUMN's right edge rather than the viewport's. That separation is a DOM
-    // fact, and it is the only part of the realignment jsdom can see: the CSS
-    // itself is asserted in `web/tests/spa_design_system.rs` (this suite runs
-    // with `css: false`, so class names never reach the DOM). Without this
-    // guard, deleting the wrapper would break the layout in every theme and no
-    // test would notice.
+    // TRANSCRIPT's right edge rather than the viewport's. That separation is a DOM
+    // fact jsdom can see; the declared CSS itself is asserted in
+    // `web/tests/spa_design_system.rs` (under `css: false` a CSS-module import is
+    // a proxy that names ANY key, so only class PLACEMENT is visible here, never a
+    // rule's definition). Without this guard, deleting the wrapper would break the
+    // layout in every theme and no test would notice.
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
     mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"answered"}\n\n']));
@@ -1275,6 +1278,69 @@ describe("ChatView — transcript column structure (S-300, FR-UI-31)", () => {
     expect(bubble?.tagName).toBe("DIV");
     expect(bubble).not.toBe(userRoot);
     expect(bubble?.textContent).toContain("where does the column start?");
+  });
+});
+
+describe("ChatView — the two-pane card grammar (S-308, FR-UI-33)", () => {
+  // Class PLACEMENT is what these assert: under `css: false` each CSS-module
+  // import is a proxy that returns a generated name for any key, so `classList`
+  // carries real tokens. Whether a class is DEFINED, and what it declares, is the
+  // Rust `spa_design_system` suite's job.
+
+  it("renders the transcript and the composer inside the view's ONE Card, which wraps no turn", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"inside"}\n\n']));
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "where is the card?");
+    const answer = await screen.findByText("inside");
+
+    // Exactly one card on the view — the edge appears once per view, never once
+    // per answer — and it holds BOTH turns and the composer.
+    const cards = container.querySelectorAll(`.${cardStyles.card}`);
+    expect(cards).toHaveLength(1);
+    const card = cards[0]!;
+    expect(card.contains(answer)).toBe(true);
+    expect(card.contains(screen.getByText("where is the card?"))).toBe(true);
+    expect(card.contains(screen.getByRole("textbox", { name: "Your message" }))).toBe(true);
+
+    // The card's content is the thread, and the transcript inside it is the log
+    // viewport — the bounded scroll box assistant-ui drives.
+    const log = container.querySelector(`.${chatStyles.log}`);
+    expect(log).not.toBeNull();
+    expect(card.contains(log)).toBe(true);
+    expect(log!.contains(answer)).toBe(true);
+
+    // The rail is NOT in the card: the card is the conversation pane only.
+    expect(card.contains(screen.getByRole("navigation", { name: "Conversations" }))).toBe(false);
+  });
+
+  it("gives the rail a full-size iconed New chat pinned outside the scrolling list", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(2, "Conv B", 200), thread(1, "Conv A", 100)]);
+    render(<ChatView />);
+    await screen.findByRole("button", { name: "Conv B" });
+
+    const newChat = screen.getByRole("button", { name: "New chat" });
+    // The shared Button at `md` — the `sm` control measured 23px tall.
+    expect(newChat.classList).toContain(buttonStyles.md);
+    expect(newChat.classList).not.toContain(buttonStyles.sm);
+    expect(newChat.classList).toContain(chatStyles.newChat);
+    // A LEADING, decorative icon: the first child is the aria-hidden glyph, so the
+    // accessible name stays the text.
+    const icon = newChat.firstElementChild;
+    expect(icon?.tagName.toLowerCase()).toBe("svg");
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+
+    // Pinned: the action is a direct child of the rail, OUTSIDE the list that
+    // scrolls — so the list can scroll without taking the action with it.
+    const rail = screen.getByRole("navigation", { name: "Conversations" });
+    const list = screen.getByRole("list");
+    expect(list.classList).toContain(chatStyles.threadList);
+    expect(newChat.parentElement).toBe(rail);
+    expect(list.contains(newChat)).toBe(false);
+    expect(rail.firstElementChild).toBe(newChat);
   });
 });
 

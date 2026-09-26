@@ -379,14 +379,16 @@ fn theme_bootstrap_is_an_external_classic_head_script() {
     assert!(!js.contains("eval("), "uses no eval (CSP)");
 }
 
-// ── 8. The chat transcript is one aligned conversation column (S-300) ─────────
+// ── 8. The chat view: flat turns inside the view's one card (S-300, S-308) ───
 //
-// [FR-UI-31] restyled the transcript to the base assistant-ui grammar. The
-// invariants below are pure CSS, and the SPA's Vitest run disables CSS entirely
-// (`css: false` — CSS Modules resolve to empty objects, so class names never
-// reach the jsdom DOM), which makes the authored stylesheet the only place the
-// contract can be checked without a headless browser — the same reasoning that
-// puts the token/contrast checks above in this file.
+// [FR-UI-31] flattened the turn to the base assistant-ui grammar; [FR-UI-33]
+// (S-308) put the transcript inside the application's own two-pane card grammar.
+// The invariants below are declared CSS, and the SPA's Vitest run disables CSS
+// processing (`css: false` — a CSS-module import is then a proxy that names ANY
+// key, so class PLACEMENT reaches the jsdom DOM but a rule's DEFINITION never
+// does), which makes the authored stylesheet the only place the contract can be
+// checked without a headless browser — the same reasoning that puts the
+// token/contrast checks above in this file.
 
 #[test]
 fn chat_assistant_turn_carries_no_card_chrome() {
@@ -457,33 +459,509 @@ fn chat_mermaid_fallback_centers_node_labels_like_the_wiki() {
     );
 }
 
+/// The properties that cap an element's inline size, i.e. that set a reading
+/// measure. Both the physical and the logical spelling, because a guard that
+/// names one spelling guards exactly one spelling.
+const MEASURE_PROPERTIES: [&str; 4] = ["max-width", "max-inline-size", "width", "inline-size"];
+
+/// A declared value's top-level components: split on whitespace only at paren depth
+/// 0, so `0 auto calc(1rem + 2px)` is three values, not five, with any trailing
+/// `!important` dropped (it changes precedence, not the value).
+fn css_values(value: &str) -> Vec<String> {
+    let v = value.trim().trim_end_matches("!important").trim();
+    let (mut out, mut cur, mut depth) = (Vec::new(), String::new(), 0i32);
+    for c in v.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if c.is_whitespace() && depth == 0 {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Whether a rule body CENTRES A MEASURE: it caps the element's inline size AND
+/// centres the capped box horizontally — or derives its inline padding from the
+/// container's width, which centres a measure with no cap at all. The cap-plus-
+/// centring pair — not either half alone — is what S-300's `--chat-measure` column
+/// was (`max-width: var(--chat-measure)` + `margin-inline: auto`), and what left the
+/// 172px void beside the rail. A cap without centring (`.userBubble`'s
+/// `max-width: 80%`) is a bubble, not a measure; centring without a cap is a no-op;
+/// `100%` / `none` / `auto` cap nothing.
+///
+/// The inline margins are RESOLVED, in declaration order, the way the cascade does
+/// it: the `margin` shorthand in each of its 1–4 value forms (split at paren depth 0,
+/// so a spaced `calc()` is one value), `margin-inline` in its one- and two-value
+/// forms, and the physical and logical longhands — so `margin: 0 auto; margin-left: 0`
+/// is correctly NOT centred. The self-alignment keywords (`justify-self` /
+/// `align-self` / either half of `place-self: center`) centre a capped box in a grid
+/// or flex parent without touching a margin. A box centred by its PARENT's alignment
+/// is `centres_its_children`' case, and a measure split across several rules is
+/// the caller's (`aggregated_rules`).
+fn centres_a_measure(body: &str) -> bool {
+    let value = |p: &str| declared(body, p).map(|v| css_values(&v));
+    let capped = MEASURE_PROPERTIES
+        .iter()
+        .filter_map(|p| value(p))
+        .any(|v| !matches!(v.first().map(String::as_str), Some("100%" | "none" | "auto") | None));
+    let (mut left, mut right) = (String::new(), String::new());
+    for (name, raw) in declarations_of(body) {
+        let v = css_values(&raw);
+        let pick = |i: usize| v.get(i).cloned().unwrap_or_default();
+        match (name.as_str(), v.len()) {
+            ("margin", 1) => (left, right) = (pick(0), pick(0)),
+            ("margin", 2 | 3) => (left, right) = (pick(1), pick(1)),
+            ("margin", 4) => (left, right) = (pick(3), pick(1)),
+            ("margin-inline", 1) => (left, right) = (pick(0), pick(0)),
+            ("margin-inline", 2) => (left, right) = (pick(0), pick(1)),
+            ("margin-left" | "margin-inline-start", _) => left = pick(0),
+            ("margin-right" | "margin-inline-end", _) => right = pick(0),
+            _ => {}
+        }
+    }
+    let self_centred = ["justify-self", "align-self", "place-self"]
+        .iter()
+        .filter_map(|p| value(p))
+        .any(|v| v.iter().any(|t| t == "center"));
+    let centred = (left == "auto" && right == "auto") || self_centred;
+    let padding_from_width = declarations_of(body).iter().any(|(n, v)| {
+        n.starts_with("padding") && !n.contains("block") && !n.ends_with("top") && !n.ends_with("bottom")
+            && v.contains("100%")
+    });
+    (capped && centred) || padding_from_width
+}
+
+/// Whether a rule body makes its element a container that CENTRES ITS CHILDREN on
+/// the inline axis — the other way to centre a capped column, and S-300's own shape
+/// one step removed: a column flexbox with `align-items: center`, a row flexbox with
+/// `justify-content: center`, or a grid with `justify-items` / `place-items` centred.
+/// Row-flex `align-items: center` centres on the BLOCK axis (a toolbar's vertical
+/// alignment) and is not this.
+fn centres_its_children(body: &str) -> bool {
+    let first = |p: &str| declared(body, p).map(|v| css_values(&v));
+    let display = declared(body, "display").unwrap_or_default();
+    let column = declared(body, "flex-direction").is_some_and(|d| d.starts_with("column"));
+    let has = |p: &str, i: usize| first(p).is_some_and(|v| v.get(i).or(v.first()).is_some_and(|t| t == "center"));
+    if display.ends_with("flex") {
+        if column { has("align-items", 0) || has("place-items", 0) } else { has("justify-content", 0) }
+    } else if display.ends_with("grid") {
+        has("justify-items", 0) || has("place-items", 1)
+    } else {
+        false
+    }
+}
+
+/// Every individual selector in a stylesheet with ALL of its declarations, from
+/// every rule that names it — grouped lists split, `@media` rungs included — in
+/// source order, so the last one still wins. A measure split across two rules (the
+/// cap in one, `margin-inline: auto` in a grouped `.composer, .other` rule) is one
+/// measure, and a per-rule scan would never see it.
+fn aggregated_rules(css: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (list, body) in all_style_rules(css) {
+        let (mut depth, mut cur, mut sels) = (0i32, String::new(), Vec::new());
+        for c in list.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    sels.push(std::mem::take(&mut cur));
+                    continue;
+                }
+                _ => {}
+            }
+            cur.push(c);
+        }
+        sels.push(cur);
+        for sel in sels.iter().map(|s| s.trim().to_string()) {
+            match out.iter_mut().find(|(s, _)| *s == sel) {
+                Some((_, acc)) => {
+                    acc.push(';');
+                    acc.push_str(&body);
+                }
+                None => out.push((sel, body.clone())),
+            }
+        }
+    }
+    out
+}
+
+/// Every `(selector, body)` rule in a stylesheet, INCLUDING the rules nested in
+/// `@media` / `@supports` blocks — a measure re-introduced inside a width rung is
+/// just as much a measure. `@keyframes` frames are not style rules and are skipped.
+fn all_style_rules(css: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (selector, body) in top_level_rules(css) {
+        if selector.starts_with("@keyframes") {
+            continue;
+        }
+        if selector.starts_with('@') {
+            out.extend(all_style_rules(&body));
+        } else {
+            out.push((selector, body));
+        }
+    }
+    out
+}
+
+/// A TSX source with its comments removed (`/* … */`, `{/* … */}` and `// …`), so a
+/// structural scan never matches an element that is only NAMED in prose. A `//`
+/// inside a string literal (a URL) is truncated too; harmless for an element scan.
+fn strip_tsx_comments(src: &str) -> String {
+    strip_comments(src)
+        .lines()
+        .map(|l| l.find("//").map_or(l, |i| &l[..i]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Byte offsets of every opening `<Tag` element in a TSX source — `<Card` followed by
+/// whitespace, `>` or `/`, so `<CardList` and a closing `</Card>` never count.
+fn opening_tags(src: &str, tag: &str) -> Vec<usize> {
+    let needle = format!("<{tag}");
+    src.match_indices(&needle)
+        .filter(|(i, _)| {
+            src[i + needle.len()..].chars().next().is_some_and(|c| c.is_whitespace() || c == '>' || c == '/')
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The near misses the measure detector must tell apart. Every spelling of a
+/// centred measure is ADMITTED and every one-step-away shape is not: a detector
+/// proven only by deleting the real rule can never show what it wrongly admits,
+/// or what spelling it misses.
 #[test]
-fn chat_roles_share_one_centered_readable_measure() {
+fn centred_measure_detector_admits_every_spelling_and_rejects_its_near_misses() {
+    for centred in [
+        "width: 100%; max-width: var(--chat-measure); margin-inline: auto",
+        "max-width: 46rem; margin: 0 auto",
+        "max-width: 46rem; margin: 0 auto var(--space-4)",
+        "max-width: 46rem; margin: 0 auto 0 auto",
+        "max-width: 46rem; margin: auto",
+        "max-width: 46rem; margin-left: auto; margin-right: auto",
+        "max-inline-size: 60ch; margin-inline-start: auto; margin-inline-end: auto",
+        "width: 46rem; justify-self: center",
+        "max-width: 46rem; align-self: center",
+        "inline-size: 46rem; place-self: center",
+        // Review (S-308): spellings the first detector missed.
+        "max-width: 46rem; margin: calc(var(--space-4) + 2px) auto",
+        "max-width: 46rem; margin: 0 auto calc(1rem + 2px)",
+        "max-width: 46rem; margin-inline: auto !important",
+        "max-width: 46rem; margin-inline: auto auto",
+        "inline-size: 46rem; place-self: center center",
+        "padding-inline: max(0px, calc((100% - 46rem) / 2))",
+    ] {
+        assert!(centres_a_measure(centred), "a centred measure must be detected: `{centred}`");
+    }
+    for not_centred in [
+        // The user bubble: capped, but hugging the right edge — not centred.
+        "max-width: 80%; padding: var(--space-2) var(--space-3)",
+        // Full-width content centred on nothing.
+        "width: 100%; margin-inline: auto",
+        "max-width: none; margin: 0 auto",
+        // The log's negative inline margin: not `auto`, and no cap.
+        "margin-inline: calc(-1 * var(--space-4)); padding: var(--space-5) var(--space-4)",
+        // Only ONE side auto pushes the box to an edge; it does not centre it.
+        "max-width: 46rem; margin-left: auto",
+        "max-width: 46rem; margin: 0 auto 0 0",
+        // A custom property NAMED like a margin is not a margin.
+        "max-width: 46rem; --margin-inline: auto",
+        // The cascade: a later longhand un-centres an earlier shorthand.
+        "max-width: 46rem; margin: 0 auto; margin-left: 0",
+        "max-width: 46rem; margin-inline: auto 0",
+        // Block-axis padding is not a measure.
+        "padding-block: calc(100% - 2rem)",
+    ] {
+        assert!(!centres_a_measure(not_centred), "not a centred measure: `{not_centred}`");
+    }
+
+    // The parent's half: a container that centres its children on the inline axis.
+    for centring in [
+        "display: flex; flex-direction: column; align-items: center",
+        "display: flex; flex-direction: column; place-items: center",
+        "display: flex; justify-content: center",
+        "display: inline-flex; justify-content: center",
+        "display: grid; justify-items: center",
+        "display: grid; place-items: start center",
+        "display: grid; place-items: center",
+    ] {
+        assert!(centres_its_children(centring), "a centring container must be detected: `{centring}`");
+    }
+    for not_centring in [
+        // A toolbar: row flex centring on the BLOCK axis only.
+        "display: flex; align-items: center",
+        "display: inline-flex; align-items: center; gap: var(--space-2)",
+        // A column flex centring on the block axis.
+        "display: flex; flex-direction: column; justify-content: center",
+        "display: flex; flex-direction: column; align-items: stretch",
+        "display: grid; place-items: center start",
+        // Not a flex/grid container at all.
+        "display: block; align-items: center",
+    ] {
+        assert!(!centres_its_children(not_centring), "not a centring container: `{not_centring}`");
+    }
+
+    // The caller's half: declarations are aggregated per selector across rules, so a
+    // measure split between a cap and a grouped centring rule is still one measure.
+    let split = "a { max-width: 46rem } .other, a { margin-inline: auto }";
+    let a = aggregated_rules(split).into_iter().find(|(s, _)| s == "a").map(|(_, b)| b).unwrap();
+    assert!(centres_a_measure(&a), "a cap and its centring in two rules are one measure");
+}
+
+/// The retired-grammar guard's replacement (S-308, [FR-UI-33], CR-092): the
+/// conversation renders inside the view's ONE shared `Card`, filling its track, and
+/// no rule centres a body-content measure. It supersedes S-300's
+/// `chat_roles_share_one_centered_readable_measure`, which locked the centred
+/// `--chat-measure` column this story retires, and keeps every assertion of it that
+/// is still true: neither role self-aligns, the user turn hugs the right edge, and
+/// the bubble treatment lives on the inner `.userBubble`.
+#[test]
+fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
-    // The measure is declared once, on the thread root, and inherited by the column.
-    assert!(
-        rule_body(&css, ".threadRoot").contains("--chat-measure:"),
-        "the shared conversation measure is declared on .threadRoot",
+
+    // (1) No selector anywhere in the chat stylesheet — its declarations gathered
+    // from every rule and rung that names it — centres a measure, and none is a
+    // container that centres its children (the parent-side spelling of the same
+    // column). The retired measure token is gone rather than left dormant.
+    for (selector, body) in aggregated_rules(&css) {
+        assert!(
+            !centres_a_measure(&body),
+            "`{selector}` centres a capped reading measure. The chat view fills its card \
+             (FR-UI-33): a centred measure is what left the 172px void beside the rail",
+        );
+        assert!(
+            !centres_its_children(&body),
+            "`{selector}` centres its children on the inline axis — a capped child inside it \
+             is a centred reading measure by another route (FR-UI-33)",
+        );
+    }
+    assert!(!css.contains("--chat-measure"), "the retired `--chat-measure` token is gone");
+
+    // (2) The conversation is inside the view's ONE card. Exactly one `<Card>` in the
+    // view file, and it encloses the whole thread — the transcript viewport, the
+    // messages and the composer. One, not "at least one": a second card is a card
+    // per turn (or per notice), which is the CR-089 chrome the flat turn removed.
+    let view = strip_tsx_comments(&read("src/views/chat/ChatView.tsx"));
+    let cards = opening_tags(&view, "Card");
+    assert_eq!(
+        cards.len(),
+        1,
+        "ChatView renders exactly one shared `Card` — the view's conversation container, \
+         never a turn's (FR-UI-33, FR-UI-31)",
     );
-    let column = rule_body(&css, ".empty, .user, .assistant");
+    let open = cards[0];
+    let close = open + view[open..].find("</Card>").expect("the view's `<Card>` is closed");
+    let inside = &view[open..close];
+    for part in ["<ThreadPrimitive.Root", "<ThreadPrimitive.Viewport", "<ThreadPrimitive.Messages", "<Composer"] {
+        assert!(
+            inside.contains(part),
+            "`{part}` renders INSIDE the view's card: the transcript and the composer live in \
+             that one container (FR-UI-33)",
+        );
+    }
     assert!(
-        column.contains("max-width: var(--chat-measure)") && column.contains("margin-inline: auto"),
-        "the empty hint and BOTH roles are centred on the shared measure",
+        !inside.contains("<ThreadList"),
+        "the history rail is the other pane, not part of the conversation card",
     );
-    assert!(
-        rule_body(&css, ".composer").contains("max-width: var(--chat-measure)"),
-        "the composer rides the same measure, so the column is one continuous surface",
+
+    // (3) The card fills its track: nothing between the grid cell and the card caps
+    // or centres it, and the composer rides the card's full content box.
+    for selector in [".main", ".threadRoot", ".composer"] {
+        let body = rule_body(&css, selector);
+        for prop in MEASURE_PROPERTIES {
+            assert!(
+                !declarations_of(&body).iter().any(|(n, v)| n == prop && v != "100%"),
+                "`{selector}` declares `{prop}`: the conversation fills its card and the card its \
+                 track (FR-UI-33)",
+            );
+        }
+    }
+
+    // (3b) No unused gutter inside the card (FR-UI-33): the turns, the user bubble and
+    // the composer all sit on the card's content edge. The log's inline padding keeps
+    // its text off the scrollbar, so an equal NEGATIVE inline margin must hand that
+    // inset back to the card's own padding — without it the turns sit 16px inside
+    // the composer. And nothing between the grid cell and the turns adds an inline
+    // inset of its own (`.main` padding would be a void beside the rail).
+    let log = rule_body(&css, ".log");
+    let log_padding = css_values(&declared(&log, "padding").expect("`.log` declares its padding"));
+    let inline_pad = match log_padding.as_slice() {
+        [all] => all.clone(),
+        [_, inline] | [_, inline, _] | [_, inline, _, _] => inline.clone(),
+        _ => panic!("`.log` padding has 1–4 values"),
+    };
+    assert_eq!(
+        declared(&log, "margin-inline"),
+        Some(format!("calc(-1 * {inline_pad})")),
+        "`.log` cancels its own inline padding ({inline_pad}) with an equal negative inline margin, \
+         so the turns align on the card's content edge with the composer",
     );
-    // Neither role escapes the column with its own alignment; the user bubble is
-    // right-aligned INSIDE the column, not against the viewport.
+    for selector in [".main", ".threadRoot", ".composer"] {
+        let body = rule_body(&css, selector);
+        for (n, v) in declarations_of(&body) {
+            let inline_inset = (n.starts_with("padding") || n.starts_with("margin"))
+                && !n.contains("block") && !n.ends_with("top") && !n.ends_with("bottom")
+                && css_values(&v).iter().any(|t| t != "0");
+            assert!(
+                !inline_inset,
+                "`{selector}` declares `{n}: {v}` — an inline inset between the card's edge and \
+                 the turns is an unused gutter (FR-UI-33)",
+            );
+        }
+    }
+
+    // (4) Still true from S-300: neither role escapes the line with its own
+    // alignment; the user bubble is right-aligned INSIDE the transcript.
     let user = rule_body(&css, ".user");
-    assert!(!user.contains("align-self"), "the user turn aligns within the column, not against it");
+    assert!(!user.contains("align-self"), "the user turn aligns within the transcript, not against it");
     assert!(!rule_body(&css, ".assistant").contains("align-self"));
-    assert!(user.contains("justify-content: flex-end"), "the user bubble hugs the column's right edge");
+    assert!(user.contains("justify-content: flex-end"), "the user bubble hugs the transcript's right edge");
     assert!(
         rule_body(&css, ".userBubble").contains("background: var(--surface-2)"),
-        "the bubble treatment moved to the inner .userBubble element",
+        "the bubble treatment lives on the inner .userBubble element",
     );
+}
+
+/// The two-pane grid is the WIKI's (S-308, [FR-UI-33]): the chat layout reads its
+/// rail track and column gap off `WikiView.module.css` rather than restating them,
+/// so the two views cannot drift apart without this failing. The rail spans the full
+/// column height with no viewport-height cap of its own, and its "+ New chat" is a
+/// ≥36px action pinned above the list that scrolls.
+#[test]
+fn chat_two_pane_grid_is_the_wiki_rail_track_at_full_column_height() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let wiki = strip_comments(&read("src/views/wiki/WikiView.module.css"));
+    let prop = declared;
+    let (chat_layout, wiki_layout) = (rule_body(&css, ".layout"), rule_body(&wiki, ".layout"));
+    for p in ["grid-template-columns", "gap"] {
+        let (c, w) = (prop(&chat_layout, p), prop(&wiki_layout, p));
+        assert!(w.is_some(), "the Wiki `.layout` declares `{p}`");
+        assert_eq!(c, w, "the chat two-pane `{p}` is the Wiki menu's, verbatim (FR-UI-33)");
+    }
+
+    // Full column height: the row stretches its items (the grid default). The Wiki's
+    // own `align-items: start` is exactly what must NOT be copied — it is what sized
+    // the chat rail to its items (240×99px).
+    // Every spelling of block-axis alignment is read — the row's own (`align-items`,
+    // and the first half of `place-items`) and the rail's (`align-self`, the first
+    // half of `place-self`) — because any one of them set to `start` collapses the
+    // rail to its items again.
+    let stretches = |v: Option<String>| {
+        v.map(|v| css_values(&v).first().cloned().unwrap_or_default())
+            .is_none_or(|t| matches!(t.as_str(), "stretch" | "normal" | "auto"))
+    };
+    for p in ["align-items", "place-items"] {
+        let v = prop(&chat_layout, p);
+        assert!(stretches(v.clone()), "the chat `.layout` stretches the rail to the row (found `{p}: {v:?}`)");
+    }
+    for (selector, body) in aggregated_rules(&css) {
+        if selector != ".railPane" && selector != ".rail" {
+            continue;
+        }
+        for p in ["align-self", "place-self"] {
+            let v = prop(&body, p);
+            assert!(stretches(v.clone()), "`{selector}` opts out of the row's stretch (found `{p}: {v:?}`)");
+        }
+    }
+    let rail = rule_body(&css, ".rail");
+    assert_eq!(prop(&rail, "height").as_deref(), Some("100%"), "the rail fills its stretched pane");
+
+    // The pane is size-contained on desktop, so a long list scrolls inside the rail
+    // instead of stretching the row past the card — without it the list grows the
+    // row, the PAGE scrolls, the list never does, and "+ New chat" is no longer
+    // pinned above anything. Required, not merely checked-if-present.
+    assert!(
+        prop(&rule_body(&css, ".railPane"), "contain").is_some_and(|v| v.contains("size")),
+        "the desktop `.railPane` is size-contained, so the row is the card's height and the \
+         conversation list scrolls inside the rail (FR-UI-33)",
+    );
+    // Below the breakpoint the rail stacks and must size to its content again: a
+    // containment NOT released there collapses the opened narrow-viewport rail to 0px.
+    let narrow = top_level_rules(&css)
+        .into_iter()
+        .find(|(at, _)| at == "@media (max-width: 1023px)")
+        .map(|(_, body)| body)
+        .expect("the chat layout has its ≤1023px rung");
+    assert_eq!(
+        prop(&rule_body(&narrow, ".railPane"), "contain").as_deref(),
+        Some("none"),
+        "the ≤1023px rung releases the rail pane's size containment, or the opened rail \
+         renders 0px tall",
+    );
+    // …and the pane is the ONLY size-contained part of the rail: the rung releases
+    // exactly that one, so containment moved onto `.rail` or the list would survive
+    // into the narrow viewport and collapse it just the same.
+    for (selector, body) in aggregated_rules(&css) {
+        if selector == ".railPane" || !(selector.starts_with(".rail") || selector.starts_with(".thread") || selector == ".newChat") {
+            continue;
+        }
+        assert!(
+            !declarations_of(&body).iter().any(|(n, v)| n == "contain" && v.contains("size")),
+            "`{selector}` is size-contained; only `.railPane` may be — it is the one the ≤1023px \
+             rung releases",
+        );
+    }
+
+    // No viewport-height cap on any part of the rail, and the rail as a whole does not
+    // scroll — only the list does, which is what keeps "+ New chat" pinned.
+    // Rungs included, and the logical `block-size` spelling and every viewport unit
+    // (`vh`/`dvh`/`svh`/`lvh`, `vb`, `vmin`/`vmax`) read, as the measure guard does.
+    let rail_parts = [".railPane", ".rail", ".threadList", ".newChat"];
+    for (selector, body) in aggregated_rules(&css) {
+        if !rail_parts.contains(&selector.as_str()) {
+            continue;
+        }
+        for (n, v) in declarations_of(&body) {
+            let sizes_block = n.contains("height") || n.contains("block-size");
+            let viewport = ["vh", "vb", "vmin", "vmax"].iter().any(|u| v.contains(u));
+            assert!(
+                !(sizes_block && viewport),
+                "`{selector}` declares `{n}: {v}` — the rail's bound is its grid row, not the \
+                 viewport (FR-UI-33)",
+            );
+        }
+    }
+    assert!(prop(&rail, "overflow-y").is_none() && prop(&rail, "overflow").is_none(), "the rail itself does not scroll");
+    let list = rule_body(&css, ".threadList");
+    assert_eq!(prop(&list, "overflow-y").as_deref(), Some("auto"), "the conversation list is the scroll region");
+    assert_eq!(prop(&list, "min-height").as_deref(), Some("0"), "the list can shrink below its content, so it scrolls");
+
+    let new_chat = rule_body(&css, ".newChat");
+    assert_eq!(prop(&new_chat, "flex").as_deref(), Some("none"), "+ New chat never shrinks into the list's scroll");
+    let floor = prop(&new_chat, "min-height").and_then(|v| length_px(&v));
+    assert!(
+        floor.is_some_and(|px| px >= 36.0),
+        "+ New chat is at least 36px tall (found min-height {floor:?})",
+    );
+}
+
+/// The transcript stays a BOUNDED scroll box inside the card (FR-UI-33, CR-092
+/// §3.2). It is assistant-ui's thread viewport, which follows the stream by driving
+/// its own `scrollTop`; an unbounded box would silently stop auto-follow on the app's
+/// only streaming surface and walk the composer off-screen mid-answer. The floor
+/// keeps a short transcript from collapsing to its content.
+#[test]
+fn chat_transcript_is_a_bounded_scroll_box_inside_the_card() {
+    let log = rule_body(&strip_comments(&read("src/views/chat/Chat.module.css")), ".log");
+    let get = |p: &str| declared(&log, p);
+    assert_eq!(get("overflow-y").as_deref(), Some("auto"), "the transcript scrolls internally");
+    assert!(
+        get("max-height").is_some_and(|v| v != "none") || get("height").is_some_and(|v| v != "auto"),
+        "the transcript declares a height bound — without one it grows with the conversation \
+         and assistant-ui has no scroll box to follow the stream in",
+    );
+    assert!(get("min-height").is_some_and(|v| v != "0"), "the transcript has a floor");
 }
 
 #[test]
@@ -495,18 +973,23 @@ fn chat_transcript_has_generous_spacing_and_viewport_padding() {
 }
 
 #[test]
-fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
-    // Every rule in the transcript that declares its own ink clears the 4.5:1 AA
-    // body minimum against WHATEVER IT ACTUALLY SITS ON. That is two lists, not one,
-    // and the split is the point: the realigned turn has no fill of its own, so most
-    // of its text renders directly on `--surface-0` (list a) — which is why the
+fn chat_transcript_text_on_the_card_fill_clears_wcag_aa_in_both_themes() {
+    // Every rule in the chat view that declares its own ink clears the 4.5:1 AA body
+    // minimum against WHATEVER IT ACTUALLY SITS ON. S-308 moved the transcript into
+    // the view's `Card`, so that base is the CARD FILL — read off `Card.module.css`
+    // here, not restated, so the guard follows the card if its fill ever moves. It
+    // was `--surface-0` while S-300's transcript sat bare on the page.
+    //
+    // Two lists, and the split is the point. The turns have no fill of their own, so
+    // most transcript text renders on the card fill (list a) — which is why the
     // halt/error notices and the answer links carry the signal hue on a
     // border/underline (a 3:1 UI affordance) rather than in the text colour. The
     // Activity status glyphs are the exception, because HF-1 gave them a chip fill
-    // of their own to sit on (list b); measuring THOSE against the page surface
-    // would measure a background they never touch. The chip geometry that makes
-    // list (b) legitimate is asserted separately, by the test below this one.
+    // of their own to sit on (list b); measuring THOSE against the card fill would
+    // measure a background they never touch. The chip geometry that makes list (b)
+    // legitimate is asserted separately, by the test below this one.
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let card = strip_comments(&read("src/components/Card.module.css"));
     let tokens = strip_comments(&read("src/styles/tokens.css"));
     let base = declarations(&block_after(&tokens, ":root"));
     let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
@@ -515,18 +998,75 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
         [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))]
     };
 
-    // (a) Rules that ink STRAIGHT ONTO the page surface — nothing sits between
-    // their text and `--surface-0`, so they are measured against it.
-    for selector in [".halt, .error", ".markdown a"] {
+    // The base, derived rather than assumed: the card's own fill, and nothing
+    // between it and the turns repaints it. A `background` on the thread root or
+    // the log would put the transcript on a surface this guard never measured.
+    let card_fill = var_token(&rule_body(&card, ".card"), "background")
+        .expect("the shared `.card` declares a `background: var(--…)` fill");
+    for selector in [".threadRoot", ".log"] {
+        assert!(
+            !declarations_of(&rule_body(&css, selector)).iter().any(|(n, _)| n.starts_with("background")),
+            "`{selector}` paints no fill of its own: the transcript sits on the card fill \
+             ({card_fill}), which is what the pairs below are measured against",
+        );
+    }
+    let rail_fill = var_token(&rule_body(&css, ".rail"), "background")
+        .expect("the rail declares a `background: var(--…)` fill");
+
+    // (a) Rules that ink STRAIGHT ONTO a fill they do not own — the transcript's on
+    // the card fill, the rail's notes on the rail fill.
+    for (selector, surface) in [
+        (".halt, .error", card_fill.as_str()),
+        (".markdown a", card_fill.as_str()),
+        (".railEmpty, .railError", rail_fill.as_str()),
+        (".railError", rail_fill.as_str()),
+    ] {
         let token = color_token(&rule_body(&css, selector))
             .unwrap_or_else(|| panic!("`{selector}` declares a `color: var(--…)`"));
         for (theme, map) in themes() {
-            let c = contrast(token_rgb(&token, &map, &base), token_rgb("--surface-0", &map, &base));
+            let c = contrast(token_rgb(&token, &map, &base), token_rgb(surface, &map, &base));
             assert!(
                 c >= 4.5,
-                "{theme}: `{selector}` ink ({token}) is {c:.2}:1 on the page surface, below the \
-                 4.5:1 AA body minimum — the transcript has no card fill to sit on, so a signal \
-                 hue must be carried by a border/underline, not by the text colour",
+                "{theme}: `{selector}` ink ({token}) is {c:.2}:1 on {surface}, below the 4.5:1 \
+                 AA body minimum — a signal hue must be carried by a border/underline edge, \
+                 not by the text colour",
+            );
+        }
+    }
+
+    // (a′) The other half of (a): the hue those rules keep OFF their ink must still
+    // be ON them, as the left edge — relocated, never dropped (FR-UI-33). Resolved in
+    // cascade order over every rule naming the selector (`.error` recolours the edge
+    // it shares with `.halt`), and measured as a ≥3:1 non-text affordance on the fill
+    // the notice sits on.
+    let aggregated = aggregated_rules(&css);
+    for (selector, surface) in [
+        (".halt", card_fill.as_str()),
+        (".error", card_fill.as_str()),
+        (".railError", rail_fill.as_str()),
+    ] {
+        let body = &aggregated.iter().find(|(s, _)| s == selector).expect("the notice rule exists").1;
+        let mut edge = None;
+        for (n, v) in declarations_of(body) {
+            if matches!(n.as_str(), "border-left" | "border-inline-start" | "border-left-color" | "border-inline-start-color") {
+                if let Some(t) = css_values(&v).iter().find_map(|t| t.strip_prefix("var(").and_then(|t| t.strip_suffix(')'))) {
+                    edge = Some(t.split(',').next().unwrap_or("").trim().to_string());
+                }
+            }
+        }
+        let edge = edge.unwrap_or_else(|| {
+            panic!("`{selector}` carries its signal on a left edge `border-left: … var(--…)` — the hue was relocated off the ink, not dropped")
+        });
+        assert!(
+            SIGNAL_HUES.contains(&edge.as_str()),
+            "`{selector}`'s left edge is `{edge}`, not a signal hue — the notice's tone is gone",
+        );
+        for (theme, map) in themes() {
+            let c = contrast(token_rgb(&edge, &map, &base), token_rgb(surface, &map, &base));
+            assert!(
+                c >= 3.0,
+                "{theme}: `{selector}`'s edge ({edge}) is {c:.2}:1 on {surface}, below the 3:1 \
+                 non-text floor an edge affordance must clear",
             );
         }
     }
@@ -534,11 +1074,12 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
     // (b) The Activity status glyphs (S-301) are the sprint's near-miss and the
     // other resolution of the same rule. Added INSIDE the unfilled column a story
     // after this invariant was established, they first took the signal hues as
-    // `color:` — `--color-pass` is 2.99:1 on the light page surface, under even the
-    // 3:1 non-text floor. HF-1 put the hue where the house keeps it: a `Badge`-style
-    // chip FILL. So they are measured as fill/ink pairs — carrying them in list (a)
-    // would now be worse than wrong, it would be vacuous, because `--ink-on-warm`
-    // never touches `--surface-0` and would pass on a contrast it does not have.
+    // `color:` — `--color-pass` was 2.99:1 on the light page surface, under even the
+    // 3:1 non-text floor (3.30:1 on today's card fill: still under AA). HF-1 put the
+    // hue where the house keeps it: a `Badge`-style chip FILL. So they are measured
+    // as fill/ink pairs — carrying them in list (a) would now be worse than wrong, it
+    // would be vacuous, because `--ink-on-warm` never touches the card fill and
+    // would pass on a contrast it does not have.
     for (selector, fill) in [(".activityRunning", "--so-orange"), (".activityDone", "--so-green")] {
         let body = rule_body(&css, selector);
         let ink = color_token(&body)
@@ -546,7 +1087,7 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
         let declared = var_token(&body, "background").unwrap_or_else(|| {
             panic!(
                 "`{selector}` declares a `background: var(--…)`: the signal hue is this glyph's \
-                 FILL, not its ink — as ink on the unfilled column it does not clear AA",
+                 FILL, not its ink — as ink on the card fill it does not clear AA",
             )
         });
         assert_eq!(
@@ -563,7 +1104,6 @@ fn chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes() {
             );
         }
     }
-
 }
 
 /// The other half of the fill/ink-pair affordance the contrast guard above measures:
@@ -618,18 +1158,23 @@ const SIGNAL_HUES: &[&str] = &[
 ///   ink with `Badge` chip geometry. That is what HF-1 did to `.activityRunning` /
 ///   `.activityDone`, and it takes them OUT of this list: they now ink
 ///   `--ink-on-warm`, and the fill/ink pair is measured by
-///   `chat_transcript_text_on_the_page_surface_clears_wcag_aa_in_both_themes`.
+///   `chat_transcript_text_on_the_card_fill_clears_wcag_aa_in_both_themes`.
 /// - **Drop it** — keep `--text-1` and carry the signal on a border/underline, as
-///   `.halt, .error` and `.markdown a` do. Also not in this list, for the same reason.
-/// - **Keep it, as a UI affordance** — chrome outside the unfilled transcript column,
-///   where the hue is a ≥3:1 graphic signal rather than body text. That floor is
-///   asserted for `--color-accent` on `--surface-0` by
-///   `text_and_signal_contrast_meets_wcag_aa_in_both_themes`. These are the entries
-///   below; each one is a deliberate exception, not a default.
-const SIGNAL_INK_COVERAGE: &[(&str, &str)] = &[
-    (".threadDelete:hover, .threadDelete:focus-visible", "UiAffordance: rail icon button"),
-    (".railError", "UiAffordance: rail status line"),
-    (".streaming::after", "UiAffordance: composer caret glyph"),
+///   `.halt, .error`, `.markdown a` and (since S-308) `.railError` do. Also not in
+///   this list, for the same reason: `.railError` inked `--color-accent` at 3.55:1 on
+///   the dark rail fill, which is text, and text needs 4.5:1.
+/// - **Keep it, as a UI affordance** — a glyph that is a graphic signal rather than
+///   body text, where the hue need only clear the ≥3:1 non-text floor. The test
+///   below measures that floor for each entry against the surface named beside it,
+///   in both themes. These are the entries below; each one is a deliberate
+///   exception, not a default.
+///
+/// The surface is the one the glyph is painted on: the rule's OWN `background` when
+/// it declares one (the test checks the two agree), else the fill it sits on — the
+/// view card's `--surface-1` for the transcript (S-308).
+const SIGNAL_INK_COVERAGE: &[(&str, &str, &str)] = &[
+    (".threadDelete:hover, .threadDelete:focus-visible", "--surface-2", "UiAffordance: rail ✕ icon button"),
+    (".streaming::after", "--surface-1", "UiAffordance: streaming caret glyph on the card fill"),
 ];
 
 /// The coverage half of the S-300 invariant, and the guard that would have caught
@@ -644,26 +1189,32 @@ const SIGNAL_INK_COVERAGE: &[(&str, &str)] = &[
 #[test]
 fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
-    for (selector, body) in top_level_rules(&css) {
+    // Rungs included: a signal ink re-introduced inside a `@media` block is just as
+    // much a signal ink, and a top-level-only walk would never see it.
+    for (selector, body) in all_style_rules(&css) {
         let Some(token) = color_token(&body) else { continue };
         if !SIGNAL_HUES.contains(&token.as_str()) {
             continue;
         }
         assert!(
-            SIGNAL_INK_COVERAGE.iter().any(|(sel, _)| *sel == selector),
+            SIGNAL_INK_COVERAGE.iter().any(|(sel, _, _)| *sel == selector),
             "`{selector}` inks the signal hue `{token}` but is not classified in \
-             `SIGNAL_INK_COVERAGE`. On the unfilled transcript column a signal hue does \
-             not clear 4.5:1 as text — move it to a `background:` fill under an \
+             `SIGNAL_INK_COVERAGE`. On the view card's fill a signal hue does not clear \
+             4.5:1 as text in every theme — move it to a `background:` fill under an \
              `--ink-on-*` ink with `Badge` chip geometry, or drop it and carry the signal \
-             on a border/underline. If this rule is chrome OUTSIDE that column it may keep \
-             the hue as a ≥3:1 UI affordance — then add it below with its reason. Pick one \
+             on a border/underline. If this rule is a graphic glyph rather than text it may \
+             keep the hue as a ≥3:1 UI affordance — then add it below with its surface and \
+             reason. Pick one \
              and record it: leaving a rule unclassified is how S-301 shipped at 2.99:1.",
         );
     }
     // …and the contract cannot rot in the other direction either: a classified
     // selector that no longer inks a signal hue is stale and must be dropped, or the
     // list slowly becomes a record of what the stylesheet used to look like.
-    for (selector, note) in SIGNAL_INK_COVERAGE {
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
+    for (selector, surface, note) in SIGNAL_INK_COVERAGE {
         let body = rule_body(&css, selector);
         let token = color_token(&body).unwrap_or_else(|| {
             panic!("`{selector}` is classified ({note}) but declares no `color: var(--…)`")
@@ -673,6 +1224,22 @@ fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
             "`{selector}` is classified as a signal-hue ink ({note}) but now inks \
              `{token}`, which is not a signal hue — drop it from `SIGNAL_INK_COVERAGE`",
         );
+        // A classified affordance still has to BE one: ≥3:1 against what it is painted
+        // on, in both themes. The surface is the rule's own fill when it declares one.
+        if let Some(own) = var_token(&body, "background") {
+            assert_eq!(
+                own, *surface,
+                "`{selector}` paints its own `{own}` fill; classify it against that surface",
+            );
+        }
+        for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
+            let c = contrast(token_rgb(&token, &map, &base), token_rgb(surface, &map, &base));
+            assert!(
+                c >= 3.0,
+                "{theme}: `{selector}` ({note}) inks {token} at {c:.2}:1 on {surface}, below the \
+                 3:1 non-text floor a UI affordance must clear",
+            );
+        }
     }
 }
 
@@ -1210,6 +1777,14 @@ fn declarations_of(body: &str) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+/// The value a rule body finally declares for `property` — the LAST declaration of
+/// it, the one that wins the cascade within the rule — normalised as
+/// `declarations_of` does, or `None` when the body never declares it. Unlike
+/// `var_token`, it returns the raw value rather than unwrapping a `var(--…)`.
+fn declared(body: &str, property: &str) -> Option<String> {
+    declarations_of(body).into_iter().rev().find(|(n, _)| n == property).map(|(_, v)| v)
 }
 
 /// Whether a rule body takes its element off the page, by any mechanism in

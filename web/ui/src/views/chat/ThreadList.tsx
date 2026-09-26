@@ -18,6 +18,7 @@
 import { useEffect, useState } from "react";
 
 import { Button } from "../../components/index.ts";
+import { IconPlus } from "../../components/icons.tsx";
 import type { ThreadSummary } from "./chatModel.ts";
 import styles from "./Chat.module.css";
 
@@ -63,8 +64,14 @@ export function ThreadList({
 
   return (
     <nav className={styles.rail} aria-label="Conversations">
-      <Button variant="secondary" size="sm" className={styles.newChat} onClick={onNewChat}>
-        + New chat
+      {/* The "+ New chat" action, full-size and pinned above the scrolling list
+          (S-308, FR-UI-33): the `md` Button, kept out of the list's scroll region
+          by the rail's layout. The leading `IconPlus` IS the "+" — it is decorative
+          (`aria-hidden` via the shared `Svg` wrapper), so the accessible name is
+          "New chat" rather than a spoken "plus New chat". */}
+      <Button variant="secondary" className={styles.newChat} onClick={onNewChat}>
+        <IconPlus />
+        New chat
       </Button>
 
       {/* The note sits BESIDE the list, not instead of it. Two different things can

@@ -123,6 +123,14 @@ export const IconStatistics = (p: IconProps) => (
   </Svg>
 );
 
+/* The "+ New chat" action's leading glyph (S-308, FR-UI-33): a plain plus, the
+   set's only additive-action icon. */
+export const IconPlus = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 5v14M5 12h14" />
+  </Svg>
+);
+
 export const IconSun = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="4" />
