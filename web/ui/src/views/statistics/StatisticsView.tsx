@@ -217,7 +217,8 @@ function ToolsCard({
       <h4 className={styles.subhead}>By surface</h4>
       <p className={styles.capNote}>
         Self-referential reads — the tab's own stats request and the shell's status readout —
-        are excluded per event; a graph query issued through the dashboard counts like any other.
+        are excluded per event, so opening this tab never inflates its own numbers; a graph query
+        issued through the dashboard is counted like any other.
       </p>
       {surfaces.length === 0 ? (
         <EmptyState message="No surface usage in this window." />
