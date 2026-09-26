@@ -944,11 +944,12 @@ fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
         assert!(
             SIGNAL_INK_COVERAGE.iter().any(|(sel, _, _)| *sel == selector),
             "`{selector}` inks the signal hue `{token}` but is not classified in \
-             `SIGNAL_INK_COVERAGE`. On the unfilled transcript column a signal hue does \
-             not clear 4.5:1 as text — move it to a `background:` fill under an \
+             `SIGNAL_INK_COVERAGE`. On the view card's fill a signal hue does not clear \
+             4.5:1 as text in every theme — move it to a `background:` fill under an \
              `--ink-on-*` ink with `Badge` chip geometry, or drop it and carry the signal \
-             on a border/underline. If this rule is chrome OUTSIDE that column it may keep \
-             the hue as a ≥3:1 UI affordance — then add it below with its reason. Pick one \
+             on a border/underline. If this rule is a graphic glyph rather than text it may \
+             keep the hue as a ≥3:1 UI affordance — then add it below with its surface and \
+             reason. Pick one \
              and record it: leaving a rule unclassified is how S-301 shipped at 2.99:1.",
         );
     }
