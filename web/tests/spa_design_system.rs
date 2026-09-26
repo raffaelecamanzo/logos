@@ -1432,7 +1432,7 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
         (".codeCopy:hover:not(:disabled), .mermaidControl:hover:not(:disabled)", raised_fill.as_str()),
         (".mermaidZoom", raised_fill.as_str()),
         (".mermaidScale :global(.mermaid:not([data-processed=\"true\"]))", viewport_fill.as_str()),
-        (".mermaidFallback", raised_fill.as_str()),
+        (".mermaidFallback", viewport_fill.as_str()), // sibling of `.mermaidScale` INSIDE `.mermaidViewport`, not `.codeHeader`
         (".action", card_fill.as_str()),
         (".action:hover", card_fill.as_str()),
         (".input", rail_fill.as_str()), // own fill (== --surface-1)
