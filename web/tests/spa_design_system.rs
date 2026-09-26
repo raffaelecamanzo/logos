@@ -1034,6 +1034,43 @@ fn chat_transcript_text_on_the_card_fill_clears_wcag_aa_in_both_themes() {
         }
     }
 
+    // (a′) The other half of (a): the hue those rules keep OFF their ink must still
+    // be ON them, as the left edge — relocated, never dropped (FR-UI-33). Resolved in
+    // cascade order over every rule naming the selector (`.error` recolours the edge
+    // it shares with `.halt`), and measured as a ≥3:1 non-text affordance on the fill
+    // the notice sits on.
+    let aggregated = aggregated_rules(&css);
+    for (selector, surface) in [
+        (".halt", card_fill.as_str()),
+        (".error", card_fill.as_str()),
+        (".railError", rail_fill.as_str()),
+    ] {
+        let body = &aggregated.iter().find(|(s, _)| s == selector).expect("the notice rule exists").1;
+        let mut edge = None;
+        for (n, v) in declarations_of(body) {
+            if matches!(n.as_str(), "border-left" | "border-inline-start" | "border-left-color" | "border-inline-start-color") {
+                if let Some(t) = css_values(&v).iter().find_map(|t| t.strip_prefix("var(").and_then(|t| t.strip_suffix(')'))) {
+                    edge = Some(t.split(',').next().unwrap_or("").trim().to_string());
+                }
+            }
+        }
+        let edge = edge.unwrap_or_else(|| {
+            panic!("`{selector}` carries its signal on a left edge `border-left: … var(--…)` — the hue was relocated off the ink, not dropped")
+        });
+        assert!(
+            SIGNAL_HUES.contains(&edge.as_str()),
+            "`{selector}`'s left edge is `{edge}`, not a signal hue — the notice's tone is gone",
+        );
+        for (theme, map) in themes() {
+            let c = contrast(token_rgb(&edge, &map, &base), token_rgb(surface, &map, &base));
+            assert!(
+                c >= 3.0,
+                "{theme}: `{selector}`'s edge ({edge}) is {c:.2}:1 on {surface}, below the 3:1 \
+                 non-text floor an edge affordance must clear",
+            );
+        }
+    }
+
     // (b) The Activity status glyphs (S-301) are the sprint's near-miss and the
     // other resolution of the same rule. Added INSIDE the unfilled column a story
     // after this invariant was established, they first took the signal hues as
