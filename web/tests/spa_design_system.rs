@@ -820,11 +820,27 @@ fn chat_two_pane_grid_is_the_wiki_rail_track_at_full_column_height() {
     // Full column height: the row stretches its items (the grid default). The Wiki's
     // own `align-items: start` is exactly what must NOT be copied — it is what sized
     // the chat rail to its items (240×99px).
-    let align = prop(&chat_layout, "align-items");
-    assert!(
-        matches!(align.as_deref(), None | Some("stretch") | Some("normal")),
-        "the chat `.layout` stretches the rail to the row (found `align-items: {align:?}`)",
-    );
+    // Every spelling of block-axis alignment is read — the row's own (`align-items`,
+    // and the first half of `place-items`) and the rail's (`align-self`, the first
+    // half of `place-self`) — because any one of them set to `start` collapses the
+    // rail to its items again.
+    let stretches = |v: Option<String>| {
+        v.map(|v| css_values(&v).first().cloned().unwrap_or_default())
+            .is_none_or(|t| matches!(t.as_str(), "stretch" | "normal" | "auto"))
+    };
+    for p in ["align-items", "place-items"] {
+        let v = prop(&chat_layout, p);
+        assert!(stretches(v.clone()), "the chat `.layout` stretches the rail to the row (found `{p}: {v:?}`)");
+    }
+    for (selector, body) in aggregated_rules(&css) {
+        if selector != ".railPane" && selector != ".rail" {
+            continue;
+        }
+        for p in ["align-self", "place-self"] {
+            let v = prop(&body, p);
+            assert!(stretches(v.clone()), "`{selector}` opts out of the row's stretch (found `{p}: {v:?}`)");
+        }
+    }
     let rail = rule_body(&css, ".rail");
     assert_eq!(prop(&rail, "height").as_deref(), Some("100%"), "the rail fills its stretched pane");
 
