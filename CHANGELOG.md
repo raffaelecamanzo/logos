@@ -9,6 +9,37 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 78.
+
+### Added
+
+- **Telemetry records what a call answered, not only that it ran.** `callers`, `impact`,
+  `precedent` and `affected` now record an outcome (`answered`, `empty`, `unresolved` or
+  `failed`), and every usage cell in `logos stats --json` carries `answered_calls` and
+  `classified_calls` beside `calls`. The payload computes no rate: divide `answered_calls` by
+  `classified_calls`, never by `calls`. A cell with no classified call carries
+  `outcome_absence: "none recorded"`. The workspace aggregate carries the same fields. The
+  store migrates to schema v4 on first use; older events stay unclassified and are never
+  back-filled, and 1.4.22 still reads a v4 store (CR-144, FR-OB-14).
+- **Statistics tab: tool attribution by class.** A new card shows per-tool usage split by
+  dev/`main` origin, grouped by tool class, with each cell's `N of M answered` or
+  `none recorded`. The coverage limits (raw events only, retention, pre-origin-stamp data)
+  are printed beside the figures (CR-091).
+- **A census fails the build if a traced tool is neither classified nor excluded with a
+  reason**, so a new tool cannot silently shrink the answered denominator.
+
+### Fixed
+
+- **The Wiki progress banner never overshoots.** When an auto-continued run surfaces work it
+  did not start with, the denominator grows to the real scope, never decreases, and the
+  banner says so (`scope grew from 5 as new work surfaced during the run`), instead of
+  reporting `7/5` (CR-093).
+- **The chat Activity fold is correct on replanned turns.** A later round's observation no
+  longer marks an earlier round's step done, the fold groups each round's plan with its own
+  steps, and a replan to zero steps keeps the earlier round visible (CR-090).
+- **The Statistics notes no longer claim pre-origin-stamp data is CLI+MCP-only.** It came
+  from every surface running at the time, including web and the watcher.
+
 ## [1.4.22] — 2026-09-25
 
 Sprint 77, second hotfix round.
