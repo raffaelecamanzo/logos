@@ -1646,7 +1646,14 @@ pub struct StatsInfo {
 /// Usage of one tool on one surface within the stats window (FR-OB-04).
 #[derive(Debug, Default, Serialize)]
 pub struct ToolUsage {
-    /// `"cli"` or `"mcp"`.
+    /// The recording surface, e.g. `"cli"`, `"mcp"`, `"watcher"`, `"web"`,
+    /// `"shell"`, `"wikigen"`, or `"chat"`. Self-referential reads — the
+    /// Statistics tab's own `stats` request and the shell's `status` readout —
+    /// are excluded per event, so opening the tab never inflates its own
+    /// numbers ([FR-OB-09]); a graph query issued through the dashboard is
+    /// counted like any other, so `"web"` rows do appear here.
+    ///
+    /// [FR-OB-09]: ../../../docs/specs/requirements/FR-OB-09.md
     pub surface: String,
     /// Engine method or pipeline pass name.
     pub tool: String,

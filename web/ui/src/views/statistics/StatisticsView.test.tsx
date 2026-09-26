@@ -42,8 +42,8 @@ function populated(windowDays: number): StatsInfo {
   return {
     window_days: windowDays,
     calls_total: 42,
-    // No `surface:"web"` row: the endpoint filters dashboard activity out
-    // server-side (HF-1), so a populated response never carries it.
+    // This fixture carries no `surface:"web"` row; the dedicated web-row test
+    // below covers a payload that does.
     calls_by_tool: [
       { surface: "cli", tool: "context", calls: 100 + windowDays, ok_calls: 50 },
       { surface: "mcp", tool: "search", calls: 20, ok_calls: 19 },
@@ -194,8 +194,35 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     // "dev" appears in both the dev-vs-main twin and the attribution cross-tab.
     expect(screen.getAllByText("dev").length).toBeGreaterThanOrEqual(2);
 
-    // Web (dashboard) activity is excluded server-side, so no "web" surface row.
+    // This fixture carries no `web` row (see the dedicated web-row test below).
     expect(screen.queryByText("web")).toBeNull();
+  });
+
+  it("states the per-event self-referential exclusion and renders a web row (CR-146)", async () => {
+    stubFetch((windowDays) => ({
+      ...populated(windowDays),
+      calls_by_tool: [
+        { surface: "cli", tool: "context", calls: 100 + windowDays, ok_calls: 50 },
+        { surface: "mcp", tool: "search", calls: 20, ok_calls: 19 },
+        { surface: "web", tool: "context", calls: 7, ok_calls: 7 },
+      ],
+    }));
+    render(<StatisticsView />);
+    await screen.findByRole("heading", { name: "Top tools & surfaces" });
+
+    // The caption states the true per-event rule, matching docs/howto/usage.md,
+    // and never the retired blanket exclusion.
+    expect(screen.queryByText(/dashboard \(web\) activity is excluded/i)).toBeNull();
+    expect(screen.getByText(/self-referential reads/i)).toBeInTheDocument();
+    expect(screen.getByText(/the tab's own stats request/i)).toBeInTheDocument();
+    expect(screen.getByText(/the shell's status readout/i)).toBeInTheDocument();
+
+    // The chart's accessible label carries no hard-coded surface list.
+    expect(screen.queryByRole("img", { name: /cli \/ mcp \/ watcher/i })).toBeNull();
+    expect(screen.getByRole("img", { name: /usage by surface/i })).toBeInTheDocument();
+
+    // A `web` row present in the payload renders in the by-surface data table.
+    expect(screen.getByText("web")).toBeInTheDocument();
   });
 
   it("re-queries and updates every surface when the window changes (UAT-UI-09)", async () => {
