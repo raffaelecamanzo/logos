@@ -432,9 +432,11 @@ logos stats --window 30   # trailing 30 days
 Reports calls per tool split by surface (`cli`/`mcp`), latency percentiles,
 and an estimate of file reads (and tokens) saved by graph navigation versus
 raw file reading. Stats read only `telemetry.db` — they work even before (or
-without) an index. Web-dashboard activity (`surface="web"`) is **excluded from
-every figure**: viewing the stats emits its own telemetry, so counting it would
-be self-referential noise, not a measure of the tool's value.
+without) an index. **Self-referential reads are excluded from every figure** —
+`stats` reading the telemetry store, and the dashboard shell's own `status`
+readout — because counting them would measure the measurement, not the tool's
+value. A graph query a person issues *through* the dashboard counts normally
+(see [commands.md § `stats`](commands.md#stats)).
 
 ## The web UI dashboard
 
@@ -1079,7 +1081,11 @@ first turn, gitignored, never in the default binary).
    on colour alone. A turn with neither a plan nor any activity — a restored
    answer-only turn, for instance — shows **no** Activity fold at all. A turn you
    **Stop** before any answer arrives keeps its fold open, as the honest record of
-   how far it got.
+   how far it got. On a **replanned** turn the fold groups its contents **by
+   round**: each round's plan sits with that round's own steps, and a step is
+   marked done only by an observation from its own round (the orchestrator
+   restarts step numbering on every replan). A single-round turn shows no grouping
+   chrome.
 
    The synthesized **answer** then renders token-by-token as
    **GitHub-flavoured Markdown** — headings, lists,
@@ -1280,7 +1286,12 @@ perform (still no LLM/network). Generated and presented pages persist in
    halts honestly rather than looping). **Reopening the Wiki tab while a run is in flight
    re-attaches** to that same run and resumes the cumulative progress — it never starts a
    second run or resets the counter. Reopening after the run has finished shows an
-   **"up to date"** state.
+   **"up to date"** state. Because each auto-continued chunk re-reads the work-list,
+   a run can surface work it did not start with (a sync adding a page-worthy entity,
+   a section re-armed past its threshold); the denominator then **grows to the real
+   scope** rather than letting the count overshoot it, never decreases within a run,
+   and the banner says so — *"scope grew from 5 as new work surfaced during the
+   run"*. A run whose scope never changed reads exactly as before.
 
 **Honest states (never a fabricated page):**
 
@@ -1316,13 +1327,25 @@ over `GET /api/v1/statistics[?window=<days>]` — a thin, read-only pass-through
 1. A **value-estimate callout** leading with the reads/tokens-saved figures (the
    dogfood metric), clearly labeled as *estimates*, not measured truth.
 2. A **daily-activity line** — calls per UTC day over the window.
-3. A **top-tools / by-surface** ranking bar. The by-surface breakdown covers
-   `cli` / `mcp` / `watcher` only — dashboard (`web`) activity is excluded, so
-   opening this tab never inflates its own numbers.
+3. A **top-tools / by-surface** ranking bar. Self-referential reads — the tab's
+   own `stats` request and the shell's `status` readout — are excluded per event,
+   so opening this tab never inflates its own numbers; a graph query issued
+   through the dashboard is counted like any other.
 4. A **dev-vs-`main` split** — usage attributed by `origin` (a worktree's branch
    name, or `"main"`), charted as-is and **never normalized to total calls**
    (rolled-up days carry no `origin`, so the split can legitimately sum to less
    than the total — the tab does not hide that gap).
+5. A **Tool attribution by class** card — the tool × origin cross-tab
+   (`calls_by_tool_origin`), grouped by tool class (`navigation`,
+   `quality-gate`, …), so *"which navigation came from dev panes?"* is readable
+   in place. Each row states what the calls **answered**: `N of M answered` for
+   a tool whose outcomes are recorded (today `callers`, `impact`, `precedent`
+   and `affected`), or **none recorded** when no call in that cell was
+   classified — never a percentage. The coverage limits render **beside the
+   figures**, verbatim from the read-model's `attribution_coverage.notes`: the
+   cross-tab covers raw events only, a window past raw retention is truncated,
+   and events written before the origin stamp existed came from every surface of
+   the time with their dev/`main` split unknown.
 
 A **7 / 30 / 90-day window selector** (default 7) re-queries the endpoint and
 re-renders every surface. Each chart is paired with an accessible data-table twin
