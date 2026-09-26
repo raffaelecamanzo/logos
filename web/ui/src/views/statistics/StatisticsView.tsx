@@ -215,14 +215,17 @@ function ToolsCard({
       )}
 
       <h4 className={styles.subhead}>By surface</h4>
-      <p className={styles.capNote}>Dashboard (web) activity is excluded — it reflects viewing, not tool use.</p>
+      <p className={styles.capNote}>
+        Self-referential reads — the tab's own stats request and the shell's status readout —
+        are excluded per event; a graph query issued through the dashboard counts like any other.
+      </p>
       {surfaces.length === 0 ? (
         <EmptyState message="No surface usage in this window." />
       ) : (
         <>
           <StatChart
             option={surfaceOption}
-            label="Usage by surface (cli / mcp / watcher); the table below carries the same data"
+            label="Usage by surface; the table below carries the same data"
           />
           <DataTable<SurfaceRow>
             columns={[textCol("surface", "Surface", (r) => r.surface), numCol("calls", "Calls", (r) => r.calls)]}

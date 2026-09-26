@@ -119,8 +119,11 @@ export interface SurfaceRow {
   calls: number;
 }
 
-/** Usage aggregated by recording surface (cli / mcp / watcher), ranked desc.
- *  Web-dashboard activity is filtered server-side (HF-1), so it never appears. */
+/** Usage aggregated by recording surface (e.g. `cli`, `mcp`, `watcher`, `web`,
+ *  `shell`, `wikigen`, `chat`), ranked desc. Self-referential reads — the tab's
+ *  own `stats` request and the shell's `status` readout — are excluded per
+ *  event ([FR-OB-09]); a graph query issued through the dashboard counts like
+ *  any other, so a `web` row can appear. */
 export function bySurface(stats: Pick<UsageProjections, "calls_by_tool">): SurfaceRow[] {
   const totals = new Map<string, number>();
   for (const u of stats.calls_by_tool) {

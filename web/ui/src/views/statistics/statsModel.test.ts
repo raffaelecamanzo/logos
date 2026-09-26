@@ -130,8 +130,8 @@ describe("bySurface", () => {
   });
 
   it("breaks ties by surface name ascending", () => {
-    // `bySurface` is surface-agnostic; web is filtered server-side (HF-1), so the
-    // categories it ever sees are cli / mcp / watcher.
+    // `bySurface` is surface-agnostic — it just aggregates whatever surfaces
+    // the payload carries, this fixture picks cli / watcher arbitrarily.
     const stats = emptyStats({
       calls_total: 10,
       calls_by_tool: [
