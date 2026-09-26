@@ -788,6 +788,39 @@ fn chat_conversation_sits_in_one_card_with_no_centred_measure() {
         }
     }
 
+    // (3b) No unused gutter inside the card (FR-UI-33): the turns, the user bubble and
+    // the composer all sit on the card's content edge. The log's inline padding keeps
+    // its text off the scrollbar, so an equal NEGATIVE inline margin must hand that
+    // inset back to the card's own padding — without it the turns sit 16px inside
+    // the composer. And nothing between the grid cell and the turns adds an inline
+    // inset of its own (`.main` padding would be a void beside the rail).
+    let log = rule_body(&css, ".log");
+    let log_padding = css_values(&declared(&log, "padding").expect("`.log` declares its padding"));
+    let inline_pad = match log_padding.as_slice() {
+        [all] => all.clone(),
+        [_, inline] | [_, inline, _] | [_, inline, _, _] => inline.clone(),
+        _ => panic!("`.log` padding has 1–4 values"),
+    };
+    assert_eq!(
+        declared(&log, "margin-inline"),
+        Some(format!("calc(-1 * {inline_pad})")),
+        "`.log` cancels its own inline padding ({inline_pad}) with an equal negative inline margin, \
+         so the turns align on the card's content edge with the composer",
+    );
+    for selector in [".main", ".threadRoot", ".composer"] {
+        let body = rule_body(&css, selector);
+        for (n, v) in declarations_of(&body) {
+            let inline_inset = (n.starts_with("padding") || n.starts_with("margin"))
+                && !n.contains("block") && !n.ends_with("top") && !n.ends_with("bottom")
+                && css_values(&v).iter().any(|t| t != "0");
+            assert!(
+                !inline_inset,
+                "`{selector}` declares `{n}: {v}` — an inline inset between the card's edge and \
+                 the turns is an unused gutter (FR-UI-33)",
+            );
+        }
+    }
+
     // (4) Still true from S-300: neither role escapes the line with its own
     // alignment; the user bubble is right-aligned INSIDE the transcript.
     let user = rule_body(&css, ".user");
