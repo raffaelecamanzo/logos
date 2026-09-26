@@ -9,6 +9,8 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.23] — 2026-09-26
+
 Sprint 78.
 
 ### Added
