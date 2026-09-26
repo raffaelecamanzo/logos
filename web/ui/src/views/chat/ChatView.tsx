@@ -1,6 +1,6 @@
 /*
- * ChatView (S-200, S-300, CR-051, CR-089, FR-UI-18, FR-UI-19, FR-UI-20, FR-UI-24,
- * FR-UI-31, ADR-45) — the
+ * ChatView (S-200, S-300, S-308, CR-051, CR-089, CR-092, FR-UI-18, FR-UI-19,
+ * FR-UI-20, FR-UI-24, FR-UI-31, FR-UI-33, ADR-45) — the
  * Chat tab rebuilt on **assistant-ui** (`@assistant-ui/react`) over a custom
  * runtime adapter on the UNCHANGED intent-guarded SSE stream (`chatRuntime.tsx`).
  *
@@ -17,10 +17,13 @@
  *     ([NFR-CC-04]),
  *   - the answer as streamed markdown with code blocks (`MarkdownAnswer.tsx`).
  *
- * S-300 ([FR-UI-31]) realigned the transcript to the base assistant-ui column
- * grammar: both roles now sit in ONE centred readable measure — the assistant
- * turn a flat full-width left-aligned block (no card fill, no red top rule, no
- * shadow), the user turn a bubble right-aligned inside that same column. S-301
+ * S-300 ([FR-UI-31]) flattened the TURN to the base assistant-ui grammar — the
+ * assistant turn a flat full-width left-aligned block (no card fill, no red top
+ * rule, no shadow), the user turn a right-aligned bubble. S-308 ([FR-UI-33],
+ * CR-092) then re-rooted the VIEW in the application's own two-pane card grammar,
+ * adopted from the Wiki tab: the transcript and composer live inside ONE shared
+ * `Card` beside the history rail, filling its track, and S-300's centred reading
+ * measure is retired. The card wraps the transcript, never a turn. S-301
  * (same FR) then folded the separate plan list and the subagent-activity pills
  * into ONE native "Activity" disclosure whose steps carry their full observed
  * result as rendered markdown, replacing the native hover tooltip. Both are
@@ -51,7 +54,7 @@ import {
 
 import { fetchChatConfig } from "../../api/chatClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
-import { Button, Callout } from "../../components/index.ts";
+import { Button, Callout, Card } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
 import { MarkdownAnswer } from "./MarkdownAnswer.tsx";
 import { ThreadList } from "./ThreadList.tsx";
@@ -169,8 +172,9 @@ function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
 }
 
 /** The configured chat surface: the conversation-history rail (S-210/S-211), the
- *  consent banner, and the assistant-ui thread. There is no global Clear-history —
- *  deletion is per conversation, in the rail (S-211, [FR-UI-26], [ADR-47]). */
+ *  consent banner, and the assistant-ui thread inside the view's `Card` (S-308,
+ *  [FR-UI-33]). There is no global Clear-history — deletion is per conversation,
+ *  in the rail (S-211, [FR-UI-26], [ADR-47]). */
 function ChatConfigured({ ready }: { ready: ChatReady }) {
   const chat = ready.policy;
   const [consented, setConsented] = useState<boolean>(() => hasConsent());
@@ -234,17 +238,24 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
         </aside>
 
         <div className={styles.main}>
-          <AssistantRuntimeProvider runtime={runtime}>
-            <ThreadPrimitive.Root className={styles.threadRoot}>
-              <ThreadPrimitive.Viewport className={styles.log}>
-                <ThreadPrimitive.Empty>
-                  <EmptyHint chat={chat} />
-                </ThreadPrimitive.Empty>
-                <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
-              </ThreadPrimitive.Viewport>
-              <Composer consented={consented} />
-            </ThreadPrimitive.Root>
-          </AssistantRuntimeProvider>
+          {/* The view's ONE card (S-308, [FR-UI-33]): it wraps the whole transcript
+              and the composer, never a turn — the turns inside stay flat, so the
+              signal-red edge appears once per view, not once per answer. The
+              viewport inside stays a bounded scroll box; assistant-ui drives its
+              `scrollTop` to follow the stream. */}
+          <Card>
+            <AssistantRuntimeProvider runtime={runtime}>
+              <ThreadPrimitive.Root className={styles.threadRoot}>
+                <ThreadPrimitive.Viewport className={styles.log}>
+                  <ThreadPrimitive.Empty>
+                    <EmptyHint chat={chat} />
+                  </ThreadPrimitive.Empty>
+                  <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+                </ThreadPrimitive.Viewport>
+                <Composer consented={consented} />
+              </ThreadPrimitive.Root>
+            </AssistantRuntimeProvider>
+          </Card>
         </div>
       </div>
     </div>
@@ -297,10 +308,11 @@ function EmptyHint({ chat }: { chat: ChatPolicy }) {
   );
 }
 
-/** A user turn: the message text in a bubble hugging the RIGHT edge of the shared
- *  conversation column (S-300, [FR-UI-31]). The root spans the column measure so
- *  both roles share one alignment line; the bubble is the inner element, so it
- *  right-aligns within the column rather than against the viewport. */
+/** A user turn: the message text in a bubble hugging the RIGHT edge of the
+ *  transcript (S-300, [FR-UI-31]). The root spans the transcript's width so both
+ *  roles share one alignment line inside the card (S-308, [FR-UI-33]); the bubble
+ *  is the inner element, so it right-aligns within that line rather than against
+ *  the viewport. */
 function UserMessage() {
   return (
     <MessagePrimitive.Root className={styles.user}>
@@ -313,8 +325,9 @@ function UserMessage() {
 
 /** An assistant turn: the Activity disclosure, the streamed markdown answer, an
  *  honest halt or error, and the copy/regenerate action bar. A full-width block
- *  flush with the LEFT edge of the same column the user turn sits in — not a card
- *  (S-300, [FR-UI-31]). The folded turn rides on `metadata.custom.turn`; data is
+ *  flush with the LEFT edge of the same transcript the user turn sits in — not a
+ *  card of its own; the view's one card wraps the transcript (S-300, [FR-UI-31];
+ *  S-308, [FR-UI-33]). The folded turn rides on `metadata.custom.turn`; data is
  *  rendered as React-escaped text or through `react-markdown` (which never injects
  *  raw HTML). */
 function AssistantMessage() {

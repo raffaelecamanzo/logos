@@ -1,17 +1,24 @@
 /*
- * Chat view layout (S-190, S-200, S-300, FR-UI-18/19/20/24, FR-UI-23, FR-UI-31,
- * ADR-44, ADR-45).
+ * Chat view layout (S-190, S-200, S-300, S-308, FR-UI-18/19/20/24, FR-UI-23,
+ * FR-UI-31, FR-UI-33, ADR-44, ADR-45).
  * Zero-runtime CSS Module → external <link> stylesheet (no inline <style>, no
- * CSS-in-JS), so the self-only CSP stays byte-identical. Every value is a design
- * token. The surface is now composed from assistant-ui primitives; these classes
+ * CSS-in-JS), so the self-only CSP stays byte-identical. Every colour is a design
+ * token, as is every spacing value the scale has a step for; the few literal
+ * lengths (hairline borders, the chip inset, the ≥36px action floor, the
+ * transcript's floor) are deliberate and commented where declared. The surface
+ * is now composed from assistant-ui primitives; these classes
  * skin those primitives (thread/composer/action-bar/message) plus the custom
  * plan / chips / halt / error / markdown components.
  *
- * S-300 ([FR-UI-31]) realigned the transcript to the base **assistant-ui column
- * grammar**: one centred readable measure (`--chat-measure`) shared by both
- * roles, the empty hint, and the composer; the assistant turn is a flat
- * full-width block rather than a shadowed card with a red top rule. See the
- * thread/log section below.
+ * S-300 ([FR-UI-31]) flattened the assistant TURN: a full-width block rather
+ * than a shadowed card with a red top rule. S-308 ([FR-UI-33], CR-092) re-rooted
+ * the VIEW in the application's own two-pane card grammar, adopted from the Wiki
+ * tab: the rail sits on the Wiki menu's fluid rail track at full column height,
+ * and the transcript and composer live inside the shared `Card` (3px signal-red
+ * accent edge), filling its track. S-300's centred `--chat-measure` column is
+ * retired — it was the SPA's only centred body-content measure, and the void
+ * beside the rail. The card wraps the transcript, never a turn. See the layout
+ * and thread/log sections below.
  */
 
 .view {
@@ -26,15 +33,19 @@
   gap: var(--space-4);
 }
 
-/* ── Two-pane layout: history rail + conversation (S-210, FR-UI-26) ─────────── */
-/* Desktop (≥1024px): a fixed-width rail column beside the conversation. The
-   narrow-viewport toggle is display:none here, so it occupies no grid cell and
-   the rail is always shown. */
+/* ── Two-pane layout: history rail + conversation (S-210, S-308, FR-UI-26/33) ── */
+/* Desktop (≥1024px): the Wiki menu's fluid rail track and column gap, verbatim
+   (`WikiView.module.css` `.layout` — the design-system guard reads both files and
+   fails if they drift). The narrow-viewport toggle is display:none here, so it
+   occupies no grid cell and the rail is always shown.
+
+   Unlike the Wiki, the row is NOT `align-items: start`: the default `stretch` is
+   what makes the rail span the full column height beside the conversation card
+   rather than collapsing to the height of its items. */
 .layout {
   display: grid;
-  grid-template-columns: 15rem 1fr;
-  gap: var(--space-4);
-  align-items: start;
+  grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr);
+  gap: var(--space-5);
 }
 .main {
   display: flex;
@@ -61,27 +72,46 @@
 .railToggle:hover {
   border-color: var(--color-accent);
 }
+/* The rail pane is size-contained: it contributes NO height of its own to the
+   grid row, so the row is exactly as tall as the conversation card and a long
+   conversation list scrolls inside the rail instead of stretching the page. The
+   stretched pane is then a definite height, which `.rail`'s `height: 100%`
+   resolves against. (Released below the breakpoint, where the rail stacks.) */
 .railPane {
   min-width: 0;
+  contain: size;
 }
+/* The rail spans the full column height and carries no viewport-height cap of its
+   own (S-308): its bound is the row. It does NOT scroll as a whole — only the list
+   below the "+ New chat" action does, which is what keeps that action pinned. */
 .rail {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  height: 100%;
   padding: var(--space-3);
   background: var(--surface-1);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-2);
-  max-height: 60vh;
-  overflow-y: auto;
 }
+/* A full-size action (S-308): the shared `Button` at `md` with a leading
+   `IconPlus`. `flex: none` keeps it out of the list's scroll region; the floor
+   guarantees the ≥36px target however the type scale moves. */
 .newChat {
+  flex: none;
   align-self: stretch;
+  min-height: 2.25rem;
 }
+/* The scroll region. The inset padding (cancelled by an equal negative inline
+   margin, so rows stay flush with the rail's padding) gives the 2px+2px global
+   focus ring room, so a focused row is never clipped by the scroll box. */
 .threadList {
   list-style: none;
-  margin: 0;
-  padding: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 calc(-1 * var(--space-1));
+  padding: var(--space-1);
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
@@ -187,6 +217,11 @@
   background: var(--surface-1);
   border-color: var(--border-subtle);
 }
+/* The rail's honest notes. A failed read or delete is a signal, but
+   `--color-accent` as INK on the rail's `--surface-1` is 3.55:1 in the dark theme —
+   below the 4.5:1 AA body minimum (S-308 re-measure). So the hue rides a left edge,
+   the view's in-flow notice grammar (`.halt`/`.error`, `.threadConfirm`), and the
+   text takes `--text-1`. */
 .railEmpty,
 .railError {
   margin: 0;
@@ -195,7 +230,10 @@
   line-height: var(--leading-base);
 }
 .railError {
-  color: var(--color-accent);
+  flex: none;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-accent);
+  color: var(--text-1);
 }
 
 /* Tablet & below (≤1023px): the rail collapses behind a toggle, mirroring the
@@ -209,8 +247,11 @@
     display: inline-flex;
     justify-self: start;
   }
+  /* Stacked, the rail has no column beside the card to span: it sizes to its
+     content again, so the containment that bound it to the row is released. */
   .railPane {
     display: none;
+    contain: none;
   }
   .railPaneOpen {
     display: block;
@@ -229,45 +270,48 @@
 }
 
 /* ── Thread + conversation log (assistant-ui ThreadPrimitive.Viewport) ─────── */
+/* The thread root is the whole content of the view's `Card` (S-308): transcript
+   over composer, both filling the card's content box. Neither declares a fill of
+   its own, so every transcript ink sits on the card's `--surface-1` — the base the
+   contrast guard measures against. */
 .threadRoot {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  /* The shared readable measure (S-300, FR-UI-31). Declared ONCE here and
-     inherited by the whole column, so the transcript and the composer can never
-     drift apart. ~46rem keeps a comfortable line length at --text-base rather
-     than letting an answer run the full width of a wide viewport. */
-  --chat-measure: 46rem;
 }
+/* The transcript stays a BOUNDED scroll box (FR-UI-33, CR-092 §3.2): it is
+   assistant-ui's thread viewport, which follows the stream by driving its own
+   `scrollTop` — an unbounded box would silently stop auto-follow and walk the
+   composer off-screen mid-answer. The floor keeps an empty or one-turn transcript
+   from collapsing to its content (it measured 95px under S-300).
+
+   The negative inline margin hands the viewport's own inset back to the card's
+   padding, so the turns align on the card's content edge — the same line as the
+   composer below — and the scrollbar sits in the card's gutter rather than
+   against the text. */
 .log {
   display: flex;
   flex-direction: column;
   /* Generous inter-turn spacing: with the card chrome gone, the rhythm between
      turns is what separates them, so it has to do that work on its own. */
   gap: var(--space-6);
+  min-height: 20rem;
   max-height: 60vh;
   overflow-y: auto;
+  margin-inline: calc(-1 * var(--space-4));
   padding: var(--space-5) var(--space-4);
 }
 
-/* One conversation column (S-300, FR-UI-31). Every child of the log — the empty
-   hint and BOTH roles — is centred on the same measure, so the two roles share
-   one alignment line instead of floating independently. Alignment WITHIN the
-   measure is each role's own business (see `.user` / `.assistant`). */
-.empty,
-.user,
-.assistant {
-  width: 100%;
-  max-width: var(--chat-measure);
-  margin-inline: auto;
-}
+/* Both roles share ONE alignment line — the card's content edge — because each
+   fills the log's width (the flex column stretches them); alignment WITHIN that
+   line is each role's own business (see `.user` / `.assistant`). */
 .empty {
   color: var(--text-2);
   line-height: var(--leading-base);
   margin-block: 0;
 }
 
-/* The user turn: a row spanning the column, with its bubble hugging the column's
+/* The user turn: a row spanning the transcript, with its bubble hugging the
    RIGHT edge — the transcript's only remaining bubble. */
 .user {
   display: flex;
@@ -284,12 +328,14 @@
 }
 
 /* The assistant turn (S-300, FR-UI-31): a full-width block flush with the
-   column's LEFT edge, in the base assistant-ui grammar. The CR-051 card
+   transcript's LEFT edge, in the base assistant-ui grammar. The CR-051 card
    treatment is deliberately gone — no `surface-1` fill, no 1px border, no 3px
    `--card-accent` top rule, no `--elevation-1` shadow, no `space-5` inset — so
    the turn reads as part of one conversation rather than as a floating card,
    and `--so-red` is left to carry signal only. Nothing replaces it: separation
-   comes from the log's inter-turn spacing. */
+   comes from the log's inter-turn spacing. The view's `Card` (S-308) wraps the
+   whole transcript; it is never repeated per turn, so `--so-red` appears once per
+   view as that card's edge. */
 .assistant {
   display: flex;
   flex-direction: column;
@@ -430,18 +476,19 @@
 
    The hue is the chip's FILL, never its ink, which is the conclusion S-300 drew
    one section below: the fold has no fill of its own, so anything inked here
-   renders straight onto `--surface-0`, where the signal hues do not clear AA as
-   text — `--color-pass` is 2.99:1 there in the light theme (below even the 3:1
-   non-text floor) and `--color-accent-warm` is 3.48:1. Everywhere else in the SPA
+   renders straight onto the view card's `--surface-1` (S-308; `--surface-0`
+   before it), where the signal hues do not clear AA as text — `--color-pass` is
+   3.30:1 there in the light theme and `--color-accent-warm` 3.84:1 (2.99:1 and
+   3.48:1 on the old page surface). Everywhere else in the SPA
    a signal hue is a fill (`Badge`, `ScoreBar`) or a border edge (`Callout`,
    `Toast`, `.halt`/`.error`). These glyphs take the `Badge` idiom verbatim rather
    than inventing a fourth one: its chip geometry, and its ink pairing —
    `--ink-on-warm` measures 5.42:1 on `--so-green` and 4.65:1 on `--so-orange`,
    theme-independently, because the signal hues are theme-independent primitives.
-   Reading the hue therefore never depends on the page surface behind it.
+   Reading the hue therefore never depends on the surface behind it.
 
-   What the fill does NOT clear is its own edge against the page: green is 2.99:1
-   on the light `--surface-0`. That is deliberate and is not the 1.4.11 case — the
+   What the fill does NOT clear is its own edge against that surface: green is
+   3.30:1 on the light card fill. That is deliberate and is not the 1.4.11 case — the
    chip is not a control, and nothing about the state is identified by finding its
    boundary. The glyph inside it is, at 5.42:1, and the shape and the sr-only text
    equivalent say the same thing twice more.
@@ -449,8 +496,8 @@
    The geometry is what makes it read as an affordance instead of tinted text, so
    it is not optional: `line-height: 1` and the tight padding keep the chip on the
    step head's baseline row beside the role and instruction, without growing the
-   fold. Locked by `spa_design_system::chat_transcript_text_on_the_page_surface_…`,
-   which measures these two as fill/ink PAIRS — not as ink on `--surface-0`. */
+   fold. Locked by `spa_design_system::chat_transcript_text_on_the_card_fill_…`,
+   which measures these two as fill/ink PAIRS — not as ink on the card fill. */
 .activityRunning,
 .activityDone {
   display: inline-flex;
@@ -541,10 +588,11 @@
 }
 /* Honest budget-halt / provider-error notices ([FR-UI-24], [NFR-CC-04]). The
    wording is the SSE frame's, verbatim; only the presentation changes here.
-   Dropping the card fill (S-300) put these lines directly on `--surface-0`,
-   where signal-coloured BODY text no longer clears the 4.5:1 AA minimum in
-   either theme — so the tone moves to a left signal edge (a 3:1 UI affordance)
-   and the ink to `--text-1`, which clears it.
+   These lines sit on the view card's `--surface-1` (S-308), where signal-
+   coloured BODY text does not clear the 4.5:1 AA minimum — `--color-accent` is
+   3.55:1 in the dark theme, `--color-accent-warm` 3.84:1 in the light — so the
+   tone rides a left signal edge (a 3:1 UI affordance) and the ink is `--text-1`,
+   which clears it (14.46:1 dark, 11.44:1 light).
 
    The edge is 3px, matching `.threadConfirm` above — this view's grammar for an
    INLINE, in-flow notice. The 4px edge belongs to the shared `Callout`
@@ -582,9 +630,9 @@
   margin: 0 0 var(--space-2);
   line-height: var(--leading-base);
 }
-/* Answer links. On the (now unfilled) page surface `--color-accent` ink falls
-   below 4.5:1 in both themes, so the link takes full-contrast ink and the signal
-   red moves to the underline — which also stops colour being the sole cue. */
+/* Answer links. On the card fill `--color-accent` ink falls below 4.5:1 in the
+   dark theme (3.55:1), so the link takes full-contrast ink and the signal red
+   moves to the underline — which also stops colour being the sole cue. */
 .markdown a {
   color: var(--text-1);
   text-decoration: underline;
@@ -856,15 +904,13 @@
 }
 
 /* ── Composer (assistant-ui ComposerPrimitive) ────────────────────────────── */
+/* The composer fills the card's content box (S-308), on the same edge as the
+   turns above it, so the card reads as one surface from the last turn down into
+   the input. */
 .composer {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  /* The composer rides the transcript's measure (S-300), so the column reads as
-     one continuous surface from the last turn down into the input. */
-  width: 100%;
-  max-width: var(--chat-measure);
-  margin-inline: auto;
 }
 .input {
   width: 100%;
