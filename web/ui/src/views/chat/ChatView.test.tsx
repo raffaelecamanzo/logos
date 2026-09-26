@@ -245,6 +245,76 @@ describe("ChatView — configured chrome", () => {
   });
 });
 
+describe("ChatView — persistent status band (S-309, FR-UI-33)", () => {
+  it("is absent until consent is given — the first-use gate stays verbatim ahead of it", async () => {
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    render(<ChatView />);
+    await screen.findByRole("button", { name: "Start chatting" });
+    expect(screen.queryByText("CHAT")).not.toBeInTheDocument();
+  });
+
+  it("names the provider, endpoint host, model and the budget-tree bounds once consented", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    render(<ChatView />);
+    await acceptConsent(user);
+
+    const band = (await screen.findByText("CHAT")).closest("section");
+    expect(band).toHaveTextContent("openai · openrouter.ai · openrouter/some-model");
+    expect(band).toHaveTextContent("24 tool calls");
+    expect(band).toHaveTextContent("8 per subagent");
+    expect(band).toHaveTextContent("3 replans");
+    // The masked key is structurally absent from the ChatPolicy slice this band
+    // renders — a fixture that carries it proves the surface never leaks it in.
+    expect(band?.textContent).not.toContain(MASKED_LAST4);
+  });
+
+  it("stays visible after the first message, unlike the compact line it replaces", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"Done."}\n\n']));
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "hello");
+    await screen.findByText("Done.");
+
+    const band = screen.getByText("CHAT").closest("section");
+    expect(band).toHaveTextContent("openai · openrouter.ai · openrouter/some-model");
+    expect(band).toHaveTextContent("24 tool calls");
+  });
+
+  it("states an undeclared model honestly rather than a fabricated default (NFR-CC-04)", async () => {
+    const user = userEvent.setup();
+    // `resolve_chat` only resolves a policy origin once its model is declared, so
+    // `ready: true` with no model is not a shape the server produces today — the
+    // TypeScript type stays optional, and this pins the honest fallback for the
+    // day that invariant changes.
+    const model = configuredModel();
+    model.effective_chat.policy = { ...model.effective_chat.policy, model: null };
+    mockFetchConfig.mockResolvedValue(model);
+    render(<ChatView />);
+    await acceptConsent(user);
+
+    const band = (await screen.findByText("CHAT")).closest("section");
+    expect(band).toHaveTextContent("openai · openrouter.ai · no model configured");
+    expect(band?.textContent).not.toContain("undefined");
+  });
+
+  it("removes the budget figures from the empty-thread hint, without leaving it empty or duplicating them", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    render(<ChatView />);
+    await acceptConsent(user);
+
+    const hint = await screen.findByText(/No messages yet/);
+    expect(hint.textContent).not.toMatch(/tool call/);
+    expect(hint.textContent).not.toMatch(/replan/);
+    expect(hint.textContent?.trim().length).toBeGreaterThan(0);
+    // The bounds render exactly once on the page — in the band, not duplicated.
+    expect(screen.getAllByText(/24 tool calls/)).toHaveLength(1);
+  });
+});
+
 describe("ChatView — configure-first", () => {
   it("renders the honest configure-first state with no composer", async () => {
     mockFetchConfig.mockResolvedValue(unconfiguredModel());
