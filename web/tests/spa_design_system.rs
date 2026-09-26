@@ -882,11 +882,18 @@ fn chat_two_pane_grid_is_the_wiki_rail_track_at_full_column_height() {
 
     // No viewport-height cap on any part of the rail, and the rail as a whole does not
     // scroll — only the list does, which is what keeps "+ New chat" pinned.
-    for selector in [".railPane", ".rail", ".threadList", ".newChat"] {
-        let body = rule_body(&css, selector);
+    // Rungs included, and the logical `block-size` spelling and every viewport unit
+    // (`vh`/`dvh`/`svh`/`lvh`, `vb`, `vmin`/`vmax`) read, as the measure guard does.
+    let rail_parts = [".railPane", ".rail", ".threadList", ".newChat"];
+    for (selector, body) in aggregated_rules(&css) {
+        if !rail_parts.contains(&selector.as_str()) {
+            continue;
+        }
         for (n, v) in declarations_of(&body) {
+            let sizes_block = n.contains("height") || n.contains("block-size");
+            let viewport = ["vh", "vb", "vmin", "vmax"].iter().any(|u| v.contains(u));
             assert!(
-                !(n.contains("height") && (v.contains("vh") || v.contains("vb"))),
+                !(sizes_block && viewport),
                 "`{selector}` declares `{n}: {v}` — the rail's bound is its grid row, not the \
                  viewport (FR-UI-33)",
             );
