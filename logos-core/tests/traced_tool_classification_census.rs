@@ -24,31 +24,51 @@
 //!    generated from, so a new variant is enumerated the moment it is added —
 //!    there is no second place to remember to update.
 //! 2. **The classified tools** — every `Tool::Variant` passed as the first
-//!    argument to a `traced_with(…)` call in `engine.rs`
-//!    ([`classified_variants`]), the single chokepoint file every `Engine`
-//!    method funnels telemetry through ([ADR-13], `observability/mod.rs`'s own
-//!    module doc). A tool is classified if and only if its chokepoint calls
-//!    `traced_with` rather than `traced` — this walk is exactly that
-//!    definition, not an approximation of it.
+//!    argument to a `traced_with(…)` call in **any production file** under
+//!    `logos-core/src` ([`classified_variants`]). A tool is classified if and
+//!    only if some call site traces it through `traced_with` rather than
+//!    `traced` — this walk is exactly that definition, not an approximation of
+//!    it.
 //!
 //! Every registered tool not found classified must appear in [`EXCLUSIONS`]
 //! with a stated reason ([`every_registered_tool_is_classified_or_excluded`]).
 //! Adding a tool that is neither is exactly the failure this file exists to
 //! catch, and it fails loudly rather than recording another silent `NULL`.
 //!
-//! # Why `engine.rs` alone, and what widening it would cost
+//! # Why every production file, and why an unreadable call site panics
 //!
-//! Today `traced_with` is called from exactly one file
-//! (`grep -rn 'traced_with(' --include='*.rs'` finds it only in `engine.rs`'s
-//! four chokepoints and in `observability/tests.rs`'s unit tests exercising
-//! them). Scanning only `engine.rs` keeps this walk simple and matches the
-//! architecture's own single-chokepoint invariant. If a future story ever adds
-//! a `traced_with` call in another production file, this walk will not see it:
-//! the tool then reads as neither classified nor excluded (since it is new) and
-//! [`every_registered_tool_is_classified_or_excluded`] fails — loudly, the one
-//! direction a census may be wrong in — and the fix is to widen
-//! [`classified_variants`] to that file, not to add a false [`EXCLUSIONS`]
-//! entry.
+//! Today the four `traced_with` call sites all sit in `engine.rs`, but plain
+//! `traced*` calls already live in `config/workspace_tier.rs`,
+//! `federation/manifest.rs` and `pipeline/mod.rs`, and `watch/mod.rs` emits
+//! telemetry events directly. The walk once scanned `engine.rs` alone and
+//! claimed a call site added anywhere else would fail loudly. That held only
+//! for a *new* tool. Switching an already-excluded tool to `traced_with` in
+//! another file, or even in `engine.rs` through a qualified path
+//! (`crate::observability::Tool::Callees`), left the census green while the
+//! tool's [`EXCLUSIONS`] entry became false: the admission direction, which is
+//! the one a census that fails only on omissions cannot see (Sprint 78 review).
+//!
+//! So the walk now covers every `.rs` file under `src/` except test-only code
+//! (a file named `*tests.rs`, or an item under `#[cfg(test)]`). A `traced_with`
+//! call whose first argument is not a literal `Tool::Variant` (with or
+//! without a leading path) **panics** instead of being skipped, because the
+//! census cannot tell which tool it classifies. The fix is to pass the variant
+//! literally, never to add an [`EXCLUSIONS`] entry. One more route to a
+//! non-`NULL` outcome exists: the telemetry layer accepts an `outcome` field
+//! from any event on the telemetry target. The walk therefore also fails on any
+//! telemetry-target macro outside `observability/mod.rs` (the home of
+//! `traced_inner`'s own emit) that names an `outcome` field
+//! ([`no_telemetry_event_outside_the_seam_carries_an_outcome`]).
+//!
+//! Demonstrated in the admission direction, each mutation reverted and
+//! `touch`ed afterwards: `ConfigRead` switched to `traced_with` in
+//! `federation/manifest.rs`, and `Callees` switched to `traced_with` in
+//! `engine.rs` through `crate::observability::Tool::Callees`, each fail the
+//! contradictory/stale checks and read `(75, 5, 71)` (both were green before
+//! this widening). `Tool::Impact` passed through a local fails with the
+//! literal-argument panic, and an `outcome = "answered"` field added to a
+//! `watch/mod.rs` telemetry event fails the seam test. A `traced_with` placed
+//! inside `engine.rs`'s `#[cfg(test)]` module stays out of the count.
 //!
 //! # What a mutation looks like, and how it was demonstrated
 //!
@@ -105,10 +125,14 @@ use tree_sitter::{Node, Parser, Tree};
 /// The date the figures in this module's header were taken.
 const AUDITED_ON: &str = "2026-09-26";
 
-/// The two source files the enumeration and the classification are each read
-/// from, relative to `logos-core` (`env!("CARGO_MANIFEST_DIR")`).
+/// The registry file, and the production tree the classification is read
+/// from, both relative to `logos-core` (`env!("CARGO_MANIFEST_DIR")`).
 const TOOL_RS: &str = "src/observability/tool.rs";
-const ENGINE_RS: &str = "src/engine.rs";
+const SRC_DIR: &str = "src";
+
+/// The one file allowed to put an `outcome` field on a telemetry-target event:
+/// `traced_inner`'s own emit, which is what `traced_with` feeds.
+const OUTCOME_EMITTER: &str = "src/observability/mod.rs";
 
 /// Every registered tool **not** found classified, with the reason it has no
 /// `CallOutcome` vocabulary yet.
@@ -145,9 +169,9 @@ const REASON_ENGINE_INTERNAL: &str =
      or build step did.";
 const REASON_READ_MODEL: &str =
     "Read-model (Tool::tool_class() == ReadModel): reports Logos's own state rather than a fact \
-     about the indexed code — the same self-referential subject Tool::event_class excludes from \
-     the usage figures (FR-OB-09) — and no answered/empty/unresolved split has been defined for \
-     it.";
+     about the indexed code, and no answered/empty/unresolved split has been defined for it. \
+     (Only stats and status are also excluded from the usage figures as self-referential \
+     reads, Tool::event_class / FR-OB-09; languages, wiki_status and config_read are counted.)";
 
 /// `(registered variant, reason)`. Compared for equality with the walk, in
 /// both directions: a registered, unclassified tool absent from here fails
@@ -343,39 +367,167 @@ fn registered_tools(source: &str) -> Vec<(String, String)> {
     pairs
 }
 
+/// Every production `.rs` file under `src/`, as `(path relative to
+/// logos-core, source)`, sorted. Test-only files (`*tests.rs`) are left out
+/// here; inline `#[cfg(test)]` items are skipped during the walk.
+fn production_sources() -> Vec<(String, String)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if path.extension().is_some_and(|x| x == "rs")
+                && !path.file_name().is_some_and(|n| n.to_string_lossy().ends_with("tests.rs"))
+            {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("under the manifest dir")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                out.push((relative, source));
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = Vec::new();
+    walk(&root.join(SRC_DIR), root, &mut out);
+    out.sort();
+    assert!(
+        out.iter().any(|(p, _)| p == "src/engine.rs"),
+        "the production walk did not reach src/engine.rs — it is reading the wrong tree"
+    );
+    out
+}
+
+/// Whether `node` is an item gated behind `#[cfg(test)]`: its preceding
+/// attribute siblings (comments between them allowed) include one.
+fn is_cfg_test_item(node: Node<'_>, source: &str) -> bool {
+    let mut sibling = node.prev_sibling();
+    while let Some(s) = sibling {
+        match s.kind() {
+            "attribute_item" if text(s, source).replace(' ', "").contains("cfg(test)") => {
+                return true;
+            }
+            "attribute_item" | "line_comment" | "block_comment" => sibling = s.prev_sibling(),
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The bare name a call expression's `function` node calls: `f`, `a::b::f`
+/// and `f::<T>` all name `f`. A method call (`x.f()`) names nothing here,
+/// because `traced_with` is a free function.
+fn callee_name<'s>(function: Node<'_>, source: &'s str) -> Option<&'s str> {
+    match function.kind() {
+        "identifier" => Some(text(function, source)),
+        "scoped_identifier" => function.child_by_field_name("name").map(|n| text(n, source)),
+        "generic_function" => {
+            callee_name(function.child_by_field_name("function")?, source)
+        }
+        _ => None,
+    }
+}
+
+/// The `Variant` of a `Tool::Variant` / `…::Tool::Variant` argument, or `None`
+/// when the argument is anything else (a local, a call, a field).
+fn tool_variant<'s>(arg: Node<'_>, source: &'s str) -> Option<&'s str> {
+    if arg.kind() != "scoped_identifier" {
+        return None;
+    }
+    let path = arg.child_by_field_name("path")?;
+    let last_segment = match path.kind() {
+        "identifier" => text(path, source),
+        "scoped_identifier" => text(path.child_by_field_name("name")?, source),
+        _ => return None,
+    };
+    if last_segment != "Tool" {
+        return None;
+    }
+    arg.child_by_field_name("name").map(|n| text(n, source))
+}
+
+/// Whether a macro's token tree names an `outcome` identifier anywhere.
+fn names_outcome(node: Node<'_>, source: &str) -> bool {
+    if node.kind() == "identifier" && text(node, source) == "outcome" {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(|c| names_outcome(c, source));
+    found
+}
+
+/// What the production walk found: the classified variants, and every
+/// telemetry-target macro outside [`OUTCOME_EMITTER`] that names an `outcome`
+/// field (as `path:line`).
+struct Walk {
+    classified: HashSet<String>,
+    stray_outcome_emits: Vec<String>,
+}
+
 /// Every `Tool::Variant` passed as the first argument of a `traced_with(…)`
-/// call in `engine.rs` — the tools actually wired through the classifying
-/// seam, read structurally rather than by scanning for the substring
-/// `"Tool::"` near the text `"traced_with("`.
-fn classified_variants(source: &str) -> HashSet<String> {
-    fn visit(node: Node<'_>, source: &str, out: &mut HashSet<String>) {
+/// call anywhere in the production tree — the tools actually wired through the
+/// classifying seam, read structurally rather than by scanning for the
+/// substring `"Tool::"` near the text `"traced_with("`.
+///
+/// # Panics
+///
+/// On a `traced_with` call whose first argument is not a literal
+/// `Tool::Variant`: skipping it would silently under-count, and reporting the
+/// tool unclassified would invite a false [`EXCLUSIONS`] entry.
+fn walk_production() -> Walk {
+    fn visit(node: Node<'_>, path: &str, source: &str, walk: &mut Walk) {
+        if is_cfg_test_item(node, source) {
+            return;
+        }
         if node.kind() == "call_expression" {
-            if let Some(function) = node.child_by_field_name("function") {
-                if text(function, source).ends_with("traced_with") {
-                    if let Some(arguments) = node.child_by_field_name("arguments") {
-                        let mut cursor = arguments.walk();
-                        let first = arguments
-                            .children(&mut cursor)
-                            .find(|c| c.kind() != "(" && c.kind() != ")" && c.kind() != ",");
-                        if let Some(first) = first {
-                            let arg = text(first, source);
-                            if let Some(("Tool", variant)) = arg.split_once("::") {
-                                out.insert(variant.to_string());
-                            }
-                        }
+            let function = node.child_by_field_name("function");
+            if function.and_then(|f| callee_name(f, source)) == Some("traced_with") {
+                let arguments = node.child_by_field_name("arguments");
+                let first = arguments.and_then(|a| a.named_child(0));
+                let line = node.start_position().row + 1;
+                let variant = first.and_then(|f| tool_variant(f, source));
+                match variant {
+                    Some(variant) => {
+                        walk.classified.insert(variant.to_string());
                     }
+                    None => panic!(
+                        "{path}:{line}: traced_with's first argument `{}` is not a literal \
+                         `Tool::Variant`, so this census cannot tell which tool it classifies — \
+                         pass the variant literally; never answer this with an EXCLUSIONS entry",
+                        first.map_or("<none>", |f| text(f, source))
+                    ),
                 }
+            }
+        }
+        if node.kind() == "macro_invocation" && path != OUTCOME_EMITTER {
+            let body = text(node, source);
+            if (body.contains("TELEMETRY_TARGET") || body.contains("logos::telemetry"))
+                && names_outcome(node, source)
+            {
+                walk.stray_outcome_emits
+                    .push(format!("{path}:{}", node.start_position().row + 1));
             }
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            visit(child, source, out);
+            visit(child, path, source, walk);
         }
     }
-    let tree = parse(source);
-    let mut out = HashSet::new();
-    visit(tree.root_node(), source, &mut out);
-    out
+    let mut walk = Walk { classified: HashSet::new(), stray_outcome_emits: Vec::new() };
+    for (path, source) in production_sources() {
+        let tree = parse(&source);
+        visit(tree.root_node(), &path, &source, &mut walk);
+    }
+    walk
+}
+
+fn classified_variants() -> HashSet<String> {
+    walk_production().classified
 }
 
 // ── The census ───────────────────────────────────────────────────────────────
@@ -384,7 +536,7 @@ fn classified_variants(source: &str) -> HashSet<String> {
 fn every_registered_tool_is_classified_or_excluded() {
     let registered = registered_tools(&read(TOOL_RS));
     assert!(!registered.is_empty(), "the registry walk found no tools — it is reading nothing");
-    let classified = classified_variants(&read(ENGINE_RS));
+    let classified = classified_variants();
     let excluded: std::collections::HashMap<&str, &str> = EXCLUSIONS.iter().copied().collect();
 
     let mut unaccounted: Vec<&str> = Vec::new();
@@ -402,7 +554,7 @@ fn every_registered_tool_is_classified_or_excluded() {
     assert!(
         unaccounted.is_empty(),
         "these registered tools are enumerated in tool.rs but are neither classified \
-         (a `traced_with` call in engine.rs) nor excluded with a reason in EXCLUSIONS: \
+         (a `traced_with` call in logos-core/src) nor excluded with a reason in EXCLUSIONS: \
          {unaccounted:?} — classify it or add an EXCLUSIONS entry"
     );
     assert!(
@@ -417,7 +569,7 @@ fn every_registered_tool_is_classified_or_excluded() {
 fn no_stale_or_contradictory_exclusions() {
     let registered: HashSet<String> =
         registered_tools(&read(TOOL_RS)).into_iter().map(|(v, _)| v).collect();
-    let classified = classified_variants(&read(ENGINE_RS));
+    let classified = classified_variants();
 
     let mut seen = HashSet::new();
     let mut duplicated: Vec<&str> = Vec::new();
@@ -455,13 +607,28 @@ fn every_exclusion_carries_a_stated_reason() {
     assert!(empty.is_empty(), "these EXCLUSIONS entries carry no reason: {empty:?}");
 }
 
+/// The second route to a non-`NULL` outcome: the telemetry layer reads an
+/// `outcome` field off any event on the telemetry target, so a direct
+/// `tracing::info!(target: TELEMETRY_TARGET, outcome = …)` would classify a
+/// tool that has no `traced_with` call and that this census reads as excluded.
+#[test]
+fn no_telemetry_event_outside_the_seam_carries_an_outcome() {
+    let stray = walk_production().stray_outcome_emits;
+    assert!(
+        stray.is_empty(),
+        "these telemetry-target events carry an `outcome` field outside {OUTCOME_EMITTER}, \
+         so they classify a tool behind this census's back: {stray:?} — route the call \
+         through traced_with instead"
+    );
+}
+
 /// The denominator, printed (`--nocapture`) and pinned as a dated fact — not a
 /// floor a later reading must clear, the same discipline
 /// `absence_taxonomy_audit.rs`'s own denominator test follows.
 #[test]
 fn the_census_reports_its_denominator() {
     let registered = registered_tools(&read(TOOL_RS));
-    let classified = classified_variants(&read(ENGINE_RS));
+    let classified = classified_variants();
     let excluded: HashSet<&str> = EXCLUSIONS.iter().map(|(v, _)| *v).collect();
 
     let enumerated = registered.len();

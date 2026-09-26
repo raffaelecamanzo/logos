@@ -18,7 +18,7 @@ vi.mock("./echarts.ts", () => ({
 import { StatisticsView } from "./StatisticsView.tsx";
 
 /** The `attribution_coverage` rider (FR-OB-11): the raw-events-only limit, the
- *  legacy-`NULL`-origin caveat, and the CLI+MCP-only label, exactly as the
+ *  legacy-`NULL`-origin caveat, and the pre-origin-stamp label, exactly as the
  *  read-model states them — asserted verbatim, not re-derived by the view. */
 function coverage(): StatsInfo["attribution_coverage"] {
   return {
@@ -30,7 +30,7 @@ function coverage(): StatsInfo["attribution_coverage"] {
     notes: [
       "computed from raw events only",
       "legacy NULL origins fold into main",
-      "predates the origin stamp: CLI+MCP-only",
+      "predates the origin stamp: every surface of the time, dev/main unknown",
     ],
   };
 }
@@ -276,6 +276,6 @@ describe("StatisticsView (S-235, FR-UI-27)", () => {
     // exactly the read-model's own `attribution_coverage.notes`, verbatim.
     expect(screen.getByText(/computed from raw events only/i)).toBeInTheDocument();
     expect(screen.getByText(/legacy NULL origins fold into main/i)).toBeInTheDocument();
-    expect(screen.getByText(/CLI\+MCP-only/i)).toBeInTheDocument();
+    expect(screen.getByText(/predates the origin stamp: every surface of the time/i)).toBeInTheDocument();
   });
 });

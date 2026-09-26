@@ -2973,7 +2973,8 @@ fn the_attribution_projections_state_their_coverage_limits() {
     assert!(prose.contains("raw events only"), "got {:?}", coverage.notes);
     assert!(prose.contains("daily_rollup"), "got {:?}", coverage.notes);
     assert!(prose.contains("origin IS NULL"), "got {:?}", coverage.notes);
-    assert!(prose.contains("CLI+MCP-only"), "got {:?}", coverage.notes);
+    assert!(prose.contains("every surface running at the time"), "got {:?}", coverage.notes);
+    assert!(!prose.contains("CLI+MCP-only"), "legacy rows include web and watcher: {:?}", coverage.notes);
 
     // The behaviour the claim describes: the rollup day is in the totals…
     assert_eq!(info.calls_total, 5, "1 raw + 4 rolled up");
@@ -3059,8 +3060,8 @@ fn the_cross_tab_folds_legacy_null_origins_into_main() {
         "and the payload says the historical main bucket is inflated"
     );
     assert!(
-        info.attribution_coverage.notes.iter().any(|n| n.contains("CLI+MCP-only")),
-        "and that the same legacy period is CLI+MCP-only: {:?}",
+        info.attribution_coverage.notes.iter().any(|n| n.contains("every surface running at the time")),
+        "and that the same legacy period came from every surface, not the CLI and MCP alone: {:?}",
         info.attribution_coverage.notes
     );
 }

@@ -1692,6 +1692,54 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     expect(activity.textContent).toContain("Revised plan");
   });
 
+  it("keeps round 0's plan beside its steps when the replan carries zero steps (S-303, sprint-78 review)", async () => {
+    // `activityRounds()` drops a zero-step round, so this turn has ONE renderable
+    // round and takes the flat branch — which must render THAT round's plan, not
+    // `turn.plan` (the latest, empty replan). Before the fix the fold showed round
+    // 0's step with no plan above it.
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":[{"role":"graph_navigator","instruction":"map callers"}]}\n\n',
+        'event: step_started\ndata: {"index":0,"role":"graph_navigator","instruction":"map callers"}\n\n',
+        'event: step_observed\ndata: {"index":0,"role":"graph_navigator","summary":"found callers"}\n\n',
+        'event: plan\ndata: {"round":1,"steps":[]}\n\n',
+        'event: final_answer\ndata: {"answer":"done"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("done")).toBeInTheDocument();
+
+    const activity = fold(container)!;
+    expect(activity.querySelectorAll("ol")).toHaveLength(2); // the plan's list and the steps' list
+    expect(activity.textContent).toContain("Plan");
+    expect(activity.textContent).not.toContain("Revised plan");
+    expect(activity.textContent).toContain("found callers");
+  });
+
+  it("still shows round 0's plan when it is replanned to zero steps before any step started (S-303, sprint-78 review)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: plan\ndata: {"round":0,"steps":[{"role":"graph_navigator","instruction":"map callers"}]}\n\n',
+        'event: plan\ndata: {"round":1,"steps":[]}\n\n',
+        'event: final_answer\ndata: {"answer":"done"}\n\n',
+      ]),
+    );
+    const { container } = render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "q");
+    expect(await screen.findByText("done")).toBeInTheDocument();
+
+    const activity = fold(container);
+    expect(activity).not.toBeNull();
+    expect(activity!.textContent).toContain("map callers");
+  });
+
   it("groups a replanned turn's fold by round, keeps colliding indices apart, and renders no duplicate-key warning (S-303, CR-090)", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
