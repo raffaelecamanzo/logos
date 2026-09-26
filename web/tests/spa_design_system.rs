@@ -829,20 +829,38 @@ fn chat_two_pane_grid_is_the_wiki_rail_track_at_full_column_height() {
     assert_eq!(prop(&rail, "height").as_deref(), Some("100%"), "the rail fills its stretched pane");
 
     // The pane is size-contained on desktop, so a long list scrolls inside the rail
-    // instead of stretching the row past the card. Below the breakpoint the rail
-    // stacks and must size to its content again: a containment NOT released there
-    // collapses the opened narrow-viewport rail to 0px, and nothing else would say so.
-    if prop(&rule_body(&css, ".railPane"), "contain").is_some_and(|v| v.contains("size")) {
-        let narrow = top_level_rules(&css)
-            .into_iter()
-            .find(|(at, _)| at == "@media (max-width: 1023px)")
-            .map(|(_, body)| body)
-            .expect("the chat layout has its ≤1023px rung");
-        assert_eq!(
-            prop(&rule_body(&narrow, ".railPane"), "contain").as_deref(),
-            Some("none"),
-            "the ≤1023px rung releases the rail pane's size containment, or the opened rail \
-             renders 0px tall",
+    // instead of stretching the row past the card — without it the list grows the
+    // row, the PAGE scrolls, the list never does, and "+ New chat" is no longer
+    // pinned above anything. Required, not merely checked-if-present.
+    assert!(
+        prop(&rule_body(&css, ".railPane"), "contain").is_some_and(|v| v.contains("size")),
+        "the desktop `.railPane` is size-contained, so the row is the card's height and the \
+         conversation list scrolls inside the rail (FR-UI-33)",
+    );
+    // Below the breakpoint the rail stacks and must size to its content again: a
+    // containment NOT released there collapses the opened narrow-viewport rail to 0px.
+    let narrow = top_level_rules(&css)
+        .into_iter()
+        .find(|(at, _)| at == "@media (max-width: 1023px)")
+        .map(|(_, body)| body)
+        .expect("the chat layout has its ≤1023px rung");
+    assert_eq!(
+        prop(&rule_body(&narrow, ".railPane"), "contain").as_deref(),
+        Some("none"),
+        "the ≤1023px rung releases the rail pane's size containment, or the opened rail \
+         renders 0px tall",
+    );
+    // …and the pane is the ONLY size-contained part of the rail: the rung releases
+    // exactly that one, so containment moved onto `.rail` or the list would survive
+    // into the narrow viewport and collapse it just the same.
+    for (selector, body) in aggregated_rules(&css) {
+        if selector == ".railPane" || !(selector.starts_with(".rail") || selector.starts_with(".thread") || selector == ".newChat") {
+            continue;
+        }
+        assert!(
+            !declarations_of(&body).iter().any(|(n, v)| n == "contain" && v.contains("size")),
+            "`{selector}` is size-contained; only `.railPane` may be — it is the one the ≤1023px \
+             rung releases",
         );
     }
 
