@@ -459,6 +459,137 @@ fn chat_mermaid_fallback_centers_node_labels_like_the_wiki() {
     );
 }
 
+/// The chat answer table's container chrome must be JOINED to the fenced code
+/// block's, not copied (S-311, [FR-UI-31]): `.tableWrapper` is the THIRD selector
+/// on the existing `.codeBlock, .mermaidBlock` rule, so all three share border,
+/// radius and background from ONE declaration. Matching the exact joined selector
+/// string (not merely each property individually) is what catches the admission
+/// mutation this guard is named for: a copied, non-joined `.tableWrapper` rule
+/// with identical property VALUES reads the same to every per-property assertion
+/// below, but fails this lookup outright because the selector it copied from no
+/// longer names all three container kinds in one rule.
+#[test]
+fn chat_answer_table_shares_the_code_block_chrome_and_carries_the_house_table_voice() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+
+    // (1) One declaration, not a copy: the exact three-selector join, in the
+    // documented order (codeBlock, mermaidBlock, THEN tableWrapper — FR-UI-31).
+    let container = rule_body(&css, ".codeBlock, .mermaidBlock, .tableWrapper");
+    for (prop, value) in [
+        ("border-radius", "var(--radius-2)"),
+        ("overflow", "hidden"),
+        ("background", "var(--surface-2)"),
+    ] {
+        assert_eq!(
+            declared(&container, prop).as_deref(),
+            Some(value),
+            "`.tableWrapper`'s shared container rule declares `{prop}: {value}`",
+        );
+    }
+
+    // (2) The wrapper's OWN rule: `min-width: 0` is what lets `overflow-x` actually
+    // engage as a flex child of `.markdown` (computed-state behaviour, not just the
+    // declaration — verified live at review); `overflow-x: auto` is the scroll axis
+    // itself. Both must survive independently: this is the guard the AC names for
+    // "removing the wrapper's overflow-x".
+    let wrapper = rule_body(&css, ".tableWrapper");
+    assert_eq!(
+        declared(&wrapper, "min-width").as_deref(),
+        Some("0"),
+        "`.tableWrapper` declares `min-width: 0` so `overflow-x` can engage",
+    );
+    assert_eq!(
+        declared(&wrapper, "overflow-x").as_deref(),
+        Some("auto"),
+        "`.tableWrapper` declares `overflow-x: auto` — the table's own scroll axis",
+    );
+
+    // (3) The header: uppercase tracked `--text-xs` label in `--text-2`, over a
+    // `--border-strong` UNDERLINE — never a fill. Named by the AC as "the header
+    // underline"; its removal is the guard's second required mutation.
+    let th = rule_body(&css, ".markdown th");
+    for (prop, value) in [
+        ("text-transform", "uppercase"),
+        ("letter-spacing", "var(--tracking-label)"),
+        ("font-size", "var(--text-xs)"),
+        ("color", "var(--text-2)"),
+        ("border-bottom", "1px solid var(--border-strong)"),
+    ] {
+        assert_eq!(
+            declared(&th, prop).as_deref(),
+            Some(value),
+            "`.markdown th` declares `{prop}: {value}` (the house header voice)",
+        );
+    }
+    assert!(
+        declared(&th, "background").is_none(),
+        "`.markdown th` paints NO header fill — the AC bans a header background \
+         (unlike the interactive `DataTable`, which fills its sticky header)",
+    );
+    assert!(
+        declared(&th, "border-top").is_none() && declared(&th, "border").is_none(),
+        "`.markdown th` carries no header BAND (a border on every edge, or a top \
+         rule) — only the bottom underline",
+    );
+
+    // (4) Row rules: a hairline `--border-subtle` rule under every row. Named by
+    // the AC as "the row rules"; its removal is the guard's third required
+    // mutation.
+    let td = rule_body(&css, ".markdown td");
+    assert_eq!(
+        declared(&td, "border-bottom").as_deref(),
+        Some("1px solid var(--border-subtle)"),
+        "`.markdown td` declares the hairline row rule",
+    );
+
+    // (5) Row hover: `--tint-hover`, on body rows only (not the header row).
+    assert_eq!(
+        declared(&rule_body(&css, ".markdown tbody tr:hover"), "background").as_deref(),
+        Some("var(--tint-hover)"),
+        "`.markdown tbody tr:hover` declares the house row-hover tint",
+    );
+
+    // (6) `border-collapse: collapse`, and token-only padding on both cell kinds —
+    // no literal length anywhere in the table's own box model.
+    assert_eq!(
+        declared(&rule_body(&css, ".markdown table"), "border-collapse").as_deref(),
+        Some("collapse"),
+    );
+    for selector in [".markdown th", ".markdown td"] {
+        let body = rule_body(&css, selector);
+        let padding = declared(&body, "padding").expect("token-only padding");
+        assert!(
+            css_values(&padding).iter().all(|t| t.starts_with("var(--")),
+            "`{selector}` padding must be built entirely from tokens: `{padding}`",
+        );
+    }
+
+    // (7) No content-based column typing: unlike `DataTable.module.css` (`.num`
+    // right-aligns a numeric column by its content), the answer table has no
+    // selector that re-types a cell from what it holds.
+    assert!(
+        !css.contains(".num") && !css.contains(".mono"),
+        "the chat stylesheet carries no content-based column-typing selector — a \
+         GFM answer table is content, not a dataset (frontend-design §5)",
+    );
+
+    // (8) No per-table copy control: the table renderer wraps a bare `<table>`,
+    // never a `CopyControl` — that affordance stays exclusive to fenced code. Sliced
+    // to the next top-level `function ` rather than brace-matched: `TableRenderer`'s
+    // own signature destructures its props with a `{ … }` type annotation, which
+    // `block_after` (built for CSS, where a selector never contains a brace) would
+    // close on before ever reaching the function body.
+    let tsx = strip_tsx_comments(&read("src/views/chat/MarkdownAnswer.tsx"));
+    let start = tsx.find("function TableRenderer").expect("`TableRenderer` is defined");
+    let after = &tsx[start..];
+    let end = after[1..].find("function ").map_or(after.len(), |i| i + 1);
+    let table_renderer = &after[..end];
+    assert!(
+        !table_renderer.contains("CopyControl"),
+        "the table renderer carries no per-table copy control (unlike `CodeBlock`)",
+    );
+}
+
 /// The properties that cap an element's inline size, i.e. that set a reading
 /// measure. Both the physical and the logical spelling, because a guard that
 /// names one spelling guards exactly one spelling.
@@ -980,14 +1111,17 @@ fn chat_transcript_text_on_the_card_fill_clears_wcag_aa_in_both_themes() {
     // here, not restated, so the guard follows the card if its fill ever moves. It
     // was `--surface-0` while S-300's transcript sat bare on the page.
     //
-    // Two lists, and the split is the point. The turns have no fill of their own, so
-    // most transcript text renders on the card fill (list a) — which is why the
-    // halt/error notices and the answer links carry the signal hue on a
-    // border/underline (a 3:1 UI affordance) rather than in the text colour. The
-    // Activity status glyphs are the exception, because HF-1 gave them a chip fill
-    // of their own to sit on (list b); measuring THOSE against the card fill would
-    // measure a background they never touch. The chip geometry that makes list (b)
-    // legitimate is asserted separately, by the test below this one.
+    // What used to be list (a) here — the closed set of selectors that ink STRAIGHT
+    // ONTO a fill they do not own — is now
+    // `every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa`
+    // below (S-311): a hardcoded 4-entry list could say nothing about a selector it
+    // did not name, which is the exact shape that let a signal-hue ink (S-301,
+    // measured separately by `every_signal_hue_ink_in_the_chat_stylesheet_is_…`
+    // above) ship unmeasured a story after this file's fill/ink split was written.
+    // What remains here are the two halves that list's inversion does not replace:
+    // (a′) the signal hue those same rules carry on a border EDGE instead of their
+    // ink, and (b) the Activity glyphs' fill/ink pairs, measured against their OWN
+    // fill rather than a shared one.
     let css = strip_comments(&read("src/views/chat/Chat.module.css"));
     let card = strip_comments(&read("src/components/Card.module.css"));
     let tokens = strip_comments(&read("src/styles/tokens.css"));
@@ -1012,27 +1146,6 @@ fn chat_transcript_text_on_the_card_fill_clears_wcag_aa_in_both_themes() {
     }
     let rail_fill = var_token(&rule_body(&css, ".rail"), "background")
         .expect("the rail declares a `background: var(--…)` fill");
-
-    // (a) Rules that ink STRAIGHT ONTO a fill they do not own — the transcript's on
-    // the card fill, the rail's notes on the rail fill.
-    for (selector, surface) in [
-        (".halt, .error", card_fill.as_str()),
-        (".markdown a", card_fill.as_str()),
-        (".railEmpty, .railError", rail_fill.as_str()),
-        (".railError", rail_fill.as_str()),
-    ] {
-        let token = color_token(&rule_body(&css, selector))
-            .unwrap_or_else(|| panic!("`{selector}` declares a `color: var(--…)`"));
-        for (theme, map) in themes() {
-            let c = contrast(token_rgb(&token, &map, &base), token_rgb(surface, &map, &base));
-            assert!(
-                c >= 4.5,
-                "{theme}: `{selector}` ink ({token}) is {c:.2}:1 on {surface}, below the 4.5:1 \
-                 AA body minimum — a signal hue must be carried by a border/underline edge, \
-                 not by the text colour",
-            );
-        }
-    }
 
     // (a′) The other half of (a): the hue those rules keep OFF their ink must still
     // be ON them, as the left edge — relocated, never dropped (FR-UI-33). Resolved in
@@ -1238,6 +1351,139 @@ fn every_signal_hue_ink_in_the_chat_stylesheet_is_classified() {
                 c >= 3.0,
                 "{theme}: `{selector}` ({note}) inks {token} at {c:.2}:1 on {surface}, below the \
                  3:1 non-text floor a UI affordance must clear",
+            );
+        }
+    }
+}
+
+/// Every top-level rule in the chat stylesheet — rungs included — that inks a
+/// NEUTRAL colour (`--text-1`/`--text-2`/`--ink-on-*`; a `SIGNAL_HUES` member is
+/// `SIGNAL_INK_COVERAGE`'s contract, above), together with the fill it is measured
+/// against. This is what list (a) used to be, in
+/// `chat_transcript_text_on_the_card_fill_clears_wcag_aa_in_both_themes` — a
+/// hardcoded `[".halt, .error", ".markdown a", …]` array that could say nothing
+/// about a selector it did not name. INVERTED (S-311): the test below fails on any
+/// neutral-ink rule missing from here, so a new one — `.markdown th`/`.markdown
+/// td`, this same story's table treatment, among them — cannot ink text past the
+/// AA floor unmeasured, the exact closed-list shape that let a signal hue ship at
+/// 2.99:1 one story after this file's fill/ink split was first written.
+///
+/// Every surface here is DERIVED (`var_token` off the selector's own rule, or its
+/// container's), never a hand-typed literal: `--surface-1` and `--surface-2` are
+/// the identical hex in the light theme (`#ffffff`) but diverge in dark, so an
+/// entry that reads the wrong container would still pass in light and only fail in
+/// dark — exactly the kind of mistake a derived value catches and a literal would
+/// not. Two selectors are deliberately absent: `.activityRunning`/`.activityDone`
+/// ink `--ink-on-warm`, a neutral token, but are already measured — against their
+/// OWN fill, not one of these shared ones — by list (b) two tests above.
+#[test]
+fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
+    let css = strip_comments(&read("src/views/chat/Chat.module.css"));
+    let card = strip_comments(&read("src/components/Card.module.css"));
+    let callout = strip_comments(&read("src/components/Callout.module.css"));
+    let tokens = strip_comments(&read("src/styles/tokens.css"));
+    let base = declarations(&block_after(&tokens, ":root"));
+    let light = declarations(&block_after(&tokens, ":root[data-theme=\"light\"]"));
+
+    let card_fill = var_token(&rule_body(&card, ".card"), "background")
+        .expect("the shared `.card` declares a `background: var(--…)` fill");
+    let rail_fill = var_token(&rule_body(&css, ".rail"), "background")
+        .expect("`.rail` declares a `background: var(--…)` fill");
+    let raised_fill = var_token(&rule_body(&css, ".codeHeader"), "background")
+        .expect("`.codeHeader` declares a `background: var(--…)` fill");
+    let accent_fill = var_token(&rule_body(&css, ".send"), "background")
+        .expect("`.send` declares a `background: var(--…)` fill");
+    let viewport_fill = var_token(&rule_body(&css, ".mermaidViewport"), "background")
+        .expect("`.mermaidViewport` declares a `background: var(--…)` fill");
+    let callout_fill = var_token(&rule_body(&callout, ".callout"), "background")
+        .expect("the shared `.callout` declares a `background: var(--…)` fill");
+
+    // The classification: selector → the fill token it visually sits on, traced
+    // against the component tree (`ChatView.tsx`, `MermaidBlock.tsx`) rather than
+    // assumed — a selector that declares its own `background:` sits on that (noted
+    // "own fill" below); every other one is read off its container's.
+    let coverage: Vec<(&str, &str)> = vec![
+        (".halt, .error", card_fill.as_str()),
+        (".markdown a", card_fill.as_str()),
+        (".railEmpty, .railError", rail_fill.as_str()),
+        (".railError", rail_fill.as_str()),
+        (".railToggle", raised_fill.as_str()), // own fill
+        (".threadItem", rail_fill.as_str()),
+        (".threadDelete", rail_fill.as_str()),
+        (".threadConfirmText", raised_fill.as_str()), // `.threadConfirm`'s own fill
+        (".threadConfirmDelete", accent_fill.as_str()), // own fill
+        (".threadConfirmCancel", rail_fill.as_str()),   // own fill (== --surface-1)
+        (".providerLine", callout_fill.as_str()),       // the shared `Callout`'s own fill
+        (".empty", card_fill.as_str()),
+        (".activitySummary", card_fill.as_str()),
+        (".activityLabel", card_fill.as_str()),
+        (".activityMeta", card_fill.as_str()),
+        (".activityCaption", card_fill.as_str()),
+        (".planSteps", card_fill.as_str()),
+        (".activityRole", card_fill.as_str()),
+        (".activityInstruction", card_fill.as_str()),
+        (".activityResult", card_fill.as_str()),
+        (".activityEmpty", card_fill.as_str()),
+        (".working", card_fill.as_str()),
+        (".markdown th", raised_fill.as_str()),
+        (".markdown td", raised_fill.as_str()),
+        (".codeLang", raised_fill.as_str()),
+        (".codeCopy, .mermaidControl", raised_fill.as_str()),
+        (".codeCopy:hover:not(:disabled), .mermaidControl:hover:not(:disabled)", raised_fill.as_str()),
+        (".mermaidZoom", raised_fill.as_str()),
+        (".mermaidScale :global(.mermaid:not([data-processed=\"true\"]))", viewport_fill.as_str()),
+        (".mermaidFallback", raised_fill.as_str()),
+        (".action", card_fill.as_str()),
+        (".action:hover", card_fill.as_str()),
+        (".input", rail_fill.as_str()), // own fill (== --surface-1)
+        (".send", accent_fill.as_str()), // own fill
+        (".stop", raised_fill.as_str()), // own fill (== --surface-2)
+    ];
+
+    // Every top-level rule (rungs included) that inks a NEUTRAL colour must be
+    // classified above. The one deliberate exemption is SVG-internal Mermaid node
+    // theming (`.node text`/`.label`/`.cluster-label`): diagram content coloured by
+    // the vendored render once it mounts, not chat body text — the PRE-render
+    // fallback text (`:not([data-processed])`, above) is real UI text and stays in
+    // scope.
+    const MERMAID_SVG_LABEL_SELECTOR: &str = ".mermaidScale :global(.mermaid .label), \
+        .mermaidScale :global(.mermaid .label text), .mermaidScale :global(.mermaid .label span), \
+        .mermaidScale :global(.mermaid .cluster-label text), .mermaidScale :global(.mermaid .cluster-label span)";
+    for (selector, body) in all_style_rules(&css) {
+        if selector == MERMAID_SVG_LABEL_SELECTOR || selector == ".activityRunning" || selector == ".activityDone" {
+            continue;
+        }
+        let Some(token) = color_token(&body) else { continue };
+        if SIGNAL_HUES.contains(&token.as_str()) {
+            continue;
+        }
+        assert!(
+            coverage.iter().any(|(sel, _)| *sel == selector),
+            "`{selector}` inks the neutral colour `{token}` but is not classified in \
+             `every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa`'s \
+             `coverage` — name the fill it sits on so a new rule cannot ship its text past \
+             the AA floor unmeasured",
+        );
+    }
+
+    // …and the reverse: a classified selector that no longer declares a `color:` —
+    // or now inks a signal hue instead — is stale and must be dropped or moved.
+    for (selector, surface) in &coverage {
+        let body = rule_body(&css, selector);
+        let token = color_token(&body).unwrap_or_else(|| {
+            panic!("`{selector}` is classified but declares no `color: var(--…)`")
+        });
+        assert!(
+            !SIGNAL_HUES.contains(&token.as_str()),
+            "`{selector}` is classified as a neutral ink but now inks the signal hue \
+             `{token}` — move it to `SIGNAL_INK_COVERAGE` instead",
+        );
+        for (theme, map) in [("dark", theme_map(&base, None)), ("light", theme_map(&base, Some(&light)))] {
+            let c = contrast(token_rgb(&token, &map, &base), token_rgb(surface, &map, &base));
+            assert!(
+                c >= 4.5,
+                "{theme}: `{selector}` ink ({token}) is {c:.2}:1 on {surface}, below the 4.5:1 \
+                 AA body minimum",
             );
         }
     }

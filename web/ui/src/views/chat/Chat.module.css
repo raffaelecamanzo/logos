@@ -1,6 +1,6 @@
 /*
- * Chat view layout (S-190, S-200, S-300, S-308, FR-UI-18/19/20/24, FR-UI-23,
- * FR-UI-31, FR-UI-33, ADR-44, ADR-45).
+ * Chat view layout (S-190, S-200, S-300, S-308, S-311, FR-UI-18/19/20/24, FR-UI-23,
+ * FR-UI-31, FR-UI-32, FR-UI-33, ADR-44, ADR-45).
  * Zero-runtime CSS Module → external <link> stylesheet (no inline <style>, no
  * CSS-in-JS), so the self-only CSP stays byte-identical. Every colour is a design
  * token, as is every spacing value the scale has a step for; the few literal
@@ -19,6 +19,10 @@
  * retired — it was the SPA's only centred body-content measure, and the void
  * beside the rail. The card wraps the transcript, never a turn. See the layout
  * and thread/log sections below.
+ *
+ * S-311 ([FR-UI-31], [FR-UI-32]) gave the answer body's one remaining
+ * user-agent-default surface — a GFM table — the same treatment: see the answer
+ * table section below the fenced code block it shares its container chrome with.
  */
 
 .view {
@@ -649,15 +653,58 @@
 }
 
 /* Fenced code block: a header (language + copy) over the verbatim source. The
-   Mermaid viewer (below) is the same block with a diagram in place of the source, so
-   the two share this chrome from one declaration rather than two that can drift. */
+   Mermaid viewer (below) is the same block with a diagram in place of the source, and
+   the answer-table scroll wrapper (S-311, FR-UI-31/32) is the same block again with a
+   GFM table in place of either — so all three share this chrome from ONE declaration
+   rather than one that can drift into two or three. */
 .codeBlock,
-.mermaidBlock {
+.mermaidBlock,
+.tableWrapper {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-2);
   overflow: hidden;
   background: var(--surface-2);
 }
+
+/* ── GFM answer table (S-311, FR-UI-31/32) ───────────────────────────────────
+   `min-width: 0` is what lets `overflow-x` actually engage: `.tableWrapper` is a
+   flex child of `.markdown`, and a flex child's default `min-width: auto` would
+   otherwise refuse to shrink below the table's intrinsic width, so the COLUMN
+   grows instead of the wrapper scrolling. The table itself is the §5 house table
+   voice — uppercase tracked header over a border-strong underline, hairline row
+   rules, token-only padding, border-collapse, no header fill/band. Unlike the
+   interactive `DataTable` (sticky header, sort, numeric right-align) this is an
+   authored prose/answer table: content, not a dataset (frontend-design §5), so it
+   carries no per-table copy control and no column re-typed from its content — a
+   backticked cell still renders through the shared `.inlineCode` rule above. */
+.tableWrapper {
+  min-width: 0;
+  overflow-x: auto;
+}
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.markdown th {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+  text-align: left;
+  border-bottom: 1px solid var(--border-strong);
+}
+.markdown td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-1);
+}
+.markdown tbody tr:hover {
+  background: var(--tint-hover);
+}
+
 .codeHeader {
   display: flex;
   align-items: center;
