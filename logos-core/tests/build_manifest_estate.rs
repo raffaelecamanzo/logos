@@ -27,8 +27,8 @@ use std::path::PathBuf;
 
 use logos_core::config;
 use logos_core::extract::build_manifest::{
-    manifest_format, member_facts, ArtifactRole, ManifestFacts, ManifestStatus, ReferenceKind,
-    Resolution,
+    manifest_format, member_facts, ArtifactRole, ManifestFacts, ManifestFormat, ManifestStatus,
+    ReferenceKind, Resolution,
 };
 use logos_core::federation;
 
@@ -102,6 +102,10 @@ fn the_reference_workspace_reports_its_build_manifest_facts_when_one_is_configur
     let mut producers: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let mut references: Vec<(String, &'static str, String, String)> = Vec::new();
     let mut members_with_manifests = 0usize;
+    // Found / read per format — the denominator that makes "Gradle is
+    // unexercised" a reading of this run rather than a claim about it.
+    let mut by_format: BTreeMap<&'static str, (usize, usize)> =
+        [(ManifestFormat::Maven.as_str(), (0, 0)), (ManifestFormat::Gradle.as_str(), (0, 0))].into();
     // Every fact that did not fully resolve, with its reason — the refusals are
     // few enough to read one by one, and reading them is the point.
     let mut unresolved: Vec<String> = Vec::new();
@@ -109,6 +113,11 @@ fn the_reference_workspace_reports_its_build_manifest_facts_when_one_is_configur
     for member in &workspace.members {
         let (found, facts) = member_manifests(&member.root);
         let read = facts.iter().filter(|m| m.status == ManifestStatus::Read).count();
+        for m in &facts {
+            let entry = by_format.get_mut(m.format.as_str()).expect("a known format");
+            entry.0 += 1;
+            entry.1 += usize::from(m.status == ManifestStatus::Read);
+        }
         let mut row = BTreeMap::<&str, usize>::new();
         for m in &facts {
             for a in &m.artifacts {
@@ -197,6 +206,15 @@ fn the_reference_workspace_reports_its_build_manifest_facts_when_one_is_configur
         t("refused"),
     );
 
+    for (format, (found, read)) in &by_format {
+        let exercised = if *found == 0 { " — UNEXERCISED on this workspace" } else { "" };
+        println!("{format}: read {read} of {found} found{exercised}");
+    }
+    assert_eq!(
+        by_format.values().map(|(f, _)| f).sum::<usize>(),
+        t("found"),
+        "the per-format split accounts for every manifest found"
+    );
     println!("facts that did not fully resolve: {}", unresolved.len());
     for line in &unresolved {
         println!("{line}");
