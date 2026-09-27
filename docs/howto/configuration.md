@@ -50,7 +50,7 @@ directories documented above — a member keeps its own `.logos/` and its own
 
 | Path (at the workspace root) | What it is | Check in? |
 |---|---|---|
-| `logos.workspace.toml` | The manifest: approved members plus your hand-written `default` / `autodiscover` / `[workspace.warm]` / `[workspace.member.<name>]` / `[[links]]` / `[governance]`. Re-running `init --workspace` preserves them verbatim. Editable in the app — see [Editing the manifest from the app](#editing-the-manifest-from-the-app). | Yes |
+| `logos.workspace.toml` | The manifest: approved members plus your hand-written `default` / `autodiscover` / `[workspace.warm]` / `[workspace.member.<name>]` / `[[links]]` / `[governance]`. Re-running `init --workspace` preserves their keys and values; it re-serialises the file, so comments and formatting are not kept. Editable in the app — see [Editing the manifest from the app](#editing-the-manifest-from-the-app). | Yes |
 | `.logos.workspace.warm.json` | Machine-written record of the last background warm's per-member outcome. Derived, host-local, safe to delete. | No |
 | `.mcp.json` | Gains a single `logos-workspace` server key, deliberately distinct from a member's own `logos` key so neither shadows the other. | Yes |
 | `.logos/config.toml` | *(optional)* The **workspace-level** `[chat]` policy that every member declaring none inherits (and a `[wiki].model`, inherited by a member that inherits this policy) — see [Workspace-level chat configuration](#workspace-level-chat-configuration). Never a member: a `.logos/` at the root is not admitted. | Yes |
@@ -117,7 +117,7 @@ architecture documents that keeps copies of every service's OpenAPI spec, or a
 mock that stands in for an external API. Their spec copies read as
 contract-surface **consumers**, so they fill the coverage headline with rows
 that say nothing about the product. On the reference estate, one documentation
-repository held 411 of the 874 contract-surface rows.
+repository held 411 of the 868 contract-surface rows.
 
 Declare such a member's kind, and its contract-surface rows are reported
 **apart**:
@@ -137,18 +137,20 @@ kind = "mock"   # a stand-in provider of the API it mocks, never a consumer
   also be an autodiscovered directory name. `"./docs"` and `"docs/"` both mean
   `docs`. `kind` takes `"documentation"` or `"mock"`. Any other value, or any
   other key in the table, is **rejected at parse time** (exit 2), and the error
-  names the key and the legal values. A table naming no resolved member is
-  ignored, with a warning. `init --workspace` preserves every table verbatim,
-  and never writes one: a kind is declared by you, never inferred.
+  names the key and the legal values. A `kind` declared for a name that is no
+  resolved member is ignored, with a warning. `init --workspace` preserves every
+  table's keys and values — it re-serialises the manifest, so a comment such as
+  the one on `pecserver-mock` above does not survive a re-run — and never writes
+  a table itself: a kind is declared by you, never inferred.
 - **What moves.** A declared member's contract-surface rows leave
   `coverage.by_intake.contract_surface`, the four headline counts and
   `spec_conformance_ratio`. They appear under `coverage.declared_apart`: the
   rows themselves, their four-bucket `counts`, each declared member with its
   `kind` and `rows`, and a `summary` line that states the count over its
-  denominator, e.g. `"411 of 874 contract-surface rows reported apart from 1
+  denominator, e.g. `"411 of 868 contract-surface rows reported apart from 1
   declared member (documentation: 1); the headline and spec_conformance_ratio
   exclude them"`. `spec_conformance_summary` itself ends with the same count
-  (`"…; 411 of 874 contract-surface rows reported apart by declared member
+  (`"…; 411 of 868 contract-surface rows reported apart by declared member
   kind"`), so a surface that renders only that line still shows the
   population shrank. The reachability rider carries the same count as
   `declared_apart: {rows, contract_surface_rows}`. The member's routes still

@@ -1323,7 +1323,7 @@ pub struct CrossServiceCoverage {
 /// A documentation repository's spec copies describe services and a mock's are
 /// the API it stands in for; neither is a statement about the product's own
 /// declared contracts, and on the reference estate one documentation repo held
-/// 411 of 874 contract-surface rows ([CR-147] §2). So a declared member's
+/// 411 of 868 contract-surface rows ([CR-147] §2.1). So a declared member's
 /// contract-surface rows are filed **here** instead of into
 /// [`by_intake`](CrossServiceCoverage::by_intake)`.contract_surface` — and
 /// therefore out of the four headline counts and
@@ -1356,7 +1356,7 @@ pub struct DeclaredApart {
     pub contract_surface_rows: u64,
     /// The rows set apart, in the headline's four buckets.
     pub counts: ClassificationCounts,
-    /// The count and its denominator as one line, e.g. `"411 of 874
+    /// The count and its denominator as one line, e.g. `"411 of 868
     /// contract-surface rows reported apart from 1 declared member
     /// (documentation: 1); the headline and spec_conformance_ratio exclude
     /// them"` — the [`spec_conformance_summary`](CrossServiceCoverage::spec_conformance_summary)
