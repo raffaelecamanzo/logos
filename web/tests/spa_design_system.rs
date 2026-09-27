@@ -1414,6 +1414,7 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
         (".threadConfirmDelete", accent_fill.as_str()), // own fill
         (".threadConfirmCancel", rail_fill.as_str()),   // own fill (== --surface-1)
         (".providerLine", callout_fill.as_str()),       // the shared `Callout`'s own fill
+        (".budgetLine", callout_fill.as_str()),         // S-309 status band, inside the same `Callout`
         (".empty", card_fill.as_str()),
         (".activitySummary", card_fill.as_str()),
         (".activityLabel", card_fill.as_str()),
