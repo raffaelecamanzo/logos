@@ -9137,6 +9137,34 @@ mod tests {
         );
     }
 
+    /// A declared member's **genuinely unbound** row — an operation whose
+    /// template never composed (`path-not-composed`) — is set apart and counted in
+    /// both the apart rows and their denominator, like every other bucket. The
+    /// reference estate's apart set holds one such row.
+    #[test]
+    fn a_declared_members_unbound_row_counts_in_the_rows_and_the_denominator() {
+        docs_workspace();
+        set_member(
+            "docs",
+            vec![
+                op("GET /users/{id}", "local docs_get"),
+                op("GET /orders", "local docs_orders"),
+                // No `ApiPath` parent: the bare method name reduces to no key.
+                op("post", "local docs_orphan"),
+            ],
+        );
+        let cov = cross_service_coverage(
+            &registry_declaring(&DOCS_WORKSPACE, &[("docs", MemberKind::Documentation)]).answer(),
+        );
+        let apart = cov.declared_apart.expect("declared");
+        assert_eq!(
+            apart.counts,
+            ClassificationCounts { bound: 1, ambiguous: 1, unbound: 1, no_provider_in_workspace: 0 }
+        );
+        assert_eq!((apart.rows, apart.contract_surface_rows), (3, 5));
+        assert_eq!(apart.references.len(), 3, "every row counted is a row listed");
+    }
+
     /// Only a declared member's **consumer** rows move. Its routes stay in the
     /// provider index, so a mock that serves an operation another member
     /// declares still ties that operation exactly as it did undeclared — the
