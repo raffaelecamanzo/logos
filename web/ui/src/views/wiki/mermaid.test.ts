@@ -464,6 +464,25 @@ describe("repairSequenceDiagramSource escapes bare ';' in sequenceDiagram messag
       ["%%{init: {'theme':'base'}}%%", "", "sequenceDiagram", "A->>B: x#59;y"].join("\n"),
     );
   });
+
+  it("skips a YAML frontmatter block ('---' ... '---') to find the diagram type", () => {
+    const source = ["---", "title: incident flow", "---", "sequenceDiagram", "A->>B: x;y"].join(
+      "\n",
+    );
+    expect(repairSequenceDiagramSource(source)).toBe(
+      ["---", "title: incident flow", "---", "sequenceDiagram", "A->>B: x#59;y"].join("\n"),
+    );
+  });
+
+  it("does not touch a colon line whose head contains '-' but no real arrow token (e.g. a title/metadata line)", () => {
+    const source = "sequenceDiagram\ntitle: pre-release notes;more\nA->>B: hi";
+    expect(repairSequenceDiagramSource(source)).toBe(source);
+  });
+
+  it("does not touch a '%% comment' line even when it contains an arrow-token substring before a colon", () => {
+    const source = "sequenceDiagram\n%% A->>B: this should not be touched; right?\nA->>B: hi";
+    expect(repairSequenceDiagramSource(source)).toBe(source);
+  });
 });
 
 describe("renderMermaidIn repairs sequence-diagram ';' on the DOM copy only, before mermaid.run (HF-2)", () => {

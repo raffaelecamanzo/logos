@@ -336,9 +336,17 @@ function escapeSemicolons(text: string): string {
  * `Note left of|right of|over …: text` line has every `;` in its text — the
  * part after the FIRST `:` — replaced with `#59;`. Every other line (a
  * participant/actor declaration, a keyword line, a comment, a line with no
- * colon) is returned unchanged, because it matches neither pattern.
+ * colon) is returned unchanged.
+ *
+ * A `%% comment` is excluded explicitly, not merely by missing both patterns:
+ * a comment can itself contain an arrow-token substring before a colon (e.g.
+ * `%% A->>B: note this`), which would otherwise be misclassified as a message
+ * line and mutated — breaking the "comments pass through byte-identical"
+ * guarantee (review-fix, HF-2).
  */
 function repairSequenceDiagramLine(line: string): string {
+  if (line.trim().startsWith("%%")) return line;
+
   const noteMatch = line.match(NOTE_LINE_RE);
   if (noteMatch) return noteMatch[1] + escapeSemicolons(noteMatch[2]);
 
