@@ -276,7 +276,7 @@ mod client_call_gate;
 /// contract surfaces and ledgers; every estate walk it makes is the shipped
 /// `ConfigCorpus` walk or S-411's, called rather than copied.
 ///
-/// `#[path]`-attached for the same reason its five siblings are: a plain
+/// `#[path]`-attached for the same reason every sibling above is: a plain
 /// `tests/vendored_spec_contracts.rs` would become a second cargo test target.
 #[path = "operand_resolvability/vendored_spec_contracts.rs"]
 mod vendored_spec_contracts;
