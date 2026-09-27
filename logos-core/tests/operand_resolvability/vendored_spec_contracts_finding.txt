@@ -94,7 +94,10 @@ relation needs an identity beyond its name.
 HALF 2 — INVOCATION → EXTERNAL: 20 ROWS (floor 15)
 --------------------------------------------------
 
-Population: 42 invocation-intake `no-provider-in-workspace` `route` rows.
+Population: 42 invocation-intake `no-provider-in-workspace` `route` rows. The
+intake's own no-provider figure is 44 (CR-147 section 2.1); the other 2 are
+`broker-topic` rows (`mailbox-manager`, `official-log-export-job-manager`), not
+REST, so outside the metric by its words. The run prints and pins both counts.
 
   EXACT UNDER A COMMITTED BASE PATH ........ 20  (all `pecserver-facade`)
   BASE PATH OVERSHOOTS ...................... 1  (`notification-adapter`)

@@ -152,6 +152,9 @@ pub const RECORDED_INVOCATION_EXACT: usize = 20;
 pub const RECORDED_INVOCATION_EXACT_APP_ONLY: usize = 1;
 /// Invocation rows in the population (`no-provider-in-workspace`, `route`).
 pub const RECORDED_INVOCATION_POPULATION: usize = 42;
+/// Invocation `no-provider-in-workspace` rows of other relations (two
+/// `broker-topic` rows): 42 + 2 = the intake's 44 in CR-147 §2.1.
+pub const RECORDED_NON_REST_NO_PROVIDER: usize = 2;
 /// Own-spec ties measured.
 pub const RECORDED_OWN_SPEC_TIES: usize = 43;
 /// Contract-surface ambiguous rows — the third half's population.
@@ -1092,6 +1095,10 @@ pub struct Census {
     pub kinds: BTreeMap<String, Kind>,
     pub documents: Vec<Document>,
     pub invocation_rows: Vec<InvocationRow>,
+    /// Invocation `no-provider-in-workspace` rows outside the REST metric, by
+    /// relation — with [`Census::invocation_rows`], the intake's whole
+    /// no-provider figure.
+    pub non_rest_no_provider: BTreeMap<String, usize>,
     /// `(member, call-site symbol)` → its HTTP consumer ledger targets.
     pub ledger: BTreeMap<(String, String), Vec<String>>,
     pub tie_rows: Vec<TieRow>,
@@ -1196,6 +1203,7 @@ pub fn census(root: &Path) -> Census {
     let mut provisions: BTreeMap<(String, String), OpProvision> = BTreeMap::new();
     let mut tie_rows = Vec::new();
     let mut invocation_rows = Vec::new();
+    let mut non_rest_no_provider: BTreeMap<String, usize> = BTreeMap::new();
     for row in &coverage.references {
         match row_use(row) {
             RowUse::ContractSurface { provision, tie } => {
@@ -1204,6 +1212,9 @@ pub fn census(root: &Path) -> Census {
                 tie_rows.extend(tie);
             }
             RowUse::Invocation(r) => invocation_rows.push(r),
+            RowUse::NonRestNoProvider(relation) => {
+                *non_rest_no_provider.entry(relation).or_default() += 1;
+            }
             RowUse::Outside => {}
         }
     }
@@ -1267,6 +1278,7 @@ pub fn census(root: &Path) -> Census {
         kinds,
         documents,
         invocation_rows,
+        non_rest_no_provider,
         ledger,
         tie_rows,
         scalars,
@@ -1286,6 +1298,10 @@ pub enum RowUse {
     /// A second-half row: invocation intake, relation `route`, reason
     /// `no-provider-in-workspace`.
     Invocation(InvocationRow),
+    /// An invocation `no-provider-in-workspace` row of another relation — not
+    /// REST, so outside the metric; counted so the population reconciles to the
+    /// intake's own no-provider figure.
+    NonRestNoProvider(String),
     /// In neither population.
     Outside,
 }
@@ -1312,14 +1328,14 @@ pub fn row_use(row: &ReferenceCoverage) -> RowUse {
                 row.state,
                 CoverageState::Unbound { reason: UnboundReason::NoProviderInWorkspace }
             );
-            if no_provider && row.relation == "route" {
-                RowUse::Invocation(InvocationRow {
+            match (no_provider, row.relation == "route") {
+                (true, true) => RowUse::Invocation(InvocationRow {
                     member: row.from.member.clone(),
                     symbol: row.from.symbol.as_str().to_string(),
                     evidence: evidence(&row.provenance),
-                })
-            } else {
-                RowUse::Outside
+                }),
+                (true, false) => RowUse::NonRestNoProvider(row.relation.clone()),
+                (false, _) => RowUse::Outside,
             }
         }
     }
@@ -1453,8 +1469,11 @@ fn report(root: &Path, census: &Census, j: &Judgement) {
     println!("\n== HALF 2 — {HALF_INVOCATION}");
     println!("  {}", verdict_line(HALF_INVOCATION, j.invocation_exact(), INVOCATION_EXTERNAL_FLOOR));
     println!(
-        "  population: {} invocation-intake `no-provider-in-workspace` `route` rows",
-        j.calls.len()
+        "  population: {} invocation-intake `no-provider-in-workspace` `route` rows \
+         (+ {} of other relations, outside the REST metric: {:?})",
+        j.calls.len(),
+        census.non_rest_no_provider.values().sum::<usize>(),
+        census.non_rest_no_provider,
     );
     println!(
         "  counterfactual, application config alone: {} exact",
@@ -1628,6 +1647,11 @@ fn measure_vendored_spec_contracts_over_the_reference_workspace() {
     assert_eq!(j.declared_pairs(), RECORDED_DECLARED_PAIRS, "declared-contract pairs drifted");
     assert_eq!(j.declared.split(), RECORDED_DECLARED_SPLIT, "identity/external split drifted");
     assert_eq!(j.calls.len(), RECORDED_INVOCATION_POPULATION, "invocation population drifted");
+    assert_eq!(
+        census.non_rest_no_provider.values().sum::<usize>(),
+        RECORDED_NON_REST_NO_PROVIDER,
+        "the non-REST no-provider rows drifted — the reconciliation to the intake's figure moved"
+    );
     assert_eq!(j.invocation_exact(), RECORDED_INVOCATION_EXACT, "exact invocation rows drifted");
     assert_eq!(
         j.invocation_exact_app_only(),
@@ -2364,11 +2388,11 @@ mod tests {
         // Near misses: another relation, another reason, another intake.
         let broker = row("facade", SITE, BridgeIntake::Invocation, "broker-topic",
             unbound(UnboundReason::NoProviderInWorkspace), None, Provenance::Literal);
+        assert_eq!(row_use(&broker), RowUse::NonRestNoProvider("broker-topic".into()));
         let tied = row("facade", SITE, BridgeIntake::Invocation, "route",
             unbound(UnboundReason::Ambiguous), None, Provenance::Literal);
         let declared = row("facade", OP, BridgeIntake::ContractSurface, "route",
             unbound(UnboundReason::NoProviderInWorkspace), None, Provenance::Literal);
-        assert_eq!(row_use(&broker), RowUse::Outside);
         assert_eq!(row_use(&tied), RowUse::Outside);
         assert!(matches!(row_use(&declared), RowUse::ContractSurface { tie: None, .. }));
     }
