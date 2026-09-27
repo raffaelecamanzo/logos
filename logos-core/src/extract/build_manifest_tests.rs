@@ -879,3 +879,13 @@ fn a_parent_field_the_parent_does_not_declare_is_refused() {
     assert_eq!(dep.resolution, Resolution::VersionRefused);
     assert!(dep.reason.as_deref().unwrap().contains("does not declare it"), "{:?}", dep.reason);
 }
+
+/// An unterminated `${` is not a coordinate: refused, with the reason saying so.
+#[test]
+fn an_unterminated_property_reference_is_refused() {
+    let pom = "<project><groupId>${broken</groupId><artifactId>svc</artifactId></project>";
+    let facts = member_facts(&[("pom.xml", pom)]);
+    let own = produced(&facts[0]);
+    assert_eq!(own.resolution, Resolution::Refused);
+    assert!(own.reason.as_deref().unwrap().contains("unterminated"), "{:?}", own.reason);
+}
