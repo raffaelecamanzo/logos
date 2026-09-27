@@ -693,7 +693,14 @@
    interactive `DataTable` (sticky header, sort, numeric right-align) this is an
    authored prose/answer table: content, not a dataset (frontend-design §5), so it
    carries no per-table copy control and no column re-typed from its content — a
-   backticked cell still renders through the shared `.inlineCode` rule above. */
+   backticked cell still renders through the shared `.inlineCode` rule above.
+
+   The table resets `overflow-wrap` because the answer body's `.final` wrapper sets
+   `anywhere`, which is inherited, and `anywhere` counts in min-content sizing.
+   Without the reset the columns shrink to single characters: the answer-body table
+   never overflows, so the wrapper never scrolls, and cells break mid-word. The
+   Activity fold has no such ancestor, so the same table would scroll there. The
+   reset makes both surfaces render one way. */
 .tableWrapper {
   min-width: 0;
   overflow-x: auto;
@@ -702,6 +709,7 @@
   width: 100%;
   border-collapse: collapse;
   font-size: var(--text-sm);
+  overflow-wrap: normal;
 }
 .markdown th {
   padding: var(--space-2) var(--space-3);

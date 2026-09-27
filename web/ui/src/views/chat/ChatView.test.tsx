@@ -283,6 +283,22 @@ describe("ChatView — persistent status band (S-309, FR-UI-33)", () => {
     expect(band).toHaveTextContent("24 tool calls");
   });
 
+  it("leads the view above both panes, in the slot the consent banner vacates", async () => {
+    // §4.13's lead callout is ONE element whose state moves from consent to band.
+    // Inside the conversation pane instead, it would sit after the rail toggle —
+    // and after the whole list when opened — once the panes stack below ~1023px.
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    render(<ChatView />);
+    const slot = (await screen.findByText(/source and graph excerpts/)).closest("section")!.parentElement;
+    await acceptConsent(user);
+
+    const band = (await screen.findByText("CHAT")).closest("section")!;
+    expect(band.parentElement).toBe(slot);
+    const toggle = screen.getByRole("button", { name: "Conversations" });
+    expect(band.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("states an undeclared model honestly rather than a fabricated default (NFR-CC-04)", async () => {
     const user = userEvent.setup();
     // `resolve_chat` only resolves a policy origin once its model is declared, so
