@@ -926,3 +926,22 @@ fn gradle_comments_inside_a_dependencies_block_are_not_read() {
         .collect();
     assert_eq!(refs, vec![Some("a"), Some("b")], "commented-out declarations are not references");
 }
+
+/// `/*` and `//` inside a string literal are text, not comments: a glob in
+/// `files('libs/*.jar')` must not swallow the declarations after it.
+#[test]
+fn a_comment_marker_inside_a_gradle_string_is_not_a_comment() {
+    let script = "dependencies {\n\
+                  implementation files('libs/*.jar')\n\
+                  implementation 'g:a:1'\n\
+                  implementation \"g:b:1\" // a real comment */\n\
+                  }\n";
+    let facts = member_facts(&[("build.gradle", script)]);
+    let refs: Vec<_> = facts[0]
+        .artifacts
+        .iter()
+        .filter(|a| a.role == ArtifactRole::Referenced)
+        .map(|a| a.artifact_id.as_deref())
+        .collect();
+    assert_eq!(refs, vec![Some("a"), Some("b")]);
+}
