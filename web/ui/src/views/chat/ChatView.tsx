@@ -177,8 +177,9 @@ function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
   );
 }
 
-/** The configured chat surface: the conversation-history rail (S-210/S-211), the
- *  consent banner, and the assistant-ui thread inside the view's `Card` (S-308,
+/** The configured chat surface: the lead callout (the consent banner, then the
+ *  S-309 status band), the conversation-history rail (S-210/S-211), and the
+ *  assistant-ui thread inside the view's `Card` (S-308,
  *  [FR-UI-33]). There is no global Clear-history — deletion is per conversation,
  *  in the rail (S-211, [FR-UI-26], [ADR-47]). */
 function ChatConfigured({ ready }: { ready: ChatReady }) {
@@ -216,7 +217,12 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
 
   return (
     <div className={styles.chat}>
-      {!consented && <ConsentBanner ready={ready} onAccept={acceptConsent} />}
+      {/* The lead callout (frontend-design §4.13): one slot, full width above the
+          two panes, whose state moves from the first-use consent gate to the
+          persistent status band (S-309, [FR-UI-33]) once consented. Here rather
+          than inside `.main`, it leads the view at every width — below ~1023px the
+          panes stack and the rail toggle and list come before `.main`. */}
+      {consented ? <StatusBand chat={chat} /> : <ConsentBanner ready={ready} onAccept={acceptConsent} />}
 
       <div className={styles.layout}>
         <button
@@ -244,11 +250,6 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
         </aside>
 
         <div className={styles.main}>
-          {/* The persistent status band (S-309, [FR-UI-33]): this view's leading
-              verdict element, once configured and consented — the first-use
-              consent gate above is preserved verbatim ahead of it. `.main` is
-              this component's stable composition point (S-308). */}
-          {consented && <StatusBand chat={chat} />}
           {/* The view's ONE card (S-308, [FR-UI-33]): it wraps the whole transcript
               and the composer, never a turn — the turns inside stay flat, so the
               signal-red edge appears once per view, not once per answer. The
