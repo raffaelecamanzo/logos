@@ -889,3 +889,18 @@ fn an_unterminated_property_reference_is_refused() {
     assert_eq!(own.resolution, Resolution::Refused);
     assert!(own.reason.as_deref().unwrap().contains("unterminated"), "{:?}", own.reason);
 }
+
+/// Maven interpolates an inherited value in the CHILD's context: a parent's
+/// `<lib.version>${rev}</lib.version>` reads the child's override of `rev`.
+#[test]
+fn an_inherited_property_interpolates_in_the_childs_context() {
+    let parent = "<project><groupId>g</groupId><artifactId>parent</artifactId>\
+                  <properties><rev>1</rev><lib.version>${rev}</lib.version></properties></project>";
+    let child = "<project><parent><groupId>g</groupId><artifactId>parent</artifactId></parent>\
+                 <artifactId>child</artifactId><properties><rev>2</rev></properties>\
+                 <dependencies><dependency><groupId>g</groupId><artifactId>lib</artifactId>\
+                 <version>${lib.version}</version></dependency></dependencies></project>";
+    let facts = member_facts(&[("pom.xml", parent), ("child/pom.xml", child)]);
+    let dep = refs(&only(&facts, "child/pom.xml"), ReferenceKind::Dependency)[0].clone();
+    assert_eq!(dep.version.as_deref(), Some("2"), "the child's `rev` wins inside the inherited value");
+}
