@@ -99,6 +99,7 @@ use super::config_declared_coupling::{
     members_with_source, runnable_members, walk_overlays, Scalar, SourceSet,
 };
 use super::configuration_agreement::ConfigCorpus;
+use super::identity;
 
 /// **The floors, as declared before the run.** Embedded, following
 /// [`super::config_declared_coupling::DECLARED_FLOOR`]: a file the build embeds
@@ -1038,9 +1039,13 @@ pub fn judge_invocations(
 // ── Half 3: own-spec ties ──────────────────────────────────────────────────
 
 /// Whether a member-relative path lies under a `src/main/resources/` directory,
-/// at the member root or in a build module.
+/// at the member root or in a build module — and nowhere inside a documentation
+/// tree ([`identity::is_documentation`], S-384's guard) or a test tree, which
+/// the floor excludes in terms.
 pub fn under_main_resources(path: &str) -> bool {
-    path.starts_with(MAIN_RESOURCES) || path.contains(&format!("/{MAIN_RESOURCES}"))
+    let under = path.starts_with(MAIN_RESOURCES) || path.contains(&format!("/{MAIN_RESOURCES}"));
+    let test_tree = path.starts_with("src/test/") || path.contains("/src/test/");
+    under && !test_tree && !identity::is_documentation(path)
 }
 
 /// Where one contract-surface ambiguous row lands.
@@ -2460,6 +2465,9 @@ mod tests {
         // Near misses one character off a segment boundary.
         assert!(!under_main_resources("mysrc/main/resources/v1.yaml"));
         assert!(!under_main_resources("src/main/resourcesx/v1.yaml"));
+        // A main-resources directory nested inside a documentation or test tree.
+        assert!(!under_main_resources("docs/api/src/main/resources/openapi/v1.yaml"));
+        assert!(!under_main_resources("src/test/resources/fixtures/src/main/resources/openapi.yaml"));
     }
 
     #[test]
