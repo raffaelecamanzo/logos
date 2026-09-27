@@ -3895,9 +3895,10 @@ impl BatchWriter<'_> {
     /// any manifest changed. Deleting a manifest cascades its artifacts away
     /// (migration 22's FK), so the two tables can never disagree.
     ///
-    /// The pipeline calls this only when a manifest was added, changed or
-    /// removed — never for a member with no manifest and none recorded — so a
-    /// member without a build manifest writes nothing here.
+    /// An incremental sync calls this only when a manifest was added, changed or
+    /// removed; a full index calls it whenever the walk found a manifest or one
+    /// is recorded. Neither calls it for a member with no manifest and none
+    /// recorded, so a member without a build manifest writes nothing here.
     ///
     /// # Errors
     /// Returns an error if a constraint fires (a vocabulary token migration 22
