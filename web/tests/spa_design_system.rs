@@ -504,6 +504,31 @@ fn chat_answer_table_shares_the_code_block_chrome_and_carries_the_house_table_vo
         "`.tableWrapper` declares `overflow-x: auto` — the table's own scroll axis",
     );
 
+    // (2b) `overflow-x` only engages if the table can be wider than the wrapper. An
+    // inherited `overflow-wrap: anywhere` or `word-break: break-all` (the answer body's
+    // `.final` sets the first) counts in min-content sizing, so it lets every column
+    // shrink to one character. The table then never overflows and its cells break
+    // mid-word in the answer body, while the Activity fold, which has no such
+    // ancestor, scrolls the same table. So the table resets every such property that
+    // any chat rule declares. The list comes from the stylesheet, so a wrap rule
+    // added later is caught here too.
+    let table = rule_body(&css, ".markdown table");
+    for (selector, body) in all_style_rules(&css) {
+        for (prop, value) in declarations_of(&body) {
+            let shrinks_min_content = (prop == "overflow-wrap" && value == "anywhere")
+                || (prop == "word-break" && matches!(value.as_str(), "break-all" | "break-word"));
+            if shrinks_min_content {
+                assert_eq!(
+                    declared(&table, &prop).as_deref(),
+                    Some("normal"),
+                    "`{selector}` declares `{prop}: {value}`. A table that inherits it shrinks \
+                     its columns to one character, so the wrapper never scrolls — \
+                     `.markdown table` must reset `{prop}: normal` (FR-UI-31)",
+                );
+            }
+        }
+    }
+
     // (3) The header: uppercase tracked `--text-xs` label in `--text-2`, over a
     // `--border-strong` UNDERLINE — never a fill. Named by the AC as "the header
     // underline"; its removal is the guard's second required mutation.
