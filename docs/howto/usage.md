@@ -1010,10 +1010,14 @@ that streams the turn as Server-Sent Events over the unchanged intent-guarded
 per-turn memory are all **untouched** — the surface is rebuilt on assistant-ui
 through a **custom external-store runtime adapter** over the existing SSE client,
 so Logos keeps owning its own message array and renders the planner side-channel
-(the **Activity** disclosure, budget-halt) as custom components. Both roles sit in
-one centred conversation column at a fixed readable measure — the assistant turn is
-a flat, full-width block with no card fill, and your own turns are right-aligned
-bubbles inside that same column. A **planner**
+(the **Activity** disclosure, budget-halt) as custom components. The tab uses the
+same two-pane layout as the Wiki tab. On the left is the **conversation history
+rail**: it runs the full height of the view, and a full-size **+ New chat**
+control stays pinned above the scrolling list. On the right, the conversation
+sits inside the application's shared **card**, which has the red accent edge and
+fills its column. The assistant turn is a flat block with no card of its own, and
+your own turns are right-aligned bubbles. Below 1024px wide the two panes stack,
+and a toggle shows or hides the rail. A **planner**
 decomposes the question, dispatches
 specialized read-only **subagents** over the existing Logos tools, and streams
 back a synthesized answer:
@@ -1068,6 +1072,15 @@ first turn, gitignored, never in the default binary).
    graph excerpts** from the project to that endpoint. **Nothing is sent until
    you click _Start chatting_** to acknowledge — the acknowledgement persists, so
    you grant it once.
+
+   After you acknowledge, a **CHAT status band** takes the banner's place at the
+   top of the view. The configure state, the consent banner and the band share that
+   one slot, so the view always opens with a single verdict line, as Health and Wiki
+   do. The band names the **provider**, **endpoint host** and **model**, and the
+   turn's **budget tree**: tool calls, the per-subagent cap and replans. It stays
+   visible after your first message, so the budget is on screen during a long turn.
+   A value you have not configured is shown as not configured, never as an invented
+   default. The chat key never appears on the page.
 4. **Ask a question.** Type into the composer at the bottom and **Send**. The
    answer streams in over SSE. The planner's plan and every subagent step live in
    one **Activity** disclosure above the answer — a native fold that is **open
@@ -1090,7 +1103,13 @@ first turn, gitignored, never in the default binary).
    The synthesized **answer** then renders token-by-token as
    **GitHub-flavoured Markdown** — headings, lists,
    tables, and **fenced code blocks**, each block carrying a **copy** control (the
-   markdown is built as an escaped React tree, no raw HTML, CSP-clean). A
+   markdown is built as an escaped React tree, no raw HTML, CSP-clean). A table
+   renders in a bordered block, like a code block: an uppercase header over a
+   stronger underline, hairline row rules and a hover tint on each row. There is no
+   copy control on a table. A table wider than the column scrolls sideways inside
+   its own block, so the page never scrolls sideways and cells never break
+   mid-word. A table in an **Activity** step result looks and scrolls the same
+   way. A
    ` ```mermaid ` fence renders as an **interactive diagram** rather than source —
    see [Mermaid diagrams in chat](#mermaid-diagrams-in-chat) below. While a
    turn streams you can **Stop** it (the in-flight request is aborted — and is also
@@ -1098,8 +1117,8 @@ first turn, gitignored, never in the default binary).
    offers **Copy** (the whole answer) and **Regenerate** (drops the prior assistant
    turn and re-runs your message — never a duplicate). The turn runs under the
    budget tree ([configuration.md](configuration.md#the-budget-tree)) — the
-   tool-call ceiling, the per-subagent cap, and the replan limit are shown as a
-   note on the empty log.
+   tool-call ceiling, the per-subagent cap, and the replan limit are shown in the
+   CHAT status band (step 3). The empty log shows only a hint about what to ask.
 5. **Delete a conversation.** Each row in the history rail carries a **delete**
    affordance. Clicking it *arms* an inline confirmation naming what will go
    ("Delete this conversation and its memory?"); only **Delete** in that panel
