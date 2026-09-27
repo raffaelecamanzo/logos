@@ -62,7 +62,7 @@
 //! [S-011]: ../../../docs/planning/journal.md#s-011-resolution-engine
 //! [S-014]: ../../../docs/planning/journal.md#s-014-annotation-engine
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
@@ -70,11 +70,12 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
-use crate::config::{self, BindingPolicy, Config, ConfigGlobs, DocGlobs};
+use crate::config::{self, AdmissionAuthority, BindingPolicy, Config, ConfigGlobs, DocGlobs};
+use crate::extract::build_manifest::{self, ManifestFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
-    BatchWriter, NewConfigSource, NewNode, NewUnresolvedRef, StoreCounts,
-    CONFIG_FINGERPRINT_KEY, LAST_FULL_INDEX_AT_KEY,
+    BatchWriter, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewNode, NewUnresolvedRef,
+    StoreCounts, CONFIG_FINGERPRINT_KEY, LAST_FULL_INDEX_AT_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
@@ -149,7 +150,7 @@ pub fn index(
     // (FR-OB-01, CR-057) so they join the per-phase index breakdown (FR-OB-06)
     // — the same measurement that reaches telemetry is handed back here, never
     // a parallel timing path (NFR-OO-01).
-    let (candidates, discover_ms) = {
+    let (Discovery { candidates, build_manifests }, discover_ms) = {
         let (res, ms) = crate::observability::traced_timed(Tool::Discover, || {
             discover_candidates(root, config, registry, &mut warnings)
         });
@@ -211,6 +212,12 @@ pub fn index(
     let pending_fingerprint = admission_change(runtime, config)?;
     let admitted: HashSet<&str> = candidates.iter().map(|c| c.rel.as_str()).collect();
     purge_unadmitted(runtime, &admitted)?;
+
+    // Member-local build-manifest facts (S-462, CR-148, ADR-69 point 1): a full
+    // index re-derives them from every manifest this walk found — the same walk,
+    // so no second traversal. A member with no manifest and none recorded writes
+    // nothing (see `rebuild_build_manifests`).
+    rebuild_build_manifests(runtime, &build_manifests)?;
 
     // Pass 2 binds the freshly persisted reference ledger (S-011); the
     // framework pass promotes route/component matches against the resolved
@@ -525,6 +532,7 @@ pub fn sync(
     let mut seen: HashSet<String> = HashSet::new();
     let mut files_failed: Vec<String> = Vec::new();
     let mut module_descriptors: Vec<String> = Vec::new();
+    let mut build_manifests: Vec<String> = Vec::new();
 
     for path in paths {
         let Some(rel) = relativize(&canon_root, path) else {
@@ -542,6 +550,15 @@ pub fn sync(
         // re-binds them. The admission gate below then skips it as usual.
         if rel == "go.mod" || rel.ends_with("/go.mod") {
             module_descriptors.push(rel.clone());
+        }
+        // A build manifest (S-462) is recorded here, ahead of every gate, and
+        // reconciled after this loop by `sync_build_manifests`: a `pom.xml` is
+        // never a `files` row, so the admission gate below skips it as a
+        // non-source file — which is exactly right for the graph and says nothing
+        // about its artifact facts. A `build.gradle.kts` is both: Kotlin source
+        // below, and a manifest here.
+        if build_manifest::manifest_format(&rel).is_some() {
+            build_manifests.push(rel.clone());
         }
 
         let abs = canon_root.join(&rel);
@@ -726,6 +743,11 @@ pub fn sync(
         result.files_removed += 1;
     }
 
+    // Build-manifest facts (S-462): re-derived for the whole member when — and
+    // only when — a manifest this sync names was added, changed or removed.
+    let manifests_changed =
+        sync_build_manifests(runtime, &canon_root, &authority, &build_manifests, scope)?;
+
     // CR-015 incremental resolution change-set (part 2 of 2): union the names that
     // entered the changed files (this sync's freshly extracted facts) with those
     // that left them (`old_names`) and the changed paths, tokenized. The resolve
@@ -794,7 +816,9 @@ pub fn sync(
     // mutated the graph — at least one file added, modified, or removed. A no-op
     // sync (every requested path unchanged or skipped) leaves the graph, and so
     // the revision, untouched. Done after every pass committed, mirroring index.
-    if result.files_added + result.files_modified + result.files_removed > 0 {
+    // A manifest change moves the build facts, which later readers cache on
+    // this revision, so it advances it too (S-462).
+    if result.files_added + result.files_modified + result.files_removed > 0 || manifests_changed {
         advance_graph_revision(runtime)?;
     }
 
@@ -852,7 +876,10 @@ pub fn reconcile(
     }
 
     let mut warnings = Vec::new();
-    let candidates = discover_candidates(root, config, registry, &mut warnings)?;
+    let Discovery {
+        candidates,
+        build_manifests,
+    } = discover_candidates(root, config, registry, &mut warnings)?;
     let candidate_keys: HashSet<&str> = candidates.iter().map(|c| c.rel.as_str()).collect();
 
     // CR-004 / FR-SY-07: a config-narrowing change reconciles on the next
@@ -867,7 +894,16 @@ pub fn reconcile(
     // `sync` below — its Channel-B sweep removes any stored file gone from disk
     // (CR-052 / FR-SY-10, [FR-RC-01]) — so no stored-set pre-union is needed here.
     let pending_fingerprint = admission_change(runtime, config)?;
-    let paths: Vec<PathBuf> = candidates.iter().map(|c| PathBuf::from(&c.rel)).collect();
+    // The walk's build manifests ride the same full-walk sync (S-462): `sync`
+    // recognises them by basename, re-derives the member's facts if any was
+    // added, changed or removed, and otherwise leaves them untouched. A manifest
+    // that is also admitted as source (`build.gradle.kts` is Kotlin) is named
+    // twice here; `sync` de-duplicates a repeated path.
+    let paths: Vec<PathBuf> = candidates
+        .iter()
+        .chain(&build_manifests)
+        .map(|c| PathBuf::from(&c.rel))
+        .collect();
     let purge = if pending_fingerprint.is_some() {
         purge_unadmitted(runtime, &candidate_keys)?
     } else {
@@ -1372,7 +1408,7 @@ pub fn purge_on_config_change(
     // caught (not just `!admits_file` layer toggles). Discovery warnings are
     // immaterial to the prologue (best-effort, [ADR-11]) and dropped.
     let mut warnings = Vec::new();
-    let candidates = discover_candidates(root, config, registry, &mut warnings)?;
+    let candidates = discover_candidates(root, config, registry, &mut warnings)?.candidates;
     let admitted: HashSet<&str> = candidates.iter().map(|c| c.rel.as_str()).collect();
     // The navigation prologue deliberately defers inbound-ref demotion to the
     // next governance reconcile ([FR-SY-08], [NFR-PE-01]); take only the count
@@ -1421,14 +1457,28 @@ struct Candidate {
     rel: String,
 }
 
+/// What one discovery walk yields: the files admitted into the graph, and the
+/// build manifests the same walk passed over (S-462).
+struct Discovery {
+    candidates: Vec<Candidate>,
+    /// Every `pom.xml` / `build.gradle(.kts)` the walk admitted, whether or not
+    /// it is also a graph candidate — read into member-local artifact facts,
+    /// never into nodes.
+    build_manifests: Vec<Candidate>,
+}
+
 /// Discover the supported source files under `root`, honouring config and
 /// gitignore, and fold any oversize-skip notices into `warnings`.
+///
+/// The build manifests are collected from the **same** walk, so they obey the
+/// same gitignore, nested-`.git`, glob and size admission as source and cost no
+/// second traversal.
 fn discover_candidates(
     root: &Path,
     config: &Config,
     registry: &LanguageRegistry,
     warnings: &mut Vec<String>,
-) -> Result<Vec<Candidate>> {
+) -> Result<Discovery> {
     let report = config::discover(root, config)?;
     for notice in report.notices() {
         warnings.push(notice);
@@ -1461,11 +1511,18 @@ fn discover_candidates(
     let langs = config.language_allowlist();
 
     let mut candidates = Vec::new();
+    let mut build_manifests = Vec::new();
     for abs in report.files {
         let Ok(rel_path) = abs.strip_prefix(&canon_root) else {
             continue; // defence in depth — discovery already contains the walk
         };
         let rel = to_forward_slash(rel_path);
+        if build_manifest::manifest_format(&rel).is_some() {
+            build_manifests.push(Candidate {
+                abs: abs.clone(),
+                rel: rel.clone(),
+            });
+        }
         if admits_file(registry, doc_globs.as_ref(), config_globs.as_ref(), langs.as_ref(), &rel) {
             candidates.push(Candidate { abs, rel });
         }
@@ -1494,7 +1551,10 @@ fn discover_candidates(
     ) {
         warnings.push(diagnostic.to_string());
     }
-    Ok(candidates)
+    Ok(Discovery {
+        candidates,
+        build_manifests,
+    })
 }
 
 /// Read and hash each candidate, skipping (with a warning) any that cannot be
@@ -1827,6 +1887,170 @@ fn persist_file(
     Ok(PersistCounts {
         nodes: counts.nodes,
         edges: counts.edges,
+    })
+}
+
+/// One build manifest as read from disk: its text (or why it could not be
+/// read) and the blake3 hash an incremental sync compares.
+struct LoadedManifest {
+    rel: String,
+    text: Result<String, String>,
+    /// `None` exactly when the manifest could not be read.
+    hash: Option<String>,
+}
+
+impl LoadedManifest {
+    fn read(rel: &str, abs: &Path) -> Self {
+        match fs::read_to_string(abs) {
+            Ok(text) => Self {
+                rel: rel.to_string(),
+                hash: Some(hash_source(&text)),
+                text: Ok(text),
+            },
+            Err(e) => Self {
+                rel: rel.to_string(),
+                hash: None,
+                text: Err(format!("unreadable or non-UTF-8 ({e})")),
+            },
+        }
+    }
+}
+
+/// A full index's build-manifest pass (S-462, [CR-148] §3.2 A): read every
+/// manifest the walk found, derive the member's facts, and replace what the
+/// store recorded.
+///
+/// A member with no manifest and none recorded returns before any read or
+/// write — the path that keeps a manifest-less member byte-for-byte unaffected
+/// apart from the two empty tables migration 22 created.
+///
+/// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+fn rebuild_build_manifests(runtime: &Runtime, found: &[Candidate]) -> Result<()> {
+    if found.is_empty() && runtime.submit_read(|store| store.build_manifests())?.is_empty() {
+        return Ok(());
+    }
+    let loaded: Vec<LoadedManifest> = found
+        .iter()
+        .map(|c| LoadedManifest::read(&c.rel, &c.abs))
+        .collect();
+    persist_build_manifests(runtime, loaded)
+}
+
+/// An incremental sync's build-manifest pass (S-462): `requested` are the
+/// manifests among this sync's paths; returns whether the member's facts were
+/// rewritten.
+///
+/// The member's facts are re-derived **wholesale**, and only when a requested
+/// manifest was added, changed (its blake3 hash moved) or removed — or, on a
+/// [`SyncScope::FullWalk`], when a recorded manifest is no longer in the walk.
+/// Wholesale because a pom's inherited group and properties come from its
+/// in-member parents, so the unchanged manifests are re-read from disk too.
+/// A [`SyncScope::Partial`] sync that names no manifest does nothing here, not
+/// even a read: an ordinary source edit costs this pass nothing.
+///
+/// A manifest the walk-level [`AdmissionAuthority`] rejects (gitignored, under
+/// a nested `.git`, glob-excluded, oversize) is treated as absent, exactly as
+/// the discovery walk would treat it.
+fn sync_build_manifests(
+    runtime: &Runtime,
+    canon_root: &Path,
+    authority: &AdmissionAuthority,
+    requested: &[String],
+    scope: SyncScope,
+) -> Result<bool> {
+    if requested.is_empty() && scope == SyncScope::Partial {
+        return Ok(false);
+    }
+    let stored: HashMap<String, Option<String>> = runtime
+        .submit_read(|store| store.build_manifests())?
+        .into_iter()
+        .map(|m| (m.path, m.content_hash))
+        .collect();
+    if requested.is_empty() && stored.is_empty() {
+        return Ok(false);
+    }
+
+    let load = |rel: &str| -> Option<LoadedManifest> {
+        let abs = canon_root.join(rel);
+        (abs.is_file() && authority.admits_path(&abs)).then(|| LoadedManifest::read(rel, &abs))
+    };
+    let mut current: BTreeMap<String, LoadedManifest> = BTreeMap::new();
+    let mut changed = false;
+    for rel in requested {
+        match load(rel) {
+            Some(manifest) => {
+                changed |= stored.get(rel) != Some(&manifest.hash);
+                current.insert(rel.clone(), manifest);
+            }
+            None => changed |= stored.contains_key(rel),
+        }
+    }
+    let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
+    let unrequested = stored.keys().filter(|p| !requested_set.contains(p.as_str()));
+    match scope {
+        // The walk is the whole manifest set: a recorded one it did not find is gone.
+        SyncScope::FullWalk => changed |= unrequested.clone().next().is_some(),
+        SyncScope::Partial => {}
+    }
+    if !changed {
+        return Ok(false);
+    }
+    if scope == SyncScope::Partial {
+        for rel in unrequested {
+            if let Some(manifest) = load(rel) {
+                current.insert(rel.clone(), manifest);
+            }
+        }
+    }
+    persist_build_manifests(runtime, current.into_values().collect())?;
+    Ok(true)
+}
+
+/// Derive one member's build-manifest facts from its loaded manifests and write
+/// them wholesale, adapting [`ManifestFacts`] to the store's row shape here —
+/// where extraction and store meet — as [`persist_config_source`] does.
+fn persist_build_manifests(runtime: &Runtime, loaded: Vec<LoadedManifest>) -> Result<()> {
+    let readable: Vec<(&str, &str)> = loaded
+        .iter()
+        .filter_map(|m| m.text.as_ref().ok().map(|t| (m.rel.as_str(), t.as_str())))
+        .collect();
+    let mut facts = build_manifest::member_facts(&readable);
+    for m in &loaded {
+        if let (Err(detail), Some(format)) = (&m.text, build_manifest::manifest_format(&m.rel)) {
+            facts.push(ManifestFacts::unreadable(&m.rel, format, detail.clone()));
+        }
+    }
+    facts.sort_by(|a, b| a.path.cmp(&b.path));
+    let hashes: HashMap<String, Option<String>> =
+        loaded.into_iter().map(|m| (m.rel, m.hash)).collect();
+
+    runtime.submit_write(move |w| {
+        let rows: Vec<NewBuildManifest<'_>> = facts
+            .iter()
+            .map(|m| NewBuildManifest {
+                path: &m.path,
+                format: m.format.as_str(),
+                content_hash: hashes.get(&m.path).and_then(|h| h.as_deref()),
+                status: m.status.as_str(),
+                detail: m.detail.as_deref(),
+                artifacts: m
+                    .artifacts
+                    .iter()
+                    .map(|a| NewBuildArtifact {
+                        role: a.role.as_str(),
+                        kind: a.kind.map(|k| k.as_str()),
+                        group_id: a.group_id.as_deref(),
+                        artifact_id: a.artifact_id.as_deref(),
+                        version: a.version.as_deref(),
+                        scope: a.scope.as_deref(),
+                        project_path: a.project_path.as_deref(),
+                        resolution: a.resolution.as_str(),
+                        reason: a.reason.as_deref(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        w.replace_build_manifests(&rows)
     })
 }
 

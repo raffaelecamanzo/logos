@@ -54,6 +54,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (19, MIGRATION_19),
     (20, MIGRATION_20),
     (21, MIGRATION_21),
+    (22, MIGRATION_22),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2087,12 +2088,89 @@ ALTER TABLE check_run ADD COLUMN rules_present INTEGER CHECK (rules_present IN (
 ALTER TABLE check_run ADD COLUMN operation     TEXT CHECK (operation IN ('check','scan'));
 ";
 
+/// Migration 22 — the member-local **build-manifest facts** (S-462, [CR-148]
+/// §3.2 A, [ADR-69] decision point 1).
+///
+/// Two tables, the migration-19 shape: a manifest, and the artifact facts it
+/// yields. `build_manifests` holds one row per Maven `pom.xml` or Gradle
+/// `build.gradle(.kts)` the discovery walk found — **read or not**, because the
+/// census reports "files read, of manifests found" and a manifest that failed
+/// to parse must stay in the denominator. `build_artifacts` holds what each read
+/// manifest proves: the artifact it produces and every artifact it references,
+/// each with its kind, declared scope and whether its coordinates resolved
+/// ([`crate::extract::build_manifest`]).
+///
+/// Keyed by **path**, not by `files.id`. A `pom.xml` has no grammar and is never
+/// a `files` row; admitting it there would add a file, and a LOC total, to every
+/// Java member's index. The manifest's own `content_hash` is what an incremental
+/// sync compares, exactly as `files.content_hash` is for source.
+///
+/// The CHECKs pin the vocabulary and its two pairings in the schema: a produced
+/// fact carries no reference kind and a reference always carries one; a
+/// resolved fact carries no reason and an unresolved one always does. A caller
+/// cannot store a refusal without saying why.
+///
+/// **Purely additive**: two `CREATE TABLE`s and one index. No table is dropped,
+/// rebuilt or copied, so `nodes`, `edges`, `shingles` and the external-content
+/// `nodes_fts` index are byte-for-byte unaffected and an existing store upgrades
+/// in place with no re-index ([FR-DB-04], [NFR-MA-06]) — asserted on a populated
+/// store by
+/// `migration_22_adds_the_build_manifest_tables_preserving_the_graph_byte_for_byte`
+/// in [`super::migrate`]. A member with no build manifest keeps both tables
+/// empty for ever.
+///
+/// [ADR-69]: ../../../../docs/specs/architecture/decisions/ADR-69.md
+/// [CR-148]: ../../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_22: &str = "\
+-- build_manifests: one row per build manifest the walk found, read or not
+-- (the census denominator is manifests FOUND). content_hash is NULL only for a
+-- manifest that could not be read; detail says why a manifest yielded no facts
+-- and is NULL exactly when it was read.
+CREATE TABLE build_manifests (
+    id           INTEGER PRIMARY KEY,
+    path         TEXT NOT NULL UNIQUE,
+    format       TEXT NOT NULL CHECK (format IN ('maven','gradle')),
+    content_hash TEXT,
+    status       TEXT NOT NULL CHECK (status IN ('read','malformed','unreadable')),
+    detail       TEXT,
+    CHECK ((status = 'read') = (detail IS NULL))
+) STRICT;
+
+-- build_artifacts: what one manifest produces and references. group_id /
+-- artifact_id / version hold the RESOLVED value, or the declared text verbatim
+-- when it did not resolve -- resolution and reason, never the text, say which.
+-- A Gradle project(':x') reference names a project_path and no coordinate.
+-- scope is as declared (NULL = undeclared, never defaulted to compile).
+CREATE TABLE build_artifacts (
+    id           INTEGER PRIMARY KEY,
+    manifest_id  INTEGER NOT NULL REFERENCES build_manifests(id) ON DELETE CASCADE,
+    role         TEXT NOT NULL CHECK (role IN ('produced','referenced')),
+    kind         TEXT CHECK (kind IN ('parent','dependency','managed','bom-import')),
+    group_id     TEXT,
+    artifact_id  TEXT,
+    version      TEXT,
+    scope        TEXT,
+    project_path TEXT,
+    resolution   TEXT NOT NULL CHECK (resolution IN ('resolved','version-refused','refused')),
+    reason       TEXT,
+    CHECK ((role = 'produced') = (kind IS NULL)),
+    CHECK ((resolution = 'resolved') = (reason IS NULL))
+) STRICT;
+
+-- The cascade's lookup: replacing a member's facts deletes its manifests, and
+-- each delete finds its artifacts through this index. Coordinates are NOT
+-- indexed: the workspace join reads every row of a member once, in memory.
+CREATE INDEX idx_build_artifacts_manifest ON build_artifacts(manifest_id);
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
-        MIGRATION_20, MIGRATION_21, MIGRATION_3, MIGRATION_4, MIGRATION_8,
+        MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_3, MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, RefForm};
 
@@ -3176,6 +3254,73 @@ mod tests {
             assert!(
                 !MIGRATION_21.contains(untouched),
                 "migration 21 must not mention `{untouched}` (additive upgrade in place)"
+            );
+        }
+    }
+
+    /// Migration 22's vocabulary is exactly the build-manifest reader's (S-462,
+    /// [CR-148] §3.2 A) — the token lists of its CHECKs equal the `as_str` of
+    /// every variant, in both directions — and the migration is purely additive.
+    ///
+    /// The reader and the schema spell the same enumerations twice; this is the
+    /// guard that they cannot drift, the migration-17 discriminant contract's
+    /// shape for string vocabularies. The runtime half — a populated store
+    /// crossing the boundary byte-for-byte — is
+    /// `migration_22_adds_the_build_manifest_tables_preserving_the_graph_byte_for_byte`
+    /// in `super::migrate`.
+    ///
+    /// [CR-148]: ../../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+    #[test]
+    fn migration_22_pins_the_build_manifest_vocabulary_and_is_purely_additive() {
+        use crate::extract::build_manifest::{
+            ArtifactRole, ManifestFormat, ManifestStatus, ReferenceKind, Resolution,
+        };
+        fn tokens(sql: &str, column: &str) -> Vec<String> {
+            let marker = format!("{column} IN (");
+            let (idx, _) = sql
+                .match_indices(&marker)
+                .next()
+                .unwrap_or_else(|| panic!("a CHECK on {column}"));
+            let tail = &sql[idx + marker.len()..];
+            tail[..tail.find(')').expect("closing paren")]
+                .split(',')
+                .map(|t| t.trim().trim_matches('\'').to_string())
+                .collect()
+        }
+        let expect = |column: &str, model: &[&str]| {
+            assert_eq!(
+                tokens(MIGRATION_22, column),
+                model.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                "migration 22's {column} CHECK must equal the reader's vocabulary"
+            );
+        };
+        expect("format", &[ManifestFormat::Maven.as_str(), ManifestFormat::Gradle.as_str()]);
+        expect(
+            "status",
+            &[ManifestStatus::Read, ManifestStatus::Malformed, ManifestStatus::Unreadable].map(ManifestStatus::as_str),
+        );
+        expect("role", &[ArtifactRole::Produced.as_str(), ArtifactRole::Referenced.as_str()]);
+        expect(
+            "kind",
+            &[ReferenceKind::Parent, ReferenceKind::Dependency, ReferenceKind::Managed, ReferenceKind::BomImport]
+                .map(ReferenceKind::as_str),
+        );
+        expect(
+            "resolution",
+            &[Resolution::Resolved, Resolution::VersionRefused, Resolution::Refused].map(Resolution::as_str),
+        );
+
+        assert_eq!(MIGRATION_22.matches("CREATE TABLE").count(), 2, "exactly two new tables");
+        for forbidden in ["DROP ", "ALTER TABLE", "INSERT INTO", "UPDATE "] {
+            assert!(
+                !MIGRATION_22.contains(forbidden),
+                "migration 22 must be purely additive — found `{forbidden}` (NFR-MA-06)"
+            );
+        }
+        for untouched in ["nodes", "edges", "shingles", "unresolved_refs", "files"] {
+            assert!(
+                !MIGRATION_22.contains(untouched),
+                "migration 22 must not mention `{untouched}` (additive upgrade in place)"
             );
         }
     }

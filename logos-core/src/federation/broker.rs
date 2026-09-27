@@ -766,9 +766,10 @@ mod tests {
     /// separate migrations — the first-class-topic promotion this arm precedes
     /// ([S-255], [FR-WS-11], migration 17), CR-080's relation-aware ledger key
     /// ([S-290], migration 18), CR-121's configuration-corpus tables (S-380,
-    /// migration 19), CR-096's check-run marker (S-313, migration 20) and
-    /// CR-140's evaluated set on that marker (S-437, migration 21) — not the
-    /// ledger-only binding under test here.
+    /// migration 19), CR-096's check-run marker (S-313, migration 20),
+    /// CR-140's evaluated set on that marker (S-437, migration 21) and CR-148's
+    /// build-manifest facts (S-462, migration 22) — not the ledger-only binding
+    /// under test here.
     ///
     /// [S-255]: ../../../../docs/planning/journal.md#s-255-migration-17-first-class-broker-topic-node-and-edge-kinds
     /// [S-290]: ../../../../docs/planning/journal.md#s-290-relation-aware-reference-ledger-dedup-for-broker-relays-migration-18
@@ -777,12 +778,12 @@ mod tests {
         let store = SqliteGraphStore::open_in_memory().expect("in-memory store opens");
         assert_eq!(
             store.schema_version().expect("read PRAGMA user_version"),
-            21,
+            22,
             "no migration is added by the ledger-only arm itself — user_version reflects \
              only the later, separate broker-kind widening (migration 17), the \
              relation-aware ledger key (migration 18), the configuration-corpus \
-             tables (migration 19), the check-run marker (migration 20) and its \
-             evaluated set (migration 21)"
+             tables (migration 19), the check-run marker (migration 20), its \
+             evaluated set (migration 21) and the build-manifest facts (migration 22)"
         );
     }
 }

@@ -1482,13 +1482,13 @@ fn health_reports_store_integrity_and_counts() {
         health.structural_ok && health.structural_faults.is_empty(),
         "a clean graph is structurally sound (CR-052, NFR-RA-13)"
     );
-    // Migration 21 (S-437, CR-140) widened the check-run marker with the
-    // evaluated set, following migration 20's (S-313, CR-096) creation of it.
-    // This assertion tracks the latest applied migration — the store reports 21
+    // Migration 22 (S-462, CR-148) added the member-local build-manifest
+    // facts, after migration 21 (S-437, CR-140) widened the check-run marker.
+    // This assertion tracks the latest applied migration — the store reports 22
     // once fully migrated (`federation::broker`'s
     // `the_broker_arm_introduces_no_schema_migration` and
-    // `graph_store::tests`'s three version pins carry the same number).
-    assert_eq!(health.schema_version, 21, "migration 21 applied");
+    // `graph_store::tests`'s four version-pinning tests carry the same number).
+    assert_eq!(health.schema_version, 22, "migration 22 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);

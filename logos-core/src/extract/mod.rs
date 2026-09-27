@@ -50,6 +50,12 @@ pub mod doc;
 // ConfigSection tree here (the third plugin class beside code and docs), instead
 // of via the code `symbols` query.
 pub mod config;
+// Build manifests → member-local artifact facts (S-462, CR-148, ADR-69 point 1):
+// Maven `pom.xml` and Gradle `build.gradle(.kts)` read into the artifacts a
+// member produces and references. Not a grammar plugin — a manifest yields no
+// node — so the pipeline drives it beside extraction rather than through it.
+// PUBLIC so the reference-workspace census reads the product's own reader.
+pub mod build_manifest;
 // `pub(crate)`: the framework pass (resolve::framework, S-015) canonicalises
 // captured handler paths and unquotes captured route-path literals with the
 // same helpers extraction uses, so the two passes can never disagree on what
