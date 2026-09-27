@@ -861,3 +861,21 @@ fn a_key_that_resolves_to_empty_is_refused_but_an_empty_version_part_is_not() {
     assert!(deps[0].reason.as_deref().unwrap().contains("resolves to an empty value"), "{:?}", deps[0].reason);
     assert_eq!((deps[1].version.as_deref(), deps[1].resolution), (Some("1.0"), Resolution::Resolved));
 }
+
+/// `${project.parent.version}` on a `<parent>` that declares no version is
+/// refused — not resolved to an empty string.
+#[test]
+fn a_parent_field_the_parent_does_not_declare_is_refused() {
+    let pom = r#"<project>
+        <parent><groupId>com.example</groupId><artifactId>ext</artifactId></parent>
+        <artifactId>svc</artifactId>
+        <dependencies><dependency>
+            <groupId>com.example</groupId><artifactId>x</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency></dependencies>
+    </project>"#;
+    let facts = member_facts(&[("pom.xml", pom)]);
+    let dep = refs(&facts[0], ReferenceKind::Dependency)[0].clone();
+    assert_eq!(dep.resolution, Resolution::VersionRefused);
+    assert!(dep.reason.as_deref().unwrap().contains("does not declare it"), "{:?}", dep.reason);
+}
