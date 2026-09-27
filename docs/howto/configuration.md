@@ -509,8 +509,8 @@ What this admits, and what it does not:
   refused exactly as before, so a read root is reachable only through a symlink
   inside the project that resolves into it — never by naming it.
 - **Only the declared directories.** A symlink to any other directory is still a
-  sandbox escape and still ends the turn ("resolves outside the project root and
-  every declared read root"). Containment is by path component, so
+  sandbox escape and still ends the turn ("resolves outside the project root").
+  Containment is by path component, so
   `../logos-docs-private` is not under `../logos-docs`.
 - **`grep` and `glob` see them too**, even when the symlink is git-ignored (this
   repo's `/docs/planning` is). The walks follow a symlink only when its target is

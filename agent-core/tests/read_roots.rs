@@ -141,6 +141,11 @@ fn without_read_roots_a_symlink_into_the_docs_repo_is_still_an_escape() {
         .expect_err("no read roots declared ⇒ today's refusal");
     assert!(matches!(err, SandboxError::Escape(_)), "got {err:?}");
     assert!(err.is_containment_refusal());
+    // Byte-identical to the pre-read-roots refusal the user already knows.
+    assert_eq!(
+        err.to_string(),
+        r#"path "docs/planning/sprint-log.md" resolves outside the project root"#
+    );
 }
 
 #[tokio::test]

@@ -74,7 +74,9 @@ pub enum SandboxError {
 
     /// The resolved (canonical) path lies outside the project root — e.g. a
     /// symlink pointing out of the tree — and outside every declared read root.
-    #[error("path {0:?} resolves outside the project root and every declared read root")]
+    /// The message is the pre-read-roots text, byte-for-byte, so a project that
+    /// declares none sees exactly what it saw before.
+    #[error("path {0:?} resolves outside the project root")]
     Escape(String),
 
     /// The path does not exist within the project.
