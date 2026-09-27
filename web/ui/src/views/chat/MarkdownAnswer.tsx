@@ -13,6 +13,12 @@
  * same-origin bundle (S-302, [FR-UI-32]). This renderer is shared by the finalized
  * answer body AND the S-301 Activity step results, so diagrams appear in both.
  *
+ * A GFM table (S-311, [FR-UI-31], [FR-UI-32]) renders inside a scroll wrapper that
+ * shares the fenced code block's chrome (`.codeBlock, .mermaidBlock, .tableWrapper`
+ * in `Chat.module.css`) so a table wider than the column scrolls on its own axis
+ * without widening the transcript; the table itself takes the §5 house table voice
+ * from `.markdown table/th/td`, not a class here — same renderer, same both surfaces.
+ *
  * Every value is a design token (`Chat.module.css`); nothing here injects a style
  * tag, so the byte-identical self-only CSP holds ([NFR-SE-06]).
  */
@@ -37,6 +43,20 @@ function CodeBlock({ language, code }: { language: string | undefined; code: str
       <pre className={styles.pre}>
         <code>{code}</code>
       </pre>
+    </div>
+  );
+}
+
+/** A GFM table: wrapped in a scroll box (`min-width: 0`, `overflow-x: auto` in
+ *  Chat.module.css) so a table wider than the conversation column scrolls inside
+ *  its own wrapper while the column and the page do not (S-311, [FR-UI-31]). The
+ *  house voice (header, row rules, hover) is declared entirely in the stylesheet
+ *  against `.markdown table/th/td` — no class or content inspection here, so no
+ *  column is re-typed from its content. */
+function TableRenderer({ children }: { children?: ReactNode }) {
+  return (
+    <div className={styles.tableWrapper}>
+      <table>{children}</table>
     </div>
   );
 }
@@ -72,6 +92,7 @@ export function MarkdownAnswer({ text }: { text: string }) {
         components={{
           pre: ({ children }) => <>{children}</>,
           code: CodeRenderer,
+          table: TableRenderer,
           a: ({ href, children }) => (
             <a href={href} target="_blank" rel="noreferrer noopener">
               {children}

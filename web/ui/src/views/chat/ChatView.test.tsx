@@ -521,6 +521,42 @@ describe("ChatView — a streamed turn", () => {
     expect(fold.querySelector(".mermaid")?.getAttribute("data-processed")).toBe("true");
   });
 
+  it("renders a GFM table as a real <table> inside the scroll wrapper, on both surfaces (S-311, FR-UI-31/32)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    const table = "| A | B |\n| --- | --- |\n| 1 | 2 |";
+    mockStreamTurn.mockResolvedValue(
+      sseResponse([
+        'event: step_started\ndata: {"index":0,"role":"source_reader","instruction":"read"}\n\n',
+        `event: step_observed\ndata: {"index":0,"role":"source_reader","summary":${JSON.stringify(table)}}\n\n`,
+        `event: final_answer\ndata: {"answer":${JSON.stringify(table)}}\n\n`,
+      ]),
+    );
+    render(<ChatView />);
+    await acceptConsent(user);
+    await ask(user, "tabulate it");
+
+    // The finalized answer body: a real <table> (semantic markup, not a div-grid),
+    // mounted inside the shared `.tableWrapper` scroll box rather than bare
+    // user-agent defaults.
+    await waitFor(() => {
+      const wrapper = document.querySelector(`.${chatStyles.tableWrapper}`);
+      expect(wrapper).not.toBeNull();
+      expect(wrapper!.querySelector("table")).not.toBeNull();
+    });
+
+    // The SAME renderer draws the Activity step result's table on the OTHER
+    // surface — scoped to the fold, which a native <details> keeps its children
+    // mounted even while collapsed, so querying the whole document would pass
+    // without the table ever reaching this surface.
+    const fold = screen.getByText("Activity").closest("details")!;
+    await user.click(screen.getByText("Activity"));
+    expect(fold.open).toBe(true);
+    const foldWrapper = fold.querySelector(`.${chatStyles.tableWrapper}`);
+    expect(foldWrapper).not.toBeNull();
+    expect(foldWrapper!.querySelector("table")).not.toBeNull();
+  });
+
   it("renders an honest halt, never a fabricated answer", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
