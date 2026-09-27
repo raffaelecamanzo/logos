@@ -9,6 +9,8 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+## [1.4.27] — 2026-09-27
+
 ### Changed
 
 - **The Logos mark and wordmark in the web header are 1.4 times larger** (mark 28px →
