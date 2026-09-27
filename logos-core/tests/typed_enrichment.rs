@@ -447,8 +447,11 @@ fn dogfood_promotes_typed_nodes_on_logos_own_docs() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = crate_root.parent().expect("workspace root");
     let docs = repo_root.join("docs");
-    if !docs.is_dir() {
-        eprintln!("no docs/ tree to dogfood; skipping");
+    // The swe-skills corpus is `docs/specs` (requirements, ADRs) plus
+    // `docs/planning` (the journal). The public checkout ships `docs/howto` only,
+    // so `docs/` alone existing is not enough — skip unless both are present.
+    if !docs.join("specs").is_dir() || !docs.join("planning").is_dir() {
+        eprintln!("no swe-skills docs corpus (docs/specs + docs/planning) to dogfood; skipping");
         return;
     }
     copy_tree(repo_root, &docs, tmp.path(), &["md", "markdown"]);
