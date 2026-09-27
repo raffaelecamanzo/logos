@@ -9,6 +9,13 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 79, hotfix round 2.
+
+### Changed
+
+- **The web header shows the Logos mark and wordmark only.** The "code intelligence"
+  subtitle after the wordmark is removed.
+
 ## [1.4.25] — 2026-09-27
 
 Sprint 79, hotfix round 1.
