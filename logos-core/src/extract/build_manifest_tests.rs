@@ -801,3 +801,24 @@ fn a_wide_fan_out_of_empty_properties_is_refused_by_the_reference_budget() {
     let reason = produced_version_refusal(&pom);
     assert!(reason.contains("more than 256 property references"), "{reason}");
 }
+
+/// A multi-byte character right before a `{` — here inside a `'''` string,
+/// whose body the line reader scans as code — once panicked slicing inside it,
+/// on the indexing thread, for every later index of the member.
+#[test]
+fn a_multi_byte_character_before_a_brace_does_not_panic_the_gradle_reader() {
+    let script = "description = '''\nsee the docs—here {\n'''\n}\ngroup = 'com.example'\n\
+                  dependencies {\n  implementation 'a:b:1'\n}\n";
+    let facts = member_facts(&[("build.gradle", script)]);
+    let refs: Vec<_> = facts[0]
+        .artifacts
+        .iter()
+        .filter(|a| a.role == ArtifactRole::Referenced)
+        .map(|a| (a.group_id.as_deref(), a.artifact_id.as_deref()))
+        .collect();
+    assert_eq!(refs, vec![(Some("a"), Some("b"))]);
+    for name in ["§{", "→ {", "x✔{", "“name”{"] {
+        let facts = member_facts(&[("build.gradle", name)]);
+        assert_eq!(facts[0].status, ManifestStatus::Read, "{name}");
+    }
+}

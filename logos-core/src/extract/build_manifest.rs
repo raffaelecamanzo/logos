@@ -980,9 +980,15 @@ fn gradle_facts(text: &str) -> Vec<ArtifactFact> {
 /// `dependencies`), or `""` when there is none (`) {`).
 fn block_name(segment: &str) -> String {
     let trimmed = segment.trim_end();
+    // Walk back over identifier characters by char, not byte: the character
+    // before the name may be multi-byte (`—{`), and a byte offset past it would
+    // slice inside it.
     let start = trimmed
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map_or(0, |i| i + 1);
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| c.is_alphanumeric() || c == '_')
+        .last()
+        .map_or(trimmed.len(), |(i, _)| i);
     trimmed[start..].to_string()
 }
 
