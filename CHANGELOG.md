@@ -9,6 +9,36 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 79.
+
+### Changed
+
+- **The Chat tab uses the application's two-pane layout.** The conversation now sits
+  inside the shared card with its red top edge, beside a history rail that runs the full
+  height of the view, on the same rail track and column gap as the Wiki tab. The centred
+  reading column that left a 172px gap beside the rail at 1600px (652px at 2560px) is gone.
+  A full-size, iconed **+ New chat** stays pinned above the scrolling conversation list
+  (CR-092).
+
+### Added
+
+- **A persistent CHAT status band.** After you acknowledge the consent banner, the band
+  takes its place at the top of the view. It names the provider, endpoint host and model,
+  and the turn's budget tree (tool calls, per-subagent cap, replans), and stays visible
+  after the first message. A value you have not configured is shown as not configured,
+  and the key never appears (CR-092, FR-UI-33).
+- **Chat answer tables render as bordered blocks.** A table in an answer or an Activity
+  step result uses the code block's border and radius, with an uppercase header over a
+  stronger underline, hairline row rules and a row hover tint. A table wider than the
+  column scrolls sideways inside its block instead of breaking cells mid-word (CR-094).
+
+### Fixed
+
+- **The Statistics "By surface" caption no longer claims dashboard activity is
+  excluded.** It states the rule the figures apply: the tab's own `stats` request and the
+  shell's `status` readout are excluded per event, and a graph query issued through the
+  dashboard counts (CR-146).
+
 ## [1.4.23] — 2026-09-26
 
 Sprint 78.
