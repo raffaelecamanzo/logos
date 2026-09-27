@@ -9,6 +9,7 @@ import { useTheme } from "../../theme/theme.ts";
 // reader test asserts the reader *invokes* it once the safe HTML has mounted.
 vi.mock("./mermaid.ts", () => ({
   renderMermaidIn: vi.fn(() => Promise.resolve()),
+  unadoptMermaidStyleFor: vi.fn(),
   VENDORED_MERMAID_URL: "/assets/vendor/mermaid.min.js",
 }));
 

@@ -186,3 +186,210 @@ describe("renderMermaidIn initializes Mermaid with theme-matched themeVariables 
     expect(mockInit).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── Constructable stylesheet adopt/unadopt lifecycle (HF-3) ───────────────────
+//
+// jsdom (this project's test environment) implements the `CSSStyleSheet`
+// constructor but not `#replaceSync` or `document.adoptedStyleSheets` — confirmed
+// against the installed jsdom 25.0.1. The polyfills below patch in exactly the
+// two missing pieces onto the REAL jsdom classes, so these tests exercise
+// `renderMermaidIn`'s actual adopt/unadopt code path (including its
+// `typeof CSSStyleSheet === "undefined"` feature-detect finding a real
+// constructor) rather than a fully mocked stand-in.
+//
+// Every container is appended to `document.body` before rendering (and cleared
+// in `afterEach`): `renderMermaidIn` gates adoption on `node.isConnected`
+// (review-fix, HF-3), so an unattached `document.createElement` container would
+// silently skip adoption for a reason that has nothing to do with what each test
+// claims to check.
+
+describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (CSSStyleSheet.prototype as any).replaceSync = function (this: { cssText?: string }, css: string) {
+      this.cssText = css;
+    };
+    Object.defineProperty(document, "adoptedStyleSheets", {
+      value: [],
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (CSSStyleSheet.prototype as any).replaceSync;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (document as any).adoptedStyleSheets;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).mermaid;
+    document.body.innerHTML = "";
+    setThemeAttr(null);
+  });
+
+  /**
+   * Installs a `.run` mock that hands each `nodes` entry its own scoped `<style>`,
+   * mirroring the vendored bundle's real behaviour (a `<style>` as the drawn
+   * `<svg>`'s first child, its rules prefixed by that diagram's own `#mermaid-N`
+   * id). Returns a `setStyle` setter rather than taking a fixed style up front,
+   * because `renderMermaidIn` memoizes the loaded bundle reference for the life of
+   * the module (`loadMermaid`'s `loadPromise`) — a test that re-renders more than
+   * once per module instance must vary this SAME mock's output across calls, not
+   * install a second `window.mermaid` object that the already-resolved
+   * `loadPromise` would never pick up.
+   */
+  function mockMermaidDraw(initial: (index: number) => string) {
+    let styleFor = initial;
+    const run = vi.fn(async (opts: { nodes?: ArrayLike<Element> }) => {
+      const nodes = opts.nodes ? Array.from(opts.nodes) : [];
+      nodes.forEach((node, i) => {
+        node.innerHTML = `<svg><style>${styleFor(i)}</style><rect /></svg>`;
+        node.setAttribute("data-processed", "true");
+      });
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).mermaid = { initialize: vi.fn(), run };
+    return { run, setStyle: (fn: (index: number) => string) => (styleFor = fn) };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function adopted(): any[] {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (document as any).adoptedStyleSheets;
+  }
+
+  it("adopts the rendered diagram's <style> text as a constructable stylesheet", async () => {
+    mockMermaidDraw(() => "#mermaid-1 .node rect{fill:#123456}");
+    const { renderMermaidIn: fresh } = await import("./mermaid.ts");
+    const container = document.createElement("div");
+    container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
+
+    await fresh(container);
+
+    expect(adopted()).toHaveLength(1);
+    expect(adopted()[0].cssText).toBe("#mermaid-1 .node rect{fill:#123456}");
+  });
+
+  it("keeps each diagram's sheet independent when several render in one container", async () => {
+    mockMermaidDraw((i) => `#mermaid-${i} .node rect{fill:#${i}${i}${i}${i}${i}${i}}`);
+    const { renderMermaidIn: fresh } = await import("./mermaid.ts");
+    const container = document.createElement("div");
+    container.innerHTML =
+      '<div class="mermaid">graph TD\nA-->B</div><div class="mermaid">graph TD\nC-->D</div>';
+    document.body.appendChild(container);
+
+    await fresh(container);
+
+    expect(adopted()).toHaveLength(2);
+    const cssTexts = adopted().map((s) => s.cssText);
+    expect(cssTexts).toContain("#mermaid-0 .node rect{fill:#000000}");
+    expect(cssTexts).toContain("#mermaid-1 .node rect{fill:#111111}");
+  });
+
+  it("replaces (never stacks) the sheet when the same element re-renders", async () => {
+    const mock = mockMermaidDraw(() => "#mermaid-1 .node rect{fill:#111111}");
+    const { renderMermaidIn: fresh } = await import("./mermaid.ts");
+    const container = document.createElement("div");
+    container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
+
+    await fresh(container);
+    expect(adopted()).toHaveLength(1);
+
+    // Simulate a theme-toggle re-render: same element, freshly generated CSS.
+    container.querySelectorAll(".mermaid").forEach((el) => el.removeAttribute("data-processed"));
+    mock.setStyle(() => "#mermaid-1 .node rect{fill:#222222}");
+    await fresh(container);
+
+    expect(adopted()).toHaveLength(1);
+    expect(adopted()[0].cssText).toBe("#mermaid-1 .node rect{fill:#222222}");
+  });
+
+  it("unadoptMermaidStyleFor removes exactly that element's sheet, leaving others", async () => {
+    const mock = mockMermaidDraw(() => "#mermaid-1 .node rect{fill:#123456}");
+    const { renderMermaidIn: fresh, unadoptMermaidStyleFor } = await import("./mermaid.ts");
+    const containerA = document.createElement("div");
+    containerA.innerHTML = '<div class="mermaid">graph TD\nA-->B</div>';
+    const containerB = document.createElement("div");
+    containerB.innerHTML = '<div class="mermaid">graph TD\nC-->D</div>';
+    document.body.appendChild(containerA);
+    document.body.appendChild(containerB);
+
+    await fresh(containerA);
+    mock.setStyle(() => "#mermaid-2 .node rect{fill:#654321}");
+    await fresh(containerB);
+    expect(adopted()).toHaveLength(2);
+
+    unadoptMermaidStyleFor(containerA.querySelector(".mermaid")!);
+
+    expect(adopted()).toHaveLength(1);
+    expect(adopted()[0].cssText).toBe("#mermaid-2 .node rect{fill:#654321}");
+  });
+
+  it("unadoptMermaidStyleFor on an element with no adopted sheet is a no-op", async () => {
+    const { unadoptMermaidStyleFor } = await import("./mermaid.ts");
+    expect(() => unadoptMermaidStyleFor(document.createElement("div"))).not.toThrow();
+    expect(adopted()).toHaveLength(0);
+  });
+
+  it("does not adopt a stylesheet when Mermaid draws no <style> (nothing to copy)", async () => {
+    const run = vi.fn(async (opts: { nodes?: ArrayLike<Element> }) => {
+      const nodes = opts.nodes ? Array.from(opts.nodes) : [];
+      nodes.forEach((node) => {
+        node.innerHTML = "<svg><rect /></svg>";
+        node.setAttribute("data-processed", "true");
+      });
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).mermaid = { initialize: vi.fn(), run };
+
+    const { renderMermaidIn: fresh } = await import("./mermaid.ts");
+    const container = document.createElement("div");
+    container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
+
+    await fresh(container);
+
+    expect(adopted()).toHaveLength(0);
+  });
+
+  it("does not adopt a stylesheet for a target detached before the async render resolved (review-fix, HF-3)", async () => {
+    // `mermaid.run` is a real async boundary in production (the vendored bundle's
+    // own layout/draw work, or — on the session's first diagram — the bundle
+    // fetch inside `loadMermaid()`). Model that with a deferred promise this test
+    // controls, resolved from OUTSIDE the mock so this test never has to guess
+    // how many microtask ticks pass before `run` is actually invoked: whenever it
+    // is, `runPromise` may already be resolved and its `.then()` still fires.
+    let resolveRun!: () => void;
+    const runPromise = new Promise<void>((resolve) => {
+      resolveRun = resolve;
+    });
+    const run = vi.fn((opts: { nodes?: ArrayLike<Element> }) =>
+      runPromise.then(() => {
+        const nodes = opts.nodes ? Array.from(opts.nodes) : [];
+        nodes.forEach((node) => {
+          node.innerHTML = `<svg><style>#mermaid-1 .node rect{fill:#123456}</style></svg>`;
+          node.setAttribute("data-processed", "true");
+        });
+      }),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).mermaid = { initialize: vi.fn(), run };
+
+    const { renderMermaidIn: fresh } = await import("./mermaid.ts");
+    const container = document.createElement("div");
+    container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
+
+    const pending = fresh(container);
+    // Simulate the owning component unmounting (or the Wiki page/theme
+    // re-rendering) while `mermaid.run` is still in flight.
+    container.remove();
+    resolveRun();
+    await pending;
+
+    expect(adopted()).toHaveLength(0);
+  });
+});

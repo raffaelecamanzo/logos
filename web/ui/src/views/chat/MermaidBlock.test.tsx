@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../wiki/mermaid.ts", () => ({
   renderMermaidIn: vi.fn(() => Promise.resolve()),
+  unadoptMermaidStyleFor: vi.fn(),
   VENDORED_MERMAID_URL: "/assets/vendor/mermaid.min.js",
 }));
 

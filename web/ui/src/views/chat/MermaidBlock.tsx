@@ -43,7 +43,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 
 import { ThemeContext } from "../../theme/theme.ts";
-import { renderMermaidIn } from "../wiki/mermaid.ts";
+import { renderMermaidIn, unadoptMermaidStyleFor } from "../wiki/mermaid.ts";
 import styles from "./Chat.module.css";
 import { CopyControl } from "./CopyControl.tsx";
 
@@ -158,6 +158,11 @@ export function MermaidBlock({ code }: { code: string }) {
     return () => {
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
+      // This target is either unmounting for good (component unmount, or the
+      // "Source" toggle swapping it out of the tree) or about to be re-seeded by
+      // the next effect run — either way its adopted stylesheet, if any, must not
+      // outlive it (HF-3).
+      unadoptMermaidStyleFor(target);
     };
   }, [code, source, theme]);
 
