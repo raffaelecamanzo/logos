@@ -384,3 +384,23 @@ fn a_gitignored_manifest_named_by_a_sync_is_treated_as_absent() {
         "a manifest the walk would no longer admit leaves the facts, as its source would"
     );
 }
+
+/// A full index is authoritative: when the walk finds no manifest any more, the
+/// facts an earlier index recorded are cleared, not left standing.
+#[test]
+fn a_re_index_after_every_manifest_is_deleted_clears_the_facts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    member(root);
+    let engine = Engine::start(root).expect("engine starts");
+    engine.index();
+    assert_eq!(manifests(engine.runtime().unwrap()).len(), 2);
+
+    fs::remove_file(root.join("pom.xml")).unwrap();
+    fs::remove_file(root.join("lifecycle-module/pom.xml")).unwrap();
+    engine.index();
+    assert!(
+        manifests(engine.runtime().unwrap()).is_empty(),
+        "a re-index that finds no manifest leaves none recorded"
+    );
+}
