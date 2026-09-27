@@ -9113,6 +9113,30 @@ mod tests {
         );
     }
 
+    /// Each declared kind is listed once with **its own member count** — two
+    /// mocks read `mock: 2`, the shape of the reference estate, where both
+    /// candidate members are mocks — beside the total of declared members.
+    #[test]
+    fn the_summary_counts_the_members_of_each_declared_kind() {
+        docs_workspace();
+        let cov = cross_service_coverage(
+            &registry_declaring(
+                &DOCS_WORKSPACE,
+                &[
+                    ("docs", MemberKind::Documentation),
+                    ("shop", MemberKind::Mock),
+                    ("web", MemberKind::Mock),
+                ],
+            )
+            .answer(),
+        );
+        assert_eq!(
+            cov.declared_apart.expect("declared").summary,
+            "2 of 4 contract-surface rows reported apart from 3 declared members \
+             (documentation: 1, mock: 2); the headline and spec_conformance_ratio exclude them"
+        );
+    }
+
     /// Only a declared member's **consumer** rows move. Its routes stay in the
     /// provider index, so a mock that serves an operation another member
     /// declares still ties that operation exactly as it did undeclared — the
