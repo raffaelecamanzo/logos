@@ -615,9 +615,14 @@ pub fn judge_declared(
     let excluded: BTreeSet<String> = kinds.keys().cloned().collect();
     let own: Vec<&Document> =
         documents.iter().filter(|d| d.implementation() == Implementation::Own).collect();
-    // The copy graph: every document that is not an own spec.
-    let pool: Vec<&Document> =
-        documents.iter().filter(|d| d.implementation() != Implementation::Own).collect();
+    // The copy graph: every document that is not an own spec — plus EVERY copy a
+    // declared documentation or mock member holds, served or not. A mock whose
+    // routes serve its spec is still a stand-in for the external it mocks, and
+    // the floor puts its copy in that external's group (ADR-68 point 5).
+    let pool: Vec<&Document> = documents
+        .iter()
+        .filter(|d| d.implementation() != Implementation::Own || kinds.contains_key(&d.member))
+        .collect();
     let keysets: Vec<&BTreeSet<OpKey>> = pool.iter().map(|d| &d.keys).collect();
     let component = external_components(&keysets);
     let mut copies: BTreeMap<usize, Vec<&Document>> = BTreeMap::new();
@@ -645,7 +650,9 @@ pub fn judge_declared(
                 out.unjudged.push((d.member.clone(), d.path.clone()));
                 continue;
             }
-            Implementation::Own => unreachable!("own specs are not in the pool"),
+            // Only a declared holder's served copy is in the pool as an own spec:
+            // it joins the copy graph and declares nothing.
+            Implementation::Own => continue,
             Implementation::Vendored => {}
         }
         let identity = resolve_identity(d, &own, &excluded);
@@ -2005,10 +2012,37 @@ mod tests {
         // The docs repo's copies are subtracted and enumerated, never counted.
         let docs = j.declared.pairs_of(Holder::Declared(Kind::Documentation));
         assert_eq!(docs.len(), 2, "docs holds an identity copy and an external copy: {docs:?}");
-        // The mock's own copy is an own spec (it serves it), so it is no pair at
-        // all — and, being declared, it cannot be the member PSS resolves to.
+        // The mock serves its copy, so it declares no pair — but the copy joins
+        // PSS's copy graph, and, being declared, the mock is never the member PSS
+        // resolves to.
         assert!(j.declared.pairs_of(Holder::Declared(Kind::Mock)).is_empty());
+        assert!(j.declared.externals.values().any(|(name, copies)| name == "PSS"
+            && copies.iter().any(|(m, _)| m == "pss-mock")));
         assert_eq!(j.candidates, set(&["docs", "pss-mock"]));
+    }
+
+    #[test]
+    fn a_served_mock_copy_joins_two_partial_copies_into_one_external() {
+        // Neither of facade's copies contains the other; the mock's full copy
+        // contains both, so they are one external and one pair.
+        let range = |a: usize, b: usize| -> Vec<(String, String)> {
+            (a..b).map(|i| ("GET".to_string(), format!("/prov/{i}"))).collect()
+        };
+        let mk = |member: &str, path: &str, ops: &[(String, String)], provided: usize| {
+            let refs: Vec<(&str, &str)> = ops.iter().map(|(m, t)| (m.as_str(), t.as_str())).collect();
+            doc(member, path, &refs, provided)
+        };
+        let c = Census {
+            runnable: set(&["facade"]),
+            kinds: [("pss-mock".to_string(), Kind::Mock)].into_iter().collect(),
+            documents: vec![
+                mk("facade", "a.yaml", &range(0, 10), 0),
+                mk("facade", "b.yaml", &range(5, 20), 0),
+                mk("pss-mock", "swagger.yaml", &range(0, 20), 20),
+            ],
+            ..Census::default()
+        };
+        assert_eq!(judge(&c).declared_pairs(), 1);
     }
 
     #[test]
