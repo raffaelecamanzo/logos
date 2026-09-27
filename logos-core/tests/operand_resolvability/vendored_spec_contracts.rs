@@ -47,9 +47,12 @@
 //!     private `route_key` over the public [`normalize_template`]. It is the one
 //!     hand-mirrored rule here, and it is fixture-pinned to the same key shape;
 //!   - an invocation row's composed path — the ledger target with each
-//!     placeholder replaced by the row's own evidence value ([`compose`]). The
-//!     bridge composes the same way through its private `identify`; a row whose
-//!     evidence diverges is left uncomposed and enumerated rather than guessed.
+//!     placeholder replaced by the row's own evidence value ([`compose`]). Every
+//!     placeholder KEY is read by the shipped [`placeholder_keys`], the function
+//!     the bridge derives the row's evidence keys through; only the substitution
+//!     is local, because the bridge's own composition (`identify`) is private. A
+//!     row whose evidence diverges is left uncomposed and enumerated, never
+//!     guessed.
 //!
 //! # The one framework rule, and the canonicalisation it inherits
 //!
@@ -88,7 +91,7 @@ use logos_core::federation::{
     MemberContracts, ProviderDisposition, ReferenceCoverage, RegistryMode, UnboundReason,
 };
 use logos_core::model::{ArtifactRelation, BridgeNamespace, BridgeRole, NodeKind};
-use logos_core::resolve::binding::Provenance;
+use logos_core::resolve::binding::{placeholder_keys, Provenance};
 use logos_core::resolve::route_template::normalize_template;
 use logos_core::Engine;
 
@@ -658,18 +661,11 @@ pub fn judge_declared(
 
 // ── Half 2: invocation → external ──────────────────────────────────────────
 
-/// The `${key}` placeholders of a template, keys only (a `:default` dropped).
-pub fn placeholders(template: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = template;
-    while let Some(start) = rest.find("${") {
-        let after = &rest[start + 2..];
-        let Some(end) = after.find('}') else { break };
-        let inner = &after[..end];
-        out.push(inner.split(':').next().unwrap_or(inner).to_string());
-        rest = &after[end + 1..];
-    }
-    out
+/// A template's canonical placeholder keys, as the product reads them — the
+/// shipped [`placeholder_keys`], the same function the bridge derives a row's
+/// evidence keys through, so the ledger join cannot compare two key rules.
+fn keys_of(template: &str) -> BTreeSet<String> {
+    placeholder_keys(template).unwrap_or_default().into_iter().collect()
 }
 
 /// Why an invocation row was not composed.
@@ -695,18 +691,26 @@ pub fn compose(
     evidence: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<(String, String), NotComposed> {
     let (method, template) = target.split_once(' ').ok_or(NotComposed::Malformed)?;
-    let mut path = template.to_string();
-    for key in placeholders(template) {
-        let values = evidence
-            .get(&canonical_key(&key))
-            .ok_or_else(|| NotComposed::MissingEvidence(key.clone()))?;
-        let [value] = values.iter().collect::<Vec<_>>()[..] else {
-            return Err(NotComposed::DivergentEvidence(key));
+    // Only the span boundaries are found here; each span's KEY is the product's
+    // reading of that span alone, so a nested or empty span — which the product
+    // refuses — refuses here too rather than inventing a key.
+    let mut path = String::new();
+    let mut rest = template;
+    while let Some(open) = rest.find("${") {
+        let close = open + rest[open..].find('}').ok_or(NotComposed::Malformed)?;
+        let span = &rest[open..=close];
+        let [key] = &placeholder_keys(span).unwrap_or_default()[..] else {
+            return Err(NotComposed::Malformed);
         };
-        let start = path.find("${").ok_or(NotComposed::Malformed)?;
-        let end = start + path[start..].find('}').ok_or(NotComposed::Malformed)?;
-        path.replace_range(start..=end, value);
+        let values = evidence.get(key).ok_or_else(|| NotComposed::MissingEvidence(key.clone()))?;
+        let [value] = values.iter().collect::<Vec<_>>()[..] else {
+            return Err(NotComposed::DivergentEvidence(key.clone()));
+        };
+        path.push_str(&rest[..open]);
+        path.push_str(value);
+        rest = &rest[close + 1..];
     }
+    path.push_str(rest);
     if method.is_empty() || !path.starts_with('/') {
         return Err(NotComposed::Malformed);
     }
@@ -721,10 +725,7 @@ pub fn join_ledger<'a>(
 ) -> Result<&'a str, NotComposed> {
     let matching: BTreeSet<&str> = targets
         .iter()
-        .filter(|t| {
-            placeholders(t).iter().map(|k| canonical_key(k)).collect::<BTreeSet<_>>()
-                == *evidence_keys
-        })
+        .filter(|t| keys_of(t) == *evidence_keys)
         .map(String::as_str)
         .collect();
     match matching.into_iter().collect::<Vec<_>>()[..] {
@@ -1961,7 +1962,7 @@ mod tests {
 
     #[test]
     fn placeholders_and_composition_use_the_rows_own_evidence() {
-        assert_eq!(placeholders("PUT ${pecserver.uri-x:/d}/y/${a.b}"), vec!["pecserver.uri-x", "a.b"]);
+        assert_eq!(keys_of("PUT ${pecserver.uri-x:/d}/y/${a.b}"), set(&["pecserver.urix", "a.b"]));
         let mut ev = BTreeMap::new();
         ev.insert("pecserver.urix".to_string(), set(&["/domain/{d}/user/{u}"]));
         assert_eq!(
@@ -1978,6 +1979,13 @@ mod tests {
             Err(NotComposed::MissingEvidence("c.d".into()))
         );
         assert_eq!(compose("GET /literal/{id}", &BTreeMap::new()), Ok(("GET".into(), "/literal/{id}".into())));
+        // The product's key reading, not a copy of it: whitespace is trimmed, a
+        // repeated key substitutes everywhere, a nested span invents no key.
+        assert_eq!(
+            compose("GET ${ pecserver.uri-x }/z${pecserver.urix}", &ev),
+            Ok(("GET".into(), "/domain/{d}/user/{u}/z/domain/{d}/user/{u}".into()))
+        );
+        assert_eq!(compose("GET ${a${b}}", &ev), Err(NotComposed::Malformed));
     }
 
     #[test]
@@ -1986,6 +1994,8 @@ mod tests {
         assert_eq!(join_ledger(&targets, &set(&["p.a"])), Ok("PUT ${p.a}"));
         assert_eq!(join_ledger(&targets, &BTreeSet::new()), Ok("GET /lit"));
         assert_eq!(join_ledger(&targets, &set(&["p.z"])), Err(NotComposed::NoLedgerTarget));
+        let spaced = vec!["GET ${ p-a }".to_string()];
+        assert_eq!(join_ledger(&spaced, &set(&["pa"])), Ok("GET ${ p-a }"), "keys read as the product reads them");
         let twice = vec!["PUT ${p.a}".to_string(), "DELETE ${p.a}".to_string()];
         assert_eq!(join_ledger(&twice, &set(&["p.a"])), Err(NotComposed::LedgerJoinNotUnique));
     }
