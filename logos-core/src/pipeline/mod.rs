@@ -532,7 +532,6 @@ pub fn sync(
     let mut seen: HashSet<String> = HashSet::new();
     let mut files_failed: Vec<String> = Vec::new();
     let mut module_descriptors: Vec<String> = Vec::new();
-    let mut build_manifests: Vec<String> = Vec::new();
 
     for path in paths {
         let Some(rel) = relativize(&canon_root, path) else {
@@ -550,15 +549,6 @@ pub fn sync(
         // re-binds them. The admission gate below then skips it as usual.
         if rel == "go.mod" || rel.ends_with("/go.mod") {
             module_descriptors.push(rel.clone());
-        }
-        // A build manifest (S-462) is recorded here, ahead of every gate, and
-        // reconciled after this loop by `sync_build_manifests`: a `pom.xml` is
-        // never a `files` row, so the admission gate below skips it as a
-        // non-source file — which is exactly right for the graph and says nothing
-        // about its artifact facts. A `build.gradle.kts` is both: Kotlin source
-        // below, and a manifest here.
-        if build_manifest::manifest_format(&rel).is_some() {
-            build_manifests.push(rel.clone());
         }
 
         let abs = canon_root.join(&rel);
@@ -743,10 +733,9 @@ pub fn sync(
         result.files_removed += 1;
     }
 
-    // Build-manifest facts (S-462): re-derived for the whole member when — and
-    // only when — a manifest this sync names was added, changed or removed.
-    let manifests_changed =
-        sync_build_manifests(runtime, &canon_root, &authority, &build_manifests, scope)?;
+    // Build-manifest facts (S-462): the manifests among every path this sync
+    // named, reconciled apart from the graph gates above.
+    let manifests_changed = sync_build_manifests(runtime, &canon_root, &authority, &seen, scope)?;
 
     // CR-015 incremental resolution change-set (part 2 of 2): union the names that
     // entered the changed files (this sync's freshly extracted facts) with those
@@ -1936,9 +1925,14 @@ fn rebuild_build_manifests(runtime: &Runtime, found: &[Candidate]) -> Result<()>
     persist_build_manifests(runtime, loaded)
 }
 
-/// An incremental sync's build-manifest pass (S-462): `requested` are the
-/// manifests among this sync's paths; returns whether the member's facts were
-/// rewritten.
+/// An incremental sync's build-manifest pass (S-462): `named` is every
+/// project-relative path this sync was handed, and the manifests among them are
+/// selected here; returns whether the member's facts were rewritten.
+///
+/// Selected from the whole named set, ahead of — and independent of — the graph
+/// admission gate: a `pom.xml` is never a `files` row, so that gate skips it as
+/// a non-source file, which is right for the graph and says nothing about its
+/// artifact facts. A `build.gradle.kts` is both Kotlin source and a manifest.
 ///
 /// The member's facts are re-derived **wholesale**, and only when a requested
 /// manifest was added, changed (its blake3 hash moved) or removed — or, on a
@@ -1955,9 +1949,13 @@ fn sync_build_manifests(
     runtime: &Runtime,
     canon_root: &Path,
     authority: &AdmissionAuthority,
-    requested: &[String],
+    named: &HashSet<String>,
     scope: SyncScope,
 ) -> Result<bool> {
+    let requested: Vec<&String> = named
+        .iter()
+        .filter(|rel| build_manifest::manifest_format(rel).is_some())
+        .collect();
     if requested.is_empty() && scope == SyncScope::Partial {
         return Ok(false);
     }
@@ -1976,7 +1974,7 @@ fn sync_build_manifests(
     };
     let mut current: BTreeMap<String, LoadedManifest> = BTreeMap::new();
     let mut changed = false;
-    for rel in requested {
+    for &rel in &requested {
         match load(rel) {
             Some(manifest) => {
                 changed |= stored.get(rel) != Some(&manifest.hash);
@@ -1985,7 +1983,7 @@ fn sync_build_manifests(
             None => changed |= stored.contains_key(rel),
         }
     }
-    let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
+    let requested_set: HashSet<&str> = requested.iter().map(|r| r.as_str()).collect();
     let unrequested = stored.keys().filter(|p| !requested_set.contains(p.as_str()));
     match scope {
         // The walk is the whole manifest set: a recorded one it did not find is gone.
