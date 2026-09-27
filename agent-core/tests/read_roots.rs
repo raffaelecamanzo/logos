@@ -467,3 +467,34 @@ async fn grep_scoped_to_a_file_reports_the_files_own_path() {
         );
     }
 }
+
+/// `ignored_dirs` are matched BELOW the read root, never above it: a read root
+/// living under a directory that happens to share an ignored name (here
+/// `target/`) is still read and still walked — `resolve` and the walks agree.
+#[tokio::test]
+async fn an_ignored_name_above_a_read_root_does_not_hide_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let project = base.join("project");
+    write(&base.join("target/docs-repo/planning/log.md"), "needle\n");
+    std::fs::create_dir_all(project.join("docs")).expect("docs");
+    symlink(
+        base.join("target/docs-repo/planning"),
+        project.join("docs/planning"),
+    )
+    .expect("link");
+    let sandbox = || {
+        Sandbox::new(&project, ["target".to_string()])
+            .expect("sandbox")
+            .with_read_roots(&project, ["../target/docs-repo"])
+            .expect("read root")
+    };
+
+    assert!(sandbox().resolve("docs/planning/log.md").is_ok());
+    let globbed = call(sandbox(), "glob", serde_json::json!({ "pattern": "**/*.md" })).await;
+    assert_eq!(
+        paths_of(&globbed, "paths", None),
+        ["docs/planning/log.md"],
+        "{globbed}"
+    );
+}
