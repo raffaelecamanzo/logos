@@ -1,0 +1,220 @@
+S-456 T1 — RECORDED FINDING: THE THREE CR-147 SECTION 3.2 B1 HALVES
+===================================================================
+
+Measured (UTC):  2026-09-27T22:25Z (local 2026-09-28), Dev Session 1.1, sprint-80,
+                 branch sprint-80-I1-S1
+Floors:          vendored_spec_contracts_floor.txt, declared 2026-09-27T22:13:34Z in
+                 commit 1aeb8ab4, which precedes every commit carrying measurement
+                 code
+Estate:          a byte-for-byte private copy (`cp -Rp`) of ~/source/pec-services
+                 at ~/source/.estate-copies/pec-services-S-456, taken 2026-09-27.
+                 The harness opens member engines, so the live estate was not
+                 opened. The copy reproduces CR-147 section 2.1 through logos
+                 1.4.27's `workspace status --json`: contract-surface 81 / 140 /
+                 1 / 646, invocation no-provider 44. Member graphs are at
+                 `PRAGMA user_version` 21, this branch's highest migration: nothing
+                 was migrated.
+Command:         LOGOS_REF_WORKSPACE=~/source/.estate-copies/pec-services-S-456 \
+                   cargo test -p logos-core --test operand_resolvability \
+                   measure_vendored_spec_contracts_over_the_reference_workspace \
+                   -- --nocapture
+Denominators:    83 manifest members, 83 read of 83; 41 spec documents; 80
+                 members runnable under S-411's rule.
+
+
+VERDICTS
+--------
+
+  Declared contracts: measured 6, floor 3 — HOLDS
+  Invocation → external: measured 20, floor 15 — HOLDS
+  Own-spec ties: measured 43, floor 45 — FALSIFIED
+
+Consequences, per S-456's acceptance criteria:
+  - Declared contracts HOLDS: ADR-68 decision points 1 and 2 stay Proposed;
+    S-458 may be planned and accepts them at delivery.
+  - Invocation → external HOLDS: ADR-68 decision point 3 stays Proposed; S-459 may
+    be planned and accepts it at delivery.
+  - Own-spec ties FALSIFIED: ADR-68 decision point 4 is SUPERSEDED IN PLACE on
+    this evidence (2026-09-27); S-460 stays UNPLANNED; the FR-WS-04 clause it
+    would have appended is not written; CR-131 section 3.3's "narrowing across
+    the contract-surface intake" line is NOT re-decided and stands whole.
+  - ADR-68 decision point 5 (member kind) was never gated; S-457 owns it.
+
+
+HALF 1 — DECLARED CONTRACTS: 6 PAIRS (floor 3)
+----------------------------------------------
+
+Split: 1 document-identity · 5 named-external.
+
+  webmail                  -> member mailbox-aggregator-api   (identity 31/31)
+  webmail                  -> external PSS                    (two PSS versions,
+                                                               one component)
+  pecserver-facade         -> external PSS
+  notification-adapter     -> external Notification Gateway
+  ptpec-assistance-tool    -> external "Poste portale assitenza"
+  archive-listener-adapter -> external "v1"
+
+Subtracted and enumerated, never counted: 12 pairs from the declared
+documentation holder `software-architecture-documents`, 3 from the declared mocks
+(`pecserver-mock` 2, `notification-gateway-mock` 1), 0 from non-runnable holders.
+Partially implemented documents (neither own spec nor vendored, count toward
+nothing): 4 — `deprecated-mailbox-core` 6 of 9, `funnel-aggregator-api` 6 of 9,
+`mailbox-api` 17 of 22, `reporting-api` 7 of 8. Identity collisions: 0.
+
+Reconciliation to CR-147 section 2.1 (census 4), by name. All four census pairs
+are reproduced: `webmail -> mailbox-aggregator-api` at 31 of 31 operations, with
+15 of that document's 31 operations tied per-operation (census: 15); `webmail`,
+`pecserver-facade` -> PSS; `notification-adapter` -> Notification Gateway. The
+two the census did not name, by mechanism:
+
+  - `ptpec-assistance-tool` is a `client/` front end plus `server/customer-care-
+    bff.yaml` and a Compose file; the BFF it describes is served by nothing in the
+    workspace. A consumer declaration of the kind CR-147 describes, which the
+    hand census did not examine.
+
+  - `archive-listener-adapter` is a FALSE POSITIVE OF THE RULE AS DECLARED, and
+    is recorded rather than patched after the run. Its
+    `src/main/resources/openapi/v1.yaml` is its OWN spec, stale: title
+    `OpenAPI definition` (the springdoc default), one operation
+    `POST /v1/listener-notify/{itemId}`, while its controller serves
+    `/v1/listener-notify/{itemId}/limitsTrigger` and `.../quotaVariation`. The
+    product binds none of the document's operations to the holder's routes, so
+    "does not implement" reads it as vendored and the stem names the external.
+    S-458 should refuse an external whose every copy carries the springdoc default
+    title under the holder's own main resources. Without it the half measures 5,
+    still above its floor.
+
+Two observations for S-458, neither affecting a counted pair: the copy graph
+yields TWO components titled PSS (the second holds only `pecserver-mock:
+source.yaml` and the documentation repo's 2022 index, both subtracted), and two
+titled Notification Gateway — an external's display name is not unique, so the
+relation needs an identity beyond its name.
+
+
+HALF 2 — INVOCATION → EXTERNAL: 20 ROWS (floor 15)
+--------------------------------------------------
+
+Population: 42 invocation-intake `no-provider-in-workspace` `route` rows.
+
+  EXACT UNDER A COMMITTED BASE PATH ........ 20  (all `pecserver-facade`)
+  BASE PATH OVERSHOOTS ...................... 1  (`notification-adapter`)
+  NO MATCH .................................. 1  (`pecserver-facade`)
+  THE MEMBER HOLDS NO NAMED EXTERNAL ........ 20
+  SUFFIX-ONLY / DISAGREE / NO BASE KEY /
+  NOT COMPOSED .............................. 0
+
+Every exact row's base path is `/prov`, from the four deploy overlays that
+override `pec-server.base-url` with `PECSERVER_BASEURL` and all agree:
+`pecserver-facade/deploy-coll/values.yaml`, `deploy-coll-bp/values.yaml`,
+`deploy-svil/values.yaml`, `deploy-svil-bp/values.yaml`
+(`deploy-config/values_TEMPLATE.yaml` commits `_#PLACEHOLDER`, not a URL). The
+application config's `http://localhost:8082` carries no path.
+
+Counterfactual, application config alone: 1 exact. Without the overlays not one
+`pecserver-facade` row is exact — every one of the 20 is suffix inference, which
+is CR-147 section 2.1's statement, measured.
+
+Reconciliation to CR-147 section 2.1 (census 21 = 20 `pecserver-facade` + 1
+`notification-adapter`), by name and mechanism:
+
+  - `pecserver-facade`: 20 of its 21 rows exact — the census count. By name the
+    20 are its 19 `/domain/{}/…` calls plus `POST /session/authenticate`, which
+    the vendored spec declares as `/prov/session/authenticate`. The one that
+    does not match is `getUnreadMails`, `GET /domain/{domain}/user/{user}/folder`:
+    the PSS copy `pecserver-facade` vendors does not declare it at all (no
+    suffix match either), while `webmail`'s two PSS versions and
+    `pecserver-mock/source.yaml` do. `pecserver-facade` vendors an older PSS
+    version than the one it calls. The census's parenthetical "(`/domain/{}/
+    user/{}/…`)" described its 20 more loosely than this.
+
+  - `notification-adapter`: the census counted it exact under application config
+    (`http://localhost:8083`, no path). Its only overlay, `.helm/values.yaml`,
+    commits `NOTIFICATIONGATEWAY_API_BASEURL:
+    http://newpec-notificator.pec.svc.cluster.local:8080/api`, so under the
+    declared overlay-overrides rule the call is `/api/v1/notification/send`,
+    which the vendored spec (servers `https://localhost:8080`, no path) does not
+    declare. It is a BASE PATH OVERSHOOT, as the floor file's honesty note
+    predicted before the run. S-459 has a real case to decide here: either the
+    spec omits a gateway prefix, or the overlay's `/api` is served by an ingress
+    that strips it; committed evidence alone cannot tell.
+
+
+HALF 3 — OWN-SPEC TIES: 43 ROWS (floor 45) — FALSIFIED
+------------------------------------------------------
+
+Population: 140 contract-surface ambiguous rows.
+
+  OWN-SPEC TIES .......................................... 43
+      mailbox-aggregator-api 15 · mailbox-api 10 · deprecated-mailbox-core 6 ·
+      funnel-aggregator-api 5 · reporting-api 4 · official-log-export-api 3
+  HOLDER IS A CANDIDATE, SPEC NOT UNDER ITS MAIN RESOURCES  0
+  HOLDER IS NOT A CANDIDATE .............................. 97
+      software-architecture-documents (documentation, declared) 82 · webmail 15
+  UNDECIDABLE (TRUNCATED TIED LIST) ....................... 0
+
+43 + 0 + 97 = 140: the population is fully accounted for, and every row in it
+whose holder is tied lies under its own `src/main/resources/`.
+
+Reconciliation to CR-147 section 2.1 (census 62), by mechanism — reproduced
+EXACTLY, and the census measured a different population than the metric names.
+The census's 62 is every contract-surface row, IN ANY BUCKET, whose document is a
+member's own `src/main/resources/openapi/v1.yaml`, counted BEFORE the fork
+exclusion. Measured on the same copy with the pre-exclusion manifest
+(`logos.workspace.toml.bak-2026-09-27`, swapped in and restored, 1.4.27
+`workspace status --json`):
+
+    62 rows = 49 ambiguous + 13 unbound        (pre-exclusion; census 62)
+    56 rows = 43 ambiguous + 13 unbound        (post-exclusion)
+
+  - 13 rows are `unbound` (no provider in the workspace, or path not composed) —
+    not ties at all, so outside the metric's "ambiguous rows" by its own words.
+  - 6 rows are `archive-api`'s and `archive-api-logiclens-fork`'s own specs tied
+    with each other (3 each); the CR-147 section 2.3 exclusion turned each into a
+    sole same-member provider, which the tier reports as no row.
+
+    62 − 13 − 6 = 43.
+
+CR-147 section 2.1 labels the 62 "post-exclusion"; it was the pre-exclusion
+figure, and counted unbound rows as ties. The floor of 45 was set below 62 to
+absorb the permissive reader's excess (CR-147 section 3.2 B1); the excess was 19,
+larger than the 17 the floor allowed. The half is FALSIFIED by two rows.
+
+What the falsification does NOT say. The 43 ties are real and every one has the
+spec's own member among its candidates; co-location would resolve all 43. What
+fell short is the yield against a floor the CR declared, and the CR's own rule is
+that a half below its floor stays unbuilt. Re-proposing co-location is a
+re-decision of CR-147 on this evidence, not a consequence of this run.
+
+
+THE CANDIDATE LIST, AND A FINDING ABOUT S-411's "RUNNABLE"
+---------------------------------------------------------
+
+Members holding a spec document and no runnable source, under the declared rule
+(S-411's `runnable`): 0. All three declared members are "runnable" under it,
+because the rule counts ANY file the plugin registry claims and the registry
+links `yaml`, `json`, `markdown` and `dockerfile` plugins: a member holding an
+OpenAPI document holds, by that document alone, a claimed source file. The rule
+cannot produce a non-empty candidate list over spec holders — ever.
+
+Printed beside it, never deciding anything: under the narrower reading (no file
+in a language whose plugin ships an `invocations` query), the candidates are
+`pecserver-mock` and `notification-gateway-mock`. `software-architecture-
+documents` is still not a candidate: it commits Java and JavaScript under
+`OtherDocs/` (a sample Spring Cloud Data Flow app, CDC scripts), which
+`identity::is_documentation` does not recognise as a documentation tree.
+
+Half-1 sensitivity to the narrower reading: 0 counted pairs change — every
+counted holder commits source in an `invocations` language. The verdict does not
+turn on the choice. S-457's candidate hint needs the narrower reading, or an
+equivalent, to list anything at all.
+
+
+PINNED
+------
+
+vendored_spec_contracts.rs pins every figure above that a verdict or an
+adjudication leans on (RECORDED_*), so a drift in the product's rows, the
+identity rule, the overlay walk or the composition fails the estate gate rather
+than moving a number under a green run. The estate gate skips without
+LOGOS_REF_WORKSPACE, in `gate.sh` and in CI; the always-run fixtures in the same
+module pin every classifier the three verdicts rest on.

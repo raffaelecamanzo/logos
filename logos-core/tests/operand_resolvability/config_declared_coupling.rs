@@ -93,7 +93,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use logos_core::plugin::LanguageRegistry;
+use logos_core::plugin::{LanguagePlugin, LanguageRegistry};
 
 use super::configuration_agreement::{
     agreed_value, parse_properties, parse_yaml, workspace_agreement, ConfigCorpus,
@@ -600,7 +600,7 @@ pub struct Scalar {
 /// That is [`identity::walk_deploy`]'s configuration, reproduced because the cost
 /// of *this* traversal is one of the figures the story asks for and a walk behind
 /// a `OnceLock` another gate already consumed cannot be timed.
-fn walk_overlays(root: &Path, members: &BTreeSet<String>) -> DeployCorpus {
+pub(crate) fn walk_overlays(root: &Path, members: &BTreeSet<String>) -> DeployCorpus {
     let mut out = DeployCorpus::default();
 
     let started = Instant::now();
@@ -1285,10 +1285,30 @@ fn judge(root: &Path) -> Judgement {
 ///
 /// Read off [`ConfigCorpus::files`], the roster the corpus walk already stashed,
 /// so this costs no traversal of its own.
-fn runnable_members(
+///
+/// Every plugin counts, the data and document ones included: the registry links
+/// `yaml`, `json`, `markdown` and `dockerfile`, so a member committing only
+/// manifests and specs is runnable here. S-456 measured what that costs a
+/// "no runnable source" reading and reads [`members_with_source`] under a
+/// narrower predicate beside this one; this rule is S-411's declaration and is
+/// not narrowed.
+pub(crate) fn runnable_members(
     root: &Path,
     members: &BTreeSet<String>,
     config: &ConfigCorpus,
+) -> BTreeSet<String> {
+    members_with_source(root, members, config, |_| true)
+}
+
+/// Members committing, outside a documentation tree, at least one file the
+/// plugin registry claims with a plugin `admits` accepts — the one loop behind
+/// [`runnable_members`] and any narrower reading of it, so two readings of
+/// "has source" cannot drift apart on the walk they share.
+pub(crate) fn members_with_source(
+    root: &Path,
+    members: &BTreeSet<String>,
+    config: &ConfigCorpus,
+    admits: impl Fn(&dyn LanguagePlugin) -> bool,
 ) -> BTreeSet<String> {
     let Ok(registry) = LanguageRegistry::load(root) else {
         return BTreeSet::new();
@@ -1302,7 +1322,7 @@ fn runnable_members(
         if identity::is_documentation(rel) {
             continue;
         }
-        if registry.for_path(rel).is_some() {
+        if registry.for_path(rel).is_some_and(&admits) {
             out.insert(member.to_string());
         }
     }

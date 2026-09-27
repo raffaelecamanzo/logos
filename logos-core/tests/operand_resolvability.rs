@@ -171,6 +171,15 @@
 //! only so the next reader does not have to decide that: they are grammar
 //! punctuation, the way `is_deploy_path` is a directory convention.
 //!
+//! Sprint 80 added one, in `vendored_spec_contracts` (S-456):
+//! `overlay_overrides`, Spring's environment-variable relaxed binding — the rule
+//! by which `PECSERVER_BASEURL` in a Helm values file overrides
+//! `pec-server.base-url` in `application.yml`. `SPRINGDOC_DEFAULT_TITLE` and
+//! `MAIN_RESOURCES` in the same module are NOT of this kind and are named only so
+//! the reader does not have to decide that: the first is a sentinel value the
+//! gate refuses to treat as a name, the second a directory convention the
+//! metric names in terms.
+//!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
 //! prohibition. The fitness function cannot enforce it — it scans
@@ -260,6 +269,17 @@ mod config_declared_coupling;
 /// `tests/client_call_gate.rs` would become a second cargo test target.
 #[path = "operand_resolvability/client_call_gate.rs"]
 mod client_call_gate;
+
+/// S-456's vendored-spec gate — its own module, so the three CR-147 halves do
+/// not co-edit the file S-411's deploy-overlay arm owns. Reads that module's
+/// overlay walk and `runnable` rule, and the shipped federation's coverage rows,
+/// contract surfaces and ledgers; every estate walk it makes is the shipped
+/// `ConfigCorpus` walk or S-411's, called rather than copied.
+///
+/// `#[path]`-attached for the same reason its five siblings are: a plain
+/// `tests/vendored_spec_contracts.rs` would become a second cargo test target.
+#[path = "operand_resolvability/vendored_spec_contracts.rs"]
+mod vendored_spec_contracts;
 
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
