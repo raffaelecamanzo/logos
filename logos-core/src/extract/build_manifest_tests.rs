@@ -904,3 +904,25 @@ fn an_inherited_property_interpolates_in_the_childs_context() {
     let dep = refs(&only(&facts, "child/pom.xml"), ReferenceKind::Dependency)[0].clone();
     assert_eq!(dep.version.as_deref(), Some("2"), "the child's `rev` wins inside the inherited value");
 }
+
+/// Comments INSIDE `dependencies { }` — the only place a comment could turn into
+/// a reference. A trailing `//` comment holding a `}` must not close the block,
+/// and a `/* … */` spanning lines must hide the declaration inside it.
+#[test]
+fn gradle_comments_inside_a_dependencies_block_are_not_read() {
+    let script = "dependencies {\n\
+                  implementation 'g:a:1' // } is not a block end\n\
+                  /*\n\
+                  implementation 'x:block:1'\n\
+                  */\n\
+                  implementation 'g:b:1' /* inline */\n\
+                  }\n";
+    let facts = member_facts(&[("build.gradle", script)]);
+    let refs: Vec<_> = facts[0]
+        .artifacts
+        .iter()
+        .filter(|a| a.role == ArtifactRole::Referenced)
+        .map(|a| a.artifact_id.as_deref())
+        .collect();
+    assert_eq!(refs, vec![Some("a"), Some("b")], "commented-out declarations are not references");
+}
