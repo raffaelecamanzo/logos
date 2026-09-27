@@ -1719,29 +1719,42 @@ fn header_hides_nothing_but_the_readout() {
     );
 }
 
+/// Whether `needle` occurs in `haystack` as a whole selector/class token, not
+/// merely as a substring. `.brandSub` is a literal prefix of `.brandSubtle` or
+/// `.brandSubtitleWrap`, so a plain `contains` would reject an unrelated future
+/// class that happens to start the same way; this requires the character right
+/// after the match to not continue a CSS identifier (alphanumeric, `_` or `-`).
+fn contains_selector_token(haystack: &str, needle: &str) -> bool {
+    let is_ident_continuation = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let end = start + pos + needle.len();
+        if haystack[end..].chars().next().is_none_or(|c| !is_ident_continuation(c)) {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
 /// HF-4 removed the `code intelligence` brand subtitle outright — the span in
 /// `Header.tsx` and the `.brandSub` rule (and its 767px rung) in
 /// `Header.module.css` alike — rather than relocating it, so nothing should ever
-/// reintroduce either half. `header_hides_nothing_but_the_readout` above would
-/// already fail if a `.brandSub` hiding rule came back inside a media query; this
-/// guard closes the gap it leaves open, an unconditional (non-media) `.brandSub`
-/// rule, which `header_disclosure_ladder` only walks INSIDE `@media` blocks and
-/// so would not see.
+/// reintroduce either half. The media-query case is already covered by
+/// `header_hides_nothing_but_the_readout` above — a `.brandSub` hiding rule
+/// coming back inside `@media` would show up in its hidden-set assertion and
+/// fail it there, so re-asserting it here would only duplicate that test. This
+/// guard's own job is the case that ladder can't see: an unconditional
+/// (non-`@media`) `.brandSub` rule, which `header_disclosure_ladder` only walks
+/// INSIDE `@media` blocks and so would not see at all.
 #[test]
 fn header_never_reintroduces_the_brand_subtitle() {
-    assert_eq!(
-        header_drops_at(".brandSub"),
-        None,
-        "`.brandSub` must not exist in the header stylesheets at all — HF-4 \
-         removed the brand subtitle, it was not moved to a different rung",
-    );
     for sheet in HEADER_ROW_STYLESHEETS {
         let css = strip_comments(&read(sheet));
         assert!(
-            !css.contains(".brandSub"),
+            !contains_selector_token(&css, ".brandSub"),
             "`{sheet}` still names `.brandSub` — HF-4 removed the brand subtitle \
-             span from `Header.tsx`, so no rule may reference that class \
-             unconditionally either",
+             span from `Header.tsx`, so no rule may reference that class at all",
         );
     }
 }
