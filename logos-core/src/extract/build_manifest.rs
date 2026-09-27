@@ -370,7 +370,8 @@ fn set_coord_field(coord: &mut RawCoord, field: &str, text: &str) {
 /// Streams with `quick-xml` and records only the exact element paths listed in
 /// the module docs; everything else — plugins, exclusions, profiles, reporting —
 /// is walked past by path. quick-xml expands no DTD entities, so an entity
-/// declaration cannot inflate the input.
+/// declaration cannot inflate the input — and a pom that *uses* one is refused
+/// as malformed rather than read with the entity left unexpanded.
 fn parse_pom(text: &str) -> Result<RawPom, String> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().check_end_names = true;
@@ -428,13 +429,15 @@ fn parse_pom(text: &str) -> Result<RawPom, String> {
                         "amp" => buf.push('&'),
                         "apos" => buf.push('\''),
                         "quot" => buf.push('"'),
-                        // An undeclared entity is kept as written: it is not a
-                        // value this reader can know, and dropping it would
-                        // silently shorten the text.
+                        // Any other entity is DTD-declared, and this reader
+                        // expands no DTD. Keeping `&g;` as text would make it a
+                        // "resolved" coordinate and dropping it would shorten
+                        // one, so the pom yields no facts at all — never a guess.
                         other => {
-                            buf.push('&');
-                            buf.push_str(other);
-                            buf.push(';');
+                            return Err(format!(
+                                "entity `&{other};` is not expanded (only the five XML \
+                                 entities and character references are)"
+                            ))
                         }
                     }
                 }

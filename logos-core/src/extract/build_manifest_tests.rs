@@ -822,3 +822,19 @@ fn a_multi_byte_character_before_a_brace_does_not_panic_the_gradle_reader() {
         assert_eq!(facts[0].status, ManifestStatus::Read, "{name}");
     }
 }
+
+/// The five XML entities decode; a DTD-declared one is not expanded, so the
+/// pom is malformed with the entity named — `&g;` never becomes a coordinate.
+#[test]
+fn a_dtd_entity_makes_the_pom_malformed_rather_than_a_literal_coordinate() {
+    let pom = "<project><groupId>a&lt;&gt;&apos;&quot;b</groupId><artifactId>x</artifactId></project>";
+    let facts = member_facts(&[("pom.xml", pom)]);
+    assert_eq!(key(produced(&facts[0])), (Some("a<>'\"b"), Some("x")));
+
+    let pom = "<!DOCTYPE project [<!ENTITY g \"org.example\">]>\
+               <project><groupId>&g;</groupId><artifactId>x</artifactId></project>";
+    let facts = member_facts(&[("pom.xml", pom)]);
+    assert_eq!(facts[0].status, ManifestStatus::Malformed);
+    assert!(facts[0].artifacts.is_empty(), "no fact is built from an unexpanded entity");
+    assert!(facts[0].detail.as_deref().unwrap().contains("`&g;` is not expanded"), "{:?}", facts[0].detail);
+}
