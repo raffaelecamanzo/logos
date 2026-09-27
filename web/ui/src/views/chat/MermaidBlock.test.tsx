@@ -272,6 +272,25 @@ describe("MermaidBlock — zoom, toggle, and copy (FR-UI-32)", () => {
   });
 });
 
+describe("MermaidBlock — Source toggle shows the unrepaired original (HF-2)", () => {
+  // `renderMermaidIn` is mocked in this suite (module header), so the real
+  // sequence-diagram ';' repair (mermaid.test.ts covers it directly) never runs
+  // here — this instead pins the guarantee the repair depends on: the "Source"
+  // toggle renders the `code` prop straight from the fence, never anything
+  // derived from the `.mermaid` DOM target the seam is free to mutate.
+  it("keeps the bare ';' in a sequenceDiagram fence visible under Source, even after a successful render", async () => {
+    const user = userEvent.setup();
+    const sequence = "sequenceDiagram\nNote over A: hi;there";
+    succeed();
+    render(<MarkdownAnswer text={"```mermaid\n" + sequence + "\n```\n"} />);
+    await waitFor(() => expect(target().querySelector("svg")).not.toBeNull());
+
+    await user.click(screen.getByRole("button", { name: "Show source" }));
+    expect(screen.getByText(/hi;there/)).toBeInTheDocument();
+    expect(screen.queryByText(/hi#59;there/)).not.toBeInTheDocument();
+  });
+});
+
 describe("MermaidBlock — a fence that arrives by streaming deltas", () => {
   it("shows the growing source without claiming failure, then renders once it settles", async () => {
     // An answer streams token by token, so react-markdown hands the mermaid branch a

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { currentTheme, renderMermaidIn, THEME_VARS } from "./mermaid.ts";
+import { currentTheme, renderMermaidIn, repairSequenceDiagramSource, THEME_VARS } from "./mermaid.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -391,5 +391,105 @@ describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)",
     await pending;
 
     expect(adopted()).toHaveLength(0);
+  });
+});
+
+// ── repairSequenceDiagramSource — ';' repair (HF-2) ───────────────────────────
+//
+// Pure and DOM-free by design, so these test the repair directly rather than
+// through `renderMermaidIn`'s DOM plumbing (covered separately below).
+
+describe("repairSequenceDiagramSource escapes bare ';' in sequenceDiagram message/note text (HF-2)", () => {
+  it("escapes the ';' in the user's failing Note line (root-cause reproduction)", () => {
+    const source = [
+      "sequenceDiagram",
+      "    participant SPA",
+      "    participant API",
+      "    SPA->>API: GET /page",
+      "    Note over SPA: Client-side navigation only;<br/>separate GET /api/v1/graph fetch<br/>(not part of this sequence)",
+    ].join("\n");
+    const repaired = repairSequenceDiagramSource(source);
+    expect(repaired).toContain(
+      "Note over SPA: Client-side navigation only#59;<br/>separate GET /api/v1/graph fetch<br/>(not part of this sequence)",
+    );
+    expect(repaired).not.toMatch(/only;/);
+  });
+
+  it("escapes a ';' inside a plain message line", () => {
+    expect(repairSequenceDiagramSource("sequenceDiagram\nA->>B: x; y")).toBe(
+      "sequenceDiagram\nA->>B: x#59; y",
+    );
+  });
+
+  it("escapes a ';' inside a Note over two participants", () => {
+    expect(repairSequenceDiagramSource("sequenceDiagram\nNote over U,S: a note; with semicolon")).toBe(
+      "sequenceDiagram\nNote over U,S: a note#59; with semicolon",
+    );
+  });
+
+  it("escapes a ';' after an activation-marker arrow ('+')", () => {
+    expect(repairSequenceDiagramSource("sequenceDiagram\nA->>+B: a;b")).toBe(
+      "sequenceDiagram\nA->>+B: a#59;b",
+    );
+  });
+
+  it("leaves an already-escaped '#59;' alone (idempotent)", () => {
+    const source = "sequenceDiagram\nNote over U,S: a note#59; with semicolon";
+    expect(repairSequenceDiagramSource(source)).toBe(source);
+  });
+
+  it("does not touch a participant alias containing ';' (no colon on the line at all)", () => {
+    const source = "sequenceDiagram\nparticipant A as Foo;Bar\nA->>A: hi";
+    expect(repairSequenceDiagramSource(source)).toBe(source);
+  });
+
+  it("does not touch a loop label", () => {
+    const source = "sequenceDiagram\nloop Every minute;check\nA->>B: hi\nend";
+    expect(repairSequenceDiagramSource(source)).toBe(source);
+  });
+
+  it("leaves a non-sequence diagram byte-identical, including its ';'", () => {
+    const source = "flowchart TD\n  A[Start;here] --> B[End]";
+    expect(repairSequenceDiagramSource(source)).toBe(source);
+  });
+
+  it("skips a leading %%{init}%% directive and blank lines to find the diagram type", () => {
+    const source = [
+      "%%{init: {'theme':'base'}}%%",
+      "",
+      "sequenceDiagram",
+      "A->>B: x;y",
+    ].join("\n");
+    expect(repairSequenceDiagramSource(source)).toBe(
+      ["%%{init: {'theme':'base'}}%%", "", "sequenceDiagram", "A->>B: x#59;y"].join("\n"),
+    );
+  });
+});
+
+describe("renderMermaidIn repairs sequence-diagram ';' on the DOM copy only, before mermaid.run (HF-2)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (window as any).mermaid;
+  });
+
+  it("passes the repaired text to mermaid.run but leaves the container's original prop-level source untouched", async () => {
+    const mockRun = vi.fn().mockResolvedValue(undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).mermaid = { initialize: vi.fn(), run: mockRun };
+
+    const { renderMermaidIn: fresh } = await import("./mermaid.ts");
+    const container = document.createElement("div");
+    const original = "sequenceDiagram\nNote over A: hi;there";
+    container.innerHTML = `<div class="mermaid">${original}</div>`;
+    const target = container.querySelector(".mermaid")!;
+
+    await fresh(container);
+
+    expect(target.textContent).toBe("sequenceDiagram\nNote over A: hi#59;there");
+    expect(mockRun).toHaveBeenCalledWith(expect.objectContaining({ nodes: expect.anything() }));
   });
 });

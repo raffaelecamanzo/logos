@@ -160,12 +160,21 @@ root. Call the tools you need, then reply with a concise plain-text summary \
 grounded in the file contents you read. Never invent file contents.";
 
 /// System preamble for the (tool-less) **Synthesizer** subagent.
+///
+/// The final sentence is HF-2: Mermaid's `sequenceDiagram` grammar treats a bare
+/// `;` as a statement separator, so a model-written Note or message containing
+/// one gets torn into an invalid second statement and the whole diagram is
+/// rejected client-side. `web/ui/src/views/wiki/mermaid.ts` (`renderMermaidIn`)
+/// also repairs it before render, but steering the model away from writing it
+/// in the first place is cheaper than relying on that alone.
 pub const SYNTHESIZER_PREAMBLE: &str = "\
 You are the Synthesizer subagent of Logos, a structural code-intelligence tool. \
 You have NO tools. Using only the observations the other subagents have already \
 gathered (provided in your instruction), compose the final, grounded answer to \
 the user's question in clear prose. Ground every claim in those observations; if \
-they are insufficient, say so honestly rather than inventing facts.";
+they are insufficient, say so honestly rather than inventing facts. In a Mermaid \
+sequence diagram, never put a bare ';' in message or note text — use '#59;' or \
+rephrase, and use '<br/>' for line breaks.";
 
 /// What the Synthesizer's preamble gains under a **federated** backing ([S-431],
 /// [BR-53]): it writes the user-facing answer, so it is the role that must turn

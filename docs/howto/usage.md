@@ -1199,7 +1199,11 @@ sequence, and ER shapes the same way it covers a flowchart's cylinders — nothi
 falls back to the browser's solid-black default fill. If the bundle is unavailable
 or the diagram does not parse, the **escaped source stays visible** with an
 explanatory note — never a blank space and never a silent failure
-([FR-UI-32](../specs/requirements/FR-UI-32.md)).
+([FR-UI-32](../specs/requirements/FR-UI-32.md)). A bare `;` in a sequence
+diagram's message or note text — Mermaid's own statement separator, which would
+otherwise reject the whole diagram — is auto-repaired to Mermaid's `#59;` escape
+before render; the Source toggle still shows exactly what was written, `;` and
+all.
 
 Non-mermaid code blocks are unaffected and keep their existing copy control.
 
