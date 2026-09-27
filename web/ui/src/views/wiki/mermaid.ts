@@ -84,8 +84,9 @@ export function currentTheme(): MermaidTheme {
  * Design-token-derived themeVariables for each theme.
  *
  * Passed to `mermaid.initialize({ theme: "base", themeVariables })` so Mermaid
- * bakes colors into the SVG as inline presentation attributes (CSP-safe — no
- * `<style>` injection, no `unsafe-inline` required). Values are the raw hex
+ * fills its per-render `<style>` block with these colors. The CSP blocks that
+ * block as an injected element; `adoptMermaidStyleFor` re-applies it as a
+ * constructable stylesheet (HF-3), with no `unsafe-inline`. Values are the raw hex
  * equivalents of the semantic tokens in styles/tokens.css; raw hex is intentional
  * here because Mermaid's themeVariables API accepts only hex strings, not CSS
  * custom properties. This is the SINGLE place raw hex appears outside the token
@@ -168,9 +169,10 @@ let initializedTheme: MermaidTheme | null = null;
  * Initialize Mermaid once per effective theme with the CSP-safe config and the
  * design-token-matched themeVariables. Mermaid still injects a per-render
  * `<style id="mermaid-XXXX">` block (unavoidable with any theme setting). In
- * production the self-only CSP blocks that block; `WikiView.module.css` provides
- * the color fallback via design tokens. See that file's comment block for the
- * full two-layer strategy (themeVariables for dev, external CSS for production).
+ * production the self-only CSP blocks that block as an element, so
+ * `renderMermaidIn` adopts its text as a constructable stylesheet after the render
+ * (HF-3); `WikiView.module.css` supplies a design-token fallback for the frame
+ * before that. The module header describes all three layers.
  */
 function initialize(mermaid: MermaidApi, theme: MermaidTheme): void {
   if (initializedTheme === theme) return;

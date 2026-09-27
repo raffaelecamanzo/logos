@@ -31,13 +31,15 @@
  *     actually happened and restores the escaped source when the render did not
  *     land ([FR-UI-32] progressive enhancement, [NFR-CC-04] honesty).
  *
- * Theming reuses the wiki's two-layer strategy ([ADR-44]): the seam's
- * `themeVariables` bake design-token colours into the SVG in development, and the
- * token-driven `.mermaid*` fallback rules in `Chat.module.css` — served as a hashed
- * external `<link>`, token-only with no raw hex — supply the colours in production
- * where the CSP strips Mermaid's injected `<style>`. That fallback must stay in step
- * with `WikiView.module.css`: it carries the label `text-anchor` fix too, which is
- * layout rather than colour but is stripped by the very same mechanism.
+ * Theming reuses the wiki's strategy ([ADR-44], HF-3): the seam's `themeVariables`
+ * fill Mermaid's per-render `<style>` with design-token colours. The CSP blocks that
+ * `<style>` as an injected element, so the seam adopts its text as a constructable
+ * stylesheet after the render — and this component's effect cleanup releases it
+ * (`unadoptMermaidStyleFor`). The token-driven `.mermaid*` fallback rules in
+ * `Chat.module.css` — served as a hashed external `<link>`, token-only with no raw
+ * hex — cover the frame before adoption and an engine without constructable sheets.
+ * That fallback must stay in step with `WikiView.module.css`: it carries the label
+ * `text-anchor` fix too, which is layout rather than colour.
  */
 
 import { useContext, useEffect, useRef, useState } from "react";
