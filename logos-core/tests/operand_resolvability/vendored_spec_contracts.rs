@@ -578,6 +578,13 @@ impl DeclaredHalf {
             .collect()
     }
 
+    /// Every vendored document whose identity tied between members — counted or
+    /// not — so the floor's "identity collisions, enumerated" split is printed
+    /// rather than inferred from absent lines.
+    pub fn collisions(&self) -> Vec<&DeclaredRow> {
+        self.rows.iter().filter(|r| matches!(r.identity, Identity::Collision { .. })).collect()
+    }
+
     /// `(document identity, named external)` among the counted pairs.
     pub fn split(&self) -> (usize, usize) {
         let pairs = self.pairs();
@@ -1410,6 +1417,13 @@ fn report(root: &Path, census: &Census, j: &Judgement) {
             println!("    {holder} -> {}", d.contract_label(&contract));
         }
     }
+    let collisions = d.collisions();
+    println!("  identity collisions (resolve to neither member): {}", collisions.len());
+    for row in collisions {
+        if let Identity::Collision { members, shared, total } = &row.identity {
+            println!("    {}:{} — {shared}/{total} with each of {members:?}", row.holder, row.path);
+        }
+    }
     println!("  partially implemented documents: {}", d.partial.len());
     for (m, p, provided, keyed) in &d.partial {
         println!("    {m}:{p} — holder provides {provided} of {keyed}");
@@ -1848,6 +1862,24 @@ mod tests {
             resolve_identity(&held, &[&one, &two], &BTreeSet::new()),
             Identity::Collision { ref members, .. } if members.len() == 2
         ));
+    }
+
+    #[test]
+    fn a_collision_is_enumerated_and_falls_through_to_an_external() {
+        let c = Census {
+            runnable: set(&["w", "p", "q"]),
+            documents: vec![
+                doc("w", "x.yaml", &[("GET", "/a")], 0),
+                doc("p", "v1.yaml", &[("GET", "/a")], 1),
+                doc("q", "v1.yaml", &[("GET", "/a")], 1),
+            ],
+            ..Census::default()
+        };
+        let j = judge(&c);
+        let hits = j.declared.collisions();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].holder.as_str(), hits[0].path.as_str()), ("w", "x.yaml"));
+        assert!(matches!(hits[0].contract, Contract::External(_)));
     }
 
     #[test]
