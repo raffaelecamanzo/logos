@@ -131,6 +131,11 @@ describe("Header brand lockup", () => {
     expect(link).toHaveAttribute("href", "/");
     // The inlined brand mark is decorative SVG inside the same link.
     expect(link.querySelector("svg")).not.toBeNull();
+    // HF-4 removed the `code intelligence` subtitle outright — the stylesheet
+    // guard in `spa_design_system.rs` only reads `.module.css` files from disk
+    // and would stay silent if the span alone came back into the JSX, so the
+    // markup half of that regression needs its own net here.
+    expect(screen.queryByText(/code intelligence/i)).toBeNull();
     // Flush the mount-time status read so its state update is acted-on.
     await screen.findByText(readout(status));
   });
