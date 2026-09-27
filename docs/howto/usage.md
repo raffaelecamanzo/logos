@@ -970,9 +970,11 @@ focusing, and filtering mutate no store and contact no external origin:
   ` ```mermaid ` fences in agent prose) render as **visual diagrams** from a
   vendored, embedded offline bundle under the unchanged self-only CSP, with every
   node label sitting within its box. Diagram colors are **theme-aware** — driven
-  through `mermaid.initialize({ themeVariables })` so they land as inline SVG
-  attributes (CSP-safe, no injected `<style>`) and **follow the app's light/dark
-  mode**, so a diagram is legible in either theme rather than black-on-black
+  through `mermaid.initialize({ themeVariables })`, which lands most colors as
+  inline SVG attributes, plus the rest of each render's generated `<style>`
+  (CSP-blocked as an injected element) adopted onto the page as a constructable
+  stylesheet the CSP does not restrict — so a diagram is legible in either theme,
+  in every shape Mermaid draws, rather than black-on-black
   ([FR-WK-15](../specs/requirements/FR-WK-15.md)). The Wiki tab owns its own client sub-routes —
   `/wiki` (landing), `/wiki/search`, and the `/wiki/page/*` reader — all inside one
   mounted React view; the page bodies and freshness come from `GET /api/v1/wiki`,
@@ -1173,11 +1175,16 @@ Each diagram carries:
 - **Copy** — copies the **raw fence source** in *both* modes, matching the copy
   control on ordinary fenced code blocks.
 
-Diagram colours follow the app's light/dark toggle through
-`themeVariables`, with a token-driven CSS fallback for the rules the CSP strips.
-If the bundle is unavailable or the diagram does not parse, the **escaped source
-stays visible** with an explanatory note — never a blank space and never a silent
-failure ([FR-UI-32](../specs/requirements/FR-UI-32.md)).
+Diagram colours follow the app's light/dark toggle through `themeVariables`. Every
+rendered diagram's own generated styling — not just the flowchart shapes a small
+token-driven CSS fallback covers — reaches the page too: each render's `<style>`
+(CSP-blocked as an injected element) is copied into a constructable stylesheet and
+adopted onto the page, which the CSP does not restrict. That covers classDiagram,
+sequence, and ER shapes the same way it covers a flowchart's cylinders — nothing
+falls back to the browser's solid-black default fill. If the bundle is unavailable
+or the diagram does not parse, the **escaped source stays visible** with an
+explanatory note — never a blank space and never a silent failure
+([FR-UI-32](../specs/requirements/FR-UI-32.md)).
 
 Non-mermaid code blocks are unaffected and keep their existing copy control.
 

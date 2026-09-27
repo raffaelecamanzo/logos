@@ -7,6 +7,7 @@ import { ThemeProvider } from "../../theme/ThemeProvider.tsx";
 // Mermaid is mocked so jsdom never loads the vendored UMD bundle.
 vi.mock("./mermaid.ts", () => ({
   renderMermaidIn: vi.fn(() => Promise.resolve()),
+  unadoptMermaidStyleFor: vi.fn(),
   VENDORED_MERMAID_URL: "/assets/vendor/mermaid.min.js",
 }));
 

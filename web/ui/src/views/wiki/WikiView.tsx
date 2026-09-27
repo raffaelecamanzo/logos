@@ -28,7 +28,7 @@ import type { ConfigReadModel, WikiHit, WikiNav, WikiPageView } from "../../api/
 import { Badge, Button, Callout, Card, DataTable, DEFAULT_TABLE_PAGE_SIZE, EmptyState, TextField } from "../../components/index.ts";
 import type { BadgeTone, Column } from "../../components/index.ts";
 import { navigate, useNavigationState, usePathname } from "../../router.tsx";
-import { renderMermaidIn } from "./mermaid.ts";
+import { renderMermaidIn, unadoptMermaidStyleFor } from "./mermaid.ts";
 import { clearHighlight, highlightFirstMatch } from "./searchHighlight.ts";
 import {
   extractToc,
@@ -458,8 +458,13 @@ function WikiPageBody({ page, highlightTerm }: { page: WikiPageView; highlightTe
   useEffect(() => {
     if (!proseRef.current) return;
     const container = proseRef.current;
+    // Captured now, not re-queried in the cleanup below: by the time that
+    // cleanup runs (next page or unmount), dangerouslySetInnerHTML may already
+    // have replaced this container's children with the NEXT page's markup, so a
+    // fresh querySelectorAll there would find the wrong elements (HF-3).
+    const targets = Array.from(container.querySelectorAll(".mermaid"));
 
-    for (const el of container.querySelectorAll(".mermaid")) {
+    for (const el of targets) {
       if (!el.hasAttribute("data-processed")) {
         // Fresh element (new page or restored): capture its source.
         sources.current.set(el, el.innerHTML);
@@ -480,6 +485,10 @@ function WikiPageBody({ page, highlightTerm }: { page: WikiPageView; highlightTe
     }
 
     void renderMermaidIn(container);
+
+    return () => {
+      for (const el of targets) unadoptMermaidStyleFor(el);
+    };
   }, [page.rendered_html, theme]);
 
   // Jump-to-match (S-271, FR-WK-28): scroll to + <mark> the first occurrence of

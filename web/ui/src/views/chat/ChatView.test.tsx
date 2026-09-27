@@ -22,6 +22,7 @@ vi.mock("../../api/chatClient.ts", () => ({
 // diagram reaches BOTH surfaces that render through `MarkdownAnswer`.
 vi.mock("../wiki/mermaid.ts", () => ({
   renderMermaidIn: vi.fn(() => Promise.resolve()),
+  unadoptMermaidStyleFor: vi.fn(),
   VENDORED_MERMAID_URL: "/assets/vendor/mermaid.min.js",
 }));
 

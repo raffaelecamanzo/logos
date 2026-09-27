@@ -14,13 +14,22 @@
  *     permitted (it is not an inline script), and the bundle names no fetch origin
  *     (NFR-SE-01, confirmed by the `spa_bundle` fitness test). Nothing is added to the
  *     SPA bundle itself.
- *   - **CSP-safe theming via themeVariables + external CSS fallback (S-196, CR-051).**
- *     `mermaid.initialize({ theme: "base", themeVariables })` pre-populates Mermaid's
- *     per-render `<style id="mermaid-XXXX">` block with design-token hex values. In
- *     development (no CSP), Mermaid's own style wins (higher specificity). In
- *     production, the self-only CSP blocks that injected `<style>`; the external CSS
- *     Module fallback rules in `WikiView.module.css` (served as a hashed `<link>`,
- *     ADR-44) supply the theme colors via `var(--surface-1)` / `var(--text-1)` etc.
+ *   - **CSP-safe theming via themeVariables + adopted stylesheet + CSS fallback
+ *     (S-196, CR-051, HF-3).** `mermaid.initialize({ theme: "base", themeVariables })`
+ *     pre-populates Mermaid's per-render `<style id="mermaid-XXXX">` block with
+ *     design-token hex values. That `<style>` is an element Mermaid inserts into the
+ *     rendered SVG, so the self-only CSP blocks it outright (not merely
+ *     out-specificitied) — confirmed live on 1.4.24 (236 CSP violations on one page,
+ *     every non-flowchart shape and the flowchart cylinder painted solid black).
+ *     `adoptMermaidStyleFor` (below) copies that blocked `<style>`'s text into a
+ *     constructable `CSSStyleSheet` and adds it to `document.adoptedStyleSheets` —
+ *     a CSSOM-constructed sheet is not an inline style and the CSP does not touch
+ *     it. The external CSS Module fallback rules in `WikiView.module.css` (served as
+ *     a hashed `<link>`, ADR-44) remain as a second layer: they cover the frame
+ *     before adoption lands and the jsdom test environment, which does not support
+ *     constructable stylesheets. Only the flowchart shapes those fallback rules
+ *     enumerate are covered by that second layer — everything else (classDiagram,
+ *     sequence, ER) depends on the adopted sheet.
  *   - **Theme-aware (ADR-44).** `currentTheme()` reads the `data-theme` attribute on
  *     `:root` (or OS preference as fallback) so diagrams follow the app's dark/light
  *     toggle. Re-initialization is triggered only when the effective theme changes.
@@ -192,6 +201,12 @@ function initialize(mermaid: MermaidApi, theme: MermaidTheme): void {
  * reflect the active light/dark choice (ADR-44). When re-calling after a theme
  * toggle, the caller (WikiView.tsx) should first restore `.mermaid[data-processed]`
  * elements to their original source so Mermaid re-renders them cleanly.
+ *
+ * Also adopts each rendered `.mermaid` element's constructable stylesheet (HF-3) —
+ * replacing any sheet already adopted for that same element, so a re-render never
+ * stacks sheets. The caller owns the other half of that lifecycle: when a
+ * `.mermaid` element unmounts for good, call `unadoptMermaidStyleFor` on it, or its
+ * sheet stays adopted forever.
  */
 export async function renderMermaidIn(container: HTMLElement): Promise<void> {
   const nodes = container.querySelectorAll(".mermaid");
@@ -202,7 +217,65 @@ export async function renderMermaidIn(container: HTMLElement): Promise<void> {
     const theme = currentTheme();
     initialize(mermaid, theme);
     await mermaid.run({ nodes });
+    for (const node of nodes) adoptMermaidStyleFor(node);
   } catch {
     // Leave the diagram source visible rather than breaking the page.
   }
+}
+
+// ── CSP-safe styling via constructable stylesheets ────────────────────────────
+
+/**
+ * The constructable stylesheet currently adopted for each rendered diagram,
+ * keyed by its `.mermaid` mount element (stable across a theme-toggle
+ * re-render — only its contents are replaced). A `WeakMap` lets an unmounted
+ * target's entry drop once nothing else references the element.
+ */
+const adoptedSheets = new WeakMap<Element, CSSStyleSheet>();
+
+/**
+ * Copy `target`'s freshly-rendered `<style>` (the first child of the `<svg>`
+ * Mermaid just drew — CSP-blocked as an injected element) into a constructable
+ * `CSSStyleSheet` and add it to `document.adoptedStyleSheets`. CSSOM-constructed
+ * sheets are not inline styles, so `default-src 'self'` does not block them
+ * (proven against the served CSP — see the module header).
+ *
+ * Mermaid scopes every rule in that `<style>` to the diagram's own `#mermaid-…`
+ * id, so adopting many diagrams' sheets side by side cannot let one diagram
+ * restyle another.
+ *
+ * Replaces (never stacks) `target`'s previous sheet, so a theme toggle's
+ * re-render does not accumulate stale sheets for the same target.
+ */
+function adoptMermaidStyleFor(target: Element): void {
+  const css = target.querySelector("svg > style")?.textContent;
+  if (!css) return;
+  if (typeof CSSStyleSheet === "undefined" || !("adoptedStyleSheets" in document)) return;
+  let sheet: CSSStyleSheet;
+  try {
+    sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+  } catch {
+    // Older engines / jsdom: leave the CSS-Module fallback as the only styling.
+    return;
+  }
+  unadoptMermaidStyleFor(target);
+  adoptedSheets.set(target, sheet);
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+}
+
+/**
+ * Remove `target`'s adopted stylesheet, if one was adopted, from
+ * `document.adoptedStyleSheets`.
+ *
+ * Callers MUST call this when a diagram's mount element unmounts for good
+ * (not merely re-rendering in place) — otherwise a long-lived conversation or
+ * wiki session keeps growing `document.adoptedStyleSheets` by one sheet per
+ * diagram ever shown, none of them ever released.
+ */
+export function unadoptMermaidStyleFor(target: Element): void {
+  const sheet = adoptedSheets.get(target);
+  if (!sheet) return;
+  adoptedSheets.delete(target);
+  document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== sheet);
 }
