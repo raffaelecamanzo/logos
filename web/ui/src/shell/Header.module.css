@@ -67,10 +67,9 @@
    lockup, the workspace-probe fault badge and the theme toggle survive to the
    narrowest supported viewport. (The member selector was on this row until S-425
    moved it into the sidebar's Service-section header; its own module carries its
-   widths.) Both rungs are ladder positions frontend-design §7 already documents
-   (desktop ≥1024px, tablet ≥768px); 1023px is the tier the AppShell sidebar and
-   the Chat rail already collapse at, so the shell reflows at one width, not
-   three. */
+   widths.) This rung is the tablet tier frontend-design §7 already documents
+   (≥768px); 1023px is the tier the AppShell sidebar and the Chat rail already
+   collapse at, so the shell reflows at one width, not three. */
 
 /* Tablet and below. The readout is dropped WHOLE — the figures, "Connecting…",
    "Not indexed" and the "API unavailable" badge alike, since `.status` is the one
