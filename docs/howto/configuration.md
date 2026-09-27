@@ -147,7 +147,10 @@ kind = "mock"   # a stand-in provider of the API it mocks, never a consumer
   `kind` and `rows`, and a `summary` line that states the count over its
   denominator, e.g. `"411 of 874 contract-surface rows reported apart from 1
   declared member (documentation: 1); the headline and spec_conformance_ratio
-  exclude them"`. The reachability rider carries the same count as
+  exclude them"`. `spec_conformance_summary` itself ends with the same count
+  (`"…; 411 of 874 contract-surface rows reported apart by declared member
+  kind"`), so a surface that renders only that line still shows the
+  population shrank. The reachability rider carries the same count as
   `declared_apart: {rows, contract_surface_rows}`. The member's routes still
   bind other members' calls. Its invocation rows still count, so
   `resolved_cross_service_edges` and `egress_resolution` never move by a

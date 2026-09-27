@@ -1270,6 +1270,16 @@ pub struct CrossServiceCoverage {
     /// same field — one line, in both outputs, that can never regress on one
     /// surface while the other stays honest ([CR-111] §4.4).
     ///
+    /// When a declared member kind set rows apart
+    /// ([`declared_apart`](Self::declared_apart)), the line ends with that count
+    /// over its denominator — `"…; 411 of 868 contract-surface rows reported apart
+    /// by declared member kind"` — so a surface rendering only this line still
+    /// says the population shrank ([BR-51], [FR-WS-32]). Without a declaration the
+    /// line is unchanged.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    ///
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
@@ -2614,12 +2624,23 @@ impl Tally {
         let total = self.by_intake.total();
         let denom = total.bound + total.ambiguous + total.unbound;
         let spec_conformance_ratio = (denom > 0).then(|| total.bound as f64 / denom as f64);
-        let spec_conformance_summary = summarize_spec_conformance(
+        // Sealed before the summary is composed so the summary can state it: a
+        // ratio whose population a declaration shrank must say so in the one line
+        // every surface renders, not only in a sibling key a renderer may ignore
+        // ([BR-51], [FR-WS-32]). Absent ⇒ the line is exactly what it always was.
+        let declared_apart = self.apart.finish(self.by_intake.contract_surface);
+        let mut spec_conformance_summary = summarize_spec_conformance(
             total.bound,
             denom,
             total.no_provider_in_workspace,
             spec_conformance_ratio,
         );
+        if let Some(apart) = &declared_apart {
+            spec_conformance_summary.push_str(&format!(
+                "; {} of {} contract-surface rows reported apart by declared member kind",
+                apart.rows, apart.contract_surface_rows
+            ));
+        }
 
         // The successor headline ([CR-120], [BR-51], [CR-127]). Its two figures
         // have different numerators on purpose — resolved *edges* against
@@ -2639,7 +2660,6 @@ impl Tally {
         // fixtures, this fires on the integration harnesses that run over the real
         // 84-member estate ([CR-120]'s reconcile-against-`references` contract).
         let invocation = self.by_intake.invocation;
-        let declared_apart = self.apart.finish(self.by_intake.contract_surface);
         debug_assert_eq!(
             (egress.resolved_sites, egress.measured),
             (
@@ -9012,6 +9032,17 @@ mod tests {
         );
         assert_eq!(after.spec_conformance_measured, 2, "api GET + shop's bound call");
         assert_eq!(after.spec_conformance_ratio, Some(1.0));
+        assert_eq!(
+            after.spec_conformance_summary,
+            "1.000 (2 of 2 measured; 1 excluded as no-provider-in-workspace); \
+             2 of 4 contract-surface rows reported apart by declared member kind",
+            "the one line every surface renders states the rows set apart (BR-51)"
+        );
+        assert_eq!(
+            before.spec_conformance_summary,
+            "0.750 (3 of 4 measured; 1 excluded as no-provider-in-workspace)",
+            "undeclared, the line is exactly what it always was"
+        );
         assert!(
             after.references.iter().all(|row| row.from.member != "docs"),
             "no docs row is left in the headline's rows"

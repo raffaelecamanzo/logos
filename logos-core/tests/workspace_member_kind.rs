@@ -152,6 +152,12 @@ fn a_candidate_stays_in_the_headline_until_its_kind_is_declared() {
         coverage.get("spec_conformance_ratio").is_none(),
         "nothing left to measure is absent, never 1.0: {coverage}"
     );
+    assert_eq!(
+        coverage["spec_conformance_summary"],
+        "0 of 0 measured; 0 excluded as no-provider-in-workspace; \
+         2 of 2 contract-surface rows reported apart by declared member kind",
+        "the line every surface renders states the rows set apart (BR-51)"
+    );
     let apart = &coverage["declared_apart"];
     assert_eq!(apart["rows"], 2);
     assert_eq!(apart["contract_surface_rows"], 2);
