@@ -177,9 +177,11 @@
   padding: 0 2px;
 }
 /* ── Mermaid diagram blocks (S-196, FR-WK-15, CR-051) ────────────────────────
-   Colors are driven via mermaid.initialize({ themeVariables }) as inline SVG
-   presentation attributes (CSP-safe — no injected <style>, no unsafe-inline).
-   These rules handle STRUCTURE and LAYOUT only, not color. */
+   Colors come from mermaid.initialize({ themeVariables }), which fills each
+   render's own <style> block. The CSP blocks that block as an injected element,
+   so the seam (mermaid.ts, HF-3) adopts its text as a constructable stylesheet;
+   the colour fallback further down covers the frame before that lands. These
+   rules handle STRUCTURE and LAYOUT only, not color. */
 
 /* Container — always applied (both pre- and post-render). */
 .prose :global(.mermaid) {
@@ -225,12 +227,16 @@
  * no unsafe-inline) blocks that injected block in production. Without it, SVG shapes
  * fall back to black fill + black text — the original regression.
  *
+ * The seam (mermaid.ts, HF-3) re-applies that block's text as a constructable
+ * stylesheet, which the CSP does not restrict, so in production Mermaid's own rules
+ * do land — after the render, and only where the engine supports adoptedStyleSheets.
  * These external same-origin rules (served as a hashed <link> — CSP-safe by
- * construction) provide the fallback: they target the same Mermaid class structure
- * using design tokens (--surface-1, --text-1, etc.) that follow the data-theme
- * toggle automatically. Specificity is 0-3-1 (three classes + element), which loses
- * to Mermaid's 1-1-1 (#id + class + element) in dev mode (no CSP), so themeVariables
- * still apply there; in production the Mermaid block is blocked and these rules win.
+ * construction) are the fallback for the rest: the frame before adoption, an engine
+ * (or jsdom) without constructable sheets. They target the same Mermaid class
+ * structure using design tokens (--surface-1, --text-1, etc.) that follow the
+ * data-theme toggle automatically, and cover the flowchart shapes only. Specificity
+ * is 0-3-1 (three classes + element), which loses to Mermaid's 1-1-1 (#id + class +
+ * element) wherever Mermaid's rules apply — dev mode, or the adopted sheet.
  */
 
 /* Node shapes: fill = surface-1, border = border-subtle */

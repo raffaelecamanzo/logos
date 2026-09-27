@@ -869,19 +869,23 @@
 }
 
 /*
- * CSP-safe colour fallback — the wiki's two-layer strategy (S-196, ADR-44,
- * NFR-SE-06), applied to the chat viewer.
+ * CSP-safe colour fallback — the wiki's styling strategy (S-196, ADR-44,
+ * NFR-SE-06, HF-3), applied to the chat viewer.
  *
  * The shared seam passes `themeVariables` so Mermaid pre-populates its per-render
  * `<style id="mermaid-XXXX">` block with token-matched colours; in development (no
  * CSP) that block wins on specificity. In production the self-only policy blocks
- * it, and without a fallback the SVG falls back to black fill on black text. These
- * external same-origin rules (a hashed <link>, CSP-safe by construction) are that
- * fallback, and they are expressed in DESIGN TOKENS — so they follow the
- * `data-theme` toggle automatically and no raw hex enters this module.
+ * it as an injected element, so the seam (`mermaid.ts`, HF-3) re-applies its text
+ * as an adopted constructable stylesheet once the render lands. These external
+ * same-origin rules (a hashed <link>, CSP-safe by construction) cover what that
+ * leaves: the frame before adoption, and an engine without constructable sheets.
+ * They cover the flowchart shapes only, and they are expressed in DESIGN TOKENS —
+ * so they follow the `data-theme` toggle automatically and no raw hex enters this
+ * module.
  *
  * Specificity is deliberately low (classes + element) so Mermaid's own 1-1-1
- * (#id + class + element) still wins wherever it is allowed to load.
+ * (#id + class + element) still wins wherever it applies — dev mode, or the
+ * adopted sheet.
  */
 
 /* Node shapes: fill = surface-1, border = border-subtle. */
