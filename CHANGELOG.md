@@ -9,6 +9,32 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+Sprint 79, hotfix round 1.
+
+### Added
+
+- **The chat can read documentation kept outside the project.** A new optional
+  `[chat] read_roots` key (for example `read_roots = ["../logos-docs"]`) lets the
+  Source-Reader read files reached through symlinks inside the project that point
+  into the listed folders. `grep` and `glob` follow only those links. It is empty by
+  default, so nothing changes unless a project opts in. The consent banner and the
+  CHAT band name the extra folders, and changing them asks for consent again. A
+  listed folder that does not exist fails the turn with an error naming it
+  (NFR-SE-04 amended).
+
+### Fixed
+
+- **Mermaid shapes are no longer drawn solid black.** The strict content-security
+  policy blocked Mermaid's own styles, so cylinders, class boxes and most
+  sequence-diagram parts fell back to black, and self-calls drew as filled blobs.
+  Those styles are now applied in a way the policy allows, without loosening it, in
+  both the Chat and Wiki tabs.
+- **Sequence diagrams with a `;` in a message or note render.** Mermaid treats `;` as
+  the end of a statement and rejected the whole diagram, so the chat showed its
+  source. The text is repaired to Mermaid's `#59;` escape before rendering; the
+  Source view still shows exactly what the model wrote, and the chat's answer writer
+  is told to avoid a bare `;` in diagram text.
+
 ## [1.4.24] — 2026-09-27
 
 Sprint 79.
