@@ -196,6 +196,12 @@ describe("renderMermaidIn initializes Mermaid with theme-matched themeVariables 
 // `renderMermaidIn`'s actual adopt/unadopt code path (including its
 // `typeof CSSStyleSheet === "undefined"` feature-detect finding a real
 // constructor) rather than a fully mocked stand-in.
+//
+// Every container is appended to `document.body` before rendering (and cleared
+// in `afterEach`): `renderMermaidIn` gates adoption on `node.isConnected`
+// (review-fix, HF-3), so an unattached `document.createElement` container would
+// silently skip adoption for a reason that has nothing to do with what each test
+// claims to check.
 
 describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)", () => {
   beforeEach(() => {
@@ -218,6 +224,7 @@ describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)",
     delete (document as any).adoptedStyleSheets;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     delete (window as any).mermaid;
+    document.body.innerHTML = "";
     setThemeAttr(null);
   });
 
@@ -257,6 +264,7 @@ describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)",
     const { renderMermaidIn: fresh } = await import("./mermaid.ts");
     const container = document.createElement("div");
     container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
 
     await fresh(container);
 
@@ -270,6 +278,7 @@ describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)",
     const container = document.createElement("div");
     container.innerHTML =
       '<div class="mermaid">graph TD\nA-->B</div><div class="mermaid">graph TD\nC-->D</div>';
+    document.body.appendChild(container);
 
     await fresh(container);
 
@@ -284,6 +293,7 @@ describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)",
     const { renderMermaidIn: fresh } = await import("./mermaid.ts");
     const container = document.createElement("div");
     container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
 
     await fresh(container);
     expect(adopted()).toHaveLength(1);
@@ -304,6 +314,8 @@ describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)",
     containerA.innerHTML = '<div class="mermaid">graph TD\nA-->B</div>';
     const containerB = document.createElement("div");
     containerB.innerHTML = '<div class="mermaid">graph TD\nC-->D</div>';
+    document.body.appendChild(containerA);
+    document.body.appendChild(containerB);
 
     await fresh(containerA);
     mock.setStyle(() => "#mermaid-2 .node rect{fill:#654321}");
@@ -336,8 +348,47 @@ describe("renderMermaidIn adopts a constructable stylesheet per diagram (HF-3)",
     const { renderMermaidIn: fresh } = await import("./mermaid.ts");
     const container = document.createElement("div");
     container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
 
     await fresh(container);
+
+    expect(adopted()).toHaveLength(0);
+  });
+
+  it("does not adopt a stylesheet for a target detached before the async render resolved (review-fix, HF-3)", async () => {
+    // `mermaid.run` is a real async boundary in production (the vendored bundle's
+    // own layout/draw work, or — on the session's first diagram — the bundle
+    // fetch inside `loadMermaid()`). Model that with a deferred promise this test
+    // controls, resolved from OUTSIDE the mock so this test never has to guess
+    // how many microtask ticks pass before `run` is actually invoked: whenever it
+    // is, `runPromise` may already be resolved and its `.then()` still fires.
+    let resolveRun!: () => void;
+    const runPromise = new Promise<void>((resolve) => {
+      resolveRun = resolve;
+    });
+    const run = vi.fn((opts: { nodes?: ArrayLike<Element> }) =>
+      runPromise.then(() => {
+        const nodes = opts.nodes ? Array.from(opts.nodes) : [];
+        nodes.forEach((node) => {
+          node.innerHTML = `<svg><style>#mermaid-1 .node rect{fill:#123456}</style></svg>`;
+          node.setAttribute("data-processed", "true");
+        });
+      }),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).mermaid = { initialize: vi.fn(), run };
+
+    const { renderMermaidIn: fresh } = await import("./mermaid.ts");
+    const container = document.createElement("div");
+    container.innerHTML = '<div class="mermaid">graph TD\nA --> B</div>';
+    document.body.appendChild(container);
+
+    const pending = fresh(container);
+    // Simulate the owning component unmounting (or the Wiki page/theme
+    // re-rendering) while `mermaid.run` is still in flight.
+    container.remove();
+    resolveRun();
+    await pending;
 
     expect(adopted()).toHaveLength(0);
   });

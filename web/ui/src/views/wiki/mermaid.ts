@@ -217,7 +217,13 @@ export async function renderMermaidIn(container: HTMLElement): Promise<void> {
     const theme = currentTheme();
     initialize(mermaid, theme);
     await mermaid.run({ nodes });
-    for (const node of nodes) adoptMermaidStyleFor(node);
+    // A target can be detached while this call was awaiting `mermaid.run` (or,
+    // on the session's first diagram, the vendored-bundle fetch inside
+    // `loadMermaid()`) — an unmount, a page navigation, or a theme re-render
+    // racing ahead of this one. Its cleanup already ran and found nothing to
+    // unadopt, so adopting for it now would leak the sheet for the page's
+    // lifetime (review-fix, HF-3).
+    for (const node of nodes) if (node.isConnected) adoptMermaidStyleFor(node);
   } catch {
     // Leave the diagram source visible rather than breaking the page.
   }
