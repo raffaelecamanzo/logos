@@ -1799,6 +1799,30 @@ mod tests {
     }
 
     #[test]
+    fn identity_takes_the_best_member_and_each_members_best_spec() {
+        let ten: Vec<(&str, &str)> = ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i", "/j"]
+            .iter()
+            .map(|t| ("GET", *t))
+            .collect();
+        let held = doc("w", "x.yaml", &ten, 0);
+        let p_full = doc("p", "v1.yaml", &ten, 10);
+        let p_old = doc("p", "old.yaml", &ten[..9], 9);
+        let q_nine = doc("q", "v1.yaml", &ten[..9], 9);
+        let none = BTreeSet::new();
+        // Across members: the higher score wins, both clearing 90 %.
+        assert!(matches!(
+            resolve_identity(&held, &[&q_nine, &p_full], &none),
+            Identity::Member { ref member, shared: 10, .. } if member == "p"
+        ));
+        // Within a member: its best spec stands for it, whatever order they come
+        // in — else p's weaker copy would tie q and resolve to neither.
+        assert!(matches!(
+            resolve_identity(&held, &[&p_old, &p_full, &q_nine], &none),
+            Identity::Member { ref member, ref path, shared: 10, .. } if member == "p" && path == "v1.yaml"
+        ));
+    }
+
+    #[test]
     fn an_equal_best_score_resolves_to_neither_member() {
         let held = doc("w", "x.yaml", &[("GET", "/a")], 0);
         let one = doc("p", "v1.yaml", &[("GET", "/a")], 1);
