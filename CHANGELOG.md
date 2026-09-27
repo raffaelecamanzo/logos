@@ -4,8 +4,12 @@ All notable changes to Logos are recorded here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
 The dogfood point releases between 0.2.0 and 0.7.6 advanced the self-dogfood pin
-without a capability change and were recorded only in `VERSIONS` / commit history;
+without a capability change and were recorded only in the commit history;
 0.8.0 is the next notable, capability-bearing release.
+
+Releases 1.1.0 through 1.4.13 shipped without changelog entries. The entries for
+them below are one-line summaries reconstructed afterwards from the release commits
+and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
@@ -662,6 +666,82 @@ the absence vocabulary is stated once.
   `covers_all_members` are new: a summary computed over a partially-opened
   workspace is now marked as covering fewer than all members instead of reading
   as a complete picture.
+
+## [1.4.13] — 2026-09-18
+
+Sprint 71: the last cross-service arm agrees with itself, and three readouts start reporting state they can establish (CR-132, CR-133).
+
+## [1.4.12] — 2026-09-17
+
+Sprint 70: Kafka Streams coupling becomes visible, and the two gates that decide the config-declared intake are measured (CR-131).
+
+## [1.4.11] — 2026-09-14
+
+Sprint 69: the capture reaches the shapes real estates write, and every cross-service figure agrees with its own payload (CR-123..CR-127).
+
+## [1.4.10] — 2026-09-13
+
+Sprint 68: committed-configuration evidence is wired into the production extract pass, and the workspace surface stops repeating itself.
+
+## [1.4.9] — 2026-09-12
+
+Sprint 67: committed configuration becomes cross-service evidence, and both blocking gates return a verdict (CR-121).
+
+## [1.4.8] — 2026-09-09
+
+Sprint 66: the invocation arms report their own refusals, and the headline stops flattering them (CR-120).
+
+## [1.4.7] — 2026-09-07
+
+Sprint 65: the gating measurements for the blocked change requests, plus the capture work not waiting on them.
+
+## [1.4.6] — 2026-09-06
+
+Sprint 64: `logos check` over an absent rules contract exits 4 instead of passing vacuously, seeded worktrees carry the contract, and the graph is offered at scoping time (CR-112..CR-114).
+
+## [1.4.5] — 2026-09-05
+
+Sprints 61–63: bounded workspace index/warm resources, JVM Spring route binding, a truthful multi-repo workspace from first contact to steady state, and visible cross-service REST coupling (CR-098..CR-102, CR-108..CR-111). 1.4.4 was a dev-only build.
+
+## [1.4.3] — 2026-08-06
+
+The session-start quality readout and the write-free `logos quality-report` (CR-095); four RustSec advisories cleared. 1.4.2 was never released.
+
+## [1.4.1] — 2026-07-26
+
+Sprint 60: chat UI refresh — assistant-ui column, foldable activity, Mermaid viewer (CR-089).
+
+## [1.4.0] — 2026-07-25
+
+Sprint 59: multi-thread chat history, streaming answers, and metric-semantics corrections (CR-053).
+
+## [1.3.0] — 2026-07-23
+
+Sprint 58: hardened CR-061 app-wide reachability and broker coupling, and dashboard LOC figures (CR-084).
+
+## [1.2.3] — 2026-07-12
+
+Sprint 57: CR-061 completion — broker topics, reachability, governance, workspace UI.
+
+## [1.2.2] — 2026-07-11
+
+Sprint 56: CR-061 cross-service invocation arms.
+
+## [1.2.1] — 2026-07-11
+
+Sprint 55: CR-061 federation surface.
+
+## [1.2.0] — 2026-07-11
+
+Sprint 54: CR-061 multi-repo workspace federation foundation.
+
+## [1.1.1] — 2026-07-10
+
+Sprint 53: the Quadrant view and static test-gaps tool are dropped, and Rule findings are promoted (CR-079).
+
+## [1.1.0] — 2026-07-10
+
+Sprint 52: the web dashboard joins the default build, with the agents egress carve-out (CR-078).
 
 ## [1.0.7] — 2026-07-09
 
