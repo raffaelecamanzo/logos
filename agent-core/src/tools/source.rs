@@ -24,9 +24,10 @@
 //! directory is still an [`SandboxError::Escape`]. The walks follow a symlink
 //! only when its canonical target lies under a read root — found by a per-
 //! directory scan, because such a link is commonly git-ignored (this repo's
-//! `/docs/planning`) and the gitignore-aware walker would prune it unseen — each
-//! canonical directory at most once (the cycle guard), reporting every hit under
-//! its in-tree path.
+//! `/docs/planning`) and the gitignore-aware walker would prune it unseen —
+//! skipping a link whose target is, or encloses, a directory already on the
+//! chain of links that reached it (the cycle guard), and reporting every hit
+//! under its in-tree path, so two links to one directory are both listed.
 //!
 //! [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
 
@@ -52,6 +53,12 @@ const DEFAULT_MAX_READ_BYTES: usize = 256 * 1024;
 
 /// The default cap on `grep` matches / `glob` paths returned in one call.
 const DEFAULT_MATCH_LIMIT: usize = 200;
+
+/// The cap on symlinks one `grep`/`glob` call follows into read roots. The
+/// ancestry cycle guard makes every walk finite, but a link graph with fan-out
+/// can still multiply the walks; past this cap no further link is followed and
+/// the call reports `truncated`. A real docs layout follows a handful.
+pub const MAX_FOLLOWED_LINKS: usize = 256;
 
 /// Why a sandboxed path or pattern was refused.
 ///
@@ -435,30 +442,56 @@ impl Sandbox {
     /// containment walk. With read roots declared, each walked directory is also
     /// scanned for symlinks into them ([`read_root_target`](Self::read_root_target)):
     /// a directory target is queued for its own walk under the link's in-tree
-    /// path — each canonical directory at most once, which is what makes a
-    /// cyclic link terminate — and a file target is visited directly.
+    /// path, and a file target is visited directly. Every link is followed —
+    /// two links to one directory are both walked, each under its own in-tree
+    /// path — **except** one whose target is, or encloses, a directory already
+    /// on the chain of walks that reached it: following that would re-enter
+    /// where the walk already is, so skipping it is what makes a cycle
+    /// terminate. At most [`MAX_FOLLOWED_LINKS`] links are followed per call.
+    ///
+    /// Returns `false` when the cap left a link unfollowed — the caller then
+    /// reports `truncated` — and `true` otherwise (including when `visit`
+    /// asked to stop). Past the cap the walks already queued still run.
     fn walk_files(
         &self,
         start: &Path,
         logical: &Path,
         mut visit: impl FnMut(&Path, &Path) -> std::ops::ControlFlow<()>,
-    ) {
-        let mut walked: HashSet<PathBuf> = HashSet::from([start.to_path_buf()]);
-        let mut queue = VecDeque::from([(start.to_path_buf(), logical.to_path_buf())]);
-        while let Some((physical, logical)) = queue.pop_front() {
+    ) -> bool {
+        // Each queued walk carries its chain: the canonical roots of the walks
+        // that led to it, itself included.
+        let mut queue = VecDeque::from([(
+            start.to_path_buf(),
+            logical.to_path_buf(),
+            vec![start.to_path_buf()],
+        )]);
+        let mut followed = 0usize;
+        let mut capped = false;
+        while let Some((physical, logical, chain)) = queue.pop_front() {
             let mut links = Vec::new();
             if self
                 .walk_one(&physical, &logical, &mut links, &mut visit)
                 .is_break()
             {
-                return;
+                return !capped;
             }
             for (target, link_logical) in links {
-                if walked.insert(target.clone()) {
-                    queue.push_back((target, link_logical));
+                if chain.iter().any(|walked| walked.starts_with(&target)) {
+                    continue; // a cycle: the target is, or encloses, this chain.
                 }
+                // Past the cap no new link is queued, but the walks already
+                // queued still run, so the answer holds everything reached.
+                if followed == MAX_FOLLOWED_LINKS {
+                    capped = true;
+                    break;
+                }
+                followed += 1;
+                let mut link_chain = chain.clone();
+                link_chain.push(target.clone());
+                queue.push_back((target, link_logical, link_chain));
             }
         }
+        !capped
     }
 
     /// One contained walk of `start` (see [`walk_files`](Self::walk_files)):
@@ -736,7 +769,7 @@ impl Tool for Grep {
         let max_file_bytes = self.sandbox.max_read_bytes as u64;
         let mut matches = Vec::new();
         let mut truncated = false;
-        self.sandbox.walk_files(&start, &logical, |abs, rel| {
+        let complete = self.sandbox.walk_files(&start, &logical, |abs, rel| {
             // Skip files larger than the read cap: a single large file in the
             // tree must not drive an unbounded `read_to_string` allocation.
             if std::fs::metadata(abs).is_ok_and(|m| m.len() > max_file_bytes) {
@@ -765,7 +798,7 @@ impl Tool for Grep {
         Ok(GrepOutput {
             pattern: args.pattern,
             matches,
-            truncated,
+            truncated: truncated || !complete,
         })
     }
 }
@@ -841,7 +874,7 @@ impl Tool for Glob {
         let mut paths = Vec::new();
         let mut truncated = false;
         let root = self.sandbox.root().to_path_buf();
-        self.sandbox.walk_files(&root, Path::new(""), |_abs, rel| {
+        let complete = self.sandbox.walk_files(&root, Path::new(""), |_abs, rel| {
             if glob.is_match(rel) {
                 if paths.len() >= limit {
                     truncated = true;
@@ -856,7 +889,7 @@ impl Tool for Glob {
         Ok(GlobOutput {
             pattern: args.pattern,
             paths,
-            truncated,
+            truncated: truncated || !complete,
         })
     }
 }

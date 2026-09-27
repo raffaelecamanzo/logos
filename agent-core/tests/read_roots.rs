@@ -28,6 +28,7 @@ use agent_core::{source_toolset, Sandbox, SandboxError};
 ///   src/lib.rs                      "pub fn f() { needle(); }"
 ///   docs/notes.md                   "needle in a real doc"
 ///   docs/planning -> docs-repo/planning      (gitignored, into the read root)
+///   planning -> docs-repo/planning           (a second, root-level alias, gitignored)
 ///   log.md -> docs-repo/planning/sprint-log.md   (a FILE symlink into it)
 ///   stray -> elsewhere                        (an undeclared directory)
 ///   stray-file.md -> elsewhere/secret.md      (an undeclared file)
@@ -63,7 +64,7 @@ fn estate() -> Estate {
     let docs_repo = base.join("docs-repo");
     let elsewhere = base.join("elsewhere");
 
-    write(&project.join(".gitignore"), "/docs/planning\n/docs/sprawl\n");
+    write(&project.join(".gitignore"), "/docs/planning\n/docs/sprawl\n/planning\n");
     write(&project.join("src/lib.rs"), "pub fn f() { needle(); }\n");
     write(&project.join("docs/notes.md"), "needle in a real doc\n");
     write(&project.join("target/junk.md"), "needle buried in-tree\n");
@@ -74,6 +75,7 @@ fn estate() -> Estate {
     write(&elsewhere.join("secret.md"), "needle top secret\n");
 
     symlink(docs_repo.join("planning"), project.join("docs/planning")).expect("docs link");
+    symlink(docs_repo.join("planning"), project.join("planning")).expect("alias link");
     symlink(docs_repo.join("planning/sprint-log.md"), project.join("log.md")).expect("file link");
     symlink(&elsewhere, project.join("stray")).expect("stray link");
     symlink(elsewhere.join("secret.md"), project.join("stray-file.md")).expect("stray file");
@@ -260,7 +262,14 @@ async fn glob_discovers_files_behind_a_gitignored_symlink_into_a_read_root() {
     let globbed = call(estate.with_docs(), "glob", serde_json::json!({ "pattern": "**/*.md" })).await;
     let paths = paths_of(&globbed, "paths", None);
 
-    for expected in ["docs/notes.md", "docs/planning/sprint-log.md", "log.md"] {
+    // Both links to the one read-root directory are listed, each under its own
+    // in-tree path — the shallower alias must not shadow `docs/planning`.
+    for expected in [
+        "docs/notes.md",
+        "docs/planning/sprint-log.md",
+        "planning/sprint-log.md",
+        "log.md",
+    ] {
         assert!(paths.contains(&expected.to_string()), "{expected} listed: {paths:?}");
     }
     for refused in ["stray", "near", "target", "out/", "secret", "sneaky", "buried"] {
@@ -269,13 +278,14 @@ async fn glob_discovers_files_behind_a_gitignored_symlink_into_a_read_root() {
             "nothing via {refused:?} is listed: {paths:?}"
         );
     }
-    // The self-referential `loop` link is followed at most once: its canonical
-    // target is the directory already walked, so the walk terminates and no
+    // The self-referential `loop` link is never followed: its target is the
+    // directory the walk reached it through, so the walk terminates and no
     // `loop/loop/…` chain appears.
     assert!(
         !paths.iter().any(|p| p.contains("loop")),
         "a cycle back onto a walked directory is not re-walked: {paths:?}"
     );
+    assert_eq!(globbed["truncated"], false, "{globbed}");
 }
 
 #[tokio::test]
@@ -371,4 +381,37 @@ fn read_roots_resolve_relative_to_the_declaring_root_or_as_given_when_absolute()
         .expect("an absolute entry is taken as given");
     assert_eq!(relative_to_base.read_roots(), absolute.read_roots());
     assert_eq!(absolute.read_roots(), [estate.base.join("docs-repo")]);
+}
+
+/// Past [`MAX_FOLLOWED_LINKS`] followed links a walk stops following and says
+/// so — `truncated`, never a silently short answer.
+#[tokio::test]
+async fn a_walk_past_the_followed_link_cap_reports_truncated() {
+    use agent_core::MAX_FOLLOWED_LINKS;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let project = base.join("project");
+    std::fs::create_dir_all(&project).expect("project");
+    for i in 0..=MAX_FOLLOWED_LINKS {
+        write(&base.join(format!("docs-repo/d{i:03}/f.md")), "x\n");
+        symlink(base.join(format!("docs-repo/d{i:03}")), project.join(format!("l{i:03}")))
+            .expect("link");
+    }
+    let sandbox = Sandbox::new(&project, std::iter::empty::<String>())
+        .expect("sandbox")
+        .with_read_roots(&project, ["../docs-repo"])
+        .expect("read root");
+    let globbed = call(
+        sandbox,
+        "glob",
+        serde_json::json!({ "pattern": "**/*.md", "limit": 10_000 }),
+    )
+    .await;
+    assert_eq!(globbed["truncated"], true, "the cap is reported");
+    assert_eq!(
+        paths_of(&globbed, "paths", None).len(),
+        MAX_FOLLOWED_LINKS,
+        "exactly the capped number of links was followed"
+    );
 }

@@ -514,9 +514,11 @@ What this admits, and what it does not:
   `../logos-docs-private` is not under `../logos-docs`.
 - **`grep` and `glob` see them too**, even when the symlink is git-ignored (this
   repo's `/docs/planning` is). The walks follow a symlink only when its target is
-  under a declared read root — every other symlink is still skipped — follow
-  each directory at most once, so a link cycle terminates, and report every hit
-  under its in-project path (`docs/planning/…`).
+  under a declared read root — every other symlink is still skipped — and report
+  every hit under its in-project path (`docs/planning/…`), so two links to one
+  directory are both listed. A link whose target is, or encloses, a directory
+  the walk reached it through is not followed, so a link cycle terminates; one
+  call follows at most 256 links and says `truncated` past that.
 - **`ignored_dirs` still apply** inside a read root.
 - **Resolved when a turn starts.** A relative entry resolves against the root
   whose `config.toml` declares the `[chat]` table. An entry that does not exist,
