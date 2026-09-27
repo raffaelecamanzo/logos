@@ -1280,7 +1280,9 @@ pub struct BuildManifestRow {
     pub content_hash: Option<String>,
     pub status: String,
     pub detail: Option<String>,
-    /// In insertion order: produced first, then references in document order.
+    /// In insertion order: the produced fact first, then references grouped by
+    /// kind (Maven `<parent>`, `<dependencies>`, `<dependencyManagement>`, each
+    /// in document order; Gradle in document order).
     pub artifacts: Vec<BuildArtifactRow>,
 }
 

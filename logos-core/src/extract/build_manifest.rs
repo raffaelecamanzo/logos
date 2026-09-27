@@ -248,7 +248,9 @@ pub struct ManifestFacts {
     /// Why it could not be read or parsed; `None` exactly when
     /// [`status`](Self::status) is [`ManifestStatus::Read`].
     pub detail: Option<String>,
-    /// Produced facts first, then references in document order.
+    /// The produced fact first, then the references grouped by kind — Maven
+    /// `<parent>`, then `<dependencies>`, then `<dependencyManagement>`, each
+    /// group in document order; Gradle references in document order.
     pub artifacts: Vec<ArtifactFact>,
 }
 
@@ -707,8 +709,9 @@ impl<'a> Chain<'a> {
             .or_else(|| pom.parent.as_ref().and_then(|p| p.version.as_deref()))
     }
 
-    /// Every fact pom `index` yields: produced first, then `<parent>`,
-    /// `<dependencies>` and `<dependencyManagement>` in document order.
+    /// Every fact pom `index` yields: produced first, then `<parent>`, then
+    /// `<dependencies>`, then `<dependencyManagement>` — grouped by kind, each
+    /// group in document order, whatever order the pom declares the sections in.
     fn facts(&self, index: usize) -> Vec<ArtifactFact> {
         let pom = &self.poms[index].pom;
         let mut out = Vec::new();

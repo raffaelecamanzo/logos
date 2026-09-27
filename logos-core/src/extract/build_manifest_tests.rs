@@ -263,8 +263,9 @@ fn dependency_management_is_managed_and_scope_import_is_a_bom_import() {
     assert_eq!(deps.len(), 1, "a managed entry is never also a dependency");
     assert_eq!(deps[0].scope.as_deref(), Some("runtime"));
 
-    // Every kind is distinct, and document order holds: produced, then the
-    // dependencies, then management.
+    // Every kind is distinct, and the order is BY KIND, not by document: the
+    // fixture declares <dependencyManagement> before <dependencies>, yet the
+    // dependencies come first — produced, then dependencies, then management.
     let order: Vec<Option<ReferenceKind>> = m.artifacts.iter().map(|a| a.kind).collect();
     assert_eq!(
         order,
