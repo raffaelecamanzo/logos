@@ -1091,7 +1091,9 @@ first turn, gitignored, never in the default binary).
    are then readable, greppable and globbable **through the project's symlinks**, under
    their in-project paths. Files under a read root can be sent to the endpoint too,
    so the consent banner and the status band both list every declared read root
-   ("Extra read roots: `../logos-docs`"). An inherited workspace table's roots are
+   ("Extra read roots: `../logos-docs`"). Declaring read roots after you consented,
+   or changing the set, brings the consent banner back before the next send. An
+   inherited workspace table's roots are
    marked as relative to the workspace root. A declared root that does not exist
    fails the turn with a message naming it.
 4. **Ask a question.** Type into the composer at the bottom and **Send**. The

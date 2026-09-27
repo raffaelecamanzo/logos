@@ -5,6 +5,7 @@ import {
   applyFrame,
   boundNote,
   CONSENT_KEY,
+  READ_ROOTS_CONSENT_KEY,
   endpointHost,
   hasConsent,
   hostOf,
@@ -529,6 +530,21 @@ describe("consent gate", () => {
     rememberConsent();
     expect(window.localStorage.getItem(CONSENT_KEY)).toBe("1");
     expect(hasConsent()).toBe(true);
+  });
+
+  it("covers declared read roots only for the exact set it disclosed (HF-1)", () => {
+    // A plain first-use consent — given before any read root was declared —
+    // still covers a policy with none, but not one that declares some.
+    rememberConsent();
+    expect(hasConsent([])).toBe(true);
+    expect(hasConsent(["../logos-docs"])).toBe(false);
+
+    rememberConsent(["../logos-docs", "/srv/specs"]);
+    expect(window.localStorage.getItem(READ_ROOTS_CONSENT_KEY)).toBe('["../logos-docs","/srv/specs"]');
+    // Order and repetition do not matter; the SET does.
+    expect(hasConsent(["/srv/specs", "../logos-docs", "/srv/specs"])).toBe(true);
+    expect(hasConsent(["../logos-docs"])).toBe(false);
+    expect(hasConsent(["../logos-docs", "/srv/specs", "/extra"])).toBe(false);
   });
 });
 

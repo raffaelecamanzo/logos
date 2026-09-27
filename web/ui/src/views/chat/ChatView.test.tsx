@@ -2006,6 +2006,25 @@ describe("ChatView — extra read roots (sprint-79 HF-1)", () => {
     expect(banner?.textContent).not.toMatch(/relative to the workspace root/);
   });
 
+  it("asks again when read roots appear after an earlier consent, before anything is sent", async () => {
+    const user = userEvent.setup();
+    // Consented on a policy with no read roots…
+    window.localStorage.setItem("logos.chat.consent", "1");
+    mockFetchConfig.mockResolvedValue(withReadRoots(configuredModel(), ["../logos-docs"]));
+    const first = render(<ChatView />);
+    // …so the banner naming the new root is back, and the composer is gated.
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("Extra read roots: ../logos-docs");
+    expect(screen.getByRole("textbox", { name: "Your message" })).toBeDisabled();
+    await acceptConsent(user);
+    first.unmount();
+
+    // The same set is now covered: no banner on the next visit.
+    render(<ChatView />);
+    await screen.findByText("CHAT");
+    expect(screen.queryByRole("button", { name: "Start chatting" })).not.toBeInTheDocument();
+  });
+
   it("keeps naming them in the status band, and says an inherited table's roots are the workspace's", async () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(

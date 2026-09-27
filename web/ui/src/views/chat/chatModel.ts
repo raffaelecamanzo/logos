@@ -638,20 +638,41 @@ export function turnEndedEmpty(state: TurnState): boolean {
 /** The localStorage key remembering the first-use consent acknowledgement. */
 export const CONSENT_KEY = "logos.chat.consent";
 
-/** Has the user acknowledged the first-use consent? Storage-blocked ⇒ re-ask each
- *  load (fail SAFE, not open). */
-export function hasConsent(): boolean {
+/** The localStorage key remembering WHICH extra read roots (sprint-79 HF-1) the
+ *  consent was given for — their content can reach the endpoint too, so a
+ *  consent given before they were declared, or for a different set, does not
+ *  cover them. */
+export const READ_ROOTS_CONSENT_KEY = "logos.chat.consent.readRoots";
+
+/** The disclosed read-root set as one comparable value: sorted, deduplicated. */
+function readRootsScope(roots: string[]): string {
+  return JSON.stringify([...new Set(roots)].sort());
+}
+
+/** Has the user acknowledged the first-use consent — and, when the policy
+ *  declares extra read roots, acknowledged exactly this set of them? With none
+ *  declared this is the plain first-use gate it always was. Storage-blocked ⇒
+ *  re-ask each load (fail SAFE, not open). */
+export function hasConsent(roots: string[] = []): boolean {
   try {
-    return window.localStorage.getItem(CONSENT_KEY) === "1";
+    if (window.localStorage.getItem(CONSENT_KEY) !== "1") return false;
+    return (
+      roots.length === 0 ||
+      window.localStorage.getItem(READ_ROOTS_CONSENT_KEY) === readRootsScope(roots)
+    );
   } catch {
     return false;
   }
 }
 
-/** Remember the consent acknowledgement (best-effort; non-fatal if storage is blocked). */
-export function rememberConsent(): void {
+/** Remember the consent acknowledgement, and the read-root set it disclosed
+ *  (best-effort; non-fatal if storage is blocked). */
+export function rememberConsent(roots: string[] = []): void {
   try {
     window.localStorage.setItem(CONSENT_KEY, "1");
+    if (roots.length > 0) {
+      window.localStorage.setItem(READ_ROOTS_CONSENT_KEY, readRootsScope(roots));
+    }
   } catch {
     /* non-fatal: consent holds for this page even if it cannot persist */
   }

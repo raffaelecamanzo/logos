@@ -183,7 +183,9 @@ function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
  *  [FR-UI-33]). There is no global Clear-history — deletion is per conversation,
  *  in the rail (S-211, [FR-UI-26], [ADR-47]). */
 function ChatConfigured({ ready }: { ready: ChatReady }) {
-  const [consented, setConsented] = useState<boolean>(() => hasConsent());
+  // Consent covers the disclosed read roots too (HF-1): a new or changed set
+  // shows the banner again, naming them before anything is sent.
+  const [consented, setConsented] = useState<boolean>(() => hasConsent(readRoots(ready.policy)));
   // The rail collapses behind a toggle below ~1023px (S-210 AC-3); `railOpen`
   // drives that toggle. At ≥1024px the rail is always shown (CSS), so this state
   // is inert there — it only gates the narrow-viewport disclosure.
@@ -192,9 +194,9 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
     useChatRuntime(consented);
 
   const acceptConsent = useCallback(() => {
-    rememberConsent();
+    rememberConsent(readRoots(ready.policy));
     setConsented(true);
-  }, []);
+  }, [ready.policy]);
 
   // Deleting keeps the rail OPEN (unlike select / new chat): the user is managing
   // the list and usually deletes more than one row.
