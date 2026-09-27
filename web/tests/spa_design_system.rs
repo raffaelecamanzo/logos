@@ -1517,16 +1517,20 @@ fn every_neutral_ink_in_the_chat_stylesheet_is_classified_and_clears_wcag_aa() {
 
 // ── The shell header's progressive disclosure (S-317, FR-UI-34, CR-089/CR-092) ──
 
-/// The two rungs of the disclosure ladder, in CSS px: the complements of the tiers
-/// frontend-design §7 documents (desktop ≥1024px, tablet ≥768px), and the shell's
+/// The one rung of the disclosure ladder still standing, in CSS px: the complement
+/// of the tier frontend-design §7 documents (tablet ≥768px), and the shell's
 /// existing collapse point (`AppShell.module.css`, `Chat.module.css`).
 ///
-/// Pinned as constants because a rung is the one value in this story that can drift
-/// in silence. Every rendered measurement in the S-317 record was taken by hand,
-/// once, against these two numbers; move them to 419px and 400px and both elements
-/// are back on the row at the exact viewport CR-089 measured, with nothing to say so.
+/// Pinned as a constant because a rung is the one value in this story that can
+/// drift in silence. Every rendered measurement in the S-317 record was taken by
+/// hand, once, against this number; move it to 419px and the readout is back on
+/// the row at the exact viewport CR-089 measured, with nothing to say so.
+///
+/// HF-4 removed the second rung this ladder used to carry: the `code
+/// intelligence` brand subtitle (`.brandSub`, dropped at 767px) no longer exists,
+/// so there is nothing left to drop at that width — see
+/// `header_never_reintroduces_the_brand_subtitle` below.
 const READOUT_RUNG_PX: f64 = 1023.0;
-const SUBTITLE_RUNG_PX: f64 = 767.0;
 
 /// Every declaration that takes an element off the page. `display: none` is the one
 /// the header uses; the other two are here because an element hidden by any of them
@@ -1597,21 +1601,17 @@ fn header_drops_at(selector: &str) -> Option<f64> {
         .reduce(f64::max)
 }
 
-/// The rungs themselves. Everything else asserted about the ladder is relative —
-/// the order test only says one rung is wider than the other — so the whole ladder
-/// could slide off the documented tiers while every other test here stayed green.
+/// The rung itself. Nothing else asserted about the ladder pins the absolute
+/// width — the surrounding tests only say the readout is the one thing dropped —
+/// so the rung could slide off the documented tier while every other test here
+/// stayed green.
 #[test]
-fn header_disclosure_rungs_are_the_documented_tiers() {
+fn header_disclosure_rung_is_the_documented_tier() {
     assert_eq!(
         header_drops_at(".status"),
         Some(READOUT_RUNG_PX),
         "the graph-state readout gives way at the tablet tier the AppShell sidebar \
          and the Chat rail already collapse at (frontend-design §7)",
-    );
-    assert_eq!(
-        header_drops_at(".brandSub"),
-        Some(SUBTITLE_RUNG_PX),
-        "the brand subtitle gives way below tablet (frontend-design §7)",
     );
 }
 
@@ -1636,24 +1636,18 @@ fn header_hides_nothing_unconditionally() {
 }
 
 /// The priority the design contract states (frontend-design §3, re-baselined by
-/// CR-097): the readout gives way FIRST, the brand subtitle SECOND, so the brand
-/// lockup, the workspace-probe fault badge and the theme toggle survive to the
-/// narrowest supported viewport. (The member selector was on this row until S-425
-/// moved it into the sidebar's Service-section header.) `.status` is the readout's
-/// whole slot — every one of its four states renders into it (`Header.test.tsx`
-/// binds that end).
+/// CR-097, amended by HF-4): the readout gives way FIRST and is now the ONLY
+/// thing that gives way, so the brand lockup, the workspace-probe fault badge and
+/// the theme toggle survive to the narrowest supported viewport. (The member
+/// selector was on this row until S-425 moved it into the sidebar's
+/// Service-section header. The brand subtitle that used to give way second was
+/// removed outright by HF-4, not relocated — there is no second rung to reach.)
+/// `.status` is the readout's whole slot — every one of its four states renders
+/// into it (`Header.test.tsx` binds that end).
 #[test]
-fn header_drops_the_readout_before_the_brand_subtitle() {
-    let readout = header_drops_at(".status")
+fn header_drops_the_readout_and_only_the_readout() {
+    header_drops_at(".status")
         .expect("the graph-state readout (`.status`) must be dropped at some rung");
-    let subtitle = header_drops_at(".brandSub")
-        .expect("the brand subtitle (`.brandSub`) must be dropped at some rung");
-    assert!(
-        readout > subtitle,
-        "the readout gives way FIRST, so its rung ({readout}px) must be WIDER than \
-         the brand subtitle's ({subtitle}px) — equal rungs drop both at once and \
-         state no order at all (FR-UI-34)",
-    );
 }
 
 /// A dropped readout is ABSENT, not truncated. An ellipsis would present a clipped
@@ -1708,7 +1702,7 @@ fn header_drops_the_readout_absent_never_truncated() {
 /// left this suite green at 25/25. A survivor guarded by a sentence is not
 /// guarded.
 #[test]
-fn header_hides_nothing_but_the_readout_and_the_brand_subtitle() {
+fn header_hides_nothing_but_the_readout() {
     let mut hidden: Vec<String> = HEADER_ROW_STYLESHEETS
         .iter()
         .flat_map(|sheet| header_disclosure_ladder(sheet))
@@ -1718,11 +1712,51 @@ fn header_hides_nothing_but_the_readout_and_the_brand_subtitle() {
     hidden.dedup();
     assert_eq!(
         hidden,
-        vec![".brandSub".to_string(), ".status".to_string()],
-        "only the readout and the brand subtitle give way, across every stylesheet \
-         that renders into the header row; anything else here is a survivor the \
-         narrow viewport has lost (FR-UI-29, FR-UI-34)",
+        vec![".status".to_string()],
+        "only the readout gives way, across every stylesheet that renders into the \
+         header row; anything else here is a survivor the narrow viewport has lost \
+         (FR-UI-29, FR-UI-34)",
     );
+}
+
+/// Whether `needle` occurs in `haystack` as a whole selector/class token, not
+/// merely as a substring. `.brandSub` is a literal prefix of `.brandSubtle` or
+/// `.brandSubtitleWrap`, so a plain `contains` would reject an unrelated future
+/// class that happens to start the same way; this requires the character right
+/// after the match to not continue a CSS identifier (alphanumeric, `_` or `-`).
+fn contains_selector_token(haystack: &str, needle: &str) -> bool {
+    let is_ident_continuation = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let end = start + pos + needle.len();
+        if haystack[end..].chars().next().is_none_or(|c| !is_ident_continuation(c)) {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+/// HF-4 removed the `code intelligence` brand subtitle outright — the span in
+/// `Header.tsx` and the `.brandSub` rule (and its 767px rung) in
+/// `Header.module.css` alike — rather than relocating it, so nothing should ever
+/// reintroduce either half. The media-query case is already covered by
+/// `header_hides_nothing_but_the_readout` above — a `.brandSub` hiding rule
+/// coming back inside `@media` would show up in its hidden-set assertion and
+/// fail it there, so re-asserting it here would only duplicate that test. This
+/// guard's own job is the case that ladder can't see: an unconditional
+/// (non-`@media`) `.brandSub` rule, which `header_disclosure_ladder` only walks
+/// INSIDE `@media` blocks and so would not see at all.
+#[test]
+fn header_never_reintroduces_the_brand_subtitle() {
+    for sheet in HEADER_ROW_STYLESHEETS {
+        let css = strip_comments(&read(sheet));
+        assert!(
+            !contains_selector_token(&css, ".brandSub"),
+            "`{sheet}` still names `.brandSub` — HF-4 removed the brand subtitle \
+             span from `Header.tsx`, so no rule may reference that class at all",
+        );
+    }
 }
 
 /// The theme toggle is a `Button`, so its module is the third way off the row —
