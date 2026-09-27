@@ -114,6 +114,7 @@ fn assembling_the_residue_moves_no_gate_verdict_and_writes_no_member_store() {
         links: Vec::new(),
         governance: Default::default(),
         warm_concurrency: None,
+        member_kinds: Default::default(),
     };
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
     let bridge = ContractBridge::new();

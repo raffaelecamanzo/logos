@@ -191,6 +191,7 @@ fn workspace_of(shape: Shape) -> Workspace {
         links: Vec::new(),
         governance: Default::default(),
         warm_concurrency: None,
+        member_kinds: Default::default(),
     };
     let backing = Arc::new(Backing::Federated(Box::new(EngineRegistry::<Engine>::new(
         federation,

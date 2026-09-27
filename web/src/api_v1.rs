@@ -887,6 +887,20 @@ pub(crate) async fn workspace_roster(
 /// [CR-120]: ../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 ///
+/// # Declared documentation/mock members are reported apart ([FR-WS-32])
+/// A member the manifest declares `kind = "documentation"` or `"mock"` has its
+/// contract-surface rows moved out of the four counters, `by_intake` and
+/// `spec_conformance_ratio`, into `coverage.declared_apart` — the rows, their
+/// counts, each declared member with its row count, and a `summary` stating them
+/// over their denominator. A consumer rendering the headline on a workspace that
+/// carries `declared_apart` must render that line beside it ([BR-51]).
+/// `kind_candidates` names undeclared members that hold API documents and no
+/// runnable source: a hint for a human, never a classification. Both keys are
+/// absent when there is nothing to report, so an undeclared workspace's payload is
+/// unchanged. This route serializes the same read-model the CLI and MCP print.
+///
+/// [FR-WS-32]: ../../docs/specs/requirements/FR-WS-32.md
+///
 /// [FR-WS-15]: ../../docs/specs/requirements/FR-WS-15.md
 /// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md

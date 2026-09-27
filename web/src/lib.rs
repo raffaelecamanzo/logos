@@ -1800,6 +1800,7 @@ mod tests {
             links: Vec::new(),
             governance: Default::default(),
             warm_concurrency: None,
+            member_kinds: Default::default(),
         };
         let federated: Arc<Backing<Engine>> = Arc::new(Backing::Federated(Box::new(
             EngineRegistry::new(federation, RegistryMode::Lazy),

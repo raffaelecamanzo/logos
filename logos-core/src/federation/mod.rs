@@ -107,6 +107,7 @@ pub mod topics;
 pub mod warm;
 pub mod warm_state;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -119,23 +120,24 @@ pub use bridge::{
     MemberContracts,
 };
 pub use coverage::{
-    cross_service_coverage, ClassificationCounts, CoverageState, CrossServiceCoverage, IntakeSplit,
-    ProviderCandidates, ProviderDisposition, ReferenceCoverage, SpecConformanceReading,
-    UnboundReason,
+    cross_service_coverage, ClassificationCounts, CoverageState, CrossServiceCoverage,
+    DeclaredApart, DeclaredMemberRows, IntakeSplit, ProviderCandidates, ProviderDisposition,
+    ReferenceCoverage, SpecConformanceReading, UnboundReason,
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
 pub use manifest::{
-    Governance, Link, NoCrossServiceCallers, ServiceBoundary, ServiceLayer, MANIFEST_FILENAME,
+    Governance, Link, MemberDecl, MemberKind, NoCrossServiceCallers, ServiceBoundary, ServiceLayer,
+    MANIFEST_FILENAME,
 };
 pub use reach::{
     app_wide_reachability, AppWideReachability, AppWideVerdict, BoundedReachability, CoverageRider,
     MemberReachability, ReachNode, ReachabilityClaim, ReachabilityScope, ReachabilitySurface,
-    UNION_VIEW,
+    RowsApart, UNION_VIEW,
 };
 pub use query::{
     workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,
-    CrossServiceImpact, MemberResult, MemberStatus, WorkspaceStatus, XserviceCallers,
-    XserviceImpact, XserviceRouteProviders, XserviceSearch,
+    CrossServiceImpact, KindCandidates, MemberResult, MemberStatus, WorkspaceStatus,
+    XserviceCallers, XserviceImpact, XserviceRouteProviders, XserviceSearch,
 };
 pub use budget::WorkspaceBudget;
 pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
@@ -232,6 +234,21 @@ pub struct Federation {
     /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warm_concurrency: Option<usize>,
+    /// Each declared member kind (`[workspace.member.<name>] kind`), keyed by
+    /// the **resolved** [`Member::name`] ([FR-WS-01], [FR-WS-32]).
+    ///
+    /// Resolved by [`discover`] under the same normalisation `default` gets, so
+    /// every key names a member of [`members`](Self::members) when it came from
+    /// there; a declaration naming no resolved member is dropped with a
+    /// warning. Empty on a workspace declaring no kind, and skipped on
+    /// serialisation then, so such a workspace serialises byte-identically to
+    /// before the key existed. Like [`warm_concurrency`](Self::warm_concurrency),
+    /// "names a member" is a property of the producer, not of the type.
+    ///
+    /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub member_kinds: BTreeMap<String, MemberKind>,
 }
 
 /// Discover the workspace by walking **up** from `hint`'s resolved root
@@ -310,6 +327,7 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
     // Read before the literal moves `manifest` apart field by field, the same
     // reason `members` and `default` above are locals rather than inline.
     let warm_concurrency = manifest.warm_concurrency();
+    let member_kinds = resolve_member_kinds(&root, &manifest.workspace, &members);
 
     Ok(Some(Federation {
         name: manifest.workspace.name,
@@ -319,7 +337,43 @@ pub fn discover(hint: &Path) -> Result<Option<Federation>, ConfigError> {
         links: manifest.links,
         governance: manifest.governance,
         warm_concurrency,
+        member_kinds,
     }))
+}
+
+/// Resolve each `[workspace.member.<name>] kind` declaration onto the resolved
+/// member set ([FR-WS-32]).
+///
+/// The key is matched by the SAME normalisation `default` is (resolve →
+/// canonicalise → relativise, [`member_name`]), so `"./docs"` and `"docs/"`
+/// declare the member `docs`. A declaration whose key names no surviving
+/// member — a typo, a member since removed — cannot apply to anything and is
+/// dropped, but loudly: a silent drop would leave a documentation repo in the
+/// headline with nobody told why.
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+fn resolve_member_kinds(
+    root: &Path,
+    workspace: &manifest::WorkspaceSection,
+    members: &[Member],
+) -> BTreeMap<String, MemberKind> {
+    let mut kinds = BTreeMap::new();
+    for (spec, decl) in &workspace.member {
+        let Some(kind) = decl.kind else {
+            continue;
+        };
+        match member_name(root, &root.join(spec)).filter(|name| members.iter().any(|m| &m.name == name)) {
+            Some(name) => {
+                kinds.insert(name, kind);
+            }
+            None => tracing::warn!(
+                member = %spec,
+                kind = kind.as_str(),
+                "[workspace.member] declares a kind for a name that is not a resolved member — ignored"
+            ),
+        }
+    }
+    kinds
 }
 
 /// Walk `start` and its ancestors for a [`MANIFEST_FILENAME`]; the first hit
@@ -763,6 +817,56 @@ mod tests {
                 "default {spec:?} binds member \"api\" as its canonical name"
             );
         }
+    }
+
+    /// A declared kind is resolved onto the member set under the SAME
+    /// normalisation `default` gets — `"./docs"` declares the member `docs`, an
+    /// autodiscovered member is declarable though `members` never lists it — and
+    /// a declaration naming no resolved member is dropped rather than applied
+    /// to nothing ([FR-WS-32]).
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    #[test]
+    fn member_kinds_resolve_onto_the_member_set_and_drop_a_non_member() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("api"));
+        init_repo(&root.join("docs"));
+        init_repo(&root.join("found"));
+        write_manifest(
+            root,
+            "[workspace]\nname = \"w\"\nmembers = [\"api\", \"docs\"]\n\n\
+             [workspace.autodiscover]\n\n\
+             [workspace.member.\"./docs\"]\nkind = \"documentation\"\n\n\
+             [workspace.member.found]\nkind = \"mock\"\n\n\
+             [workspace.member.gone]\nkind = \"mock\"\n\n\
+             [workspace.member.api]\n",
+        );
+        let fed = discover(root).unwrap().unwrap();
+
+        assert_eq!(
+            fed.member_kinds,
+            BTreeMap::from([
+                ("docs".to_string(), MemberKind::Documentation),
+                ("found".to_string(), MemberKind::Mock),
+            ]),
+            "canonical names only; the bare `api` table declares no kind and `gone` is no member"
+        );
+    }
+
+    /// A workspace declaring no kind serializes its federation exactly as before
+    /// the key existed: the empty map is skipped, not emitted as `{}`.
+    #[test]
+    fn a_federation_without_member_kinds_serializes_without_the_key() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(&root.join("api"));
+        write_manifest(root, "[workspace]\nname = \"w\"\nmembers = [\"api\"]\n");
+        let fed = discover(root).unwrap().unwrap();
+
+        assert!(fed.member_kinds.is_empty());
+        let json = serde_json::to_value(&fed).unwrap();
+        assert!(json.get("member_kinds").is_none(), "no key on the wire: {json}");
     }
 
     // ── the single-root invariant (FR-WS-01) ──────────────────────────────

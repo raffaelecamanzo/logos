@@ -171,6 +171,41 @@ pub fn compiled() -> Vec<GrammarEntry> {
     entries
 }
 
+/// The names of the compiled-in **code** grammars — every linked grammar whose
+/// descriptor declares neither `documentation = true` nor `artifact = true`
+/// ([ADR-19], [ADR-25]: the three plugin classes).
+///
+/// Read off the embedded descriptors rather than listed by hand, so a grammar
+/// that lands or changes class is classified by its own `plugin.toml` and no
+/// second roster can drift from it. A file in one of these languages is
+/// **runnable source**; a file in any other (YAML, JSON, Markdown, SQL, …) is a
+/// document or configuration. Used by `workspace status`'s member-kind
+/// candidate hint ([FR-WS-32]), which lists members that hold API documents and
+/// no runnable source.
+///
+/// Parsed once per process. A descriptor that fails to parse contributes no
+/// name here; the same descriptor already fails
+/// [`LanguageRegistry::load`](super::LanguageRegistry::load) loudly, which is
+/// where that fault is reported.
+///
+/// [ADR-19]: ../../../docs/specs/architecture/decisions/ADR-19.md
+/// [ADR-25]: ../../../docs/specs/architecture/decisions/ADR-25.md
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+pub fn code_language_names() -> &'static std::collections::BTreeSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        compiled()
+            .iter()
+            .filter_map(|entry| {
+                super::PluginManifest::parse(entry.manifest_label, entry.manifest_toml).ok()
+            })
+            .filter(|manifest| !manifest.documentation && !manifest.artifact)
+            .map(|manifest| manifest.name)
+            .collect()
+    })
+}
+
 /// The YAML data-format artifact grammar entry (S-063, [CR-010]).
 ///
 /// Uses `tree_sitter_yaml::LANGUAGE`; its descriptor sets `artifact = true` and
