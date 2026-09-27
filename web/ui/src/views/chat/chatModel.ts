@@ -386,6 +386,19 @@ export function endpointHost(chat: ChatPolicy): string {
   return chat.provider === "anthropic" ? ANTHROPIC_HOST : hostOf(chat.base_url);
 }
 
+/** The model named in the persistent status band (S-309): the declared model, or
+ *  an honest "not configured" note rather than a fabricated default
+ *  ([NFR-CC-04]). `resolve_chat` (`logos-core/src/config/chat.rs`) only resolves a
+ *  policy origin once its model is a non-empty string, so a `ChatReady` policy
+ *  carries one in practice — the type stays optional (`model?: string | null`) so
+ *  a change to that invariant renders honestly instead of silently printing
+ *  `undefined`. The consent banner (`ConsentBanner`) predates this helper and
+ *  still names `chat.model` directly, verbatim — out of scope here, since the
+ *  AC requires that gate preserved exactly as it was. */
+export function modelLabel(chat: ChatPolicy): string {
+  return chat.model && chat.model.trim() !== "" ? chat.model : "no model configured";
+}
+
 // ── Display labels (ported verbatim from the legacy chat.js client) ───────────
 
 const ROLE_LABELS: Record<string, string> = {

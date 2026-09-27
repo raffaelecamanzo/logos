@@ -12,6 +12,7 @@ import {
   chatScope,
   configureFirstCopy,
   initialTurn,
+  modelLabel,
   parseSseBlock,
   readSseStream,
   rememberConsent,
@@ -252,6 +253,23 @@ describe("endpoint disclosure", () => {
   it("names the native Anthropic host for the anthropic provider", () => {
     expect(endpointHost({ ...POLICY, provider: "anthropic" })).toBe(ANTHROPIC_HOST);
     expect(endpointHost(POLICY)).toBe("openrouter.ai");
+  });
+});
+
+describe("modelLabel (S-309, NFR-CC-04) — the declared model, or an honest note", () => {
+  it("names the declared model verbatim", () => {
+    expect(modelLabel(POLICY)).toBe("openrouter/some-model");
+  });
+
+  it("states an absent model honestly rather than a fabricated default", () => {
+    // `resolve_chat` only resolves a policy origin once its model is declared
+    // (`logos-core/src/config/chat.rs`), so this combination is not reachable via
+    // the server today — the type stays optional, and this pins the honest
+    // fallback for the day it changes rather than a silently-printed `undefined`.
+    expect(modelLabel({ ...POLICY, model: null })).toBe("no model configured");
+    expect(modelLabel({ ...POLICY, model: undefined })).toBe("no model configured");
+    expect(modelLabel({ ...POLICY, model: "" })).toBe("no model configured");
+    expect(modelLabel({ ...POLICY, model: "   " })).toBe("no model configured");
   });
 });
 

@@ -273,6 +273,23 @@
   color: var(--text-2);
 }
 
+/* ── Persistent status band (S-309, FR-UI-33, CR-092's third §4.13 lead-callout
+   state): once configured and consented, the compact provider/model line — sharing
+   `.providerLine` with the consent banner above — plus the turn's budget-tree
+   bounds, moved here from the empty-thread hint so they survive past the first
+   message instead of vanishing. */
+.status p {
+  margin: 0 0 var(--space-1);
+  line-height: var(--leading-base);
+}
+.status p:last-child {
+  margin-bottom: 0;
+}
+.budgetLine {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
 /* ── Thread + conversation log (assistant-ui ThreadPrimitive.Viewport) ─────── */
 /* The thread root is the whole content of the view's `Card` (S-308): transcript
    over composer, both filling the card's content box. Neither declares a fill of

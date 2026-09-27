@@ -26,9 +26,14 @@
  * measure is retired. The card wraps the transcript, never a turn. S-301
  * (same FR) then folded the separate plan list and the subagent-activity pills
  * into ONE native "Activity" disclosure whose steps carry their full observed
- * result as rendered markdown, replacing the native hover tooltip. Both are
- * presentation changes only; the SSE contract, the runtime adapter, and the
- * orchestrator are untouched.
+ * result as rendered markdown, replacing the native hover tooltip. S-309 (same
+ * CR) then built the third §4.13 lead-callout state — the `StatusBand`, this
+ * view's leading verdict element (frontend-design §9): once configured and
+ * consented, it names the provider, endpoint host and model plus the turn's
+ * budget-tree bounds, which used to live only in the empty-thread hint and
+ * vanish after the first message. All of the above are presentation changes
+ * only; the SSE contract, the runtime adapter, and the orchestrator are
+ * untouched.
  *
  * Everything renders through the S-193 design tokens (`Chat.module.css`); no
  * inline `<style>`/`<script>`, no CSS-in-JS, so the byte-identical self-only CSP
@@ -65,6 +70,7 @@ import {
   configureFirstCopy,
   endpointHost,
   hasConsent,
+  modelLabel,
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
@@ -238,6 +244,11 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
         </aside>
 
         <div className={styles.main}>
+          {/* The persistent status band (S-309, [FR-UI-33]): this view's leading
+              verdict element, once configured and consented — the first-use
+              consent gate above is preserved verbatim ahead of it. `.main` is
+              this component's stable composition point (S-308). */}
+          {consented && <StatusBand chat={chat} />}
           {/* The view's ONE card (S-308, [FR-UI-33]): it wraps the whole transcript
               and the composer, never a turn — the turns inside stay flat, so the
               signal-red edge appears once per view, not once per answer. The
@@ -248,7 +259,7 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
               <ThreadPrimitive.Root className={styles.threadRoot}>
                 <ThreadPrimitive.Viewport className={styles.log}>
                   <ThreadPrimitive.Empty>
-                    <EmptyHint chat={chat} />
+                    <EmptyHint />
                   </ThreadPrimitive.Empty>
                   <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
                 </ThreadPrimitive.Viewport>
@@ -296,14 +307,41 @@ function ConsentBanner({ ready, onAccept }: { ready: ChatReady; onAccept: () => 
   );
 }
 
-/** The empty-thread hint: what to ask and the turn's budget bounds. */
-function EmptyHint({ chat }: { chat: ChatPolicy }) {
+/**
+ * The persistent status band (S-309, [FR-UI-33], CR-092's third §4.13
+ * lead-callout state — specified but never built until now): once configured
+ * and consented, names the provider, endpoint host and model, plus the turn's
+ * budget-tree bounds, giving Chat the leading verdict element every other view
+ * opens with (frontend-design §9, e.g. Health's `GATE · PASS`, Wiki's `WIKI ·
+ * STALE`). It reads the same effective `[chat]` policy the configured body
+ * already receives, so the masked key never reaches it ([NFR-SE-07]); an
+ * undeclared model is named honestly rather than defaulted ([NFR-CC-04],
+ * {@link modelLabel}). The bounds used to live only in the empty-thread hint
+ * and vanish after the first message ({@link EmptyHint}) — they now persist
+ * here instead, moved rather than duplicated.
+ */
+function StatusBand({ chat }: { chat: ChatPolicy }) {
+  return (
+    <Callout label="CHAT" tone="muted" className={styles.status}>
+      <p className={styles.providerLine}>
+        {chat.provider} · {endpointHost(chat)} · {modelLabel(chat)}
+      </p>
+      <p className={styles.budgetLine}>
+        Budget tree: {chat.max_tool_calls} tool calls, {chat.max_subagent_tool_calls} per
+        subagent, {chat.max_replans} replans.
+      </p>
+    </Callout>
+  );
+}
+
+/** The empty-thread hint: what to ask. The turn's budget bounds used to live here
+ *  and vanished after the first message — they now persist in the {@link
+ *  StatusBand} above instead (S-309). */
+function EmptyHint() {
   return (
     <p className={styles.empty}>
       No messages yet. Ask a question to start a turn — the planner&apos;s steps and each
-      subagent&apos;s activity appear as the answer streams. The turn is bounded by the budget
-      tree ({chat.max_tool_calls} tool calls, {chat.max_subagent_tool_calls} per subagent,{" "}
-      {chat.max_replans} replans).
+      subagent&apos;s activity appear as the answer streams.
     </p>
   );
 }
