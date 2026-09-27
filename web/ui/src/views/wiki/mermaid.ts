@@ -24,7 +24,10 @@
  *     `adoptMermaidStyleFor` (below) copies that blocked `<style>`'s text into a
  *     constructable `CSSStyleSheet` and adds it to `document.adoptedStyleSheets` —
  *     a CSSOM-constructed sheet is not an inline style and the CSP does not touch
- *     it. The external CSS Module fallback rules in `WikiView.module.css` (served as
+ *     it. Mermaid's inline `style="…"` attributes (a self-message curve's
+ *     `fill: none`, label font sizes) are dropped by the same CSP;
+ *     `replayMermaidInlineStyles` re-applies them through `el.style`, a CSSOM write
+ *     the CSP also does not touch. The external CSS Module fallback rules in `WikiView.module.css` (served as
  *     a hashed `<link>`, ADR-44) remain as a second layer: they cover the frame
  *     before adoption lands and the jsdom test environment, which does not support
  *     constructable stylesheets. Only the flowchart shapes those fallback rules
@@ -243,7 +246,11 @@ export async function renderMermaidIn(container: HTMLElement): Promise<void> {
     // racing ahead of this one. Its cleanup already ran and found nothing to
     // unadopt, so adopting for it now would leak the sheet for the page's
     // lifetime (review-fix, HF-3).
-    for (const node of nodes) if (node.isConnected) adoptMermaidStyleFor(node);
+    for (const node of nodes) {
+      if (!node.isConnected) continue;
+      adoptMermaidStyleFor(node);
+      replayMermaidInlineStyles(node);
+    }
   } catch {
     // Leave the diagram source visible rather than breaking the page.
   }
@@ -288,6 +295,29 @@ function adoptMermaidStyleFor(target: Element): void {
   unadoptMermaidStyleFor(target);
   adoptedSheets.set(target, sheet);
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+}
+
+/**
+ * Re-apply every inline `style="…"` attribute inside `target`'s rendered `<svg>`
+ * through the CSSOM (`el.style.cssText`), returning how many were replayed.
+ *
+ * Mermaid writes part of its styling as inline style attributes — e.g.
+ * `fill: none` on a sequence diagram's self-message curve, and each label's
+ * font size. The self-only CSP drops those attributes exactly as it drops the
+ * injected `<style>`, so a self-message rendered as a filled blob and labels
+ * lost their sizes. Setting `el.style` is a CSSOM write, which the CSP does not
+ * restrict (proven on the served CSP, Sprint 79 test execution: 106 attributes
+ * replayed on one sequence diagram, every self-message blob gone).
+ */
+export function replayMermaidInlineStyles(target: Element): number {
+  let replayed = 0;
+  for (const el of target.querySelectorAll<SVGElement | HTMLElement>("svg[style], svg [style]")) {
+    const declared = el.getAttribute("style");
+    if (!declared) continue;
+    el.style.cssText = declared;
+    replayed += 1;
+  }
+  return replayed;
 }
 
 // ── Sequence-diagram ';' repair (HF-2) ────────────────────────────────────────

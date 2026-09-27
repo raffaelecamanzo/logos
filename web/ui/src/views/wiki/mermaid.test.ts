@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { currentTheme, renderMermaidIn, repairSequenceDiagramSource, THEME_VARS } from "./mermaid.ts";
+import { currentTheme, renderMermaidIn, replayMermaidInlineStyles, repairSequenceDiagramSource, THEME_VARS } from "./mermaid.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -510,5 +510,41 @@ describe("renderMermaidIn repairs sequence-diagram ';' on the DOM copy only, bef
 
     expect(target.textContent).toBe("sequenceDiagram\nNote over A: hi#59;there");
     expect(mockRun).toHaveBeenCalledWith(expect.objectContaining({ nodes: expect.anything() }));
+  });
+});
+
+// ── replayMermaidInlineStyles — CSP-dropped style attributes (Sprint 79) ─────
+
+describe("replayMermaidInlineStyles re-applies inline style attributes through the CSSOM", () => {
+  /** jsdom parses a style attribute into `el.style` on its own (it has no CSP), so
+   *  each element gets a recording `style` object: the test then proves the
+   *  function WRITES `cssText` — the CSSOM path the browser CSP leaves open —
+   *  rather than relying on the attribute having been honoured. */
+  function recordingStyle(el: Element): { cssText: string } {
+    const rec = { cssText: "" };
+    Object.defineProperty(el, "style", { value: rec, configurable: true });
+    return rec;
+  }
+
+  it("writes each svg element's style attribute into el.style.cssText and counts them", () => {
+    const target = document.createElement("div");
+    target.innerHTML =
+      '<svg style="max-width: 100%"><path class="messageLine0" style="fill: none;"></path>' +
+      '<text class="actor" style="font-size: 13.6px"></text><rect></rect></svg>';
+    const svg = target.querySelector("svg")!;
+    const path = target.querySelector("path")!;
+    const text = target.querySelector("text")!;
+    const recs = [recordingStyle(svg), recordingStyle(path), recordingStyle(text)];
+
+    expect(replayMermaidInlineStyles(target)).toBe(3);
+    expect(recs.map((r) => r.cssText)).toEqual(["max-width: 100%", "fill: none;", "font-size: 13.6px"]);
+  });
+
+  it("touches nothing outside the rendered svg and replays nothing when there is no svg", () => {
+    const target = document.createElement("div");
+    target.innerHTML = '<p style="color: red"></p>';
+    const rec = recordingStyle(target.querySelector("p")!);
+    expect(replayMermaidInlineStyles(target)).toBe(0);
+    expect(rec.cssText).toBe("");
   });
 });
