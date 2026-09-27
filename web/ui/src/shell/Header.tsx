@@ -53,8 +53,8 @@ function BrandMark() {
     <svg
       className={styles.brandLogo}
       viewBox="0 0 32 32"
-      width="28"
-      height="28"
+      width="39"
+      height="39"
       aria-hidden="true"
       focusable="false"
     >

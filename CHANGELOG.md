@@ -9,6 +9,11 @@ without a capability change and were recorded only in `VERSIONS` / commit histor
 
 ## [Unreleased]
 
+### Changed
+
+- **The Logos mark and wordmark in the web header are 1.4 times larger** (mark 28px →
+  39px, wordmark `--text-lg` × 1.4).
+
 ## [1.4.26] — 2026-09-27
 
 Sprint 79, hotfix round 2.

@@ -29,9 +29,11 @@
   flex-shrink: 0;
 }
 
+/* The lockup is drawn at 1.4x its original size (mark 28px -> 39px, wordmark
+   --text-lg x 1.4) so the brand reads first in the header. */
 .brandMark {
   font-weight: var(--weight-bold);
-  font-size: var(--text-lg);
+  font-size: calc(var(--text-lg) * 1.4);
   color: var(--text-1);
   letter-spacing: -0.01em;
 }
