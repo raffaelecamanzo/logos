@@ -750,3 +750,54 @@ fn a_gradle_near_miss_is_not_a_coordinate() {
     );
     assert_eq!(produced(m).group_id, None, "`groupId =` is not `group =`");
 }
+
+// ── Bounded on untrusted input (S-462 review) ────────────────────────────────
+
+/// A pom whose `<version>` is `${p0}`, with `<p{i}>` defined by `body(i)`.
+fn property_chain(depth: usize, body: impl Fn(usize) -> String) -> String {
+    let props: String = (0..depth).map(|i| format!("<p{i}>{}</p{i}>", body(i))).collect();
+    format!(
+        "<project><groupId>g</groupId><artifactId>a</artifactId><version>${{p0}}</version>\
+         <properties>{props}<p{depth}>x</p{depth}></properties></project>"
+    )
+}
+
+fn produced_version_refusal(pom: &str) -> String {
+    let facts = member_facts(&[("pom.xml", pom)]);
+    let own = produced(&facts[0]).clone();
+    assert_eq!(own.resolution, Resolution::VersionRefused, "the version is refused, the key kept");
+    own.reason.expect("a refusal carries its reason")
+}
+
+/// A linear chain recurses once per link. 5000 links overflowed the 2 MiB
+/// stack every test (and the watcher's sync) thread runs on, aborting the
+/// process; now it is refused at the nesting bound.
+#[test]
+fn a_linear_property_chain_is_refused_at_the_nesting_bound_not_by_the_stack() {
+    let pom = property_chain(5000, |i| format!("${{p{}}}", i + 1));
+    let reason = produced_version_refusal(&pom);
+    assert!(reason.contains("deeper than 32"), "{reason}");
+}
+
+/// Each property referencing the next twice doubles the expansion per level —
+/// the `<properties>` form of an entity bomb. Depth 30 would have built a
+/// 1 GiB string; it is refused at the length bound in a few hundred steps.
+#[test]
+fn a_doubling_property_chain_is_refused_rather_than_expanded() {
+    let pom = property_chain(30, |i| format!("${{p{0}}}${{p{0}}}", i + 1));
+    let reason = produced_version_refusal(&pom);
+    assert!(
+        reason.contains("expands beyond 1024 bytes") || reason.contains("more than 256"),
+        "{reason}"
+    );
+}
+
+/// A fan-out of EMPTY values never grows the output, so only the reference
+/// budget stops it: 20 references per level over 10 levels is 20^10 expansions.
+#[test]
+fn a_wide_fan_out_of_empty_properties_is_refused_by_the_reference_budget() {
+    let pom = property_chain(10, |i| format!("${{p{}}}", i + 1).repeat(20));
+    let pom = pom.replace("<p10>x</p10>", "<p10></p10>");
+    let reason = produced_version_refusal(&pom);
+    assert!(reason.contains("more than 256 property references"), "{reason}");
+}

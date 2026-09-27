@@ -52,6 +52,14 @@
 //! directory; neither is read, so a Gradle manifest's produced fact is always
 //! recorded refused, carrying the `group` it did read.
 //!
+//! # Bounded on untrusted input
+//!
+//! A manifest is committed text anyone can write. quick-xml expands no DTD
+//! entity, and interpolation is bounded three ways — nesting depth, the number
+//! of references one field expands, and the expanded length — so a crafted
+//! `<properties>` chain is refused with a reason instead of exhausting the stack,
+//! the clock or memory.
+//!
 //! # A pure function of the manifest texts
 //!
 //! [`member_facts`] takes every manifest of one member as `(path, text)` pairs
@@ -514,6 +522,28 @@ fn join_relative(dir: &str, rel: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// How deep one `${…}` may nest property references before it is refused.
+/// Each level recurses once, so this is what keeps a crafted linear chain
+/// (`<p0>${p1}</p0>`, `<p1>${p2}</p1>`, …) from exhausting the stack.
+const MAX_EXPANSION_DEPTH: usize = 32;
+
+/// How many property references one field may expand in total. A property
+/// that references the next one twice doubles the work per level — the
+/// `<properties>` form of an entity-expansion bomb — and this bounds it.
+const MAX_SUBSTITUTIONS: usize = 256;
+
+/// The longest value one field may expand to. A coordinate is a few dozen
+/// bytes; anything past this is refused rather than built.
+const MAX_EXPANDED_LEN: usize = 1024;
+
+/// The state of one field's interpolation: the property names being expanded
+/// (the cycle guard and the depth), and the references expanded so far.
+#[derive(Default)]
+struct Expansion {
+    names: Vec<String>,
+    substitutions: usize,
+}
+
 /// The in-member parent chain over one member's parsed poms.
 struct Chain<'a> {
     poms: &'a [ParsedPom],
@@ -543,7 +573,7 @@ impl<'a> Chain<'a> {
     }
 
     /// Interpolate every `${…}` in `raw` in the context of pom `index`.
-    fn interpolate(&self, index: usize, raw: &str, active: &mut Vec<String>) -> Result<String, String> {
+    fn interpolate(&self, index: usize, raw: &str, active: &mut Expansion) -> Result<String, String> {
         let mut out = String::new();
         let mut rest = raw;
         while let Some(start) = rest.find("${") {
@@ -553,23 +583,40 @@ impl<'a> Chain<'a> {
                 return Err(format!("`{raw}` has an unterminated `${{`"));
             };
             let name = &after[..end];
-            if active.iter().any(|a| a == name) {
+            if active.names.iter().any(|a| a == name) {
                 return Err(format!("`${{{name}}}` is defined in terms of itself"));
             }
-            active.push(name.to_string());
+            if active.names.len() >= MAX_EXPANSION_DEPTH {
+                return Err(format!(
+                    "`${{{name}}}` nests property references deeper than {MAX_EXPANSION_DEPTH}"
+                ));
+            }
+            active.substitutions += 1;
+            if active.substitutions > MAX_SUBSTITUTIONS {
+                return Err(format!(
+                    "`{raw}` expands more than {MAX_SUBSTITUTIONS} property references"
+                ));
+            }
+            active.names.push(name.to_string());
             let value = self.property(index, name, active);
-            active.pop();
+            active.names.pop();
             out.push_str(&value?);
+            if out.len() > MAX_EXPANDED_LEN {
+                return Err(format!("`{raw}` expands beyond {MAX_EXPANDED_LEN} bytes"));
+            }
             rest = &after[end + 1..];
         }
         out.push_str(rest);
+        if out.len() > MAX_EXPANDED_LEN {
+            return Err(format!("`{raw}` expands beyond {MAX_EXPANDED_LEN} bytes"));
+        }
         Ok(out)
     }
 
     /// The value of property `name` for pom `index`: a `project.*` model
     /// expression the pom answers, else the nearest `<properties>` definition in
     /// its in-member lineage — else refused, never defaulted.
-    fn property(&self, index: usize, name: &str, active: &mut Vec<String>) -> Result<String, String> {
+    fn property(&self, index: usize, name: &str, active: &mut Expansion) -> Result<String, String> {
         let pom = &self.poms[index].pom;
         let parent = pom.parent.as_ref();
         let model = match name {
@@ -610,7 +657,7 @@ impl<'a> Chain<'a> {
         index: usize,
         value: Option<&str>,
         name: &str,
-        active: &mut Vec<String>,
+        active: &mut Expansion,
     ) -> Result<String, String> {
         match value {
             Some(v) => self.interpolate(index, v, active),
@@ -637,7 +684,7 @@ impl<'a> Chain<'a> {
     }
 
     /// The pom's group: its own, else the one its `<parent>` declares.
-    fn effective_group(&self, index: usize, active: &mut Vec<String>) -> Result<String, String> {
+    fn effective_group(&self, index: usize, active: &mut Expansion) -> Result<String, String> {
         let pom = &self.poms[index].pom;
         match pom
             .group
@@ -663,7 +710,7 @@ impl<'a> Chain<'a> {
         let pom = &self.poms[index].pom;
         let mut out = Vec::new();
 
-        let group = self.effective_group(index, &mut Vec::new());
+        let group = self.effective_group(index, &mut Expansion::default());
         out.push(self.fact(
             index,
             ArtifactRole::Produced,
@@ -695,7 +742,7 @@ impl<'a> Chain<'a> {
 
     fn reference(&self, index: usize, kind: ReferenceKind, coord: &RawCoord, scoped: bool) -> ArtifactFact {
         let group = match &coord.group {
-            Some(g) => FieldState::from_result(self.interpolate(index, g, &mut Vec::new()), Some(g)),
+            Some(g) => FieldState::from_result(self.interpolate(index, g, &mut Expansion::default()), Some(g)),
             None => FieldState::Missing,
         };
         self.fact(
@@ -722,10 +769,10 @@ impl<'a> Chain<'a> {
         scope: Option<String>,
     ) -> ArtifactFact {
         let artifact = match artifact {
-            Some(a) => FieldState::from_result(self.interpolate(index, a, &mut Vec::new()), Some(a)),
+            Some(a) => FieldState::from_result(self.interpolate(index, a, &mut Expansion::default()), Some(a)),
             None => FieldState::Missing,
         };
-        let version = version.map(|v| (v, self.interpolate(index, v, &mut Vec::new())));
+        let version = version.map(|v| (v, self.interpolate(index, v, &mut Expansion::default())));
 
         let mut reasons = Vec::new();
         let group_id = group.into_value("groupId", &mut reasons);
