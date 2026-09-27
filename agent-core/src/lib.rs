@@ -54,5 +54,6 @@ pub use retry::{
 pub use tools::{
     governance_toolset, graph_toolset, source_toolset, xservice_reading, xservice_toolset,
     BoundedDispatcher, BudgetExhausted, DispatchError, Sandbox, SandboxError, ToolBudget,
+    MAX_FOLLOWED_LINKS,
     ToolCallError, ToolDomain, XserviceAnswer, XserviceBacking, XSERVICE_TOOL_NAMES,
 };

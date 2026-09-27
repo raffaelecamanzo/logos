@@ -1081,6 +1081,21 @@ first turn, gitignored, never in the default binary).
    visible after your first message, so the budget is on screen during a long turn.
    A value you have not configured is shown as not configured, never as an invented
    default. The chat key never appears on the page.
+
+   **Symlinked docs.** The Source-Reader reads only inside the project root, so docs
+   kept in a sibling repo behind a symlink (`docs/planning → ../logos-docs/planning`)
+   are out of its reach by default. Asking about them ends the turn with a sandbox
+   refusal. To make them readable, declare the sibling repo as an extra read root:
+   `[chat] read_roots = ["../logos-docs"]`
+   ([configuration.md](configuration.md#reading-symlinked-docs--read_roots)). Its files
+   are then readable, greppable and globbable **through the project's symlinks**, under
+   their in-project paths. Files under a read root can be sent to the endpoint too,
+   so the consent banner and the status band both list every declared read root
+   ("Extra read roots: `../logos-docs`"). Declaring read roots after you consented,
+   or changing the set, brings the consent banner back before the next send. An
+   inherited workspace table's roots are
+   marked as relative to the workspace root. A declared root that does not exist
+   fails the turn with a message naming it.
 4. **Ask a question.** Type into the composer at the bottom and **Send**. The
    answer streams in over SSE. The planner's plan and every subagent step live in
    one **Activity** disclosure above the answer — a native fold that is **open

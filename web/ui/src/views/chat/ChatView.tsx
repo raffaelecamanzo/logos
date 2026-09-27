@@ -71,6 +71,7 @@ import {
   endpointHost,
   hasConsent,
   modelLabel,
+  readRoots,
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
@@ -78,7 +79,6 @@ import {
   WORKSPACE_CONFIG_FILE,
   WORKSPACE_SECRETS_FILE,
   type ChatConfigReadModel,
-  type ChatPolicy,
   type ChatReady,
   type ConfigureFirst as ConfigureFirstState,
   type TurnState,
@@ -183,8 +183,9 @@ function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
  *  [FR-UI-33]). There is no global Clear-history — deletion is per conversation,
  *  in the rail (S-211, [FR-UI-26], [ADR-47]). */
 function ChatConfigured({ ready }: { ready: ChatReady }) {
-  const chat = ready.policy;
-  const [consented, setConsented] = useState<boolean>(() => hasConsent());
+  // Consent covers the disclosed read roots too (HF-1): a new or changed set
+  // shows the banner again, naming them before anything is sent.
+  const [consented, setConsented] = useState<boolean>(() => hasConsent(readRoots(ready.policy)));
   // The rail collapses behind a toggle below ~1023px (S-210 AC-3); `railOpen`
   // drives that toggle. At ≥1024px the rail is always shown (CSS), so this state
   // is inert there — it only gates the narrow-viewport disclosure.
@@ -193,9 +194,9 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
     useChatRuntime(consented);
 
   const acceptConsent = useCallback(() => {
-    rememberConsent();
+    rememberConsent(readRoots(ready.policy));
     setConsented(true);
-  }, []);
+  }, [ready.policy]);
 
   // Deleting keeps the rail OPEN (unlike select / new chat): the user is managing
   // the list and usually deletes more than one row.
@@ -222,7 +223,7 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
           persistent status band (S-309, [FR-UI-33]) once consented. Here rather
           than inside `.main`, it leads the view at every width — below ~1023px the
           panes stack and the rail toggle and list come before `.main`. */}
-      {consented ? <StatusBand chat={chat} /> : <ConsentBanner ready={ready} onAccept={acceptConsent} />}
+      {consented ? <StatusBand ready={ready} /> : <ConsentBanner ready={ready} onAccept={acceptConsent} />}
 
       <div className={styles.layout}>
         <button
@@ -298,6 +299,7 @@ function ConsentBanner({ ready, onAccept }: { ready: ChatReady; onAccept: () => 
         .{ready.credentialOrigin === "workspace" && " The API key is inherited from the workspace root."}{" "}
         Nothing is sent until you ask.
       </p>
+      <ReadRootsNote ready={ready} />
       <p className={styles.providerLine}>
         {chat.provider} · {endpointHost(chat)} · {chat.model}
       </p>
@@ -321,7 +323,8 @@ function ConsentBanner({ ready, onAccept }: { ready: ChatReady; onAccept: () => 
  * and vanish after the first message ({@link EmptyHint}) — they now persist
  * here instead, moved rather than duplicated.
  */
-function StatusBand({ chat }: { chat: ChatPolicy }) {
+function StatusBand({ ready }: { ready: ChatReady }) {
+  const chat = ready.policy;
   return (
     <Callout label="CHAT" tone="muted" className={styles.status}>
       <p className={styles.providerLine}>
@@ -331,7 +334,32 @@ function StatusBand({ chat }: { chat: ChatPolicy }) {
         Budget tree: {chat.max_tool_calls} tool calls, {chat.max_subagent_tool_calls} per
         subagent, {chat.max_replans} replans.
       </p>
+      <ReadRootsNote ready={ready} />
     </Callout>
+  );
+}
+
+/** The extra read roots (`[chat] read_roots`, sprint-79 HF-1), named wherever the
+ *  view says what is sent: files under them can be read through this project's
+ *  symlinks and quoted to the endpoint, so the consent banner and the status band
+ *  both name them. Renders nothing when none are declared — the default. An
+ *  inherited table's entries are relative to the workspace root that declared it,
+ *  which is said, since this member's own `config.toml` never names them. */
+function ReadRootsNote({ ready }: { ready: ChatReady }) {
+  const roots = readRoots(ready.policy);
+  if (roots.length === 0) return null;
+  return (
+    <p className={styles.budgetLine}>
+      Extra read roots:{" "}
+      {roots.map((root, i) => (
+        <span key={root}>
+          {i > 0 && ", "}
+          <code>{root}</code>
+        </span>
+      ))}
+      {ready.policyOrigin === "workspace" && " (relative to the workspace root)"} — files
+      under them, reached through this project&apos;s symlinks, can be sent too.
+    </p>
   );
 }
 

@@ -73,6 +73,10 @@ export interface ChatPolicy {
   max_tool_calls: number;
   max_subagent_tool_calls: number;
   max_replans: number;
+  /** `[chat] read_roots` (sprint-79 HF-1): extra directories the Source-Reader may
+   *  read through in-tree symlinks, as declared — relative to the root that
+   *  declared the table, or absolute. Omitted by the server when empty. */
+  read_roots?: string[];
 }
 
 /** Where one half of the effective resolution came from (mirrors `ChatOrigin`).
@@ -399,6 +403,14 @@ export function modelLabel(chat: ChatPolicy): string {
   return chat.model && chat.model.trim() !== "" ? chat.model : "no model configured";
 }
 
+/** The extra read roots the effective policy declares (sprint-79 HF-1), named by
+ *  the consent banner and the status band because their content can be sent to
+ *  the endpoint too. Empty — and so rendering nothing — unless the project opted
+ *  in; the server omits the key then, so an absent key is the common case. */
+export function readRoots(chat: ChatPolicy): string[] {
+  return (chat.read_roots ?? []).filter((root) => root.trim() !== "");
+}
+
 // ── Display labels (ported verbatim from the legacy chat.js client) ───────────
 
 const ROLE_LABELS: Record<string, string> = {
@@ -626,20 +638,41 @@ export function turnEndedEmpty(state: TurnState): boolean {
 /** The localStorage key remembering the first-use consent acknowledgement. */
 export const CONSENT_KEY = "logos.chat.consent";
 
-/** Has the user acknowledged the first-use consent? Storage-blocked ⇒ re-ask each
- *  load (fail SAFE, not open). */
-export function hasConsent(): boolean {
+/** The localStorage key remembering WHICH extra read roots (sprint-79 HF-1) the
+ *  consent was given for — their content can reach the endpoint too, so a
+ *  consent given before they were declared, or for a different set, does not
+ *  cover them. */
+export const READ_ROOTS_CONSENT_KEY = "logos.chat.consent.readRoots";
+
+/** The disclosed read-root set as one comparable value: sorted, deduplicated. */
+function readRootsScope(roots: string[]): string {
+  return JSON.stringify([...new Set(roots)].sort());
+}
+
+/** Has the user acknowledged the first-use consent — and, when the policy
+ *  declares extra read roots, acknowledged exactly this set of them? With none
+ *  declared this is the plain first-use gate it always was. Storage-blocked ⇒
+ *  re-ask each load (fail SAFE, not open). */
+export function hasConsent(roots: string[] = []): boolean {
   try {
-    return window.localStorage.getItem(CONSENT_KEY) === "1";
+    if (window.localStorage.getItem(CONSENT_KEY) !== "1") return false;
+    return (
+      roots.length === 0 ||
+      window.localStorage.getItem(READ_ROOTS_CONSENT_KEY) === readRootsScope(roots)
+    );
   } catch {
     return false;
   }
 }
 
-/** Remember the consent acknowledgement (best-effort; non-fatal if storage is blocked). */
-export function rememberConsent(): void {
+/** Remember the consent acknowledgement, and the read-root set it disclosed
+ *  (best-effort; non-fatal if storage is blocked). */
+export function rememberConsent(roots: string[] = []): void {
   try {
     window.localStorage.setItem(CONSENT_KEY, "1");
+    if (roots.length > 0) {
+      window.localStorage.setItem(READ_ROOTS_CONSENT_KEY, readRootsScope(roots));
+    }
   } catch {
     /* non-fatal: consent holds for this page even if it cannot persist */
   }

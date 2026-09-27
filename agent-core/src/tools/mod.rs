@@ -48,7 +48,7 @@ mod source;
 mod xservice;
 
 pub use budget::{BoundedDispatcher, BudgetExhausted, DispatchError, ToolBudget};
-pub use source::{Sandbox, SandboxError};
+pub use source::{Sandbox, SandboxError, MAX_FOLLOWED_LINKS};
 pub use xservice::{xservice_reading, XserviceAnswer, XserviceBacking, XSERVICE_TOOL_NAMES};
 
 /// The error every Engine-backed tool surfaces.
