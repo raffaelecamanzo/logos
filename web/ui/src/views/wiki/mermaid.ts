@@ -39,6 +39,12 @@
  *     the painted `--font-sans` so boxes size to their labels.
  *   - **Progressive enhancement.** A load or parse failure leaves the escaped diagram
  *     source visible (never a blank) — the same honesty contract as the legacy.
+ *   - **Sequence-diagram ';' repair (HF-2).** Mermaid's `sequenceDiagram` grammar
+ *     treats a bare `;` in message/note text as a statement separator and rejects
+ *     the whole diagram. `repairSequenceDiagramSource` (below) rewrites it to
+ *     Mermaid's own `#59;` escape before render — only on this seam's DOM copy,
+ *     never on the caller's own source (Source toggle, copy) — so a model-written
+ *     `;` no longer takes down the entire diagram.
  *
  * This module is the single seam the Wiki tests mock, so jsdom never loads a 3 MB
  * UMD bundle.
@@ -197,6 +203,12 @@ function initialize(mermaid: MermaidApi, theme: MermaidTheme): void {
  * load/parse failure is swallowed — the escaped diagram source stays visible
  * (FR-WK-15 progressive enhancement).
  *
+ * Before handing anything to Mermaid, each node's text is passed through
+ * `repairSequenceDiagramSource` (HF-2): a bare `;` in a sequenceDiagram message or
+ * note is Mermaid's own statement separator, so the model text it appears in
+ * rejects the WHOLE diagram. The repair only ever touches this DOM copy — the
+ * caller's own source (React state, the Source toggle, copy) is untouched.
+ *
  * The theme is read from the DOM at call time (`currentTheme()`) so diagrams always
  * reflect the active light/dark choice (ADR-44). When re-calling after a theme
  * toggle, the caller (WikiView.tsx) should first restore `.mermaid[data-processed]`
@@ -211,6 +223,12 @@ function initialize(mermaid: MermaidApi, theme: MermaidTheme): void {
 export async function renderMermaidIn(container: HTMLElement): Promise<void> {
   const nodes = container.querySelectorAll(".mermaid");
   if (nodes.length === 0) return;
+  for (const node of nodes) {
+    const original = node.textContent;
+    if (original === null) continue;
+    const repaired = repairSequenceDiagramSource(original);
+    if (repaired !== original) node.textContent = repaired;
+  }
   const mermaid = await loadMermaid();
   if (!mermaid) return;
   try {
@@ -268,6 +286,100 @@ function adoptMermaidStyleFor(target: Element): void {
   unadoptMermaidStyleFor(target);
   adoptedSheets.set(target, sheet);
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+}
+
+// ── Sequence-diagram ';' repair (HF-2) ────────────────────────────────────────
+
+/**
+ * Is `source`'s first non-empty, non-comment, non-frontmatter/directive line
+ * exactly `sequenceDiagram`? Gates `repairSequenceDiagramSource` — every other
+ * diagram type passes through untouched.
+ */
+function isSequenceDiagram(source: string): boolean {
+  const lines = source.split("\n");
+  let i = 0;
+  if (lines[i]?.trim() === "---") {
+    // YAML frontmatter block — skip to its closing '---'.
+    i++;
+    while (i < lines.length && lines[i].trim() !== "---") i++;
+    i++;
+  }
+  while (i < lines.length) {
+    const trimmed = lines[i].trim();
+    if (trimmed === "" || trimmed.startsWith("%%")) {
+      // Blank line, a `%% comment`, or a `%%{init: ...}%%` directive.
+      i++;
+      continue;
+    }
+    return trimmed === "sequenceDiagram";
+  }
+  return false;
+}
+
+/** Matches a `Note left of|right of|over <participants>:` line. Group 1 is the
+ *  `Note ... :` head (left untouched); group 2 is the note text. */
+const NOTE_LINE_RE = /^(\s*Note\s+(?:left of|right of|over)\s+[^:]*:)([\s\S]*)$/;
+
+/** Any Mermaid sequence-message arrow token (with an optional `+`/`-` activation
+ *  marker handled by the caller — this only needs to detect the arrow itself). */
+const ARROW_TOKEN_RE = /(<<->>|-->>|->>|-->|->|--x|-x|--\)|-\))/;
+
+/** Replace every bare `;` with Mermaid's own literal-semicolon escape (`#59;`),
+ *  leaving an already-escaped `#59;` alone (idempotent). */
+function escapeSemicolons(text: string): string {
+  return text.replace(/#59;|;/g, (m) => (m === ";" ? "#59;" : m));
+}
+
+/**
+ * Repair one line of a sequenceDiagram source: a message line (`A->>B: text`,
+ * any arrow form, with or without an activation marker) or a
+ * `Note left of|right of|over …: text` line has every `;` in its text — the
+ * part after the FIRST `:` — replaced with `#59;`. Every other line (a
+ * participant/actor declaration, a keyword line, a comment, a line with no
+ * colon) is returned unchanged.
+ *
+ * A `%% comment` is excluded explicitly, not merely by missing both patterns:
+ * a comment can itself contain an arrow-token substring before a colon (e.g.
+ * `%% A->>B: note this`), which would otherwise be misclassified as a message
+ * line and mutated — breaking the "comments pass through byte-identical"
+ * guarantee (review-fix, HF-2).
+ */
+function repairSequenceDiagramLine(line: string): string {
+  if (line.trim().startsWith("%%")) return line;
+
+  const noteMatch = line.match(NOTE_LINE_RE);
+  if (noteMatch) return noteMatch[1] + escapeSemicolons(noteMatch[2]);
+
+  const colonIdx = line.indexOf(":");
+  if (colonIdx === -1) return line;
+  const head = line.slice(0, colonIdx);
+  if (!ARROW_TOKEN_RE.test(head)) return line;
+  return line.slice(0, colonIdx + 1) + escapeSemicolons(line.slice(colonIdx + 1));
+}
+
+/**
+ * Repair a Mermaid diagram's source so a bare `;` in sequenceDiagram message or
+ * note text does not reject the whole diagram (HF-2).
+ *
+ * Mermaid's `sequenceDiagram` grammar treats `;` as a statement separator, so a
+ * model-written `Note over SPA: ...only;<br/>separate GET ...` line splits into
+ * an invalid second statement and Mermaid rejects the entire diagram. Mermaid's
+ * own entity escape, `#59;`, renders as a literal semicolon — so this rewrites
+ * every bare `;` in message/note TEXT (the part after the first `:`) to that
+ * escape before the source ever reaches `mermaid.parse`/`mermaid.run`.
+ *
+ * A pure, DOM-free function so it can be unit-tested directly. Non-sequence
+ * diagrams (gated by `isSequenceDiagram`) pass through byte-identical, as do
+ * participant/actor declarations, keyword lines (loop/alt/opt/par/critical/
+ * break/rect/end/else/and/autonumber/activate/deactivate), comments, and any
+ * `;` already escaped as `#59;`.
+ */
+export function repairSequenceDiagramSource(source: string): string {
+  if (!isSequenceDiagram(source)) return source;
+  return source
+    .split("\n")
+    .map(repairSequenceDiagramLine)
+    .join("\n");
 }
 
 /**
