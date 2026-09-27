@@ -818,7 +818,14 @@ enum FieldState {
 }
 
 impl FieldState {
+    /// Grade one key field. A group or artifact that interpolates to nothing
+    /// (`<g/>` then `${g}`) names no artifact, and an empty key would join
+    /// every other empty key, so it is refused rather than resolved.
     fn from_result(result: Result<String, String>, declared: Option<&str>) -> Self {
+        let result = match result {
+            Ok(v) if v.trim().is_empty() => Err("resolves to an empty value".to_string()),
+            other => other,
+        };
         match (result, declared) {
             (Ok(v), _) => FieldState::Resolved(v),
             (Err(why), Some(d)) => FieldState::Refused {

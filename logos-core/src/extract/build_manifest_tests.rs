@@ -838,3 +838,25 @@ fn a_dtd_entity_makes_the_pom_malformed_rather_than_a_literal_coordinate() {
     assert!(facts[0].artifacts.is_empty(), "no fact is built from an unexpanded entity");
     assert!(facts[0].detail.as_deref().unwrap().contains("`&g;` is not expanded"), "{:?}", facts[0].detail);
 }
+
+/// A key that interpolates to an empty value is refused — an empty group
+/// would be a join key every other empty group matches. An empty VERSION part
+/// is legitimate (`1.0${suffix}`) and still resolves.
+#[test]
+fn a_key_that_resolves_to_empty_is_refused_but_an_empty_version_part_is_not() {
+    let pom = r#"<project>
+        <groupId>com.example</groupId>
+        <artifactId>svc</artifactId>
+        <properties><g/><suffix/></properties>
+        <dependencies>
+            <dependency><groupId>${g}</groupId><artifactId>x</artifactId></dependency>
+            <dependency><groupId>com.example</groupId><artifactId>y</artifactId><version>1.0${suffix}</version></dependency>
+        </dependencies>
+    </project>"#;
+    let facts = member_facts(&[("pom.xml", pom)]);
+    let deps = refs(&facts[0], ReferenceKind::Dependency);
+    assert_eq!(deps[0].resolution, Resolution::Refused);
+    assert_eq!(deps[0].group_id.as_deref(), Some("${g}"), "the declared text is kept");
+    assert!(deps[0].reason.as_deref().unwrap().contains("resolves to an empty value"), "{:?}", deps[0].reason);
+    assert_eq!((deps[1].version.as_deref(), deps[1].resolution), (Some("1.0"), Resolution::Resolved));
+}
