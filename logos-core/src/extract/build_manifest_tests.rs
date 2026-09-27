@@ -517,6 +517,11 @@ fn a_parent_cycle_terminates_and_refuses_what_it_cannot_define() {
     let facts = member_facts(&[("a/pom.xml", a), ("b/pom.xml", b)]);
     let dep = refs(&only(&facts, "a/pom.xml"), ReferenceKind::Dependency)[0].clone();
     assert_eq!(dep.resolution, Resolution::Refused);
+    let reason = dep.reason.expect("a refusal carries its reason");
+    assert!(
+        !reason.contains("is not a pom of this member"),
+        "a cycle is not an out-of-member boundary: {reason}"
+    );
 }
 
 // ── Maven: well-formedness ───────────────────────────────────────────────────
