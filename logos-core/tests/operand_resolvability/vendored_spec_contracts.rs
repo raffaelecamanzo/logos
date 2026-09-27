@@ -778,6 +778,10 @@ pub enum BaseReading {
     One { path: String, files: Vec<String>, overlay: bool },
     /// Two or more distinct paths, each with the file committing it.
     Disagree(Vec<(String, String)>),
+    /// Overlays override the base-url key, but none commits a URL path (a
+    /// placeholder, a templated authority): no path is proven, and the
+    /// application value they override is not read in their place.
+    OverlayWithoutPath(Vec<String>),
 }
 
 /// Read a call's committed base path.
@@ -801,11 +805,13 @@ pub fn base_reading(
     if base_keys.is_empty() {
         return BaseReading::NoKey;
     }
+    // An override is decided by the KEY, as the floor states it: an overlay
+    // value that is no URL still replaces the application value at deploy time,
+    // so it must not let that value back in. It contributes no path below.
     let overriding: Vec<&Scalar> = if admit_overlays {
         overlays
             .iter()
             .copied()
-            .filter(|s| url_path(&s.value).is_some())
             .filter(|s| base_keys.iter().any(|k| overlay_overrides(&s.key, k)))
             .collect()
     } else {
@@ -818,6 +824,10 @@ pub fn base_reading(
         if let Some(p) = url_path(&s.value) {
             by_path.entry(p).or_default().insert(s.file.clone());
         }
+    }
+    if by_path.is_empty() {
+        let files: BTreeSet<String> = chosen.iter().map(|s| s.file.clone()).collect();
+        return BaseReading::OverlayWithoutPath(files.into_iter().collect());
     }
     if by_path.len() == 1 {
         let (path, files) = by_path.into_iter().next().expect("one path");
@@ -843,6 +853,8 @@ pub enum CallClass {
     NoBaseKey { p_exact: bool },
     /// The committed base paths disagree.
     Disagree(Vec<(String, String)>),
+    /// Overlays override the base-url key without committing a URL path.
+    OverlayWithoutPath(Vec<String>),
     /// Exact under a committed base path — the counted rows.
     Exact { base: String, files: Vec<String>, overlay: bool, document: String },
     /// `P` alone equals an operation but the base path is not empty.
@@ -860,6 +872,7 @@ impl CallClass {
             Self::NotComposed(_) => "NOT COMPOSED",
             Self::NoBaseKey { .. } => "NO COMMITTED BASE-URL KEY",
             Self::Disagree(_) => "REFUSED, BASE PATHS DISAGREE",
+            Self::OverlayWithoutPath(_) => "REFUSED, OVERRIDING OVERLAY COMMITS NO URL PATH",
             Self::Exact { .. } => "EXACT UNDER A COMMITTED BASE PATH",
             Self::Overshoot { .. } => "BASE PATH OVERSHOOTS",
             Self::SuffixOnly { .. } => "SUFFIX-ONLY",
@@ -891,6 +904,9 @@ pub fn judge_call(
             return CallClass::NoBaseKey { p_exact: bare.as_ref().and_then(holding).is_some() }
         }
         BaseReading::Disagree(rows) => return CallClass::Disagree(rows.clone()),
+        BaseReading::OverlayWithoutPath(files) => {
+            return CallClass::OverlayWithoutPath(files.clone())
+        }
         BaseReading::One { path: base, files, overlay } => {
             let composed = normalize_template(&join_base(base, path)).map(|t| (method.to_string(), t));
             if let Some(document) = composed.as_ref().and_then(holding) {
@@ -1461,6 +1477,7 @@ fn report(root: &Path, census: &Census, j: &Judgement) {
                     .collect::<Vec<_>>()
                     .join("; "),
                 CallClass::NotComposed(why) => format!("{why:?}"),
+                CallClass::OverlayWithoutPath(files) => format!("overridden by {}", files.join(", ")),
                 CallClass::NoBaseKey { p_exact } => format!("P alone exact: {p_exact}"),
                 CallClass::NoMatch | CallClass::NoExternal => String::new(),
             };
@@ -2039,6 +2056,7 @@ mod tests {
         let base = canonical_key("pec-server.base-url");
         assert!(overlay_overrides(&canonical_key("envFrom.PECSERVER_BASEURL"), &base));
         assert!(overlay_overrides(&canonical_key("config.pec-server.base-url"), &base));
+        assert!(overlay_overrides(&canonical_key("pec-server.base-url"), &base), "the key itself");
         // Near misses, one token away.
         assert!(!overlay_overrides(&canonical_key("envFrom.PECSERVER_BASEURLS"), &base));
         assert!(!overlay_overrides(&canonical_key("envFrom.NOTIFICATIONGATEWAY_API_BASEURL"), &base));
@@ -2086,6 +2104,46 @@ mod tests {
             }
         );
         assert_eq!(base_reading(&set(&["other.uri"]), &app, &overlays, true), BaseReading::NoKey);
+    }
+
+    #[test]
+    fn an_override_is_decided_by_key_and_a_pathless_one_proves_no_base() {
+        let s = facade_scalars();
+        let (app, _) = split_sources(&s);
+        let keys = set(&["pecserver.uriget"]);
+        // A lone overriding placeholder: the application path must not come back.
+        let placeholder = scalar("facade", "envFrom.PECSERVER_BASEURL", "${PECSERVER_URL}",
+            SourceSet::Deploy, "facade/deploy-x/values.yaml");
+        assert_eq!(
+            base_reading(&keys, &app, &[&placeholder], true),
+            BaseReading::OverlayWithoutPath(vec!["facade/deploy-x/values.yaml".into()])
+        );
+        let templated = scalar("facade", "envFrom.PECSERVER_BASEURL", "https://${PSS_HOST}/api",
+            SourceSet::Deploy, "facade/deploy-y/values.yaml");
+        assert!(matches!(
+            base_reading(&keys, &app, &[&templated], true),
+            BaseReading::OverlayWithoutPath(_)
+        ));
+        // Beside overlays that do commit a path, a pathless one adds nothing —
+        // the estate's `values_TEMPLATE.yaml` shape.
+        let literal = scalar("facade", "envFrom.PECSERVER_BASEURL", "https://t:8443/prov",
+            SourceSet::Deploy, "facade/deploy-coll/values.yaml");
+        assert!(matches!(
+            base_reading(&keys, &app, &[&placeholder, &literal], true),
+            BaseReading::One { ref path, overlay: true, .. } if path == "/prov"
+        ));
+        // Only a URL-valued application key is a base-url key.
+        let path_only = scalar("m", "ns.uri", "/p", SourceSet::Application, "a.yml");
+        assert_eq!(base_reading(&set(&["ns.uri"]), &[&path_only], &[], true), BaseReading::NoKey);
+        let ext = keys_set_prov();
+        assert!(matches!(
+            judge_call("GET", "/domain/{x}", &BaseReading::OverlayWithoutPath(vec!["o".into()]), &[("pss.yaml", &ext)]),
+            CallClass::OverlayWithoutPath(_)
+        ));
+    }
+
+    fn keys_set_prov() -> BTreeSet<OpKey> {
+        keys(&[("GET", "/prov/domain/{d}")])
     }
 
     #[test]
