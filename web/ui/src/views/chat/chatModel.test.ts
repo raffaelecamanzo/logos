@@ -13,6 +13,7 @@ import {
   configureFirstCopy,
   initialTurn,
   modelLabel,
+  readRoots,
   parseSseBlock,
   readSseStream,
   rememberConsent,
@@ -528,5 +529,19 @@ describe("consent gate", () => {
     rememberConsent();
     expect(window.localStorage.getItem(CONSENT_KEY)).toBe("1");
     expect(hasConsent()).toBe(true);
+  });
+});
+
+describe("readRoots (sprint-79 HF-1) — the declared extra read roots", () => {
+  it("is empty when the server omits the key (the default) or sends an empty list", () => {
+    expect(readRoots(POLICY)).toEqual([]);
+    expect(readRoots({ ...POLICY, read_roots: [] })).toEqual([]);
+  });
+
+  it("names each declared entry verbatim, dropping only blank ones", () => {
+    expect(readRoots({ ...POLICY, read_roots: ["../logos-docs", " ", "/srv/specs"] })).toEqual([
+      "../logos-docs",
+      "/srv/specs",
+    ]);
   });
 });

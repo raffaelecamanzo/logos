@@ -450,6 +450,13 @@ max_provider_retries = 2
 # ≥ 1 — a value of 0 fails loud at load.
 provider_retry_base_ms = 200
 
+# ── Extra read roots (optional) ─────────────────────────────────────────────
+# Directories the Source-Reader may read THROUGH symlinks in this project — for
+# docs/ folders symlinked into a sibling repo. Each entry is relative to the
+# root whose config.toml declares this table, or absolute. Default: none, and
+# the sandbox is exactly the project root. See "Reading symlinked docs" below.
+# read_roots = ["../logos-docs"]
+
 # ── Per-role model overrides (optional) ─────────────────────────────────────
 # Each role with no override falls back to the top-level `model` above. The
 # roster is fixed, so the keys are an enumerated set: a typo'd role fails loud.
@@ -475,11 +482,52 @@ synthesizer        = "anthropic/claude-sonnet-4"
 | `max_replans` | integer | `3` | Budget tree: max planner replans per turn. `0` = a single plan pass. |
 | `max_provider_retries` | integer | `2` | Retries after the first attempt for a transient provider fault. `0` disables retry. Out-of-range fails loud. Inherited by the wiki generator. |
 | `provider_retry_base_ms` | integer | `200` | Base backoff (ms) for the exponential + jitter retry delay. Must be ≥ 1 (`0` fails loud). Inherited by the wiki generator. |
+| `read_roots` | list of strings | `[]` | Extra directories the Source-Reader may read, reached **only through symlinks inside the project** — see [Reading symlinked docs](#reading-symlinked-docs--read_roots). Relative to the declaring root, or absolute. A blank entry fails loud at load. |
 
 The `[chat.models]` table maps a fixed set of roles — `planner`,
 `graph_navigator`, `governance_analyst`, `source_reader`, `synthesizer` — each to
 a model string. Every key is optional; an omitted role uses the top-level
 `model`. An unknown role key fails loud at load.
+
+### Reading symlinked docs — `read_roots`
+
+The Chat tab's Source-Reader reads files with sandboxed `read` / `grep` / `glob`
+tools confined to the project root. A project that keeps its docs in a sibling
+repo — `docs/planning → ../logos-docs/planning` — therefore could not read them:
+the symlink resolves outside the root, the `read` is refused as a sandbox escape,
+and that refusal ends the turn. Declare the sibling repo instead:
+
+```toml
+[chat]
+read_roots = ["../logos-docs"]
+```
+
+What this admits, and what it does not:
+
+- **Reached through the project only.** The agent still names project-relative
+  paths (`docs/planning/sprint-log.md`). An absolute path or a `..` component is
+  refused exactly as before, so a read root is reachable only through a symlink
+  inside the project that resolves into it — never by naming it.
+- **Only the declared directories.** A symlink to any other directory is still a
+  sandbox escape and still ends the turn ("resolves outside the project root and
+  every declared read root"). Containment is by path component, so
+  `../logos-docs-private` is not under `../logos-docs`.
+- **`grep` and `glob` see them too**, even when the symlink is git-ignored (this
+  repo's `/docs/planning` is). The walks follow a symlink only when its target is
+  under a declared read root — every other symlink is still skipped — follow
+  each directory at most once, so a link cycle terminates, and report every hit
+  under its in-project path (`docs/planning/…`).
+- **`ignored_dirs` still apply** inside a read root.
+- **Resolved when a turn starts.** A relative entry resolves against the root
+  whose `config.toml` declares the `[chat]` table. An entry that does not exist,
+  or is not a directory, fails the turn with a message naming it (`could not
+  open the source sandbox: [chat] read_roots entry "../logos-docs" … does not
+  exist`) — it is never silently dropped.
+- **Its content can be sent to the endpoint.** The Chat tab's consent banner and
+  status band name every declared read root.
+
+`read_roots` has no typed control in the Config tab; edit it in the raw TOML
+pane. Typed edits to the other `[chat]` fields leave it byte-for-byte intact.
 
 ### The budget tree
 
@@ -596,6 +644,10 @@ member's own key is never sent to a workspace endpoint:**
   workspace endpoint. The Chat tab, the member Config tab and a refused request say
   when a member's key is withheld this way; setting a `[chat] model` on the member
   makes it use its own key.
+- **`read_roots` travel with the table.** An inherited table's `read_roots` resolve
+  against the **workspace root** that declared them, not the member; the Chat tab
+  says so beside them. They still admit only what a symlink inside the member
+  reaches.
 - **Wiki generation inherits the same way.** The wiki model resolves in this order:
   the member's own `[wiki].model`; else the **workspace root's** `[wiki].model`, but
   only while the member **inherits the workspace `[chat]` policy**; else the effective

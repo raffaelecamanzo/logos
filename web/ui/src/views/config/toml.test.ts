@@ -170,3 +170,35 @@ describe("dropEmptyTable — a table whose presence is a value (S-430, FR-UI-38)
     expect(dropEmptyTable('[workspace]\nname = "a"', "workspace.autodiscover")).toBe('[workspace]\nname = "a"');
   });
 });
+
+describe("patch — [chat] read_roots survives the typed chat fields (sprint-79 HF-1)", () => {
+  // `read_roots` has no typed control: it is edited in the raw pane, so a typed
+  // provider/model/base_url edit must carry it through byte-for-byte — including
+  // the multi-line array shape `toml::to_string_pretty` writes.
+  const raw =
+    '[chat]\nread_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\nmodel = "old/model"\nbase_url = "https://x.example/v1"\n';
+  const roots = 'read_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\n';
+
+  it("replaces model after the array without touching it", () => {
+    const out = patch(raw, "chat", "model", "str", "new/model");
+    expect(out).toContain(roots);
+    expect(out).toContain('model = "new/model"');
+    expect(out).not.toContain("old/model");
+  });
+
+  it("removes a cleared base_url without touching the array", () => {
+    const out = patch(raw, "chat", "base_url", "str", "");
+    expect(out).toBe('[chat]\nread_roots = [\n  "../logos-docs",\n  "/srv/specs",\n]\nmodel = "old/model"\n');
+  });
+
+  it("inserts an absent provider after the header, above the array", () => {
+    const out = patch(raw, "chat", "provider", "str", "anthropic");
+    expect(out.startsWith('[chat]\nprovider = "anthropic"\n' + roots)).toBe(true);
+  });
+
+  it("never mistakes an array item spelling `model =` for the key (the near miss)", () => {
+    const tricky = '[chat]\nread_roots = [\n  "model = inside",\n]\nmodel = "old/model"\n';
+    const out = patch(tricky, "chat", "model", "str", "new/model");
+    expect(out).toBe('[chat]\nread_roots = [\n  "model = inside",\n]\nmodel = "new/model"\n');
+  });
+});

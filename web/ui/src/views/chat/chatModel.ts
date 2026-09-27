@@ -73,6 +73,10 @@ export interface ChatPolicy {
   max_tool_calls: number;
   max_subagent_tool_calls: number;
   max_replans: number;
+  /** `[chat] read_roots` (sprint-79 HF-1): extra directories the Source-Reader may
+   *  read through in-tree symlinks, as declared — relative to the root that
+   *  declared the table, or absolute. Omitted by the server when empty. */
+  read_roots?: string[];
 }
 
 /** Where one half of the effective resolution came from (mirrors `ChatOrigin`).
@@ -397,6 +401,14 @@ export function endpointHost(chat: ChatPolicy): string {
  *  AC requires that gate preserved exactly as it was. */
 export function modelLabel(chat: ChatPolicy): string {
   return chat.model && chat.model.trim() !== "" ? chat.model : "no model configured";
+}
+
+/** The extra read roots the effective policy declares (sprint-79 HF-1), named by
+ *  the consent banner and the status band because their content can be sent to
+ *  the endpoint too. Empty — and so rendering nothing — unless the project opted
+ *  in; the server omits the key then, so an absent key is the common case. */
+export function readRoots(chat: ChatPolicy): string[] {
+  return (chat.read_roots ?? []).filter((root) => root.trim() !== "");
 }
 
 // ── Display labels (ported verbatim from the legacy chat.js client) ───────────

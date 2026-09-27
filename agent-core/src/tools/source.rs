@@ -14,9 +14,23 @@
 //! - the `grep`/`glob` walks use [`ignore::WalkBuilder`] with
 //!   `follow_links(false)`, mirroring [`logos_core::config::discovery`].
 //!
+//! # Declared read roots (`[chat] read_roots`, sprint-79 HF-1)
+//! A project may declare extra directories ([`Sandbox::with_read_roots`]) — the
+//! sibling repo its `docs/` symlinks point into. Default: none, and everything
+//! above holds byte-for-byte. When declared, a resolved canonical path is also
+//! admitted under a read root, but a read root is reachable **only through an
+//! in-tree symlink**: the lexical refusals (absolute, `..`) still run first, so
+//! the agent never names a read root itself, and a symlink to any *undeclared*
+//! directory is still an [`SandboxError::Escape`]. The walks follow a symlink
+//! only when its canonical target lies under a read root — found by a per-
+//! directory scan, because such a link is commonly git-ignored (this repo's
+//! `/docs/planning`) and the gitignore-aware walker would prune it unseen — each
+//! canonical directory at most once (the cycle guard), reporting every hit under
+//! its in-tree path.
+//!
 //! [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 // Anonymous import: brings `Read::{take, read_to_end}` into scope for the
 // bounded file read without binding the name `Read` (which is also this
 // module's `read` tool struct).
@@ -59,8 +73,8 @@ pub enum SandboxError {
     Ignored(String, String),
 
     /// The resolved (canonical) path lies outside the project root — e.g. a
-    /// symlink pointing out of the tree.
-    #[error("path {0:?} resolves outside the project root")]
+    /// symlink pointing out of the tree — and outside every declared read root.
+    #[error("path {0:?} resolves outside the project root and every declared read root")]
     Escape(String),
 
     /// The path does not exist within the project.
@@ -89,6 +103,20 @@ pub enum SandboxError {
     /// The caller's regex pattern failed to compile.
     #[error("invalid regex {0:?}: {1}")]
     BadRegex(String, String),
+
+    /// A declared read root (`[chat] read_roots`) cannot be used — it does not
+    /// exist, is not a directory, or cannot be canonicalised. Raised when the
+    /// sandbox is built, never by a tool call: a declared entry is reported,
+    /// never silently dropped.
+    #[error("[chat] read_roots entry {entry:?} (resolved to {resolved:?}) {reason}")]
+    BadReadRoot {
+        /// The entry as declared.
+        entry: String,
+        /// The path it resolved to against its declaring root.
+        resolved: String,
+        /// Why it was refused.
+        reason: String,
+    },
 }
 
 impl SandboxError {
@@ -133,6 +161,10 @@ pub struct Sandbox {
     /// walk applies, so neither tool can be steered into an unbounded allocation
     /// by a large file in the tree.
     max_read_bytes: usize,
+    /// The canonicalised declared read roots ([`with_read_roots`](Self::with_read_roots));
+    /// empty by default, which keeps every check and walk exactly the
+    /// root-only containment.
+    read_roots: Arc<Vec<PathBuf>>,
 }
 
 impl Sandbox {
@@ -158,6 +190,7 @@ impl Sandbox {
             root: canon,
             ignored_dirs: Arc::new(ignored_dirs.into_iter().collect()),
             max_read_bytes: DEFAULT_MAX_READ_BYTES,
+            read_roots: Arc::new(Vec::new()),
         })
     }
 
@@ -179,9 +212,80 @@ impl Sandbox {
         self
     }
 
+    /// Declare extra read roots (`[chat] read_roots`), each resolved against
+    /// `base` — the root whose `config.toml` declared them — or taken as given
+    /// when absolute, then canonicalised **once**, here.
+    ///
+    /// A read root widens only what a resolved path may *land* in; callers still
+    /// pass project-relative paths, so one is reached through an in-tree symlink
+    /// or not at all (see the module docs).
+    ///
+    /// # Errors
+    /// [`SandboxError::BadReadRoot`] naming the first entry that does not exist,
+    /// is not a directory, or cannot be canonicalised.
+    pub fn with_read_roots<I, S>(mut self, base: &Path, entries: I) -> Result<Self, SandboxError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut roots = Vec::new();
+        for entry in entries {
+            let entry = entry.as_ref();
+            let joined = base.join(entry);
+            let bad = |reason: String| SandboxError::BadReadRoot {
+                entry: entry.to_string(),
+                resolved: joined.display().to_string(),
+                reason,
+            };
+            let canonical = joined.canonicalize().map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    bad("does not exist".to_string())
+                } else {
+                    bad(format!("cannot be resolved: {e}"))
+                }
+            })?;
+            if !canonical.is_dir() {
+                return Err(bad("is not a directory".to_string()));
+            }
+            roots.push(canonical);
+        }
+        self.read_roots = Arc::new(roots);
+        Ok(self)
+    }
+
     /// The canonical project root.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The canonicalised declared read roots (empty unless declared).
+    pub fn read_roots(&self) -> &[PathBuf] {
+        &self.read_roots
+    }
+
+    /// The anchor a canonical path is contained by — the project root, else the
+    /// first declared read root containing it — or `None` for an escape.
+    /// Containment is by path component ([`Path::starts_with`]), so a sibling
+    /// sharing a read root's name as a string prefix is not contained.
+    fn anchor_of(&self, canonical: &Path) -> Option<&Path> {
+        if canonical.starts_with(&self.root) {
+            return Some(&self.root);
+        }
+        self.read_roots
+            .iter()
+            .find(|read_root| canonical.starts_with(read_root))
+            .map(PathBuf::as_path)
+    }
+
+    /// Whether any segment of `relative` names an `ignored_dirs` entry.
+    fn ignored_segment(&self, relative: &Path) -> Option<String> {
+        relative.components().find_map(|component| match component {
+            Component::Normal(name) => name
+                .to_str()
+                .filter(|name| self.ignored_dirs.contains(*name))
+                .map(str::to_string),
+            _ => None,
+        })
     }
 
     /// Resolve a caller-supplied project-relative path to a canonical path
@@ -189,9 +293,10 @@ impl Sandbox {
     ///
     /// Refuses, **before** touching the filesystem, an absolute path, a `..`
     /// component, or any segment named in `ignored_dirs`; then canonicalises and
-    /// re-checks `starts_with(root)` so a symlink cannot escape, and re-scans the
-    /// canonical path's segments for ignored directories (catching a symlink
-    /// *into* an ignored subtree).
+    /// re-checks `starts_with(root)` — or `starts_with` a declared read root — so
+    /// a symlink cannot escape, and re-scans the canonical path's segments below
+    /// that anchor for ignored directories (catching a symlink *into* an ignored
+    /// subtree).
     pub fn resolve(&self, rel: &str) -> Result<PathBuf, SandboxError> {
         let requested = Path::new(rel);
 
@@ -228,25 +333,59 @@ impl Sandbox {
             }
         })?;
 
-        // Defence in depth: the canonical path must still live under the root —
-        // this is what stops a symlink whose target is outside the tree.
+        // Defence in depth: the canonical path must still live under the root or
+        // a declared read root — this is what stops a symlink whose target is
+        // outside the tree.
+        let anchor = self
+            .anchor_of(&canonical)
+            .ok_or_else(|| SandboxError::Escape(rel.to_string()))?;
         let relative = canonical
-            .strip_prefix(&self.root)
+            .strip_prefix(anchor)
             .map_err(|_| SandboxError::Escape(rel.to_string()))?;
 
         // A symlink could resolve to a path *inside* the root but under an ignored
         // subtree; re-scan the canonical segments to refuse that too.
-        for component in relative.components() {
-            if let Component::Normal(name) = component {
-                if let Some(name) = name.to_str() {
-                    if self.ignored_dirs.contains(name) {
-                        return Err(SandboxError::Ignored(rel.to_string(), name.to_string()));
-                    }
-                }
-            }
+        if let Some(name) = self.ignored_segment(relative) {
+            return Err(SandboxError::Ignored(rel.to_string(), name));
         }
 
         Ok(canonical)
+    }
+
+    /// Resolve a `grep` scope to the pair its walk needs: the physical
+    /// (canonical) directory to walk, and the in-tree path its hits are reported
+    /// under. A scope inside the tree reports under its canonical relative path,
+    /// exactly as before; a scope that resolved into a read root reports under
+    /// the path the caller named (normalised), since that is its in-tree identity.
+    fn resolve_scope(&self, rel: &str) -> Result<(PathBuf, PathBuf), SandboxError> {
+        let canonical = self.resolve(rel)?;
+        let logical = match canonical.strip_prefix(&self.root) {
+            Ok(inside) => inside.to_path_buf(),
+            Err(_) => Path::new(rel)
+                .components()
+                .filter(|c| matches!(c, Component::Normal(_)))
+                .collect(),
+        };
+        Ok((canonical, logical))
+    }
+
+    /// The canonical target of `link` when it lies under a declared read root
+    /// and not under an ignored segment there — the only symlinks a walk
+    /// follows. Every other symlink (in-tree alias, undeclared target, broken
+    /// link) is `None` and stays skipped; an in-tree alias stays skipped even
+    /// when a read root encloses the project, since it only re-reaches content
+    /// the walk already visits under its real path.
+    fn read_root_target(&self, link: &Path) -> Option<PathBuf> {
+        let target = link.canonicalize().ok()?;
+        if target.starts_with(&self.root) {
+            return None;
+        }
+        let read_root = self
+            .read_roots
+            .iter()
+            .find(|read_root| target.starts_with(read_root))?;
+        let below = target.strip_prefix(read_root).ok()?;
+        self.ignored_segment(below).is_none().then_some(target)
     }
 
     /// Read a confined file, capped at the sandbox's read budget.
@@ -284,17 +423,53 @@ impl Sandbox {
         })
     }
 
-    /// Walk the regular files under `start` (an absolute path within the root),
-    /// honoring gitignore + `ignored_dirs` and never following a symlink out of
-    /// the tree, invoking `visit(absolute, relative)` until it asks to stop.
+    /// Walk the regular files under `start` (an absolute, canonical path within
+    /// the root or a read root) whose hits are reported under the in-tree path
+    /// `logical`, honoring gitignore + `ignored_dirs` and never following a
+    /// symlink out of the tree, invoking `visit(absolute, relative)` until it
+    /// asks to stop.
     ///
     /// Mirrors [`logos_core::config::discovery`] — the canonical [NFR-SE-04]
-    /// containment walk.
+    /// containment walk. With read roots declared, each walked directory is also
+    /// scanned for symlinks into them ([`read_root_target`](Self::read_root_target)):
+    /// a directory target is queued for its own walk under the link's in-tree
+    /// path — each canonical directory at most once, which is what makes a
+    /// cyclic link terminate — and a file target is visited directly.
     fn walk_files(
         &self,
         start: &Path,
+        logical: &Path,
         mut visit: impl FnMut(&Path, &Path) -> std::ops::ControlFlow<()>,
     ) {
+        let mut walked: HashSet<PathBuf> = HashSet::from([start.to_path_buf()]);
+        let mut queue = VecDeque::from([(start.to_path_buf(), logical.to_path_buf())]);
+        while let Some((physical, logical)) = queue.pop_front() {
+            let mut links = Vec::new();
+            if self
+                .walk_one(&physical, &logical, &mut links, &mut visit)
+                .is_break()
+            {
+                return;
+            }
+            for (target, link_logical) in links {
+                if walked.insert(target.clone()) {
+                    queue.push_back((target, link_logical));
+                }
+            }
+        }
+    }
+
+    /// One contained walk of `start` (see [`walk_files`](Self::walk_files)):
+    /// visits its regular files under `logical`, and — only with read roots
+    /// declared — pushes each directory symlink into a read root onto `links`
+    /// as `(canonical target, in-tree path)`.
+    fn walk_one(
+        &self,
+        start: &Path,
+        logical: &Path,
+        links: &mut Vec<(PathBuf, PathBuf)>,
+        visit: &mut impl FnMut(&Path, &Path) -> std::ops::ControlFlow<()>,
+    ) -> std::ops::ControlFlow<()> {
         let ignored_dirs = self.ignored_dirs.clone();
         let walker = WalkBuilder::new(start)
             .require_git(false)
@@ -323,20 +498,81 @@ impl Sandbox {
             let Some(file_type) = entry.file_type() else {
                 continue;
             };
+            let path = entry.path();
+            let Ok(within) = path.strip_prefix(start) else {
+                continue;
+            };
+            // `start` itself (depth 0) reports as `logical`, never `logical/`.
+            let reported = if within.as_os_str().is_empty() {
+                logical.to_path_buf()
+            } else {
+                logical.join(within)
+            };
+            if file_type.is_dir() && !self.read_roots.is_empty() {
+                if self
+                    .scan_read_root_links(path, &reported, links, visit)
+                    .is_break()
+                {
+                    return std::ops::ControlFlow::Break(());
+                }
+                continue;
+            }
             // With follow_links(false) a symlink is yielded as-is; skip it
-            // explicitly so a symlinked file is never read.
+            // explicitly so a symlinked file is never read (a link into a read
+            // root is picked up by the directory scan above instead).
             if file_type.is_symlink() || !file_type.is_file() {
                 continue;
             }
-            let path = entry.path();
-            // Belt-and-braces: confirm the path is under the root.
-            let Ok(relative) = path.strip_prefix(&self.root) else {
+            // Belt-and-braces: confirm the path is under the root or a read root.
+            if self.anchor_of(path).is_none() {
                 continue;
-            };
-            if visit(path, relative).is_break() {
-                break;
+            }
+            if visit(path, &reported).is_break() {
+                return std::ops::ControlFlow::Break(());
             }
         }
+        std::ops::ControlFlow::Continue(())
+    }
+
+    /// Scan one walked directory's entries for symlinks into a read root. The
+    /// walker cannot be asked: a git-ignored link (`/docs/planning` here) is
+    /// pruned before it is yielded, so the directory is read directly. A link
+    /// named in `ignored_dirs` is skipped; a directory target is pushed onto
+    /// `links`, a file target visited under its in-tree path. Sorted, so which
+    /// link reaches a shared target first is deterministic.
+    fn scan_read_root_links(
+        &self,
+        dir: &Path,
+        logical: &Path,
+        links: &mut Vec<(PathBuf, PathBuf)>,
+        visit: &mut impl FnMut(&Path, &Path) -> std::ops::ControlFlow<()>,
+    ) -> std::ops::ControlFlow<()> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return std::ops::ControlFlow::Continue(());
+        };
+        let mut found: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_symlink()))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| !self.ignored_dirs.contains(name))
+            })
+            .filter_map(|entry| {
+                let target = self.read_root_target(&entry.path())?;
+                Some((target, logical.join(entry.file_name())))
+            })
+            .collect();
+        found.sort();
+        for (target, link_logical) in found {
+            if target.is_dir() {
+                links.push((target, link_logical));
+            } else if target.is_file() && visit(&target, &link_logical).is_break() {
+                return std::ops::ControlFlow::Break(());
+            }
+        }
+        std::ops::ControlFlow::Continue(())
     }
 }
 
@@ -489,16 +725,16 @@ impl Tool for Grep {
             .map_err(|e| SandboxError::BadRegex(args.pattern.clone(), e.to_string()))?;
 
         // Scope: a subdirectory must resolve within the sandbox; default to root.
-        let start = match args.path.as_deref() {
-            Some(sub) => self.sandbox.resolve(sub)?,
-            None => self.sandbox.root().to_path_buf(),
+        let (start, logical) = match args.path.as_deref() {
+            Some(sub) => self.sandbox.resolve_scope(sub)?,
+            None => (self.sandbox.root().to_path_buf(), PathBuf::new()),
         };
         let limit = args.limit.unwrap_or(DEFAULT_MATCH_LIMIT);
 
         let max_file_bytes = self.sandbox.max_read_bytes as u64;
         let mut matches = Vec::new();
         let mut truncated = false;
-        self.sandbox.walk_files(&start, |abs, rel| {
+        self.sandbox.walk_files(&start, &logical, |abs, rel| {
             // Skip files larger than the read cap: a single large file in the
             // tree must not drive an unbounded `read_to_string` allocation.
             if std::fs::metadata(abs).is_ok_and(|m| m.len() > max_file_bytes) {
@@ -603,7 +839,7 @@ impl Tool for Glob {
         let mut paths = Vec::new();
         let mut truncated = false;
         let root = self.sandbox.root().to_path_buf();
-        self.sandbox.walk_files(&root, |_abs, rel| {
+        self.sandbox.walk_files(&root, Path::new(""), |_abs, rel| {
             if glob.is_match(rel) {
                 if paths.len() >= limit {
                     truncated = true;
@@ -657,6 +893,11 @@ mod tests {
             },
             SandboxError::BadGlob("[".into(), "unclosed".into()),
             SandboxError::BadRegex("(".into(), "unclosed".into()),
+            SandboxError::BadReadRoot {
+                entry: "../docs".into(),
+                resolved: "/x/docs".into(),
+                reason: "does not exist".into(),
+            },
         ] {
             assert!(
                 !benign.is_containment_refusal(),

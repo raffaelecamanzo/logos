@@ -1979,3 +1979,41 @@ describe("ChatView — the Activity disclosure (S-301, FR-UI-31)", () => {
     errorSpy.mockRestore();
   });
 });
+describe("ChatView — extra read roots (sprint-79 HF-1)", () => {
+  function withReadRoots(model: ChatConfigReadModel, roots: string[]): ChatConfigReadModel {
+    model.effective_chat.policy = { ...model.effective_chat.policy, read_roots: roots };
+    return model;
+  }
+
+  it("names nothing extra when no read roots are declared (the default)", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    render(<ChatView />);
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner?.textContent).not.toMatch(/read roots/);
+    await acceptConsent(user);
+    const band = (await screen.findByText("CHAT")).closest("section");
+    expect(band?.textContent).not.toMatch(/read roots/);
+  });
+
+  it("names every declared read root in the consent banner, before anything is sent", async () => {
+    mockFetchConfig.mockResolvedValue(withReadRoots(configuredModel(), ["../logos-docs", "/srv/specs"]));
+    render(<ChatView />);
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent(
+      "Extra read roots: ../logos-docs, /srv/specs — files under them, reached through this project's symlinks, can be sent too.",
+    );
+    expect(banner?.textContent).not.toMatch(/relative to the workspace root/);
+  });
+
+  it("keeps naming them in the status band, and says an inherited table's roots are the workspace's", async () => {
+    const user = userEvent.setup();
+    mockFetchConfig.mockResolvedValue(
+      withReadRoots(configuredModel("openai", { policy: "workspace", credential: "workspace" }), ["../logos-docs"]),
+    );
+    render(<ChatView />);
+    await acceptConsent(user);
+    const band = (await screen.findByText("CHAT")).closest("section");
+    expect(band).toHaveTextContent("Extra read roots: ../logos-docs (relative to the workspace root)");
+  });
+});

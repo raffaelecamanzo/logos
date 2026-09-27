@@ -242,6 +242,22 @@ pub struct ChatConfig {
     #[serde(default = "default_provider_retry_base_ms")]
     pub provider_retry_base_ms: u32,
 
+    /// Extra directories the Source-Reader may read (sprint-79 HF-1,
+    /// [NFR-SE-04] amended) — for a project whose `docs/` are symlinks into a
+    /// sibling repo, e.g. `read_roots = ["../logos-docs"]`. Each entry is a path
+    /// relative to the root whose `config.toml` declares it, or absolute. Default
+    /// **empty**: containment is exactly the project root.
+    ///
+    /// A read root is reachable only **through an in-tree symlink** that resolves
+    /// into it — the agent's paths stay project-relative — and its content can
+    /// be sent to the chat endpoint, which is why the consent banner names it.
+    /// Entries are canonicalised when the turn's sandbox is built; one that does
+    /// not exist fails that turn by name rather than being dropped. Validation
+    /// here is lexical only (no blank entry): `config.toml` loads without
+    /// touching the filesystem.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_roots: Vec<String>,
+
     /// Optional per-role model overrides (`[chat.models]`, [FR-CF-06]).
     #[serde(default)]
     pub models: ChatModelOverrides,
@@ -260,6 +276,7 @@ impl Default for ChatConfig {
             max_replans: default_max_replans(),
             max_provider_retries: default_max_provider_retries(),
             provider_retry_base_ms: default_provider_retry_base_ms(),
+            read_roots: Vec::new(),
             models: ChatModelOverrides::default(),
         }
     }
@@ -297,7 +314,9 @@ impl ChatConfig {
     /// - `temperature`, if set, in `[0.0, 2.0]`;
     /// - `max_provider_retries` ≤ [`MAX_PROVIDER_RETRIES_CEILING`] (a higher
     ///   count only amplifies load; `0` is valid — retries disabled);
-    /// - `provider_retry_base_ms` ≥ 1 (a zero base delay would busy-retry).
+    /// - `provider_retry_base_ms` ≥ 1 (a zero base delay would busy-retry);
+    /// - every `read_roots` entry non-blank (a blank entry would resolve to the
+    ///   declaring root itself — never what was meant).
     ///
     /// `max_replans` needs no check: `0` is valid (a single plan pass, no replan)
     /// and `u32` has no negative form.
@@ -359,6 +378,12 @@ impl ChatConfig {
             return Err(invalid(
                 "provider_retry_base_ms",
                 "must be at least 1 (a zero base delay would busy-retry)".to_string(),
+            ));
+        }
+        if let Some(position) = self.read_roots.iter().position(|r| r.trim().is_empty()) {
+            return Err(invalid(
+                "read_roots",
+                format!("entry {position} is blank; name a directory (relative or absolute)"),
             ));
         }
         Ok(())
@@ -737,9 +762,51 @@ mod tests {
             max_replans: 0,
             max_provider_retries: DEFAULT_MAX_PROVIDER_RETRIES,
             provider_retry_base_ms: DEFAULT_PROVIDER_RETRY_BASE_MS,
+            read_roots: vec!["../logos-docs".to_string()],
             models: ChatModelOverrides::default(),
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    /// Sprint-79 HF-1: `read_roots` defaults EMPTY (so an absent key serializes
+    /// nothing — the read-model JSON is byte-identical for a project that never
+    /// opts in), parses a list, and round-trips through serialize → parse.
+    #[test]
+    fn read_roots_default_empty_parse_and_round_trip() {
+        let absent: Config = toml::from_str("[chat]\nmodel = \"m\"\n").unwrap();
+        assert!(absent.chat.read_roots.is_empty());
+        assert!(
+            !toml::to_string(&absent.chat).unwrap().contains("read_roots"),
+            "an empty list is not serialized"
+        );
+
+        let declared: Config = toml::from_str(
+            "[chat]\nread_roots = [\n  \"../logos-docs\",\n  \"/abs/docs\",\n]\n",
+        )
+        .unwrap();
+        assert_eq!(declared.chat.read_roots, ["../logos-docs", "/abs/docs"]);
+        assert!(declared.validate().is_ok());
+
+        let reparsed: ChatConfig =
+            toml::from_str(&toml::to_string(&declared.chat).unwrap()).unwrap();
+        assert_eq!(reparsed, declared.chat, "serialize → parse is the identity");
+    }
+
+    /// A blank `read_roots` entry fails loud at load, naming `chat.read_roots`.
+    #[test]
+    fn a_blank_read_roots_entry_is_rejected() {
+        let cfg = Config {
+            chat: ChatConfig {
+                read_roots: vec!["../docs".to_string(), "  ".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidValue { ref key, ref message })
+                if key == "chat.read_roots" && message.contains("entry 1")
+        ));
     }
 
     /// [CR-060]/[FR-CF-06] AC: the provider-retry keys default to the documented

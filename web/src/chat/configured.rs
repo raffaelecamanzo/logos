@@ -60,7 +60,7 @@ use chat_agent::{
     BudgetTree, ChatRole, ChatStore, MemoryGrounding, MemoryStore, Orchestrator, Planner,
     SubagentRoster, SynthesizerGrounding,
 };
-use logos_core::config::{resolve_chat, ChatProvider};
+use logos_core::config::{resolve_chat, ChatOrigin, ChatProvider};
 use logos_core::Engine;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -126,13 +126,14 @@ struct ChatSetup {
     retry: RetryPolicy,
 }
 
-/// Resolve the policy + credential through the seam, resolve/create the thread,
-/// open memory, and open the source sandbox — the **blocking** half of a turn's
-/// setup. Returns an honest configure-first / setup-fault message on failure
-/// ([NFR-CC-04]); runs on the blocking pool ([ADR-03]).
+/// Resolve the policy + credential through the seam, open the source sandbox,
+/// resolve/create the thread, and open memory — the **blocking** half of a
+/// turn's setup. Returns an honest configure-first / setup-fault message on
+/// failure ([NFR-CC-04]); runs on the blocking pool ([ADR-03]).
 ///
-/// The configure-first verdict is checked **before** any store is touched, so a
-/// refused turn records no thread and no message.
+/// The configure-first verdict and the sandbox (with its declared read roots)
+/// are checked **before** any store is touched, so a refused turn records no
+/// thread and no message.
 fn build_setup(
     root: &Path,
     workspace_root: Option<&Path>,
@@ -145,6 +146,21 @@ fn build_setup(
     // is the seam's origins — the same facts the tab reads ([ADR-67] §6).
     let TurnProvider { model_id, api_key } = turn_provider(root, workspace_root, &resolution)?;
     let chat = resolution.policy;
+
+    // `[chat] read_roots` travel with the policy table, so they resolve against
+    // the root that declared that table: the workspace root for an inherited
+    // policy, else this member (sprint-79 HF-1). A missing entry fails the turn
+    // by name — reported, never dropped — and, like the configure-first
+    // verdict, before any store is touched, so it records no orphan thread.
+    let declaring_root = match (resolution.policy_origin, workspace_root) {
+        (ChatOrigin::Workspace, Some(workspace_root)) => workspace_root,
+        _ => root,
+    };
+    let sandbox = Arc::new(
+        Sandbox::from_root(root)
+            .and_then(|sandbox| Ok(sandbox.with_read_roots(declaring_root, &chat.read_roots)?))
+            .map_err(|e| format!("could not open the source sandbox: {e}"))?,
+    );
 
     // The thread the turn appends to (a new one when the caller gave none); the
     // scratchpad's foreign key requires the thread to exist first.
@@ -169,10 +185,6 @@ fn build_setup(
     let turn = memory
         .next_turn(thread_id)
         .map_err(|e| format!("could not compute the turn ordinal: {e}"))?;
-
-    let sandbox = Arc::new(
-        Sandbox::from_root(root).map_err(|e| format!("could not open the source sandbox: {e}"))?,
-    );
 
     let budget = BudgetTree::from(&chat);
     let temperature = chat.temperature;
@@ -597,6 +609,61 @@ mod tests {
             (11, 5, 2)
         );
         assert_eq!(setup.retry, RetryPolicy::new(4, 321));
+    }
+
+    /// Sprint-79 HF-1: `[chat] read_roots` resolve against the root that
+    /// declared the effective table. A member-owned table resolves its entry
+    /// against the member; an inherited one against the WORKSPACE root — the
+    /// same entry names a different directory, and each turn gets its own.
+    #[test]
+    fn read_roots_resolve_against_the_root_that_declared_the_policy() {
+        let e = estate(Half::Declared, Half::Declared, Half::Declared, Half::Declared);
+        fs::create_dir_all(e.member.join("member-docs")).unwrap();
+        fs::create_dir_all(e.ws.join("member-docs")).unwrap();
+        let body = |model: &str| {
+            format!("[chat]\nmodel = \"{model}\"\nread_roots = [\"member-docs\"]\n")
+        };
+        write(&e.member, "config.toml", &body(MEMBER_MODEL));
+        write(&e.ws, "config.toml", &body(WS_MODEL));
+
+        let owned = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
+        assert_eq!(
+            owned.sandbox.read_roots(),
+            [e.member.join("member-docs").canonicalize().unwrap()],
+            "a member-owned table resolves against the member"
+        );
+
+        write(&e.member, "config.toml", "[chat]\n");
+        let inherited = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
+        assert_eq!(inherited.model_id, WS_MODEL);
+        assert_eq!(
+            inherited.sandbox.read_roots(),
+            [e.ws.join("member-docs").canonicalize().unwrap()],
+            "an inherited table resolves against the workspace root that declared it"
+        );
+    }
+
+    /// Sprint-79 HF-1: a declared read root that does not exist fails the turn
+    /// with a setup message naming the entry — reported, never silently dropped
+    /// into a turn that quietly cannot see the docs.
+    #[test]
+    fn a_missing_read_root_fails_the_turn_by_name() {
+        let e = estate(Half::Declared, Half::Declared, Half::Absent, Half::Absent);
+        write(
+            &e.member,
+            "config.toml",
+            &format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\nread_roots = [\"../no-such-docs\"]\n"),
+        );
+        let message = build_setup(&e.member, None, None, "q")
+            .err()
+            .expect("a missing read root refuses the turn");
+        assert!(message.starts_with("could not open the source sandbox"), "{message}");
+        assert!(message.contains("../no-such-docs"), "names the entry: {message}");
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(
+            !e.member.join(".logos/chat.db").exists(),
+            "the refused turn opened no chat store, so it recorded no orphan thread"
+        );
     }
 
     /// AC-2: tab verdict == turn verdict, asserted as ONE equality over the whole
