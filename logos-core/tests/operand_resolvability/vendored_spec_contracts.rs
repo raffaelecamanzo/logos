@@ -84,10 +84,10 @@ use std::path::Path;
 
 use logos_core::extract::config::corpus::canonical_key;
 use logos_core::federation::{
-    cross_service_coverage, discover, BridgeIntake, EngineRegistry, MemberContracts,
-    ProviderDisposition, ReferenceCoverage, RegistryMode, UnboundReason,
+    cross_service_coverage, discover, BridgeIntake, CoverageState, EngineRegistry,
+    MemberContracts, ProviderDisposition, ReferenceCoverage, RegistryMode, UnboundReason,
 };
-use logos_core::model::{BridgeNamespace, BridgeRole, NodeKind};
+use logos_core::model::{ArtifactRelation, BridgeNamespace, BridgeRole, NodeKind};
 use logos_core::resolve::binding::Provenance;
 use logos_core::resolve::route_template::normalize_template;
 use logos_core::Engine;
@@ -928,7 +928,7 @@ pub fn judge_call(
 
 /// One invocation row of the second half's population, reduced to what the
 /// judgement reads.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationRow {
     pub member: String,
     pub symbol: String,
@@ -1034,7 +1034,7 @@ impl TieClass {
 }
 
 /// One contract-surface ambiguous row, reduced.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TieRow {
     pub holder: String,
     pub document: String,
@@ -1173,37 +1173,14 @@ pub fn census(root: &Path) -> Census {
     let mut tie_rows = Vec::new();
     let mut invocation_rows = Vec::new();
     for row in &coverage.references {
-        let key = (row.from.member.clone(), row.from.symbol.as_str().to_string());
-        match row.intake {
-            BridgeIntake::ContractSurface => {
-                let provision = tied(row).map_or(OpProvision::Other, |(members, truncated)| {
-                    OpProvision::Tied { members, truncated }
-                });
-                if let OpProvision::Tied { members, truncated } = &provision {
-                    tie_rows.push(TieRow {
-                        holder: row.from.member.clone(),
-                        document: document_path(row.from.symbol.as_str()).unwrap_or_default(),
-                        tied: members.clone(),
-                        truncated: *truncated,
-                    });
-                }
+        match row_use(row) {
+            RowUse::ContractSurface { provision, tie } => {
+                let key = (row.from.member.clone(), row.from.symbol.as_str().to_string());
                 provisions.insert(key, provision);
+                tie_rows.extend(tie);
             }
-            BridgeIntake::Invocation => {
-                let no_provider = matches!(
-                    row.state,
-                    logos_core::federation::CoverageState::Unbound {
-                        reason: UnboundReason::NoProviderInWorkspace
-                    }
-                );
-                if no_provider && row.relation == "route" {
-                    invocation_rows.push(InvocationRow {
-                        member: key.0,
-                        symbol: key.1,
-                        evidence: evidence(&row.provenance),
-                    });
-                }
-            }
+            RowUse::Invocation(r) => invocation_rows.push(r),
+            RowUse::Outside => {}
         }
     }
 
@@ -1227,9 +1204,7 @@ pub fn census(root: &Path) -> Census {
     for scoped in &ledgers {
         let Ok(Ok(refs)) = &scoped.value else { continue };
         for r in refs {
-            if r.relation.bridge_namespace() == Some(BridgeNamespace::Http)
-                && r.relation.bridge_role() == Some(BridgeRole::Consumer)
-            {
+            if is_http_consumer(r.relation) {
                 ledger
                     .entry((scoped.member.clone(), r.symbol.as_str().to_string()))
                     .or_default()
@@ -1274,6 +1249,63 @@ pub fn census(root: &Path) -> Census {
         members_read: coverage.members_read as usize,
         members_total: coverage.members_total as usize,
     }
+}
+
+/// What one product coverage row contributes to the census — the ONE place a row
+/// is sorted into the halves' populations, so the sorting is fixture-pinned
+/// rather than exercised only when the estate is configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowUse {
+    /// A contract-surface row: its operation's provision, and — when it is a
+    /// tie — the third half's reduced row.
+    ContractSurface { provision: OpProvision, tie: Option<TieRow> },
+    /// A second-half row: invocation intake, relation `route`, reason
+    /// `no-provider-in-workspace`.
+    Invocation(InvocationRow),
+    /// In neither population.
+    Outside,
+}
+
+pub fn row_use(row: &ReferenceCoverage) -> RowUse {
+    match row.intake {
+        BridgeIntake::ContractSurface => {
+            let Some((members, truncated)) = tied(row) else {
+                return RowUse::ContractSurface { provision: OpProvision::Other, tie: None };
+            };
+            let tie = TieRow {
+                holder: row.from.member.clone(),
+                document: document_path(row.from.symbol.as_str()).unwrap_or_default(),
+                tied: members.clone(),
+                truncated,
+            };
+            RowUse::ContractSurface {
+                provision: OpProvision::Tied { members, truncated },
+                tie: Some(tie),
+            }
+        }
+        BridgeIntake::Invocation => {
+            let no_provider = matches!(
+                row.state,
+                CoverageState::Unbound { reason: UnboundReason::NoProviderInWorkspace }
+            );
+            if no_provider && row.relation == "route" {
+                RowUse::Invocation(InvocationRow {
+                    member: row.from.member.clone(),
+                    symbol: row.from.symbol.as_str().to_string(),
+                    evidence: evidence(&row.provenance),
+                })
+            } else {
+                RowUse::Outside
+            }
+        }
+    }
+}
+
+/// Whether a ledger reference is an HTTP call site — the consumer side of the
+/// HTTP namespace, read off the arm's own descriptors.
+pub fn is_http_consumer(relation: ArtifactRelation) -> bool {
+    relation.bridge_namespace() == Some(BridgeNamespace::Http)
+        && relation.bridge_role() == Some(BridgeRole::Consumer)
 }
 
 /// An ambiguous row's tied members, as the row lists them, and whether the list
@@ -2116,6 +2148,116 @@ mod tests {
         );
         assert_eq!(j.invocation_exact(), 1);
         assert_eq!(j.invocation_exact_app_only(), 0, "without the overlay it is suffix inference");
+    }
+
+    // ── Sorting product rows into the populations ──────────────────────────
+
+    fn row(
+        member: &str,
+        symbol: &str,
+        intake: BridgeIntake,
+        relation: &str,
+        state: CoverageState,
+        candidates: Option<(ProviderDisposition, &[&str], u64)>,
+        provenance: Provenance,
+    ) -> ReferenceCoverage {
+        let endpoint = |m: &str| logos_core::federation::BridgeEndpoint {
+            member: m.into(),
+            symbol: logos_core::model::LogosSymbol::parse(symbol).expect("fixture symbol parses"),
+        };
+        ReferenceCoverage {
+            relation: relation.into(),
+            from: endpoint(member),
+            bucket: state.bucket(),
+            state,
+            to: None,
+            intake,
+            candidates: candidates.map(|(disposition, members, omitted)| {
+                logos_core::federation::ProviderCandidates {
+                    disposition,
+                    providers: members.iter().map(|m| endpoint(m)).collect(),
+                    total: members.len() as u64 + omitted,
+                    omitted,
+                    summary: String::new(),
+                }
+            }),
+            provenance,
+        }
+    }
+
+    const OP: &str = "logos . . . src/main/resources/openapi/`v1.yaml`/v1-a#get#";
+    const SITE: &str = "logos . . . src/`Client.java`/Client#get().";
+    fn unbound(reason: UnboundReason) -> CoverageState {
+        CoverageState::Unbound { reason }
+    }
+    fn bound(key: &str, values: &[&str]) -> Provenance {
+        Provenance::ConfigBound {
+            bound: vec![logos_core::resolve::binding::ConfigBound {
+                key: key.into(),
+                source: logos_core::resolve::binding::KeySource::Placeholder,
+                values: values
+                    .iter()
+                    .map(|v| logos_core::resolve::binding::ProfiledValue {
+                        value: (*v).into(),
+                        profiles: Vec::new(),
+                        unprofiled: true,
+                        sources: vec!["application.yml".into()],
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_contract_surface_tie_is_a_provision_and_a_third_half_row() {
+        let tie = row("agg", OP, BridgeIntake::ContractSurface, "route",
+            unbound(UnboundReason::Ambiguous),
+            Some((ProviderDisposition::TiedBetween, &["agg", "api"], 0)), Provenance::Literal);
+        let RowUse::ContractSurface { provision, tie: Some(t) } = row_use(&tie) else {
+            panic!("a tie is a contract-surface provision with a tie row");
+        };
+        assert_eq!(provision, OpProvision::Tied { members: vec!["agg".into(), "api".into()], truncated: false });
+        assert_eq!(t.document, "src/main/resources/openapi/v1.yaml");
+        assert!(!t.truncated);
+        // A truncated list says so, or a hidden holder reads as not tied.
+        let cut = row("agg", OP, BridgeIntake::ContractSurface, "route",
+            unbound(UnboundReason::Ambiguous),
+            Some((ProviderDisposition::TiedBetween, &["x", "y"], 1)), Provenance::Literal);
+        assert!(matches!(row_use(&cut), RowUse::ContractSurface { tie: Some(TieRow { truncated: true, .. }), .. }));
+        // A bound fan-out names a set but is no tie.
+        let fan = row("agg", OP, BridgeIntake::ContractSurface, "route", CoverageState::Bound,
+            Some((ProviderDisposition::BoundTo, &["a", "b"], 0)), Provenance::Literal);
+        assert_eq!(row_use(&fan), RowUse::ContractSurface { provision: OpProvision::Other, tie: None });
+    }
+
+    #[test]
+    fn only_a_no_provider_route_invocation_row_enters_the_second_half() {
+        let hit = row("facade", SITE, BridgeIntake::Invocation, "route",
+            unbound(UnboundReason::NoProviderInWorkspace), None,
+            bound("pecserver.uriget", &["/domain/{d}", "/other"]));
+        let RowUse::Invocation(r) = row_use(&hit) else { panic!("a no-provider route row counts") };
+        assert_eq!(r.evidence.get("pecserver.uriget").map(BTreeSet::len), Some(2), "every value is kept");
+        // Near misses: another relation, another reason, another intake.
+        let broker = row("facade", SITE, BridgeIntake::Invocation, "broker-topic",
+            unbound(UnboundReason::NoProviderInWorkspace), None, Provenance::Literal);
+        let tied = row("facade", SITE, BridgeIntake::Invocation, "route",
+            unbound(UnboundReason::Ambiguous), None, Provenance::Literal);
+        let declared = row("facade", OP, BridgeIntake::ContractSurface, "route",
+            unbound(UnboundReason::NoProviderInWorkspace), None, Provenance::Literal);
+        assert_eq!(row_use(&broker), RowUse::Outside);
+        assert_eq!(row_use(&tied), RowUse::Outside);
+        assert!(matches!(row_use(&declared), RowUse::ContractSurface { tie: None, .. }));
+    }
+
+    #[test]
+    fn the_ledger_keeps_http_call_sites_only() {
+        assert!(is_http_consumer(ArtifactRelation::HttpClientCall));
+        // `Route` is a declaration, in no bridge namespace. The role conjunct is
+        // redundant today — `HttpClientCall` is the HTTP namespace's only member
+        // — and is kept so a future HTTP provider arm cannot enter the ledger.
+        assert!(!is_http_consumer(ArtifactRelation::Route), "a route declaration is no call site");
+        assert!(!is_http_consumer(ArtifactRelation::BrokerPublish));
+        assert!(!is_http_consumer(ArtifactRelation::GrpcCall));
     }
 
     // ── Half 3 ──────────────────────────────────────────────────────────────
