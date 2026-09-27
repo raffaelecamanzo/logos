@@ -415,3 +415,34 @@ async fn a_walk_past_the_followed_link_cap_reports_truncated() {
         "exactly the capped number of links was followed"
     );
 }
+
+/// Every declared read root is honoured — not just the first. Each link lands
+/// in a different root, and both `resolve` and the walks admit both.
+#[tokio::test]
+async fn every_declared_read_root_is_honoured_by_resolve_and_the_walks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let project = base.join("project");
+    write(&base.join("r1/a/one.md"), "needle one\n");
+    write(&base.join("r2/b/two.md"), "needle two\n");
+    std::fs::create_dir_all(project.join("docs")).expect("docs");
+    symlink(base.join("r1/a"), project.join("docs/a")).expect("a");
+    symlink(base.join("r2/b"), project.join("docs/b")).expect("b");
+    let sandbox = || {
+        Sandbox::new(&project, std::iter::empty::<String>())
+            .expect("sandbox")
+            .with_read_roots(&project, ["../r1", "../r2"])
+            .expect("both roots exist")
+    };
+
+    assert_eq!(
+        sandbox().resolve("docs/b/two.md").expect("the second root admits"),
+        base.join("r2/b/two.md")
+    );
+    let globbed = call(sandbox(), "glob", serde_json::json!({ "pattern": "**/*.md" })).await;
+    assert_eq!(
+        paths_of(&globbed, "paths", None),
+        ["docs/a/one.md", "docs/b/two.md"],
+        "{globbed}"
+    );
+}
