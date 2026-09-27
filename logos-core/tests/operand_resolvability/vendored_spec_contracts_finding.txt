@@ -59,7 +59,12 @@ documentation holder `software-architecture-documents`, 3 from the declared mock
 (`pecserver-mock` 2, `notification-gateway-mock` 1), 0 from non-runnable holders.
 Partially implemented documents (neither own spec nor vendored, count toward
 nothing): 4 — `deprecated-mailbox-core` 6 of 9, `funnel-aggregator-api` 6 of 9,
-`mailbox-api` 17 of 22, `reporting-api` 7 of 8. Identity collisions: 0.
+`mailbox-api` 17 of 22, `reporting-api` 7 of 8. Identity collisions: 1 —
+`software-architecture-documents:Interfaces/Swaggers/official-log_api.yml`, 3 of
+3 with both `mailbox-aggregator-api` and `official-log-export-api`; a declared
+documentation holder, so it affects no counted pair. (The first draft of this
+finding read 0 off the eligible rows' lines; review made the split print over
+every row.)
 
 Reconciliation to CR-147 section 2.1 (census 4), by name. All four census pairs
 are reproduced: `webmail -> mailbox-aggregator-api` at 31 of 31 operations, with
