@@ -27,7 +27,9 @@
 //! `/docs/planning`) and the gitignore-aware walker would prune it unseen —
 //! skipping a link whose target is, or encloses, a directory already on the
 //! chain of links that reached it (the cycle guard), and reporting every hit
-//! under its in-tree path, so two links to one directory are both listed.
+//! under its in-tree path, so two links to one directory are both listed. A
+//! walk into a read root also honours that repo's own `.gitignore` files from
+//! the read root down to the link target — never above the read root.
 //!
 //! [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
 
@@ -40,6 +42,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use globset::GlobBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use rig_core::completion::ToolDefinition;
@@ -394,7 +397,41 @@ impl Sandbox {
             .iter()
             .find(|read_root| target.starts_with(read_root))?;
         let below = target.strip_prefix(read_root).ok()?;
-        self.ignored_segment(below).is_none().then_some(target)
+        if self.ignored_segment(below).is_some() {
+            return None;
+        }
+        let above = self.read_root_gitignores(&target);
+        (!gitignored(&above, &target, target.is_dir())).then_some(target)
+    }
+
+    /// The `.gitignore` matchers a walk of `path` inherits from its read root:
+    /// one per directory from `path`'s parent up to the read root itself. A
+    /// walk runs `parents(false)` from its own start, so without these a link
+    /// to `R/planning` would ignore `R/.gitignore` and list what the read-root
+    /// repo keeps out of git (this repo's `planning/sprints/.pending/`). Never
+    /// above the read root, and empty for a path in the project tree, whose
+    /// walks are exactly as before.
+    fn read_root_gitignores(&self, path: &Path) -> Vec<Gitignore> {
+        if path.starts_with(&self.root) {
+            return Vec::new();
+        }
+        let Some(read_root) = self.read_roots.iter().find(|r| path.starts_with(r)) else {
+            return Vec::new();
+        };
+        path.ancestors()
+            .skip(1)
+            .take_while(|dir| dir.starts_with(read_root))
+            .filter_map(|dir| {
+                let file = dir.join(".gitignore");
+                if !file.is_file() {
+                    return None;
+                }
+                let mut builder = GitignoreBuilder::new(dir);
+                // A malformed line is skipped, as git and the walker skip it.
+                let _ = builder.add(file);
+                builder.build().ok()
+            })
+            .collect()
     }
 
     /// Read a confined file, capped at the sandbox's read budget.
@@ -506,6 +543,7 @@ impl Sandbox {
         visit: &mut impl FnMut(&Path, &Path) -> std::ops::ControlFlow<()>,
     ) -> std::ops::ControlFlow<()> {
         let ignored_dirs = self.ignored_dirs.clone();
+        let above = self.read_root_gitignores(start);
         let walker = WalkBuilder::new(start)
             .require_git(false)
             .git_ignore(true)
@@ -516,7 +554,11 @@ impl Sandbox {
             .parents(false)
             .follow_links(false) // never leave the tree via a symlink (NFR-SE-04).
             .filter_entry(move |entry| {
-                if entry.depth() > 0 && entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+                if gitignored(&above, entry.path(), is_dir) {
+                    return false;
+                }
+                if entry.depth() > 0 && is_dir {
                     if entry.path().join(".git").exists() {
                         return false;
                     }
@@ -609,6 +651,14 @@ impl Sandbox {
         }
         std::ops::ControlFlow::Continue(())
     }
+}
+
+/// Whether any inherited read-root `.gitignore` ignores `path` (or one of its
+/// parents). Always `false` for an empty set — every in-tree walk.
+fn gitignored(above: &[Gitignore], path: &Path, is_dir: bool) -> bool {
+    above
+        .iter()
+        .any(|matcher| matcher.matched_path_or_any_parents(path, is_dir).is_ignore())
 }
 
 // ── read ────────────────────────────────────────────────────────────────────

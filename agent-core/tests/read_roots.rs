@@ -498,3 +498,60 @@ async fn an_ignored_name_above_a_read_root_does_not_hide_it() {
         "{globbed}"
     );
 }
+
+/// The walks honour the read-root repo's own `.gitignore` above a link target,
+/// as they honour the project's: this repo's `logos-docs/.gitignore` keeps
+/// `planning/sprints/.pending/` (the coordinator's transient prompts and
+/// markers) out of git, and a walk through `docs/planning` must not list it.
+/// A link straight at an ignored directory, or file, is not followed either,
+/// and no `.gitignore` above the read root applies.
+#[tokio::test]
+async fn the_walks_honour_the_read_roots_own_gitignore() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let project = base.join("project");
+    let docs_repo = base.join("docs-repo");
+    write(&docs_repo.join(".gitignore"), "planning/sprints/.pending/\n");
+    // ABOVE the read root: never consulted — the read root is where its own
+    // rules begin, as the project root is for the in-tree walk.
+    write(&base.join(".gitignore"), "*.md\n");
+    write(&docs_repo.join("planning/sprints/sprint-1.md"), "needle plan\n");
+    write(&docs_repo.join("planning/sprints/.pending/HF-1-impl.md"), "needle transient\n");
+    std::fs::create_dir_all(project.join("docs")).expect("docs");
+    symlink(docs_repo.join("planning"), project.join("docs/planning")).expect("planning");
+    symlink(
+        docs_repo.join("planning/sprints/.pending"),
+        project.join("pending"),
+    )
+    .expect("dir link into the ignored dir");
+    symlink(
+        docs_repo.join("planning/sprints/.pending/HF-1-impl.md"),
+        project.join("impl.md"),
+    )
+    .expect("file link into the ignored dir");
+    let sandbox = || {
+        Sandbox::new(&project, std::iter::empty::<String>())
+            .expect("sandbox")
+            .with_read_roots(&project, ["../docs-repo"])
+            .expect("read root")
+    };
+
+    let globbed = call(sandbox(), "glob", serde_json::json!({ "pattern": "**/*.md" })).await;
+    assert_eq!(
+        paths_of(&globbed, "paths", None),
+        ["docs/planning/sprints/sprint-1.md"],
+        "{globbed}"
+    );
+    // A scope that resolves into the read root inherits the same rules.
+    let grepped = call(
+        sandbox(),
+        "grep",
+        serde_json::json!({ "pattern": "needle", "path": "docs/planning/sprints" }),
+    )
+    .await;
+    assert_eq!(
+        paths_of(&grepped, "matches", Some("path")),
+        ["docs/planning/sprints/sprint-1.md"],
+        "{grepped}"
+    );
+}

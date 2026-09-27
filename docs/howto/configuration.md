@@ -519,7 +519,11 @@ What this admits, and what it does not:
   directory are both listed. A link whose target is, or encloses, a directory
   the walk reached it through is not followed, so a link cycle terminates; one
   call follows at most 256 links and says `truncated` past that.
-- **`ignored_dirs` still apply** inside a read root.
+- **`ignored_dirs` still apply** inside a read root, and so does the read root's
+  own `.gitignore` (from the read root down; never a directory above it): a
+  walk through `docs/planning` does not list what `../logos-docs/.gitignore`
+  keeps out of git. As in the project tree, `read` of a named gitignored file
+  still works; only the walks skip it.
 - **Resolved when a turn starts.** A relative entry resolves against the root
   whose `config.toml` declares the `[chat]` table. An entry that does not exist,
   or is not a directory, fails the turn with a message naming it (`could not
