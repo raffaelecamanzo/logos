@@ -446,3 +446,24 @@ async fn every_declared_read_root_is_honoured_by_resolve_and_the_walks() {
         "{globbed}"
     );
 }
+
+/// A `grep` scoped to a single FILE reports that file's own path — never
+/// `src/lib.rs/` — both in-tree (the pre-read-roots behaviour) and through a
+/// file symlink into a read root.
+#[tokio::test]
+async fn grep_scoped_to_a_file_reports_the_files_own_path() {
+    let estate = estate();
+    for (scope, expected) in [("src/lib.rs", "src/lib.rs"), ("log.md", "log.md")] {
+        let grepped = call(
+            estate.with_docs(),
+            "grep",
+            serde_json::json!({ "pattern": "needle", "path": scope }),
+        )
+        .await;
+        assert_eq!(
+            paths_of(&grepped, "matches", Some("path")),
+            [expected],
+            "{scope}: {grepped}"
+        );
+    }
+}
