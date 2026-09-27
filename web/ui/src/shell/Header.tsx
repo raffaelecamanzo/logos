@@ -137,7 +137,6 @@ export function Header() {
       >
         <BrandMark />
         <span className={styles.brandMark}>Logos</span>
-        <span className={styles.brandSub}>code intelligence</span>
       </a>
       <div className={styles.spacer} />
       {/* A FAULTED workspace probe only — in a single-root serve, and in a healthy

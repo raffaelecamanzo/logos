@@ -36,12 +36,6 @@
   letter-spacing: -0.01em;
 }
 
-.brandSub {
-  font-size: var(--text-sm);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-}
-
 .spacer {
   flex: 1;
 }
@@ -51,9 +45,9 @@
   align-items: center;
 }
 
-/* The graph-state readout (S-315, FR-UI-34): the mono voice the brand subtitle and
-   the analytics figures already use, in the secondary ink so it reports without
-   competing with the brand. Token-driven, so the served CSP is untouched. */
+/* The graph-state readout (S-315, FR-UI-34): the mono voice the analytics figures
+   already use, in the secondary ink so it reports without competing with the
+   brand. Token-driven, so the served CSP is untouched. */
 .readout {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
@@ -62,20 +56,21 @@
 }
 
 /* ── Progressive disclosure (S-317, FR-UI-34, frontend-design §3 / §7) ──────────
-   The header's FIRST media queries. It was one flex row that never wrapped, never
+   The header's media queries. It was one flex row that never wrapped, never
    shrank and never hid anything, which is the whole mechanism behind the overflow
    CR-089 recorded and CR-092 deferred a second time — measured at 618px of content
    in a 420px viewport before this block existed. S-315 then added the readout to
    that row, so the choice was to fix the row or to worsen a known defect.
 
-   Disclosure follows the order the design contract states: the graph-state readout
-   gives way FIRST, the brand subtitle SECOND, so the brand lockup, the
-   workspace-probe fault badge and the theme toggle survive to the narrowest
-   supported viewport. (The member selector was on this row until S-425 moved it
-   into the sidebar's Service-section header; its own module carries its widths.) Both
-   rungs are the ladder frontend-design §7 already documents (desktop ≥1024px,
-   tablet ≥768px); 1023px is the tier the AppShell sidebar and the Chat rail
-   already collapse at, so the shell reflows at one width, not three. */
+   The graph-state readout is the ONLY thing this row gives way (HF-4 removed the
+   `code intelligence` brand subtitle that used to give way second) — the brand
+   lockup, the workspace-probe fault badge and the theme toggle survive to the
+   narrowest supported viewport. (The member selector was on this row until S-425
+   moved it into the sidebar's Service-section header; its own module carries its
+   widths.) Both rungs are ladder positions frontend-design §7 already documents
+   (desktop ≥1024px, tablet ≥768px); 1023px is the tier the AppShell sidebar and
+   the Chat rail already collapse at, so the shell reflows at one width, not
+   three. */
 
 /* Tablet and below. The readout is dropped WHOLE — the figures, "Connecting…",
    "Not indexed" and the "API unavailable" badge alike, since `.status` is the one
@@ -91,15 +86,11 @@
   }
 }
 
-/* Below tablet. The brand subtitle gives way second, leaving the mark and the
-   wordmark, which are what make the lockup a recognisable home link; the row also
-   tightens from `--space-6` to `--space-4`, two steps down the ramp — the width
-   that kept a workspace member selector inside a 420px viewport when the selector
-   shared this row, and that now pays for the fault badge's wrap. */
+/* Below tablet. The row tightens from `--space-6` to `--space-4`, two steps down
+   the ramp — the width that kept a workspace member selector inside a 420px
+   viewport when the selector shared this row, and that now pays for the fault
+   badge's wrap. */
 @media (max-width: 767px) {
-  .brandSub {
-    display: none;
-  }
   .header {
     padding-inline: var(--space-4);
   }
