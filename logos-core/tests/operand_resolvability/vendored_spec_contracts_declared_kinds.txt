@@ -1,0 +1,24 @@
+# S-456 — documentation / mock declarations for the pec-services estate
+#
+# Declared (UTC): 2026-09-27T22:13:34Z, in the same commit as
+# vendored_spec_contracts_floor.txt and before any measurement code.
+#
+# This is the list the S-456 harness subtracts documentation and mock holders by.
+# It is a HUMAN DECLARATION, read and never inferred (CR-147 section 3.2 A): the
+# harness prints its own candidate list (members holding a spec document and no
+# runnable source) beside this one, and a difference is for a human to adjudicate
+# here, never for the harness to act on.
+#
+# The three entries are the members CR-147 section 6 AC2 names, with the kind
+# CR-147 section 2.1 gives each: a documentation repository holding Swagger copies
+# and ADR attachments, and two stand-ins for the externals they mock (PSS and the
+# Notification Gateway). A mock is a provider stand-in, never a consumer
+# (ADR-68 point 5).
+#
+# Format: one `<member> <kind>` per line; kind is `documentation` or `mock`;
+# `#` starts a comment; blank lines are ignored. A member named here that is not a
+# workspace member fails the run.
+
+software-architecture-documents documentation
+pecserver-mock mock
+notification-gateway-mock mock
