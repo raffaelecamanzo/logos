@@ -2098,6 +2098,11 @@ mod tests {
         c.scalars.push(scalar("docs", "pss.base-url", "http://pss/prov", SourceSet::Application, "d/a.yml"));
         c.ledger.insert(("webmail".into(), "s4".into()), vec!["GET ${agg.uri}".into()]);
         c.ledger.insert(("docs".into(), "s5".into()), vec!["GET ${pss.uri}".into()]);
+        // Another member's overlay on the SAME key: it must never reach
+        // facade's reading, or facade's overlays would disagree and its exact
+        // row would be refused.
+        c.scalars.push(scalar("webmail", "envFrom.PECSERVER_BASEURL", "https://w:8443/other",
+            SourceSet::Deploy, "webmail/values.yaml"));
         c.ledger.insert(("facade".into(), "s1".into()), vec!["GET ${pecserver.uri-get}".into()]);
         c.ledger.insert(("webmail".into(), "s2".into()), vec!["GET ${x.uri}".into()]);
         c.ledger.insert(("agg".into(), "s3".into()), vec!["GET /prov/1".into()]);
