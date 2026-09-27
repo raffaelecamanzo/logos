@@ -1479,6 +1479,13 @@ fn report(root: &Path, census: &Census, j: &Judgement) {
         "  counterfactual, application config alone: {} exact",
         j.invocation_exact_app_only()
     );
+    let mut app_only: BTreeMap<&str, usize> = BTreeMap::new();
+    for call in &j.calls {
+        *app_only.entry(call.app_only.label()).or_default() += 1;
+    }
+    for (label, n) in &app_only {
+        println!("    under application config alone, {label}: {n}");
+    }
     let mut by_class: BTreeMap<&str, Vec<&JudgedCall>> = BTreeMap::new();
     for call in &j.calls {
         by_class.entry(call.class.label()).or_default().push(call);

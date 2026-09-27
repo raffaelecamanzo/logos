@@ -118,9 +118,10 @@ override `pec-server.base-url` with `PECSERVER_BASEURL` and all agree:
 (`deploy-config/values_TEMPLATE.yaml` commits `_#PLACEHOLDER`, not a URL). The
 application config's `http://localhost:8082` carries no path.
 
-Counterfactual, application config alone: 1 exact. Without the overlays not one
-`pecserver-facade` row is exact — every one of the 20 is suffix inference, which
-is CR-147 section 2.1's statement, measured.
+Counterfactual, application config alone: 1 exact (`notification-adapter`), 20
+SUFFIX-ONLY, 1 NO MATCH, 20 holding no named external — printed by the run.
+Without the overlays not one `pecserver-facade` row is exact: all 20 are suffix
+inference, which is CR-147 section 2.1's statement, measured.
 
 Reconciliation to CR-147 section 2.1 (census 21 = 20 `pecserver-facade` + 1
 `notification-adapter`), by name and mechanism:
@@ -167,9 +168,12 @@ Reconciliation to CR-147 section 2.1 (census 62), by mechanism — reproduced
 EXACTLY, and the census measured a different population than the metric names.
 The census's 62 is every contract-surface row, IN ANY BUCKET, whose document is a
 member's own `src/main/resources/openapi/v1.yaml`, counted BEFORE the fork
-exclusion. Measured on the same copy with the pre-exclusion manifest
-(`logos.workspace.toml.bak-2026-09-27`, swapped in and restored, 1.4.27
-`workspace status --json`):
+exclusion. OUTSIDE THIS HARNESS — no gate reproduces it, and it is recorded as
+an adjudication aid only: measured on the same copy with the pre-exclusion
+manifest (`logos.workspace.toml.bak-2026-09-27`, swapped in and restored), by
+logos 1.4.27 `workspace status --json`, counting `coverage.references` rows with
+intake `contract-surface` whose symbol names `src/main/resources/openapi/v1.yaml`,
+by bucket:
 
     62 rows = 49 ambiguous + 13 unbound        (pre-exclusion; census 62)
     56 rows = 43 ambiguous + 13 unbound        (post-exclusion)
