@@ -134,11 +134,17 @@ jobs:
       # Supply-chain gate — license allowlist + RustSec advisories (NFR-CR-01).
       # cargo-deny is version-pinned: an unpinned tool fetched at run time is
       # itself a supply-chain/determinism hazard, and cargo-deny has changed its
-      # config format across major versions. `cargo install` is idempotent — if
-      # the pinned binary is already restored from the cargo cache (~/.cargo/bin
-      # is cached above), it detects the match and skips the rebuild.
+      # config format across major versions. ~/.cargo/bin is cached above but
+      # cargo's install records (~/.cargo/.crates*.toml/json) are not, so a bare
+      # `cargo install` over a restored binary fails "already exists". Skip when
+      # the restored binary is the pinned version; otherwise force-install it.
       - name: Install cargo-deny (pinned)
-        run: cargo install cargo-deny --locked --version 0.19.8
+        run: |
+          if [ "$(cargo deny --version 2>/dev/null)" = "cargo-deny 0.19.8" ]; then
+            echo "cargo-deny 0.19.8 restored from cache"
+          else
+            cargo install cargo-deny --locked --version 0.19.8 --force
+          fi
 
       - name: cargo-deny check
         run: cargo deny check
