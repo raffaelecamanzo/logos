@@ -1305,6 +1305,21 @@ mod tests {
         let starter = relation.member("starter").expect("read");
         assert!(starter.builds_against.is_empty());
         assert_eq!(starter.built_against_by.len(), 4);
+        let api = relation.member("api").expect("read");
+        assert_eq!(
+            api.builds_against
+                .iter()
+                .map(|e| (e.to.as_str(), e.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("common", BuildEdgeKind::Dependency),
+                ("common", BuildEdgeKind::Managed),
+                ("starter", BuildEdgeKind::Parent),
+                ("starter", BuildEdgeKind::BomImport),
+            ],
+            "the outbound half of the per-member view"
+        );
+        assert!(api.built_against_by.is_empty());
         let views = relation.per_member();
         assert_eq!(
             views.iter().map(|v| v.member.as_str()).collect::<Vec<_>>(),
