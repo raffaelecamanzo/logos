@@ -338,6 +338,7 @@ function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
 function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline }) {
   if (!headline) return null;
   const unread = headline.members.unread ?? [];
+  const reasons = headline.members.unread_reasons ?? {};
   return (
     <Card title="Build dependencies">
       <p className="muted">
@@ -375,8 +376,15 @@ function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline 
       )}
       {unread.length > 0 && (
         <p className="muted">
-          Build facts could not be read for <span className="mono">{unread.join(", ")}</span> —
-          their build dependencies are unknown, not absent.
+          Build facts could not be read for{" "}
+          {unread.map((member, i) => (
+            <span key={member}>
+              {i > 0 && ", "}
+              <span className="mono">{member}</span>
+              {reasons[member] && ` (${reasons[member]})`}
+            </span>
+          ))}{" "}
+          — their build dependencies are unknown, not absent.
         </p>
       )}
     </Card>

@@ -136,46 +136,62 @@ fn fan<T>(
 /// engine this walk already opened, so it costs no walk of its own and
 /// `WALKS_PER_STATUS` stays at 4 ([NFR-PE-10]). A member whose facts cannot be
 /// read is left out of them with a warning — the join names it unread — and
-/// its freshness row is untouched.
+/// its freshness row is untouched. A member whose store holds no extracted
+/// facts yet is returned by name, apart, so the join names it unread with that
+/// reason rather than as a member with no manifests.
 ///
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
-fn fan_status(
-    answer: &AnswerScope<'_, Engine>,
-) -> (Vec<MemberResult<StatusInfo>>, Vec<MemberBuildFacts>) {
-    let mut build_facts = Vec::new();
+fn fan_status(answer: &AnswerScope<'_, Engine>) -> (Vec<MemberResult<StatusInfo>>, FactsWalked) {
+    let mut walked = FactsWalked::default();
     let freshness = answer
         .fan_out(|_, engine| (engine.try_status(), engine.build_manifests()))
         .into_iter()
-        .map(|scoped| split_status_and_facts(scoped, &mut build_facts))
+        .map(|scoped| split_status_and_facts(scoped, &mut walked))
         .collect();
-    (freshness, build_facts)
+    (freshness, walked)
 }
 
 /// What the freshness walk reads off one member's engine: its freshness read and
-/// its build-manifest facts, each with its own failure channel.
-type StatusAndFacts = (anyhow::Result<StatusInfo>, anyhow::Result<Vec<BuildManifestRow>>);
+/// its build-manifest facts (`None`: not yet extracted), each with its own
+/// failure channel.
+type StatusAndFacts = (anyhow::Result<StatusInfo>, anyhow::Result<Option<Vec<BuildManifestRow>>>);
+
+/// The build facts the freshness walk read, as [`build_deps::join`] takes them:
+/// the members read, and apart from them the members whose store holds no
+/// extracted facts yet.
+#[derive(Debug, Default)]
+struct FactsWalked {
+    facts: Vec<MemberBuildFacts>,
+    not_extracted: Vec<String>,
+}
 
 /// One member of the freshness walk: its freshness row, with its build facts
-/// pushed onto `build_facts` only when they were read ([FR-WS-33]).
+/// pushed onto `walked` only when they were read ([FR-WS-33]).
 ///
 /// A facts read that failed — or an engine that never started — pushes
 /// nothing, so the join names the member unread instead of counting it read
-/// with no manifests; the freshness row is exactly what [`flatten_status`]
-/// makes of the status half either way. Split out from [`fan_status`] so all
-/// three channels are assertable without a corrupt on-disk store, as
-/// [`flatten_status`] is.
+/// with no manifests; a store holding no extracted facts yet is pushed by name
+/// onto `not_extracted`, so the join names it unread with that reason. The
+/// freshness row is exactly what [`flatten_status`] makes of the status half
+/// in every case. Split out from [`fan_status`] so all four channels are
+/// assertable without a corrupt on-disk store, as [`flatten_status`] is.
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 fn split_status_and_facts(
     scoped: MemberScoped<anyhow::Result<StatusAndFacts>>,
-    build_facts: &mut Vec<MemberBuildFacts>,
+    walked: &mut FactsWalked,
 ) -> MemberResult<StatusInfo> {
     let member = scoped.member;
     let value = scoped.value.map(|(status, facts)| {
         match facts {
-            Ok(rows) => build_facts.push((member.clone(), rows)),
+            Ok(read) => build_deps::sort_read(
+                member.clone(),
+                read,
+                &mut walked.facts,
+                &mut walked.not_extracted,
+            ),
             Err(err) => tracing::warn!(
                 member = %member,
                 "reading a workspace member's build-manifest facts failed; \
@@ -607,8 +623,10 @@ pub struct WorkspaceStatus {
     /// **Never a runtime figure** ([BR-58]): it sits beside
     /// [`coverage`](Self::coverage), and nothing in coverage reads it. Absent
     /// only when every member was read and none holds a build manifest; a
-    /// member whose facts could not be read keeps it present, naming the
-    /// member under `members.unread` ([NFR-CC-04]).
+    /// member whose facts could not be read — or are not yet extracted, as on a
+    /// store upgraded across migration 22 — keeps it present, naming the member
+    /// under `members.unread` with its reason in `members.unread_reasons`
+    /// ([NFR-CC-04]).
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     ///
@@ -844,7 +862,11 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         &members_holding_api_documents(&coverage),
         &registry.federation().member_kinds,
     );
-    let build_dependency = build_dependency_headline(registry.federation(), &build_facts);
+    let build_dependency = build_dependency_headline(
+        registry.federation(),
+        &build_facts.facts,
+        &build_facts.not_extracted,
+    );
 
     // `zip`, not a name-keyed join: `fan_status` and `open_states` are two
     // projections of the SAME list — both map over `federation.members` in
@@ -883,17 +905,20 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
 /// workspace without one serializes exactly as before the relation existed
 /// ([FR-WS-33]).
 ///
-/// A member whose facts could not be read keeps the headline present: "unread"
-/// is not "no manifests", and dropping the section would leave the failure in a
-/// log line only ([NFR-CC-04]).
+/// A member whose facts could not be read — or whose store holds none extracted
+/// yet (`not_extracted`) — keeps the headline present: "unread" is not "no
+/// manifests", and dropping the section would leave the failure in a log line
+/// only ([NFR-CC-04]).
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn build_dependency_headline(
     federation: &super::Federation,
     facts: &[MemberBuildFacts],
+    not_extracted: &[String],
 ) -> Option<BuildDependencyHeadline> {
-    let relation = build_deps::join(&federation.members, &federation.member_kinds, facts);
+    let relation =
+        build_deps::join(&federation.members, &federation.member_kinds, facts, not_extracted);
     let members = &relation.headline.members;
     (members.with_manifests > 0 || !members.unread.is_empty()).then_some(relation.headline)
 }
@@ -952,35 +977,62 @@ mod tests {
         }
     }
 
-    /// The three channels of one freshness-walk member: facts read (pushed),
-    /// facts unreadable on a live engine (not pushed — the member reads
-    /// unread — and its freshness row untouched), and an engine that never
-    /// started (not pushed, error row).
+    /// The four channels of one freshness-walk member: facts read (pushed),
+    /// facts not yet extracted (named apart, never counted read), facts
+    /// unreadable on a live engine (not pushed — the member reads unread — and
+    /// its freshness row untouched), and an engine that never started (not
+    /// pushed, error row).
     #[test]
     fn a_failed_build_facts_read_is_unread_and_leaves_the_freshness_row_alone() {
         let scoped = |value| MemberScoped { member: "api".to_string(), value };
-        let mut facts = Vec::new();
+        let mut walked = FactsWalked::default();
 
         let row = split_status_and_facts(
-            scoped(Ok((Ok(StatusInfo::default()), Ok(Vec::new())))),
-            &mut facts,
+            scoped(Ok((Ok(StatusInfo::default()), Ok(Some(Vec::new()))))),
+            &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none());
-        assert_eq!(facts.len(), 1, "facts read are pushed, even when empty");
+        assert_eq!(walked.facts.len(), 1, "facts read are pushed, even when empty");
+
+        let row =
+            split_status_and_facts(scoped(Ok((Ok(StatusInfo::default()), Ok(None)))), &mut walked);
+        assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
+        assert_eq!(walked.facts.len(), 1, "a store with no extracted facts is never counted read");
+        assert_eq!(walked.not_extracted, ["api"], "…it is named apart");
 
         let row = split_status_and_facts(
             scoped(Ok((Ok(StatusInfo::default()), Err(anyhow::anyhow!("store read failed"))))),
-            &mut facts,
+            &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
-        assert_eq!(facts.len(), 1, "an unreadable member is never counted read");
+        assert_eq!(walked.facts.len(), 1, "an unreadable member is never counted read");
 
-        let row = split_status_and_facts(scoped(Err(anyhow::anyhow!("store is corrupt"))), &mut facts);
+        let row = split_status_and_facts(scoped(Err(anyhow::anyhow!("store is corrupt"))), &mut walked);
         assert!(row.error.is_some());
-        assert_eq!(facts.len(), 1);
+        assert_eq!((walked.facts.len(), walked.not_extracted.len()), (1, 1));
 
-        let headline = build_dependency_headline(&two_member_federation(), &[]).unwrap();
+        let headline = build_dependency_headline(&two_member_federation(), &[], &[]).unwrap();
         assert_eq!(headline.members.unread, ["a", "b"], "no fact pushed ⇒ named unread");
+    }
+
+    /// **Not yet extracted keeps the section and says so** ([FR-WS-33], S-462
+    /// task 2): every member of an upgraded workspace unread, with the reason,
+    /// never "every member read, none holds a manifest" — which would drop the
+    /// section entirely.
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    #[test]
+    fn a_member_not_yet_extracted_keeps_the_section_and_names_its_reason() {
+        let federation = two_member_federation();
+        let upgraded = ["a".to_string(), "b".to_string()];
+        let headline = build_dependency_headline(&federation, &[], &upgraded)
+            .expect("an unextracted member keeps the section");
+        assert_eq!(headline.members.unread, ["a", "b"]);
+        assert_eq!(
+            headline.members.unread_reasons.values().copied().collect::<Vec<_>>(),
+            [build_deps::UNREAD_NOT_EXTRACTED; 2]
+        );
+        assert_eq!((headline.members.read, headline.members.with_manifests), (0, 0));
     }
 
     /// Every member read and none holds a manifest: the section is absent. One
@@ -990,14 +1042,14 @@ mod tests {
     fn an_unread_member_keeps_the_build_dependency_headline_on_the_payload() {
         let federation = two_member_federation();
         let all_read = [("a".to_string(), Vec::new()), ("b".to_string(), Vec::new())];
-        assert!(build_dependency_headline(&federation, &all_read).is_none());
+        assert!(build_dependency_headline(&federation, &all_read, &[]).is_none());
 
-        let headline = build_dependency_headline(&federation, &[("a".to_string(), Vec::new())])
+        let headline = build_dependency_headline(&federation, &[("a".to_string(), Vec::new())], &[])
             .expect("an unread member keeps the section");
         assert_eq!(headline.members.unread, ["b"]);
         assert_eq!((headline.members.read, headline.members.with_manifests), (1, 0));
 
-        let none_read = build_dependency_headline(&federation, &[]).expect("present");
+        let none_read = build_dependency_headline(&federation, &[], &[]).expect("present");
         assert_eq!(none_read.members.unread, ["a", "b"]);
         assert!(none_read.platform_candidates.is_empty(), "no member read, no candidate");
         assert!(none_read.summary.contains("over 0 of 2 members read"), "{}", none_read.summary);

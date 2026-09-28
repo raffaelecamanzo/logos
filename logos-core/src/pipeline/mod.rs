@@ -75,7 +75,7 @@ use crate::extract::build_manifest::{self, ManifestFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
     BatchWriter, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewNode, NewUnresolvedRef,
-    StoreCounts, CONFIG_FINGERPRINT_KEY, LAST_FULL_INDEX_AT_KEY,
+    StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY, LAST_FULL_INDEX_AT_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
@@ -215,8 +215,9 @@ pub fn index(
 
     // Member-local build-manifest facts (S-462, CR-148, ADR-69 point 1): a full
     // index re-derives them from every manifest this walk found — the same walk,
-    // so no second traversal. A member with no manifest and none recorded writes
-    // nothing (see `rebuild_build_manifests`).
+    // so no second traversal — and marks them extracted. A member with no
+    // manifest and none recorded writes only that marker (see
+    // `rebuild_build_manifests`).
     rebuild_build_manifests(runtime, &build_manifests)?;
 
     // Pass 2 binds the freshly persisted reference ledger (S-011); the
@@ -806,7 +807,8 @@ pub fn sync(
     // sync (every requested path unchanged or skipped) leaves the graph, and so
     // the revision, untouched. Done after every pass committed, mirroring index.
     // A manifest change moves the build facts, which later readers cache on
-    // this revision, so it advances it too (S-462).
+    // this revision, so it advances it too (S-462) — as does the first full walk
+    // marking them extracted, which turns an unread member into a read one.
     if result.files_added + result.files_modified + result.files_removed > 0 || manifests_changed {
         advance_graph_revision(runtime)?;
     }
@@ -1906,28 +1908,39 @@ impl LoadedManifest {
 }
 
 /// A full index's build-manifest pass (S-462, [CR-148] §3.2 A): read every
-/// manifest the walk found, derive the member's facts, and replace what the
-/// store recorded.
+/// manifest the walk found, derive the member's facts, replace what the store
+/// recorded, and record [`BUILD_FACTS_EXTRACTED_KEY`] — the walk saw the whole
+/// member, so its facts, however few, are complete.
 ///
-/// A member with no manifest and none recorded returns before any read or
-/// write — the path that keeps a manifest-less member byte-for-byte unaffected
-/// apart from the two empty tables migration 22 created.
+/// A member with no manifest and none recorded reads no manifest and writes
+/// only that marker — the path that keeps a manifest-less member byte-for-byte
+/// unaffected apart from the two empty tables migration 22 created and the one
+/// marker row. The marker is what lets the workspace join tell that member
+/// ("read, no manifests") from a store upgraded across migration 22 ("not yet
+/// extracted"), which holds the same empty tables ([FR-WS-33]).
 ///
 /// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 fn rebuild_build_manifests(runtime: &Runtime, found: &[Candidate]) -> Result<()> {
     if found.is_empty() && runtime.submit_read(|store| store.build_manifests())?.is_empty() {
-        return Ok(());
+        return runtime.submit_write(mark_build_facts_extracted);
     }
     let loaded: Vec<LoadedManifest> = found
         .iter()
         .map(|c| LoadedManifest::read(&c.rel, &c.abs))
         .collect();
-    persist_build_manifests(runtime, loaded)
+    persist_build_manifests(runtime, loaded, true)
+}
+
+/// Record that a full-walk build-manifest pass ran ([`BUILD_FACTS_EXTRACTED_KEY`]).
+fn mark_build_facts_extracted(w: &BatchWriter<'_>) -> Result<()> {
+    w.set_project_metadata(BUILD_FACTS_EXTRACTED_KEY, "1")
 }
 
 /// An incremental sync's build-manifest pass (S-462): `named` is every
 /// project-relative path this sync was handed, and the manifests among them are
-/// selected here; returns whether the member's facts were rewritten.
+/// selected here; returns whether what a reader of the member's facts sees
+/// changed — the facts were rewritten, or first marked extracted.
 ///
 /// Selected from the whole named set, ahead of — and independent of — the graph
 /// admission gate: a `pom.xml` is never a `files` row, so that gate skips it as
@@ -1941,6 +1954,13 @@ fn rebuild_build_manifests(runtime: &Runtime, found: &[Candidate]) -> Result<()>
 /// in-member parents, so the unchanged manifests are re-read from disk too.
 /// A [`SyncScope::Partial`] sync that names no manifest does nothing here, not
 /// even a read: an ordinary source edit costs this pass nothing.
+///
+/// A [`SyncScope::FullWalk`] also records [`BUILD_FACTS_EXTRACTED_KEY`] when the
+/// store does not yet hold it — a store upgraded across migration 22, whose
+/// empty tables say nothing about its manifests — including for a member with
+/// no manifest, and counts that as a change. A partial sync never records it:
+/// it saw a subset of the member, so even the facts it writes do not make them
+/// complete. Once recorded, a no-op full walk writes nothing.
 ///
 /// A manifest the walk-level [`AdmissionAuthority`] rejects (gitignored, under
 /// a nested `.git`, glob-excluded, oversize) is treated as absent, exactly as
@@ -1959,13 +1979,18 @@ fn sync_build_manifests(
     if requested.is_empty() && scope == SyncScope::Partial {
         return Ok(false);
     }
-    let stored: HashMap<String, Option<String>> = runtime
-        .submit_read(|store| store.build_manifests())?
-        .into_iter()
-        .map(|m| (m.path, m.content_hash))
-        .collect();
+    let (stored, extracted) =
+        runtime.submit_read(|store| Ok((store.build_manifests()?, store.build_facts_extracted()?)))?;
+    let stored: HashMap<String, Option<String>> =
+        stored.into_iter().map(|m| (m.path, m.content_hash)).collect();
+    // The walk is the whole member: the first one over this store marks its
+    // facts extracted, whatever else it finds.
+    let mark = scope == SyncScope::FullWalk && !extracted;
     if requested.is_empty() && stored.is_empty() {
-        return Ok(false);
+        if mark {
+            runtime.submit_write(mark_build_facts_extracted)?;
+        }
+        return Ok(mark);
     }
 
     let load = |rel: &str| -> Option<LoadedManifest> {
@@ -1991,7 +2016,10 @@ fn sync_build_manifests(
         SyncScope::Partial => {}
     }
     if !changed {
-        return Ok(false);
+        if mark {
+            runtime.submit_write(mark_build_facts_extracted)?;
+        }
+        return Ok(mark);
     }
     if scope == SyncScope::Partial {
         for rel in unrequested {
@@ -2000,14 +2028,21 @@ fn sync_build_manifests(
             }
         }
     }
-    persist_build_manifests(runtime, current.into_values().collect())?;
+    persist_build_manifests(runtime, current.into_values().collect(), mark)?;
     Ok(true)
 }
 
 /// Derive one member's build-manifest facts from its loaded manifests and write
 /// them wholesale, adapting [`ManifestFacts`] to the store's row shape here —
 /// where extraction and store meet — as [`persist_config_source`] does.
-fn persist_build_manifests(runtime: &Runtime, loaded: Vec<LoadedManifest>) -> Result<()> {
+///
+/// `mark_extracted` records [`BUILD_FACTS_EXTRACTED_KEY`] in the same batch, so
+/// a full walk's facts and the marker saying they are complete commit together.
+fn persist_build_manifests(
+    runtime: &Runtime,
+    loaded: Vec<LoadedManifest>,
+    mark_extracted: bool,
+) -> Result<()> {
     let readable: Vec<(&str, &str)> = loaded
         .iter()
         .filter_map(|m| m.text.as_ref().ok().map(|t| (m.rel.as_str(), t.as_str())))
@@ -2048,7 +2083,11 @@ fn persist_build_manifests(runtime: &Runtime, loaded: Vec<LoadedManifest>) -> Re
                     .collect(),
             })
             .collect();
-        w.replace_build_manifests(&rows)
+        w.replace_build_manifests(&rows)?;
+        if mark_extracted {
+            mark_build_facts_extracted(w)?;
+        }
+        Ok(())
     })
 }
 

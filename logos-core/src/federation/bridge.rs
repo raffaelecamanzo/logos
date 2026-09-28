@@ -409,8 +409,14 @@ pub trait MemberContracts {
     /// [`super::build_deps`]'s, and it never feeds this bridge's matcher, its
     /// edge set or any runtime figure ([BR-58], [ADR-26]).
     ///
-    /// The default is **empty** — a member with no build manifest, and every
-    /// lightweight test double, contributes no fact.
+    /// `None` when the store records no full-walk build-manifest pass yet
+    /// ([`crate::graph_store::BUILD_FACTS_EXTRACTED_KEY`] absent) — a store
+    /// upgraded across migration 22, or one never indexed. Its empty tables
+    /// then say nothing about the member's manifests, so the join reports it
+    /// unread with that reason, never as "read, no manifests" ([FR-WS-33]).
+    ///
+    /// The default is **extracted and empty** — every lightweight test double
+    /// contributes no fact and reads as a member with no build manifest.
     ///
     /// # Errors
     /// Propagates a read failure so the caller can skip the member as degraded
@@ -421,8 +427,8 @@ pub trait MemberContracts {
     /// [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
     /// [ADR-26]: ../../../docs/specs/architecture/decisions/ADR-26.md
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
-    fn build_manifests(&self) -> Result<Vec<crate::graph_store::BuildManifestRow>> {
-        Ok(Vec::new())
+    fn build_manifests(&self) -> Result<Option<Vec<crate::graph_store::BuildManifestRow>>> {
+        Ok(Some(Vec::new()))
     }
 }
 
@@ -462,12 +468,18 @@ impl MemberContracts for crate::Engine {
         Ok(invocation_refs_from(rows))
     }
 
-    fn build_manifests(&self) -> Result<Vec<crate::graph_store::BuildManifestRow>> {
+    fn build_manifests(&self) -> Result<Option<Vec<crate::graph_store::BuildManifestRow>>> {
         let runtime = self.runtime().context(
             "reading a member's build-manifest facts requires a long-lived engine \
              (Engine::start) with a read-only pool",
         )?;
-        runtime.submit_read(|store| store.build_manifests())
+        // One read: the marker and the rows it vouches for, from one snapshot.
+        runtime.submit_read(|store| {
+            if !store.build_facts_extracted()? {
+                return Ok(None);
+            }
+            store.build_manifests().map(Some)
+        })
     }
 
     fn topic_surface(&self) -> Result<Vec<super::topics::TopicSummary>> {

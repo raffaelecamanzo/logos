@@ -998,7 +998,8 @@ working, not a defect.
   every context's models under `managed` is not a hint. `--repo X` scopes the
   rows and the hint to member `X` while the headline stays workspace-wide; a
   name that is not a member read (unknown, or its build facts could not be
-  read) answers an empty `members` list **with** a `scope_note` saying so,
+  read or are not yet extracted) answers an empty `members` list **with** a
+  `scope_note` stating which,
   never a silent "no edges". The MCP twin is `xservice_build_deps`, and the web
   service map draws the same relation behind a legend toggle that is off by
   default.
@@ -1240,8 +1241,11 @@ a build dependency, never a runtime coupling: no build edge enters the figures
 above. Its `summary` states the pairs by kind beside the denominator in one
 line — read that rather than recomposing the two. **After upgrading from a release before
 the build relation**, a member's facts exist only once that member has been
-fully re-read: run `logos index` or `logos health` in each member. Until then an upgraded member reads as
-holding no manifest, and the section is absent or its pairs short. The rows behind it are
+fully re-read: run `logos index` or `logos health` in each member (`logos sync`
+reads only the paths it is given, so it does not count). Until then the member is
+listed under `members.unread` with `members.unread_reasons` giving
+`"build facts not yet extracted"`, and the section stays present. It is never
+reported as a member with no manifest; its pairs are simply not counted yet. The rows behind it are
 [`xservice build-deps`](#xservice-workspace-federation-queries); the web
 coverage tab renders the same section as its own card, after every runtime
 board. A workspace with no build manifest prints exactly what it printed

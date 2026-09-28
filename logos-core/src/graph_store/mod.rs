@@ -134,6 +134,28 @@ pub const GRAPH_REVISION_KEY: &str = "graph_revision";
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub const LAST_FULL_INDEX_AT_KEY: &str = "last_full_index_at";
 
+/// The `project_metadata` key a **full-walk** build-manifest pass records once
+/// it has read the member's whole manifest set (S-462 task 2, [FR-WS-33],
+/// [NFR-CC-04]).
+///
+/// Written by a full [`index`](crate::pipeline::index) and by a
+/// [`SyncScope::FullWalk`](crate::pipeline::SyncScope::FullWalk) sync — for a
+/// member with no build manifest too — and never by a partial sync, which sees
+/// a subset of the member. Its value is `"1"`; only presence is read
+/// ([`GraphStore::build_facts_extracted`]).
+///
+/// It separates two states the `build_manifests` table alone cannot: "read, no
+/// manifests" and "never extracted". Migration 22 creates that table empty, so
+/// a store upgraded from v21 holds no rows until a full walk re-reads the
+/// member — and without the marker it would read as a member with no
+/// manifests, the exact report [FR-WS-33] forbids for facts that were never
+/// read. The workspace join reports an unmarked member unread instead
+/// ([`crate::federation::build_deps`]).
+///
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub const BUILD_FACTS_EXTRACTED_KEY: &str = "build_facts_extracted";
+
 /// A row read back from the `nodes` table, mapped to model types.
 ///
 /// `kind` is recovered via [`NodeKind::try_from`] and `symbol` via
@@ -1845,6 +1867,17 @@ pub trait GraphStore {
             .project_metadata(GRAPH_REVISION_KEY)?
             .and_then(|raw| raw.parse::<u64>().ok())
             .unwrap_or(0))
+    }
+
+    /// Whether a full-walk build-manifest pass has ever run over this store —
+    /// the presence of [`BUILD_FACTS_EXTRACTED_KEY`] (S-462 task 2).
+    ///
+    /// `false` on a store upgraded across migration 22 until its first full
+    /// index or full-walk reconcile, and on a store never indexed: in both,
+    /// [`build_manifests`](GraphStore::build_manifests) being empty says
+    /// nothing about the member's manifests.
+    fn build_facts_extracted(&self) -> Result<bool> {
+        Ok(self.project_metadata(BUILD_FACTS_EXTRACTED_KEY)?.is_some())
     }
 }
 
