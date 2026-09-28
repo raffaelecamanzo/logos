@@ -97,8 +97,8 @@ fn relation_over(root: &Path, kinds: &[(&str, MemberKind)]) -> std::sync::Arc<Bu
 fn assert_accounted(relation: &BuildDependencyRelation) {
     let r = relation.headline.references;
     assert_eq!(
-        r.to_member + r.in_member + r.to_collision + r.external + r.refused + r.project_reference
-            + r.build_plugin,
+        r.to_member + r.to_platform + r.in_member + r.to_collision + r.external + r.refused
+            + r.project_reference + r.build_plugin,
         r.references,
         "every reference is filed exactly once"
     );

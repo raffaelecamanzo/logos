@@ -35,7 +35,9 @@
 //! - **in member** — the referencing member produces it itself (a multi-module
 //!   build's sibling module);
 //! - **external** — no member produces it (a third-party dependency);
-//! - **to member** — exactly one other member produces it: an edge.
+//! - **to member** — exactly one other member produces it: an edge;
+//! - **to platform** — the same, into a declared `platform` member: an edge
+//!   counted apart.
 //!
 //! # Platform members ([ADR-69] point 3)
 //! A member declared `kind = "platform"` has its **inbound** edges counted
@@ -208,8 +210,13 @@ impl PairCount {
 pub struct ReferenceAccounting {
     /// Every referenced fact in every manifest read.
     pub references: u64,
-    /// Resolved to exactly one other member — each is part of an edge.
+    /// Resolved to exactly one other member that is not a declared platform —
+    /// each is part of an edge counted in the headline.
     pub to_member: u64,
+    /// Resolved to exactly one other member that **is** a declared platform —
+    /// each is part of an edge counted in [`PlatformApart`], never in the
+    /// headline. Zero when no platform is declared.
+    pub to_platform: u64,
     /// Produced by the referencing member itself.
     pub in_member: u64,
     /// Produced by two or more members: resolves to neither.
@@ -431,6 +438,11 @@ pub fn join(
         }
     }
 
+    let is_platform = |member: &str| {
+        kinds
+            .get(member)
+            .is_some_and(|kind| kind.sets_inbound_build_edges_apart())
+    };
     let mut references = ReferenceAccounting::default();
     let mut collided: BTreeMap<&str, u64> = BTreeMap::new();
     let mut edges: BTreeMap<(String, String, BuildEdgeKind, Option<String>, String), u64> =
@@ -469,8 +481,12 @@ pub fn join(
                     }
                     Some((_, set)) if set.contains(member) => references.in_member += 1,
                     Some((_, set)) => {
-                        references.to_member += 1;
                         let to = set.iter().next().expect("a non-empty producer set");
+                        if is_platform(to) {
+                            references.to_platform += 1;
+                        } else {
+                            references.to_member += 1;
+                        }
                         *edges
                             .entry((
                                 (*member).to_string(),
@@ -486,11 +502,6 @@ pub fn join(
         }
     }
 
-    let is_platform = |member: &str| {
-        kinds
-            .get(member)
-            .is_some_and(|kind| kind.sets_inbound_build_edges_apart())
-    };
     let edges: Vec<BuildsAgainst> = edges
         .into_iter()
         .map(|((from, to, kind, scope, artifact), references)| BuildsAgainst {
@@ -524,10 +535,11 @@ pub fn join(
         let pairs = PairCount::over(edges.iter().filter(|e| e.platform));
         PlatformApart {
             summary: format!(
-                "{} into {} declared platform member(s), counted apart from the headline \
-                 (the same {} references are the denominator)",
+                "{} into {} declared platform member(s), from {} of {} referenced artifacts, \
+                 counted apart from the headline over the same denominator",
                 pairs.render(),
                 platforms.len(),
+                references.to_platform,
                 references.references
             ),
             members: platforms,
@@ -540,12 +552,13 @@ pub fn join(
     // "of N" they are stated over — the denominator is never partial.
     let summary = format!(
         "{} built against another member, from {} of {} referenced artifacts \
-         ({} external, {} in-member, {} to a colliding artifact, {} refused, \
-         {} project reference(s), {} build plugin(s)), over {} of {} members read; \
+         ({} to a declared platform, {} external, {} in-member, {} to a colliding artifact, \
+         {} refused, {} project reference(s), {} build plugin(s)), over {} of {} members read; \
          a build dependency, never a runtime coupling",
         headline_pairs.render(),
         references.to_member,
         references.references,
+        references.to_platform,
         references.external,
         references.in_member,
         references.to_collision,
@@ -917,6 +930,7 @@ mod tests {
             ReferenceAccounting {
                 references: 11,
                 to_member: 7,
+                to_platform: 0,
                 in_member: 2,
                 to_collision: 0,
                 external: 1,
@@ -926,7 +940,7 @@ mod tests {
             }
         );
         assert_eq!(
-            r.to_member + r.in_member + r.to_collision + r.external + r.refused
+            r.to_member + r.to_platform + r.in_member + r.to_collision + r.external + r.refused
                 + r.project_reference + r.build_plugin,
             r.references,
             "every reference is filed exactly once"
@@ -947,9 +961,10 @@ mod tests {
         assert_eq!(
             headline.summary,
             "5 pairs (parent 3 · dependency 2 · managed 1 · bom-import 1) built against another \
-             member, from 7 of 11 referenced artifacts (1 external, 2 in-member, 0 to a colliding \
-             artifact, 1 refused, 0 project reference(s), 0 build plugin(s)), over 4 of 4 members \
-             read; a build dependency, never a runtime coupling"
+             member, from 7 of 11 referenced artifacts (0 to a declared platform, 1 external, \
+             2 in-member, 0 to a colliding artifact, 1 refused, 0 project reference(s), \
+             0 build plugin(s)), over 4 of 4 members read; a build dependency, never a runtime \
+             coupling"
         );
     }
 
@@ -1105,8 +1120,9 @@ mod tests {
         assert_eq!((r.project_reference, r.build_plugin, r.to_member), (1, 1, 1));
         assert!(
             relation.headline.summary.contains(
-                "from 1 of 3 referenced artifacts (0 external, 0 in-member, 0 to a colliding \
-                 artifact, 0 refused, 1 project reference(s), 1 build plugin(s))"
+                "from 1 of 3 referenced artifacts (0 to a declared platform, 0 external, \
+                 0 in-member, 0 to a colliding artifact, 0 refused, 1 project reference(s), \
+                 1 build plugin(s))"
             ),
             "the summary names every bucket, so they sum to its denominator: {}",
             relation.headline.summary
@@ -1138,11 +1154,26 @@ mod tests {
             apart.build_dependency_pairs,
             PairCount { pairs: 3, parent: 3, dependency: 0, managed: 0, bom_import: 1 }
         );
-        assert!(apart.summary.contains("the same 11 references"), "{}", apart.summary);
         assert_eq!(
-            headline.references,
-            join(&roster, &BTreeMap::new(), &facts).headline.references,
-            "the denominator does not move by a declaration"
+            apart.summary,
+            "3 pairs (parent 3 · dependency 0 · managed 0 · bom-import 1) into 1 declared platform \
+             member(s), from 4 of 11 referenced artifacts, counted apart from the headline over \
+             the same denominator"
+        );
+        // The headline states only its own share: the 2 pairs into `common`
+        // stand for 3 references, the 4 into the platform are apart.
+        let undeclared = join(&roster, &BTreeMap::new(), &facts).headline.references;
+        assert_eq!((headline.references.to_member, headline.references.to_platform), (3, 4));
+        assert_eq!(
+            headline.references.to_member + headline.references.to_platform,
+            undeclared.to_member,
+            "a declaration only moves references between the two edge buckets"
+        );
+        assert_eq!(headline.references.references, undeclared.references, "the denominator holds");
+        assert!(
+            headline.summary.contains("from 3 of 11 referenced artifacts (4 to a declared platform,"),
+            "{}",
+            headline.summary
         );
         assert!(relation.edges.iter().all(|e| e.platform == (e.to == "starter")));
         assert_eq!(relation.edges.len(), 7, "the relation keeps every edge");
