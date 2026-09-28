@@ -1466,6 +1466,24 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     expect(screen.getByText(/2 services/).textContent).toMatch(/1 bound · 1 ambiguous · 1 unbound/);
   });
 
+  it("states platform candidates, colliding artifacts and unread members on the coverage card", async () => {
+    const headline: BuildDependencyHeadline = {
+      ...BUILD_HEADLINE,
+      members: { ...BUILD_HEADLINE.members, read: 1, unread: ["web"] },
+      platform_candidates: [{ member: "api", in_degree: 2, of: 3 }],
+      collisions: [{ artifact: "com.acme:common", producers: ["api", "web"], references: 7 }],
+    };
+    stubApi({ coverage: COVERAGE, providers: [BINDING], buildDependency: headline, buildDeps: BUILD_DEPS });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+    const card = screen.getByRole("heading", { name: "Build dependencies" }).closest("section")!;
+    const text = card.textContent ?? "";
+    expect(text).toContain("Platform candidates (a hint; nothing is classified until declared): api (2 of 3)");
+    expect(text).toContain("Produced by more than one member, so resolved to neither: com.acme:common (api, web)");
+    // The unread member is unknown, never reported as having no build dependency (NFR-CC-04).
+    expect(text).toContain("Build facts could not be read for web — their build dependencies are unknown, not absent.");
+  });
+
   /* A workspace with no build manifest renders the coverage tab byte-for-byte as
      before the build layer existed. The recorded file was written from the tree
      as it stood BEFORE S-464 (the view reverted to its merge-base version for the
