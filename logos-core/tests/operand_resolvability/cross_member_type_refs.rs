@@ -298,40 +298,70 @@ pub fn source_path_name(path: &str) -> Option<(String, String)> {
     Some((dirs.replace('/', "."), name.to_string()))
 }
 
+/// `text` with every comment removed and every string or character literal's
+/// contents dropped (its quotes kept), newlines preserved — scanned left to
+/// right, so a `/*` inside a `//` comment or a string opens nothing (a
+/// `//*****` licence banner is one line comment, not a block).
+fn code_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'/') => {
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        out.push('\n');
+                    }
+                    if prev == '*' && d == '/' {
+                        break;
+                    }
+                    prev = d;
+                }
+                out.push(' ');
+            }
+            '"' | '\'' => {
+                out.push(c);
+                let mut escaped = false;
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                    if escaped {
+                        escaped = false;
+                    } else if d == '\\' {
+                        escaped = true;
+                    } else if d == c {
+                        out.push(c);
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// The package a Java/Kotlin file declares — its first code line, when that is
 /// a `package` statement — or `None` for the default package.
 ///
-/// Comments are skipped (`//`, `/* … */` across lines) and so are annotation
-/// lines (Kotlin's `@file:JvmName`, Java's `package-info` annotations), which
-/// may precede the statement. Kotlin's backtick escapes are dropped.
+/// Comments are skipped ([`code_only`]) and so are annotation lines (Kotlin's
+/// `@file:JvmName`, Java's `package-info` annotations), which may precede the
+/// statement. Kotlin's backtick escapes are dropped.
 pub fn declared_package(text: &str) -> Option<String> {
-    let mut in_block = false;
-    for raw in text.lines() {
-        let mut line = raw;
-        let mut code = String::new();
-        loop {
-            if in_block {
-                match line.find("*/") {
-                    Some(i) => {
-                        line = &line[i + 2..];
-                        in_block = false;
-                    }
-                    None => break,
-                }
-            }
-            match line.find("/*") {
-                Some(i) => {
-                    code.push_str(&line[..i]);
-                    line = &line[i + 2..];
-                    in_block = true;
-                }
-                None => {
-                    code.push_str(line);
-                    break;
-                }
-            }
-        }
-        let code = code.split("//").next().unwrap_or("").trim();
+    for line in code_only(text).lines() {
+        let code = line.trim();
         if code.is_empty() || code.starts_with('@') {
             continue;
         }
@@ -1470,6 +1500,17 @@ mod tests {
         assert_eq!(declared_package("/* a */ package com.x; /* b */").as_deref(), Some("com.x"));
         // A file whose first code line is not `package` is the default package.
         assert_eq!(declared_package("import a.B;\nclass C {}\npackage late;\n"), None);
+        // A `/*` inside a line comment or a string opens no block: the licence
+        // banners `//*****` and a path like `docs/*` in a comment.
+        let banner = "//*****************************\n// Copyright ACME\n//*****************************\npackage com.x.y;\n";
+        assert_eq!(declared_package(banner).as_deref(), Some("com.x.y"));
+        assert_eq!(declared_package("// see docs/* for details\npackage com.x.y;\n").as_deref(), Some("com.x.y"));
+        assert_eq!(
+            declared_package("@file:JvmName(\"a/*b\")\npackage com.x.k\n").as_deref(),
+            Some("com.x.k")
+        );
+        // …and a `//` inside a block comment ends nothing.
+        assert_eq!(declared_package("/* http://x.y\n package no; */\npackage com.z;").as_deref(), Some("com.z"));
         // `packageX` is not a package statement.
         assert_eq!(declared_package("packages.foo;\n"), None);
         assert_eq!(declared_package(""), None);
