@@ -885,8 +885,11 @@ mod tests {
             ("two single-type imports of G", vec![import("a.b.G", false, false), import("z.G", false, false)], false, "G.X"),
             ("an inherited member type G", vec![import("a.b.G", false, false)], true, "G.X"),
         ] {
-            let (folded, _) = fold_with_imports(&[], &imports, opaque, path);
+            let (folded, asked) = fold_with_imports(&[], &imports, opaque, path);
             assert_eq!(folded, None, "{why}");
+            // Refused by the imports themselves, never by a lookup that happens
+            // not to know the type: a fall-through to another rung would ask.
+            assert!(asked.is_empty(), "{why}: asked {asked:?}");
         }
     }
 
