@@ -380,6 +380,10 @@ struct FileMatches {
     /// The file's import declarations (`@fw.const.import`, S-470): where a
     /// name it does not declare may come from.
     const_imports: Vec<fold::ImportCapture>,
+    /// `true` when the parser recovered an error outside every type
+    /// declaration — where imports live. What the file imports is then
+    /// unknown, so the fold reaches through no import at all (S-470).
+    imports_unreadable: bool,
     /// Byte ranges of opaque prefixes written inside an annotation the parser
     /// had to recover from an error: never folded, so they stay opaque and
     /// refuse (see [`fold_constants`]).
@@ -842,13 +846,21 @@ fn collect_matches(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &st
             }
         }
     }
-    // An error the parser recovered at the top of the file may be an import it
-    // could not read — one that might supply any name. The fold then reaches
-    // through no import at all (S-470).
+    // An error the parser recovered outside every type declaration may be an
+    // import it could not read — a broken declaration, a missing path, a typo
+    // that no longer parses as an import at all — and such an import might
+    // supply any name. The fold then reaches through no import (S-470). The
+    // type declarations are the captured `@fw.const.scope.decl` ranges, so an
+    // error inside a method body does not count.
+    let declarations: Vec<(usize, usize)> = out.const_scopes.iter().filter_map(|s| s.decl).collect();
     let root = tree.root_node();
-    if out.folds && root.children(&mut root.walk()).any(|n| n.is_error()) {
-        out.const_imports.push(fold::ImportCapture::unreadable());
-    }
+    out.imports_unreadable = out.folds
+        && root.children(&mut root.walk()).any(|node| {
+            node.has_error()
+                && !declarations
+                    .iter()
+                    .any(|&(start, end)| start <= node.start_byte() && node.end_byte() <= end)
+        });
     Some(out)
 }
 
@@ -894,7 +906,7 @@ fn fold_constants(
     let imports = std::mem::take(&mut out.const_imports);
     let cache = RefCell::new(HashMap::new());
     let lookup = |fqn: &[String], name: &str| member.and_then(|m| m.constant(&cache, fqn, name));
-    let names = match member {
+    let names = match member.filter(|_| !out.imports_unreadable) {
         Some(member) => names.with_reach(fold::Reach {
             imports: &imports,
             package: member.layout.package_of(rel),
@@ -1519,14 +1531,13 @@ fn generic_match(
         });
     }
 
-    // An import the parser recovered from an error is kept, marked unreadable:
-    // it might import anything, so the fold then reaches through no import.
+    // An import the parser recovered from an error is judged with the file
+    // (`FileMatches::imports_unreadable`), not here.
     if let Some(import) = const_import {
         out.const_imports.push(fold::ImportCapture {
             path: crate::extract::refs::split_path_text(text(import, src)),
             is_static: const_import_static,
             wildcard: const_import_wildcard,
-            readable: !import.parent().is_some_and(|decl| decl.has_error()),
         });
     }
 

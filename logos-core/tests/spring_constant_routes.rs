@@ -507,6 +507,9 @@ fn an_import_the_parser_could_not_read_stops_the_reach() {
         "import static a.b.Other.EMAIL\n",
         // Recovered at the top of the file: no declaration left to mark.
         "impot static a.b.Other.*;\n",
+        // No path at all, and a typo that parses as something else entirely.
+        "import static ;\n",
+        "static import a.b.Other.EMAIL;\n",
     ] {
         assert_refused_once(
             &[

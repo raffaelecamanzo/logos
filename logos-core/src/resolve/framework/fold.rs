@@ -110,22 +110,6 @@ pub(super) struct ImportCapture {
     pub(super) path: Vec<String>,
     pub(super) is_static: bool,
     pub(super) wildcard: bool,
-    /// `false` when the parser recovered an error inside the declaration: what
-    /// it imports is then unknown, so nothing may be resolved through imports.
-    pub(super) readable: bool,
-}
-
-impl ImportCapture {
-    /// An import the file may declare but that could not be read — an error the
-    /// parser recovered where imports live.
-    pub(super) fn unreadable() -> Self {
-        ImportCapture {
-            path: Vec::new(),
-            is_static: false,
-            wildcard: false,
-            readable: false,
-        }
-    }
 }
 
 /// A constant another file of the member declares, already folded in that file
@@ -502,7 +486,7 @@ impl<'s> Names<'s> {
             }
             current = scope.parent;
         }
-        let reach = self.readable_reach()?;
+        let reach = self.reach.as_ref()?;
         let owner = only_one(
             reach
                 .imports
@@ -541,7 +525,7 @@ impl<'s> Names<'s> {
             }
             return only_constant(scope.declared.get(name)?).map(Binding::Local);
         }
-        let reach = self.readable_reach()?;
+        let reach = self.reach.as_ref()?;
         if self.may_inherit_around(at)
             || reach
                 .imports
@@ -565,14 +549,6 @@ impl<'s> Names<'s> {
             None => return None,
         };
         (reach.lookup)(&fqn, name).map(Binding::Foreign)
-    }
-
-    /// The reach, when every import the file declares could be read — an
-    /// import the parser recovered from an error might import anything.
-    fn readable_reach(&self) -> Option<&Reach<'s>> {
-        self.reach
-            .as_ref()
-            .filter(|reach| reach.imports.iter().all(|i| i.readable))
     }
 
     /// `true` when a body enclosing `at` may inherit members this file does not
@@ -812,7 +788,6 @@ mod tests {
             path: path.split('.').map(str::to_string).collect(),
             is_static,
             wildcard,
-            readable: true,
         }
     }
 
@@ -899,7 +874,6 @@ mod tests {
     /// Each shape that must refuse without folding a guessed declaration.
     #[test]
     fn a_name_the_imports_do_not_prove_is_refused() {
-        let unreadable = ImportCapture::unreadable();
         for (why, imports, opaque, path) in [
             ("static wildcard only", vec![import("a.b.G", true, true)], false, "X"),
             ("no import at all", vec![], false, "X"),
@@ -909,7 +883,6 @@ mod tests {
                 false,
                 "X",
             ),
-            ("an unreadable import", vec![import("a.b.G.X", true, false), unreadable.clone()], false, "X"),
             ("a body that may inherit X", vec![import("a.b.G.X", true, false)], true, "X"),
             ("a non-static import of a member", vec![import("a.b.G.X", false, false)], false, "X"),
             // Qualified:
@@ -917,7 +890,6 @@ mod tests {
             ("G possibly a static-wildcard field", vec![import("a.b.G", false, false), import("z.Q", true, true)], false, "G.X"),
             ("two single-type imports of G", vec![import("a.b.G", false, false), import("z.G", false, false)], false, "G.X"),
             ("an inherited member type G", vec![import("a.b.G", false, false)], true, "G.X"),
-            ("an unreadable import (qualified)", vec![import("a.b.G", false, false), unreadable], false, "G.X"),
         ] {
             let (folded, _) = fold_with_imports(&[], &imports, opaque, path);
             assert_eq!(folded, None, "{why}");
