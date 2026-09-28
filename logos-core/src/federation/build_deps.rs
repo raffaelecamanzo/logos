@@ -536,10 +536,13 @@ pub fn join(
     });
 
     let platform_candidates = platform_candidates(&edges, kinds, members.read);
+    // Every bucket is named, so the figures in the parentheses sum to the
+    // "of N" they are stated over — the denominator is never partial.
     let summary = format!(
         "{} built against another member, from {} of {} referenced artifacts \
-         ({} external, {} in-member, {} to a colliding artifact, {} refused), over {} of {} \
-         members read; a build dependency, never a runtime coupling",
+         ({} external, {} in-member, {} to a colliding artifact, {} refused, \
+         {} project reference(s), {} build plugin(s)), over {} of {} members read; \
+         a build dependency, never a runtime coupling",
         headline_pairs.render(),
         references.to_member,
         references.references,
@@ -547,6 +550,8 @@ pub fn join(
         references.in_member,
         references.to_collision,
         references.refused,
+        references.project_reference,
+        references.build_plugin,
         members.read,
         members.members,
     );
@@ -939,13 +944,12 @@ mod tests {
         );
         assert!(headline.collisions.is_empty());
         assert!(headline.platform_apart.is_none(), "no platform declared, nothing apart");
-        assert!(
-            headline.summary.starts_with("5 pairs (parent 3 · dependency 2 · managed 1 · bom-import 1)")
-                && headline.summary.contains("from 7 of 11 referenced artifacts")
-                && headline.summary.contains("over 4 of 4 members read")
-                && headline.summary.contains("never a runtime coupling"),
-            "{}",
-            headline.summary
+        assert_eq!(
+            headline.summary,
+            "5 pairs (parent 3 · dependency 2 · managed 1 · bom-import 1) built against another \
+             member, from 7 of 11 referenced artifacts (1 external, 2 in-member, 0 to a colliding \
+             artifact, 1 refused, 0 project reference(s), 0 build plugin(s)), over 4 of 4 members \
+             read; a build dependency, never a runtime coupling"
         );
     }
 
@@ -1099,6 +1103,14 @@ mod tests {
         let relation = join(&roster, &BTreeMap::new(), &facts);
         let r = relation.headline.references;
         assert_eq!((r.project_reference, r.build_plugin, r.to_member), (1, 1, 1));
+        assert!(
+            relation.headline.summary.contains(
+                "from 1 of 3 referenced artifacts (0 external, 0 in-member, 0 to a colliding \
+                 artifact, 0 refused, 1 project reference(s), 1 build plugin(s))"
+            ),
+            "the summary names every bucket, so they sum to its denominator: {}",
+            relation.headline.summary
+        );
         assert_eq!(
             edge_keys(&relation),
             [("mvn", "lib", BuildEdgeKind::Dependency, "com.sourcesense.poste.pec:lib")]
