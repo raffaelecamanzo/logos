@@ -619,6 +619,84 @@ fn workspace_java_residue(root: &Path, member: &str) -> CallResidue {
         .expect("a java residue")
 }
 
+/// One two-member workspace per candidate shape: `lib` declares the types,
+/// `app` holds `app_files` and calls them. Returns `app`'s Java residue read
+/// alone, then in `workspace status`.
+fn split_probe(app_files: &[(&str, &str)]) -> (CallResidue, CallResidue) {
+    let ws = TempDir::new().unwrap();
+    let lib = ws.path().join("lib");
+    let app = ws.path().join("app");
+    git_init(&lib);
+    git_init(&app);
+    write(
+        &lib,
+        "src/main/java/com/x/shared/Outer.java",
+        "package com.x.shared;\n\npublic class Outer {\n    public static class Inner {\n        public void ping() {}\n    }\n}\n",
+    );
+    write(
+        &lib,
+        "src/main/java/com/x/shared/Helper.java",
+        "package com.x.shared;\n\npublic class Helper {\n    public void go() {}\n}\n",
+    );
+    // A split package: `lib` declares a type in `app`'s package.
+    write(
+        &lib,
+        "src/main/java/com/x/app/Util.java",
+        "package com.x.app;\n\npublic class Util {\n    public void run() {}\n}\n",
+    );
+    for (rel, text) in app_files {
+        write(&app, rel, text);
+    }
+    for member in [&lib, &app] {
+        let _ = index(member).sync(&[] as &[PathBuf]);
+    }
+    let alone = java_residue(&Engine::start(&app).expect("engine starts"));
+    (alone, workspace_java_residue(ws.path(), "app"))
+}
+
+/// A nested type another member declares matches through its outer type's
+/// name, and only the rows whose type is another member's move: a JDK call in
+/// the same member stays `external-type` (a partial move, not a reset).
+#[test]
+fn a_nested_type_of_another_member_moves_and_a_jdk_type_stays_external() {
+    let (alone, ws) = split_probe(&[(
+        "src/main/java/com/x/app/Nested.java",
+        "package com.x.app;\n\
+         \n\
+         import com.x.shared.Outer.Inner;\n\
+         import java.util.List;\n\
+         \n\
+         public class Nested {\n\
+             private Inner inner;\n\
+             private List<String> items;\n\
+             public void n() { inner.ping(); }\n\
+             public void j() { items.clear(); }\n\
+         }\n",
+    )]);
+    assert_eq!(nonzero(&alone), reasons(&[(R::ExternalType, 2)]));
+    assert_eq!(
+        nonzero(&ws),
+        reasons(&[(R::ExternalType, 1), (R::TypeInAnotherMember, 1)])
+    );
+}
+
+/// The same-package and wildcard candidates each reach another member's type.
+#[test]
+fn a_same_package_or_wildcard_type_of_another_member_moves() {
+    let (alone, ws) = split_probe(&[
+        (
+            "src/main/java/com/x/app/SamePkg.java",
+            "package com.x.app;\n\npublic class SamePkg {\n    private Util util;\n    public void s() { util.run(); }\n}\n",
+        ),
+        (
+            "src/main/java/com/x/app/Wild.java",
+            "package com.x.app;\n\nimport com.x.shared.*;\n\npublic class Wild {\n    private Helper helper;\n    public void w() { helper.go(); }\n}\n",
+        ),
+    ]);
+    assert_eq!(nonzero(&alone), reasons(&[(R::ExternalType, 2)]));
+    assert_eq!(nonzero(&ws), reasons(&[(R::TypeInAnotherMember, 2)]));
+}
+
 // ── the readout: Java only, and deterministic ─────────────────────────────
 
 #[test]
