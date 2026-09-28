@@ -63,8 +63,9 @@ use serde::Serialize;
 use logos_core::config::{self as core_config, ConfigReadModel, TierSaveOutcome};
 use logos_core::federation::{
     app_wide_reachability, open_state, query as fed_query, workspace_governance,
-    workspace_statistics, Backing, BoundedReachability, ContractBridge, DegradedRollup,
-    EngineRegistry, ReachabilityScope, WorkspaceGovernance, WorkspaceStatistics,
+    workspace_statistics, xservice_build_deps, Backing, BoundedReachability, BuildDependencies,
+    ContractBridge, DegradedRollup, EngineRegistry, ReachabilityScope, WorkspaceGovernance,
+    WorkspaceStatistics,
 };
 use logos_core::federation::manifest::{self, ManifestDocument, ManifestSaveOutcome};
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
@@ -926,6 +927,34 @@ pub(crate) async fn workspace_route_providers(
     workspace_fan(backing, bridge, "api_v1_workspace_route_providers", Surface::Web, move |registry, bridge| {
         let edges = fed_query::edges(bridge, registry);
         fed_query::xservice_route_providers(&edges, repo.as_deref())
+    })
+    .await
+}
+
+/// `GET /api/v1/workspace/build-deps[?repo=<member>]` — the build-dependency
+/// relation ([`xservice_build_deps`], [FR-WS-33], [FR-WS-05]): per member, its
+/// `builds_against` and `built_against_by` rows naming kind, scope and artifact,
+/// the headline with its denominator, and the cross-context model hint.
+///
+/// A **build** dependency, never a runtime coupling ([BR-58]): the service map
+/// draws it only behind a legend toggle that is off by default, and no runtime
+/// figure reads it. The relation is joined on the first request and cached on
+/// member sync-stamps in the holder beside the bridge ([ADR-52]), so serving
+/// the SPA costs nothing until the layer is asked for. The same read-model the
+/// CLI and MCP print.
+///
+/// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
+/// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
+/// [ADR-52]: ../../docs/specs/architecture/decisions/ADR-52.md
+pub(crate) async fn workspace_build_deps(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    State(deps): State<Arc<BuildDependencies>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let repo = opt_param(&q, "repo");
+    workspace_fan(backing, bridge, "api_v1_workspace_build_deps", Surface::Web, move |registry, _bridge| {
+        xservice_build_deps(&deps.relation(registry), repo.as_deref())
     })
     .await
 }

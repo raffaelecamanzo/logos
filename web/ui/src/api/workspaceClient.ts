@@ -29,6 +29,7 @@ import type {
   WorkspaceStatus,
   WorkspaceTierDocument,
   WorkspaceTierSaveOutcome,
+  XserviceBuildDeps,
   XserviceImpact,
   XserviceRouteProviders,
 } from "./types.ts";
@@ -52,6 +53,14 @@ export function fetchWorkspaceStatus(): Promise<WorkspaceStatus> {
  *  the service map's edges. App-level (unscoped) by design. */
 export function fetchWorkspaceBindings(): Promise<XserviceRouteProviders> {
   return apiFetch<XserviceRouteProviders>("workspace/route-providers");
+}
+
+/** `GET /api/v1/workspace/build-deps` (S-464, FR-WS-33) — the build-dependency
+ *  relation: per member what it builds against and what builds against it, the
+ *  headline, and the cross-context model hint. A BUILD dependency, never a runtime
+ *  coupling (BR-58). App-level (unscoped) by design, like the bindings above. */
+export function fetchWorkspaceBuildDeps(): Promise<XserviceBuildDeps> {
+  return apiFetch<XserviceBuildDeps>("workspace/build-deps");
 }
 
 /** `GET /api/v1/workspace/impact?symbol=<s>` — the cross-service impact of a symbol:

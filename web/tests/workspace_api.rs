@@ -162,6 +162,9 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     "/api/v1/workspace/roster",
     "/api/v1/workspace/status",
     "/api/v1/workspace/route-providers",
+    // S-464 / [FR-WS-33]: the build-dependency relation — a GET like the rest,
+    // so the `200`+CSP, single-root `404` and write-free loops all walk it.
+    "/api/v1/workspace/build-deps",
     "/api/v1/workspace/search?q=user",
     "/api/v1/workspace/callers?symbol=get_user",
     "/api/v1/workspace/impact?symbol=get_user",
@@ -749,6 +752,67 @@ async fn workspace_route_providers_report_the_resolved_binding() {
     let (_s, body, _h) = body_string(scoped_api).await;
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(v["providers"].as_array().unwrap().is_empty(), "api provides no routes: {body}");
+}
+
+/// S-464 / [FR-WS-33]: `build-deps` serializes the read-model the CLI and MCP
+/// print — per member, `builds_against` / `built_against_by` rows naming kind,
+/// scope and artifact, beside the headline — and `?repo=` scopes the rows while
+/// the denominator stays workspace-wide. The runtime `route-providers` answer
+/// over the same workspace carries no build row ([BR-58]).
+///
+/// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
+/// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[cfg(feature = "lang-all")]
+#[tokio::test]
+async fn workspace_build_deps_reports_each_members_rows_and_repo_scopes() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let pom = |artifact: &str, dependency: &str| {
+        format!(
+            "<project><groupId>com.acme</groupId><artifactId>{artifact}</artifactId>\
+             <version>1</version><dependencies>{dependency}</dependencies></project>"
+        )
+    };
+    init_repo(&root.join("api"), "api/openapi.yaml", OPENAPI_YAML);
+    write(
+        &root.join("api"),
+        "pom.xml",
+        &pom(
+            "api",
+            "<dependency><groupId>com.acme</groupId><artifactId>web</artifactId>\
+             <scope>test</scope></dependency>",
+        ),
+    );
+    init_repo(&root.join("web"), "src/main.rs", AXUM_MAIN);
+    write(&root.join("web"), "pom.xml", &pom("web", ""));
+    Engine::start(root.join("api")).expect("api engine").index();
+    Engine::start(root.join("web")).expect("web engine").index();
+    std::fs::write(root.join("logos.workspace.toml"), FIXTURE_MANIFEST).unwrap();
+    let router = ws_router(&tmp);
+
+    let resp = router.clone().oneshot(get("/api/v1/workspace/build-deps")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["members"].as_array().unwrap().len(), 2, "{body}");
+    let row = &v["members"][0]["builds_against"][0];
+    assert_eq!(v["members"][0]["member"], "api");
+    assert_eq!((&row["to"], &row["kind"], &row["scope"]), (&"web".into(), &"dependency".into(), &"test".into()));
+    assert_eq!(row["artifact"], "com.acme:web");
+    assert_eq!(v["members"][1]["built_against_by"][0]["from"], "api");
+    assert_eq!(v["headline"]["build_dependency_pairs"]["pairs"], 1);
+    assert!(v["headline"]["summary"].as_str().unwrap().contains("never a runtime coupling"));
+
+    let scoped = router.clone().oneshot(get("/api/v1/workspace/build-deps?repo=web")).await.unwrap();
+    let (_s, body, _h) = body_string(scoped).await;
+    let w: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(w["scope"], "web");
+    assert_eq!(w["members"].as_array().unwrap().len(), 1);
+    assert_eq!(w["headline"], v["headline"], "the denominator is workspace-wide under a scope");
+
+    let runtime = router.oneshot(get("/api/v1/workspace/route-providers")).await.unwrap();
+    let (_s, body, _h) = body_string(runtime).await;
+    assert!(!body.contains("com.acme"), "no build row among the runtime bindings: {body}");
 }
 
 // ── Single-root regression: the workspace surface is inert in a plain repo ────

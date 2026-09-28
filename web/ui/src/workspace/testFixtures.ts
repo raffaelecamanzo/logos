@@ -7,10 +7,12 @@
 import { vi } from "vitest";
 
 import type {
+  BuildDependencyHeadline,
   CrossServiceCoverage,
   MemberTopics,
   WorkspaceRoster,
   WorkspaceStatus,
+  XserviceBuildDeps,
 } from "../api/types.ts";
 
 /** The two-member roster the shell probe answers with. */
@@ -61,6 +63,7 @@ export function status(
   coverage: CrossServiceCoverage = EMPTY_COVERAGE,
   topics: MemberTopics[] = NO_TOPICS,
   degradedRollup?: WorkspaceStatus["degraded_rollup"],
+  buildDependency?: BuildDependencyHeadline,
 ): WorkspaceStatus {
   return {
     workspace: "shop",
@@ -92,6 +95,10 @@ export function status(
     },
     coverage,
     topics,
+    // Only when given: the server omits the key over a manifest-less workspace
+    // (S-463), and a fixture carrying it by default would let a view that cannot
+    // cope with its absence pass.
+    ...(buildDependency ? { build_dependency: buildDependency } : {}),
   };
 }
 
@@ -109,6 +116,11 @@ export interface StubOptions {
   /** Override the degraded roll-up, for the partially-opened-workspace cases
    *  (S-326, FR-WS-16). Defaults to the all-opened shape. */
   degradedRollup?: WorkspaceStatus["degraded_rollup"];
+  /** The status payload's build headline (S-464); absent by default, as over a
+   *  workspace with no build manifest. */
+  buildDependency?: BuildDependencyHeadline;
+  /** The `workspace/build-deps` answer (S-464). */
+  buildDeps?: XserviceBuildDeps;
 }
 
 /**
@@ -124,6 +136,8 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
     impact = {},
     topics = NO_TOPICS,
     degradedRollup,
+    buildDependency,
+    buildDeps,
   } = opts;
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
@@ -137,8 +151,9 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
         return json(ROSTER, probeStatus === 200, probeStatus);
       }
       if (url.startsWith("/api/v1/workspace/status"))
-        return json(status(coverage, topics, degradedRollup));
+        return json(status(coverage, topics, degradedRollup, buildDependency));
       if (url.startsWith("/api/v1/workspace/route-providers")) return json({ providers });
+      if (url.startsWith("/api/v1/workspace/build-deps")) return json(buildDeps ?? {});
       if (url.startsWith("/api/v1/workspace/impact")) return json(impact);
       return json({});
     }),

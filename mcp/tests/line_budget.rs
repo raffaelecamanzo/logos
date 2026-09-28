@@ -24,7 +24,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
     total
 }
 
-/// Budget: ≤ 995 non-blank lines of Rust across the whole MCP adapter
+/// Budget: ≤ 1010 non-blank lines of Rust across the whole MCP adapter
 /// (NFR-MA-02 thick-core/thin-surface invariant).
 ///
 /// Derivation (combined S-020, S-022, S-048, S-051, S-053 re-base): 30 `#[tool]`
@@ -190,6 +190,26 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// budget before making a one-line change. Six is this file's own precedent
 /// (S-360 took 5).
 ///
+/// **S-464/[CR-148] 995→1010** for the `xservice_build_deps` twin ([FR-WS-33]):
+/// measured 989→1007 (+18), 3 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `build_deps` field and its doc | **+3** |
+/// | the two constructors' `build_deps` line | **+2** |
+/// | the tool arm (attribute, signature, one `Arc::clone`, one delegation) | **+13** |
+/// | | **+18** |
+///
+/// Delegation only: the arm hands ONE `federation::xservice_build_deps` the
+/// relation from the holder beside the bridge. The join, the stamp cache, the
+/// per-member projection, the `--repo` scope note and the cross-context hint all
+/// live in `logos_core::federation::build_deps`, so the CLI and web twins print
+/// the same read-model. The `workspace_status` description grew a sentence and
+/// costs zero lines. Three lines of headroom, not six: no follow-up is known to
+/// land on these arms.
+///
+/// [CR-148]: ../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+/// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
 /// [S-403]: ../../docs/planning/journal.md#s-403-the-resolved-edge-headline-agrees-with-its-payload
 /// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
@@ -199,8 +219,8 @@ fn mcp_surface_line_budget() {
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 995,
-        "mcp adapter exceeds the 995 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1010,
+        "mcp adapter exceeds the 1010 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

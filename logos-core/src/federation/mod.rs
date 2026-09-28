@@ -26,7 +26,8 @@
 //! - the [`build_deps`] — the in-memory **build-dependency relation**:
 //!   member-local Maven/Gradle facts joined into `builds-against(A → B, kind,
 //!   scope, artifact)` on first query, with its own `build_dependency_pairs`
-//!   headline and a declared platform's inbound edges counted apart. Never a
+//!   headline and a declared platform's inbound edges counted apart, plus the
+//!   `xservice build-deps` read-model and its cross-context model hint. Never a
 //!   runtime coupling: nothing here enters the bridge or a runtime figure
 //!   ([FR-WS-33], [BR-58], [ADR-69]).
 //! - the [`coverage`] — the 3-state (bound/ambiguous/unbound) cross-service
@@ -150,10 +151,11 @@ pub use query::{
     XserviceCallers, XserviceImpact, XserviceRouteProviders, XserviceSearch,
 };
 pub use build_deps::{
-    ArtifactCollision, BuildDependencies, BuildDependencyHeadline, BuildDependencyRelation,
-    BuildEdgeKind, BuildsAgainst, MemberBuildDependencies, MemberBuildFacts, MembersRead,
-    PairCount, PlatformApart,
-    PlatformCandidate, ReferenceAccounting,
+    model_library_context, xservice_build_deps, ArtifactCollision, BuildDependencies,
+    BuildDependencyHeadline, BuildDependencyRelation, BuildEdgeKind, BuildsAgainst,
+    CrossContextHint, MemberBuildDependencies, MemberBuildFacts, MembersRead, ModelLibrary,
+    PairCount, PlatformApart, PlatformCandidate, ReferenceAccounting, XserviceBuildDeps,
+    MODEL_LIBRARY_ARTIFACT,
 };
 pub use budget::WorkspaceBudget;
 pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};

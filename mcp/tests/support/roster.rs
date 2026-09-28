@@ -79,12 +79,14 @@ pub const WIKI_TOOLS: &[&str] = &[
 
 /// The cross-service tools the **federated** backing adds on top of the
 /// single-root roster (S-248/CR-061 FR-WS-05; `workspace_reachability` by
-/// S-257, FR-WS-12; `workspace_check` by S-258, FR-WS-13). Alphabetical —
+/// S-257, FR-WS-12; `workspace_check` by S-258, FR-WS-13; `xservice_build_deps`
+/// by S-464, FR-WS-33). Alphabetical —
 /// `list_all` sorts by name, so this doubles as the expected added-set order.
 pub const XSERVICE_TOOLS: &[&str] = &[
     "workspace_check",
     "workspace_reachability",
     "workspace_status",
+    "xservice_build_deps",
     "xservice_callers",
     "xservice_impact",
     "xservice_route_providers",

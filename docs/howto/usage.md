@@ -635,7 +635,23 @@ labelling an aggregated link as a single kind, and the edge detail names the evi
 for each `config-bound` end the key, its defining source paths and the profile set, one row
 per overlay; for a `config-unresolved` end its keys and the refusal. The legend's
 provenance section renders only when at least one link is non-literal, so a workspace with
-no admitted binding looks exactly as it did before (S-419, CR-132). In a plain single repo
+no admitted binding looks exactly as it did before (S-419, CR-132).
+
+**The build layer (since S-464).** When any member holds a Maven or Gradle manifest, the
+service map's legend gains a **Build dependencies** checkbox — *off* by default, so the
+picture you land on is still runtime coupling only. Checking it draws what each member
+builds against, in its own `build` edge class (a hue no runtime arm uses), with an
+accessible **Build dependencies** table giving each pair's kinds, artifacts and reference
+count. A member declared [`kind = "platform"`](configuration.md#kind--platform--build-hubs)
+is **collapsed**: its inbound build edges are not drawn, and a line names it with how many
+members build against it. A **Cross-context model hint** card lists the members that
+depend on the model libraries (`<group>.<context>:kafka-models`, or
+`<context>-kafka-models`) of two or more bounded contexts, each library named — a report you review, never drawn as an edge. The **Cross-service coverage**
+tab gains a **Build dependencies** card after every runtime board, rendering the server's
+own headline line (pairs by kind beside their denominator), the declared platforms apart,
+the platform candidates and any colliding artifact. A build dependency is never a runtime
+coupling: no runtime figure counts it. A workspace with no build manifest shows no toggle,
+no card and makes no extra request — every panel is exactly as before. In a plain single repo
 (no manifest) **no selector is rendered and the UI is byte-for-byte unchanged**;
 `--standalone` forces single-repo focus even under a workspace parent. Workspace
 read-models are served under `/api/v1/workspace/*`; the single-root `/api/v1/*`

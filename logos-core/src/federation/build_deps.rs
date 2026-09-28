@@ -678,6 +678,165 @@ impl BuildDependencies {
     }
 }
 
+/// The `artifactId` of a bounded context's **model library** — the one naming
+/// convention the [cross-context hint](CrossContextHint) recognises
+/// ([CR-148] §2.1).
+///
+/// On the reference estate the `*-kafka-models` jars partition the members by
+/// bounded context exactly (`archive-kafka-models` ← 7, `mailbox-kafka-models`
+/// ← 8, …). Those are the **repositories'** names; the coordinate each one
+/// produces is `<group>.<context>:kafka-models` — every one of the six — so the
+/// context is read off the coordinate, in either of two spellings:
+///
+/// - `artifactId` exactly `kafka-models`: the context is the `groupId`'s last
+///   dot-separated segment (`com.acme.archive:kafka-models` → `archive`) — the
+///   estate's only shape;
+/// - `artifactId` `<context>-kafka-models`: the context is the prefix
+///   (`com.acme:archive-kafka-models` → `archive`).
+///
+/// Anything else names no context, and nothing is inferred from a member's name.
+///
+/// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+pub const MODEL_LIBRARY_ARTIFACT: &str = "kafka-models";
+
+/// The bounded context a joined `groupId:artifactId` coordinate's model library
+/// names ([`MODEL_LIBRARY_ARTIFACT`] states the two spellings), or `None` when
+/// it names none — including an empty context either way.
+#[must_use]
+pub fn model_library_context(artifact: &str) -> Option<&str> {
+    let (group, artifact_id) = artifact.rsplit_once(':')?;
+    let context = if artifact_id == MODEL_LIBRARY_ARTIFACT {
+        group.rsplit('.').next()?
+    } else {
+        artifact_id.strip_suffix(MODEL_LIBRARY_ARTIFACT)?.strip_suffix('-')?
+    };
+    (!context.is_empty()).then_some(context)
+}
+
+/// One model library a member builds against, named ([CR-148] §3.2 D).
+///
+/// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct ModelLibrary {
+    /// The bounded context its `artifactId` names.
+    pub context: String,
+    /// The joined coordinate, `groupId:artifactId`.
+    pub artifact: String,
+    /// The member producing it.
+    pub member: String,
+}
+
+/// A member that depends on the model libraries of **two or more** bounded
+/// contexts — a cross-context stream hint ([CR-148] §3.2 D, [CR-131] §3.3).
+///
+/// A report, never an edge: it is derived from `dependency` edges already in the
+/// relation and adds none, and no surface draws it ([BR-58]). A `managed` edge
+/// is a version pin, not a dependency, so a parent POM pinning every context's
+/// models is not a hint.
+///
+/// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+/// [CR-131]: ../../../docs/requests/CR-131-cross-service-coupling-from-committed-configuration.md
+/// [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CrossContextHint {
+    /// The depending member.
+    pub member: String,
+    /// The distinct contexts it depends on, sorted.
+    pub contexts: Vec<String>,
+    /// Every model library behind them, sorted by `(context, artifact)`.
+    pub libraries: Vec<ModelLibrary>,
+}
+
+impl BuildDependencyRelation {
+    /// The members depending on two or more contexts' model libraries, sorted by
+    /// member.
+    pub fn cross_context_hints(&self) -> Vec<CrossContextHint> {
+        let mut by_member: BTreeMap<&str, BTreeSet<ModelLibrary>> = BTreeMap::new();
+        for edge in self.edges.iter().filter(|e| e.kind == BuildEdgeKind::Dependency) {
+            if let Some(context) = model_library_context(&edge.artifact) {
+                by_member.entry(edge.from.as_str()).or_default().insert(ModelLibrary {
+                    context: context.to_string(),
+                    artifact: edge.artifact.clone(),
+                    member: edge.to.clone(),
+                });
+            }
+        }
+        by_member
+            .into_iter()
+            .filter_map(|(member, libraries)| {
+                let contexts: BTreeSet<String> =
+                    libraries.iter().map(|l| l.context.clone()).collect();
+                (contexts.len() >= 2).then(|| CrossContextHint {
+                    member: member.to_string(),
+                    contexts: contexts.into_iter().collect(),
+                    libraries: libraries.into_iter().collect(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The `xservice build-deps` read-model — one per surface, the CLI, MCP and web
+/// twins serialize it alike ([FR-WS-05], [FR-WS-33]).
+///
+/// Per member, what it **builds against** and what is **built against it**,
+/// each row naming kind, scope and artifact; the headline with its denominator
+/// beside them ([BR-51]); and the cross-context hint. A build dependency, never
+/// a runtime coupling ([BR-58]).
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct XserviceBuildDeps {
+    /// The `--repo` scope, when one was applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Set when the scope names no member the relation was read over (unknown,
+    /// or its build facts could not be read) — so the empty
+    /// [`members`](Self::members) is never read as "no edges" ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_note: Option<String>,
+    /// The workspace-wide headline, whatever the scope: the denominator the rows
+    /// are read against.
+    pub headline: BuildDependencyHeadline,
+    /// One entry per member read (roster order), or the scoped member alone; a
+    /// member with no edge is listed with both lists empty.
+    pub members: Vec<MemberBuildDependencies>,
+    /// Members depending on two or more contexts' model libraries — within the
+    /// scope, when one was applied. Never an edge.
+    pub cross_context: Vec<CrossContextHint>,
+}
+
+/// The `xservice build-deps` answer over `relation`, scoped to one member when
+/// `repo` is given.
+pub fn xservice_build_deps(relation: &BuildDependencyRelation, repo: Option<&str>) -> XserviceBuildDeps {
+    let members = match repo {
+        Some(member) => relation.member(member).into_iter().collect(),
+        None => relation.per_member(),
+    };
+    let scope_note = repo.filter(|_| members.is_empty()).map(|member| {
+        format!(
+            "`{member}` is not a member the build relation was read over \
+             (not in the workspace, or its build facts could not be read)"
+        )
+    });
+    XserviceBuildDeps {
+        scope: repo.map(str::to_string),
+        scope_note,
+        headline: relation.headline.clone(),
+        members,
+        cross_context: relation
+            .cross_context_hints()
+            .into_iter()
+            .filter(|hint| repo.is_none_or(|member| hint.member == member))
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -1534,5 +1693,214 @@ mod tests {
             assert_eq!(before[i], after[i], "{name} moved when build facts were present");
             assert_eq!(before[i], after_platform[i], "{name} moved when a platform was declared");
         }
+    }
+
+    // ── the cross-context model hint and the `xservice build-deps` read-model ──
+
+    /// The estate's shape: one model library per context, adapters depending on
+    /// their own context's models and a second one's, a parent POM pinning every
+    /// context's models (managed), and near-miss artifact names.
+    fn model_library_shape() -> BuildDependencyRelation {
+        let names = [
+            "starter",
+            "archive-kafka-models",
+            "mailbox-kafka-models",
+            "reporting-kafka-models",
+            "archive-reporting-adapter",
+            "archive-manager",
+            "near-miss",
+        ];
+        let roster = fed(&names, &[]).members;
+        // The estate's shape: each context's library is `<group>.<context>:kafka-models`,
+        // produced by a repository named `<context>-kafka-models`; one library
+        // uses the prefixed spelling so both are joined in one relation.
+        let archive = format!("{G}.archive");
+        let mailbox = format!("{G}.mailbox");
+        let facts = vec![
+            (
+                "starter".to_string(),
+                vec![pom(vec![
+                    produced(G, "poste-pec-starter"),
+                    managed(&archive, "kafka-models"),
+                    managed(&mailbox, "kafka-models"),
+                    managed(G, "reporting-kafka-models"),
+                ])],
+            ),
+            ("archive-kafka-models".to_string(), vec![pom(vec![produced(&archive, "kafka-models")])]),
+            ("mailbox-kafka-models".to_string(), vec![pom(vec![produced(&mailbox, "kafka-models")])]),
+            (
+                "reporting-kafka-models".to_string(),
+                vec![pom(vec![produced(G, "reporting-kafka-models")])],
+            ),
+            (
+                "archive-reporting-adapter".to_string(),
+                vec![pom(vec![
+                    produced(G, "archive-reporting-adapter"),
+                    parent(G, "poste-pec-starter"),
+                    dependency(&archive, "kafka-models"),
+                    scoped(dependency(G, "reporting-kafka-models"), "test"),
+                    dependency(&mailbox, "kafka-models"),
+                ])],
+            ),
+            (
+                "archive-manager".to_string(),
+                vec![pom(vec![produced(G, "archive-manager"), dependency(&archive, "kafka-models")])],
+            ),
+            (
+                "near-miss".to_string(),
+                vec![pom(vec![
+                    produced(G, "near-miss"),
+                    // Each one step from a model library: none names a context.
+                    produced(G, "xkafka-models"),
+                    produced(&archive, "kafka-model"),
+                    dependency(&archive, "kafka-models"),
+                ])],
+            ),
+        ];
+        join(&roster, &BTreeMap::new(), &facts)
+    }
+
+    #[test]
+    fn a_model_librarys_context_is_read_off_its_coordinate_in_either_spelling_and_nothing_else() {
+        // The estate's only shape: `<group>.<context>:kafka-models`.
+        assert_eq!(model_library_context("com.sourcesense.poste.pec.archive:kafka-models"), Some("archive"));
+        assert_eq!(model_library_context("com.sourcesense.poste.pec.officiallog:kafka-models"), Some("officiallog"));
+        assert_eq!(model_library_context("archive:kafka-models"), Some("archive"));
+        // The prefixed spelling.
+        assert_eq!(model_library_context("g:archive-kafka-models"), Some("archive"));
+        assert_eq!(model_library_context("g.h:official-log-kafka-models"), Some("official-log"));
+        // Near misses, each one step from a match: an empty group segment, an
+        // empty prefix, a missing hyphen, a singular artifactId, a suffix
+        // mid-name, the name in the groupId only, and no groupId at all.
+        assert_eq!(model_library_context("com.acme.:kafka-models"), None);
+        assert_eq!(model_library_context(":kafka-models"), None);
+        assert_eq!(model_library_context("g:-kafka-models"), None);
+        assert_eq!(model_library_context("g:xkafka-models"), None);
+        assert_eq!(model_library_context("com.acme.archive:kafka-model"), None);
+        assert_eq!(model_library_context("g:archive-kafka-models-api"), None);
+        assert_eq!(model_library_context("com.acme.kafka-models:core"), None);
+        assert_eq!(model_library_context("kafka-models"), None);
+    }
+
+    /// A member depending on two contexts' model libraries is a hint naming
+    /// every library and its producer; one context is not; a `managed` pin of
+    /// every context is not; and the hint adds no edge ([BR-58]).
+    ///
+    /// [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn a_member_depending_on_two_contexts_model_libraries_is_a_hint_naming_each_library() {
+        let relation = model_library_shape();
+        let edges_before = relation.edges.clone();
+        let hints = relation.cross_context_hints();
+        assert_eq!(
+            hints,
+            vec![CrossContextHint {
+                member: "archive-reporting-adapter".to_string(),
+                contexts: vec!["archive".to_string(), "mailbox".to_string(), "reporting".to_string()],
+                libraries: vec![
+                    ModelLibrary {
+                        context: "archive".to_string(),
+                        artifact: format!("{G}.archive:kafka-models"),
+                        member: "archive-kafka-models".to_string(),
+                    },
+                    ModelLibrary {
+                        context: "mailbox".to_string(),
+                        artifact: format!("{G}.mailbox:kafka-models"),
+                        member: "mailbox-kafka-models".to_string(),
+                    },
+                    ModelLibrary {
+                        context: "reporting".to_string(),
+                        artifact: format!("{G}:reporting-kafka-models"),
+                        member: "reporting-kafka-models".to_string(),
+                    },
+                ],
+            }],
+            "starter only pins (managed), archive-manager and near-miss depend on one context",
+        );
+        assert_eq!(relation.edges, edges_before, "the hint is a report, never an edge");
+    }
+
+    #[test]
+    fn two_libraries_of_one_context_are_not_a_cross_context_hint() {
+        let roster = fed(&["a-models", "b-models", "user"], &[]).members;
+        let facts = vec![
+            ("a-models".to_string(), vec![pom(vec![produced("com.acme.archive", "kafka-models")])]),
+            ("b-models".to_string(), vec![pom(vec![produced("org.other", "archive-kafka-models")])]),
+            (
+                "user".to_string(),
+                vec![pom(vec![
+                    dependency("com.acme.archive", "kafka-models"),
+                    dependency("org.other", "archive-kafka-models"),
+                ])],
+            ),
+        ];
+        let relation = join(&roster, &BTreeMap::new(), &facts);
+        assert_eq!(relation.edges.len(), 2, "both libraries joined");
+        assert!(relation.cross_context_hints().is_empty(), "one context, two producers");
+    }
+
+    /// Unscoped: every member read, each edge in its `from`'s `builds_against`
+    /// and its `to`'s `built_against_by`. Scoped: that member alone, its hint
+    /// alone, and the same workspace headline. An unknown or unread scope is an
+    /// empty list **with a note**, never a silent "no edges" ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn xservice_build_deps_lists_every_member_scopes_to_one_and_names_an_unknown_scope() {
+        let relation = model_library_shape();
+        let all = xservice_build_deps(&relation, None);
+        assert_eq!(all.members.len(), 7, "every member read, those with no edge included");
+        assert_eq!(all.scope, None);
+        assert_eq!(all.scope_note, None);
+        assert_eq!(all.headline, relation.headline);
+        assert_eq!(all.cross_context.len(), 1);
+        let out: usize = all.members.iter().map(|m| m.builds_against.len()).sum();
+        let into: usize = all.members.iter().map(|m| m.built_against_by.len()).sum();
+        assert_eq!((out, into), (relation.edges.len(), relation.edges.len()));
+
+        let one = xservice_build_deps(&relation, Some("archive-kafka-models"));
+        assert_eq!(one.scope.as_deref(), Some("archive-kafka-models"));
+        assert_eq!(one.scope_note, None);
+        assert_eq!(one.headline, relation.headline, "the denominator is workspace-wide");
+        assert_eq!(one.members.len(), 1);
+        let by: Vec<&str> = one.members[0].built_against_by.iter().map(|e| e.from.as_str()).collect();
+        assert_eq!(by, ["archive-manager", "archive-reporting-adapter", "near-miss", "starter"]);
+        assert!(one.cross_context.is_empty(), "the hint is scoped with the rows");
+
+        let adapter = xservice_build_deps(&relation, Some("archive-reporting-adapter"));
+        assert_eq!(adapter.cross_context.len(), 1);
+
+        let unknown = xservice_build_deps(&relation, Some("nope"));
+        assert!(unknown.members.is_empty());
+        assert!(
+            unknown.scope_note.as_deref().is_some_and(|n| n.contains("`nope`")),
+            "{:?}",
+            unknown.scope_note
+        );
+    }
+
+    /// The wire shape the three surfaces print: each row names `kind`, `scope`
+    /// and `artifact`; an undeclared scope is `null`, never defaulted; the scope
+    /// keys are absent unscoped.
+    #[test]
+    fn the_build_deps_payload_names_kind_scope_and_artifact_on_every_row() {
+        let json = serde_json::to_value(xservice_build_deps(&model_library_shape(), None)).unwrap();
+        assert!(json.get("scope").is_none() && json.get("scope_note").is_none(), "{json}");
+        assert!(json["headline"]["summary"].as_str().unwrap().contains("never a runtime coupling"));
+        let adapter = json["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["member"] == "archive-reporting-adapter")
+            .unwrap();
+        let rows = adapter["builds_against"].as_array().unwrap();
+        let test_row = rows.iter().find(|r| r["scope"] == "test").expect("a declared scope");
+        assert_eq!(test_row["kind"], "dependency");
+        assert_eq!(test_row["artifact"], format!("{G}:reporting-kafka-models"));
+        assert_eq!(json["cross_context"][0]["libraries"][0]["artifact"], format!("{G}.archive:kafka-models"));
+        assert_eq!(test_row["to"], "reporting-kafka-models");
+        let parent_row = rows.iter().find(|r| r["kind"] == "parent").unwrap();
+        assert!(parent_row["scope"].is_null(), "undeclared is null, never `compile`");
+        assert_eq!(json["cross_context"][0]["libraries"][1]["context"], "mailbox");
     }
 }

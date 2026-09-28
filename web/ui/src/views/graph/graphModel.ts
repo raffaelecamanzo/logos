@@ -60,6 +60,10 @@ export const EDGE_STYLE: Record<string, "solid" | "dashed" | "dotted"> = {
   // service map now draws through a topic node — not a cross-service rollup arm.
   publishes: "solid",
   subscribes: "dashed",
+  // The service map's build layer (S-464, FR-WS-33): a member building against
+  // another — a BUILD dependency, never a runtime coupling (BR-58). Its own
+  // class, drawn only behind the map's off-by-default legend toggle.
+  build: "dashed",
 };
 
 /** Edge color by relationship kind — distinct, mutually-legible hues (CR-030). */
@@ -89,6 +93,9 @@ export const EDGE_COLOR: Record<string, string> = {
   // two hops read as one coupling: `publishes` into it, `subscribes` out of it.
   publishes: "#0891b2",
   subscribes: "#0891b2",
+  // The build layer (S-464) takes a hue no runtime arm uses, so a build edge can
+  // never be read as a coupling the bridge resolved.
+  build: "#65a30d",
 };
 
 /** Node sizing — a base scaled gently by degree; the selection is bumped so it pops. */

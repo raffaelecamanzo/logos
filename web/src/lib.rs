@@ -59,7 +59,7 @@ use axum::{
 #[cfg(feature = "agents")]
 use axum::response::sse::{KeepAlive, Sse};
 use logos_core::config::{ConfigError, PolicyFile};
-use logos_core::federation::{discover, Backing, ContractBridge, EngineRegistry};
+use logos_core::federation::{discover, Backing, BuildDependencies, ContractBridge, EngineRegistry};
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
 use logos_core::observability::{in_surface, Surface};
@@ -454,6 +454,10 @@ pub(crate) struct WebState {
     /// ([FR-WS-04]); inert under [`Backing::Single`]. Shared with the workspace
     /// handlers so a fan-out stitches over one bridge edge set.
     bridge: Arc<ContractBridge>,
+    /// The build-dependency relation, held beside the bridge and joined on its
+    /// first query ([FR-WS-33]); inert under [`Backing::Single`]. Never a runtime
+    /// coupling: nothing that reads the bridge reads it ([BR-58]).
+    build_deps: Arc<BuildDependencies>,
     intent: IntentToken,
     /// The chat seam (S-170): production resolves the configured provider; the
     /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
@@ -493,6 +497,12 @@ impl FromRef<WebState> for Arc<Backing<Engine>> {
 impl FromRef<WebState> for Arc<ContractBridge> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.bridge)
+    }
+}
+
+impl FromRef<WebState> for Arc<BuildDependencies> {
+    fn from_ref(state: &WebState) -> Self {
+        Arc::clone(&state.build_deps)
     }
 }
 
@@ -654,6 +664,7 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
             engine,
             backing,
             bridge,
+            build_deps: Arc::new(BuildDependencies::new()),
             intent,
             chat,
             wiki,
@@ -666,6 +677,7 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
             engine,
             backing,
             bridge,
+            build_deps: Arc::new(BuildDependencies::new()),
             intent,
         }
     }
@@ -717,6 +729,7 @@ pub fn router_with_chat(
         engine,
         backing,
         bridge: Arc::new(ContractBridge::new()),
+        build_deps: Arc::new(BuildDependencies::new()),
         intent,
         chat,
         wiki,
@@ -747,6 +760,7 @@ pub fn router_with_wiki(
         engine,
         backing,
         bridge: Arc::new(ContractBridge::new()),
+        build_deps: Arc::new(BuildDependencies::new()),
         intent,
         chat,
         wiki,
@@ -839,6 +853,9 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/workspace/roster", get(api_v1::workspace_roster))
         .route("/api/v1/workspace/status", get(api_v1::workspace_status))
         .route("/api/v1/workspace/route-providers", get(api_v1::workspace_route_providers))
+        // S-464 / FR-WS-33: the build-dependency relation — a build dependency,
+        // never a runtime coupling (BR-58); the service map's off-by-default layer.
+        .route("/api/v1/workspace/build-deps", get(api_v1::workspace_build_deps))
         .route("/api/v1/workspace/search", get(api_v1::workspace_search))
         .route("/api/v1/workspace/callers", get(api_v1::workspace_callers))
         .route("/api/v1/workspace/impact", get(api_v1::workspace_impact))

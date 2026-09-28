@@ -30,11 +30,14 @@
 
 import type {
   BridgeEdge,
+  BuildEdgeKind,
+  BuildsAgainst,
   ConfigValueRefusal,
   MemberTopics,
   MemberWarmStateLabel,
   ValueProvenance,
   WorkspaceStatus,
+  XserviceBuildDeps,
 } from "../../api/types.ts";
 import type { CanvasEdge, LoadedSet } from "../graph/graphModel.ts";
 
@@ -584,5 +587,113 @@ export function buildServiceMap(
     // vocabulary has exactly one author.
     awaitingIndex: members.filter((m) => m.warmState === "deferred").map((m) => m.name),
     degraded: members.filter((m) => m.warmState === "degraded").map((m) => m.name),
+  };
+}
+
+// ── The build layer (S-464, CR-148, FR-WS-33, ADR-69 point 4) ────────────────
+// A member building against another is a BUILD dependency, never a runtime
+// coupling (BR-58). So the layer is a separate projection with its own edge
+// class, never folded into `buildServiceMap`'s links: the view draws it only
+// behind a legend toggle that is off by default, and a map with the toggle off
+// is exactly the runtime map.
+
+/** The canvas edge type every build edge is drawn in — one class, whatever the
+ *  kind, so the legend grammar gains one row rather than four. */
+export const BUILD_EDGE_TYPE = "build";
+
+/** The reference kinds in the order a link states them. */
+const BUILD_KIND_ORDER: readonly BuildEdgeKind[] = ["parent", "dependency", "managed", "bom-import"];
+
+/** One member pair on the build layer: every row from one member to another,
+ *  collapsed to a single line. */
+export interface BuildLink {
+  /** The member that builds against `to`. */
+  from: string;
+  /** The member producing what `from` builds against. */
+  to: string;
+  /** The distinct kinds between them, in {@link BUILD_KIND_ORDER}. */
+  kinds: BuildEdgeKind[];
+  /** The distinct artifacts, sorted. */
+  artifacts: string[];
+  /** Manifest references behind the line — never rounded. */
+  references: number;
+}
+
+/** A declared `platform` member whose inbound build edges are collapsed into it
+ *  rather than drawn — one statement instead of dozens of converging lines. */
+export interface CollapsedPlatform {
+  member: string;
+  /** Distinct members building against it. */
+  inbound: number;
+}
+
+/** The build layer the view draws when its toggle is on. */
+export interface BuildLayer {
+  /** One `build` canvas edge per drawn {@link BuildLink}. */
+  edges: CanvasEdge[];
+  /** The drawn member pairs, sorted by (from, to) — the accessible twin. */
+  links: BuildLink[];
+  /** The declared platforms, each with its collapsed in-degree, keyed on
+   *  `headline.platform_apart.members`. Empty when none is declared. */
+  collapsed: CollapsedPlatform[];
+}
+
+/**
+ * Project the build-dependency relation onto the service map's roster.
+ *
+ * Every row is read once, from its `from` member's `builds_against` (the same row
+ * also sits in its `to` member's `built_against_by`). A row flagged `platform` is
+ * never drawn: its target is a declared platform member, and those rows collapse
+ * into the {@link CollapsedPlatform} statement instead (ADR-69 point 3). A row
+ * whose ends are not both roster services is dropped for the reason an unknown
+ * binding is: the canvas resolves links by node id, and inventing an endpoint
+ * would fabricate a service (NFR-RA-05).
+ */
+export function buildLayer(deps: XserviceBuildDeps, members: readonly ServiceMember[]): BuildLayer {
+  const roster = new Set(members.map((m) => m.name));
+  const rows: BuildsAgainst[] = deps.members.flatMap((m) => m.builds_against);
+
+  const collapsed: CollapsedPlatform[] = (deps.headline.platform_apart?.members ?? []).map(
+    (member) => ({
+      member,
+      inbound: new Set(rows.filter((r) => r.platform && r.to === member).map((r) => r.from)).size,
+    }),
+  );
+
+  const byPair = new Map<string, { link: BuildLink; kinds: Set<BuildEdgeKind>; artifacts: Set<string> }>();
+  for (const r of rows) {
+    if (r.platform) continue;
+    if (!roster.has(r.from) || !roster.has(r.to) || r.from === r.to) continue;
+    const key = `${r.from}\u0000${r.to}`;
+    let entry = byPair.get(key);
+    if (!entry) {
+      entry = {
+        link: { from: r.from, to: r.to, kinds: [], artifacts: [], references: 0 },
+        kinds: new Set(),
+        artifacts: new Set(),
+      };
+      byPair.set(key, entry);
+    }
+    entry.kinds.add(r.kind);
+    entry.artifacts.add(r.artifact);
+    entry.link.references += r.references;
+  }
+
+  const links = [...byPair.values()]
+    .map(({ link, kinds, artifacts }) => ({
+      ...link,
+      kinds: BUILD_KIND_ORDER.filter((k) => kinds.has(k)),
+      artifacts: [...artifacts].sort((a, b) => a.localeCompare(b)),
+    }))
+    .sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+
+  return {
+    edges: links.map((l) => ({
+      source: serviceId(l.from),
+      target: serviceId(l.to),
+      edge_type: BUILD_EDGE_TYPE,
+    })),
+    links,
+    collapsed,
   };
 }

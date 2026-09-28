@@ -2,7 +2,12 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { BridgeEdge, CrossServiceCoverage } from "../../api/types.ts";
+import type {
+  BridgeEdge,
+  BuildDependencyHeadline,
+  CrossServiceCoverage,
+  XserviceBuildDeps,
+} from "../../api/types.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { scopedMember, setScopedMember } from "../../workspace/scope.ts";
 import { stubApi } from "../../workspace/testFixtures.ts";
@@ -67,6 +72,18 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
         .filter((e) => e.edge_type === "broker-topic")
         .map((e) => (
           <span key={`flat:${e.source}->${e.target}`} data-testid="canvas-flat-broker-edge">
+            {`${e.source}->${e.target}:${e.edge_type}`}
+          </span>
+        ))}
+      {/* The BUILD layer's edges (S-464), surfaced as DOM for the same reason as
+          the hops above, and FILTERED to the `build` class so every fixture
+          without a build layer — the recorded snapshots included — renders
+          exactly the DOM it did before. The edge type is printed, so "a distinct
+          class" is asserted on what the canvas was handed, not on the model. */}
+      {loaded.edges
+        .filter((e) => e.edge_type === "build")
+        .map((e) => (
+          <span key={`build:${e.source}->${e.target}`} data-testid="canvas-build-edge">
             {`${e.source}->${e.target}:${e.edge_type}`}
           </span>
         ))}
@@ -1278,5 +1295,164 @@ describe("WorkspaceView — cross-service impact (S-250, FR-UI-29)", () => {
       await screen.findByText(/Read from `orders.base` \(docker\)/),
     ).toBeInTheDocument();
     expect(await screen.findAllByText("Written at the call site")).not.toHaveLength(0);
+  });
+});
+
+// ── S-464 / CR-148 / FR-WS-33: the build layer, asserted on RENDERED DOM ──────
+// A build dependency is never a runtime coupling (BR-58): the layer is off by
+// default, draws in its own class when on, collapses declared platforms, and the
+// cross-context hint is never an edge. Every assertion reads what the user is
+// shown (or what the canvas was handed), never `buildLayer`'s return value.
+
+/** `web` is a declared platform: `api`'s parent edge into it is collapsed. */
+const BUILD_HEADLINE: BuildDependencyHeadline = {
+  build_dependency_pairs: { pairs: 1, parent: 0, dependency: 1, managed: 0, "bom-import": 0 },
+  references: { references: 5, to_member: 1, to_platform: 1, external: 3 } as BuildDependencyHeadline["references"],
+  members: { members: 2, read: 2, with_manifests: 2, manifests: 2, manifests_read: 2 },
+  platform_apart: {
+    members: ["web"],
+    build_dependency_pairs: { pairs: 1, parent: 1, dependency: 0, managed: 0, "bom-import": 0 },
+    summary: "1 pairs (parent 1 · dependency 0 · managed 0 · bom-import 0) into 1 declared platform member",
+  },
+  collisions: [],
+  platform_candidates: [],
+  summary:
+    "1 pairs (parent 0 · dependency 1 · managed 0 · bom-import 0) built against another member, from 1 of 5 referenced artifacts; a build dependency, never a runtime coupling",
+};
+
+const PLATFORM_ROW = {
+  from: "api",
+  to: "web",
+  kind: "parent" as const,
+  scope: null,
+  artifact: "com.acme:web",
+  references: 1,
+  platform: true as const,
+};
+const DEPENDENCY_ROW = {
+  from: "web",
+  to: "api",
+  kind: "dependency" as const,
+  scope: null,
+  artifact: "com.acme:api-client",
+  references: 2,
+};
+
+const BUILD_DEPS: XserviceBuildDeps = {
+  headline: BUILD_HEADLINE,
+  members: [
+    { member: "api", builds_against: [PLATFORM_ROW], built_against_by: [DEPENDENCY_ROW] },
+    { member: "web", builds_against: [DEPENDENCY_ROW], built_against_by: [PLATFORM_ROW] },
+  ],
+  cross_context: [
+    {
+      member: "api",
+      contexts: ["archive", "mailbox"],
+      libraries: [
+        { context: "archive", artifact: "com.acme.archive:kafka-models", member: "archive-kafka-models" },
+        { context: "mailbox", artifact: "com.acme.mailbox:kafka-models", member: "mailbox-kafka-models" },
+      ],
+    },
+  ],
+};
+
+function buildEdges(): string[] {
+  return screen.queryAllByTestId("canvas-build-edge").map((e) => e.textContent ?? "");
+}
+
+describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => {
+  it("renders NO toggle and fetches nothing over a workspace with no build manifest", async () => {
+    const calls = stubApi({ providers: [BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas")).toBeInTheDocument());
+    expect(screen.queryByRole("checkbox", { name: /builds against/i })).toBeNull();
+    expect(screen.queryByText(/build dependenc/i)).toBeNull();
+    expect(calls().some((u) => u.includes("workspace/build-deps"))).toBe(false);
+    expect(buildEdges()).toEqual([]);
+  });
+
+  it("draws NO build edge until the legend toggle is switched on — it is off by default", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
+    mount();
+    const toggle = await screen.findByRole("checkbox", { name: /draw what each member builds against/i });
+    // Wait for the relation to arrive (the hint card renders from it), so "no
+    // edge" is asserted with the data present rather than merely not loaded yet.
+    await screen.findByText("Cross-context model hint");
+    expect(toggle).not.toBeChecked();
+    expect(buildEdges()).toEqual([]);
+    expect(screen.getByTestId("canvas-edges")).toHaveTextContent("1");
+    expect(screen.queryByRole("table", { name: /accessible twin of the build layer/i })).toBeNull();
+  });
+
+  it("with the toggle ON, draws build edges in their own class and collapses platform members", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
+    mount();
+    await screen.findByText("Cross-context model hint");
+    await userEvent.click(screen.getByRole("checkbox", { name: /draw what each member builds against/i }));
+
+    // The one non-platform row is drawn, in the `build` class; `api`'s parent
+    // edge into the declared platform `web` is NOT drawn — it is collapsed.
+    expect(buildEdges()).toEqual(["service:web->service:api:build"]);
+    expect(screen.getByTestId("canvas-edges")).toHaveTextContent("2");
+    // The runtime edge is untouched beside it: one route line, still one.
+    expect(screen.getByText(/HTTP \(OpenAPI ↔ route\)/)).toBeInTheDocument();
+
+    const collapsed = screen.getAllByTestId("collapsed-platform").map((e) => e.textContent);
+    expect(collapsed).toEqual(["web (1 member build against it)"]);
+
+    const table = screen.getByRole("table", { name: /accessible twin of the build layer/i });
+    const cells = [...within(table).getAllByRole("cell")].map((c) => c.textContent);
+    expect(cells).toEqual(["web", "api", "dependency", "com.acme:api-client", "2"]);
+    expect(screen.getByText("Builds against (from its build manifest)")).toBeInTheDocument();
+
+    // And off again: the layer leaves the canvas entirely.
+    await userEvent.click(screen.getByRole("checkbox", { name: /draw what each member builds against/i }));
+    expect(buildEdges()).toEqual([]);
+    expect(screen.queryAllByTestId("collapsed-platform")).toEqual([]);
+  });
+
+  it("lists the cross-context hint with every library named, and NEVER draws it as an edge", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
+    mount();
+    const card = (await screen.findByText("Cross-context model hint")).closest("section")!;
+    const hint = within(card).getByRole("table");
+    expect(within(hint).getByRole("cell", { name: "api" })).toBeInTheDocument();
+    expect(within(hint).getByText("com.acme.archive:kafka-models")).toBeInTheDocument();
+    expect(within(hint).getByText("com.acme.mailbox:kafka-models")).toBeInTheDocument();
+    expect(within(hint).getByRole("cell", { name: "archive, mailbox" })).toBeInTheDocument();
+
+    // Toggle on: the hint's libraries are no canvas edge, and their producers
+    // (not roster services) are no canvas node.
+    await userEvent.click(screen.getByRole("checkbox", { name: /draw what each member builds against/i }));
+    expect(buildEdges().some((e) => e.includes("kafka-models"))).toBe(false);
+    expect(screen.queryByRole("button", { name: "archive-kafka-models" })).toBeNull();
+  });
+
+  it("states the build headline on the coverage tab, apart from every runtime board", async () => {
+    stubApi({ coverage: COVERAGE, providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+    const card = screen.getByRole("heading", { name: "Build dependencies" }).closest("section")!;
+    expect(card.textContent).toContain(BUILD_HEADLINE.summary);
+    expect(card.textContent).toContain("never a runtime coupling");
+    expect(card.textContent).toContain("Declared platform web");
+    // The runtime headline is still the runtime headline: the roll-up counts no build pair.
+    expect(screen.getByText(/2 services/).textContent).toMatch(/1 bound · 1 ambiguous · 1 unbound/);
+  });
+
+  /* A workspace with no build manifest renders the coverage tab byte-for-byte as
+     before the build layer existed. The recorded file was written from the tree
+     as it stood BEFORE S-464 (the view reverted to its merge-base version for the
+     recording run) and is never re-recorded with `-u`. The map tab's twin is the
+     S-419 `service-map.literal-only.html` recording above, which this story
+     leaves passing. */
+  it("renders a manifest-less workspace's coverage tab identically to the DOM recorded before the build layer", async () => {
+    stubApi({ coverage: COVERAGE, providers: [BINDING] });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+    const panel = screen.getByRole("tabpanel");
+    await expect(panel.innerHTML).toMatchFileSnapshot(
+      "./__snapshots__/coverage.no-build-manifests.html",
+    );
   });
 });
