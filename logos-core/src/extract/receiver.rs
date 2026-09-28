@@ -20,15 +20,18 @@
 //!
 //! | marker | receiver | `T` |
 //! |---|---|---|
-//! | `name` | `x.send()` | [`DeclaredTypes::get`]: the one type the file declares `x` with; a name the file never declares as a variable is a static type name when its single-type import or its own declaration names that type |
-//! | `field` | `this.x.send()` | [`DeclaredTypes::field`] (S-398) |
+//! | `name` | `x.send()` | [`DeclaredTypes::get`]: the one type the file declares `x` with, where `x` is declared in scope at the call (a field of the enclosing class, or in the callable around it); a name the file never declares as a variable is a static type name when its single-type import or its own declaration names that type |
+//! | `field` | `this.x.send()` | [`DeclaredTypes::field`] (S-398), where the enclosing class declares the field `x` itself |
 //! | `this` | `this.send()` | the enclosing class |
 //! | `super` | `super.send()` | the enclosing class's `extends`, as S-466's row records it ([`declared_superclass`]) |
 //! | `implicit` | `send()` | the enclosing class, when nothing else in scope could supply `send` |
 //!
-//! Everything else keeps its bare row: a chained call (no marker), a name
-//! bound by an untyped lambda parameter, a name declared with two disagreeing
-//! types, a generic type variable, an array, `var`, and any `this` / `super` /
+//! Everything else keeps its bare row: a chained call (no marker); a name the
+//! file also declares where [`DeclaredTypes`] cannot read its type (an untyped
+//! lambda parameter, a for-each, catch, pattern or varargs variable — the
+//! `unproven` marker); a variable declared nowhere in scope at the call (an
+//! inherited or outer class's field); a name declared with two disagreeing
+//! types; a generic type variable, an array, `var`; and any `this` / `super` /
 //! bare call inside an anonymous class body, whose class has no name.
 //!
 //! `T` is written as the file names it (`Mailer`, or `a::b::Mailer` from a
@@ -46,7 +49,7 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 use super::broker::anonymous_class_body;
-use super::config::accessor::DeclaredTypes;
+use super::config::accessor::{outermost_callable, DeclaredTypes};
 use super::{declared_superclass, type_parameters_in_scope, Decl, RefFact};
 use crate::model::{EdgeKind, NodeKind, RefForm};
 use crate::resolve::STATIC_WILDCARD_ALIAS;
@@ -73,10 +76,12 @@ enum Shape {
 pub(super) struct Receivers<'tree> {
     /// invocation node id → the shape of its receiver.
     shapes: HashMap<usize, Shape>,
-    /// Every name an untyped lambda parameter binds. File-scoped, like
-    /// [`DeclaredTypes`]: such a name's type is not the one the file declares
-    /// for it elsewhere, so it is poisoned for the whole file.
-    untyped: HashSet<String>,
+    /// Every name the file declares in a way [`DeclaredTypes`] does not read — an
+    /// untyped lambda parameter, a for-each variable, a catch parameter, a
+    /// pattern variable, a varargs parameter. File-scoped, like
+    /// [`DeclaredTypes`]: the type the file declares for that name elsewhere is
+    /// not proven to be this one's, so the name is poisoned for the whole file.
+    unproven: HashSet<String>,
     /// The names the file's NON-static single-type imports bring into scope — a
     /// static import names a member, never a type.
     type_imports: HashSet<String>,
@@ -105,7 +110,7 @@ impl<'tree> Receivers<'tree> {
     pub(super) fn for_query(capture_names: &[&str]) -> Option<Self> {
         capture_names.iter().any(|c| is_marker(c)).then(|| Self {
             shapes: HashMap::new(),
-            untyped: HashSet::new(),
+            unproven: HashSet::new(),
             type_imports: HashSet::new(),
             sites: Vec::new(),
         })
@@ -115,9 +120,9 @@ impl<'tree> Receivers<'tree> {
     /// module names no grammar node kind or field, only the query's markers.
     pub(super) fn mark(&mut self, capture: &str, node: Node<'tree>, source: &[u8]) {
         let text = || node.utf8_text(source).ok().map(|t| t.trim().to_string());
-        if capture == "ref.receiver.untyped" {
+        if capture == "ref.receiver.unproven" {
             if let Some(name) = text() {
-                self.untyped.insert(name);
+                self.unproven.insert(name);
             }
             return;
         }
@@ -175,6 +180,9 @@ impl<'tree> Receivers<'tree> {
                 && r.alias.as_deref() == Some(STATIC_WILDCARD_ALIAS)
         });
 
+        // A callable's own declarations, keyed by the callable — the scope a
+        // simple-name receiver must be declared in (see `declared_in_scope`).
+        let mut scopes: HashMap<usize, DeclaredTypes> = HashMap::new();
         let mut typed: Vec<(usize, String)> = Vec::new();
         for &(row, invocation) in &self.sites {
             let Some(shape) = self.shapes.get(&invocation.id()) else {
@@ -183,10 +191,24 @@ impl<'tree> Receivers<'tree> {
             let name = refs[row].target.as_str();
             let provable = |t: &str| provable_type(t, invocation, file.source);
             let head = match shape {
-                Shape::Name(x) if self.untyped.contains(x) => None,
-                Shape::Name(x) if types().declares(x) => types().get(x).filter(|t| provable(t)).map(str::to_string),
+                Shape::Name(x) if self.unproven.contains(x) => None,
+                // A variable: typed only where it is declared in scope at the
+                // call — the file-wide type is then its type, because every
+                // declaration of the name in the file agrees. Declared nowhere
+                // in scope, it is inherited or an outer class's: unproven.
+                Shape::Name(x) if types().declares(x) => declared_in_scope(invocation, x, file, &mut scopes)
+                    .then(|| types().get(x))
+                    .flatten()
+                    .filter(|t| provable(t))
+                    .map(str::to_string),
                 Shape::Name(x) => (self.type_imports.contains(x) || declares_type(file.decls, x)).then(|| x.clone()),
-                Shape::Field(x) => types().field(x).filter(|t| provable(t)).map(str::to_string),
+                // `this.x` is the enclosing class's field only when that class
+                // declares it; an inherited `x` is another class's.
+                Shape::Field(x) => enclosing_class(invocation, file)
+                    .filter(|&i| declares_field(file.decls, i, x))
+                    .and_then(|_| types().field(x))
+                    .filter(|t| provable(t))
+                    .map(str::to_string),
                 Shape::This => enclosing_class(invocation, file).map(|i| file.decls[i].name.clone()),
                 Shape::Super => enclosing_class(invocation, file)
                     .and_then(|i| file.symbols[i].as_ref())
@@ -252,6 +274,35 @@ fn enclosing_class(invocation: Node<'_>, file: &FileDecls<'_, '_>) -> Option<usi
         at = node.parent();
     }
     None
+}
+
+/// Whether `name`, a variable the file declares, is declared in scope at
+/// `invocation`: as a field of the enclosing class, or anywhere in the outermost
+/// callable around the call (its parameters, its locals, a local or anonymous
+/// class's members) — read by [`DeclaredTypes`] over that callable alone, so the
+/// rule for what a declaration is stays the one [`DeclaredTypes::build`] has.
+fn declared_in_scope(
+    invocation: Node<'_>,
+    name: &str,
+    file: &FileDecls<'_, '_>,
+    scopes: &mut HashMap<usize, DeclaredTypes>,
+) -> bool {
+    if enclosing_class(invocation, file).is_some_and(|i| declares_field(file.decls, i, name)) {
+        return true;
+    }
+    outermost_callable(invocation).is_some_and(|callable| {
+        scopes
+            .entry(callable.id())
+            .or_insert_with(|| DeclaredTypes::build(callable, file.source))
+            .declares(name)
+    })
+}
+
+/// Whether the class at `class` declares a field named `name` itself.
+fn declares_field(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
+    decls
+        .iter()
+        .any(|d| d.parent == Some(class) && d.name == name && d.kind == NodeKind::Field)
 }
 
 /// Whether the class at `class` declares a callable named `name` itself.

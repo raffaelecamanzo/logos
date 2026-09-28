@@ -346,6 +346,23 @@ fn writes_dimensions(type_text: &str) -> bool {
     })
 }
 
+/// The outermost node around `node` that declares a callable — the highest
+/// ancestor field-naming `parameters` — or [`None`] at a field position (see
+/// [`field_position`]). The scope a name used at `node` can be declared in
+/// below its type's own members: a method's parameters and locals, and the
+/// members of any local or anonymous class inside it (S-467).
+pub(crate) fn outermost_callable(node: Node<'_>) -> Option<Node<'_>> {
+    let mut found = None;
+    let mut at = Some(node);
+    while let Some(current) = at {
+        if current.child_by_field_name(PARAMETERS_FIELD).is_some() {
+            found = Some(current);
+        }
+        at = current.parent();
+    }
+    found
+}
+
 /// The simple name of a possibly-generic, possibly-qualified type:
 /// `com.acme.Props<String>` → `Props`.
 fn simple_type_name(declared: &str) -> &str {

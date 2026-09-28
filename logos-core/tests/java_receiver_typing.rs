@@ -569,3 +569,96 @@ fn sync_equals_a_full_reindex_after_the_receivers_type_gains_the_method() {
     assert_eq!(into_mailer, 4);
     assert_eq!(binding_facts(rt), cold_facts(&tmp));
 }
+
+/// A file-wide type is a variable's type only where the variable is declared
+/// in scope and every declaration of its name is one the file reads — each
+/// row here was typed `Mailer::…` by a scope-blind lookup, and bound to
+/// `Mailer.send`, before review (S-467 review, [NFR-RA-05]):
+///
+/// * `Loop.two` — a for-each variable `m` of type `Audit`, beside a `Mailer m`
+///   parameter elsewhere;
+/// * `Catch.go` — a catch parameter `e`, beside a `Mailer e` field;
+/// * `Pattern.go` — an `instanceof Audit m` pattern variable, beside a field;
+/// * `Varargs.two` — `Mailer... xs` is an array, beside a `Mailer xs`;
+/// * `Inherit.two` — `m` is `Base2`'s inherited `Audit m`, beside a local
+///   `Mailer m` in another method;
+/// * `InheritF.Sub.two` — `this.m` is `Base2`'s field, not the outer class's.
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+const SCOPED: [(&str, &str); 8] = [
+    (
+        "src/main/java/com/x/svc/Oops.java",
+        "package com.x.svc;\n\npublic class Oops extends RuntimeException {\n    public void send() {}\n}\n",
+    ),
+    (
+        "src/main/java/com/x/base/Base2.java",
+        "package com.x.base;\n\nimport com.x.svc.Audit;\n\npublic class Base2 {\n    protected Audit m;\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Loop.java",
+        "package com.x.svc;\n\nimport com.x.mail.Mailer;\nimport java.util.List;\n\npublic class Loop {\n    void one(Mailer m) { m.send(); }\n    void two(List<Audit> audits) { for (Audit m : audits) { m.send(); } }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Catch.java",
+        "package com.x.svc;\n\nimport com.x.mail.Mailer;\n\npublic class Catch {\n    private Mailer e;\n    void go() { try { first(); } catch (Oops e) { e.send(); } }\n    void first() {}\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Pattern.java",
+        "package com.x.svc;\n\nimport com.x.mail.Mailer;\n\npublic class Pattern {\n    private Mailer m;\n    void go(Object o) { if (o instanceof Audit m) { m.send(); } }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Varargs.java",
+        "package com.x.svc;\n\nimport com.x.mail.Mailer;\n\npublic class Varargs {\n    void one(Mailer xs) { xs.send(); }\n    void two(Mailer... xs) { xs.toString(); }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Inherit.java",
+        "package com.x.svc;\n\nimport com.x.base.Base2;\nimport com.x.mail.Mailer;\n\npublic class Inherit extends Base2 {\n    void one() { Mailer m = new Mailer(); m.send(); }\n    void two() { m.send(); }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/InheritF.java",
+        "package com.x.svc;\n\nimport com.x.base.Base2;\nimport com.x.mail.Mailer;\n\npublic class InheritF {\n    private Mailer m;\n    void one() { m.send(); }\n    static class Sub extends Base2 {\n        void two() { this.m.send(); }\n    }\n}\n",
+    ),
+];
+
+#[test]
+fn a_variable_is_typed_only_where_it_is_declared_in_scope_and_readably() {
+    let tmp = fixture();
+    for (rel, text) in SCOPED {
+        write(tmp.path(), rel, text);
+    }
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let rows = |file: &str| calls_from(rt, &format!("src/main/java/com/x/svc/{file}.java"));
+    // The near misses still type: a local, an own field. (`Loop.one`'s `m` does
+    // not: a for-each `m` poisons the name for the whole file, like a
+    // disagreeing declaration — the refusing direction.)
+    assert!(rows("Loop").contains(&row("one", "send", RefForm::Method)));
+    assert!(rows("Inherit").contains(&row("one", "Mailer::send", RefForm::Path)));
+    assert!(rows("InheritF").contains(&row("one", "Mailer::send", RefForm::Path)));
+    // The refusals keep the bare row.
+    for (file, source, name) in [
+        ("Loop", "two", "send"),
+        ("Catch", "go", "send"),
+        ("Pattern", "go", "send"),
+        ("Varargs", "two", "toString"),
+        ("Inherit", "two", "send"),
+        ("InheritF", "two", "send"),
+    ] {
+        assert!(
+            rows(file).contains(&row(source, name, RefForm::Method)),
+            "{file}.{source}: {:?}",
+            rows(file)
+        );
+    }
+    // And none of them binds to `Mailer.send`.
+    let wrong: Vec<_> = call_edges(rt)
+        .into_iter()
+        .filter(|(s, t)| {
+            *t == format!("{MAILER_FILE}:send")
+                && ["Loop.java:two", "Catch.java:go", "Pattern.java:go", "Inherit.java:two", "InheritF.java:two"]
+                    .iter()
+                    .any(|w| s.ends_with(w))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:?}");
+}

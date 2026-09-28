@@ -58,8 +58,12 @@
 ;   @ref.receiver.super    — `super.send()`: the enclosing class's `extends`.
 ;   @ref.receiver.implicit — `send()`: the enclosing class, where nothing else
 ;                            in scope could supply the name.
-;   @ref.receiver.untyped  — an untyped lambda parameter (`x -> x.send()`):
-;                            that name's type is not what the file declares.
+;   @ref.receiver.unproven — a name declared where `DeclaredTypes` does not
+;                            read its type: an untyped lambda parameter
+;                            (`x -> x.send()`), a for-each variable, a catch
+;                            parameter, a pattern variable, a varargs
+;                            parameter. The type the file declares for that
+;                            name elsewhere is not proven to be this one's.
 ;
 ; Anything else — a chained call, `a.b.send()`, `Outer.this.send()` — carries
 ; no marker and keeps its bare row.
@@ -70,9 +74,15 @@
 (method_invocation
   object: (field_access object: (this) field: (identifier) @ref.receiver.field))
 (method_invocation !object name: (identifier) @ref.receiver.implicit)
-(lambda_expression parameters: (identifier) @ref.receiver.untyped)
+(lambda_expression parameters: (identifier) @ref.receiver.unproven)
 (lambda_expression
-  parameters: (inferred_parameters (identifier) @ref.receiver.untyped))
+  parameters: (inferred_parameters (identifier) @ref.receiver.unproven))
+(enhanced_for_statement name: (identifier) @ref.receiver.unproven)
+(catch_formal_parameter name: (identifier) @ref.receiver.unproven)
+(instanceof_expression name: (identifier) @ref.receiver.unproven)
+(type_pattern (identifier) @ref.receiver.unproven)
+(record_pattern_component (identifier) @ref.receiver.unproven)
+(spread_parameter (variable_declarator name: (identifier) @ref.receiver.unproven))
 
 (import_declaration
   "static"? @ref.import.static
