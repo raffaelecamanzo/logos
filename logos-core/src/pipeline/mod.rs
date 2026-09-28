@@ -1984,14 +1984,9 @@ fn sync_build_manifests(
     let stored: HashMap<String, Option<String>> =
         stored.into_iter().map(|m| (m.path, m.content_hash)).collect();
     // The walk is the whole member: the first one over this store marks its
-    // facts extracted, whatever else it finds.
+    // facts extracted, whatever else it finds. A full walk with no manifest
+    // named and none stored reads nothing more and reaches `!changed` below.
     let mark = scope == SyncScope::FullWalk && !extracted;
-    if requested.is_empty() && stored.is_empty() {
-        if mark {
-            runtime.submit_write(mark_build_facts_extracted)?;
-        }
-        return Ok(mark);
-    }
 
     let load = |rel: &str| -> Option<LoadedManifest> {
         let abs = canon_root.join(rel);
