@@ -1889,4 +1889,84 @@ mod tests {
         assert_eq!(GraphGranularity::from_wire(""), None);
         assert_eq!(GraphGranularity::default(), GraphGranularity::Symbol);
     }
+
+    /// A repository-scoped residue with `external` rows, grouped by the
+    /// candidate names each could be.
+    fn residue(external: &[(&[&[&str]], u64)]) -> CallResidue {
+        let external_candidates: std::collections::BTreeMap<Vec<Vec<String>>, u64> = external
+            .iter()
+            .map(|(candidates, rows)| {
+                let names = candidates
+                    .iter()
+                    .map(|fqn| fqn.iter().map(|s| (*s).to_string()).collect())
+                    .collect();
+                (names, *rows)
+            })
+            .collect();
+        let external_rows = external_candidates.values().sum::<u64>();
+        let mut reasons: std::collections::BTreeMap<CallResidueReason, u64> =
+            CallResidue::REPOSITORY_REASONS.iter().map(|r| (*r, 0)).collect();
+        reasons.insert(CallResidueReason::ExternalType, external_rows);
+        CallResidue {
+            unbound: external_rows,
+            reasons,
+            unclassified: 0,
+            scope: ResidueScope::Repository,
+            external_candidates,
+            declared_types: Vec::new(),
+        }
+    }
+
+    fn split(mut residue: CallResidue, elsewhere: &[&[&str]]) -> CallResidue {
+        let elsewhere: Vec<Vec<String>> = elsewhere
+            .iter()
+            .map(|fqn| fqn.iter().map(|s| (*s).to_string()).collect())
+            .collect();
+        residue.split_by_workspace(&|fqn: &[String]| elsewhere.iter().any(|e| e == fqn));
+        residue
+    }
+
+    #[test]
+    fn a_workspace_split_moves_only_the_rows_whose_type_another_member_declares() {
+        let moved = split(
+            residue(&[
+                (&[&["com", "x", "Mailer"]], 3),
+                (&[&["java", "util", "List"]], 2),
+            ]),
+            &[&["com", "x", "Mailer"]],
+        );
+        assert_eq!(moved.reasons[&CallResidueReason::ExternalType], 2);
+        assert_eq!(moved.reasons[&CallResidueReason::TypeInAnotherMember], 3);
+        assert_eq!(moved.scope, ResidueScope::Workspace);
+    }
+
+    #[test]
+    fn a_nested_candidate_matches_through_its_declared_outer_type() {
+        let moved = split(
+            residue(&[(&[&["com", "x", "Outer", "Inner"]], 1)]),
+            &[&["com", "x", "Outer"]],
+        );
+        assert_eq!(moved.reasons[&CallResidueReason::TypeInAnotherMember], 1);
+        assert_eq!(moved.reasons[&CallResidueReason::ExternalType], 0);
+    }
+
+    #[test]
+    fn a_row_matches_when_any_of_its_candidates_is_declared_elsewhere() {
+        let moved = split(
+            residue(&[(&[&["com", "app", "Util"], &["com", "shared", "Util"]], 1)]),
+            &[&["com", "shared", "Util"]],
+        );
+        assert_eq!(moved.reasons[&CallResidueReason::TypeInAnotherMember], 1);
+    }
+
+    #[test]
+    fn a_workspace_split_with_nothing_declared_elsewhere_states_a_zero_and_its_scope() {
+        for start in [residue(&[(&[&["java", "util", "List"]], 4)]), residue(&[])] {
+            let external = start.reasons[&CallResidueReason::ExternalType];
+            let moved = split(start, &[&["com", "x", "Mailer"]]);
+            assert_eq!(moved.reasons[&CallResidueReason::ExternalType], external);
+            assert_eq!(moved.reasons.get(&CallResidueReason::TypeInAnotherMember), Some(&0));
+            assert_eq!(moved.scope, ResidueScope::Workspace);
+        }
+    }
 }
