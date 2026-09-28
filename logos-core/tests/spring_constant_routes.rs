@@ -707,3 +707,19 @@ fn an_inheriting_enclosing_class_blocks_a_qualified_import_in_a_nested_class() {
         "an inheriting enclosing class",
     );
 }
+
+/// A single-type import written twice is one import on the qualified rung too,
+/// as a repeated static import is on the simple-name rung.
+#[test]
+fn a_repeated_single_type_import_names_its_type_once() {
+    let import = "import a.b.GlobalControllerAdvice;\n";
+    let (_tmp, engine, stats) = index(&[
+        (ADVICE_FILE, &advice(r#""emailAddress""#)),
+        (
+            &api_file("c"),
+            &api("a.c", &format!("{import}{import}"), r#""/m/{" + GlobalControllerAdvice.EMAIL + "}/size""#),
+        ),
+    ]);
+    assert_eq!(route_names(engine.runtime().unwrap()), [FOLDED_ROUTE]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
