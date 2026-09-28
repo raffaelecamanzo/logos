@@ -1057,7 +1057,7 @@ fn scan_providers(root: &Path, members: &BTreeSet<String>) -> Providers {
             out.class_level_prefixes += prefixes;
         }
 
-        for route in logos_core::resolve::framework::routes_in_source(plugin, &source) {
+        for route in logos_core::resolve::framework::routes_in_source(plugin, &rel, &source) {
             let Some(norm) = normalize_template(&route.path) else { continue };
             // Both views are built from ONE walk. The production view is the
             // headline; the with-test view exists so the test-tree sensitivity

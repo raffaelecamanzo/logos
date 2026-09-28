@@ -1297,6 +1297,202 @@ public class UserController {
     assert_eq!(result.framework.components, 1);
 }
 
+/// The silent-drop half of [FR-FW-05]'s Statement, end to end (S-469,
+/// [CR-151]): a Spring path written as a `+` chain of literals and same-type
+/// `String` constants is promoted at its folded, prefix-composed path and
+/// linked to its handler, exactly as a written path would be; one that does not
+/// fold promotes nothing and is **counted** in `routes_not_composed`, where
+/// before S-469 it left no trace at all.
+///
+/// The interface is the estate's same-type shape (`mailbox-api`'s
+/// `MailboxOperationApiV1`: implicit interface constants under a literal
+/// `@RequestMapping("/v1")`); the controller carries a class `static final`
+/// constant, a mixed list, and the two refusals CR-151 found on the estate —
+/// a constant this file does not declare (the static-import shape [S-470]
+/// resolves) and another type's constant.
+///
+/// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
+/// [CR-151]: ../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+/// [S-470]: ../../docs/planning/journal.md#s-470-a-static-imported-same-member-constant-folds-measured-on-the-reference-estate
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_constant_concatenated_paths_fold_and_the_rest_are_counted() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/MailboxOperationApiV1.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+
+@RequestMapping(\"/v1\")
+public interface MailboxOperationApiV1 {
+    String USER_ID_PARAMETER_NAME = \"userId\";
+    String OPERATIONS = \"/users/{\" + USER_ID_PARAMETER_NAME + \"}/mailboxes/operations\";
+
+    @GetMapping(value = OPERATIONS)
+    String listOperations(String userId);
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/FacadeController.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RequestMapping(\"/v1\")
+@RestController
+public class FacadeController {
+    private static final String MAILBOX = \"mailboxId\";
+
+    @GetMapping(path = \"/mailboxes/{\" + MAILBOX + \"}/size\")
+    public String size() {
+        return \"\";
+    }
+
+    @GetMapping(value = {\"/mailboxes/count\", \"/mailboxes/{\" + MAILBOX + \"}/count\", Paths.LEGACY})
+    public String count() {
+        return \"\";
+    }
+
+    @GetMapping(value = \"/mailboxes/{\" + EMAIL_ADDRESS_PARAMETER_NAME + \"}/reset\")
+    public String reset() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        [
+            "GET /v1/mailboxes/count",
+            "GET /v1/mailboxes/{mailboxId}/count",
+            "GET /v1/mailboxes/{mailboxId}/size",
+            "GET /v1/users/{userId}/mailboxes/operations",
+        ]
+    );
+    assert_eq!(result.framework.routes, 4);
+    // `Paths.LEGACY` (another type's constant) and `EMAIL_ADDRESS_PARAMETER_NAME`
+    // (not declared in the file): one each, neither dropped.
+    assert_eq!(result.framework.routes_not_composed, 2);
+
+    // A folded route links to its handler exactly like a written one.
+    let routes_to = edges_of(rt, EdgeKind::RoutesTo);
+    for (route, handler) in [
+        ("GET /v1/users/{userId}/mailboxes/operations", "listOperations"),
+        ("GET /v1/mailboxes/{mailboxId}/size", "size"),
+        ("GET /v1/mailboxes/{mailboxId}/count", "count"),
+    ] {
+        let route_id = node_id(rt, route, NodeKind::Route);
+        let handler_id = node_id(rt, handler, NodeKind::Method);
+        assert!(
+            routes_to.contains(&(route_id, handler_id)),
+            "{route} must route to {handler}: {routes_to:?}"
+        );
+    }
+}
+
+/// A class-level prefix built from the type's own constants composes end to
+/// end, through the qualified form a type's own annotation needs (Java resolves
+/// it outside the type's body). The unfoldable-prefix refusal stays pinned by
+/// `spring_non_literal_prefix_promotes_no_route_and_is_counted` above.
+#[cfg(feature = "lang-java")]
+#[test]
+fn spring_prefix_built_from_same_type_constants_composes() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/UserController.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RequestMapping(UserController.VERSION + \"/users\")
+@RestController
+public class UserController {
+    static final String VERSION = \"/v2\";
+
+    @GetMapping(value = \"/{id}\")
+    public String get() {
+        return \"\";
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(route_names(rt), ["GET /v2/users/{id}"]);
+    assert_eq!(result.framework.routes_not_composed, 0);
+}
+
+/// The fold is Java's alone: a Rust Axum and a TypeScript Express project, each
+/// writing a path built from a constant, promote exactly the routes they did
+/// before S-469 and count no refusal — their queries capture no `@fw.const.*`
+/// fact, so the fold step never runs for them ([CR-151] §3.3). The pinned
+/// figures are the pre-S-469 binary's, measured on these same fixtures and
+/// recorded in the sprint's implementation notes.
+///
+/// [CR-151]: ../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn rust_and_typescript_route_counts_are_untouched_by_the_constant_fold() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/main.rs",
+        "\
+use axum::routing::get;
+use axum::Router;
+
+const BASE: &str = \"/v1\";
+
+async fn list_users() {}
+async fn health() {}
+
+fn app() -> Router {
+    Router::new()
+        .route(\"/users\", get(list_users))
+        .route(BASE, get(health))
+}
+",
+    );
+    write(
+        tmp.path(),
+        "web/server.ts",
+        "\
+import express from \"express\";
+
+const app = express();
+const BASE = \"/v1\";
+
+export function listUsers(req: unknown, res: unknown): void {}
+
+app.get(\"/users\", listUsers);
+app.get(BASE + \"/users\", listUsers);
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(route_names(rt), ["GET /users", "GET /users"]);
+    assert_eq!(result.framework.routes, 2);
+    assert_eq!(result.framework.routes_not_composed, 0);
+}
+
 // ── C: extraction parity, the honesty fixture (no frameworks) ────────────────
 
 #[cfg(feature = "lang-c")]

@@ -199,6 +199,38 @@ pub(crate) enum RouteRefusal {
     ///
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     PathNotComposed,
+    /// A **method-level** path is present but is not a literal, and does not
+    /// fold to one ([FR-FW-05], S-469): a constant of another type, a
+    /// non-final or non-`String` field, a call, a name a supertype might
+    /// supply. Counted once per refused path **element** — a mixed list
+    /// `{"/a", X}` promotes `/a` and counts `X` — where a refused prefix counts
+    /// once per registration, because here each element is its own address
+    /// the source failed to state. Before S-469 these were dropped with no
+    /// trace at all, which left [FR-FW-05]'s "or path … counts it" clause
+    /// unmet ([CR-151] §3.1).
+    ///
+    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+    /// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+    PathNotFolded,
+}
+
+/// One compile-time `String` constant a folded path was built from — the
+/// provenance that lets a reader tell a folded route from a written one
+/// ([FR-FW-05], S-469, [CR-151] §3.2 point 4). A route whose path was written
+/// as a literal carries none.
+///
+/// Carried on the scan's matches and on [`ProvidedRoute`]; the `route` node
+/// itself is identical to a literal route's, because the `nodes` table has no
+/// column to hold it.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+/// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FoldedConstant {
+    /// The constant's simple name (`USER_ID`).
+    pub name: String,
+    /// The project-relative path of the file that declares it.
+    pub file: String,
 }
 
 /// One prefix literal a declaration wrote, with the byte range it occupies —
@@ -213,6 +245,8 @@ struct PrefixLiteral {
     /// `false` when the text is not a joinable address even though the grammar
     /// calls it a literal — see [`is_resolvable_prefix`].
     resolvable: bool,
+    /// The constants this prefix was folded from; empty for a written literal.
+    folded_from: Vec<FoldedConstant>,
 }
 
 /// A class- or interface-level path prefix and the source range it governs
@@ -254,6 +288,9 @@ struct MergedScope {
     /// refused ([`RouteRefusal::PathNotComposed`]); with `paths` non-empty the
     /// readable part wins and this is ignored.
     opaque: bool,
+    /// The constants each folded entry of `paths` was built from, keyed by the
+    /// folded text. A written prefix has no entry.
+    folded_from: HashMap<String, Vec<FoldedConstant>>,
 }
 
 /// One matched route registration in one file (pre-binding).
@@ -286,6 +323,9 @@ struct RouteMatch {
     /// declaration is this in?" — so this is always populated and prefix
     /// composition works for a query that captures no anchor at all.
     at: usize,
+    /// The constants the path was folded from — the method path's and its
+    /// prefix's alike, once composed. Empty for a route written as literals.
+    folded_from: Vec<FoldedConstant>,
 }
 
 /// One matched shared-state extractor in one file (pre-binding).
@@ -313,12 +353,30 @@ struct FileMatches {
     /// [`compose_prefixes`]. Left in place afterwards as the scan's evidence
     /// of what governed what (the unit tests assert on it).
     prefixes: Vec<PrefixScope>,
-    /// Registrations composition refused, one entry each ([`RouteRefusal`]) —
-    /// the honest count published as
+    /// Refused registrations and refused method-path elements, one entry
+    /// each ([`RouteRefusal`]; see its variants for the two grains) — the
+    /// honest count published as
     /// [`FrameworkStats::routes_not_composed`](crate::models::pipeline::FrameworkStats::routes_not_composed).
     /// Not a `path-not-composed` coverage reason: see the note on
     /// [`RouteRefusal`].
     refusals: Vec<RouteRefusal>,
+    /// Method paths written as an expression (`@fw.route.path.opaque` /
+    /// `@fw.route.path.named.opaque`), each with its byte range — drained by
+    /// [`fold_constants`], which promotes or refuses every one.
+    opaque_paths: Vec<(RouteMatch, (usize, usize))>,
+    /// Byte ranges of the captured *literal* method paths. The opaque patterns
+    /// match through the `(expression)` supertype, which a literal also is; an
+    /// opaque path at exactly a literal's range is that literal, already
+    /// promoted, and is skipped rather than read twice.
+    literal_path_spans: HashSet<(usize, usize)>,
+    /// Type bodies and field declarators the fold resolves names against
+    /// (`@fw.const.*`).
+    const_scopes: Vec<fold::ScopeCapture>,
+    const_fields: Vec<fold::FieldCapture>,
+    /// `true` once the dialect's query captured any `@fw.const.*` fact — the
+    /// opt-in that makes [`fold_constants`] run at all (a Kotlin, Rust or
+    /// TypeScript query names none, so their scans are untouched by S-469).
+    folds: bool,
 }
 
 /// Run the framework-promotion pass. See the module docs for the shape.
@@ -440,8 +498,9 @@ pub fn run(
             .collect()
     });
 
-    // Registrations composition refused across the scanned files — never a
-    // promoted node, always a counted one (FR-FW-05, NFR-RA-05).
+    // Registrations composition refused, and method paths the fold refused,
+    // across the scanned files — never a promoted node, always a counted one
+    // (FR-FW-05, NFR-RA-05).
     let routes_not_composed: u64 = scanned
         .iter()
         .map(|(_, _, m)| m.refusals.len() as u64)
@@ -530,7 +589,7 @@ fn scan_path(
     let Ok(source) = fs::read_to_string(root.join(rel)) else {
         return FileMatches::default(); // gone or unreadable — best-effort
     };
-    scan_source(parser, plugin, &source)
+    scan_source(parser, plugin, rel, &source)
 }
 
 /// One route registration as the promotion pass reads it, projected for a
@@ -548,6 +607,11 @@ pub struct ProvidedRoute {
     pub method: String,
     /// 1-based first line of the registration site.
     pub line: u32,
+    /// The constants the path was folded from ([FR-FW-05], S-469); empty for a
+    /// path written as literals.
+    ///
+    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+    pub folded_from: Vec<FoldedConstant>,
 }
 
 /// The route registrations one source file would promote, without a store.
@@ -566,12 +630,20 @@ pub struct ProvidedRoute {
 ///
 /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
 /// [`NodeKind::Route`]: crate::model::NodeKind::Route
-pub fn routes_in_source(plugin: &dyn LanguagePlugin, source: &str) -> Vec<ProvidedRoute> {
+///
+/// `rel` is the file's project-relative path. It names the declaring file in a
+/// folded route's provenance and nothing else.
+pub fn routes_in_source(plugin: &dyn LanguagePlugin, rel: &str, source: &str) -> Vec<ProvidedRoute> {
     let mut parser = Parser::new();
-    scan_source(&mut parser, plugin, source)
+    scan_source(&mut parser, plugin, rel, source)
         .routes
         .into_iter()
-        .map(|r| ProvidedRoute { path: r.path, method: r.method, line: r.start_line })
+        .map(|r| ProvidedRoute {
+            path: r.path,
+            method: r.method,
+            line: r.start_line,
+            folded_from: r.folded_from,
+        })
         .collect()
 }
 
@@ -594,7 +666,12 @@ pub fn routes_in_source(plugin: &dyn LanguagePlugin, source: &str) -> Vec<Provid
 ///   capture can express.
 ///
 /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
-fn scan_source(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &str) -> FileMatches {
+fn scan_source(
+    parser: &mut Parser,
+    plugin: &dyn LanguagePlugin,
+    rel: &str,
+    source: &str,
+) -> FileMatches {
     let mut out = FileMatches::default();
     let Some(query) = plugin.query("frameworks") else {
         return out; // a grammar without the capability promotes nothing
@@ -630,6 +707,11 @@ fn scan_source(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &str) -
             }
         }
     }
+    // A path or prefix written as an expression is folded to a literal, or
+    // refused and counted (FR-FW-05, S-469). First, so everything after it —
+    // precedence, composition, the path rule, dedup — treats a folded path
+    // exactly as a written one.
+    fold_constants(&mut out, source, rel);
     // A named `value =`/`path =` argument is the registered path where an
     // annotation also carries a positional literal (Spring's `value`/`path`
     // alias semantics, FR-FW-05); the two are separate patterns, so the
@@ -651,6 +733,83 @@ fn scan_source(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &str) -
     // names a handler — deterministically, whatever the pattern order.
     dedup_routes(&mut out.routes);
     out
+}
+
+/// Fold every path and prefix written as an expression ([FR-FW-05], S-469,
+/// [CR-151]) — the step that runs before precedence and composition, so a
+/// folded path is from then on indistinguishable from a written one except for
+/// its provenance.
+///
+/// - A **method path** (`@fw.route.path.opaque`) that folds becomes an ordinary
+///   route; one that does not is refused ([`RouteRefusal::PathNotFolded`]),
+///   once per element. One at exactly a captured literal's range is that
+///   literal and is skipped.
+/// - A **prefix** opaque range (`@fw.route.prefix.opaque`) that folds becomes a
+///   prefix literal at the same range, so [`merge_scopes`] composes it like a
+///   written one — and still judges it with [`is_resolvable_prefix`]. One that
+///   does not fold stays opaque and is refused by [`compose_prefixes`] exactly
+///   as before.
+///
+/// Runs only for a dialect that captured `@fw.const.*` facts. Without them the
+/// scan is exactly what it was before S-469: every opaque prefix stays opaque,
+/// and there are no opaque method paths to judge, because only a folding
+/// dialect's query captures them.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+/// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+fn fold_constants(out: &mut FileMatches, source: &str, rel: &str) {
+    let opaque_paths = std::mem::take(&mut out.opaque_paths);
+    if !out.folds {
+        // Refuse rather than drop, should a query ever capture an opaque path
+        // without the facts to fold it: absent facts are a fold that fails.
+        out.refusals
+            .extend(opaque_paths.iter().map(|_| RouteRefusal::PathNotFolded));
+        return;
+    }
+    let names = fold::Names::new(source, rel, &out.const_scopes, &out.const_fields);
+
+    for (route, (start, end)) in opaque_paths {
+        if out.literal_path_spans.contains(&(start, end)) {
+            continue;
+        }
+        match names.fold(start, end) {
+            Some((path, folded_from)) => out.routes.push(RouteMatch {
+                // Trimmed like a written path (see `generic_match`).
+                path: path.trim().to_string(),
+                folded_from,
+                ..route
+            }),
+            None => out.refusals.push(RouteRefusal::PathNotFolded),
+        }
+    }
+
+    let literal_prefix_spans: HashSet<(usize, usize)> = out
+        .prefixes
+        .iter()
+        .flat_map(|scope| scope.literals.iter().map(|lit| (lit.start, lit.end)))
+        .collect();
+    for scope in &mut out.prefixes {
+        let mut still_opaque = Vec::with_capacity(scope.opaque.len());
+        for (start, end) in std::mem::take(&mut scope.opaque) {
+            let folded = (!literal_prefix_spans.contains(&(start, end)))
+                .then(|| names.fold(start, end))
+                .flatten();
+            match folded {
+                Some((text, folded_from)) => {
+                    let text = text.trim().to_string();
+                    scope.literals.push(PrefixLiteral {
+                        resolvable: is_resolvable_prefix(&text),
+                        text,
+                        start,
+                        end,
+                        folded_from,
+                    });
+                }
+                None => still_opaque.push((start, end)),
+            }
+        }
+        scope.opaque = still_opaque;
+    }
 }
 
 /// Compose every route's path with the class-/interface-level prefix that
@@ -704,6 +863,7 @@ fn compose_prefixes(out: &mut FileMatches) {
                 for prefix in &scope.paths {
                     composed.push(RouteMatch {
                         path: join_route_path(prefix, &route.path),
+                        folded_from: with_prefix_provenance(&route, scope, prefix),
                         ..route.clone()
                     });
                 }
@@ -733,9 +893,13 @@ fn compose_prefixes(out: &mut FileMatches) {
             None => Vec::new(),
         };
         if !usable.is_empty() {
+            let scope = innermost_prefix(&scopes, route.at);
             for prefix in usable {
                 composed.push(RouteMatch {
                     path: join_route_path(prefix, &route.path),
+                    folded_from: scope
+                        .map(|s| with_prefix_provenance(&route, s, prefix))
+                        .unwrap_or_default(),
                     ..route.clone()
                 });
             }
@@ -746,6 +910,18 @@ fn compose_prefixes(out: &mut FileMatches) {
 
     out.routes = composed;
     out.prefixes = prefixes;
+}
+
+/// A composed route's provenance: its own path's constants, then those of the
+/// prefix it was joined onto.
+fn with_prefix_provenance(route: &RouteMatch, scope: &MergedScope, prefix: &str) -> Vec<FoldedConstant> {
+    let mut folded = route.folded_from.clone();
+    for constant in scope.folded_from.get(prefix).into_iter().flatten() {
+        if !folded.contains(constant) {
+            folded.push(constant.clone());
+        }
+    }
+    folded
 }
 
 /// Record one composition refusal, at most once per registration site.
@@ -820,13 +996,19 @@ fn merge_scopes(prefixes: &[PrefixScope]) -> Vec<MergedScope> {
                     (os, oe) != (lit.start, lit.end) && os < lit.end && lit.start < oe
                 })
             };
-            let mut paths: Vec<String> = literals
+            let surviving: Vec<&PrefixLiteral> = literals
                 .iter()
                 .filter(|lit| lit.resolvable && !disqualified(lit))
-                .map(|lit| lit.text.clone())
                 .collect();
+            let mut paths: Vec<String> = surviving.iter().map(|lit| lit.text.clone()).collect();
             paths.sort();
             paths.dedup();
+            let mut folded_from: HashMap<String, Vec<FoldedConstant>> = HashMap::new();
+            for lit in surviving.iter().filter(|lit| !lit.folded_from.is_empty()) {
+                folded_from
+                    .entry(lit.text.clone())
+                    .or_insert_with(|| lit.folded_from.clone());
+            }
             // The scope declared a prefix it could not read: an unreadable
             // literal, or an opaque capture that is not simply one of the
             // literals restated.
@@ -839,6 +1021,7 @@ fn merge_scopes(prefixes: &[PrefixScope]) -> Vec<MergedScope> {
                 end,
                 paths,
                 opaque: unread,
+                folded_from,
             }
         })
         .collect();
@@ -1070,6 +1253,17 @@ fn generic_match(
     // interpreter supports without the query having to know. `bool` is the
     // `PathOrigin::named` rank of each path.
     let mut path_nodes: Vec<(Node<'_>, bool)> = Vec::new();
+    // Paths in the same positions written as an expression (S-469), with the
+    // same `named` rank; folded or refused by `fold_constants`.
+    let mut opaque_path_nodes: Vec<(Node<'_>, bool)> = Vec::new();
+    // `@fw.const.*` facts (S-469): at most one of each per match.
+    let mut const_scope: Option<Node<'_>> = None;
+    let mut const_decl: Option<Node<'_>> = None;
+    let mut const_scope_name: Option<Node<'_>> = None;
+    let mut const_opaque = false;
+    let mut const_field: Option<Node<'_>> = None;
+    let mut const_name: Option<Node<'_>> = None;
+    let mut const_value: Option<Node<'_>> = None;
     let mut prefix_nodes: Vec<Node<'_>> = Vec::new();
     let mut prefix_scope: Option<Node<'_>> = None;
     let mut prefix_opaque: Vec<(usize, usize)> = Vec::new();
@@ -1083,6 +1277,28 @@ fn generic_match(
 
     for cap in captures {
         let name = capture_names[cap.index as usize];
+        // The constant facts describe declarations, not a registration: they
+        // mark the match as declarative but contribute no line or byte to it.
+        if name.starts_with("fw.const.") {
+            generic = true;
+            out.folds = true;
+            let slot = match name {
+                "fw.const.scope" => &mut const_scope,
+                "fw.const.scope.decl" => &mut const_decl,
+                "fw.const.scope.name" => &mut const_scope_name,
+                "fw.const.field" => &mut const_field,
+                "fw.const.name" => &mut const_name,
+                "fw.const.value" => &mut const_value,
+                "fw.const.scope.opaque" => {
+                    const_opaque = true;
+                    continue;
+                }
+                // `fw.const.type` exists only for the query's predicate.
+                _ => continue,
+            };
+            slot.get_or_insert(cap.node);
+            continue;
+        }
         if !name.starts_with("fw.route.") && !name.starts_with("fw.component.") {
             continue;
         }
@@ -1093,6 +1309,10 @@ fn generic_match(
         // Collected, not slotted — see `path_nodes` above.
         if name == "fw.route.path" || name == "fw.route.path.named" {
             path_nodes.push((cap.node, name == "fw.route.path.named"));
+            continue;
+        }
+        if name == "fw.route.path.opaque" || name == "fw.route.path.named.opaque" {
+            opaque_path_nodes.push((cap.node, name == "fw.route.path.named.opaque"));
             continue;
         }
         // Prefixes are collected the same way, and for the same reason: a
@@ -1124,6 +1344,27 @@ fn generic_match(
         return false;
     }
 
+    if let Some(scope) = const_scope {
+        out.const_scopes.push(fold::ScopeCapture {
+            start: scope.start_byte(),
+            end: scope.end_byte(),
+            decl: const_decl.map(|d| (d.start_byte(), d.end_byte())),
+            name: const_scope_name.map(|n| text(n, src).trim().to_string()),
+            opaque: const_opaque,
+        });
+    }
+    // A constant's declarator is also every-field's: `Names::new` pairs the two
+    // by the name's start byte.
+    if let Some(field) = const_name.or(const_field) {
+        out.const_fields.push(fold::FieldCapture {
+            name: text(field, src).trim().to_string(),
+            at: field.start_byte(),
+            value: const_name
+                .and(const_value)
+                .map(|v| (v.start_byte(), v.end_byte())),
+        });
+    }
+
     // A prefix declaration is its own match — it names no method and promotes
     // nothing by itself; it only tells [`compose_prefixes`] which byte range
     // its path governs.
@@ -1140,6 +1381,7 @@ fn generic_match(
                         text,
                         start: node.start_byte(),
                         end: node.end_byte(),
+                        folded_from: Vec::new(),
                     }
                 })
                 .collect(),
@@ -1170,6 +1412,26 @@ fn generic_match(
             // ([FR-FW-05]). `compose_prefixes` resolves or drops it — an
             // unprefixed pathless candidate promotes nothing, so this cannot
             // manufacture a route out of a bare marker annotation.
+            // A path written as an expression is not pathless: it waits for
+            // the fold, which promotes or counts it (S-469).
+            if !opaque_path_nodes.is_empty() {
+                for (node, named) in opaque_path_nodes {
+                    out.opaque_paths.push((
+                        RouteMatch {
+                            path: String::new(),
+                            method: mapped.clone(),
+                            handler: handler.clone(),
+                            start_line,
+                            end_line,
+                            origin: PathOrigin { site, named },
+                            at,
+                            folded_from: Vec::new(),
+                        },
+                        (node.start_byte(), node.end_byte()),
+                    ));
+                }
+                return true;
+            }
             if path_nodes.is_empty() {
                 out.pathless.push(RouteMatch {
                     path: String::new(),
@@ -1179,10 +1441,12 @@ fn generic_match(
                     end_line,
                     origin: PathOrigin { site, named: false },
                     at,
+                    folded_from: Vec::new(),
                 });
                 return true;
             }
             for (path, named) in path_nodes {
+                out.literal_path_spans.insert((path.start_byte(), path.end_byte()));
                 out.routes.push(RouteMatch {
                     // Trimmed here rather than inside `join_route_path`, so an
                     // uncomposed path and a composed one obey one rule.
@@ -1193,6 +1457,7 @@ fn generic_match(
                     end_line,
                     origin: PathOrigin { site, named },
                     at,
+                    folded_from: Vec::new(),
                 });
             }
         }
@@ -1329,6 +1594,7 @@ fn route_registrations(call: Node<'_>, src: &[u8]) -> Vec<RouteMatch> {
             // each registration once, so nothing competes for precedence.
             origin: PathOrigin::default(),
             at: call.start_byte(),
+            folded_from: Vec::new(),
         })
         .collect()
 }
@@ -1460,6 +1726,7 @@ fn attribute_route(attr_item: Node<'_>, src: &[u8]) -> Option<RouteMatch> {
                     end_line: n.end_position().row as u32 + 1,
                     origin: PathOrigin::default(),
                     at: attr_item.start_byte(),
+                    folded_from: Vec::new(),
                 });
             }
             _ => return None, // attributed item is not a function
@@ -1858,6 +2125,8 @@ fn commit(
         },
     )
 }
+
+mod fold;
 
 #[cfg(test)]
 #[cfg(feature = "lang-rust")]

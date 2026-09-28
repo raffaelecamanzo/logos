@@ -14,22 +14,31 @@
 ;
 ; Deliberately NOT captured: functional `RouterFunction` routing
 ; (`RouterFunctions.route(GET("/p"), handler)`), whose builder chain names no
-; annotated handler method to link; and a *method* path that is not a written
-; literal — a constant reference or a concatenation (`value = BASE + "/x"`)
-; leaves no literal, so nothing is promoted.
+; annotated handler method to link; and a *positional list* method path
+; (`@GetMapping({"/a", "/b"})`), in either its literal or its expression form —
+; a gap this file shares with the Kotlin query, pinned by the paired fixtures.
 ;
 ; Captured, but NOT interpreted: a property placeholder (`value =
 ; "${api.base}/x"`) is a written literal, so a method path holding one is
 ; promoted verbatim; resolving it against the property sources is out of scope
-; (FR-FW-05). And in a *mixed* list (`value = {"/a", BASE + "/b"}`) the literal
-; elements are promoted while the non-literal ones are dropped silently.
+; (FR-FW-05).
+;
+; A *method* path that is present but not a written literal — a constant
+; reference or a concatenation (`value = "/users/{" + USER_ID + "}"`) — is
+; captured as `@fw.route.path.opaque` / `@fw.route.path.named.opaque` (S-469,
+; CR-151). The shared interpreter folds it when every operand is a literal or a
+; same-type `String` constant declared below (`@fw.const.*`), and otherwise
+; refuses it and counts it in `routes_not_composed`: never dropped silently. In
+; a *mixed* list (`value = {"/a", BASE + "/b"}`) each element is judged on its
+; own — `/a` is promoted and `BASE + "/b"` is folded or counted.
 ;
 ; A class-level prefix is stricter, because a prefix is *joined* rather than
-; promoted as written: a prefix that is not a resolvable literal path leaves
-; every route under it at an unknown address, so those routes are refused
-; wholesale (`path-not-composed`, FR-WS-05, NFR-RA-05) instead of promoted at a
-; partial path that would falsely claim a provider. `@fw.route.prefix.opaque`
-; below is how this file says "a prefix is here and it is not a literal".
+; promoted as written: a prefix that is not a resolvable literal path — and does
+; not fold to one from the constants below (S-469) — leaves every route under it
+; at an unknown address, so those routes are refused wholesale
+; (`path-not-composed`, FR-WS-05, NFR-RA-05) instead of promoted at a partial
+; path that would falsely claim a provider. `@fw.route.prefix.opaque` below is
+; how this file says "a prefix is here and it is not a literal".
 
 ; Spring request-mapping annotation on a handler method, positional form:
 ; `@GetMapping("/users") public List<User> list() {…}` — the annotation name
@@ -76,6 +85,37 @@
             (string_literal) @fw.route.path.named
             (element_value_array_initializer
               (string_literal) @fw.route.path.named)
+          ]))) @fw.route.anchor)
+  name: (identifier) @fw.route.handler)
+  (#any-of? @fw.route.key "value" "path"))
+
+; The same two positions holding an **expression** instead of a literal
+; (S-469, CR-151): `@GetMapping(BASE)`, `@GetMapping(value = "/u/{" + ID + "}")`,
+; `path = {"/a", BASE + "/b"}`. Captured through the `(expression)` supertype
+; for the reason the prefix section gives — every non-literal form at once, so
+; an unforeseen spelling is still captured and therefore still refused and
+; counted rather than lost. The supertype also matches a `string_literal`; the
+; interpreter ignores an opaque path whose bytes are exactly a captured literal
+; path's, so the literal patterns above keep owning every written literal.
+(method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @fw.route.method
+      arguments: (annotation_argument_list
+        (expression) @fw.route.path.opaque)) @fw.route.anchor)
+  name: (identifier) @fw.route.handler)
+
+((method_declaration
+  (modifiers
+    (annotation
+      name: (identifier) @fw.route.method
+      arguments: (annotation_argument_list
+        (element_value_pair
+          key: (identifier) @fw.route.key
+          value: [
+            (expression) @fw.route.path.named.opaque
+            (element_value_array_initializer
+              (expression) @fw.route.path.named.opaque)
           ]))) @fw.route.anchor)
   name: (identifier) @fw.route.handler)
   (#any-of? @fw.route.key "value" "path"))
@@ -220,6 +260,76 @@
     body: [(class_body) (interface_body) (enum_body)]) @fw.route.prefix.scope
   (#eq? @fw.route.prefix.name "RequestMapping")
   (#any-of? @fw.route.prefix.key "value" "path"))
+
+; ── `String` constants a path may fold from (S-469, CR-151, FR-FW-05) ──────────
+;
+; The fold is exact or nothing (NFR-RA-05): a name folds only when the
+; interpreter can prove which declaration Java binds it to. These captures give
+; it the facts that proof needs, and nothing here decides anything:
+;
+;   @fw.const.scope        — a type **body**: the region in which the type's own
+;                            members are in scope by simple name. The body, not
+;                            the declaration, because Java resolves a type's own
+;                            annotations *outside* it — `@RequestMapping(BASE)`
+;                            on `class C` cannot see `C.BASE` by its simple name;
+;   @fw.const.scope.decl   — the whole type declaration, annotations included:
+;                            where the qualified `C.BASE` names this type;
+;   @fw.const.scope.name   — the type's simple name, for that qualified form;
+;   @fw.const.scope.opaque — a sign the scope can declare names this file does
+;                            not model: a supertype (whose inherited fields a
+;                            simple name may bind to), enum constants, or an
+;                            anonymous class. A lookup reaching such a scope
+;                            without finding its own declaration refuses;
+;   @fw.const.field        — the name of **every** field declared in a body,
+;                            whatever its type or modifiers: a non-constant field
+;                            still shadows a same-named constant further out, so
+;                            the shadow has to be known to refuse on it;
+;   @fw.const.name / @fw.const.value — a compile-time `String` constant (a
+;                            `static final String` field, or any interface
+;                            `String` field, which Java makes implicitly
+;                            `public static final`) and its initializer;
+;   @fw.const.type         — predicate-only.
+;
+; A query that captures none of these opts out of folding altogether, which is
+; how the Kotlin query keeps its `const val` and string templates out of scope
+; (CR-151 §3.3) without a line of language-specific interpreter code.
+
+(_
+  name: (identifier) @fw.const.scope.name
+  body: [(class_body) (interface_body) (enum_body)] @fw.const.scope) @fw.const.scope.decl
+
+(class_declaration (superclass) @fw.const.scope.opaque body: (class_body) @fw.const.scope)
+(class_declaration (super_interfaces) @fw.const.scope.opaque body: (class_body) @fw.const.scope)
+(record_declaration (super_interfaces) @fw.const.scope.opaque body: (class_body) @fw.const.scope)
+(interface_declaration (extends_interfaces) @fw.const.scope.opaque body: (interface_body) @fw.const.scope)
+(enum_declaration body: (enum_body) @fw.const.scope @fw.const.scope.opaque)
+(object_creation_expression (class_body) @fw.const.scope @fw.const.scope.opaque)
+(enum_constant body: (class_body) @fw.const.scope @fw.const.scope.opaque)
+
+(field_declaration
+  declarator: (variable_declarator name: (identifier) @fw.const.field))
+(constant_declaration
+  declarator: (variable_declarator name: (identifier) @fw.const.field))
+
+; `static` and `final` in either order — Java admits both, and a query child
+; list matches in order.
+((field_declaration
+  [
+    (modifiers "static" "final")
+    (modifiers "final" "static")
+  ]
+  type: (_) @fw.const.type
+  declarator: (variable_declarator
+    name: (identifier) @fw.const.name
+    value: (_) @fw.const.value))
+  (#any-of? @fw.const.type "String" "java.lang.String"))
+
+((constant_declaration
+  type: (_) @fw.const.type
+  declarator: (variable_declarator
+    name: (identifier) @fw.const.name
+    value: (_) @fw.const.value))
+  (#any-of? @fw.const.type "String" "java.lang.String"))
 
 ; Spring stereotype class: the wired application building block (FR-FW-02).
 ; `@fw.component.base` exists only for the predicate.
