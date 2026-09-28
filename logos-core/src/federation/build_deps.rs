@@ -979,6 +979,24 @@ mod tests {
         assert_eq!(BuildEdgeKind::from_fact("bom_import"), None, "the near miss");
     }
 
+    /// A manifest the reader could not parse is recorded but read: it counts in
+    /// `manifests`, not in `manifests_read`, and contributes no fact.
+    #[test]
+    fn a_malformed_manifest_is_counted_but_not_read() {
+        let roster = fed(&["lib", "app"], &[]).members;
+        let mut malformed = manifest("maven", "broken/pom.xml", Vec::new());
+        malformed.status = "malformed".to_string();
+        malformed.detail = Some("a DTD entity is used".to_string());
+        let facts = vec![
+            ("lib".to_string(), vec![pom(vec![produced(G, "lib")]), malformed]),
+            ("app".to_string(), vec![pom(vec![produced(G, "app"), dependency(G, "lib")])]),
+        ];
+        let headline = join(&roster, &BTreeMap::new(), &facts).headline;
+        assert_eq!((headline.members.manifests, headline.members.manifests_read), (3, 2));
+        assert_eq!(headline.members.with_manifests, 2);
+        assert_eq!(headline.references.references, 1, "the malformed manifest adds no reference");
+    }
+
     /// Two references from two manifests of one member the same way are one
     /// edge counting both — pairs and edges are never inflated by module count.
     #[test]
