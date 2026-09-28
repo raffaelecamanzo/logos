@@ -160,7 +160,8 @@ RECONCILIATION — BY NAME, AGAINST CR-152 SECTION 2.1
   437 − 434 = 3, and every one of the three is attributed:
       3 triples of the type-only pair official-log-legal-storage-batch →
         postel-cpx-creation-lib (no direct build declaration, CR-152 section 2.1).
-      0 triples removed by a package/directory refusal (there are none).
+      0 triples removed by a package/directory refusal (there are none), and 0
+        rows of any tree given by the census rule to a refused file.
       0 unattributed; 0 Reach triples the census rule does not count.
 
   Why the Reach figure sits at 99 % of the census, not the ~70 % CR-152 section 3.2
@@ -195,6 +196,21 @@ WHAT THIS FINDING DOES NOT ESTABLISH
 LIVE ESTATE
 -----------
 
-  ~/source/pec-services was never opened by the harness. It was snapshotted (path,
-  size, mtime of every file: 22,766 files) before the copy and re-checked after the
-  measurement was recorded; see the implementation notes for the comparison.
+  ~/source/pec-services was never opened by the harness: every run above read the
+  private copy.
+
+  One touch by this session, before the copy, disclosed here: at 2026-09-28
+  ~15:32Z every live member store's `PRAGMA user_version` was read with
+  `sqlite3 "file:<db>?mode=ro"`. On one WAL store — the non-member fork's
+  `archive-api-logiclens-fork/.logos/logos.db-shm` — that read advanced the `-shm`
+  sidecar's mtime (1790581624 -> 1790609530); its size (32,768) and `logos.db`
+  itself were unchanged. Every later live read used `immutable=1`, which touches
+  no sidecar.
+
+  Snapshots (path, size and mtime of every file, 22,766 files):
+    - 15:32:08Z, before that read;
+    - immediately after it — differs from the first ONLY in the `-shm` mtime above;
+    - 15:57:16Z, after the measurement was recorded — byte-identical to the second.
+  All 84 `logos.db` read `user_version` 22 before and after. So the live estate is
+  unmodified by the harness and by the measurement; the one sidecar mtime is this
+  session's pre-copy read, not the gate's.
