@@ -660,3 +660,26 @@ fn a_type_level_prefix_folds_through_a_static_import_or_a_qualified_imported_typ
         assert_eq!(stats.routes_not_composed, 0, "{prefix}");
     }
 }
+
+/// A qualifier the handler's own file declares — twice, as member types of two
+/// classes — is decided in that file and refused there; it never falls through
+/// to the imported type of the same name, which Java would not bind to.
+#[test]
+fn a_type_name_the_handlers_file_declares_twice_is_refused_not_imported() {
+    let imported = "package a.b;\n\npublic class G {\n    public static final String X = \"/imported\";\n}\n";
+    let handler = "package a.c;\n\n\
+        import a.b.G;\n\
+        import org.springframework.web.bind.annotation.GetMapping;\n\
+        import org.springframework.web.bind.annotation.RestController;\n\n\
+        @RestController\n\
+        public class H {\n    \
+            static class G { static final String X = \"/local\"; }\n\n    \
+            @GetMapping(G.X + \"/s\")\n    \
+            public String s() { return \"\"; }\n\
+        }\n\n\
+        class Other {\n    static class G {}\n}\n";
+    assert_refused_once(
+        &[("src/main/java/a/b/G.java", imported), ("src/main/java/a/c/H.java", handler)],
+        "a qualifier declared twice in the handler's file",
+    );
+}
