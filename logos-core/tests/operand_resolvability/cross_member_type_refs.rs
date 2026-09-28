@@ -418,7 +418,8 @@ pub fn declared_package(text: &str) -> Option<String> {
 ///
 /// The Avro naming rule: a `name` containing a `.` is already full; otherwise
 /// it takes the object's own `namespace`, else the nearest enclosing named
-/// type's. An empty `namespace` is the null namespace — it inherits nothing,
+/// type's — a `namespace` key on anything but a named type is ignored. An
+/// empty `namespace` is the null namespace — it inherits nothing,
 /// per the Avro specification. A top-level array (a union) is read element by element, and named
 /// types nested in `fields`, `type`, `items` and `values` are read too.
 pub fn avro_types(text: &str) -> Result<Vec<String>, String> {
@@ -436,12 +437,16 @@ fn walk_avro(value: &serde_json::Value, namespace: Option<&str>, out: &mut Vec<S
             }
         }
         serde_json::Value::Object(map) => {
+            let kind = map.get("type").and_then(serde_json::Value::as_str);
+            // Only a named type carries a namespace; one written on a field, an
+            // array or a map is ignored, as Avro's own parser ignores it.
+            let named = matches!(kind, Some("record" | "enum" | "fixed"));
             let own = match map.get("namespace").and_then(serde_json::Value::as_str) {
+                Some(_) if !named => namespace,
                 Some("") => None,
                 Some(ns) => Some(ns),
                 None => namespace,
             };
-            let kind = map.get("type").and_then(serde_json::Value::as_str);
             let name = map.get("name").and_then(serde_json::Value::as_str);
             let mut enclosing = own.map(str::to_string);
             if let (Some("record" | "enum"), Some(name)) = (kind, name) {
@@ -1625,6 +1630,11 @@ mod tests {
             avro_types("{ not json").is_err(),
             "an unparseable schema is refused, never skipped"
         );
+        // A `namespace` on a field, an array or a map names nothing.
+        let stray = r#"{"type":"record","name":"R","namespace":"n1","fields":[
+            {"name":"f","namespace":"zz","type":{"type":"array","namespace":"n2","items":
+               {"type":"record","name":"I","fields":[]}}}]}"#;
+        assert_eq!(avro_types(stray).unwrap(), ["n1.R", "n1.I"]);
     }
 
     #[test]
