@@ -1032,7 +1032,15 @@ mod tests {
                 "deprecated-mailbox-core".to_string(),
                 vec![manifest("maven", "api/pom.xml", vec![produced(core, "api")])],
             ),
-            ("mailbox-api".to_string(), vec![pom(vec![produced(core, "api")])]),
+            // A co-producer referencing the colliding key: still a collision,
+            // never `in_member` — its own module is one of two candidates.
+            (
+                "mailbox-api".to_string(),
+                vec![
+                    pom(vec![produced(core, "api")]),
+                    manifest("maven", "client/pom.xml", vec![produced(core, "client"), dependency(core, "api")]),
+                ],
+            ),
             (
                 "mailbox-manager".to_string(),
                 vec![pom(vec![produced(core, "manager"), dependency(core, "api")])],
@@ -1043,17 +1051,18 @@ mod tests {
         assert!(relation.edges.is_empty(), "resolves to neither producer: {:?}", relation.edges);
         let headline = &relation.headline;
         assert_eq!(headline.build_dependency_pairs.pairs, 0);
-        assert_eq!(headline.references.to_collision, 1);
+        assert_eq!(headline.references.to_collision, 2);
+        assert_eq!(headline.references.in_member, 0, "the co-producer's reference is a collision");
         assert_eq!(headline.references.to_member, 0);
         assert_eq!(
             headline.collisions,
             [ArtifactCollision {
                 artifact: format!("{core}:api"),
                 producers: vec!["deprecated-mailbox-core".into(), "mailbox-api".into()],
-                references: 1,
+                references: 2,
             }]
         );
-        assert!(headline.summary.contains("1 to a colliding artifact"), "{}", headline.summary);
+        assert!(headline.summary.contains("2 to a colliding artifact"), "{}", headline.summary);
     }
 
     /// One member producing a coordinate twice (two poms, one coordinate) is
