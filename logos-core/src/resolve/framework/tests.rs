@@ -2847,6 +2847,25 @@ mod java_constant_fold {
         assert_eq!(refusals, [RouteRefusal::PathNotComposed]);
     }
 
+    /// The depth bound is sixteen constants on one chain: `A15` (sixteen,
+    /// counting `A0`) folds and `A16` is refused. The refusal is about the
+    /// asking chain, not the constants on it — a path that meets `A16` first
+    /// does not stop a later path folding `A15` through the very same
+    /// constants.
+    #[test]
+    fn a_chain_through_more_than_sixteen_constants_is_refused() {
+        let mut members = String::from("    static final String A0 = \"/a\";\n");
+        for k in 1..=16 {
+            members.push_str(&format!("    static final String A{k} = A{};\n", k - 1));
+        }
+        let (routes, refusals) = fold_scan(&format!(
+            "public class C {{\n{members}    @GetMapping(A16)\n    public String deep() {{ return \"\"; }}\n    \
+             @GetMapping(A15)\n    public String bounded() {{ return \"\"; }}\n}}\n"
+        ));
+        assert_eq!(routes, vec![get("/a", "bounded")]);
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded]);
+    }
+
     /// A folded path is trimmed exactly as a written one is, prefix or not: the
     /// route is named `GET /users/{id}`, never with the blanks the literals
     /// carried, which no consumer would match.

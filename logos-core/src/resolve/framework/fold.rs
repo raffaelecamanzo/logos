@@ -49,8 +49,8 @@ use super::FoldedConstant;
 
 /// How many constants one chain may pass through — a path naming `A`, whose
 /// initializer names `B`, … Real constants nest one or two levels; the bound
-/// keeps the recursion shallow on untrusted input, and it is what refuses a
-/// cyclic pair (`A = B; B = A`) that the in-progress set does not catch first.
+/// keeps the recursion shallow on untrusted input. (A cycle, `A = B; B = A`, is
+/// refused by the in-progress set in [`Names::constant`], not by this bound.)
 const MAX_DEPTH: usize = 16;
 
 /// How many operands one fold may read, counting every expansion of every
