@@ -604,3 +604,29 @@ fn two_constants_of_one_declaring_type_each_fold_to_their_own_value() {
     assert_eq!(route_names(engine.runtime().unwrap()), ["GET /v1/u/{userId}/m/{emailAddress}"]);
     assert_eq!(stats.routes_not_composed, 0);
 }
+
+/// A constant of the handler's own type built from a static-imported one —
+/// `BASE = "/m/{" + EMAIL + "}"`, then `@GetMapping(BASE + "/size")` — folds
+/// through both: a foreign constant counts one constant deep in the local
+/// chain.
+#[test]
+fn a_local_constant_built_from_a_static_imported_one_folds() {
+    let controller = format!(
+        "package a.c;\n\n\
+         {STATIC_IMPORT}\
+         import org.springframework.web.bind.annotation.GetMapping;\n\
+         import org.springframework.web.bind.annotation.RestController;\n\n\
+         @RestController\n\
+         public class MailboxController {{\n    \
+             static final String BASE = \"/m/{{\" + EMAIL + \"}}\";\n\n    \
+             @GetMapping(BASE + \"/size\")\n    \
+             public String size() {{ return \"\"; }}\n\
+         }}\n"
+    );
+    let (_tmp, engine, stats) = index(&[
+        (ADVICE_FILE, &advice(r#""emailAddress""#)),
+        ("src/main/java/a/c/MailboxController.java", &controller),
+    ]);
+    assert_eq!(route_names(engine.runtime().unwrap()), ["GET /m/{emailAddress}/size"]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
