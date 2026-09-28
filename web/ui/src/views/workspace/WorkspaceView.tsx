@@ -339,6 +339,8 @@ function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline 
   if (!headline) return null;
   const unread = headline.members.unread ?? [];
   const reasons = headline.members.unread_reasons ?? {};
+  // Own keys only: a member named `constructor` must never read an inherited value.
+  const reasonOf = (member: string) => (Object.hasOwn(reasons, member) ? reasons[member] : undefined);
   return (
     <Card title="Build dependencies">
       <p className="muted">
@@ -381,7 +383,7 @@ function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline 
             <span key={member}>
               {i > 0 && ", "}
               <span className="mono">{member}</span>
-              {reasons[member] && ` (${reasons[member]})`}
+              {reasonOf(member) && ` (${reasonOf(member)})`}
             </span>
           ))}{" "}
           — their build dependencies are unknown, not absent.
