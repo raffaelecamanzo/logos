@@ -338,12 +338,6 @@ pub(crate) struct Index {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     types_by_fqn: HashMap<Vec<String>, Vec<NodeId>>,
-    /// Package → the top-level type nodes of every package-shaped file in it,
-    /// id-sorted — what a package wildcard (`import a.b.*`) and the same-package
-    /// scope rung bring into view ([CR-149]).
-    ///
-    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
-    types_by_package: HashMap<Vec<String>, Vec<NodeId>>,
     /// `(trait node, method name)` → the concrete workspace impl method nodes of
     /// that trait method, id-sorted and deduplicated — the fan-out universe for a
     /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]). Built from the
@@ -392,8 +386,7 @@ impl Index {
         let crates: HashSet<String> = modules.keys().map(|(c, _)| c.clone()).collect();
 
         let info = build_node_info(nodes, &parent, &module_key, &layout);
-        let (types_by_fqn, types_by_package) =
-            build_package_types(nodes, &parent, &members, &node_by_id, &layout);
+        let types_by_fqn = build_package_types(nodes, &parent, &members, &node_by_id, &layout);
         let by_symbol = build_by_symbol(nodes);
         let by_name = build_by_name(nodes);
         let by_file_path = build_by_file_path(nodes);
@@ -422,7 +415,6 @@ impl Index {
             crates,
             layout,
             types_by_fqn,
-            types_by_package,
             impls_by_trait_method,
         }
     }
@@ -795,53 +787,47 @@ fn crate_of_node(
     }
 }
 
-/// The package-shaped type universe ([CR-149]) as `(types_by_fqn,
-/// types_by_package)`: every top-level type-like member of a package-shaped
-/// file's root module, keyed by its fully-qualified name
-/// ([`PackageLayout::type_fqn`], the one FQN derivation) and by its package.
-/// `nodes` is id-ordered and each file's children are visited name-/id-sorted,
-/// but every list is sorted explicitly anyway, so the maps are deterministic
-/// regardless of visit order ([NFR-RA-06]). Empty under the default layout.
+/// The package-shaped type universe ([CR-149]): every top-level type-like
+/// member of a package-shaped file's root module, keyed by its fully-qualified
+/// name ([`PackageLayout::type_fqn`], the one FQN derivation). A package's
+/// types named `n` are the entry `package ++ [n]`, so a wildcard and the
+/// same-package rung read this map too. `nodes` is id-ordered and each file's
+/// children are visited name-/id-sorted, but every list is sorted explicitly
+/// anyway, so the map is deterministic regardless of visit order
+/// ([NFR-RA-06]). Empty under the default layout.
 ///
 /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-#[allow(clippy::type_complexity)]
 fn build_package_types(
     nodes: &[NodeRow],
     parent: &HashMap<NodeId, NodeId>,
     members: &Members,
     node_by_id: &HashMap<NodeId, &NodeRow>,
     layout: &PackageLayout,
-) -> (
-    HashMap<Vec<String>, Vec<NodeId>>,
-    HashMap<Vec<String>, Vec<NodeId>>,
-) {
+) -> HashMap<Vec<String>, Vec<NodeId>> {
     let mut by_fqn: HashMap<Vec<String>, Vec<NodeId>> = HashMap::new();
-    let mut by_package: HashMap<Vec<String>, Vec<NodeId>> = HashMap::new();
     for root in nodes {
         if root.kind != NodeKind::Module || parent.contains_key(&root.id) {
             continue;
         }
         let Some(path) = &root.file_path else { continue };
-        let Some(package) = layout.package_of(path) else {
+        if !layout.is_package_shaped(path) {
             continue;
-        };
+        }
         for (name, id) in sorted_children(members, root.id) {
             if !node_by_id.get(&id).is_some_and(|n| is_type_like(n.kind)) {
                 continue;
             }
-            let Some(fqn) = layout.type_fqn(path, name) else {
-                continue;
-            };
-            by_fqn.entry(fqn).or_default().push(id);
-            by_package.entry(package.clone()).or_default().push(id);
+            if let Some(fqn) = layout.type_fqn(path, name) {
+                by_fqn.entry(fqn).or_default().push(id);
+            }
         }
     }
-    for list in by_fqn.values_mut().chain(by_package.values_mut()) {
+    for list in by_fqn.values_mut() {
         list.sort();
         list.dedup();
     }
-    (by_fqn, by_package)
+    by_fqn
 }
 
 /// Canonical symbol → node. First-wins on a (model-prohibited) duplicate
@@ -2540,10 +2526,7 @@ impl Ctx<'_> {
                 Res::Found(_) => {}
                 Res::Ambiguous => return None,
                 Res::NotFound => {
-                    let in_package = self.ix.types_by_package.get(glob).into_iter().flatten();
-                    found.extend(in_package.copied().filter(|id| {
-                        admits(id) && self.ix.info.get(id).is_some_and(|i| i.name == name)
-                    }));
+                    found.extend(self.package_type(glob, name).iter().copied().filter(admits));
                 }
             }
         }
