@@ -91,6 +91,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -106,6 +107,7 @@ use crate::plugin::{LanguagePlugin, LanguageRegistry};
 use crate::runtime::Runtime;
 
 use super::binder;
+use super::package_key::PackageLayout;
 use super::matches_detector;
 use super::promote::{self, Promoted, PromotedEdge};
 
@@ -201,9 +203,10 @@ pub(crate) enum RouteRefusal {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     PathNotComposed,
     /// A **method-level** path is present but is not a literal, and does not
-    /// fold to one ([FR-FW-05], S-469): a constant of another type, a
-    /// non-final or non-`String` field, a call, a name a supertype might
-    /// supply. Counted once per refused path **element** — a mixed list
+    /// fold to one ([FR-FW-05], S-469, S-470): a non-final or non-`String`
+    /// field, a call, a name a supertype might supply, a wildcard import's
+    /// name, a constant of another member or a library, a name two
+    /// declarations offer. Counted once per refused path **element** — a mixed list
     /// `{"/a", X}` promotes `/a` and counts `X` — where a refused prefix counts
     /// once per registration, because here each element is its own address
     /// the source failed to state. Before S-469 these were dropped with no
@@ -374,6 +377,16 @@ struct FileMatches {
     /// (`@fw.const.*`).
     const_scopes: Vec<fold::ScopeCapture>,
     const_fields: Vec<fold::FieldCapture>,
+    /// The file's import declarations (`@fw.const.import`, S-470): where a
+    /// name it does not declare may come from.
+    const_imports: Vec<fold::ImportCapture>,
+    /// `true` when the parser recovered an error outside every type
+    /// declaration — where imports live. What the file imports is then
+    /// unknown, so the fold reaches through no import at all (S-470).
+    imports_unreadable: bool,
+    /// The package the file declares (`@fw.const.package`, S-470) — `None`
+    /// when it declares none (the unnamed package).
+    const_package: Option<Vec<String>>,
     /// Byte ranges of opaque prefixes written inside an annotation the parser
     /// had to recover from an error: never folded, so they stay opaque and
     /// refuse (see [`fold_constants`]).
@@ -493,11 +506,25 @@ pub fn run(
     // Parse the candidates on the shared worker pool, one Parser per worker
     // (the extraction pattern, AR-05). A file that vanished from disk or no
     // longer parses simply contributes no matches — best-effort (FR-FW-04).
+    // The binder index keys every package-shaped file by its package (S-465),
+    // as the resolution pass does, and is built before the scan because the
+    // fold reads it to find a constant's declaring type (S-470).
+    let layout = PackageLayout::from_registry(registry);
+    let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout.clone());
+    let member = MemberConstants {
+        root,
+        registry,
+        layout: &layout,
+        index: &index,
+        files: Mutex::default(),
+        constants: Mutex::default(),
+    };
+
     let scanned: Vec<(i64, &str, FileMatches)> = runtime.worker_pool().install(|| {
         candidates
             .par_iter()
             .map_init(Parser::new, |parser, (file_id, rel)| {
-                let matches = scan_path(parser, registry, root, rel);
+                let matches = scan_path(parser, registry, root, rel, &member);
                 (*file_id, *rel, matches)
             })
             .collect()
@@ -511,7 +538,6 @@ pub fn run(
         .map(|(_, _, m)| m.refusals.len() as u64)
         .sum();
 
-    let index = binder::Index::build(&nodes, &edges, &refs);
     let desired = desired_set(&scanned, &nodes, &edges, &files, &index, policy);
 
     let routes = desired
@@ -576,25 +602,143 @@ fn scan_path(
     registry: &LanguageRegistry,
     root: &Path,
     rel: &str,
+    member: &MemberConstants<'_>,
 ) -> FileMatches {
-    // Defence-in-depth (NFR-SE-04): stored paths are validated relative at
-    // insert time, but `Path::join` would silently *replace* the root with an
-    // absolute `rel` — refuse to read outside the engine root even from a
-    // corrupted store.
+    let Some((plugin, source)) = read_member_file(registry, root, rel) else {
+        return FileMatches::default(); // gone, unreadable or no grammar — best-effort
+    };
+    scan_source(parser, plugin, rel, &source, Some(member))
+}
+
+/// The grammar and the current text of the file at the project-relative `rel`,
+/// or `None` when it has no grammar, has gone, or cannot be read.
+///
+/// Defence-in-depth ([NFR-SE-04]): stored paths are validated relative at
+/// insert time, but `Path::join` would silently *replace* the root with an
+/// absolute `rel` — so an absolute one is refused rather than read outside the
+/// engine root, even from a corrupted store.
+///
+/// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
+fn read_member_file<'r>(
+    registry: &'r LanguageRegistry,
+    root: &Path,
+    rel: &str,
+) -> Option<(&'r dyn LanguagePlugin, String)> {
     if Path::new(rel).is_absolute() {
-        return FileMatches::default();
+        return None;
     }
-    let Some(plugin) = Path::new(rel)
+    let plugin = Path::new(rel)
         .extension()
         .and_then(|e| e.to_str())
-        .and_then(|ext| registry.for_extension(ext))
-    else {
-        return FileMatches::default();
-    };
-    let Ok(source) = fs::read_to_string(root.join(rel)) else {
-        return FileMatches::default(); // gone or unreadable — best-effort
-    };
-    scan_source(parser, plugin, rel, &source)
+        .and_then(|ext| registry.for_extension(ext))?;
+    let source = fs::read_to_string(root.join(rel)).ok()?;
+    Some((plugin, source))
+}
+
+/// The files of the member being indexed, as the fold reaches another file's
+/// constant through a static import or a qualified `Type.NAME` ([FR-FW-05],
+/// S-470, [CR-151] §3.2 (b)/(c)).
+///
+/// A type is located through the binder's fully-qualified-name index, which is
+/// built from the package-shaped module key
+/// ([`PackageLayout::type_fqn`](super::package_key::PackageLayout::type_fqn)) —
+/// the one derivation of a package from a path; nothing here splits a path.
+/// The index holds this graph's files only, so a type of another member or of
+/// a library is simply absent, and a type two files declare (a `src/main` and
+/// a `src/test` copy) is two entries: both refuse ([NFR-RA-05]).
+///
+/// The declaring file is read from disk at scan time, like the handler file,
+/// which is what makes it an input of the handler's fold: the pass rescans
+/// every candidate on every index and sync ("Reconcile, don't accumulate"), so
+/// an edit to the constant alone re-folds every route built from it.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+/// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+struct MemberConstants<'a> {
+    root: &'a Path,
+    registry: &'a LanguageRegistry,
+    layout: &'a PackageLayout,
+    index: &'a binder::Index,
+    /// Each declaring file's facts, by project-relative path.
+    files: Cache<String, Arc<DeclaringFile>>,
+    /// Each `(type FQN, constant name)` answer.
+    constants: Cache<(Vec<String>, String), fold::ForeignConstant>,
+}
+
+/// A declaring file's text and its `@fw.const` facts, read once per pass.
+struct DeclaringFile {
+    source: String,
+    /// The package it declares; empty for the unnamed package.
+    package: Vec<String>,
+    scopes: Vec<fold::ScopeCapture>,
+    fields: Vec<fold::FieldCapture>,
+}
+
+/// A pass-wide cache: `None` for a key whose answer is "no" — also worth
+/// remembering.
+type Cache<K, V> = Mutex<HashMap<K, Option<V>>>;
+
+/// The cached answer for `key`, computing it **outside** the lock on a miss.
+/// Every answer here is a pure function of the files on disk, so two workers
+/// racing on one key compute the same value and either insert is correct.
+fn cached<K: Eq + std::hash::Hash, V: Clone>(
+    cache: &Cache<K, V>,
+    key: K,
+    compute: impl FnOnce() -> Option<V>,
+) -> Option<V> {
+    if let Some(known) = cache.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return known.clone();
+    }
+    let value = compute();
+    cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, value.clone());
+    value
+}
+
+impl MemberConstants<'_> {
+    /// The constant `name` declared by the top-level type `fqn`, folded in its
+    /// own file; `None` unless the member declares that type exactly once and
+    /// its body declares `name` as a constant that folds there.
+    ///
+    /// Each answer is computed once per pass, and each declaring file read and
+    /// parsed once per pass, however many handler files use it: a central
+    /// paths class used by every controller would otherwise be re-parsed once
+    /// per controller and constant.
+    fn constant(&self, fqn: &[String], name: &str) -> Option<fold::ForeignConstant> {
+        cached(&self.constants, (fqn.to_vec(), name.to_string()), || {
+            let [type_node] = self.index.package_types(fqn) else {
+                return None;
+            };
+            let rel = self.index.file_of(*type_node)?;
+            let file = cached(&self.files, rel.to_string(), || self.declaring_file(rel))?;
+            let (type_name, package) = fqn.split_last()?;
+            // The FQN index keys the type by its file's path; a file whose
+            // declaration names another package is not that type.
+            if file.package != package {
+                return None;
+            }
+            fold::Names::new(&file.source, rel, &file.scopes, &file.fields)
+                .member_constant(type_name, name)
+        })
+    }
+
+    /// Read and scan the file at `rel` for its constant facts; `None` when it
+    /// cannot be read, has no frameworks query, or its dialect does not fold.
+    fn declaring_file(&self, rel: &str) -> Option<Arc<DeclaringFile>> {
+        let (plugin, source) = read_member_file(self.registry, self.root, rel)?;
+        let facts = collect_matches(&mut Parser::new(), plugin, &source)?;
+        facts.folds.then(|| {
+            Arc::new(DeclaringFile {
+                source,
+                package: facts.const_package.unwrap_or_default(),
+                scopes: facts.const_scopes,
+                fields: facts.const_fields,
+            })
+        })
+    }
 }
 
 /// One route registration as the promotion pass reads it, projected for a
@@ -640,7 +784,7 @@ pub struct ProvidedRoute {
 /// folded route's provenance and nothing else.
 pub fn routes_in_source(plugin: &dyn LanguagePlugin, rel: &str, source: &str) -> Vec<ProvidedRoute> {
     let mut parser = Parser::new();
-    scan_source(&mut parser, plugin, rel, source)
+    scan_source(&mut parser, plugin, rel, source, None)
         .routes
         .into_iter()
         .map(|r| ProvidedRoute {
@@ -676,18 +820,52 @@ fn scan_source(
     plugin: &dyn LanguagePlugin,
     rel: &str,
     source: &str,
+    member: Option<&MemberConstants<'_>>,
 ) -> FileMatches {
-    let mut out = FileMatches::default();
-    let Some(query) = plugin.query("frameworks") else {
-        return out; // a grammar without the capability promotes nothing
+    let Some(mut out) = collect_matches(parser, plugin, source) else {
+        return FileMatches::default();
     };
-    if parser.set_language(plugin.language()).is_err() {
-        return out;
-    }
-    let Some(tree) = parser.parse(source, None) else {
-        return out;
-    };
+    // A path or prefix written as an expression is folded to a literal, or
+    // refused and counted (FR-FW-05, S-469). First, so everything after it —
+    // precedence, composition, the path rule, dedup — treats a folded path
+    // exactly as a written one.
+    fold_constants(&mut out, source, rel, member);
+    // A named `value =`/`path =` argument is the registered path where an
+    // annotation also carries a positional literal (Spring's `value`/`path`
+    // alias semantics, FR-FW-05); the two are separate patterns, so the
+    // ranking waits until every match for the file is in.
+    drop_outranked_paths(&mut out.routes);
+    // Join each surviving path onto its declaring type's prefix (FR-FW-05).
+    // After precedence, so a suppressed positional path is never composed and
+    // then dropped; before dedup, so two paths that only differ before
+    // composition collapse correctly once they carry the same prefix.
+    compose_prefixes(&mut out);
+    // A promoted route's path has to be a path (CR-110). After composition,
+    // because composition is what turns a relative method path into a fuller one:
+    // Spring's `@GetMapping("users")` under `@RequestMapping("/api")` is a route,
+    // and only the joined `/api/users` should be judged.
+    drop_non_path_routes(&mut out.routes);
+    // Overlapping declarative patterns (e.g. a handler-bearing and a
+    // handler-less variant of the same registration shape) may both match one
+    // site: collapse to one match per (method, path), preferring the one that
+    // names a handler — deterministically, whatever the pattern order.
+    dedup_routes(&mut out.routes);
+    out
+}
 
+/// Run the dialect's `frameworks` query over one file and interpret every
+/// match — the facts alone, before any fold, precedence or composition. `None`
+/// for a grammar without the capability or a file that does not parse.
+///
+/// The half of [`scan_source`] a constant's declaring file needs (S-470): its
+/// `@fw.const.*` facts are read exactly as a handler file's are, so a constant
+/// folds by one reading wherever it is declared.
+fn collect_matches(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &str) -> Option<FileMatches> {
+    let query = plugin.query("frameworks")?; // a grammar without the capability promotes nothing
+    parser.set_language(plugin.language()).ok()?;
+    let tree = parser.parse(source, None)?;
+
+    let mut out = FileMatches::default();
     let src = source.as_bytes();
     let methods = &plugin.semantics().framework_methods;
     let capture_names = query.capture_names();
@@ -712,32 +890,22 @@ fn scan_source(
             }
         }
     }
-    // A path or prefix written as an expression is folded to a literal, or
-    // refused and counted (FR-FW-05, S-469). First, so everything after it —
-    // precedence, composition, the path rule, dedup — treats a folded path
-    // exactly as a written one.
-    fold_constants(&mut out, source, rel);
-    // A named `value =`/`path =` argument is the registered path where an
-    // annotation also carries a positional literal (Spring's `value`/`path`
-    // alias semantics, FR-FW-05); the two are separate patterns, so the
-    // ranking waits until every match for the file is in.
-    drop_outranked_paths(&mut out.routes);
-    // Join each surviving path onto its declaring type's prefix (FR-FW-05).
-    // After precedence, so a suppressed positional path is never composed and
-    // then dropped; before dedup, so two paths that only differ before
-    // composition collapse correctly once they carry the same prefix.
-    compose_prefixes(&mut out);
-    // A promoted route's path has to be a path (CR-110). After composition,
-    // because composition is what turns a relative method path into a fuller one:
-    // Spring's `@GetMapping("users")` under `@RequestMapping("/api")` is a route,
-    // and only the joined `/api/users` should be judged.
-    drop_non_path_routes(&mut out.routes);
-    // Overlapping declarative patterns (e.g. a handler-bearing and a
-    // handler-less variant of the same registration shape) may both match one
-    // site: collapse to one match per (method, path), preferring the one that
-    // names a handler — deterministically, whatever the pattern order.
-    dedup_routes(&mut out.routes);
-    out
+    // An error the parser recovered outside every type declaration may be an
+    // import it could not read — a broken declaration, a missing path, a typo
+    // that no longer parses as an import at all — and such an import might
+    // supply any name. The fold then reaches through no import (S-470). The
+    // type declarations are the captured `@fw.const.scope.decl` ranges, so an
+    // error inside a method body does not count.
+    let declarations: Vec<(usize, usize)> = out.const_scopes.iter().filter_map(|s| s.decl).collect();
+    let root = tree.root_node();
+    out.imports_unreadable = out.folds
+        && root.children(&mut root.walk()).any(|node| {
+            node.has_error()
+                && !declarations
+                    .iter()
+                    .any(|&(start, end)| start <= node.start_byte() && node.end_byte() <= end)
+        });
+    Some(out)
 }
 
 /// Fold every path and prefix written as an expression ([FR-FW-05], S-469,
@@ -762,7 +930,12 @@ fn scan_source(
 ///
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 /// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
-fn fold_constants(out: &mut FileMatches, source: &str, rel: &str) {
+fn fold_constants(
+    out: &mut FileMatches,
+    source: &str,
+    rel: &str,
+    member: Option<&MemberConstants<'_>>,
+) {
     let opaque_paths = std::mem::take(&mut out.opaque_paths);
     if !out.folds {
         // Refuse rather than drop, should a query ever capture an opaque path
@@ -772,6 +945,21 @@ fn fold_constants(out: &mut FileMatches, source: &str, rel: &str) {
         return;
     }
     let names = fold::Names::new(source, rel, &out.const_scopes, &out.const_fields);
+    // Another file's constants are reachable only from a scan of the member's
+    // graph (S-470); a store-less scan folds what its own file proves.
+    let imports = std::mem::take(&mut out.const_imports);
+    let lookup = |fqn: &[String], name: &str| member.and_then(|m| m.constant(fqn, name));
+    let names = match member.filter(|_| !out.imports_unreadable) {
+        Some(member) => names.with_reach(fold::Reach {
+            imports: &imports,
+            package: member
+                .layout
+                .package_of(rel)
+                .filter(|package| *package == out.const_package.clone().unwrap_or_default()),
+            lookup: &lookup,
+        }),
+        None => names,
+    };
 
     for (route, (start, end)) in opaque_paths {
         if out.literal_path_spans.contains(&(start, end)) {
@@ -1270,6 +1458,9 @@ fn generic_match(
     let mut const_field: Option<Node<'_>> = None;
     let mut const_name: Option<Node<'_>> = None;
     let mut const_value: Option<Node<'_>> = None;
+    let mut const_import: Option<Node<'_>> = None;
+    let mut const_import_static = false;
+    let mut const_import_wildcard = false;
     let mut prefix_nodes: Vec<Node<'_>> = Vec::new();
     let mut prefix_scope: Option<Node<'_>> = None;
     let mut prefix_opaque: Vec<(usize, usize)> = Vec::new();
@@ -1298,8 +1489,22 @@ fn generic_match(
                 "fw.const.field" => &mut const_field,
                 "fw.const.name" => &mut const_name,
                 "fw.const.value" => &mut const_value,
+                "fw.const.import" => &mut const_import,
+                "fw.const.package" => {
+                    out.const_package =
+                        Some(crate::extract::refs::split_path_text(text(cap.node, src)));
+                    continue;
+                }
                 "fw.const.scope.opaque" => {
                     const_opaque = true;
+                    continue;
+                }
+                "fw.const.import.static" => {
+                    const_import_static = true;
+                    continue;
+                }
+                "fw.const.import.asterisk" => {
+                    const_import_wildcard = true;
                     continue;
                 }
                 // `fw.const.type` exists only for the query's predicate.
@@ -1374,6 +1579,16 @@ fn generic_match(
                 .and(const_value)
                 .filter(|v| !recovered_from_error(*v))
                 .map(|v| (v.start_byte(), v.end_byte())),
+        });
+    }
+
+    // An import the parser recovered from an error is judged with the file
+    // (`FileMatches::imports_unreadable`), not here.
+    if let Some(import) = const_import {
+        out.const_imports.push(fold::ImportCapture {
+            path: crate::extract::refs::split_path_text(text(import, src)),
+            is_static: const_import_static,
+            wildcard: const_import_wildcard,
         });
     }
 

@@ -17,7 +17,7 @@ fn scan_lang(ext: &str, source: &str) -> FileMatches {
         .for_extension(ext)
         .unwrap_or_else(|| panic!("{ext} plugin"));
     let mut parser = Parser::new();
-    scan_source(&mut parser, plugin, &format!("src/Fixture.{ext}"), source)
+    scan_source(&mut parser, plugin, &format!("src/Fixture.{ext}"), source, None)
 }
 
 /// Scan a Rust source snippet with the compiled-in plugin set.
@@ -1038,6 +1038,7 @@ class UserController {
     fun listUsers(): String { return "" }
 }
 "#,
+        None,
     );
     assert_eq!(
         route_triples(matches),
@@ -4740,7 +4741,7 @@ class MailboxApiV1 {
         let mut parser = Parser::new();
         // Every projected field is compared, `line` included: a field the
         // projection carries but no assertion reads can be silently zeroed.
-        let scanned: Vec<(String, String, u32)> = scan_source(&mut parser, plugin, "src/MailboxApiV1.java", SPRING_CONTROLLER)
+        let scanned: Vec<(String, String, u32)> = scan_source(&mut parser, plugin, "src/MailboxApiV1.java", SPRING_CONTROLLER, None)
             .routes
             .into_iter()
             .map(|r| (r.method, r.path, r.start_line))
@@ -4808,4 +4809,18 @@ class Facade {
             "the literal sibling must survive and the concatenated one must be absent",
         );
     }
+}
+
+/// A stored path is read only relative to the engine root (NFR-SE-04): an
+/// absolute one — which `Path::join` would let replace the root — is refused
+/// rather than read, for a declaring file exactly as for a candidate (S-470).
+#[test]
+fn a_member_file_is_read_only_by_a_relative_path() {
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let root = tempfile::TempDir::new().expect("temp dir");
+    std::fs::write(root.path().join("x.rs"), "fn x() {}\n").expect("write");
+    let absolute = root.path().join("x.rs");
+    let absolute = absolute.to_str().expect("utf-8 path");
+    assert!(read_member_file(&registry, root.path(), "x.rs").is_some());
+    assert!(read_member_file(&registry, root.path(), absolute).is_none());
 }

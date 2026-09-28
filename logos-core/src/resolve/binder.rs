@@ -377,7 +377,13 @@ impl Index {
     /// so every helper preserves the same canonical iteration order the
     /// monolith had, keeping the built `Index` byte-identical ([NFR-RA-06]).
     ///
+    /// The default module model for every file. Test-only since S-470: both
+    /// production builders — the resolution pass and the framework-promotion
+    /// pass — build with the registry's layout
+    /// ([`build_with_layout`](Index::build_with_layout)).
+    ///
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    #[cfg(test)]
     pub(crate) fn build(nodes: &[NodeRow], edges: &[EdgeRow], refs: &[UnresolvedRefRow]) -> Index {
         Self::build_with_layout(nodes, edges, refs, PackageLayout::default())
     }
@@ -510,6 +516,25 @@ impl Index {
     /// (`resolve::is_affected`).
     pub(crate) fn is_path_specifier_file(&self, path: &str) -> bool {
         self.specifier_targets.contains_key(&extension_of(path))
+    }
+
+    /// The top-level package-shaped type nodes declared under the
+    /// fully-qualified name `fqn`, id-sorted — empty when no file of this graph
+    /// declares it, two or more when several do (a `src/main` and a `src/test`
+    /// declaration). The index the import rungs read ([CR-149]), exposed so the
+    /// framework pass finds a constant's declaring type the same way (S-470)
+    /// rather than deriving a second FQN from a path.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    pub(crate) fn package_types(&self, fqn: &[String]) -> &[NodeId] {
+        self.types_by_fqn.get(fqn).map_or(&[], Vec::as_slice)
+    }
+
+    /// The project-relative file of node `id`, when it has one — how the
+    /// framework pass reads a [`package_types`](Index::package_types) answer's
+    /// file (S-470) without a second node → file map.
+    pub(crate) fn file_of(&self, id: NodeId) -> Option<&str> {
+        self.info.get(&id).and_then(|info| info.file_path.as_deref())
     }
 
     /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when
@@ -2580,7 +2605,7 @@ impl Ctx<'_> {
     fn package_type(&self, package: &[String], name: &str) -> &[NodeId] {
         let mut fqn = package.to_vec();
         fqn.push(name.to_string());
-        self.ix.types_by_fqn.get(&fqn).map_or(&[], Vec::as_slice)
+        self.ix.package_types(&fqn)
     }
 
     /// Walk `rest` down from the one type in `candidates`: `None` when there is

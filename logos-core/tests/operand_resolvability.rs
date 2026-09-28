@@ -297,6 +297,16 @@ mod vendored_spec_contracts;
 #[path = "operand_resolvability/cross_member_type_refs.rs"]
 mod cross_member_type_refs;
 
+/// S-470's estate report — each concatenated Spring mapping path, promoted or
+/// counted, per member. Its own module, so the fold's measurement does not
+/// co-edit a sibling gate; it reads only `corpus_root` and indexes copies of the
+/// members it needs through the shipped `Engine`.
+///
+/// `#[path]`-attached for the same reason every sibling above is: a plain
+/// `tests/static_import_routes.rs` would become a second cargo test target.
+#[path = "operand_resolvability/static_import_routes.rs"]
+mod static_import_routes;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
