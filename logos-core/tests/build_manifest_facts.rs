@@ -5,8 +5,10 @@
 //! (`extract/build_manifest_tests.rs`); the schema in `graph_store::migrate`.
 //! What is pinned here is the pipeline half: an index records the facts, a sync
 //! re-derives them when — and only when — a manifest it names changed, a
-//! full-walk reconcile notices an added or deleted manifest, and a member with
-//! no build manifest is left exactly as it was.
+//! full-walk reconcile notices an added or deleted manifest, a member with no
+//! build manifest is left exactly as it was apart from the one extraction
+//! marker, and only a full walk ever writes that marker — so an upgraded store
+//! reads as "not yet extracted" until one runs (S-462 task 2, FR-WS-33).
 //!
 //! Fixtures carry a Rust source file so the member has a graph beside its
 //! manifests, as every real member does.
@@ -15,7 +17,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use logos_core::graph_store::{BuildArtifactRow, BuildManifestRow};
+use logos_core::graph_store::{BuildArtifactRow, BuildManifestRow, BUILD_FACTS_EXTRACTED_KEY};
 use logos_core::{Engine, Runtime};
 
 fn write(root: &Path, rel: &str, contents: &str) {
@@ -108,6 +110,35 @@ fn revision(root: &Path) -> Option<String> {
         |r| r.get::<_, String>(0),
     )
     .ok()
+}
+
+/// The member store's build-facts extraction marker, if recorded.
+fn extraction_marker(root: &Path) -> Option<String> {
+    let db = root.join(".logos").join("logos.db");
+    let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    conn.query_row(
+        "SELECT value FROM project_metadata WHERE key = ?1",
+        [BUILD_FACTS_EXTRACTED_KEY],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Take a member store back to what the release before migration 22 left on
+/// disk: both build tables absent (their one index goes with them), migration
+/// 22 unrecorded, `user_version` 21 — and so no extraction marker. The exact
+/// inverse of migration 22, which is two `CREATE TABLE`s and one index; the
+/// next [`Engine::start`] re-applies it, as it does on a real upgrade.
+fn downgrade_to_v21(root: &Path) {
+    let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
+    conn.execute_batch(&format!(
+        "DROP TABLE build_artifacts; DROP TABLE build_manifests; \
+         DELETE FROM schema_versions WHERE version = 22; \
+         DELETE FROM project_metadata WHERE key = '{BUILD_FACTS_EXTRACTED_KEY}'; \
+         PRAGMA user_version = 21;"
+    ))
+    .expect("downgrade the store to v21");
 }
 
 const ROOT_POM: &str = r#"<project>
@@ -247,6 +278,12 @@ fn a_gitignored_manifest_is_not_read_and_an_unreadable_one_stays_in_the_denomina
 
 // ── a member with no build manifest is unaffected ────────────────────────────
 
+/// Byte-for-byte apart from the two empty tables **and one `project_metadata`
+/// row**: the extraction marker a full index records for every member, a
+/// manifest-less one included, so "no manifests" is never confused with "never
+/// extracted" (S-462 task 2). The graph tables are compared directly; the
+/// marker is asserted on its own because `project_metadata` also holds clocked
+/// rows.
 #[test]
 fn a_member_with_no_build_manifest_is_byte_for_byte_unaffected_apart_from_the_empty_tables() {
     let bare = tempfile::tempdir().unwrap();
@@ -279,6 +316,13 @@ fn a_member_with_no_build_manifest_is_byte_for_byte_unaffected_apart_from_the_em
         vec![("build_artifacts".to_string(), vec![]), ("build_manifests".to_string(), vec![])],
         "a member with no build manifest has the two tables, empty"
     );
+    for root in [bare.path(), with_pom.path()] {
+        assert_eq!(
+            extraction_marker(root).as_deref(),
+            Some("1"),
+            "a full index marks the facts extracted, with or without a manifest"
+        );
+    }
 
     // Neither a partial sync nor a full-walk reconcile writes anything for it:
     // the whole store — graph revision included — is unchanged by a no-op.
@@ -292,6 +336,65 @@ fn a_member_with_no_build_manifest_is_byte_for_byte_unaffected_apart_from_the_em
         before,
         "a no-op sync and reconcile on a manifest-less member write nothing"
     );
+}
+
+// ── only a full walk marks the facts extracted ───────────────────────────────
+
+/// **An upgraded store reads "not yet extracted" until a full walk.** A store
+/// written before migration 22 has no build facts and no marker. A partial sync
+/// — even one that names the manifest and so records its facts — never writes
+/// the marker: it saw a subset of the member. The first full-walk reconcile
+/// does, for a member with a manifest and for one without, advancing the graph
+/// revision; a second writes nothing at all.
+#[test]
+fn only_a_full_walk_marks_an_upgraded_members_build_facts_extracted() {
+    for with_pom in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(root, "src/lib.rs", "pub fn hello() {}\n");
+        if with_pom {
+            write(root, "pom.xml", ROOT_POM);
+        }
+        Engine::start(root).expect("engine starts").index();
+        downgrade_to_v21(root);
+
+        let engine = Engine::start(root).expect("the upgraded store opens at v22");
+        let rt = engine.runtime().unwrap();
+        assert!(manifests(rt).is_empty(), "migration 22 creates the tables empty");
+        assert_eq!(extraction_marker(root), None, "an upgraded store records no extraction");
+
+        write(root, "src/lib.rs", "pub fn hello() {}\npub fn more() {}\n");
+        engine.sync(&[PathBuf::from("src/lib.rs"), PathBuf::from("pom.xml")]);
+        assert_eq!(manifests(rt).len(), usize::from(with_pom), "the partial sync read what it named");
+        assert_eq!(
+            extraction_marker(root),
+            None,
+            "a partial sync never marks the facts extracted (with_pom = {with_pom})"
+        );
+
+        let before = revision(root);
+        engine.health(true).expect("a full-walk reconcile runs");
+        assert_eq!(
+            extraction_marker(root).as_deref(),
+            Some("1"),
+            "the first full walk marks the facts extracted (with_pom = {with_pom})"
+        );
+        assert_ne!(
+            revision(root),
+            before,
+            "marking the facts extracted moves what a reader of them sees, so it advances the \
+             graph revision as a manifest change does (with_pom = {with_pom})"
+        );
+        assert_eq!(manifests(rt).len(), usize::from(with_pom));
+
+        let before = dump(root, &["schema_versions"]);
+        engine.health(true).expect("a second full-walk reconcile runs");
+        assert_eq!(
+            dump(root, &["schema_versions"]),
+            before,
+            "once marked, a no-op full walk writes nothing (with_pom = {with_pom})"
+        );
+    }
 }
 
 // ── a changed manifest resyncs only that member's facts ──────────────────────

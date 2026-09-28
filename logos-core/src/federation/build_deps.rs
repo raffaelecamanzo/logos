@@ -46,6 +46,15 @@
 //! declares one: the status lists [`PlatformCandidate`]s by in-degree share and
 //! classifies nothing.
 //!
+//! # Unread is never "no manifests" ([NFR-CC-04])
+//! A member is **read** only when its store marks its build facts extracted —
+//! a full walk ran over it ([`crate::graph_store::BUILD_FACTS_EXTRACTED_KEY`]).
+//! Every other roster member is named in [`MembersRead::unread`] with its
+//! reason in [`MembersRead::unread_reasons`]: [`UNREAD_NOT_EXTRACTED`] for a
+//! store upgraded across migration 22 (or never indexed), whose empty tables
+//! say nothing about its manifests; [`UNREAD_FAILED`] for an engine that did
+//! not open or a read that failed.
+//!
 //! # Built on first query, never at startup ([ADR-52], [NFR-PE-10])
 //! [`BuildDependencies`] holds the relation behind a cache keyed on the
 //! members' sync-stamps, empty until the first [`BuildDependencies::relation`]
@@ -247,9 +256,15 @@ pub struct MembersRead {
     /// Members whose build facts were read.
     pub read: u64,
     /// Roster members whose facts could not be read (the engine did not open,
-    /// or the read failed), by name, in roster order. Absent when none.
+    /// the read failed, or the store holds no extracted facts yet), by name, in
+    /// roster order. Absent when none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unread: Vec<String>,
+    /// Why each [`unread`](Self::unread) member was not read, keyed by name:
+    /// [`UNREAD_NOT_EXTRACTED`] or [`UNREAD_FAILED`]. Exactly the unread
+    /// members; absent when none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub unread_reasons: BTreeMap<String, &'static str>,
     /// Members read that hold at least one build manifest.
     pub with_manifests: u64,
     /// Manifests recorded across the members read.
@@ -397,18 +412,54 @@ impl BuildDependencyRelation {
 /// its store holds — what [`join`] takes, one entry per member read.
 pub type MemberBuildFacts = (String, Vec<BuildManifestRow>);
 
+/// The [`unread`](MembersRead::unread) reason of a member whose store records
+/// no full-walk build-manifest pass: upgraded across migration 22 and not yet
+/// fully re-read, or never indexed ([FR-WS-33]). Its empty tables say nothing
+/// about its manifests.
+///
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+pub const UNREAD_NOT_EXTRACTED: &str = "build facts not yet extracted";
+
+/// The [`unread`](MembersRead::unread) reason of a member whose engine did not
+/// open or whose facts read failed ([ADR-53]); the cause is in the log line and,
+/// for an unopenable store, in the degraded roll-up.
+///
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+pub const UNREAD_FAILED: &str = "build facts could not be read";
+
+/// Sort one member's facts read into [`join`]'s two inputs: its rows onto
+/// `facts` when its store marks them extracted, its name onto `not_extracted`
+/// when it does not (the `None` of
+/// [`MemberContracts::build_manifests`]). Shared by both read paths — the lazy
+/// relation and `workspace status`'s freshness walk — so they cannot disagree
+/// about which member is read.
+pub(super) fn sort_read(
+    member: String,
+    read: Option<Vec<BuildManifestRow>>,
+    facts: &mut Vec<MemberBuildFacts>,
+    not_extracted: &mut Vec<String>,
+) {
+    match read {
+        Some(rows) => facts.push((member, rows)),
+        None => not_extracted.push(member),
+    }
+}
+
 /// Join member-local build facts into the relation ([FR-WS-33]).
 ///
 /// `roster` is the workspace's member list (manifest order); `facts` holds one
 /// entry per member whose facts were read, and a roster member absent from it
-/// is reported [`unread`](MembersRead::unread). `kinds` is the resolved
-/// `[workspace.member.<name>] kind` map. Pure: no I/O, deterministic output.
+/// is reported [`unread`](MembersRead::unread) — with
+/// [`UNREAD_NOT_EXTRACTED`] when it is named in `not_extracted`, else
+/// [`UNREAD_FAILED`]. `kinds` is the resolved `[workspace.member.<name>] kind`
+/// map. Pure: no I/O, deterministic output.
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 pub fn join(
     roster: &[Member],
     kinds: &BTreeMap<String, MemberKind>,
     facts: &[MemberBuildFacts],
+    not_extracted: &[String],
 ) -> BuildDependencyRelation {
     let read: BTreeMap<&str, &[BuildManifestRow]> = facts
         .iter()
@@ -421,7 +472,15 @@ pub fn join(
     };
     for member in roster {
         match read.get(member.name.as_str()) {
-            None => members.unread.push(member.name.clone()),
+            None => {
+                let reason = if not_extracted.contains(&member.name) {
+                    UNREAD_NOT_EXTRACTED
+                } else {
+                    UNREAD_FAILED
+                };
+                members.unread.push(member.name.clone());
+                members.unread_reasons.insert(member.name.clone(), reason);
+            }
             Some(rows) => {
                 members.read += 1;
                 members.with_manifests += u64::from(!rows.is_empty());
@@ -659,7 +718,9 @@ impl BuildDependencies {
     /// call after a member re-synced.
     ///
     /// A member whose engine will not open or whose read fails is skipped with
-    /// a warning and named in [`MembersRead::unread`] ([ADR-53]).
+    /// a warning and named in [`MembersRead::unread`] ([ADR-53]), reason
+    /// [`UNREAD_FAILED`]; a member whose store holds no extracted facts yet is
+    /// named there too, reason [`UNREAD_NOT_EXTRACTED`].
     ///
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
     pub fn relation<E>(&self, registry: &EngineRegistry<E>) -> Arc<BuildDependencyRelation>
@@ -669,11 +730,14 @@ impl BuildDependencies {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
         self.cache.get_or_compute(stamps, || {
-            let facts = read_members(&answer, "build-manifest facts", |engine| {
+            let (mut facts, mut not_extracted) = (Vec::new(), Vec::new());
+            for (member, read) in read_members(&answer, "build-manifest facts", |engine| {
                 engine.build_manifests()
-            });
+            }) {
+                sort_read(member, read, &mut facts, &mut not_extracted);
+            }
             let federation = registry.federation();
-            join(&federation.members, &federation.member_kinds, &facts)
+            join(&federation.members, &federation.member_kinds, &facts, &not_extracted)
         })
     }
 }
@@ -793,9 +857,10 @@ pub struct XserviceBuildDeps {
     /// The `--repo` scope, when one was applied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// Set when the scope names no member the relation was read over (unknown,
-    /// or its build facts could not be read) — so the empty
-    /// [`members`](Self::members) is never read as "no edges" ([NFR-CC-04]).
+    /// Set when the scope names no member the relation was read over — so the
+    /// empty [`members`](Self::members) is never read as "no edges"
+    /// ([NFR-CC-04]). It states why: the member's
+    /// [unread reason](MembersRead::unread_reasons), or "not in the workspace".
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -819,10 +884,14 @@ pub fn xservice_build_deps(relation: &BuildDependencyRelation, repo: Option<&str
         None => relation.per_member(),
     };
     let scope_note = repo.filter(|_| members.is_empty()).map(|member| {
-        format!(
-            "`{member}` is not a member the build relation was read over \
-             (not in the workspace, or its build facts could not be read)"
-        )
+        let why = relation
+            .headline
+            .members
+            .unread_reasons
+            .get(member)
+            .copied()
+            .unwrap_or("not in the workspace");
+        format!("`{member}` is not a member the build relation was read over ({why})")
     });
     XserviceBuildDeps {
         scope: repo.map(str::to_string),
@@ -893,12 +962,15 @@ mod tests {
         fn invocation_refs(&self) -> Result<Vec<InvocationRef>> {
             Ok(CALLS.with(|c| c.borrow().get(&self.member).cloned().unwrap_or_default()))
         }
-        fn build_manifests(&self) -> Result<Vec<BuildManifestRow>> {
+        fn build_manifests(&self) -> Result<Option<Vec<BuildManifestRow>>> {
             READS.with(|r| *r.borrow_mut().entry(self.member.clone()).or_default() += 1);
             if self.member == "unreadable" {
                 anyhow::bail!("store read failed");
             }
-            Ok(FACTS.with(|f| f.borrow().get(&self.member).cloned().unwrap_or_default()))
+            if self.member == "upgraded" {
+                return Ok(None);
+            }
+            Ok(Some(FACTS.with(|f| f.borrow().get(&self.member).cloned().unwrap_or_default())))
         }
     }
 
@@ -1059,7 +1131,7 @@ mod tests {
     #[test]
     fn a_reference_to_another_members_artifact_is_an_edge_and_every_other_reference_is_accounted() {
         let (roster, facts) = estate_shape();
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
 
         let starter = "com.sourcesense.poste.pec:poste-pec-starter";
         let common = "com.sourcesense.poste.pec:poste-pec-common";
@@ -1116,6 +1188,7 @@ mod tests {
                 members: 4,
                 read: 4,
                 unread: Vec::new(),
+                unread_reasons: BTreeMap::new(),
                 with_manifests: 4,
                 manifests: 5,
                 manifests_read: 5
@@ -1166,7 +1239,7 @@ mod tests {
             ("lib".to_string(), vec![pom(vec![produced(G, "lib")]), malformed]),
             ("app".to_string(), vec![pom(vec![produced(G, "app"), dependency(G, "lib")])]),
         ];
-        let headline = join(&roster, &BTreeMap::new(), &facts).headline;
+        let headline = join(&roster, &BTreeMap::new(), &facts, &[]).headline;
         assert_eq!((headline.members.manifests, headline.members.manifests_read), (3, 2));
         assert_eq!(headline.members.with_manifests, 2);
         assert_eq!(headline.references.references, 1, "the malformed manifest adds no reference");
@@ -1187,7 +1260,7 @@ mod tests {
                 ],
             ),
         ];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert_eq!(relation.edges.len(), 1);
         assert_eq!(relation.edges[0].references, 2);
         assert_eq!(relation.headline.build_dependency_pairs.pairs, 1);
@@ -1221,7 +1294,7 @@ mod tests {
                 vec![pom(vec![produced(core, "manager"), dependency(core, "api")])],
             ),
         ];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
 
         assert!(relation.edges.is_empty(), "resolves to neither producer: {:?}", relation.edges);
         let headline = &relation.headline;
@@ -1255,7 +1328,7 @@ mod tests {
             ),
             ("app".to_string(), vec![pom(vec![produced(G, "app"), dependency(G, "lib")])]),
         ];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert!(relation.headline.collisions.is_empty());
         assert_eq!(edge_keys(&relation), [("app", "lib", BuildEdgeKind::Dependency, "com.sourcesense.poste.pec:lib")]);
     }
@@ -1282,7 +1355,7 @@ mod tests {
                 vec![pom(vec![produced(G, "app"), dependency(G, "lib"), dependency(G, "tool")])],
             ),
         ];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert!(relation.edges.is_empty(), "{:?}", relation.edges);
         assert_eq!(relation.headline.references.external, 2);
     }
@@ -1317,7 +1390,7 @@ mod tests {
                 vec![pom(vec![produced(G, "mvn"), scoped(dependency(G, "lib"), "classpath")])],
             ),
         ];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         let r = relation.headline.references;
         assert_eq!((r.project_reference, r.build_plugin, r.to_member), (1, 1, 1));
         assert!(
@@ -1342,7 +1415,7 @@ mod tests {
     fn a_declared_platforms_inbound_edges_are_counted_apart_from_the_headline() {
         let (roster, facts) = estate_shape();
         let kinds = BTreeMap::from([("starter".to_string(), MemberKind::Platform)]);
-        let relation = join(&roster, &kinds, &facts);
+        let relation = join(&roster, &kinds, &facts, &[]);
         let headline = &relation.headline;
 
         assert_eq!(
@@ -1364,7 +1437,7 @@ mod tests {
         );
         // The headline states only its own share: the 2 pairs into `common`
         // stand for 3 references, the 4 into the platform are apart.
-        let undeclared = join(&roster, &BTreeMap::new(), &facts).headline.references;
+        let undeclared = join(&roster, &BTreeMap::new(), &facts, &[]).headline.references;
         assert_eq!((headline.references.to_member, headline.references.to_platform), (3, 4));
         assert_eq!(
             headline.references.to_member + headline.references.to_platform,
@@ -1388,7 +1461,7 @@ mod tests {
     fn a_platform_with_no_inbound_edge_is_reported_at_zero_and_other_kinds_set_nothing_apart() {
         let (roster, facts) = estate_shape();
         let kinds = BTreeMap::from([("batch".to_string(), MemberKind::Platform)]);
-        let apart = join(&roster, &kinds, &facts).headline.platform_apart.unwrap();
+        let apart = join(&roster, &kinds, &facts, &[]).headline.platform_apart.unwrap();
         assert_eq!(apart.members, ["batch"]);
         assert_eq!(apart.build_dependency_pairs, PairCount::default());
 
@@ -1396,7 +1469,7 @@ mod tests {
             ("starter".to_string(), MemberKind::Documentation),
             ("common".to_string(), MemberKind::Mock),
         ]);
-        let relation = join(&roster, &kinds, &facts);
+        let relation = join(&roster, &kinds, &facts, &[]);
         assert!(relation.headline.platform_apart.is_none());
         assert_eq!(relation.headline.build_dependency_pairs.pairs, 5);
     }
@@ -1429,7 +1502,7 @@ mod tests {
             facts.push(((*c).to_string(), vec![pom(refs)]));
         }
         let roster = fed(&names, &[]).members;
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert_eq!(
             relation.headline.platform_candidates,
             [
@@ -1444,7 +1517,7 @@ mod tests {
         let mut names_10 = names.clone();
         names_10.push("extra");
         facts.push(("extra".into(), vec![pom(vec![produced(G, "extra")])]));
-        let relation = join(&fed(&names_10, &[]).members, &BTreeMap::new(), &facts);
+        let relation = join(&fed(&names_10, &[]).members, &BTreeMap::new(), &facts, &[]);
         assert_eq!(
             relation.headline.platform_candidates,
             [PlatformCandidate { member: "hub".into(), in_degree: 7, of: 9 }]
@@ -1454,7 +1527,7 @@ mod tests {
         // stays 8, and `lib`'s 2 of 8 still clears the quarter.
         let mut names_unread = names.clone();
         names_unread.push("broken");
-        let relation = join(&fed(&names_unread, &[]).members, &BTreeMap::new(), &facts[..9]);
+        let relation = join(&fed(&names_unread, &[]).members, &BTreeMap::new(), &facts[..9], &[]);
         assert_eq!(relation.headline.members.unread, ["broken"]);
         assert_eq!(
             relation.headline.platform_candidates,
@@ -1468,7 +1541,7 @@ mod tests {
         // only `platform`: a human who declared the member already decided.
         for kind in [MemberKind::Platform, MemberKind::Documentation, MemberKind::Mock] {
             let kinds = BTreeMap::from([("hub".to_string(), kind)]);
-            let candidates = join(&fed(&names_10, &[]).members, &kinds, &facts)
+            let candidates = join(&fed(&names_10, &[]).members, &kinds, &facts, &[])
                 .headline
                 .platform_candidates;
             assert!(
@@ -1489,7 +1562,7 @@ mod tests {
             ("b".to_string(), vec![pom(vec![produced(G, "b"), dependency(G, "a")])]),
             ("c".to_string(), vec![pom(vec![produced(G, "c")])]),
         ];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert_eq!(relation.headline.build_dependency_pairs.pairs, 1);
         assert!(relation.headline.platform_candidates.is_empty());
     }
@@ -1500,7 +1573,7 @@ mod tests {
     fn an_unread_member_is_named_and_the_per_member_view_answers_for_members_read() {
         let (mut roster, facts) = estate_shape();
         roster.push(Member { name: "broken".into(), root: PathBuf::from("/ws/broken") });
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert_eq!(relation.headline.members.members, 5);
         assert_eq!(relation.headline.members.read, 4);
         assert_eq!(relation.headline.members.unread, ["broken"]);
@@ -1538,7 +1611,7 @@ mod tests {
     #[test]
     fn a_workspace_with_no_member_read_joins_to_nothing_and_names_them_all() {
         let roster = fed(&["a", "b"], &[]).members;
-        let relation = join(&roster, &BTreeMap::new(), &[]);
+        let relation = join(&roster, &BTreeMap::new(), &[], &[]);
         assert_eq!(relation.headline.members.unread, ["a", "b"]);
         assert_eq!(relation.headline.members.read, 0);
         assert!(relation.headline.platform_candidates.is_empty());
@@ -1552,7 +1625,7 @@ mod tests {
     fn a_workspace_without_manifests_joins_to_nothing_and_says_so() {
         let roster = fed(&["a", "b"], &[]).members;
         let facts = vec![("a".to_string(), Vec::new()), ("b".to_string(), Vec::new())];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert!(relation.edges.is_empty());
         assert_eq!(relation.headline.members.with_manifests, 0);
         let json = serde_json::to_value(&relation).unwrap();
@@ -1612,6 +1685,64 @@ mod tests {
         assert_eq!(relation.headline.members.unread, ["broken", "unreadable"]);
         assert_eq!(relation.headline.members.read, 4);
         assert_eq!(relation.headline.build_dependency_pairs.pairs, 5);
+        assert_eq!(
+            relation.headline.members.unread_reasons,
+            BTreeMap::from([
+                ("broken".to_string(), UNREAD_FAILED),
+                ("unreadable".to_string(), UNREAD_FAILED),
+            ])
+        );
+    }
+
+    /// **An upgraded store is unread, never "read, 0 manifests"** (S-462 task
+    /// 2, [FR-WS-33]). A member whose store marks no extraction (`upgraded`
+    /// answers `None`) is named unread with [`UNREAD_NOT_EXTRACTED`] through
+    /// the lazy relation, beside a failed read's [`UNREAD_FAILED`]; it counts
+    /// in neither `read` nor `with_manifests`.
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    #[test]
+    fn a_member_whose_facts_are_not_yet_extracted_is_unread_with_that_reason() {
+        let (_, facts) = estate_shape();
+        for (member, rows) in facts {
+            set_facts(&member, rows);
+        }
+        let registry = EngineRegistry::<FakeEngine>::new(
+            fed(&["starter", "common", "api", "batch", "upgraded", "unreadable"], &[]),
+            RegistryMode::Lazy,
+        );
+        let members = BuildDependencies::new().relation(&registry).headline.members.clone();
+        assert_eq!(members.unread, ["upgraded", "unreadable"]);
+        assert_eq!(
+            members.unread_reasons,
+            BTreeMap::from([
+                ("unreadable".to_string(), UNREAD_FAILED),
+                ("upgraded".to_string(), UNREAD_NOT_EXTRACTED),
+            ])
+        );
+        assert_eq!((members.read, members.with_manifests), (4, 4));
+    }
+
+    /// The reasons serialize under `members`, one per unread member, and are
+    /// absent when every member was read — so a fully-read payload does not
+    /// move a byte.
+    #[test]
+    fn unread_reasons_ride_beside_unread_and_vanish_when_every_member_is_read() {
+        let roster = fed(&["a", "b", "c"], &[]).members;
+        let facts = vec![("a".to_string(), Vec::new())];
+        let json = serde_json::to_value(join(&roster, &BTreeMap::new(), &facts, &["b".to_string()]))
+            .unwrap();
+        assert_eq!(json["headline"]["members"]["unread"], serde_json::json!(["b", "c"]));
+        assert_eq!(
+            json["headline"]["members"]["unread_reasons"],
+            serde_json::json!({"b": UNREAD_NOT_EXTRACTED, "c": UNREAD_FAILED})
+        );
+
+        let all_read: Vec<MemberBuildFacts> =
+            ["a", "b", "c"].iter().map(|m| ((*m).to_string(), Vec::new())).collect();
+        let json = serde_json::to_value(join(&roster, &BTreeMap::new(), &all_read, &[])).unwrap();
+        assert!(json["headline"]["members"].get("unread").is_none());
+        assert!(json["headline"]["members"].get("unread_reasons").is_none());
     }
 
     // ── BR-58 / ADR-26: every runtime figure is byte-identical ────────────
@@ -1764,7 +1895,7 @@ mod tests {
                 ])],
             ),
         ];
-        join(&roster, &BTreeMap::new(), &facts)
+        join(&roster, &BTreeMap::new(), &facts, &[])
     }
 
     #[test]
@@ -1841,7 +1972,7 @@ mod tests {
                 ])],
             ),
         ];
-        let relation = join(&roster, &BTreeMap::new(), &facts);
+        let relation = join(&roster, &BTreeMap::new(), &facts, &[]);
         assert_eq!(relation.edges.len(), 2, "both libraries joined");
         assert!(relation.cross_context_hints().is_empty(), "one context, two producers");
     }
@@ -1883,11 +2014,27 @@ mod tests {
         // never read as "no build dependencies".
         assert_eq!(
             unknown.scope_note.as_deref(),
-            Some(
-                "`nope` is not a member the build relation was read over \
-                 (not in the workspace, or its build facts could not be read)"
-            ),
+            Some("`nope` is not a member the build relation was read over (not in the workspace)"),
         );
+    }
+
+    /// A scope naming an unread roster member states that member's reason —
+    /// "not yet extracted" is never folded into "not in the workspace".
+    #[test]
+    fn a_scope_naming_an_unread_member_states_its_reason() {
+        let roster = fed(&["a", "b", "c"], &[]).members;
+        let facts = vec![("a".to_string(), Vec::new())];
+        let relation = join(&roster, &BTreeMap::new(), &facts, &["b".to_string()]);
+        let note = |m| xservice_build_deps(&relation, Some(m)).scope_note;
+        assert_eq!(
+            note("b").as_deref(),
+            Some("`b` is not a member the build relation was read over (build facts not yet extracted)")
+        );
+        assert_eq!(
+            note("c").as_deref(),
+            Some("`c` is not a member the build relation was read over (build facts could not be read)")
+        );
+        assert_eq!(note("a"), None, "a member read answers, even with no edge");
     }
 
     /// The wire shape the three surfaces print: each row names `kind`, `scope`

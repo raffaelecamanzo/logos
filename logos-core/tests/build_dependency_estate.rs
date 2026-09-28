@@ -196,7 +196,13 @@ fn replay_collisions_resolved_to_one_producer(root: &Path, relation: &BuildDepen
         .iter()
         .map(|m| {
             let engine = registry.engine_for(&m.name).expect("member opens");
-            (m.name.clone(), engine.build_manifests().expect("facts read"))
+            let rows = engine
+                .build_manifests()
+                .expect("facts read")
+                .unwrap_or_else(|| {
+                    panic!("{}: build facts not yet extracted — run `logos health` in it", m.name)
+                });
+            (m.name.clone(), rows)
         })
         .collect();
     for (label, pick_last) in [("first", false), ("last", true)] {
@@ -233,8 +239,8 @@ fn replay_collisions_resolved_to_one_producer(root: &Path, relation: &BuildDepen
             .collect();
         let hubs: BTreeMap<String, MemberKind> =
             PLATFORM_HUBS.iter().map(|m| ((*m).to_string(), MemberKind::Platform)).collect();
-        let all = join(&fed.members, &BTreeMap::new(), &replayed);
-        let apart = join(&fed.members, &hubs, &replayed);
+        let all = join(&fed.members, &BTreeMap::new(), &replayed, &[]);
+        let apart = join(&fed.members, &hubs, &replayed, &[]);
         let non_hub_dep: BTreeSet<(&str, &str)> = apart
             .edges
             .iter()

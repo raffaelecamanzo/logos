@@ -268,4 +268,12 @@ fn xservice_build_deps_says_it_is_a_build_dependency_not_a_runtime_coupling() {
             && status_description.contains("a BUILD dependency, NOT a runtime coupling"),
         "workspace_status names its build_dependency section as a build dependency: {status_description}",
     );
+    // An agent reading an upgraded store must be told it is unread, with a
+    // reason, and never a member with no manifests (FR-WS-33, S-462 task 2).
+    for clause in ["not yet extracted", "`members.unread_reasons`", "never counted as a member with no manifests"] {
+        assert!(
+            status_description.contains(clause),
+            "workspace_status says an unextracted member is unread with its reason ({clause}): {status_description}",
+        );
+    }
 }

@@ -1535,6 +1535,39 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     expect(text).toContain("Build facts could not be read for web — their build dependencies are unknown, not absent.");
   });
 
+  it("never reads an unread member's reason off Object.prototype", async () => {
+    const headline: BuildDependencyHeadline = {
+      ...BUILD_HEADLINE,
+      members: { ...BUILD_HEADLINE.members, read: 0, unread: ["constructor", "toString"] },
+    };
+    stubApi({ coverage: COVERAGE, providers: [BINDING], buildDependency: headline, buildDeps: BUILD_DEPS });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+    const card = screen.getByRole("heading", { name: "Build dependencies" }).closest("section")!;
+    expect(card.textContent).toContain(
+      "Build facts could not be read for constructor, toString — their build dependencies are unknown, not absent.",
+    );
+  });
+
+  it("names each unread member's server-stated reason, so an upgraded store never reads as having no manifests", async () => {
+    const headline: BuildDependencyHeadline = {
+      ...BUILD_HEADLINE,
+      members: {
+        ...BUILD_HEADLINE.members,
+        read: 0,
+        unread: ["web", "api"],
+        unread_reasons: { api: "build facts could not be read", web: "build facts not yet extracted" },
+      },
+    };
+    stubApi({ coverage: COVERAGE, providers: [BINDING], buildDependency: headline, buildDeps: BUILD_DEPS });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: /cross-service coverage/i }));
+    const card = screen.getByRole("heading", { name: "Build dependencies" }).closest("section")!;
+    expect(card.textContent).toContain(
+      "Build facts could not be read for web (build facts not yet extracted), api (build facts could not be read) — their build dependencies are unknown, not absent.",
+    );
+  });
+
   /* A workspace with no build manifest renders the coverage tab byte-for-byte as
      before the build layer existed. The recorded file was written from the tree
      as it stood BEFORE S-464 (the view reverted to its merge-base version for the

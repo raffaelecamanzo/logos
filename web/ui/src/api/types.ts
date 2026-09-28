@@ -1691,6 +1691,10 @@ export interface BuildDependencyHeadline {
     members: number;
     read: number;
     unread?: string[];
+    /** Why each `unread` member was not read, by name — e.g. "build facts not
+     *  yet extracted" for a store upgraded across migration 22 (FR-WS-33).
+     *  Absent when every member was read. */
+    unread_reasons?: Record<string, string>;
     with_manifests: number;
     manifests: number;
     manifests_read: number;

@@ -21,6 +21,7 @@ use std::process::Command;
 use logos_core::federation::{
     discover, workspace_status, BuildDependencies, ContractBridge, EngineRegistry, RegistryMode,
 };
+use logos_core::graph_store::BUILD_FACTS_EXTRACTED_KEY;
 use logos_core::Engine;
 
 const OPENAPI_YAML: &str = "\
@@ -227,4 +228,146 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
     let (edges_with, edges_without) = (edges(with.path()), edges(without.path()));
     assert!(edges_with.contains("GET /users/{id}"), "the bridge binds the route: {edges_with}");
     assert_eq!(edges_with, edges_without);
+}
+
+/// Take a member store back to what the release before migration 22 left on
+/// disk: both build tables absent (their one index goes with them), migration
+/// 22 unrecorded, `user_version` 21 — and so no extraction marker. The exact
+/// inverse of migration 22; the next open re-applies it, as a real upgrade
+/// does. Duplicated from `build_manifest_facts.rs` (no shared test module).
+fn downgrade_to_v21(member: &Path) {
+    let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
+    conn.execute_batch(&format!(
+        "DROP TABLE build_artifacts; DROP TABLE build_manifests; \
+         DELETE FROM schema_versions WHERE version = 22; \
+         DELETE FROM project_metadata WHERE key = '{BUILD_FACTS_EXTRACTED_KEY}'; \
+         PRAGMA user_version = 21;"
+    ))
+    .expect("downgrade the store to v21");
+}
+
+fn user_version(member: &Path) -> i64 {
+    let db = member.join(".logos").join("logos.db");
+    let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+}
+
+/// **An upgraded workspace never reads as "no manifests"** ([FR-WS-33],
+/// [NFR-CC-04]; the Sprint 80 review's D1). Three members indexed by the
+/// release before migration 22 — `lib`, `app` building against it, and a
+/// manifest-less `docs`:
+///
+/// 1. opened at v22, every member is **unread** with the reason "build facts
+///    not yet extracted", never "read, 0 manifests" — and the section is
+///    present, because an unread member could hold manifests nobody saw;
+/// 2. a partial sync naming `app`'s pom records its facts but not the marker,
+///    so `app` stays unread;
+/// 3. after one full-walk reconcile per member the facts are there, every
+///    member reads, and `docs` is read with 0 manifests.
+///
+/// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_its_facts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let members = [
+        ("lib", Some(pom("lib", None, &[]))),
+        ("app", Some(pom("app", None, &["lib"]))),
+        ("docs", None),
+    ];
+    for (name, pom) in &members {
+        let dir = root.join(name);
+        git_init(&dir);
+        write(&dir, "src/lib.rs", "pub fn f() {}\n");
+        if let Some(pom) = pom {
+            write(&dir, "pom.xml", pom);
+        }
+        index_member(&dir);
+        downgrade_to_v21(&dir);
+    }
+    let manifest = "[workspace]\nname = \"acme\"\nmembers = [\"lib\", \"app\", \"docs\"]\n";
+    let not_extracted = serde_json::json!("build facts not yet extracted");
+
+    let status = status_over(root, manifest);
+    for (name, _) in &members {
+        assert_eq!(user_version(&root.join(name)), 22, "{name} was opened at v22");
+    }
+    let section = status.get("build_dependency").expect("an unread member keeps the section");
+    assert_eq!(section["members"]["read"], 0, "{section:#}");
+    assert_eq!(section["members"]["unread"], serde_json::json!(["lib", "app", "docs"]));
+    for (name, _) in &members {
+        assert_eq!(section["members"]["unread_reasons"][name], not_extracted, "{section:#}");
+    }
+    assert_eq!(section["members"]["with_manifests"], 0);
+    assert!(section["summary"].as_str().unwrap().contains("over 0 of 3 members read"));
+
+    // A partial sync sees a subset of the member: facts, but no marker.
+    let app = root.join("app");
+    Engine::start(&app).expect("app opens").sync(&[PathBuf::from("pom.xml")]);
+    let status = status_over(root, manifest);
+    let section = &status["build_dependency"];
+    assert_eq!(section["members"]["unread"], serde_json::json!(["lib", "app", "docs"]));
+    assert_eq!(section["members"]["unread_reasons"]["app"], not_extracted);
+
+    for (name, _) in &members {
+        Engine::start(root.join(name))
+            .expect("member opens")
+            .health(true)
+            .expect("a full-walk reconcile runs");
+    }
+    let status = status_over(root, manifest);
+    let section = &status["build_dependency"];
+    let read = &section["members"];
+    assert_eq!((&read["read"], &read["members"]), (&serde_json::json!(3), &serde_json::json!(3)));
+    assert!(read.get("unread").is_none() && read.get("unread_reasons").is_none(), "{read:#}");
+    assert_eq!((&read["with_manifests"], &read["manifests"]), (&serde_json::json!(2), &serde_json::json!(2)));
+    assert_eq!(
+        section["build_dependency_pairs"],
+        serde_json::json!({"pairs": 1, "parent": 0, "dependency": 1, "managed": 0, "bom-import": 0}),
+        "{section:#}"
+    );
+}
+
+/// **A manifest-less workspace, fully indexed, reads every member with 0
+/// manifests** and so carries no `build_dependency` key: a full index marks
+/// the facts extracted whether or not it found a manifest.
+#[test]
+fn a_fully_indexed_manifest_less_workspace_reads_every_member_and_shows_no_section() {
+    let tmp = tempfile::tempdir().unwrap();
+    workspace(tmp.path(), false);
+    let status = status_over(tmp.path(), MANIFEST);
+    assert!(status.get("build_dependency").is_none(), "{status:#}");
+    let relation = BuildDependencies::new().relation(&registry_over(tmp.path(), MANIFEST));
+    let read = &relation.headline.members;
+    assert_eq!((read.read, read.members, read.with_manifests), (4, 4, 0));
+    assert!(read.unread.is_empty() && read.unread_reasons.is_empty(), "{read:?}");
+}
+
+/// **A never-indexed member is "not yet extracted" too** — nothing has read its
+/// manifests, so it is unread with that reason and keeps the section present,
+/// on a workspace whose only other member holds no manifest at all. One full
+/// index and it reads, with 0 manifests, and the section goes.
+#[test]
+fn a_never_indexed_member_is_unread_not_yet_extracted_until_it_is_indexed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for name in ["indexed", "cold"] {
+        let dir = root.join(name);
+        git_init(&dir);
+        write(&dir, "src/lib.rs", "pub fn f() {}\n");
+    }
+    index_member(&root.join("indexed"));
+    let manifest = "[workspace]\nname = \"acme\"\nmembers = [\"indexed\", \"cold\"]\n";
+
+    let status = status_over(root, manifest);
+    let read = &status["build_dependency"]["members"];
+    assert_eq!(read["unread"], serde_json::json!(["cold"]), "{status:#}");
+    assert_eq!(read["unread_reasons"]["cold"], "build facts not yet extracted");
+    assert_eq!((&read["read"], &read["with_manifests"]), (&serde_json::json!(1), &serde_json::json!(0)));
+
+    index_member(&root.join("cold"));
+    let status = status_over(root, manifest);
+    assert!(status.get("build_dependency").is_none(), "every member read, none holds a manifest: {status:#}");
 }

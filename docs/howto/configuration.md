@@ -201,12 +201,22 @@ kind = "platform"
   is counted as `to_collision`, never guessed onto one of them.
 - **No build manifest, nothing changes.** `build_dependency` is absent from the
   status payload when every member was read and none holds a `pom.xml` or
-  `build.gradle(.kts)`. A member whose facts could not be read keeps the
-  section present, named under `build_dependency.members.unread`.
-- **An upgraded store starts with no facts.** A member indexed by a release
-  before the build relation carries no build facts until it is fully re-read
-  (`logos index` or `logos health` in that member). Until then it reads as a
-  member with no manifest, so re-read every member after upgrading.
+  `build.gradle(.kts)`. A member that has never been indexed has not been read,
+  so it keeps the section present, reason `"build facts not yet extracted"`,
+  until its first `logos index`. A member whose facts could not be read keeps the
+  section present. It is named under `build_dependency.members.unread`, and
+  `build_dependency.members.unread_reasons` gives the reason.
+- **An upgraded store is "not yet extracted" until it is fully re-read.** A
+  member indexed by a release before the build relation carries no build facts
+  until `logos index` or `logos health` runs in it. A partial `logos sync` does
+  not count, even one that names a manifest. Until then the member is listed
+  under `members.unread` with the reason `"build facts not yet extracted"`, and
+  the section stays present. It never reads as a member with no manifest. A
+  member with no build manifest reads as read, with 0 manifests, once one full
+  re-read has run. Re-read every member after upgrading to see its pairs. Do it
+  before starting `logos serve`, or restart the serve afterwards: its cached
+  build relation (`xservice build-deps` and the map's build layer) does not see
+  a re-read made by another process.
 
 ### The warm sidecar
 
