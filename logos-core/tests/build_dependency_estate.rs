@@ -357,6 +357,18 @@ fn estate_build_dependency_relation_report() {
         top.sort_by(|a, b| b.cmp(a));
         println!("top in-degree, {}: {:?}", kind.as_str(), &top[..top.len().min(8)]);
     }
+    let mut any_kind: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for e in &undeclared.edges {
+        any_kind.entry(e.to.as_str()).or_default().insert(e.from.as_str());
+    }
+    println!(
+        "in-degree (any kind) of the *-kafka-models members: {:?}",
+        any_kind
+            .iter()
+            .filter(|(m, _)| m.ends_with("-kafka-models"))
+            .map(|(m, f)| (*m, f.len()))
+            .collect::<Vec<_>>()
+    );
     pairs_through_collisions(&root, &undeclared);
     replay_collisions_resolved_to_one_producer(&root, &undeclared);
 
@@ -376,5 +388,12 @@ fn estate_build_dependency_relation_report() {
         "\nnon-hub dependency pairs: {} over {} members",
         non_hub_dep.len(),
         members.len()
+    );
+    println!(
+        "deprecated-mailbox-core's non-hub dependency pairs: {:?}",
+        non_hub_dep
+            .iter()
+            .filter(|(f, t)| *f == "deprecated-mailbox-core" || *t == "deprecated-mailbox-core")
+            .collect::<Vec<_>>()
     );
 }
