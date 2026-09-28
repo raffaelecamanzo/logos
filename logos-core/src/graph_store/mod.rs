@@ -1223,6 +1223,83 @@ pub struct NewConfigSource<'a> {
     pub values: &'a [(&'a str, &'a str)],
 }
 
+/// One build manifest and the artifact facts it yields, as the store records
+/// them (S-462, [CR-148] §3.2 A, migration 22).
+///
+/// The store-local row shape, following [`NewConfigSource`]: the extraction
+/// engine produces a
+/// [`ManifestFacts`](crate::extract::build_manifest::ManifestFacts) and
+/// [`pipeline`](crate::pipeline) adapts it to this on the way in, so the store
+/// depends on no extraction type. The string fields carry migration 22's
+/// vocabulary, which its CHECKs enforce.
+///
+/// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+#[derive(Debug, Clone)]
+pub struct NewBuildManifest<'a> {
+    /// Project-relative path of the manifest.
+    pub path: &'a str,
+    /// `maven` or `gradle`.
+    pub format: &'a str,
+    /// blake3 of the manifest text; `None` only when it could not be read.
+    pub content_hash: Option<&'a str>,
+    /// `read`, `malformed` or `unreadable`.
+    pub status: &'a str,
+    /// Why it yielded no facts; `None` exactly when `status` is `read`.
+    pub detail: Option<&'a str>,
+    /// What it produces and references.
+    pub artifacts: Vec<NewBuildArtifact<'a>>,
+}
+
+/// One produced or referenced artifact of a [`NewBuildManifest`].
+#[derive(Debug, Clone, Copy)]
+pub struct NewBuildArtifact<'a> {
+    /// `produced` or `referenced`.
+    pub role: &'a str,
+    /// `parent`, `dependency`, `managed` or `bom-import`; `None` when produced.
+    pub kind: Option<&'a str>,
+    pub group_id: Option<&'a str>,
+    pub artifact_id: Option<&'a str>,
+    pub version: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub project_path: Option<&'a str>,
+    /// `resolved`, `version-refused` or `refused`.
+    pub resolution: &'a str,
+    /// Why it did not resolve; `None` exactly when `resolution` is `resolved`.
+    pub reason: Option<&'a str>,
+}
+
+/// One persisted build manifest with its artifact facts (S-462, migration 22) —
+/// the member-local fact base the workspace build relation joins ([ADR-69]
+/// point 2).
+///
+/// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuildManifestRow {
+    pub path: String,
+    pub format: String,
+    pub content_hash: Option<String>,
+    pub status: String,
+    pub detail: Option<String>,
+    /// In insertion order: the produced fact first, then references grouped by
+    /// kind (Maven `<parent>`, `<dependencies>`, `<dependencyManagement>`, each
+    /// in document order; Gradle in document order).
+    pub artifacts: Vec<BuildArtifactRow>,
+}
+
+/// One persisted artifact fact of a [`BuildManifestRow`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuildArtifactRow {
+    pub role: String,
+    pub kind: Option<String>,
+    pub group_id: Option<String>,
+    pub artifact_id: Option<String>,
+    pub version: Option<String>,
+    pub scope: Option<String>,
+    pub project_path: Option<String>,
+    pub resolution: String,
+    pub reason: Option<String>,
+}
+
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind)` — the
@@ -1327,6 +1404,17 @@ pub trait GraphStore {
     /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
     /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
     fn config_definitions(&self, key: &str) -> Result<Vec<ConfigDefinition>>;
+
+    /// Every build manifest this member's last index or sync recorded, with the
+    /// artifacts each produces and references (S-462, [CR-148] §3.2 A).
+    ///
+    /// Ordered by path; each manifest's artifacts in the order they were
+    /// recorded. Refused facts are returned too — a caller joining on
+    /// coordinates filters on `resolution`, and a census counts both. Empty for
+    /// a member with no build manifest.
+    ///
+    /// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+    fn build_manifests(&self) -> Result<Vec<BuildManifestRow>>;
 
     /// Every inbound edge of **any** kind: `(edge kind, source node)` pairs,
     /// ordered by `(kind, source id)`.
@@ -2218,6 +2306,54 @@ impl GraphStore for SqliteGraphStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting configuration definitions for key")?;
         Ok(rows)
+    }
+
+    fn build_manifests(&self) -> Result<Vec<BuildManifestRow>> {
+        let mut manifests: Vec<(i64, BuildManifestRow)> = self
+            .conn
+            .prepare_cached(
+                "SELECT id, path, format, content_hash, status, detail \
+                 FROM build_manifests ORDER BY path",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    BuildManifestRow {
+                        path: row.get(1)?,
+                        format: row.get(2)?,
+                        content_hash: row.get(3)?,
+                        status: row.get(4)?,
+                        detail: row.get(5)?,
+                        artifacts: Vec::new(),
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting build manifests")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT role, kind, group_id, artifact_id, version, scope, project_path, \
+                    resolution, reason \
+             FROM build_artifacts WHERE manifest_id = ?1 ORDER BY id",
+        )?;
+        for (id, manifest) in &mut manifests {
+            manifest.artifacts = stmt
+                .query_map([*id], |row| {
+                    Ok(BuildArtifactRow {
+                        role: row.get(0)?,
+                        kind: row.get(1)?,
+                        group_id: row.get(2)?,
+                        artifact_id: row.get(3)?,
+                        version: row.get(4)?,
+                        scope: row.get(5)?,
+                        project_path: row.get(6)?,
+                        resolution: row.get(7)?,
+                        reason: row.get(8)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("collecting build artifacts for manifest")?;
+        }
+        Ok(manifests.into_iter().map(|(_, m)| m).collect())
     }
 
     fn neighbours_in(&self, id: NodeId) -> Result<Vec<(EdgeKind, NodeRow)>> {
@@ -3746,6 +3882,69 @@ impl BatchWriter<'_> {
         for (key, value) in source.values {
             stmt.execute(rusqlite::params![source_id, key, value])
                 .context("inserting configuration value")?;
+        }
+        Ok(())
+    }
+
+    /// Replace this member's build-manifest facts wholesale (S-462, [CR-148]
+    /// §3.2 A): delete every recorded manifest, then record `manifests`.
+    ///
+    /// Wholesale because the facts are: a pom's inherited group and properties
+    /// come from its in-member parent chain, so one manifest's change can move
+    /// another's facts, and the pipeline re-derives the whole member whenever
+    /// any manifest changed. Deleting a manifest cascades its artifacts away
+    /// (migration 22's FK), so the two tables can never disagree.
+    ///
+    /// An incremental sync calls this only when a manifest was added, changed or
+    /// removed; a full index calls it whenever the walk found a manifest or one
+    /// is recorded. Neither calls it for a member with no manifest and none
+    /// recorded, so a member without a build manifest writes nothing here.
+    ///
+    /// # Errors
+    /// Returns an error if a constraint fires (a vocabulary token migration 22
+    /// does not admit, a refusal without a reason) or I/O fails.
+    ///
+    /// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+    pub fn replace_build_manifests(&self, manifests: &[NewBuildManifest<'_>]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM build_manifests", [])
+            .context("deleting the previous build manifests")?;
+        let mut manifest_stmt = self.conn.prepare_cached(
+            "INSERT INTO build_manifests (path, format, content_hash, status, detail) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        let mut artifact_stmt = self.conn.prepare_cached(
+            "INSERT INTO build_artifacts (manifest_id, role, kind, group_id, artifact_id, \
+                                          version, scope, project_path, resolution, reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for manifest in manifests {
+            manifest_stmt
+                .execute(rusqlite::params![
+                    manifest.path,
+                    manifest.format,
+                    manifest.content_hash,
+                    manifest.status,
+                    manifest.detail
+                ])
+                .with_context(|| format!("inserting build manifest {}", manifest.path))?;
+            let manifest_id = self.conn.last_insert_rowid();
+            for a in &manifest.artifacts {
+                artifact_stmt
+                    .execute(rusqlite::params![
+                        manifest_id,
+                        a.role,
+                        a.kind,
+                        a.group_id,
+                        a.artifact_id,
+                        a.version,
+                        a.scope,
+                        a.project_path,
+                        a.resolution,
+                        a.reason
+                    ])
+                    .with_context(|| format!("inserting a build artifact of {}", manifest.path))?;
+            }
         }
         Ok(())
     }

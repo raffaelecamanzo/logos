@@ -2331,6 +2331,178 @@ mod tests {
         );
     }
 
+    /// Migration 22 admits the member-local build-manifest tables on a
+    /// **populated** v21 store and leaves every pre-existing fact verbatim
+    /// (S-462, [CR-148] §3.2 A, [FR-DB-04]).
+    ///
+    /// The migration-19 claims, in the order a reader should doubt them: the
+    /// version advances by exactly **one**; the graph, the reference ledger, the
+    /// configuration corpus and the check-run marker cross the boundary
+    /// byte-for-byte, so an upgraded store needs no re-index; the new tables
+    /// arrive **empty**, so a member is unaffected until its next index or sync
+    /// reads a manifest. Then the additions are exercised, because "additive"
+    /// also means they work: the pairing CHECKs refuse a refusal with no reason
+    /// and a reference with no kind, a manifest path is unique, and deleting a
+    /// manifest cascades its artifacts away.
+    ///
+    /// [CR-148]: ../../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+    /// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+    #[test]
+    fn migration_22_adds_the_build_manifest_tables_preserving_the_graph_byte_for_byte() {
+        let mut conn = contract_conn();
+
+        // Stop at v21 — the pre-migration fixture — and populate every table a
+        // member's store already carries at that version.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..21]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path) VALUES (1, 'a.rs'), (2, 'application.yml');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, is_test, body) VALUES
+                 (10, 1, 7,  'caller',   1, 1, 3,    0, NULL),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, 0, 'the body prose');
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'helper', 'h', 1, 2, 42, 1, NULL);
+             INSERT INTO config_sources (id, file_id, profile) VALUES (1, 2, NULL);
+             INSERT INTO config_values (source_id, key, value) VALUES (1, 'server.port', '8080');
+             INSERT INTO check_run (id, ran_at, commit_sha, violation_count, checked_rules, rules_present, operation)
+                 VALUES (1, 1700000000, 'abc1234', 0, 9, 1, 'check');",
+        )
+        .unwrap();
+
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+        let corpus_before = (
+            read_table(&conn, "config_sources", "id"),
+            read_table(&conn, "config_values", "id"),
+        );
+        let marker_before = read_table(&conn, "check_run", "id");
+
+        // The tables do not exist before the migration.
+        assert!(
+            conn.query_row("SELECT count(*) FROM build_manifests", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "build_manifests does not exist at v21"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..22]).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            22,
+            "PRAGMA user_version advances by exactly one (21 → 22)"
+        );
+        // Forward-only: re-running the full ledger on a v22 store applies nothing.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 22", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 22 is recorded once and never re-applied");
+
+        assert_eq!(
+            read_graph(&conn),
+            graph_before,
+            "nodes, edges and shingles are byte-for-byte unchanged across migration 22"
+        );
+        assert_eq!(
+            read_ledger(&conn),
+            ledger_before,
+            "the reference ledger is byte-for-byte unchanged across migration 22"
+        );
+        assert_eq!(
+            (
+                read_table(&conn, "config_sources", "id"),
+                read_table(&conn, "config_values", "id"),
+            ),
+            corpus_before,
+            "the configuration corpus is byte-for-byte unchanged across migration 22"
+        );
+        assert_eq!(
+            read_table(&conn, "check_run", "id"),
+            marker_before,
+            "the check-run marker is byte-for-byte unchanged across migration 22"
+        );
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (nodes never touched by migration 22, NFR-RA-09)");
+
+        // The upgrade itself reads no manifest.
+        let (manifests, artifacts): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM build_manifests), (SELECT count(*) FROM build_artifacts)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((manifests, artifacts), (0, 0), "the upgrade itself ingests nothing");
+
+        // The additions work: a read manifest, an unreadable one, and facts of
+        // every shape the reader emits.
+        conn.execute_batch(
+            "INSERT INTO build_manifests (id, path, format, content_hash, status, detail) VALUES
+                 (1, 'pom.xml', 'maven', 'h1', 'read', NULL),
+                 (2, 'broken/pom.xml', 'maven', NULL, 'unreadable', 'not UTF-8');
+             INSERT INTO build_artifacts (manifest_id, role, kind, group_id, artifact_id, version,
+                                          scope, project_path, resolution, reason) VALUES
+                 (1, 'produced',   NULL,         'g', 'a', '1',           NULL,   NULL, 'resolved',        NULL),
+                 (1, 'referenced', 'bom-import', 'g', 'b', '${v}',        'import', NULL, 'version-refused', 'version: undefined'),
+                 (1, 'referenced', 'dependency', NULL, NULL, NULL,        'implementation', ':core', 'resolved', NULL);",
+        )
+        .expect("every shape the reader emits is admitted");
+
+        for (label, sql) in [
+            (
+                "a refusal without a reason",
+                "INSERT INTO build_artifacts (manifest_id, role, kind, resolution, reason) \
+                 VALUES (1, 'referenced', 'dependency', 'refused', NULL)",
+            ),
+            (
+                "a resolved fact with a reason",
+                "INSERT INTO build_artifacts (manifest_id, role, kind, resolution, reason) \
+                 VALUES (1, 'referenced', 'dependency', 'resolved', 'why')",
+            ),
+            (
+                "a reference with no kind",
+                "INSERT INTO build_artifacts (manifest_id, role, kind, resolution) \
+                 VALUES (1, 'referenced', NULL, 'resolved')",
+            ),
+            (
+                "a produced fact with a kind",
+                "INSERT INTO build_artifacts (manifest_id, role, kind, resolution) \
+                 VALUES (1, 'produced', 'parent', 'resolved')",
+            ),
+            (
+                "an unknown kind",
+                "INSERT INTO build_artifacts (manifest_id, role, kind, resolution) \
+                 VALUES (1, 'referenced', 'plugin', 'resolved')",
+            ),
+            (
+                "a read manifest with a detail",
+                "INSERT INTO build_manifests (path, format, status, detail) \
+                 VALUES ('x/pom.xml', 'maven', 'read', 'why')",
+            ),
+            (
+                "an unknown format",
+                "INSERT INTO build_manifests (path, format, status, detail) \
+                 VALUES ('package.json', 'npm', 'malformed', 'x')",
+            ),
+            (
+                "a duplicate path",
+                "INSERT INTO build_manifests (path, format, status) VALUES ('pom.xml', 'maven', 'read')",
+            ),
+        ] {
+            assert!(conn.execute(sql, []).is_err(), "migration 22 must refuse {label}");
+        }
+
+        // Deleting a manifest cascades its facts away — no orphaned artifact.
+        conn.execute("DELETE FROM build_manifests WHERE id = 1", []).unwrap();
+        let artifacts: i64 = conn
+            .query_row("SELECT count(*) FROM build_artifacts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(artifacts, 0, "deleting a manifest cascades every artifact under it");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 22");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

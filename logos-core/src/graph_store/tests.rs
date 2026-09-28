@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        21,
-        "v21 = migration 21 (S-437 CR-140 the marker's evaluated set)"
+        22,
+        "v22 = migration 22 (S-462 CR-148 the build-manifest facts)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 21,
+        recorded, 22,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 21);
+        assert_eq!(store.schema_version().unwrap(), 22);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 21);
+    assert_eq!(store.schema_version().unwrap(), 22);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 21, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 22, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -474,7 +474,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 21);
+    assert_eq!(reopened.schema_version().unwrap(), 22);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1040,11 +1040,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v21 forward-only).
+    // data (the runner applies v2..v22 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        21,
+        22,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -2784,4 +2784,124 @@ fn config_row_counts(store: &SqliteGraphStore) -> (i64, i64) {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap()
+}
+
+// ── S-462 / CR-148: the build-manifest write and read paths ──────────────────
+
+fn artifact<'a>(role: &'a str, kind: Option<&'a str>, artifact_id: &'a str) -> NewBuildArtifact<'a> {
+    NewBuildArtifact {
+        role,
+        kind,
+        group_id: Some("com.example"),
+        artifact_id: Some(artifact_id),
+        version: None,
+        scope: None,
+        project_path: None,
+        resolution: "resolved",
+        reason: None,
+    }
+}
+
+/// `replace_build_manifests` is **replace-wholesale**: a second call leaves only
+/// what it was given — a manifest dropped from the member leaves no row, and no
+/// artifact of it survives — and `build_manifests` reads the facts back by
+/// path, each manifest's artifacts in recorded order.
+#[test]
+fn replacing_build_manifests_is_wholesale_and_reads_back_in_order() {
+    let mut store = mem();
+    assert!(store.build_manifests().unwrap().is_empty(), "a fresh store records no manifest");
+
+    let first = vec![
+        NewBuildManifest {
+            path: "z/pom.xml",
+            format: "maven",
+            content_hash: Some("h1"),
+            status: "read",
+            detail: None,
+            artifacts: vec![
+                artifact("produced", None, "z"),
+                artifact("referenced", Some("dependency"), "b"),
+                artifact("referenced", Some("parent"), "a"),
+            ],
+        },
+        NewBuildManifest {
+            path: "a/pom.xml",
+            format: "maven",
+            content_hash: None,
+            status: "unreadable",
+            detail: Some("not UTF-8"),
+            artifacts: vec![],
+        },
+    ];
+    store.write_batch(|w| w.replace_build_manifests(&first)).unwrap();
+    let rows = store.build_manifests().unwrap();
+    assert_eq!(
+        rows.iter().map(|m| m.path.as_str()).collect::<Vec<_>>(),
+        vec!["a/pom.xml", "z/pom.xml"],
+        "ordered by path"
+    );
+    assert_eq!(
+        rows[1].artifacts.iter().map(|a| a.artifact_id.as_deref()).collect::<Vec<_>>(),
+        vec![Some("z"), Some("b"), Some("a")],
+        "artifacts in the order they were recorded, not re-sorted"
+    );
+    assert_eq!((rows[0].status.as_str(), rows[0].detail.as_deref()), ("unreadable", Some("not UTF-8")));
+
+    // The member drops `z/pom.xml`: nothing of it may linger.
+    let second = vec![NewBuildManifest {
+        path: "a/pom.xml",
+        format: "maven",
+        content_hash: Some("h2"),
+        status: "read",
+        detail: None,
+        artifacts: vec![artifact("produced", None, "a")],
+    }];
+    store.write_batch(|w| w.replace_build_manifests(&second)).unwrap();
+    let rows = store.build_manifests().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].path.as_str(), rows[0].content_hash.as_deref()), ("a/pom.xml", Some("h2")));
+    let artifacts: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM build_artifacts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(artifacts, 1, "the dropped manifest's three artifacts are gone with it");
+
+    // Replacing with nothing empties both tables.
+    store.write_batch(|w| w.replace_build_manifests(&[])).unwrap();
+    assert!(store.build_manifests().unwrap().is_empty());
+}
+
+/// A write the schema refuses rolls the whole replacement back: the previous
+/// facts survive intact rather than half-replaced (NFR-RA-07).
+#[test]
+fn a_refused_build_manifest_write_leaves_the_previous_facts_intact() {
+    let mut store = mem();
+    let good = vec![NewBuildManifest {
+        path: "pom.xml",
+        format: "maven",
+        content_hash: Some("h1"),
+        status: "read",
+        detail: None,
+        artifacts: vec![artifact("produced", None, "svc")],
+    }];
+    store.write_batch(|w| w.replace_build_manifests(&good)).unwrap();
+
+    let mut refusal_without_reason = artifact("referenced", Some("dependency"), "x");
+    refusal_without_reason.resolution = "refused";
+    let bad = vec![NewBuildManifest {
+        path: "pom.xml",
+        format: "maven",
+        content_hash: Some("h2"),
+        status: "read",
+        detail: None,
+        artifacts: vec![refusal_without_reason],
+    }];
+    assert!(
+        store.write_batch(|w| w.replace_build_manifests(&bad)).is_err(),
+        "a refusal must carry its reason — the schema refuses one without"
+    );
+    let rows = store.build_manifests().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].content_hash.as_deref(), Some("h1"), "the previous facts are intact");
+    assert_eq!(rows[0].artifacts.len(), 1);
 }
