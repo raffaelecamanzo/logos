@@ -340,6 +340,32 @@ fn a_type_declared_under_one_name_in_main_and_in_test_stays_unresolved() {
 }
 
 #[test]
+fn an_ambiguous_static_wildcard_blocks_only_the_names_it_could_supply() {
+    // `com.x.svc.Svc` is declared in `src/main` and `src/test`, so what
+    // `import static com.x.svc.Svc.*` supplies is ambiguous: `util()` binds to
+    // neither. The unrelated `import com.x.other.Thing` names nothing either
+    // `Svc` declares, and still binds.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), SVC_FILE, SVC);
+    write(tmp.path(), "src/test/java/com/x/svc/Svc.java", SVC);
+    let thing = "src/main/java/com/x/other/Thing.java";
+    write(
+        tmp.path(),
+        thing,
+        "package com.x.other;\n\npublic class Thing {}\n",
+    );
+    write(
+        tmp.path(),
+        CTL_FILE,
+        "package com.x.web;\n\nimport static com.x.svc.Svc.*;\nimport com.x.other.Thing;\n\npublic class Ctl {\n    public String get() { return util(); }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(imports_of(rt, CTL_FILE), [format!("{thing}:Thing:class")]);
+    assert!(callers_of(rt, &format!("{SVC_FILE}:util:method")).is_empty());
+}
+
+#[test]
 fn jdk_spring_and_lombok_imports_stay_unbound_even_beside_a_same_named_workspace_type() {
     // Each external import has a workspace type of the same simple name in
     // another package — the near miss a name-only or suffix reading would bind.

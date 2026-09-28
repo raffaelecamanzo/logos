@@ -2491,8 +2491,9 @@ impl Ctx<'_> {
     /// package's top-level types named `name`. `types_only` keeps type-like
     /// candidates alone — a path head must be a type. Deduplicated and id-sorted across
     /// every glob, so the caller's exactly-one test is over the union; `None`
-    /// when a glob's own type name is ambiguous, which no wider rung may
-    /// overrule ([NFR-RA-05]).
+    /// when a glob's own type name is ambiguous and one of its declarations
+    /// has a member named `name` — an ambiguity no wider rung may overrule
+    /// ([NFR-RA-05]). A name none of them declares is not blocked.
     ///
     /// No recursion through the file's globs: a glob's own target is read as a
     /// fully-qualified name only ([`resolve_fqn`](Ctx::resolve_fqn)), so the
@@ -2524,7 +2525,23 @@ impl Ctx<'_> {
                     found.extend(self.ix.members_named(ty, name, want).into_iter().filter(admits));
                 }
                 Res::Found(_) => {}
-                Res::Ambiguous => return None,
+                // Two declarations of the wildcard's type: `name` is ambiguous
+                // only if one of them could supply it. A name neither declares
+                // — an unrelated import's head, say — never came from this
+                // wildcard, so it must not be blocked by it.
+                Res::Ambiguous => {
+                    let could_supply = self.ix.types_by_fqn.get(glob.as_slice()).map_or(
+                        true, // ambiguous below a nested segment: stay conservative
+                        |types| {
+                            types.iter().any(|&ty| {
+                                self.ix.members_named(ty, name, want).iter().any(admits)
+                            })
+                        },
+                    );
+                    if could_supply {
+                        return None;
+                    }
+                }
                 Res::NotFound => {
                     found.extend(self.package_type(glob, name).iter().copied().filter(admits));
                 }
