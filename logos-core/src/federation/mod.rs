@@ -23,6 +23,12 @@
 //!   member's contract surface through its read pool, matches portable keys
 //!   across members exactly-one, and emits ephemeral `BridgeEdge` values cached
 //!   on member sync-stamps; never persisted, never `ATTACH`-ed ([FR-WS-04]).
+//! - the [`build_deps`] — the in-memory **build-dependency relation**:
+//!   member-local Maven/Gradle facts joined into `builds-against(A → B, kind,
+//!   scope, artifact)` on first query, with its own `build_dependency_pairs`
+//!   headline and a declared platform's inbound edges counted apart. Never a
+//!   runtime coupling: nothing here enters the bridge or a runtime figure
+//!   ([FR-WS-33], [BR-58], [ADR-69]).
 //! - the [`coverage`] — the 3-state (bound/ambiguous/unbound) cross-service
 //!   coverage read-model with a per-reference reason, a non-gated advisory
 //!   tier over the same contract surfaces the bridge reads ([FR-WS-05],
@@ -58,6 +64,9 @@
 //!   skipped by laziness or reclaimed by the [`budget`]'s eviction is never
 //!   reported degraded ([FR-WS-16], [NFR-CC-04], [BR-45]).
 //!
+//! [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+//! [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
+//! [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
 //! [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
 //! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 //! [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
@@ -92,6 +101,7 @@
 
 pub mod bridge;
 pub mod broker;
+pub mod build_deps;
 pub mod budget;
 pub mod coverage;
 pub mod enable;
@@ -138,6 +148,12 @@ pub use query::{
     workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,
     CrossServiceImpact, KindCandidates, MemberResult, MemberStatus, WorkspaceStatus,
     XserviceCallers, XserviceImpact, XserviceRouteProviders, XserviceSearch,
+};
+pub use build_deps::{
+    ArtifactCollision, BuildDependencies, BuildDependencyHeadline, BuildDependencyRelation,
+    BuildEdgeKind, BuildsAgainst, MemberBuildDependencies, MemberBuildFacts, MembersRead,
+    PairCount, PlatformApart,
+    PlatformCandidate, ReferenceAccounting,
 };
 pub use budget::WorkspaceBudget;
 pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};

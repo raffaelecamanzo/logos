@@ -38,7 +38,8 @@ use crate::model::NodeKind;
 use crate::models::{CallersResult, ImpactResult, SearchResult, StatusInfo};
 use crate::Engine;
 
-use super::bridge::{BridgeEdge, BridgeIntake};
+use super::bridge::{BridgeEdge, BridgeIntake, MemberContracts};
+use super::build_deps::{self, BuildDependencyHeadline, MemberBuildFacts};
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
 use super::manifest::MemberKind;
 use super::open_state::{self, DegradedRollup, MemberOpenState};
@@ -128,13 +129,40 @@ fn fan<T>(
 /// `MemberResult`'s exactly-one-channel contract while making the second failure
 /// visible to [`MemberStatus`].
 ///
+/// # The same walk reads each member's build-manifest facts ([FR-WS-33])
+/// The `build_dependency` headline is joined from facts read **here**, on the
+/// engine this walk already opened, so it costs no walk of its own and
+/// `WALKS_PER_STATUS` stays at 4 ([NFR-PE-10]). A member whose facts cannot be
+/// read is left out of them with a warning — the join names it unread — and
+/// its freshness row is untouched.
+///
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
-fn fan_status(answer: &AnswerScope<'_, Engine>) -> Vec<MemberResult<StatusInfo>> {
-    answer
-        .fan_out(|_, engine| engine.try_status())
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn fan_status(
+    answer: &AnswerScope<'_, Engine>,
+) -> (Vec<MemberResult<StatusInfo>>, Vec<MemberBuildFacts>) {
+    let mut build_facts = Vec::new();
+    let freshness = answer
+        .fan_out(|_, engine| (engine.try_status(), engine.build_manifests()))
         .into_iter()
-        .map(flatten_status)
-        .collect()
+        .map(|scoped| {
+            let member = scoped.member;
+            let value = scoped.value.map(|(status, facts)| {
+                match facts {
+                    Ok(rows) => build_facts.push((member.clone(), rows)),
+                    Err(err) => tracing::warn!(
+                        member = %member,
+                        "reading a workspace member's build-manifest facts failed; \
+                         the build-dependency headline reports it unread: {err:#}"
+                    ),
+                }
+                status
+            });
+            flatten_status(MemberScoped { member, value })
+        })
+        .collect();
+    (freshness, build_facts)
 }
 
 /// Collapse the two nested failure channels of a fanned [`Engine::try_status`]
@@ -548,6 +576,20 @@ pub struct WorkspaceStatus {
     /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind_candidates: Option<KindCandidates>,
+    /// The **build-dependency** headline — member pairs joined from build
+    /// manifests, by kind, beside the references they were joined from, with
+    /// declared platforms' inbound pairs apart and platform candidates listed
+    /// ([FR-WS-33], [ADR-69]).
+    ///
+    /// **Never a runtime figure** ([BR-58]): it sits beside
+    /// [`coverage`](Self::coverage), and nothing in coverage reads it. Absent
+    /// when no member holds a build manifest.
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    /// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
+    /// [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_dependency: Option<BuildDependencyHeadline>,
 }
 
 /// The member-kind **candidate hint** on `workspace status` ([FR-WS-32]).
@@ -686,8 +728,10 @@ where
 ///
 /// # The degraded roll-up costs no walk either
 /// [`EngineRegistry::open_states`](super::registry::EngineRegistry::open_states)
-/// reads the ledger the fan-outs below already wrote, so `WALKS_PER_STATUS`
-/// stays at 4 ([NFR-PE-10]) — see `tests/workspace_connection_budget.rs`.
+/// reads the ledger the fan-outs below already wrote, and the
+/// `build_dependency` headline joins facts the freshness walk read
+/// ([`fan_status`]), so `WALKS_PER_STATUS` stays at 4 ([NFR-PE-10]) — see
+/// `tests/workspace_connection_budget.rs`.
 ///
 /// # A broken member is attempted, and reported, once per answer
 /// The three statements below are **four** all-member fan-outs — `coverage`
@@ -757,7 +801,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     // One scope over all four walks below — the unit "once per answer" is
     // measured in. It is dropped with this call, so the next one re-attempts.
     let answer = registry.answer();
-    let freshness = fan_status(&answer);
+    let (freshness, build_facts) = fan_status(&answer);
     let coverage = cross_service_coverage(&answer);
     let topics = workspace_topics(&answer);
 
@@ -773,6 +817,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         &members_holding_api_documents(&coverage),
         &registry.federation().member_kinds,
     );
+    let build_dependency = build_dependency_headline(registry.federation(), &build_facts);
 
     // `zip`, not a name-keyed join: `fan_status` and `open_states` are two
     // projections of the SAME list — both map over `federation.members` in
@@ -802,7 +847,21 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         coverage,
         topics,
         kind_candidates,
+        build_dependency,
     }
+}
+
+/// The `build_dependency` headline over the facts the freshness walk read, or
+/// `None` when no member read holds a build manifest — so a workspace without
+/// one serializes exactly as before the relation existed ([FR-WS-33]).
+///
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+fn build_dependency_headline(
+    federation: &super::Federation,
+    facts: &[MemberBuildFacts],
+) -> Option<BuildDependencyHeadline> {
+    let relation = build_deps::join(&federation.members, &federation.member_kinds, facts);
+    (relation.headline.members.with_manifests > 0).then_some(relation.headline)
 }
 
 /// The bridge edge set the query surface stitches over, resolved once per call

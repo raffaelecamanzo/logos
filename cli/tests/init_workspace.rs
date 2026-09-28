@@ -614,7 +614,7 @@ fn a_malformed_member_kind_is_an_actionable_exit_2() {
     let out = logos(tmp.path(), &["init", "--workspace", "--yes"]);
     assert_eq!(exit_code(&out), 2, "a config fault is exit 2");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    for needle in ["kind", "`docs`", "documentation", "mock"] {
+    for needle in ["kind", "`docs`", "documentation", "mock", "platform"] {
         assert!(stderr.contains(needle), "{needle:?} missing from: {stderr}");
     }
 }
