@@ -138,6 +138,28 @@ fn a_single_type_import_binds_to_the_class_not_its_file_module() {
 }
 
 #[test]
+fn a_second_top_level_type_in_a_file_is_imported_by_its_own_name() {
+    // `Svc.java` also declares `class Extra`: its fully-qualified name is
+    // `com.x.svc.Extra`, not a name derived from the file's stem.
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        SVC_FILE,
+        "package com.x.svc;\n\npublic class Svc {}\n\nclass Extra {}\n",
+    );
+    write(
+        tmp.path(),
+        CTL_FILE,
+        "package com.x.web;\n\nimport com.x.svc.Extra;\n\npublic class Ctl {}\n",
+    );
+    let engine = index(&tmp);
+    assert_eq!(
+        imports_of(engine.runtime().unwrap(), CTL_FILE),
+        [format!("{SVC_FILE}:Extra:class")]
+    );
+}
+
+#[test]
 fn a_single_type_import_of_a_nested_type_binds_to_the_nested_class() {
     let tmp =
         single_module("package com.x.web;\n\nimport com.x.svc.Svc.Inner;\n\npublic class Ctl {}\n");
