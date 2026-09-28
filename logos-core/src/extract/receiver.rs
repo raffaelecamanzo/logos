@@ -54,7 +54,7 @@ use super::broker::anonymous_class_body;
 use super::config::accessor::{outermost_callable, DeclaredTypes};
 use super::{declared_superclass, type_parameters_in_scope, Decl, RefFact};
 use crate::model::{EdgeKind, NodeKind, RefForm};
-use crate::resolve::STATIC_WILDCARD_ALIAS;
+use crate::resolve::{is_class_like, STATIC_WILDCARD_ALIAS};
 
 /// The prefix every receiver marker capture carries.
 const MARKER: &str = "ref.receiver.";
@@ -266,14 +266,6 @@ fn provable_type(t: &str, invocation: Node<'_>, source: &[u8]) -> bool {
     identifier && t != "var" && !type_parameters_in_scope(invocation, source).contains(t)
 }
 
-/// A class-like declaration: the only kind a receiver's type can be.
-fn class_like(kind: NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::Class | NodeKind::Interface | NodeKind::Enum | NodeKind::Struct | NodeKind::Trait
-    )
-}
-
 /// The index of the class-like declaration enclosing `invocation` — [`None`]
 /// inside an anonymous class body, whose `this` has no name the file can
 /// write, and at file scope.
@@ -284,7 +276,7 @@ fn enclosing_class(invocation: Node<'_>, file: &FileDecls<'_, '_>) -> Option<usi
             return None;
         }
         if let Some(&i) = file.id_to_idx.get(&node.id()) {
-            if class_like(file.decls[i].kind) {
+            if is_class_like(file.decls[i].kind) {
                 return Some(i);
             }
         }
@@ -335,7 +327,7 @@ fn declares_member(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
 fn nested(decls: &[Decl<'_>], class: usize) -> bool {
     let mut at = decls[class].parent;
     while let Some(i) = at {
-        if class_like(decls[i].kind) {
+        if is_class_like(decls[i].kind) {
             return true;
         }
         at = decls[i].parent;
@@ -345,5 +337,5 @@ fn nested(decls: &[Decl<'_>], class: usize) -> bool {
 
 /// Whether the file declares a class-like type named `name`.
 fn declares_type(decls: &[Decl<'_>], name: &str) -> bool {
-    decls.iter().any(|d| class_like(d.kind) && d.name == name)
+    decls.iter().any(|d| is_class_like(d.kind) && d.name == name)
 }

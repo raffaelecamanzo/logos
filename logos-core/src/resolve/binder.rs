@@ -189,7 +189,10 @@ impl Want {
 ///
 /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn is_class_like(kind: NodeKind) -> bool {
+///
+/// Shared with extraction's receiver typing (S-467), whose `this` is the same
+/// class-bearing container.
+pub(crate) fn is_class_like(kind: NodeKind) -> bool {
     matches!(
         kind,
         NodeKind::Class | NodeKind::Struct | NodeKind::Interface | NodeKind::Enum | NodeKind::Trait
