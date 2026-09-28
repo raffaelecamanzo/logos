@@ -2847,6 +2847,19 @@ mod java_constant_fold {
         assert_eq!(refusals, [RouteRefusal::PathNotComposed]);
     }
 
+    /// A folded path is trimmed exactly as a written one is, prefix or not: the
+    /// route is named `GET /users/{id}`, never with the blanks the literals
+    /// carried, which no consumer would match.
+    #[test]
+    fn a_folded_path_is_trimmed_like_a_written_one() {
+        let (routes, refusals) = fold_scan(
+            "public class C {\n    static final String ID = \"id\";\n    \
+             @GetMapping(\" /users/{\" + ID + \"} \")\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert_eq!(routes, vec![get("/users/{id}", "get")]);
+        assert!(refusals.is_empty(), "{refusals:?}");
+    }
+
     /// Provenance: a folded route names every constant it used and the file
     /// declaring it, the prefix's included; a written route names none.
     #[test]
