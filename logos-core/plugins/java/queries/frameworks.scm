@@ -294,9 +294,23 @@
 ; how the Kotlin query keeps its `const val` and string templates out of scope
 ; (CR-151 §3.3) without a line of language-specific interpreter code.
 
-(_
-  name: (identifier) @fw.const.scope.name
-  body: [(class_body) (interface_body) (enum_body)] @fw.const.scope) @fw.const.scope.decl
+; Every **named type declaration**, spelled out rather than matched as a wildcard
+; over `name:`/`body:`: the wildcard would miss an `@interface` (whose body is an
+; `annotation_type_body`), whose `String` constants would then be filed under the
+; enclosing class as if it declared them — and it would give an enum constant's
+; body a *name*, which is not a type a qualified reference can name.
+[
+  (class_declaration
+    name: (identifier) @fw.const.scope.name body: (class_body) @fw.const.scope)
+  (record_declaration
+    name: (identifier) @fw.const.scope.name body: (class_body) @fw.const.scope)
+  (interface_declaration
+    name: (identifier) @fw.const.scope.name body: (interface_body) @fw.const.scope)
+  (enum_declaration
+    name: (identifier) @fw.const.scope.name body: (enum_body) @fw.const.scope)
+  (annotation_type_declaration
+    name: (identifier) @fw.const.scope.name body: (annotation_type_body) @fw.const.scope)
+] @fw.const.scope.decl
 
 (class_declaration (superclass) @fw.const.scope.opaque body: (class_body) @fw.const.scope)
 (class_declaration (super_interfaces) @fw.const.scope.opaque body: (class_body) @fw.const.scope)

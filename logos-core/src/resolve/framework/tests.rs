@@ -2684,6 +2684,31 @@ mod java_constant_fold {
         }
     }
 
+    /// A constant declared inside a nested `@interface` is that annotation
+    /// type's member, not the enclosing class's (review of S-469: it was filed
+    /// under the class and folded). Java binds `ID` here to the enclosing
+    /// class's constant, or — beside an inherited `BASE` — to the supertype's.
+    #[test]
+    fn a_nested_annotation_types_constant_is_not_the_enclosing_classs() {
+        let (routes, refusals) = fold_scan(
+            "public class Outer {\n    static final String ID = \"outer\";\n    \
+             public static class C {\n        @interface Marker { String ID = \"m\"; }\n        \
+             @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+        );
+        assert_eq!(routes, vec![get("/{outer}", "get")]);
+        assert!(refusals.is_empty(), "{refusals:?}");
+
+        // Beside a supertype, the annotation type's constant must not stand
+        // in for the inherited one: refused, never `/fabricated`.
+        let (routes, refusals) = fold_scan(
+            "public class C extends Base {\n    @interface Marker { String BASE = \"/fabricated\"; }\n    \
+             @GetMapping(BASE)\n    public String get() { return \"\"; }\n    \
+             @GetMapping(C.BASE)\n    public String get2() { return \"\"; }\n}\n",
+        );
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded, RouteRefusal::PathNotFolded]);
+    }
+
     /// The positive twins of the scoping refusals: a type declaring the
     /// constant itself wins over anything it inherits, and an enclosing type's
     /// constant is visible to a nested type that inherits nothing.
