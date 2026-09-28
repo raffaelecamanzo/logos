@@ -2009,24 +2009,32 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
 
     // Why a package-shaped language's calls stay unbound, by reason (FR-RS-10,
     // S-468): a re-walk of the unbound rows under the policy the resolution
-    // pass binds with. Only a graph holding a package-shaped file pays for it;
-    // a registry-less engine or an unreadable config states no residue rather
-    // than one decided under the wrong policy, and says why.
+    // pass binds with. Only a graph holding a package-shaped file pays for it.
+    // An additive readout degrades on the ADR-14 channel, never the status
+    // around it: an unreadable config or a failed read states no residue — not
+    // one decided under the wrong policy — and says why. A registry-less engine
+    // states none silently; it warned when it started without its registry,
+    // and it knows no package-shaped language to state one for.
     if let Some(registry) = engine.registry() {
-        match crate::config::load_config_from_root(engine.root()) {
-            Ok(config) => {
+        let residues = crate::config::load_config_from_root(engine.root())
+            .map_err(|err| format!("the configuration could not be read ({err})"))
+            .and_then(|config| {
                 let policy = config.resolution.policy;
-                let mut residues = runtime.submit_read(move |store| {
-                    crate::resolve::call_residue_by_language(store, registry, policy)
-                })?;
+                runtime
+                    .submit_read(move |store| {
+                        crate::resolve::call_residue_by_language(store, registry, policy)
+                    })
+                    .map_err(|err| format!("the graph could not be read ({err})"))
+            });
+        match residues {
+            Ok(mut residues) => {
                 for row in &mut resolution_by_language {
                     row.call_residue = residues.remove(&row.language);
                 }
             }
-            Err(err) => warnings.push(format!(
-                "the per-language call residue is not stated: the configuration could not \
-                 be read ({err})"
-            )),
+            Err(why) => {
+                warnings.push(format!("the per-language call residue is not stated: {why}"));
+            }
         }
     }
 
