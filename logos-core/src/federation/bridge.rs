@@ -400,6 +400,30 @@ pub trait MemberContracts {
     fn reachability_surface(&self) -> Result<super::reach::ReachabilitySurface> {
         Ok(super::reach::ReachabilitySurface::default())
     }
+
+    /// Read this member's **build-manifest facts** — every Maven/Gradle
+    /// manifest the indexer read, with its produced and referenced artifacts
+    /// ([FR-WS-33], [ADR-69] point 1).
+    ///
+    /// Read-only and member-local: the cross-member `builds-against` join is
+    /// [`super::build_deps`]'s, and it never feeds this bridge's matcher, its
+    /// edge set or any runtime figure ([BR-58], [ADR-26]).
+    ///
+    /// The default is **empty** — a member with no build manifest, and every
+    /// lightweight test double, contributes no fact.
+    ///
+    /// # Errors
+    /// Propagates a read failure so the caller can skip the member as degraded
+    /// rather than aborting the whole workspace ([ADR-53]).
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    /// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
+    /// [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [ADR-26]: ../../../docs/specs/architecture/decisions/ADR-26.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    fn build_manifests(&self) -> Result<Vec<crate::graph_store::BuildManifestRow>> {
+        Ok(Vec::new())
+    }
 }
 
 impl MemberContracts for crate::Engine {
@@ -436,6 +460,14 @@ impl MemberContracts for crate::Engine {
         )?;
         let rows = runtime.submit_read(|store| store.unresolved_refs())?;
         Ok(invocation_refs_from(rows))
+    }
+
+    fn build_manifests(&self) -> Result<Vec<crate::graph_store::BuildManifestRow>> {
+        let runtime = self.runtime().context(
+            "reading a member's build-manifest facts requires a long-lived engine \
+             (Engine::start) with a read-only pool",
+        )?;
+        runtime.submit_read(|store| store.build_manifests())
     }
 
     fn topic_surface(&self) -> Result<Vec<super::topics::TopicSummary>> {
@@ -1343,7 +1375,7 @@ pub struct ContractBridge {
 /// The bridge cache key: each member's sync-stamp at compute time, sorted by
 /// member. Any change — a stamp advancing, or a member appearing or
 /// disappearing — is a miss.
-type Stamps = Vec<(String, u64)>;
+pub(super) type Stamps = Vec<(String, u64)>;
 
 /// A cache slot: empty, or the stamps a value was computed at beside the value,
 /// shared so repeated reads clone an [`Arc`] rather than the value.
@@ -1358,7 +1390,7 @@ type Stamped<T> = Option<(Stamps, Arc<T>)>;
 /// federation modules have been bitten by, and the miss/hit accounting is the
 /// part that must not differ between them.
 #[derive(Debug)]
-struct StampCache<T> {
+pub(super) struct StampCache<T> {
     slot: Mutex<Stamped<T>>,
 }
 
@@ -1381,7 +1413,7 @@ impl<T> StampCache<T> {
     /// therefore both compute, and the last writer wins — the values are equal by
     /// construction (same stamps, same inputs), so the race costs work, never
     /// correctness.
-    fn get_or_compute(&self, stamps: Stamps, compute: impl FnOnce() -> T) -> Arc<T> {
+    pub(super) fn get_or_compute(&self, stamps: Stamps, compute: impl FnOnce() -> T) -> Arc<T> {
         {
             let slot = self.lock();
             if let Some((cached, value)) = slot.as_ref() {
@@ -1498,7 +1530,7 @@ impl ContractBridge {
 /// cache key. A member whose engine fails to start contributes no stamp (it is
 /// skipped), so if it later starts the stamp vector changes and the cache
 /// invalidates.
-fn current_stamps<E>(answer: &AnswerScope<'_, E>) -> Stamps
+pub(super) fn current_stamps<E>(answer: &AnswerScope<'_, E>) -> Stamps
 where
     E: MemberEngine + MemberContracts,
 {

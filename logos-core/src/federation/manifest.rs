@@ -397,30 +397,35 @@ pub struct WorkspaceSection {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberDecl {
-    /// `kind = "documentation" | "mock"` — what the member **is**, as declared
-    /// by whoever knows ([FR-WS-32]). `None` (the key absent) is an ordinary
-    /// member; logos never fills it in.
+    /// `kind = "documentation" | "mock" | "platform"` — what the member **is**,
+    /// as declared by whoever knows ([FR-WS-32], [FR-WS-33]). `None` (the key
+    /// absent) is an ordinary member; logos never fills it in.
     ///
     /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<MemberKind>,
 }
 
-/// A declared member kind ([FR-WS-32], [ADR-68] point 5).
+/// A declared member kind ([FR-WS-32], [FR-WS-33], [ADR-68] point 5, [ADR-69]
+/// point 3).
 ///
-/// **Designed to be extended.** [ADR-69] point 3 adds `platform`, and a
-/// platform member does *not* leave the contract-surface headline — only its
-/// inbound build edges are counted apart. So what a kind does is asked of the
-/// kind ([`leaves_contract_surface_headline`](Self::leaves_contract_surface_headline))
+/// **Designed to be extended.** A `platform` member does *not* leave the
+/// contract-surface headline — only its inbound build edges are counted apart
+/// ([`sets_inbound_build_edges_apart`](Self::sets_inbound_build_edges_apart)).
+/// So what a kind does is asked of the kind
+/// ([`leaves_contract_surface_headline`](Self::leaves_contract_surface_headline))
 /// through exhaustive `match`es, never by testing for "any kind declared": a
 /// new variant fails to compile until every such question has an answer for
 /// it.
 ///
 /// A malformed value fails the parse naming the key and the legal values
-/// (`unknown variant `docs`, expected `documentation` or `mock``), with the
-/// offending line quoted — the manifest-wide fail-loud posture.
+/// (`unknown variant `docs`, expected one of `documentation`, `mock`,
+/// `platform``), with the offending line quoted — the manifest-wide fail-loud
+/// posture.
 ///
 /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
 /// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
@@ -434,16 +439,25 @@ pub enum MemberKind {
     ///
     /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
     Mock,
+    /// A near-universal build hub — a parent POM or a shared library most
+    /// members build against ([FR-WS-33], [ADR-69] point 3). Its inbound build
+    /// edges are counted apart from `build_dependency_pairs`; everything else
+    /// about it, its contract surface included, is an ordinary member's.
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    /// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
+    Platform,
 }
 
 impl MemberKind {
-    /// The manifest spelling (`"documentation"`, `"mock"`) — the same token the
-    /// payloads serialize.
+    /// The manifest spelling (`"documentation"`, `"mock"`, `"platform"`) — the
+    /// same token the payloads serialize.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Documentation => "documentation",
             Self::Mock => "mock",
+            Self::Platform => "platform",
         }
     }
 
@@ -451,15 +465,37 @@ impl MemberKind {
     /// **apart** from the headline and from `spec_conformance_ratio`
     /// ([FR-WS-32], [BR-51]).
     ///
-    /// Both kinds today: a documentation repo's spec copies describe services
-    /// rather than consume them, and a mock's are the API it stands in for.
+    /// A documentation repo's spec copies describe services rather than
+    /// consume them, and a mock's are the API it stands in for. A platform
+    /// member's contract surface is an ordinary member's: it stays
+    /// ([ADR-69] point 3).
     ///
     /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
     /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
     #[must_use]
     pub fn leaves_contract_surface_headline(self) -> bool {
         match self {
             Self::Documentation | Self::Mock => true,
+            Self::Platform => false,
+        }
+    }
+
+    /// Whether the build edges **into** a member of this kind are counted
+    /// apart from the `build_dependency_pairs` headline ([FR-WS-33], [ADR-69]
+    /// point 3).
+    ///
+    /// Only `platform`: a hub most members build against would otherwise make
+    /// the headline a count of "who has the shared parent". A documentation
+    /// repo or a mock that someone builds against is an ordinary edge.
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    /// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
+    #[must_use]
+    pub fn sets_inbound_build_edges_apart(self) -> bool {
+        match self {
+            Self::Platform => true,
+            Self::Documentation | Self::Mock => false,
         }
     }
 }
@@ -1595,6 +1631,54 @@ mod tests {
         );
     }
 
+    /// `platform` parses beside `documentation` and `mock` under
+    /// `deny_unknown_fields`, and survives `upsert` the same way the other two
+    /// do (S-463, FR-WS-33).
+    #[test]
+    fn platform_parses_beside_documentation_and_mock_and_survives_upsert() {
+        let tmp = TempDir::new().unwrap();
+        let text = format!(
+            "{KINDS}\n[workspace.member.poste-pec-starter]\nkind = \"platform\"\n"
+        );
+        let m = parse(&write_manifest(&tmp, &text)).expect("all three kinds parse");
+        assert_eq!(m.workspace.member["docs"].kind, Some(MemberKind::Documentation));
+        assert_eq!(m.workspace.member["pecserver-mock"].kind, Some(MemberKind::Mock));
+        assert_eq!(
+            m.workspace.member["poste-pec-starter"].kind,
+            Some(MemberKind::Platform)
+        );
+
+        upsert(tmp.path(), "ignored", &["api".into(), "poste-pec-starter".into()])
+            .expect("upserts");
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).expect("the re-write parses");
+        assert_eq!(
+            m.workspace.member["poste-pec-starter"].kind,
+            Some(MemberKind::Platform),
+            "a platform declaration is carried across a re-run"
+        );
+    }
+
+    /// What each kind does is asked of the kind: a platform member keeps its
+    /// contract surface in the headline and sets its inbound build edges apart;
+    /// documentation and mock do the reverse. The spelling round-trips through
+    /// serde so the payload token and the manifest token cannot drift.
+    #[test]
+    fn each_kind_answers_both_headline_questions() {
+        for (kind, token, leaves_contract, sets_build_apart) in [
+            (MemberKind::Documentation, "documentation", true, false),
+            (MemberKind::Mock, "mock", true, false),
+            (MemberKind::Platform, "platform", false, true),
+        ] {
+            assert_eq!(kind.as_str(), token);
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::Value::String(token.to_string())
+            );
+            assert_eq!(kind.leaves_contract_surface_headline(), leaves_contract, "{token}");
+            assert_eq!(kind.sets_inbound_build_edges_apart(), sets_build_apart, "{token}");
+        }
+    }
+
     /// A manifest without any `[workspace.member]` table parses exactly as
     /// before the key existed, and `upsert`'s fresh manifest writes none —
     /// logos never declares a kind on a human's behalf.
@@ -1627,7 +1711,7 @@ mod tests {
         let err = parse(&path).expect_err("an unknown kind must not parse");
         assert!(matches!(err, ConfigError::Parse { .. }), "exit-2 parse error, got {err:?}");
         let message = err.to_string();
-        for needle in ["kind", "`docs`", "documentation", "mock"] {
+        for needle in ["kind", "`docs`", "documentation", "mock", "platform"] {
             assert!(message.contains(needle), "{needle:?} missing from {message:?}");
         }
     }

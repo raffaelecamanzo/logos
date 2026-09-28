@@ -135,7 +135,8 @@ kind = "mock"   # a stand-in provider of the API it mocks, never a consumer
 
 - **The key.** Each table key is a member path as written in `members`. It can
   also be an autodiscovered directory name. `"./docs"` and `"docs/"` both mean
-  `docs`. `kind` takes `"documentation"` or `"mock"`. Any other value, or any
+  `docs`. `kind` takes `"documentation"`, `"mock"` or `"platform"` (see
+  [below](#kind--platform--build-hubs)). Any other value, or any
   other key in the table, is **rejected at parse time** (exit 2), and the error
   names the key and the legal values. A `kind` declared for a name that is no
   resolved member is ignored, with a warning. `init --workspace` preserves every
@@ -164,6 +165,44 @@ kind = "mock"   # a stand-in provider of the API it mocks, never a consumer
 - **Nothing declared, nothing changes.** With no `[workspace.member]` table and
   no candidate, every surface renders exactly as before. `declared_apart` and
   `kind_candidates` are absent, not empty.
+
+### `kind = "platform"` — build hubs
+
+Members build against each other: a module inherits a parent POM, depends on a
+shared library, imports a BOM. Logos reads those Maven and Gradle coordinates
+into a **build-dependency relation**, `builds-against(A → B, kind, scope,
+artifact)`, with its own headline, `build_dependency_pairs`, by kind (`parent`,
+`dependency`, `managed`, `bom-import`) beside the references it was joined from.
+It is **never a runtime coupling**: no build edge enters
+`resolved_cross_service_edges`, `egress_resolution` or the bridge edge set.
+
+A workspace usually has one or two members nearly everything builds against —
+on the reference estate, a parent POM of 50 members and a shared library 32
+depend on. Declare them `platform`, and the edges **into** them leave the
+headline for `build_dependency.platform_apart`, over the same denominator:
+
+```toml
+[workspace.member.poste-pec-starter]
+kind = "platform"
+
+[workspace.member.poste-pec-common]
+kind = "platform"
+```
+
+- **Only inbound build edges move.** A platform member's contract surface, its
+  runtime coupling and its own outbound build edges are an ordinary member's.
+- **Candidates.** `workspace status --json` lists, under
+  `build_dependency.platform_candidates`, the undeclared members that at least
+  2 members, and at least a quarter of the other members read, build against —
+  each with its `in_degree` and the `of` it is stated over. It classifies
+  nothing; a candidate stays in the headline until you declare it.
+- **A coordinate two members produce resolves to neither.** It is listed under
+  `build_dependency.collisions` with both producers, and every reference to it
+  is counted as `to_collision`, never guessed onto one of them.
+- **No build manifest, nothing changes.** `build_dependency` is absent from the
+  status payload when every member was read and none holds a `pom.xml` or
+  `build.gradle(.kts)`. A member whose facts could not be read keeps the
+  section present, named under `build_dependency.members.unread`.
 
 ### The warm sidecar
 
