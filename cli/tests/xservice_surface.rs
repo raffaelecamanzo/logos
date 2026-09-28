@@ -996,12 +996,35 @@ fn the_xservice_group_keeps_exit_zero_over_a_degraded_workspace() {
         Some(1),
         "the workspace group gates on it"
     );
-    // … and every `xservice` subcommand still exits 0.
-    for args in [
-        &["xservice", "search", "f", "--json"][..],
-        &["xservice", "route-providers", "--json"][..],
-        &["xservice", "callers", "f", "--json"][..],
-    ] {
+    // … and every `xservice` subcommand still exits 0. "Every" is read off the
+    // shipped `xservice --help`, not a hand list — a later subcommand
+    // (`build-deps`, S-464) with no representative invocation below fails here
+    // instead of silently escaping the boundary.
+    let help = logos(tmp.path(), &["xservice", "--help"]);
+    assert!(help.status.success(), "xservice --help runs");
+    let text = String::from_utf8(help.stdout).expect("utf8 help");
+    let subcommands: Vec<String> = text
+        .split("Commands:\n")
+        .nth(1)
+        .unwrap_or_else(|| panic!("`xservice --help` lists a Commands block:\n{text}"))
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .filter(|name| name != "help")
+        .collect();
+    assert!(!subcommands.is_empty(), "the Commands block names no subcommand:\n{text}");
+    for name in &subcommands {
+        let args: &[&str] = match name.as_str() {
+            "route-providers" => &["xservice", "route-providers", "--json"],
+            "callers" => &["xservice", "callers", "f", "--json"],
+            "impact" => &["xservice", "impact", "f", "--json"],
+            "search" => &["xservice", "search", "f", "--json"],
+            "build-deps" => &["xservice", "build-deps", "--json"],
+            other => panic!(
+                "`xservice {other}` has no representative invocation here — add one so its \
+                 degraded exit code is pinned (CR-100 §4.4 scope)"
+            ),
+        };
         let out = logos(tmp.path(), args);
         assert_eq!(
             out.status.code(),
