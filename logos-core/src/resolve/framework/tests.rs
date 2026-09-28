@@ -4810,3 +4810,17 @@ class Facade {
         );
     }
 }
+
+/// A stored path is read only relative to the engine root (NFR-SE-04): an
+/// absolute one — which `Path::join` would let replace the root — is refused
+/// rather than read, for a declaring file exactly as for a candidate (S-470).
+#[test]
+fn a_member_file_is_read_only_by_a_relative_path() {
+    let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    let root = tempfile::TempDir::new().expect("temp dir");
+    std::fs::write(root.path().join("x.rs"), "fn x() {}\n").expect("write");
+    let absolute = root.path().join("x.rs");
+    let absolute = absolute.to_str().expect("utf-8 path");
+    assert!(read_member_file(&registry, root.path(), "x.rs").is_some());
+    assert!(read_member_file(&registry, root.path(), absolute).is_none());
+}
