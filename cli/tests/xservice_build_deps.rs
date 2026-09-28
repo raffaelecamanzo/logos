@@ -250,7 +250,11 @@ fn build_deps_lists_rows_naming_kind_scope_and_artifact_and_repo_scopes_to_one_m
 
     let unknown = logos_json(tmp.path(), &["xservice", "build-deps", "--repo", "nope"]);
     assert_eq!(unknown["members"], serde_json::json!([]));
-    assert!(unknown["scope_note"].as_str().unwrap().contains("`nope`"), "{unknown}");
+    let note = unknown["scope_note"].as_str().unwrap();
+    assert!(
+        note.starts_with("`nope` is not a member the build relation was read over"),
+        "an empty list is never presented as \"no build dependencies\": {note}"
+    );
 
     let (_, human) = logos_human(tmp.path(), &["xservice", "build-deps"]);
     assert_eq!(human, all, "human and --json print one read-model");

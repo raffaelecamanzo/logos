@@ -1872,10 +1872,14 @@ mod tests {
 
         let unknown = xservice_build_deps(&relation, Some("nope"));
         assert!(unknown.members.is_empty());
-        assert!(
-            unknown.scope_note.as_deref().is_some_and(|n| n.contains("`nope`")),
-            "{:?}",
-            unknown.scope_note
+        // The substance, not just the name: the note exists so an empty list is
+        // never read as "no build dependencies".
+        assert_eq!(
+            unknown.scope_note.as_deref(),
+            Some(
+                "`nope` is not a member the build relation was read over \
+                 (not in the workspace, or its build facts could not be read)"
+            ),
         );
     }
 
