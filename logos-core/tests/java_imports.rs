@@ -138,6 +138,20 @@ fn a_single_type_import_binds_to_the_class_not_its_file_module() {
 }
 
 #[test]
+fn a_static_import_through_a_nested_type_binds_to_the_nested_member() {
+    // `Svc.Inner.go`: the walk descends from the top-level type through its
+    // nested type to the member, never stopping at `Svc`.
+    let tmp = single_module(
+        "package com.x.web;\n\nimport static com.x.svc.Svc.Inner.go;\n\npublic class Ctl {}\n",
+    );
+    let engine = index(&tmp);
+    assert_eq!(
+        imports_of(engine.runtime().unwrap(), CTL_FILE),
+        [format!("{SVC_FILE}:go:method")]
+    );
+}
+
+#[test]
 fn a_second_top_level_type_in_a_file_is_imported_by_its_own_name() {
     // `Svc.java` also declares `class Extra`: its fully-qualified name is
     // `com.x.svc.Extra`, not a name derived from the file's stem.
