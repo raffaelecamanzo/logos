@@ -625,6 +625,17 @@ pub enum RowClass {
     NoOwner,
 }
 
+impl RowClass {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::SelfOwned => "self-owned",
+            Self::ExactlyOne { .. } => "exactly-one",
+            Self::Ambiguous { .. } => "ambiguous",
+            Self::NoOwner => "no owner",
+        }
+    }
+}
+
 pub fn classify(consumer: &str, owners: Option<&Owners>) -> RowClass {
     let Some(owners) = owners else { return RowClass::NoOwner };
     if owners.contains_key(consumer) {
@@ -909,13 +920,7 @@ impl Judgement {
     pub fn row_classes(&self) -> BTreeMap<(&'static str, Tree), usize> {
         let mut out = BTreeMap::new();
         for (_, j) in &self.rows {
-            let label = match j.class {
-                RowClass::SelfOwned => "self-owned",
-                RowClass::ExactlyOne { .. } => "exactly-one",
-                RowClass::Ambiguous { .. } => "ambiguous",
-                RowClass::NoOwner => "no owner",
-            };
-            *out.entry((label, j.tree)).or_default() += 1;
+            *out.entry((j.class.label(), j.tree)).or_default() += 1;
         }
         out
     }
@@ -964,6 +969,20 @@ pub struct Reconciliation {
     pub missing: Vec<(Triple, Mechanism)>,
     /// Reach triples the census rule does not count, with their mechanism.
     pub extra: Vec<(Triple, Mechanism)>,
+    /// Every row, of any tree and class, whose type the census rule gives to a
+    /// file the product rule refuses — the refused file, the row, and its class
+    /// under each rule.
+    pub refused_rows: Vec<RefusedRow>,
+}
+
+/// One row the census rule gives to a refused file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedRow {
+    pub file: String,
+    pub row: Row,
+    pub tree: Tree,
+    pub census: &'static str,
+    pub product: &'static str,
 }
 
 /// Reconcile the census rule's main-tree triples against Reach.
@@ -1013,6 +1032,19 @@ pub fn reconcile(product: &Judgement, census: &Judgement, decl: &Declarations) -
     }
     for triple in reach.iter().filter(|t| !census_main.contains_key(*t)) {
         out.extra.push((triple.clone(), mechanism(triple)));
+    }
+    // `judge` keeps its input order, so the two judgements pair row by row.
+    for ((row, p), (_, c)) in product.rows.iter().zip(&census.rows) {
+        let Some((t, _)) = &c.named else { continue };
+        for file in refused_by_name.get(t).into_iter().flatten() {
+            out.refused_rows.push(RefusedRow {
+                file: file.clone(),
+                row: row.clone(),
+                tree: c.tree,
+                census: c.class.label(),
+                product: p.class.label(),
+            });
+        }
     }
     out
 }
@@ -1387,6 +1419,23 @@ fn report(root: &Path, e: &Estate, product: &Judgement, census: &Judgement, rec:
     println!("    Reach triples the census rule does not count: {}", rec.extra.len());
     for (t, m) in &rec.extra {
         println!("      {} → {} : {}  [{m:?}]", t.0, t.1, t.2);
+    }
+    println!(
+        "    rows the census rule gives to a refused file: {} — by tree: {}",
+        rec.refused_rows.len(),
+        render_counts(&count_by(rec.refused_rows.iter().map(|r| r.tree.label())))
+    );
+    for r in &rec.refused_rows {
+        println!(
+            "      {}: {} {}:{} imports {} — census {}, product {}",
+            r.file,
+            r.row.consumer,
+            r.row.path,
+            r.row.line.map_or_else(|| "?".to_string(), |l| l.to_string()),
+            r.row.target,
+            r.census,
+            r.product
+        );
     }
 }
 
@@ -2103,6 +2152,8 @@ mod tests {
             row("app", "src/main/java/A.java", "com.l.Moved"),
             row("app", "src/main/java/A.java", "com.l.Twice"),
             row("other", "src/main/java/O.java", "com.l.Svc"),
+            // A test-tree row of a refused file: no triple, but still enumerated.
+            row("app", "src/test/java/T.java", "com.l.Moved"),
         ];
         let pairs = relation_pairs();
         let product = judge(&rows, &OwnerIndex::build(&decl, Rule::Product), &pairs);
@@ -2126,6 +2177,29 @@ mod tests {
                 Mechanism::PackageRefusal(vec!["util/src/main/java/com/l/Twice.java".into()])
             )],
             "a refusal that removes a co-owner makes an ambiguous type exactly-one"
+        );
+        let refused = |file: &str, r: Row, tree, census, product| RefusedRow {
+            file: file.into(),
+            row: r,
+            tree,
+            census,
+            product,
+        };
+        let moved = "lib/src/main/java/com/l/Moved.java";
+        assert_eq!(
+            rec.refused_rows,
+            vec![
+                refused(moved, rows[1].clone(), Tree::Main, "exactly-one", "no owner"),
+                refused(
+                    "util/src/main/java/com/l/Twice.java",
+                    rows[2].clone(),
+                    Tree::Main,
+                    "ambiguous",
+                    "exactly-one"
+                ),
+                refused(moved, rows[4].clone(), Tree::Test, "exactly-one", "no owner"),
+            ],
+            "every row a refused file owned under the census rule, every tree"
         );
 
         // A refusal of a target's exact owner moves the row onto its enclosing
