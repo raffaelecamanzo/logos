@@ -17,8 +17,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
-    app_wide_reachability, discover, open_state, query, workspace_governance, ContractBridge,
-    EngineRegistry, ReachabilityScope, RegistryMode,
+    app_wide_reachability, discover, open_state, query, workspace_governance, xservice_build_deps,
+    BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope, RegistryMode,
 };
 use logos_core::{model::NodeKind, Engine};
 
@@ -87,6 +87,26 @@ pub(crate) enum XserviceCommands {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// What each member builds against, and what builds against it
+    /// ([FR-WS-33]): `builds_against` and `built_against_by` rows joined from
+    /// the members' Maven/Gradle manifests, each naming kind (`parent`,
+    /// `dependency`, `managed`, `bom-import`), scope and artifact.
+    ///
+    /// A **build** dependency, never a runtime coupling ([BR-58]): nothing here
+    /// is a bridge edge or enters a coverage figure. The workspace headline rides
+    /// beside the rows with its denominator, and `cross_context` lists members
+    /// depending on two or more contexts' model libraries (`<group>.<context>:kafka-models`
+    /// or `<context>-kafka-models`) — a hint, never an edge. `--repo` scopes the rows to one member; a name that is
+    /// not a member read says so in `scope_note`.
+    ///
+    /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
+    /// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
+    #[command(name = "build-deps", alias = "build_deps")]
+    BuildDeps {
+        /// Scope to one workspace member.
+        #[arg(long)]
+        repo: Option<String>,
+    },
 }
 
 /// `workspace` sub-subcommands ([FR-WS-05], [FR-WS-12], [FR-WS-13]).
@@ -103,7 +123,14 @@ pub(crate) enum WorkspaceCommands {
     /// `kind_candidates` lists undeclared members holding API documents and no
     /// runnable source, as a hint that classifies nothing.
     ///
+    /// When any member holds a build manifest, `build_dependency` states the
+    /// build-dependency pairs by kind beside the references they were joined
+    /// from — its own section, apart from every runtime figure above ([FR-WS-33],
+    /// [BR-58]); `xservice build-deps` lists the rows.
+    ///
     /// [FR-WS-32]: ../../docs/specs/requirements/FR-WS-32.md
+    /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
+    /// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
     Status,
     /// App-wide cross-service dead code (FR-WS-12): the union of every member's
     /// call graph plus the bridge's edges as extra live roots. Advisory only —
@@ -202,6 +229,10 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
                 limit,
                 repo.as_deref(),
             ))?;
+        }
+        XserviceCommands::BuildDeps { repo } => {
+            let relation = BuildDependencies::new().relation(&registry);
+            out.print(&xservice_build_deps(&relation, repo.as_deref()))?;
         }
     }
     Ok(0)

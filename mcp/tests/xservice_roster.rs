@@ -94,9 +94,10 @@ fn single_root_roster_is_the_declared_set_with_no_repo_dimension() {
 }
 
 /// The single-root tools appear **byte-identical** under the federated
-/// backing, which adds exactly the 7 cross-service tools on top (FR-WS-05, plus
-/// S-257's `workspace_reachability` union view, FR-WS-12, and S-258's
-/// `workspace_check` governance tool, FR-WS-13).
+/// backing, which adds exactly the declared cross-service tools on top
+/// (FR-WS-05, plus S-257's `workspace_reachability` union view, FR-WS-12,
+/// S-258's `workspace_check` governance tool, FR-WS-13, and S-464's
+/// `xservice_build_deps`, FR-WS-33).
 #[test]
 fn federated_backing_adds_xservice_without_touching_the_single_roster() {
     let single = single_tools();
@@ -220,5 +221,51 @@ fn xservice_route_providers_description_names_relations_fan_out_and_provenance_f
     assert!(
         description.contains("several `route` edges"),
         "the description states that one call site can carry several route edges, one per committed composition: {description}",
+    );
+}
+
+/// `xservice_build_deps` is federation-only, takes the `repo` scope, and its
+/// description states the relation is a BUILD dependency and NOT a runtime
+/// coupling ([BR-58]) — the sentence an agent must not miss, because the rows
+/// look exactly like the runtime bindings the sibling tools return. The
+/// `workspace_status` description names its `build_dependency` section the
+/// same way.
+///
+/// Near misses pinned out: "build" alone would match "rebuild" or "build
+/// failure", and "runtime coupling" alone would match a sentence asserting the
+/// opposite, so each check is the whole phrase with its negation.
+///
+/// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn xservice_build_deps_says_it_is_a_build_dependency_not_a_runtime_coupling() {
+    assert!(
+        !single_tools().iter().any(|t| t.name == "xservice_build_deps"),
+        "xservice_build_deps must not exist without a workspace manifest",
+    );
+    let federated = federated_tools();
+    let tool = federated
+        .iter()
+        .find(|t| t.name == "xservice_build_deps")
+        .expect("the federated backing registers xservice_build_deps");
+    let description = tool.description.as_deref().unwrap_or_default();
+    assert!(
+        description.contains("A BUILD DEPENDENCY, NOT A RUNTIME COUPLING"),
+        "the description states the relation is a build dependency, not a runtime coupling: {description}",
+    );
+    for field in ["`builds_against`", "`built_against_by`", "`kind`", "`scope`", "`artifact`", "`cross_context`"] {
+        assert!(description.contains(field), "the description names {field}: {description}");
+    }
+    let schema = serde_json::to_string(&tool.input_schema).expect("schema serialises");
+    assert!(schema.contains("\"repo\""), "the tool takes the repo scope: {schema}");
+
+    let status = federated
+        .iter()
+        .find(|t| t.name == "workspace_status")
+        .expect("the federated backing registers workspace_status");
+    let status_description = status.description.as_deref().unwrap_or_default();
+    assert!(
+        status_description.contains("`build_dependency`")
+            && status_description.contains("a BUILD dependency, NOT a runtime coupling"),
+        "workspace_status names its build_dependency section as a build dependency: {status_description}",
     );
 }

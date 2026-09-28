@@ -82,7 +82,7 @@ fn adapter_lines() -> usize {
         + file_lines(CLI_XSERVICE)
 }
 
-/// Budget: ≤ 890 production lines of Rust in the CLI adapter (NFR-MA-02).
+/// Budget: ≤ 900 production lines of Rust in the CLI adapter (NFR-MA-02).
 ///
 /// S-072 500→520 for the CR-012 `ui` serve wiring: the `--ui`/`--port` flags on
 /// `serve` (cfg-gated behind the non-default `ui` feature) and the combined
@@ -361,12 +361,31 @@ fn adapter_lines() -> usize {
 /// failure with no context — CR-084 §6, recorded, not laundered.
 ///
 /// [CR-125]: ../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+///
+/// **S-464/[CR-148] 890→900** for `xservice build-deps` ([FR-WS-33]): measured
+/// 888→897 (+9), 3 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `BuildDeps { repo }` variant (`#[command]`, the field and its `#[arg]`) | **+5** |
+/// | its dispatch arm (one `relation`, one `xservice_build_deps` print) | **+4** |
+/// | | **+9** |
+///
+/// Delegation only: the arm serialises ONE `federation::xservice_build_deps`
+/// over the relation a fresh `BuildDependencies` joins. The join, the per-member
+/// projection, the `--repo` scope note and the cross-context hint live in
+/// `logos_core::federation::build_deps`, shared with the MCP and web twins. The
+/// variant's doc comment costs nothing here (comments are not counted). The
+/// same shape as every other `xservice` subcommand, so there is nothing to fold.
+///
+/// [CR-148]: ../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
+/// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 890,
-        "cli adapter exceeds the 890 production-LOC budget (NFR-MA-02): \
+        lines <= 900,
+        "cli adapter exceeds the 900 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

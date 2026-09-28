@@ -12,6 +12,15 @@
  *   - Cross-service impact — a symbol's impact in its own member(s) plus each
  *     far-side impact stitched across a binding.
  *
+ * The build layer (S-464, CR-148, FR-WS-33): when any member holds a build
+ * manifest, the map's legend gains a toggle — OFF by default — that draws what
+ * each member builds against in its own `build` edge class, with declared
+ * platform members collapsed; a cross-context model hint lists members depending
+ * on two or more contexts' model libraries, never as an edge; and the coverage
+ * tab states the build headline apart from every runtime figure. A build
+ * dependency is never a runtime coupling (BR-58), and a workspace with no build
+ * manifest renders every panel exactly as before.
+ *
  * Honesty (NFR-CC-04, NFR-RA-05): an unbound reference is never drawn as an edge
  * (its absence is *reported* as coverage, not hidden); a member with no index is a
  * muted node, not a service with "no couplings"; a workspace with no bindings gets
@@ -32,15 +41,19 @@ import { useState } from "react";
 import { AsyncResource, useApiResource } from "../../api/index.ts";
 import {
   fetchWorkspaceBindings,
+  fetchWorkspaceBuildDeps,
   fetchWorkspaceImpact,
   fetchWorkspaceStatus,
 } from "../../api/workspaceClient.ts";
 import type {
+  BuildDependencyHeadline,
+  CrossContextHint,
   CrossServiceImpact,
   ImpactEntry,
   ImpactResult,
   MemberTopics,
   WorkspaceStatus,
+  XserviceBuildDeps,
   XserviceImpact,
   XserviceRouteProviders,
 } from "../../api/types.ts";
@@ -69,6 +82,8 @@ import {
 } from "./coverageModel.ts";
 import { CoveragePanel } from "./CoverageBoards.tsx";
 import {
+  BUILD_EDGE_TYPE,
+  buildLayer,
   buildServiceMap,
   CONFIG_REFUSAL_LABEL,
   hasNonLiteralBinding,
@@ -77,6 +92,7 @@ import {
   linkEvidence,
   memberOfServiceId,
   serviceMembers,
+  type BuildLink,
   type EvidenceRow,
   type ServiceLink,
   type ServiceMember,
@@ -169,12 +185,23 @@ function WorkspaceContent({
           {
             id: "map",
             label: "Service map",
-            panel: <ServiceMapPanel services={services} topics={status.topics ?? []} />,
+            panel: (
+              <ServiceMapPanel
+                services={services}
+                topics={status.topics ?? []}
+                build={status.build_dependency}
+              />
+            ),
           },
           {
             id: "coverage",
             label: "Cross-service coverage",
-            panel: <CoveragePanel dashboard={coverage} degraded={status.degraded_rollup} />,
+            panel: (
+              <>
+                <CoveragePanel dashboard={coverage} degraded={status.degraded_rollup} />
+                <BuildDependencyCard headline={status.build_dependency} />
+              </>
+            ),
           },
           { id: "impact", label: "Cross-service impact", panel: <ImpactPanel /> },
         ]}
@@ -188,15 +215,171 @@ function WorkspaceContent({
 function ServiceMapPanel({
   services,
   topics,
+  build,
 }: {
   services: ServiceMember[];
   topics: MemberTopics[];
+  /** The status payload's build headline — present only when some member holds
+   *  a build manifest. Absent, the build layer does not exist: no toggle, no
+   *  fetch, and the map renders exactly as it did before it (S-464). */
+  build?: BuildDependencyHeadline;
 }) {
   const bindings = useApiResource<XserviceRouteProviders>(() => fetchWorkspaceBindings(), []);
+  // Read beside the bindings rather than on the toggle, so the cross-context hint
+  // (a report, not a layer) is shown without drawing anything. Never fetched when
+  // the status says there is no relation to read.
+  const hasBuild = build !== undefined;
+  const deps = useApiResource<XserviceBuildDeps | null>(
+    () => (hasBuild ? fetchWorkspaceBuildDeps() : Promise.resolve(null)),
+    [hasBuild],
+  );
   return (
     <AsyncResource resource={bindings} loadingLabel="Loading the service map…">
-      {(model) => <ServiceMap services={services} providers={model} topics={topics} />}
+      {(model) => (
+        <ServiceMap
+          services={services}
+          providers={model}
+          topics={topics}
+          build={build}
+          deps={deps.data ?? null}
+          depsError={deps.error ?? null}
+        />
+      )}
     </AsyncResource>
+  );
+}
+
+// ── The build layer (S-464, FR-WS-33) ────────────────────────────────────────
+
+const BUILD_KIND_LABEL: Record<string, string> = {
+  parent: "parent",
+  dependency: "dependency",
+  managed: "managed (a version pin)",
+  "bom-import": "BOM import",
+};
+
+/** The build layer's accessible twin: one row per drawn member pair. */
+const BUILD_LINK_COLUMNS: Column<BuildLink>[] = [
+  { key: "from", header: "Member", mono: true, cell: (l) => l.from, sortValue: (l) => l.from },
+  { key: "to", header: "Builds against", mono: true, cell: (l) => l.to, sortValue: (l) => l.to },
+  {
+    key: "kinds",
+    header: "Kind",
+    cell: (l) => l.kinds.map((k) => BUILD_KIND_LABEL[k] ?? k).join(", "),
+    sortValue: (l) => l.kinds.join(","),
+  },
+  {
+    key: "artifacts",
+    header: "Artifact",
+    mono: true,
+    cell: (l) => l.artifacts.join(", "),
+    sortValue: (l) => l.artifacts.join(","),
+  },
+  {
+    key: "references",
+    header: "References",
+    numeric: true,
+    cell: (l) => l.references,
+    sortValue: (l) => l.references,
+  },
+];
+
+const HINT_COLUMNS: Column<CrossContextHint>[] = [
+  { key: "member", header: "Member", mono: true, cell: (h) => h.member, sortValue: (h) => h.member },
+  {
+    key: "contexts",
+    header: "Contexts",
+    cell: (h) => h.contexts.join(", "),
+    sortValue: (h) => h.contexts.length,
+  },
+  {
+    key: "libraries",
+    header: "Model libraries",
+    cell: (h) => (
+      <ul className={styles.reasons}>
+        {h.libraries.map((l) => (
+          <li key={l.artifact}>
+            <span className="mono">{l.artifact}</span> <span className="muted">from {l.member}</span>
+          </li>
+        ))}
+      </ul>
+    ),
+    sortValue: (h) => h.libraries.length,
+  },
+];
+
+/** The cross-context model hint (S-464, CR-148 §3.2 D) — a REPORT, never an
+ *  edge: nothing here reaches the canvas, whatever the build toggle says. */
+function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
+  if (hints.length === 0) return null;
+  return (
+    <Card title="Cross-context model hint">
+      <p className="muted">
+        {hints.length} {hints.length === 1 ? "member depends" : "members depend"} on the model
+        libraries of two or more bounded contexts — a context is named by its model library&apos;s coordinate,{" "}
+        <span className="mono">&lt;group&gt;.&lt;context&gt;:kafka-models</span> or{" "}
+        <span className="mono">&lt;context&gt;-kafka-models</span>. A hint for review, drawn as no
+        edge: a build dependency is not a runtime coupling.
+      </p>
+      <DataTable
+        caption="Members depending on two or more contexts' model libraries"
+        columns={HINT_COLUMNS}
+        rows={hints}
+        rowKey={(h) => h.member}
+        pageSize={DEFAULT_TABLE_PAGE_SIZE}
+      />
+    </Card>
+  );
+}
+
+/** The build headline on the coverage tab (S-464, frontend-design §4.17) — its
+ *  own card, after every runtime board, rendering the server's composed lines
+ *  (BR-51) and never a figure of its own. Absent headline, no card. */
+function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline }) {
+  if (!headline) return null;
+  const unread = headline.members.unread ?? [];
+  return (
+    <Card title="Build dependencies">
+      <p className="muted">
+        What members build against, joined from their Maven/Gradle manifests. A build dependency,
+        never a runtime coupling: no figure above counts it.
+      </p>
+      <p>{headline.summary}</p>
+      {headline.platform_apart && (
+        <p className="muted">
+          Declared platform <span className="mono">{headline.platform_apart.members.join(", ")}</span>{" "}
+          — counted apart: {headline.platform_apart.summary}
+        </p>
+      )}
+      {headline.platform_candidates.length > 0 && (
+        <p className="muted">
+          Platform candidates (a hint; nothing is classified until declared):{" "}
+          {headline.platform_candidates.map((c, i) => (
+            <span key={c.member}>
+              {i > 0 && ", "}
+              <span className="mono">{c.member}</span> ({c.in_degree} of {c.of})
+            </span>
+          ))}
+        </p>
+      )}
+      {headline.collisions.length > 0 && (
+        <p className="muted">
+          Produced by more than one member, so resolved to neither:{" "}
+          {headline.collisions.map((c, i) => (
+            <span key={c.artifact}>
+              {i > 0 && ", "}
+              <span className="mono">{c.artifact}</span> ({c.producers.join(", ")})
+            </span>
+          ))}
+        </p>
+      )}
+      {unread.length > 0 && (
+        <p className="muted">
+          Build facts could not be read for <span className="mono">{unread.join(", ")}</span> —
+          their build dependencies are unknown, not absent.
+        </p>
+      )}
+    </Card>
   );
 }
 
@@ -364,13 +547,28 @@ function ServiceMap({
   services,
   providers,
   topics,
+  build,
+  deps,
+  depsError,
 }: {
   services: ServiceMember[];
   providers: XserviceRouteProviders;
   topics: MemberTopics[];
+  build?: BuildDependencyHeadline;
+  deps: XserviceBuildDeps | null;
+  depsError: Error | null;
 }) {
   const { selectMember } = useWorkspace();
+  // OFF by default (CR-148 §3.2 D, BR-58): runtime coupling stays the picture a
+  // reader lands on, and the build layer is something they ask for.
+  const [showBuild, setShowBuild] = useState(false);
   const map = buildServiceMap(services, providers.providers, topics);
+  const layer = showBuild && deps ? buildLayer(deps, services) : null;
+  // With the toggle off the canvas gets the runtime set itself, not a copy — the
+  // map is the pre-S-464 map, object for object.
+  const loaded = layer
+    ? { nodes: map.loaded.nodes, edges: [...map.loaded.edges, ...layer.edges] }
+    : map.loaded;
   /* The one gate on every rendering the provenance channel adds (S-419,
      CR-132 AC3/AC6). A workspace whose bindings were all observed at call sites
      has nothing to distinguish, so it renders exactly the DOM it rendered before
@@ -392,7 +590,7 @@ function ServiceMap({
           A topic node is NOT a member, so clicking it selects nothing — `memberOfServiceId`
           returns null for a `topic:` id, which is why the two namespaces are distinct. */}
       <GraphCanvas
-        loaded={map.loaded}
+        loaded={loaded}
         selection={{ seed: null, focusId: null, lockedId: null, locatedId: null, depth: 0 }}
         onNodeClick={(id) => {
           const member = memberOfServiceId(id);
@@ -440,8 +638,61 @@ function ServiceMap({
               </p>
             </>
           )}
+          {/* The build layer's toggle (S-464): rendered only when a relation
+              exists, and unchecked until the reader checks it. */}
+          {build && (
+            <>
+              <span className={graphStyles.legendHeading}>Build dependencies</span>
+              <label className={graphStyles.check}>
+                <input
+                  type="checkbox"
+                  checked={showBuild}
+                  onChange={(e) => setShowBuild(e.target.checked)}
+                />{" "}
+                Draw what each member builds against
+              </label>
+              {showBuild && (
+                <ul className={graphStyles.legendList}>
+                  <EdgeRow type={BUILD_EDGE_TYPE} label="Builds against (from its build manifest)" />
+                </ul>
+              )}
+              <p className={graphStyles.legendNote}>
+                Drawn in its own class and counted apart from every binding above:{" "}
+                {build.summary}
+              </p>
+            </>
+          )}
         </div>
       </details>
+
+      {/* A failed read is stated whatever the toggle says: the cross-context hint is
+          read from the same answer and shown with the toggle off, so an unstated
+          failure would read as "no hint" (NFR-CC-04). Only a workspace whose status
+          carries a build headline ever reads the relation, so a manifest-less one
+          never reaches this. */}
+      {depsError ? (
+        <ErrorPanel>
+          The build relation could not be read: {depsError.message} — the build layer and the
+          cross-context model hint are unknown, not absent.
+        </ErrorPanel>
+      ) : (
+        showBuild && !deps && <LoadingState label="Reading the build relation…" />
+      )}
+
+      {layer && layer.collapsed.length > 0 && (
+        <p className="muted">
+          Platform members collapsed:{" "}
+          {layer.collapsed.map((c, i) => (
+            <span key={c.member} data-testid="collapsed-platform">
+              {i > 0 && ", "}
+              <span className="mono">{c.member}</span> ({c.inbound}{" "}
+              {c.inbound === 1 ? "member builds" : "members build"} against it)
+            </span>
+          ))}{" "}
+          — declared <span className="mono">platform</span>, so their inbound build edges are
+          counted apart and not drawn.
+        </p>
+      )}
 
       {map.topics.length > 0 && (
         <p className="muted">
@@ -479,6 +730,20 @@ function ServiceMap({
       )}
 
       <BindingEvidence links={map.links} />
+
+      {layer && layer.links.length > 0 && (
+        <Card title="Build dependencies">
+          <DataTable
+            caption="Build dependencies (the accessible twin of the build layer)"
+            columns={BUILD_LINK_COLUMNS}
+            rows={layer.links}
+            rowKey={(l) => `${l.from}->${l.to}`}
+            pageSize={DEFAULT_TABLE_PAGE_SIZE}
+          />
+        </Card>
+      )}
+
+      {deps && <CrossContextHintCard hints={deps.cross_context} />}
     </div>
   );
 }

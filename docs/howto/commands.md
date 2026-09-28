@@ -939,6 +939,7 @@ logos xservice route-providers [--repo <MEMBER>] [--json]   # the service map: c
 logos xservice search <QUERY> [--kind <K>] [--limit <N>] [--repo <MEMBER>] [--json]
 logos xservice callers <SYMBOL> [--limit <N>] [--repo <MEMBER>] [--json]
 logos xservice impact <SYMBOL> [--depth <N>] [--repo <MEMBER>] [--json]
+logos xservice build-deps [--repo <MEMBER>] [--json]          # what each member builds against — never a runtime coupling
 ```
 
 **Method wildcards.** A provider declared without an explicit verb — Spring's
@@ -976,6 +977,48 @@ working, not a defect.
 - **`impact`** — transitive impact per member, extended across bridge edges: a
   handler reachable only via a matched cross-service call is included, tagged
   with the bridge edge it was reached through.
+- **`build-deps`** (since S-464) — what each member **builds against** and what
+  is **built against it**, joined from the members' Maven/Gradle manifests
+  ([FR-WS-33](../specs/requirements/FR-WS-33.md)). Every member read gets a
+  `builds_against` and a `built_against_by` list (a member with no edge is
+  listed with both empty); each row names `kind` (`parent`, `dependency`,
+  `managed` — a version pin — or `bom-import`), `scope` as declared (`null`
+  when the manifest declares none; never defaulted to `compile`), `artifact`
+  (`groupId:artifactId`), `references`, and `platform: true` when its target is
+  a member declared [`kind = "platform"`](configuration.md#kind--platform--build-hubs).
+  The workspace `headline` rides beside the rows — `build_dependency_pairs` by
+  kind with its denominator, the same section `workspace status` carries — and
+  `cross_context` lists the members depending on the model libraries of **two
+  or more** bounded contexts, each library named with its producer. A context is
+  read off its model library's coordinate: an artifactId `kafka-models` names the
+  groupId's last segment (`com.acme.archive:kafka-models` is the `archive`
+  context — the only shape on the reference estate, whose repositories are named
+  `archive-kafka-models` and so on), and an artifactId `<context>-kafka-models`
+  names its prefix. Only `dependency` rows count: a parent POM that pins
+  every context's models under `managed` is not a hint. `--repo X` scopes the
+  rows and the hint to member `X` while the headline stays workspace-wide; a
+  name that is not a member read (unknown, or its build facts could not be
+  read) answers an empty `members` list **with** a `scope_note` saying so,
+  never a silent "no edges". The MCP twin is `xservice_build_deps`, and the web
+  service map draws the same relation behind a legend toggle that is off by
+  default.
+
+  **A build dependency is never a runtime coupling**
+  ([BR-58](../specs/software-spec.md#327-workspace-federation)): no row is a
+  bridge edge, none enters `route-providers`, `callers`, `impact` or any
+  coverage figure, and a member that builds against another is not thereby
+  coupled to it at runtime.
+
+  ```jsonc
+  // logos xservice build-deps --repo archive-kafka-models --json (abridged)
+  { "scope": "archive-kafka-models",
+    "headline": { "build_dependency_pairs": { "pairs": 148, "parent": 51, "dependency": 84, "managed": 15, "bom-import": 0 },
+                  "summary": "148 pairs (…) built against another member, from 184 of 1728 referenced artifacts (…); a build dependency, never a runtime coupling", … },
+    "members": [ { "member": "archive-kafka-models", "builds_against": [],
+                   "built_against_by": [ { "from": "archive-feeder", "to": "archive-kafka-models", "kind": "dependency",
+                                           "scope": null, "artifact": "com.sourcesense.poste.pec.archive:kafka-models", "references": 1 }, … ] } ],
+    "cross_context": [] }
+  ```
 
 `--repo` constructs only the member engines the answer needs (a one-shot never
 builds all N, [NFR-PE-10](../specs/requirements/NFR-PE-10.md)). All `--json`
@@ -1186,14 +1229,20 @@ declare them. Both keys are absent when there is nothing to report. See
 
 Members also build against each other. When any member holds a `pom.xml` or
 `build.gradle(.kts)` — or a member's facts could not be read, which is never
-reported as "none" — the `--json` payload carries a `build_dependency` section:
+reported as "none" — both renderings (human and `--json`) carry a
+`build_dependency` section, its own top-level key after every runtime one:
 `build_dependency_pairs` by kind (`parent`, `dependency`, `managed`,
 `bom-import`) beside the `references` it was joined from and the `members`
 read, the `collisions` (a coordinate two members produce, resolved to
 neither), the `platform_candidates` by in-degree, and — when a member is
 declared `kind = "platform"` — its inbound pairs under `platform_apart`. It is
 a build dependency, never a runtime coupling: no build edge enters the figures
-above. See [`kind = "platform"`](configuration.md#kind--platform--build-hubs).
+above. Its `summary` states the pairs by kind beside the denominator in one
+line — read that rather than recomposing the two. The rows behind it are
+[`xservice build-deps`](#xservice-workspace-federation-queries); the web
+coverage tab renders the same section as its own card, after every runtime
+board. A workspace with no build manifest prints exactly what it printed
+before. See [`kind = "platform"`](configuration.md#kind--platform--build-hubs).
 
 ##### Each reference names the other end
 

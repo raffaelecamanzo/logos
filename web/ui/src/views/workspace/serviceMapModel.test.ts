@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 
 import type {
   BridgeEdge,
+  BuildsAgainst,
   ConfigBoundKey,
   ConfigValueRefusal,
   MemberTopics,
   ValueProvenance,
   WorkspaceStatus,
+  XserviceBuildDeps,
 } from "../../api/types.ts";
 import {
+  BUILD_EDGE_TYPE,
+  buildLayer,
   buildServiceMap,
   CONFIG_REFUSAL_LABEL,
   edgeProvenanceKind,
@@ -734,5 +738,104 @@ describe("edge provenance (S-419, CR-132, ADR-64, FR-WS-19 AC6)", () => {
   it("yields NO evidence rows for a literal or unstated end — absence is not a claim", () => {
     const map = buildServiceMap([member("api"), member("web")], [binding("api", "web")]);
     expect(linkEvidence(map.links[0])).toEqual([]);
+  });
+});
+
+// ── The build layer (S-464, FR-WS-33) ───────────────────────────────────────
+
+function row(from: string, to: string, kind: BuildsAgainst["kind"], artifact: string, extra: Partial<BuildsAgainst> = {}): BuildsAgainst {
+  return { from, to, kind, scope: null, artifact, references: 1, ...extra };
+}
+
+/** Every row sits in its `from`'s `builds_against` AND its `to`'s
+ *  `built_against_by`, exactly as the server sends it. */
+function deps(rows: BuildsAgainst[], platforms: string[] = []): XserviceBuildDeps {
+  const names = [...new Set(rows.flatMap((r) => [r.from, r.to]))];
+  return {
+    headline: {
+      build_dependency_pairs: { pairs: 0, parent: 0, dependency: 0, managed: 0, "bom-import": 0 },
+      references: { references: 0, to_member: 0, external: 0 },
+      members: { members: names.length, read: names.length, with_manifests: 0, manifests: 0, manifests_read: 0 },
+      ...(platforms.length
+        ? {
+            platform_apart: {
+              members: platforms,
+              build_dependency_pairs: { pairs: 0, parent: 0, dependency: 0, managed: 0, "bom-import": 0 },
+              summary: "",
+            },
+          }
+        : {}),
+      collisions: [],
+      platform_candidates: [],
+      summary: "",
+    },
+    members: names.map((m) => ({
+      member: m,
+      builds_against: rows.filter((r) => r.from === m),
+      built_against_by: rows.filter((r) => r.to === m),
+    })),
+    cross_context: [],
+  };
+}
+
+describe("buildLayer (S-464)", () => {
+  it("draws one `build` edge per member pair, reading each row once, kinds in order", () => {
+    const layer = buildLayer(
+      deps([
+        row("api", "lib", "managed", "g:lib"),
+        row("api", "lib", "dependency", "g:lib", { references: 3 }),
+        row("api", "lib", "dependency", "g:lib-extra"),
+        row("web", "lib", "dependency", "g:lib"),
+      ]),
+      [member("api"), member("lib"), member("web")],
+    );
+    expect(layer.edges).toEqual([
+      { source: serviceId("api"), target: serviceId("lib"), edge_type: BUILD_EDGE_TYPE },
+      { source: serviceId("web"), target: serviceId("lib"), edge_type: BUILD_EDGE_TYPE },
+    ]);
+    expect(layer.links[0]).toEqual({
+      from: "api",
+      to: "lib",
+      kinds: ["dependency", "managed"],
+      artifacts: ["g:lib", "g:lib-extra"],
+      references: 5,
+    });
+    expect(BUILD_EDGE_TYPE).toBe("build");
+  });
+
+  it("collapses a declared platform: its inbound rows are not drawn, their members counted", () => {
+    const layer = buildLayer(
+      deps(
+        [
+          row("api", "starter", "parent", "g:starter", { platform: true }),
+          row("web", "starter", "parent", "g:starter", { platform: true }),
+          row("web", "starter", "managed", "g:starter", { platform: true }),
+          // OUT of the platform is an ordinary edge.
+          row("starter", "lib", "managed", "g:lib"),
+        ],
+        ["starter"],
+      ),
+      [member("api"), member("web"), member("starter"), member("lib")],
+    );
+    expect(layer.links.map((l) => `${l.from}->${l.to}`)).toEqual(["starter->lib"]);
+    expect(layer.collapsed).toEqual([{ member: "starter", inbound: 2 }]);
+  });
+
+  it("collapses on the `platform` flag, listing a declared platform with no inbound row at zero", () => {
+    const layer = buildLayer(deps([row("api", "lib", "dependency", "g:lib")], ["mock"]), [
+      member("api"),
+      member("lib"),
+    ]);
+    expect(layer.links).toHaveLength(1);
+    expect(layer.collapsed).toEqual([{ member: "mock", inbound: 0 }]);
+  });
+
+  it("drops a row whose end is not a roster service — never a fabricated node", () => {
+    const layer = buildLayer(
+      deps([row("api", "ghost", "dependency", "g:ghost"), row("api", "api", "dependency", "g:self")]),
+      [member("api")],
+    );
+    expect(layer.edges).toEqual([]);
+    expect(layer.links).toEqual([]);
   });
 });

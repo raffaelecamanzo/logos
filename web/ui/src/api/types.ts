@@ -1634,6 +1634,103 @@ export interface WorkspaceStatus {
    *  alone would render it as an absence; FR-WS-11's promise is that it is visible
    *  before any cross-repo match. */
   topics: MemberTopics[];
+  /** The build-dependency headline (S-463/S-464, FR-WS-33) — its own section,
+   *  never a runtime figure (BR-58). ABSENT when every member was read and none
+   *  holds a build manifest, so a manifest-less workspace's payload, and every
+   *  view over it, is unchanged. */
+  build_dependency?: BuildDependencyHeadline;
+}
+
+// ── The build-dependency relation (S-464, FR-WS-33, ADR-69) ──────────────────
+// A BUILD dependency, never a runtime coupling (BR-58): these types are never
+// folded into a BridgeEdge, a coverage count or a runtime headline.
+
+/** The kind of one `builds-against` edge — the reference it was joined from. */
+export type BuildEdgeKind = "parent" | "dependency" | "managed" | "bom-import";
+
+/** One `builds-against(from → to, kind, scope, artifact)` row. */
+export interface BuildsAgainst {
+  /** The member that builds against `to`. */
+  from: string;
+  /** The member producing the artifact. */
+  to: string;
+  kind: BuildEdgeKind;
+  /** The scope as declared; `null` when undeclared — never defaulted. */
+  scope: string | null;
+  /** `groupId:artifactId`. */
+  artifact: string;
+  /** How many manifest references this row stands for. */
+  references: number;
+  /** `to` is a declared `platform` member: the row is counted apart. Absent when false. */
+  platform?: true;
+}
+
+/** Member pairs with a build edge, by kind — the kinds can sum to more than `pairs`. */
+export interface BuildPairCount {
+  pairs: number;
+  parent: number;
+  dependency: number;
+  managed: number;
+  "bom-import": number;
+}
+
+/** Declared platforms' inbound pairs, counted apart over the same denominator. */
+export interface BuildPlatformApart {
+  /** The declared platform members, sorted — the map's collapse key. */
+  members: string[];
+  build_dependency_pairs: BuildPairCount;
+  summary: string;
+}
+
+/** The `build_dependency` headline: pairs by kind beside their denominator. */
+export interface BuildDependencyHeadline {
+  build_dependency_pairs: BuildPairCount;
+  /** Every referenced fact read, by bucket — the denominator. */
+  references: { references: number; to_member: number; external: number } & Record<string, number>;
+  members: {
+    members: number;
+    read: number;
+    unread?: string[];
+    with_manifests: number;
+    manifests: number;
+    manifests_read: number;
+  };
+  platform_apart?: BuildPlatformApart;
+  collisions: { artifact: string; producers: string[]; references: number }[];
+  platform_candidates: { member: string; in_degree: number; of: number }[];
+  /** The headline and its denominator as one server-composed line — render it,
+   *  never recompose it (BR-51). */
+  summary: string;
+}
+
+/** One member's side of the relation. */
+export interface MemberBuildDependencies {
+  member: string;
+  builds_against: BuildsAgainst[];
+  built_against_by: BuildsAgainst[];
+}
+
+/** One model library a member depends on, named with its context and producer. */
+export interface ModelLibrary {
+  context: string;
+  artifact: string;
+  member: string;
+}
+
+/** A member depending on two or more contexts' model libraries — a hint, never an edge. */
+export interface CrossContextHint {
+  member: string;
+  contexts: string[];
+  libraries: ModelLibrary[];
+}
+
+/** `GET /api/v1/workspace/build-deps` — the `xservice build-deps` read-model. */
+export interface XserviceBuildDeps {
+  scope?: string;
+  scope_note?: string;
+  headline: BuildDependencyHeadline;
+  members: MemberBuildDependencies[];
+  cross_context: CrossContextHint[];
 }
 
 /** `GET /api/v1/workspace/route-providers` — the resolved cross-service bindings:
