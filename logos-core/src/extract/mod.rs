@@ -1341,6 +1341,21 @@ fn collect_refs(
         }
         file_module.cloned()
     };
+    // The declarations a declared type belongs to, when its node sits beside
+    // captured declarators rather than inside one — a Java field's type is a
+    // sibling of its `variable_declarator`s (`private Dto a, b;`), so the
+    // enclosing declaration would be the class, not the fields (S-466). `None`
+    // for every other shape: the enclosing declaration is the owner.
+    let declarator_symbols = |node: Node<'_>| -> Option<Vec<LogosSymbol>> {
+        let parent = node.parent()?;
+        let mut cursor = parent.walk();
+        let owners: Vec<LogosSymbol> = parent
+            .children_by_field_name("declarator", &mut cursor)
+            .filter_map(|d| id_to_idx.get(&d.id()))
+            .filter_map(|&idx| symbols[idx].clone())
+            .collect();
+        (!owners.is_empty()).then_some(owners)
+    };
 
     let capture_names = query.capture_names();
     let imports = match semantics.import_specifier {
@@ -1530,6 +1545,33 @@ fn collect_refs(
                         });
                     }
                 }
+                // A type relation (S-466, CR-149 §3.2 B, FR-EX-10): the captured
+                // node is a TYPE, recorded as a Path-form row of the capture's
+                // kind — never Method form, whose `::` target the binder
+                // reserves for trait-object dispatch (S-281). Its type
+                // arguments are type uses of the same declaration(s).
+                name @ ("ref.extends" | "ref.implements" | "ref.instantiates" | "ref.type_use") => {
+                    let head = match name {
+                        "ref.extends" => EdgeKind::Extends,
+                        "ref.implements" => EdgeKind::Implements,
+                        "ref.instantiates" => EdgeKind::Instantiates,
+                        _ => EdgeKind::TypeUses,
+                    };
+                    let owners = declarator_symbols(node).unwrap_or_else(|| vec![source_symbol]);
+                    for (kind, target) in type_relation_targets(node, source, head) {
+                        for owner in &owners {
+                            out.push(RefFact {
+                                source: owner.clone(),
+                                target: target.clone(),
+                                alias: None,
+                                form: RefForm::Path,
+                                kind,
+                                line,
+                                relation: None,
+                            });
+                        }
+                    }
+                }
                 "ref.use" => {
                     let mut items = Vec::new();
                     flatten_use_tree(node, source, &mut items);
@@ -1558,6 +1600,135 @@ fn collect_refs(
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
     dedup_sort_refs(&mut out);
     out
+}
+
+/// The rows one captured **type** node records (S-466, [CR-149] §3.2 B): its
+/// head type under `head` — `Base<T>` → `Base`, `a.b.C` → `a::b::C`, `Dto[]` →
+/// `Dto` — then every type argument inside it, at any depth, as a
+/// [`EdgeKind::TypeUses`] (`List<Map<K, Dto>>` → `Map`, `K`, `Dto`; a wildcard's
+/// bound included).
+///
+/// A primitive or `void` names no type and records nothing, and neither does a
+/// single name the enclosing declarations declare as a **type parameter** — `T`
+/// in `class Box<T>` is a type variable, and binding it to a same-package class
+/// `T` would fabricate the edge [NFR-RA-05] forbids. Java's `var` is not a type
+/// name either. Every shape is read from the grammar's node kinds, which only
+/// the Java query captures today; another grammar's type nodes that are not
+/// among them record nothing rather than a guess.
+///
+/// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn type_relation_targets(node: Node<'_>, source: &[u8], head: EdgeKind) -> Vec<(EdgeKind, String)> {
+    let parameters = type_parameters_in_scope(node, source);
+    let mut out: Vec<(EdgeKind, String)> = Vec::new();
+    let mut record = |kind: EdgeKind, ty: Node<'_>| {
+        let Some(path) = type_path(ty, source) else {
+            return;
+        };
+        if let [only] = path.as_slice() {
+            if only == "var" || parameters.contains(only) {
+                return;
+            }
+        }
+        out.push((kind, path.join("::")));
+    };
+    record(head, node);
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        let mut cursor = n.walk();
+        let children: Vec<Node<'_>> = n.named_children(&mut cursor).collect();
+        if n.kind() == "type_arguments" {
+            for arg in &children {
+                // `? extends Dto` — the bound is the type the argument names.
+                let ty = if arg.kind() == "wildcard" {
+                    let mut c = arg.walk();
+                    arg.named_children(&mut c).last()
+                } else {
+                    Some(*arg)
+                };
+                if let Some(ty) = ty {
+                    record(EdgeKind::TypeUses, ty);
+                }
+            }
+        }
+        stack.extend(children);
+    }
+    out
+}
+
+/// The `::`-joined path a Java type node names, generics and array dimensions
+/// stripped, or `None` for a node that names no class-like type (a primitive,
+/// `void`, an annotation). See [`type_relation_targets`].
+fn type_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
+    let is_annotation = |n: &Node<'_>| matches!(n.kind(), "annotation" | "marker_annotation");
+    let mut cursor = node.walk();
+    let named: Vec<Node<'_>> = node
+        .named_children(&mut cursor)
+        .filter(|n| !is_annotation(n))
+        .collect();
+    match node.kind() {
+        "type_identifier" => Some(vec![node.utf8_text(source).ok()?.trim().to_string()]),
+        // `a.b.C`, `Outer<A>.Inner`: the qualifier, then the last identifier.
+        "scoped_type_identifier" => {
+            let (last, qualifier) = named.split_last()?;
+            if last.kind() != "type_identifier" {
+                return None;
+            }
+            let mut path = type_path(*qualifier.first()?, source)?;
+            path.push(last.utf8_text(source).ok()?.trim().to_string());
+            Some(path)
+        }
+        "generic_type" | "annotated_type" => named
+            .iter()
+            .find(|n| n.kind() != "type_arguments")
+            .and_then(|n| type_path(*n, source)),
+        "array_type" => type_path(node.child_by_field_name("element")?, source),
+        _ => None,
+    }
+}
+
+/// Every type-parameter name the declarations enclosing `node` (itself
+/// included) declare — `T` of `class Box<T>`, `E` of `<E> E get(E e)`.
+fn type_parameters_in_scope(node: Node<'_>, source: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut at = Some(node);
+    while let Some(n) = at {
+        if let Some(parameters) = n.child_by_field_name("type_parameters") {
+            let mut cursor = parameters.walk();
+            for parameter in parameters.named_children(&mut cursor) {
+                let mut inner = parameter.walk();
+                let name = parameter
+                    .named_children(&mut inner)
+                    .find(|c| c.kind() == "type_identifier");
+                if let Some(text) = name.and_then(|c| c.utf8_text(source).ok()) {
+                    names.insert(text.trim().to_string());
+                }
+            }
+        }
+        at = n.parent();
+    }
+    names
+}
+
+/// The superclass a class declares, as its `Extends` row records it (`Base`,
+/// `a::b::Base`), read from the file's own reference facts — the per-file
+/// accessor S-467's `super.m()` receiver shape consumes, so the type it
+/// qualifies a `super` call with is the one this capture recorded and never a
+/// second reading of the source (S-466, [CR-150]).
+///
+/// `None` when `class` records no `Extends` row, and when it records several
+/// (an interface's super-interfaces) — a `super` receiver names one type or
+/// none ([NFR-RA-05]).
+///
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[allow(dead_code)] // consumed by S-467 (Sprint 81, Iteration 3); pinned by its unit test.
+pub(crate) fn declared_superclass<'a>(refs: &'a [RefFact], class: &LogosSymbol) -> Option<&'a str> {
+    let mut supers = refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Extends && r.form == RefForm::Path && &r.source == class);
+    let first = supers.next()?;
+    supers.next().is_none().then_some(first.target.as_str())
 }
 
 /// The HTTP verbs the client-call arm (S-252, [FR-WS-08]) captures. A method call

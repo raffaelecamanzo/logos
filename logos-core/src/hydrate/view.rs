@@ -12,7 +12,9 @@
 //! Four views, selected by [`Granularity`](super::Granularity):
 //!
 //! - **`ExcludeContains`** — symbol-level vertices; every dependency edge *except*
-//!   the lexical [`EdgeKind::Contains`]. This is *the* dependency graph metrics
+//!   the lexical [`EdgeKind::Contains`] and the structural facts (`Accesses`,
+//!   `Implements`, `Extends`, `Instantiates`, `TypeUses`), which record a
+//!   relation rather than a coupling. This is *the* dependency graph metrics
 //!   and SCC run on ([FR-DB-06]: "the dependency graph used for metrics contains
 //!   no `contains` edges").
 //! - **`Symbol`** — symbol-level vertices; **all** edge kinds including
@@ -20,12 +22,12 @@
 //!   neighbourhood explore where lexical nesting matters, never for dependency
 //!   metrics). Still the **code subgraph** — non-code vertices/edges are dropped.
 //! - **`File`** — file-rollup: vertices are files, dependency edges (exclude
-//!   `Contains`) lifted to the file that defines each endpoint and deduplicated
+//!   `Contains` and the structural facts) lifted to the file that defines each endpoint and deduplicated
 //!   with a multiplicity weight.
 //! - **`Module`** — module-rollup: vertices are modules; membership is derived by
 //!   walking `Contains` up to the nearest enclosing module ([FR-DB-06]: "module
-//!   rollup is derived via `contains`"); dependency edges (exclude `Contains`)
-//!   lifted to modules and deduplicated with a weight.
+//!   rollup is derived via `contains`"); dependency edges (exclude `Contains`
+//!   and the structural facts) lifted to modules and deduplicated with a weight.
 //! - **`Visualization`** — symbol-level vertices that, alone among the views,
 //!   **keep** the non-code layers (doc/config/artifact vertices and the
 //!   cross-layer `DocReference`/`TracesTo`/`ArtifactRef`/`ArtifactBinding` edges).
@@ -250,9 +252,9 @@ pub fn build_view(granularity: Granularity, nodes: &[NodeRow], edges: &[EdgeRow]
 /// before the visualization view existed.
 #[derive(Debug, Clone, Copy)]
 struct SymbolScope {
-    /// Keep the lexical `Contains` and member-access `Accesses` edges (the full
-    /// `Symbol` and `Visualization` views); the `ExcludeContains` dependency
-    /// view drops both.
+    /// Keep the lexical `Contains` edges and the structural facts
+    /// ([`is_structural_fact`]) — the full `Symbol` and `Visualization` views;
+    /// the `ExcludeContains` dependency view drops them all.
     include_contains: bool,
     /// Admit non-code vertices ([`NodeKind::is_non_code`]) and the cross-layer
     /// documentation/artifact edges ([`EdgeKind::is_documentation`] /
@@ -270,7 +272,8 @@ struct SymbolScope {
 ///
 /// [`SymbolScope`] selects what is kept: `include_contains` distinguishes the
 /// full `Symbol` view (all code edge kinds) from the `ExcludeContains`
-/// dependency view (every kind but `Contains`/`Accesses`); `admit_non_code`
+/// dependency view (every kind but `Contains` and the structural facts of
+/// [`is_structural_fact`]); `admit_non_code`
 /// distinguishes the presentation-only `Visualization` view (which keeps the
 /// non-code vertices and the cross-layer doc/artifact edges) from the
 /// code-subgraph views (which drop them at this single audit point — [ADR-34]).
@@ -309,24 +312,11 @@ fn build_symbol_level(
         if !scope.include_contains && edge.kind == EdgeKind::Contains {
             continue;
         }
-        // The CR-005 member-access `Accesses` edge is a structural field-usage
-        // fact, not a code-coupling dependency: excluded from the dependency
-        // view the five original metrics run on (FR-EX-08, ADR-21) — kept in the
-        // full symbol view (include_contains) where it is navigable, exactly as
-        // Contains is. Admitting Accesses therefore leaves the original signal
-        // byte-identical (metric-neutrality).
-        if !scope.include_contains && edge.kind == EdgeKind::Accesses {
-            continue;
-        }
-        // The S-281 `Implements` edge (an impl method → the trait it implements,
-        // CR-073) is a structural type-relation fact, not a code-coupling
-        // dependency — excluded from the dependency view the five original metrics
-        // run on (FR-RS-08, ADR-21), exactly as `Accesses` is, and kept in the
-        // full symbol view where it is navigable. So admitting it leaves
-        // aggregate_signal, cycles, DSM, and dead-code byte-identical: the
-        // dyn-dispatch dead-code recovery rides entirely on the fan-out `Calls`
-        // edges, never on these structural edges (metric-neutrality).
-        if !scope.include_contains && edge.kind == EdgeKind::Implements {
+        // A structural fact (`Accesses`, `Implements`, and Java's `Extends`,
+        // `Instantiates`, `TypeUses`) is kept in the full symbol view
+        // (include_contains) where it is navigable, exactly as Contains is, and
+        // fenced out of the dependency view — see `is_structural_fact`.
+        if !scope.include_contains && is_structural_fact(edge.kind) {
             continue;
         }
         if !scope.admit_non_code && edge.kind.is_documentation() {
@@ -371,6 +361,41 @@ fn build_symbol_level(
     }
 
     finish(granularity, graph, by_key)
+}
+
+/// `true` for an edge kind that records a **structural fact** rather than a
+/// code-coupling dependency — fenced out of every dependency view the gated
+/// metrics run on (the `ExcludeContains` view and both rollups, [ADR-21]) and
+/// kept in the full symbol view, where it is navigable. One predicate for both
+/// builders, so the symbol-level fence and its rollup twin cannot drift.
+///
+/// - `Accesses` (CR-005, [FR-EX-08]): a method's use of its own class's field.
+/// - `Implements` (S-281, CR-073, [FR-RS-08]): an impl method → its trait. The
+///   dyn-dispatch dead-code recovery rides on the fan-out `Calls` edges, never
+///   on this one.
+/// - `Extends`, `Instantiates`, `TypeUses`, and `Implements` for Java (S-466,
+///   [CR-149] §10's default, recorded at delivery): a class's supertypes, the
+///   classes a method news, a declaration's types. Fenced so the quality signal
+///   of a Java project moves by one attributable cause — its bound imports —
+///   and admitting type uses as couplings stays a later, separately measurable
+///   step.
+///
+/// Fencing leaves `aggregate_signal`, cycles, DSM and dead-code byte-identical
+/// with these edges present (metric-neutrality).
+///
+/// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
+/// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
+/// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+/// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+fn is_structural_fact(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Accesses
+            | EdgeKind::Implements
+            | EdgeKind::Extends
+            | EdgeKind::Instantiates
+            | EdgeKind::TypeUses
+    )
 }
 
 /// The two rollup flavours, distinguished by how a node maps to its aggregate.
@@ -438,15 +463,14 @@ fn build_rollup(
     let mut aggregated: BTreeMap<(usize, usize), u32> = BTreeMap::new();
     for edge in edges {
         if edge.kind == EdgeKind::Contains
-            || edge.kind == EdgeKind::Accesses
-            || edge.kind == EdgeKind::Implements
+            || is_structural_fact(edge.kind)
             || edge.kind.is_documentation()
             || edge.kind.is_config_reference()
         {
-            continue; // lexical, member-access, trait-implements (S-281, a
-                      // structural type-relation), doc-kind, or cross-artifact
-                      // edge — none is a code coupling (FR-CG-05, ADR-26, FR-RS-08,
-                      // the rollup twin of the symbol-level fences above)
+            continue; // lexical, structural (`is_structural_fact`), doc-kind, or
+                      // cross-artifact edge — none is a code coupling (FR-CG-05,
+                      // ADR-26, FR-RS-08, the rollup twin of the symbol-level
+                      // fences above)
         }
         // A doc endpoint was never given a rollup vertex above, so its incident
         // edges fall away here, keeping the rollup a pure code subgraph (FR-DG-06).

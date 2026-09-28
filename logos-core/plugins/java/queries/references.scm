@@ -29,9 +29,6 @@
 ; `import a.b.C /* why */;` would slip past such an anchor and record nothing.
 ;
 ; Droppable on disk at `.logos/plugins/java/queries/references.scm`.
-;
-; Deliberately NOT captured in v1: `new T()` construction references (no
-; constructor nodes exist to bind them to — see symbols.scm).
 
 (method_invocation
   !object
@@ -57,3 +54,57 @@
 (field_access
   object: (this)
   field: (identifier) @ref.access)
+;   Type relations (S-466, CR-149 §3.2 B, FR-EX-10). Each capture is a TYPE
+;   node; `collect_refs` turns it into PATH-form rows — the head type (generics
+;   stripped, `a.b.C` → `a::b::C`) under the capture's edge kind, and every type
+;   argument inside it (`List<Dto>` → `Dto`) as a `TypeUses` of the same
+;   declaration. Never method-form: a Method-form `::` target is the binder's
+;   trait-dispatch branch (S-281). A name the enclosing declarations declare as a
+;   type parameter (`T` in `class Box<T>`) is a type variable, not a type, and
+;   records nothing.
+;
+;   @ref.extends     — a class's superclass, an interface's super-interfaces:
+;                      `Extends` (class → class, interface → interface).
+;   @ref.implements  — a class's, enum's or record's super-interfaces:
+;                      `Implements` (→ interface).
+;   @ref.instantiates — the type of `new T(…)`: `Instantiates` (→ class). It
+;                      binds to the class — constructors are not nodes
+;                      (symbols.scm); an anonymous `new I() {…}` of an interface
+;                      names no class and stays unresolved.
+;   @ref.type_use    — a declared type: a field's (attributed to the field), an
+;                      interface constant's, a method's return type, a
+;                      parameter's (record components included), a local's, a
+;                      for-each variable's, a resource's, a caught exception's:
+;                      `TypeUses` (declaration → type).
+;
+; Deliberately NOT captured: annotations (`@interface` types are not extracted
+; as nodes), casts, `instanceof`, class literals, `throws`, type bounds and
+; method references — not declarations of a type.
+
+(class_declaration
+  superclass: (superclass (_) @ref.extends))
+
+(interface_declaration
+  (extends_interfaces (type_list (_) @ref.extends)))
+
+(class_declaration
+  interfaces: (super_interfaces (type_list (_) @ref.implements)))
+
+(enum_declaration
+  interfaces: (super_interfaces (type_list (_) @ref.implements)))
+
+(record_declaration
+  interfaces: (super_interfaces (type_list (_) @ref.implements)))
+
+(object_creation_expression
+  type: (_) @ref.instantiates)
+
+(field_declaration type: (_) @ref.type_use)
+(constant_declaration type: (_) @ref.type_use)
+(method_declaration type: (_) @ref.type_use)
+(formal_parameter type: (_) @ref.type_use)
+(spread_parameter (_) @ref.type_use)
+(local_variable_declaration type: (_) @ref.type_use)
+(enhanced_for_statement type: (_) @ref.type_use)
+(resource type: (_) @ref.type_use)
+(catch_formal_parameter (catch_type (_) @ref.type_use))

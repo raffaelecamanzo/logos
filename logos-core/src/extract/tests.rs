@@ -5154,3 +5154,123 @@ fn a_rust_call_is_recorded_exactly_as_before_s440() {
         ]
     );
 }
+
+// ── S-466 / CR-149 §3.2 B: Java type relations are captured ─────────────────
+
+/// Every type-relation row as `(source name, kind, target)`, sorted — the source
+/// named by its node, so a field's row reads as the field's.
+#[cfg(feature = "lang-java")]
+fn type_relation_rows(facts: &Facts) -> Vec<(String, EdgeKind, String)> {
+    let name_of: HashMap<&str, &str> = facts
+        .nodes
+        .iter()
+        .map(|n| (n.symbol.as_str(), n.name.as_str()))
+        .collect();
+    let mut out: Vec<(String, EdgeKind, String)> = facts
+        .refs
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.kind,
+                EdgeKind::Extends | EdgeKind::Implements | EdgeKind::Instantiates | EdgeKind::TypeUses
+            )
+        })
+        .map(|r| {
+            assert_eq!(r.form, RefForm::Path, "a type relation is Path form: {r:?}");
+            (
+                name_of.get(r.source.as_str()).copied().unwrap_or("?").to_string(),
+                r.kind,
+                r.target.clone(),
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.0, a.1.as_i32(), &a.2).cmp(&(&b.0, b.1.as_i32(), &b.2)));
+    out
+}
+
+#[test]
+#[cfg(feature = "lang-java")]
+fn java_type_relations_record_each_shape_as_a_path_row_of_its_declaration() {
+    let src = "package com.x;\n\
+\n\
+public class Svc extends com.x.base.Base<Dto> implements Port, Wide<Req> {\n\
+    private Dto a, b;\n\
+    private Map<String, List<? extends Dto>>[] nested;\n\
+    public Out.In make(int n, Req... reqs) {\n\
+        var local = new Dto();\n\
+        for (Item item : items) {}\n\
+        try (Res res = open()) {} catch (Bad | Worse e) {}\n\
+        return null;\n\
+    }\n\
+}\n";
+    let facts = extract_lang("java", "src/main/java/com/x/Svc.java", src);
+    let row = |source: &str, kind: EdgeKind, target: &str| {
+        (source.to_string(), kind, target.to_string())
+    };
+    assert_eq!(
+        type_relation_rows(&facts),
+        [
+            row("Svc", EdgeKind::Implements, "Port"),
+            row("Svc", EdgeKind::Implements, "Wide"),
+            row("Svc", EdgeKind::Extends, "com::x::base::Base"),
+            // The superclass's and super-interface's type arguments.
+            row("Svc", EdgeKind::TypeUses, "Dto"),
+            row("Svc", EdgeKind::TypeUses, "Req"),
+            // Each declarator of `private Dto a, b;` owns the field's type.
+            row("a", EdgeKind::TypeUses, "Dto"),
+            row("b", EdgeKind::TypeUses, "Dto"),
+            row("make", EdgeKind::Instantiates, "Dto"),
+            // `var` is not a type name; primitives name no type.
+            row("make", EdgeKind::TypeUses, "Bad"),
+            row("make", EdgeKind::TypeUses, "Item"),
+            row("make", EdgeKind::TypeUses, "Out::In"),
+            row("make", EdgeKind::TypeUses, "Req"),
+            row("make", EdgeKind::TypeUses, "Res"),
+            row("make", EdgeKind::TypeUses, "Worse"),
+            // An array of a generic, a wildcard's bound, every argument.
+            row("nested", EdgeKind::TypeUses, "Dto"),
+            row("nested", EdgeKind::TypeUses, "List"),
+            row("nested", EdgeKind::TypeUses, "Map"),
+            row("nested", EdgeKind::TypeUses, "String"),
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "lang-java")]
+fn declared_superclass_reads_the_one_extends_row_a_class_records() {
+    let src = "package com.x;\n\
+\n\
+public class Sub extends Base<Dto> {}\n\
+class Plain {}\n\
+interface Both extends A, B {}\n\
+interface One extends A {}\n";
+    let facts = extract_lang("java", "src/main/java/com/x/Sub.java", src);
+    let symbol = |name: &str| {
+        facts
+            .nodes
+            .iter()
+            .find(|n| n.name == name && n.kind != NodeKind::Module)
+            .unwrap_or_else(|| panic!("node {name}"))
+            .symbol
+            .clone()
+    };
+    assert_eq!(declared_superclass(&facts.refs, &symbol("Sub")), Some("Base"));
+    assert_eq!(declared_superclass(&facts.refs, &symbol("Plain")), None);
+    // Two super-interfaces name no single `super` type.
+    assert_eq!(declared_superclass(&facts.refs, &symbol("Both")), None);
+    assert_eq!(declared_superclass(&facts.refs, &symbol("One")), Some("A"));
+}
+
+#[test]
+fn a_rust_file_records_no_extends_instantiates_or_type_use_rows() {
+    // The captures are Java's alone: Rust's only type relation stays the S-281
+    // `Implements` row, byte-identical.
+    let src = "pub trait T { fn f(&self); }\npub struct S { x: Vec<S> }\nimpl T for S { fn f(&self) { let _ = S { x: Vec::new() }; } }\n";
+    let facts = extract_src("src/lib.rs", src);
+    let kinds: Vec<EdgeKind> = facts.refs.iter().map(|r| r.kind).collect();
+    assert!(!kinds.contains(&EdgeKind::Extends));
+    assert!(!kinds.contains(&EdgeKind::Instantiates));
+    assert!(!kinds.contains(&EdgeKind::TypeUses));
+    assert_eq!(implements_refs(&facts).len(), 1);
+}
