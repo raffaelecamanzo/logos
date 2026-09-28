@@ -2476,14 +2476,16 @@ impl Ctx<'_> {
                 // — an unrelated import's head, say — never came from this
                 // wildcard, so it must not be blocked by it.
                 Res::Ambiguous => {
-                    let could_supply = self.ix.types_by_fqn.get(glob.as_slice()).map_or(
-                        true, // ambiguous below a nested segment: stay conservative
-                        |types| {
+                    let could_supply = self
+                        .ix
+                        .types_by_fqn
+                        .get(glob.as_slice())
+                        // `None`: ambiguous below a nested segment — stay conservative.
+                        .is_none_or(|types| {
                             types.iter().any(|&ty| {
                                 self.ix.members_named(ty, name, want).iter().any(admits)
                             })
-                        },
-                    );
+                        });
                     if could_supply {
                         return None;
                     }

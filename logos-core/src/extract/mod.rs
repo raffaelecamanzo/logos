@@ -1455,8 +1455,11 @@ fn collect_refs(
                     if segments.is_empty() {
                         continue;
                     }
-                    let marked =
-                        |name: &str| m.captures.iter().any(|c| capture_names[c.index as usize] == name);
+                    let marked = |name: &str| {
+                        m.captures
+                            .iter()
+                            .any(|c| capture_names[c.index as usize] == name)
+                    };
                     // A static wildcard brings in every static member of its
                     // type, a plain one only types: the `*` alias
                     // (`STATIC_WILDCARD_ALIAS`) carries the difference into
