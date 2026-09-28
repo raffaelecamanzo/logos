@@ -1382,6 +1382,12 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     expect(buildEdges()).toEqual([]);
     expect(screen.getByTestId("canvas-edges")).toHaveTextContent("1");
     expect(screen.queryByRole("table", { name: /accessible twin of the build layer/i })).toBeNull();
+    // Off, the legend documents no build class — only the toggle and the note.
+    expect(screen.queryByText("Builds against (from its build manifest)")).toBeNull();
+    // The note carries the server's composed headline line, never a figure of its
+    // own (BR-51): pairs by kind beside their denominator.
+    const note = toggle.closest("div")!.querySelector("p:last-of-type")!;
+    expect(note.textContent).toContain(BUILD_HEADLINE.summary);
   });
 
   it("with the toggle ON, draws build edges in their own class and collapses platform members", async () => {
@@ -1409,6 +1415,7 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     await userEvent.click(screen.getByRole("checkbox", { name: /draw what each member builds against/i }));
     expect(buildEdges()).toEqual([]);
     expect(screen.queryAllByTestId("collapsed-platform")).toEqual([]);
+    expect(screen.queryByText("Builds against (from its build manifest)")).toBeNull();
   });
 
   it("lists the cross-context hint with every library named, and NEVER draws it as an edge", async () => {
