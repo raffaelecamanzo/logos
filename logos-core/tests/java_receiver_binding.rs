@@ -882,6 +882,42 @@ fn an_unreadable_config_states_no_residue_and_says_why() {
     );
 }
 
+/// The residue reaches the serialised status — what the CLI, MCP and HTTP
+/// surfaces print — with its reasons as their kebab-case tokens, and its two
+/// internal halves never do. A `#[serde(skip)]` on the field would pass every
+/// struct-level assertion above while dropping the readout from all three.
+#[test]
+fn the_residue_is_on_the_serialised_status_and_its_internals_are_not() {
+    let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
+    let engine = index(tmp.path());
+    let json = serde_json::to_value(engine.status()).expect("serialises");
+    let java = json["resolution_by_language"]
+        .as_array()
+        .expect("an array of rows")
+        .iter()
+        .find(|row| row["language"] == "java")
+        .expect("a java row")
+        .clone();
+    let residue = &java["call_residue"];
+    assert_eq!(residue["unbound"], 1, "{java:#}");
+    assert_eq!(residue["unclassified"], 0);
+    assert_eq!(residue["scope"], "repository");
+    assert_eq!(
+        residue["reasons"],
+        serde_json::json!({
+            "external-type": 0,
+            "no-receiver-evidence": 1,
+            "overload-ambiguous": 0,
+            "supertype-unreached": 0,
+            "type-ambiguous": 0,
+        })
+    );
+    assert!(
+        residue.get("declared_types").is_none() && residue.get("external_candidates").is_none(),
+        "{residue:#}"
+    );
+}
+
 // ── sync ≡ reindex ─────────────────────────────────────────────────────────
 
 /// Every edge and every non-Symbol ledger row, by symbol — the store's whole
