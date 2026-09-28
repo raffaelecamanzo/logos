@@ -526,6 +526,58 @@ fn a_type_another_member_declares_is_type_in_another_member_in_a_workspace_only(
     assert_eq!(lib_residue.unbound, 0);
 }
 
+/// A simple type name in a named package never names a default-package type
+/// (JLS §7.5), so another member's default-package `Mailer` is not the type a
+/// `com.x.app` file wrote: the row stays `external-type` in the workspace too.
+#[test]
+fn another_members_default_package_type_is_not_a_named_package_files_type() {
+    let ws = TempDir::new().unwrap();
+    let lib = ws.path().join("lib");
+    let app = ws.path().join("app");
+    git_init(&lib);
+    git_init(&app);
+    write(
+        &lib,
+        "src/main/java/Mailer.java",
+        "public class Mailer {\n    public void send() {}\n}\n",
+    );
+    write(
+        &app,
+        "src/main/java/com/x/app/Consumer.java",
+        "package com.x.app;\n\npublic class Consumer {\n    private Mailer mailer;\n    public void m() { mailer.send(); }\n}\n",
+    );
+    for member in [&lib, &app] {
+        let _ = index(member).sync(&[] as &[PathBuf]);
+    }
+    let residue = workspace_java_residue(ws.path(), "app");
+    assert_eq!(residue.scope, ResidueScope::Workspace);
+    assert_eq!(nonzero(&residue), reasons(&[(R::ExternalType, 1)]));
+}
+
+/// The `app` member's Java residue in `workspace status` over `root`, whose
+/// manifest this writes for the members `lib` and `app`.
+fn workspace_java_residue(root: &Path, member: &str) -> CallResidue {
+    write(
+        root,
+        "logos.workspace.toml",
+        "[workspace]\nname = \"w\"\nmembers = [\"lib\", \"app\"]\n",
+    );
+    let federation = discover(root).expect("discovers").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
+    workspace_status(&registry)
+        .members
+        .iter()
+        .find(|m| m.status.member == member)
+        .and_then(|m| m.status.result.as_ref())
+        .and_then(|info| {
+            info.resolution_by_language
+                .iter()
+                .find(|row| row.language == "java")
+                .and_then(|row| row.call_residue.clone())
+        })
+        .expect("a java residue")
+}
+
 // ── the readout: Java only, and deterministic ─────────────────────────────
 
 #[test]

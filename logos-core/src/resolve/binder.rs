@@ -2815,8 +2815,11 @@ impl Ctx<'_> {
     /// The fully-qualified names the type of a call `segs` (the receiver type
     /// segments, then the member) could be, in the order the source's scope
     /// reads them: the source's own package, each non-static wildcard, then the
-    /// path as written. Its single-type import never appears here — an
-    /// imported head is expanded and resolved as the path written.
+    /// path as written when it is qualified. Its single-type import never
+    /// appears here — an imported head is expanded and resolved as the path
+    /// written. A simple name as written would name a type of the default
+    /// package, which a file in a named package cannot see (JLS §7.5); a
+    /// default-package source reaches it as its own package, first.
     fn type_candidates(&self, package: &[String], segs: &[String]) -> Vec<Vec<String>> {
         let Some((_, ty)) = segs.split_last() else {
             return Vec::new();
@@ -2835,7 +2838,9 @@ impl Ctx<'_> {
                 push(glob);
             }
         }
-        push(&[]);
+        if ty.len() > 1 {
+            push(&[]);
+        }
         candidates
     }
 
