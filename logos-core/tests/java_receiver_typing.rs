@@ -755,3 +755,100 @@ fn a_qualified_super_call_is_never_typed_as_its_qualifying_class() {
     // lexical receiver-method rung (the CR-066 path this story leaves as it
     // was), which is a binding question, not this extraction's.
 }
+
+/// Refusals the fixtures above reach only through ANOTHER shape, each pinned
+/// where the review's mutation sweep found it unguarded (S-467 review):
+///
+/// * `GenF` — `this.item` of a type-parameter type and `this.many` of an array
+///   type refuse through the field shape too, not only the simple-name one;
+/// * `Lam` — a two-parameter lambda's `(a, b)` poisons `a` like `x -> …` does;
+/// * `Logr` — `log.info()` where `log` is a METHOD: a method is no type name;
+/// * `Fld` — an inner class's FIELD `ping` is no member a bare `ping()` calls;
+/// * `LocalC` — a class local to a method is nested too, so its bare
+///   `helper()` is the outer class's.
+const GAP_FILES: [(&str, &str); 5] = [
+    (
+        "src/main/java/com/x/svc/GenF.java",
+        "package com.x.svc;\n\npublic class GenF<T> {\n    private T item;\n    private Audit[] many;\n    void a() { this.item.send(); }\n    void b() { this.many.clone(); }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Lam.java",
+        "package com.x.svc;\n\nimport java.util.Map;\n\npublic class Lam {\n    private Audit a;\n    void go(Map<String, String> m) { m.forEach((a, b) -> a.send()); }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Logr.java",
+        "package com.x.svc;\n\npublic class Logr {\n    void log(String s) {}\n    void go() { log.info(\"x\"); }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Fld.java",
+        "package com.x.svc;\n\npublic class Fld {\n    void ping() {}\n    class Inner {\n        int ping;\n        void go() { ping(); }\n    }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/LocalC.java",
+        "package com.x.svc;\n\npublic class LocalC {\n    void helper() {}\n    public void go() {\n        class Local {\n            void run() { helper(); }\n        }\n    }\n}\n",
+    ),
+];
+
+#[test]
+fn each_refusal_holds_through_every_shape_that_reaches_it() {
+    let tmp = fixture();
+    write(tmp.path(), T_FILE, T_CLASS);
+    for (rel, text) in GAP_FILES {
+        write(tmp.path(), rel, text);
+    }
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let rows = |file: &str| calls_from(rt, &format!("src/main/java/com/x/svc/{file}.java"));
+    assert_eq!(
+        rows("GenF"),
+        [row("a", "send", RefForm::Method), row("b", "clone", RefForm::Method)]
+    );
+    assert_eq!(
+        rows("Lam"),
+        [row("go", "Map::forEach", RefForm::Path), row("go", "send", RefForm::Method)]
+    );
+    assert_eq!(rows("Logr"), [row("go", "info", RefForm::Method)]);
+    assert_eq!(rows("Fld"), [row("go", "ping", RefForm::Path)]);
+    assert_eq!(rows("LocalC"), [row("run", "helper", RefForm::Path)]);
+}
+
+/// Proofs that must still TYPE, each pinned where the review's mutation sweep
+/// found a refusal could creep in unnoticed (S-467 review):
+///
+/// * `Wild` — a NON-static wildcard (`import java.util.*`) supplies no method,
+///   so a bare inherited `start()` is still the class's;
+/// * `Impl` — `super` is the one `extends`, however many interfaces the class
+///   also `implements`;
+/// * `Digits` — a type name with digits (`S3Client`) or a `$` is one
+///   identifier.
+const TYPED_FILES: [(&str, &str); 3] = [
+    (
+        "src/main/java/com/x/svc/Wild.java",
+        "package com.x.svc;\n\nimport java.util.*;\nimport com.x.base.Base;\n\npublic class Wild extends Base {\n    void go() { start(); }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Impl.java",
+        "package com.x.svc;\n\nimport com.x.base.Base;\n\npublic class Impl extends Base implements Runnable {\n    public void run() { super.start(); }\n}\n",
+    ),
+    (
+        "src/main/java/com/x/svc/Digits.java",
+        "package com.x.svc;\n\npublic class Digits {\n    private S3Client s3;\n    private $Proxy px;\n    void a() { s3.send(); }\n    void b() { px.send(); }\n}\n",
+    ),
+];
+
+#[test]
+fn a_proof_still_types_beside_the_shapes_that_look_like_refusals() {
+    let tmp = fixture();
+    for (rel, text) in TYPED_FILES {
+        write(tmp.path(), rel, text);
+    }
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let rows = |file: &str| calls_from(rt, &format!("src/main/java/com/x/svc/{file}.java"));
+    assert_eq!(rows("Wild"), [row("go", "Wild::start", RefForm::Path)]);
+    assert_eq!(rows("Impl"), [row("run", "Base::start", RefForm::Path)]);
+    assert_eq!(
+        rows("Digits"),
+        [row("a", "S3Client::send", RefForm::Path), row("b", "$Proxy::send", RefForm::Path)]
+    );
+}
