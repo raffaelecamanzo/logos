@@ -1184,6 +1184,16 @@ are listed under `kind_candidates` as a hint, and nothing moves until you
 declare them. Both keys are absent when there is nothing to report. See
 [`[workspace.member.<name>] kind`](configuration.md#workspacemembername-kind--documentation-and-mock-members).
 
+Members also build against each other. When any member holds a `pom.xml` or
+`build.gradle(.kts)`, the `--json` payload carries a `build_dependency` section:
+`build_dependency_pairs` by kind (`parent`, `dependency`, `managed`,
+`bom-import`) beside the `references` it was joined from and the `members`
+read, the `collisions` (a coordinate two members produce, resolved to
+neither), the `platform_candidates` by in-degree, and — when a member is
+declared `kind = "platform"` — its inbound pairs under `platform_apart`. It is
+a build dependency, never a runtime coupling: no build edge enters the figures
+above. See [`kind = "platform"`](configuration.md#kind--platform--build-hubs).
+
 ##### Each reference names the other end
 
 `bound: 96` and `ambiguous: 169` are not actionable on their own — the obvious
