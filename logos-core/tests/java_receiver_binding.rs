@@ -582,6 +582,22 @@ fn a_wildcard_over_a_type_declared_twice_is_type_ambiguous() {
     assert_eq!(nonzero(&residue), reasons(&[(R::TypeAmbiguous, 2)]));
 }
 
+/// A sub-lookup's miss is not the call's reason: the wildcard's own type is
+/// ambiguous, but neither declaration supplies the head `Foo`, so the row reads
+/// `external-type` — the wildcard's ambiguity, recorded for a non-call lookup,
+/// must not become the call's `type-ambiguous`.
+#[test]
+fn a_wildcards_own_ambiguity_that_supplies_nothing_is_not_the_calls_reason() {
+    let outer = duplicated_outer();
+    let mut files: Vec<(&str, &str)> = outer.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    files.push((
+        CALLER,
+        "package com.x.app;\n\nimport com.x.o.Outer.*;\n\npublic class Caller {\n    private Foo foo;\n    public void c() { foo.bar(); }\n}\n",
+    ));
+    let residue = residue_of(&files, CALLER);
+    assert_eq!(nonzero(&residue), reasons(&[(R::ExternalType, 1)]));
+}
+
 // ── type-in-another-member: only a workspace can tell it from external ────
 
 fn git_init(dir: &Path) {
