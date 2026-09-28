@@ -538,6 +538,50 @@ fn a_nested_type_its_in_graph_outer_type_does_not_declare_is_external_type() {
     assert_eq!(nonzero(&residue), reasons(&[(R::ExternalType, 1)]));
 }
 
+/// `Outer` declared twice under one name (a `src/main` and a `src/test`
+/// class), each with a nested `Mailer` and a static `now()`.
+fn duplicated_outer() -> Vec<(&'static str, String)> {
+    let body = "package com.x.o;\n\npublic class Outer {\n    public static class Mailer {\n        public void send() {}\n    }\n    public static long now() { return 0; }\n}\n";
+    vec![
+        ("src/main/java/com/x/o/Outer.java", body.to_string()),
+        ("src/test/java/com/x/o/Outer.java", body.to_string()),
+    ]
+}
+
+/// A wildcard over a type declared twice, which could supply the call's head
+/// type or its bare name, is `type-ambiguous` — for a typed receiver and for a
+/// statically imported bare call alike.
+#[test]
+fn a_wildcard_over_a_type_declared_twice_is_type_ambiguous() {
+    let outer = duplicated_outer();
+    let mut files: Vec<(&str, &str)> = outer.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    // Two files: the ledger keeps one `Glob` row per written target, so a
+    // static and a non-static wildcard of one type in one file are one row.
+    files.push((
+        CALLER,
+        "package com.x.app;\n\
+         \n\
+         import com.x.o.Outer.*;\n\
+         \n\
+         public class Caller {\n\
+             private Mailer mailer;\n\
+             public void typed() { mailer.send(); }\n\
+         }\n",
+    ));
+    files.push((
+        "src/main/java/com/x/app/Bare.java",
+        "package com.x.app;\n\
+         \n\
+         import static com.x.o.Outer.*;\n\
+         \n\
+         public class Bare {\n\
+             public void bare() { now(); }\n\
+         }\n",
+    ));
+    let residue = residue_of(&files, CALLER);
+    assert_eq!(nonzero(&residue), reasons(&[(R::TypeAmbiguous, 2)]));
+}
+
 // ── type-in-another-member: only a workspace can tell it from external ────
 
 fn git_init(dir: &Path) {
