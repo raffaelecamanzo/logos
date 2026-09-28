@@ -1439,6 +1439,12 @@ fn collect_refs(
                 // member-path rules. The Rust grammar keeps `ref.use` below
                 // because its use-trees (groups, renames, globs) need a
                 // structural walk no text split can express.
+                //
+                // A match that also carries `ref.import.asterisk` wrote the
+                // specifier before a wildcard (a Java `import a.b.*`, CR-149):
+                // it names a scope whose members come into view, not one
+                // declaration, so it is a `Glob` row and introduces no alias —
+                // `b` is not a name the file can now use.
                 "ref.import" => {
                     let segments = match semantics.import_specifier {
                         ImportSpecifier::Path => {
@@ -1449,11 +1455,27 @@ fn collect_refs(
                     if segments.is_empty() {
                         continue;
                     }
+                    let marked = |name: &str| {
+                        m.captures
+                            .iter()
+                            .any(|c| capture_names[c.index as usize] == name)
+                    };
+                    // A static wildcard brings in every static member of its
+                    // type, a plain one only types: the `*` alias
+                    // (`STATIC_WILDCARD_ALIAS`) carries the difference into
+                    // the ledger, which has no other column for it.
+                    let (form, alias) = if marked("ref.import.asterisk") {
+                        let every_static_member = marked("ref.import.static")
+                            .then(|| crate::resolve::STATIC_WILDCARD_ALIAS.to_string());
+                        (RefForm::Glob, every_static_member)
+                    } else {
+                        (RefForm::Path, segments.last().cloned())
+                    };
                     out.push(RefFact {
                         source: source_symbol,
-                        alias: segments.last().cloned(),
+                        alias,
                         target: segments.join("::"),
-                        form: RefForm::Path,
+                        form,
                         kind: EdgeKind::Imports,
                         line,
                         relation: None,

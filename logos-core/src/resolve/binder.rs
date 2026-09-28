@@ -30,6 +30,18 @@
 //! 5. **workspace** — policy-gated unique-candidate fallbacks
 //!    ([`BindingPolicy`]).
 //!
+//! A file of a **package-shaped** language (Java, [CR-149]) is keyed by its
+//! package ([`PackageLayout`]) and, after the lexical chain, takes its own
+//! rungs instead of 2–5: its single-type/static imports, the top-level types of
+//! its own package, what its wildcards bring into view, then a path read as a
+//! fully-qualified name ([`Ctx::resolve_package_name`],
+//! [`Ctx::resolve_package_path`]). An import binds to the type or member it
+//! names, never to a file module, and the workspace suffix match is never
+//! consulted — the aggressive bare-name fallback alone stays policy-gated as
+//! everywhere else.
+//!
+//! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+//!
 //! # Never fabricate ([NFR-RA-05])
 //!
 //! Every level ends in the same acceptance rule: bind **iff the candidate set
@@ -56,12 +68,13 @@ use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, RefForm};
 
 use super::go_module::GoModule;
+use super::package_key::{module_key_for_file, normalize_crate, ModuleKey, PackageLayout};
 use super::route_method::preferred_candidates;
 use super::route_template::route_key;
 use crate::extract::refs::is_relative_head;
 
 /// A module's identity: `(crate name, module path segments)`.
-type ModKey = (String, Vec<String>);
+type ModKey = ModuleKey;
 
 /// `Contains` membership: scope → name → member nodes, each list id-sorted for
 /// a deterministic candidate order ([NFR-RA-06]).
@@ -202,9 +215,28 @@ const MAX_CONTAINS_DEPTH: u32 = 64;
 struct FileScope {
     /// In-scope name → the `::`-split path it abbreviates.
     aliases: HashMap<String, Vec<String>>,
-    /// Glob-imported module paths (`use m::*` → `["m"]`), unresolved form.
+    /// In-scope name → **every** path the file's imports give it, in ledger
+    /// order. The package rung reads this, not the first-wins `aliases`: two
+    /// static imports may name one method overloaded across two types
+    /// (`import static a.A.m; import static b.B.m;`, CR-149), and that name is
+    /// then ambiguous rather than the first import's ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    alias_expansions: HashMap<String, Vec<Vec<String>>>,
+    /// Glob-imported module paths (`use m::*` → `["m"]`), unresolved form. For a
+    /// package-shaped file (CR-149) these are the non-static wildcards
+    /// (`import a.b.*`, `import a.b.C.*`), which bring **types** into scope only.
     globs: Vec<Vec<String>>,
+    /// A package-shaped file's **static** wildcards (`import static a.b.C.*`,
+    /// recorded with the alias `*`, [`STATIC_WILDCARD_ALIAS`]): every static
+    /// member of the named type comes into scope, methods and fields included.
+    static_globs: Vec<Vec<String>>,
 }
+
+/// The alias a static wildcard import's `Glob` row carries — "every static
+/// member name of the type" (CR-149). A non-static wildcard, and every other
+/// language's glob, carries none.
+pub(crate) const STATIC_WILDCARD_ALIAS: &str = "*";
 
 /// One node's binding-relevant facts.
 #[derive(Debug)]
@@ -291,6 +323,21 @@ pub(crate) struct Index {
     imported: HashMap<i64, HashMap<String, Vec<NodeId>>>,
     /// Normalised crate names present in the graph.
     crates: HashSet<String>,
+    /// Which files are keyed by their package ([CR-149]); empty — the default
+    /// model for every file — unless the run was built with the registry's
+    /// layout ([`Index::build_with_layout`]).
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    layout: PackageLayout,
+    /// Fully-qualified name → the **top-level** type nodes declared under it in
+    /// a package-shaped file, id-sorted — the universe a Java import, a
+    /// same-package name and a wildcard resolve against ([CR-149]). Two entries
+    /// under one name (a `src/main` and a `src/test` declaration) are an
+    /// ambiguity, never a pick ([NFR-RA-05]).
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    types_by_fqn: HashMap<Vec<String>, Vec<NodeId>>,
     /// `(trait node, method name)` → the concrete workspace impl method nodes of
     /// that trait method, id-sorted and deduplicated — the fan-out universe for a
     /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]). Built from the
@@ -314,16 +361,32 @@ impl Index {
     ///
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     pub(crate) fn build(nodes: &[NodeRow], edges: &[EdgeRow], refs: &[UnresolvedRefRow]) -> Index {
+        Self::build_with_layout(nodes, edges, refs, PackageLayout::default())
+    }
+
+    /// [`build`](Index::build), keying every file of a package-shaped language by
+    /// its package ([CR-149]) — the layout the loaded plugins declare
+    /// ([`PackageLayout::from_registry`]). An empty layout is exactly `build`.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    pub(crate) fn build_with_layout(
+        nodes: &[NodeRow],
+        edges: &[EdgeRow],
+        refs: &[UnresolvedRefRow],
+        layout: PackageLayout,
+    ) -> Index {
         // Built once and shared: module-tree construction and containment both
         // look nodes up by id.
         let node_by_id: HashMap<NodeId, &NodeRow> = nodes.iter().map(|n| (n.id, n)).collect();
 
         // Contains topology first — module-tree construction needs it.
         let (parent, members) = build_containment(edges, &node_by_id);
-        let (modules, module_key) = build_module_tree(nodes, &parent, &members, &node_by_id);
+        let (modules, module_key) =
+            build_module_tree(nodes, &parent, &members, &node_by_id, &layout);
         let crates: HashSet<String> = modules.keys().map(|(c, _)| c.clone()).collect();
 
-        let info = build_node_info(nodes, &parent, &module_key);
+        let info = build_node_info(nodes, &parent, &module_key, &layout);
+        let types_by_fqn = build_package_types(nodes, &parent, &members, &node_by_id, &layout);
         let by_symbol = build_by_symbol(nodes);
         let by_name = build_by_name(nodes);
         let by_file_path = build_by_file_path(nodes);
@@ -350,6 +413,8 @@ impl Index {
             file_scopes,
             imported: HashMap::new(),
             crates,
+            layout,
+            types_by_fqn,
             impls_by_trait_method,
         }
     }
@@ -484,6 +549,15 @@ impl Index {
     /// to a name it does not spell. The alias chase is bounded by
     /// [`MAX_ALIAS_DEPTH`], the same cap [`Ctx::resolve_path`] honours, so a
     /// self-referential import cannot loop here either.
+    ///
+    /// A package-shaped file's globs **do** need their own tokens ([CR-149]): a
+    /// wildcard's target is a type or package whose identity can change while
+    /// the member name a call spells does not — a second `C` under
+    /// `import static a.b.C.*` makes `m()` ambiguous without touching `m`. So a
+    /// row of such a file is also affected when a token of any of its globs is
+    /// dirty. Every other language's selection is unchanged.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub(crate) fn ref_affected(&self, r: &UnresolvedRefRow, dirty: &HashSet<String>) -> bool {
         if super::tokens(&r.target).iter().any(|t| dirty.contains(t)) {
             return true;
@@ -494,9 +568,44 @@ impl Index {
         let Some(scope) = self.file_scopes.get(&file_id) else {
             return false;
         };
+        let package_shaped = || {
+            self.by_symbol
+                .get(&r.source_symbol)
+                .and_then(|id| self.info.get(id))
+                .and_then(|i| i.file_path.as_deref())
+                .is_some_and(|p| self.layout.is_package_shaped(p))
+        };
+        if !(scope.globs.is_empty() && scope.static_globs.is_empty())
+            && scope
+                .globs
+                .iter()
+                .chain(&scope.static_globs)
+                .flatten()
+                .flat_map(|seg| super::tokens(seg))
+                .any(|t| dirty.contains(&t))
+            && package_shaped()
+        {
+            return true;
+        }
+        // A package-shaped row reads every expansion of its head, not only the
+        // first (`FileScope::alias_expansions`), so each must be able to select it.
+        let first = r.target.split("::").next().unwrap_or_default();
+        if scope
+            .alias_expansions
+            .get(first)
+            .is_some_and(|all| all.len() > 1)
+            && scope.alias_expansions[first]
+                .iter()
+                .flatten()
+                .flat_map(|seg| super::tokens(seg))
+                .any(|t| dirty.contains(&t))
+            && package_shaped()
+        {
+            return true;
+        }
         // Chase the head segment through `as`-alias rewrites: each hop's path may
         // name something dirty even though the written target does not.
-        let mut head = r.target.split("::").next().unwrap_or_default().to_string();
+        let mut head = first.to_string();
         for _ in 0..MAX_ALIAS_DEPTH {
             let Some(path) = scope.aliases.get(&head) else {
                 return false;
@@ -559,6 +668,7 @@ fn build_module_tree(
     parent: &HashMap<NodeId, NodeId>,
     members: &Members,
     node_by_id: &HashMap<NodeId, &NodeRow>,
+    layout: &PackageLayout,
 ) -> (HashMap<ModKey, NodeId>, HashMap<NodeId, ModKey>) {
     let mut modules: HashMap<ModKey, NodeId> = HashMap::new();
     let mut module_key: HashMap<NodeId, ModKey> = HashMap::new();
@@ -571,7 +681,7 @@ fn build_module_tree(
         let Some(path) = &root.file_path else {
             continue; // an orphaned module node cannot anchor a tree
         };
-        let key = module_key_for_file(path);
+        let key = layout.module_key(path);
         modules.entry(key.clone()).or_insert(root.id);
         module_key.insert(root.id, key.clone());
         append_inline_modules(
@@ -638,6 +748,7 @@ fn build_node_info(
     nodes: &[NodeRow],
     parent: &HashMap<NodeId, NodeId>,
     module_key: &HashMap<NodeId, ModKey>,
+    layout: &PackageLayout,
 ) -> HashMap<NodeId, NodeInfo> {
     let mut info: HashMap<NodeId, NodeInfo> = HashMap::new();
     for n in nodes {
@@ -645,7 +756,7 @@ fn build_node_info(
             n.id,
             NodeInfo {
                 kind: n.kind,
-                crate_name: crate_of_node(n, parent, module_key),
+                crate_name: crate_of_node(n, parent, module_key, layout),
                 name: n.name.clone(),
                 file_path: n.file_path.clone(),
             },
@@ -661,6 +772,7 @@ fn crate_of_node(
     n: &NodeRow,
     parent: &HashMap<NodeId, NodeId>,
     module_key: &HashMap<NodeId, ModKey>,
+    layout: &PackageLayout,
 ) -> String {
     let mut cursor = Some(n.id);
     while let Some(id) = cursor {
@@ -670,9 +782,52 @@ fn crate_of_node(
         cursor = parent.get(&id).copied();
     }
     match &n.file_path {
-        Some(path) => module_key_for_file(path).0,
+        Some(path) => layout.module_key(path).0,
         None => String::new(),
     }
+}
+
+/// The package-shaped type universe ([CR-149]): every top-level type-like
+/// member of a package-shaped file's root module, keyed by its fully-qualified
+/// name ([`PackageLayout::type_fqn`], the one FQN derivation). A package's
+/// types named `n` are the entry `package ++ [n]`, so a wildcard and the
+/// same-package rung read this map too. `nodes` is id-ordered and each file's
+/// children are visited name-/id-sorted, but every list is sorted explicitly
+/// anyway, so the map is deterministic regardless of visit order
+/// ([NFR-RA-06]). Empty under the default layout.
+///
+/// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_package_types(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    members: &Members,
+    node_by_id: &HashMap<NodeId, &NodeRow>,
+    layout: &PackageLayout,
+) -> HashMap<Vec<String>, Vec<NodeId>> {
+    let mut by_fqn: HashMap<Vec<String>, Vec<NodeId>> = HashMap::new();
+    for root in nodes {
+        if root.kind != NodeKind::Module || parent.contains_key(&root.id) {
+            continue;
+        }
+        let Some(path) = &root.file_path else { continue };
+        if !layout.is_package_shaped(path) {
+            continue;
+        }
+        for (name, id) in sorted_children(members, root.id) {
+            if !node_by_id.get(&id).is_some_and(|n| is_type_like(n.kind)) {
+                continue;
+            }
+            if let Some(fqn) = layout.type_fqn(path, name) {
+                by_fqn.entry(fqn).or_default().push(id);
+            }
+        }
+    }
+    for list in by_fqn.values_mut() {
+        list.sort();
+        list.dedup();
+    }
+    by_fqn
 }
 
 /// Canonical symbol → node. First-wins on a (model-prohibited) duplicate
@@ -796,9 +951,17 @@ fn build_file_scopes(refs: &[UnresolvedRefRow]) -> HashMap<i64, FileScope> {
         let scope = file_scopes.entry(file_id).or_default();
         let path: Vec<String> = r.target.split("::").map(str::to_string).collect();
         match r.form {
+            RefForm::Glob if r.alias.as_deref() == Some(STATIC_WILDCARD_ALIAS) => {
+                scope.static_globs.push(path)
+            }
             RefForm::Glob => scope.globs.push(path),
             _ => {
                 if let Some(alias) = &r.alias {
+                    scope
+                        .alias_expansions
+                        .entry(alias.clone())
+                        .or_default()
+                        .push(path.clone());
                     scope.aliases.entry(alias.clone()).or_insert(path);
                 }
             }
@@ -895,43 +1058,6 @@ fn exactly_one(candidates: &[NodeId]) -> Res {
     }
 }
 
-/// Derive a file's module identity from its project-relative path.
-///
-/// The segment before the last `src/` names the crate (normalised `-` → `_`,
-/// `crate` when there is none); segments after it are modules, with the
-/// `mod`/`lib`/`main` stems naming their enclosing module rather than adding a
-/// segment. `logos-core/src/extract/mod.rs` → `("logos_core", ["extract"])`.
-fn module_key_for_file(path: &str) -> ModKey {
-    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let (crate_name, mods_start) = match segs.iter().rposition(|s| *s == "src") {
-        Some(0) => ("crate".to_string(), 1),
-        Some(pos) => (normalize_crate(segs[pos - 1]), pos + 1),
-        None => ("crate".to_string(), 0),
-    };
-    let mut mods: Vec<String> = segs
-        .get(mods_start..)
-        .unwrap_or_default()
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    if let Some(last) = mods.pop() {
-        let stem = Path::new(&last)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&last)
-            .to_string();
-        if !matches!(stem.as_str(), "mod" | "lib" | "main") {
-            mods.push(stem);
-        }
-    }
-    (crate_name, mods)
-}
-
-/// Normalise a crate directory name to its extern-path form (`-` → `_`).
-fn normalize_crate(name: &str) -> String {
-    name.replace('-', "_")
-}
-
 /// Bind one ledger row against the index under `policy`.
 pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> Outcome {
     // No source node, no edge — a captured ref whose source file was removed
@@ -952,6 +1078,11 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
         source,
         file_id: r.file_id,
         ix,
+        source_package: ix
+            .info
+            .get(&source)
+            .and_then(|i| i.file_path.as_deref())
+            .and_then(|p| ix.layout.package_of(p)),
         policy,
         in_glob_resolution: Cell::new(false),
         no_workspace_fallback: Cell::new(false),
@@ -1004,6 +1135,19 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
         },
         RefForm::Glob => {
             let segs = split(&r.target);
+            // A package-shaped wildcard (CR-149) names a type or a package. The
+            // row binds to the one type it names (`import static a.b.C.*` → `C`);
+            // a package has no node, so `import a.b.*` binds nothing — its
+            // members still come into scope through the file's globs
+            // ([`Ctx::glob_members`]), which is what the row is for.
+            if ctx.source_package.is_some() {
+                return match ctx.resolve_fqn(&segs, Want::Any) {
+                    Res::Found(t) if ix.info.get(&t).is_some_and(|i| is_type_like(i.kind)) => {
+                        bound(t)
+                    }
+                    _ => Outcome::Unbound,
+                };
+            }
             match ctx.resolve_path(&segs, Want::Module, MAX_ALIAS_DEPTH) {
                 Res::Found(target) => bound(target),
                 _ => Outcome::Unbound,
@@ -1228,6 +1372,13 @@ struct Ctx<'a> {
     source: NodeId,
     file_id: Option<i64>,
     ix: &'a Index,
+    /// The package the source's file declares, when its language is
+    /// package-shaped ([`PackageLayout::package_of`], [CR-149]) — the switch
+    /// between the package rung and the default module-tree hierarchy. `None`
+    /// for every file of every other language, so their binding is untouched.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    source_package: Option<Vec<String>>,
     policy: BindingPolicy,
     /// Re-entrancy guard for [`through_globs`](Ctx::through_globs): set while a
     /// glob's own module path is being resolved, so that resolution cannot fan
@@ -1319,6 +1470,13 @@ impl Ctx<'_> {
                 Res::NotFound => {} // fall through to wider scopes
                 decided => return decided,
             }
+        }
+        // 4b) A package-shaped source (CR-149): the rest of the path is decided
+        //     by the package rung alone — the module tree below names no
+        //     package directory, and the workspace suffix match would read a
+        //     fully-qualified name as a guess.
+        if let Some(package) = &self.source_package {
+            return self.resolve_package_path(package, segs, want);
         }
         // 5) A crate-name head (`logos_core::…`).
         let norm = normalize_crate(head);
@@ -2069,6 +2227,11 @@ impl Ctx<'_> {
             }
             cursor = self.ix.parent.get(&scope).copied();
         }
+        // A package-shaped source (CR-149) continues on its own rungs: its
+        // imports, its package, its wildcards — never the module tree.
+        if let Some(package) = &self.source_package {
+            return self.resolve_package_name(package, name, want, depth);
+        }
         // 2) A child module of the source module, a crate-root module
         //    (sibling files are linked via the path-derived module tree, not
         //    via Contains), or an extern crate's root (`use other::*` /
@@ -2109,6 +2272,232 @@ impl Ctx<'_> {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
+    }
+
+    /// A bare name from a package-shaped source, after the lexical chain
+    /// ([CR-149], [FR-RS-03]) — Java's scope order for a simple name:
+    ///
+    /// 1. **imported** — every single-type or single-static import naming it
+    ///    (the file's alias expansions), each resolved through
+    ///    [`resolve_path`](Ctx::resolve_path), exactly-one across all of them;
+    /// 2. **same package** — a top-level type of the source's own package,
+    ///    visible without an import;
+    /// 3. **on-demand** — a member of a type, or a type of a package, the file
+    ///    imports with a wildcard ([`glob_members`](Ctx::glob_members));
+    /// 4. the policy-gated workspace name fallback, exactly as for every other
+    ///    language.
+    ///
+    /// A **receiver**-method call ([`RefForm::Method`]) takes none of these
+    /// rungs: its target is its receiver's type's member ([CR-150]), which no
+    /// import names, and the workspace fallback is off for it anyway ([CR-066]).
+    ///
+    /// Each rung is exactly-one; a known ambiguity stops the walk ([NFR-RA-05]).
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    /// [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
+    /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+    /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_package_name(&self, package: &[String], name: &str, want: Want, depth: u8) -> Res {
+        // A receiver call (`x.m()`, `List.of()`) is decided by its receiver's
+        // type, never by what the file imports: a static import of `of` says
+        // nothing about `List.of`. Only the lexical chain above spoke for it.
+        if self.no_workspace_fallback.get() {
+            return Res::NotFound;
+        }
+        let expansions = self.scope().and_then(|s| s.alias_expansions.get(name));
+        let mut imported: Vec<NodeId> = Vec::new();
+        for alias_path in expansions.into_iter().flatten() {
+            match self.resolve_path(alias_path, want, depth - 1) {
+                Res::Found(id) => imported.push(id),
+                Res::Ambiguous => return Res::Ambiguous,
+                Res::NotFound => {}
+            }
+        }
+        imported.sort();
+        imported.dedup();
+        match exactly_one(&imported) {
+            Res::NotFound => {}
+            decided => return decided,
+        }
+        let same_package: Vec<NodeId> = self
+            .package_type(package, name)
+            .iter()
+            .copied()
+            .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind)))
+            .collect();
+        match exactly_one(&same_package) {
+            Res::NotFound => {}
+            decided => return decided,
+        }
+        match self.glob_members(name, want, false) {
+            Some(found) => match exactly_one(&found) {
+                Res::NotFound => {}
+                decided => return decided,
+            },
+            None => return Res::Ambiguous,
+        }
+        if self.policy == BindingPolicy::Aggressive {
+            return self.unique_by_name(name, want);
+        }
+        Res::NotFound
+    }
+
+    /// A multi-segment path from a package-shaped source ([CR-149]), after its
+    /// alias head was tried: a head naming a type of the source's own package,
+    /// else one a wildcard brings into view, else the whole path read as a
+    /// fully-qualified name ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung
+    /// whose head names a type decides — a simple type name obscures a package
+    /// of the same spelling, as the language rules it.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    fn resolve_package_path(&self, package: &[String], segs: &[String], want: Want) -> Res {
+        let Some((head, rest)) = segs.split_first() else {
+            return Res::NotFound;
+        };
+        if let Some(decided) = self.walk_from(self.package_type(package, head), rest, want) {
+            return decided;
+        }
+        match self.glob_members(head, Want::Any, true) {
+            Some(found) => {
+                if let Some(decided) = self.walk_from(&found, rest, want) {
+                    return decided;
+                }
+            }
+            None => return Res::Ambiguous,
+        }
+        self.resolve_fqn(segs, want)
+    }
+
+    /// `segs` read as a fully-qualified name ([CR-149]): the **longest** prefix
+    /// that names a top-level package-shaped type, then the rest as that type's
+    /// nested members — so `a::b::C::m` is member `m` of `a.b.C`, and `a::b::C`
+    /// is the class itself, never its file module. Two types under the prefix (a
+    /// `src/main` and a `src/test` declaration of one name) are
+    /// [`Res::Ambiguous`] ([NFR-RA-05]); a name no in-repository type carries —
+    /// the JDK, Spring, Lombok, a generated class — is [`Res::NotFound`].
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_fqn(&self, segs: &[String], want: Want) -> Res {
+        for split_at in (1..=segs.len()).rev() {
+            if let Some(types) = self.ix.types_by_fqn.get(&segs[..split_at]) {
+                return self
+                    .walk_from(types, &segs[split_at..], want)
+                    .unwrap_or(Res::NotFound);
+            }
+        }
+        Res::NotFound
+    }
+
+    /// The top-level types named `name` in `package`, id-sorted.
+    fn package_type(&self, package: &[String], name: &str) -> &[NodeId] {
+        let mut fqn = package.to_vec();
+        fqn.push(name.to_string());
+        self.ix.types_by_fqn.get(&fqn).map_or(&[], Vec::as_slice)
+    }
+
+    /// Walk `rest` down from the one type in `candidates`: `None` when there is
+    /// none (the caller's next rung decides), else the walk's result — sticky
+    /// [`Res::Ambiguous`] for two candidates. Every segment but the last must
+    /// name exactly one nested type; the last names a member admitted by
+    /// `want`, and an empty `rest` is the type itself.
+    fn walk_from(&self, candidates: &[NodeId], rest: &[String], want: Want) -> Option<Res> {
+        let mut cursor = match exactly_one(candidates) {
+            Res::NotFound => return None,
+            Res::Ambiguous => return Some(Res::Ambiguous),
+            Res::Found(ty) => ty,
+        };
+        let Some((last, inner)) = rest.split_last() else {
+            let admitted = self.ix.info.get(&cursor).is_some_and(|i| want.admits(i.kind));
+            return Some(if admitted { Res::Found(cursor) } else { Res::NotFound });
+        };
+        for seg in inner {
+            match exactly_one(&self.member_types(cursor, seg)) {
+                Res::Found(nested) => cursor = nested,
+                other => return Some(other),
+            }
+        }
+        Some(exactly_one(&self.ix.members_named(cursor, last, want)))
+    }
+
+    /// The type-like members of `scope` named `name`.
+    fn member_types(&self, scope: NodeId, name: &str) -> Vec<NodeId> {
+        self.ix
+            .members_named(scope, name, Want::Any)
+            .into_iter()
+            .filter(|id| self.ix.info.get(id).is_some_and(|i| is_type_like(i.kind)))
+            .collect()
+    }
+
+    /// What the file's wildcards bring into view under `name` ([CR-149]):
+    /// for a glob naming a type, `C`'s members named `name` — every static
+    /// member for `import static a.b.C.*`, member types only for
+    /// `import a.b.C.*`; for one naming a package (`import a.b.*`), the
+    /// package's top-level types named `name`. `types_only` keeps type-like
+    /// candidates alone — a path head must be a type. Deduplicated and id-sorted across
+    /// every glob, so the caller's exactly-one test is over the union; `None`
+    /// when a glob's own type name is ambiguous and one of its declarations
+    /// has a member named `name` — an ambiguity no wider rung may overrule
+    /// ([NFR-RA-05]). A name none of them declares is not blocked.
+    ///
+    /// No recursion through the file's globs: a glob's own target is read as a
+    /// fully-qualified name only ([`resolve_fqn`](Ctx::resolve_fqn)), so the
+    /// CR-016 fan-out [`through_globs`](Ctx::through_globs) guards against
+    /// cannot arise here.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn glob_members(&self, name: &str, want: Want, types_only: bool) -> Option<Vec<NodeId>> {
+        let Some(scope) = self.scope() else {
+            return Some(Vec::new());
+        };
+        // A non-static wildcard imports types only — a static one, every static
+        // member — so a method is only ever reached through `import static`.
+        let globs = scope
+            .globs
+            .iter()
+            .map(|g| (g, true))
+            .chain(scope.static_globs.iter().map(|g| (g, types_only)));
+        let mut found: Vec<NodeId> = Vec::new();
+        for (glob, types_only) in globs {
+            let admits = |id: &NodeId| {
+                self.ix.info.get(id).is_some_and(|i| {
+                    want.admits(i.kind) && (!types_only || is_type_like(i.kind))
+                })
+            };
+            match self.resolve_fqn(glob, Want::Any) {
+                Res::Found(ty) if self.ix.info.get(&ty).is_some_and(|i| is_type_like(i.kind)) => {
+                    found.extend(self.ix.members_named(ty, name, want).into_iter().filter(admits));
+                }
+                Res::Found(_) => {}
+                // Two declarations of the wildcard's type: `name` is ambiguous
+                // only if one of them could supply it. A name neither declares
+                // — an unrelated import's head, say — never came from this
+                // wildcard, so it must not be blocked by it.
+                Res::Ambiguous => {
+                    let could_supply = self
+                        .ix
+                        .types_by_fqn
+                        .get(glob.as_slice())
+                        // `None`: ambiguous below a nested segment — stay conservative.
+                        .is_none_or(|types| {
+                            types.iter().any(|&ty| {
+                                self.ix.members_named(ty, name, want).iter().any(admits)
+                            })
+                        });
+                    if could_supply {
+                        return None;
+                    }
+                }
+                Res::NotFound => {
+                    found.extend(self.package_type(glob, name).iter().copied().filter(admits));
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        Some(found)
     }
 
     /// Resolve `segs` as members reached through each of the file's glob
@@ -2382,6 +2771,21 @@ impl Ctx<'_> {
             if !doc_files.is_empty() {
                 return exactly_one(&doc_files);
             }
+        }
+        // A package-shaped file (CR-149) is found by its path, never by its
+        // module key: a `src/main` and a `src/test` file of one package and
+        // name share a key, and the tree keeps only the first.
+        if self.ix.layout.is_package_shaped(path) {
+            let roots: Vec<NodeId> = in_file
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| {
+                    !self.ix.parent.contains_key(id)
+                        && self.ix.info.get(id).is_some_and(|i| i.kind == NodeKind::Module)
+                })
+                .collect();
+            return exactly_one(&roots);
         }
         match self.ix.modules.get(&module_key_for_file(path)) {
             Some(&m) => Res::Found(m),

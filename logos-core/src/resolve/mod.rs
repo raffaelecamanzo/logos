@@ -43,6 +43,7 @@
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
+pub(crate) use binder::STATIC_WILDCARD_ALIAS;
 /// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
 /// function the intra-repo promotion pass, the federation bridge and the
 /// coverage read-model all resolve a broker topic operand through, so a `Topic`
@@ -73,6 +74,12 @@ pub mod framework;
 /// shares its last segments. See its module docs.
 pub(crate) mod go_module;
 pub(crate) mod grpc_key;
+/// The package-shaped module key (S-465, CR-149, FR-RS-01): the ONE derivation
+/// of the package a file declares — and so of a type's fully-qualified name —
+/// from its path, for a language whose descriptor declares `[package_modules]`.
+/// The binder keys such files by it; any later consumer asks it rather than
+/// splitting a path a second way. See its module docs.
+pub mod package_key;
 /// The shared positional route-template normalizer (S-069, CR-011): aligns the
 /// OpenAPI `ApiOperation` path templates with framework-extracted `route` node
 /// templates under one parameter-position-only comparison. See its module docs.
@@ -245,7 +252,13 @@ pub fn run(
                 go_module::discover(root, go_files),
             )
         });
-    let index = binder::Index::build(&snap.nodes, &snap.edges, &snap.refs)
+    // A package-shaped language (CR-149) keys its files by their package, as
+    // its plugin declares; a synthetic graph with no registry keeps the default
+    // module model for every file.
+    let layout = tree.map_or_else(Default::default, |(registry, _)| {
+        package_key::PackageLayout::from_registry(registry)
+    });
+    let index = binder::Index::build_with_layout(&snap.nodes, &snap.edges, &snap.refs, layout)
         .with_path_specifiers(specifier_targets, go_modules)
         .with_imported_bindings(&snap.refs, policy);
 
@@ -580,3 +593,5 @@ fn stats(
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "lang-java"))]
+mod package_rung_tests;

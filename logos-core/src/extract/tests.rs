@@ -38,6 +38,7 @@ impl NoSymbolsPlugin {
                 module_separator: "::".to_string(),
                 import_specifier: crate::plugin::ImportSpecifier::Name,
                 specifier_extensions: Vec::new(),
+                package_modules: None,
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
                 abi_version: 15,
