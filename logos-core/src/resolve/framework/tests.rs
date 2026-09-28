@@ -2662,6 +2662,32 @@ mod java_constant_fold {
                  public static class C implements Api {\n        \
                  @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
             ),
+            // The other type kinds that may inherit a name, one row each —
+            // every `@fw.const.scope.opaque` pattern is pinned by its own row.
+            (
+                "an interface extending another",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public interface Api extends Base {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        String get();\n    }\n}\n",
+            ),
+            (
+                "a record implementing an interface",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public record R() implements Api {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+            (
+                "an enum",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public enum E {\n        A;\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+            (
+                "an anonymous class",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 Object o = new Base() {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    };\n}\n",
+            ),
             // A non-constant field of the inner type shadows the outer
             // constant; skipping past it would fold the wrong declaration.
             (
