@@ -1246,7 +1246,11 @@ reads only the paths it is given, so it does not count). Until then the member i
 listed under `members.unread` with `members.unread_reasons` giving
 `"build facts not yet extracted"`, and the section stays present. It is never
 reported as a member with no manifest; its pairs are simply not counted yet. A member
-that has **never been indexed** reads the same way, for the same reason. The rows behind it are
+that has **never been indexed** reads the same way, for the same reason. Re-read
+before starting `logos serve`, or restart it afterwards. A running serve keeps
+its cached build relation, which its `xservice build-deps`, the MCP twin and the
+map's build layer read, until that member re-syncs inside the serve. A re-read
+run from another shell does not refresh it, though `workspace status` reads fresh. The rows behind it are
 [`xservice build-deps`](#xservice-workspace-federation-queries); the web
 coverage tab renders the same section as its own card, after every runtime
 board. A workspace with no build manifest, every member indexed, prints exactly

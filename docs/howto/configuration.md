@@ -213,7 +213,10 @@ kind = "platform"
   under `members.unread` with the reason `"build facts not yet extracted"`, and
   the section stays present. It never reads as a member with no manifest. A
   member with no build manifest reads as read, with 0 manifests, once one full
-  re-read has run. Re-read every member after upgrading to see its pairs.
+  re-read has run. Re-read every member after upgrading to see its pairs. Do it
+  before starting `logos serve`, or restart the serve afterwards: its cached
+  build relation (`xservice build-deps` and the map's build layer) does not see
+  a re-read made by another process.
 
 ### The warm sidecar
 
