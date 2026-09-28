@@ -750,3 +750,127 @@ fn a_qualified_type_name_reads_its_head_as_a_member_type_in_scope_first() {
         )]
     );
 }
+
+// ── Shapes the first fixtures left unpinned (S-466 review, surviving mutants) ──
+
+#[test]
+fn an_enum_and_a_record_implement_their_interface() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), PORT_FILE, PORT);
+    let color = "src/main/java/com/x/svc/Color.java";
+    let pt = "src/main/java/com/x/svc/Pt.java";
+    write(
+        tmp.path(),
+        color,
+        "package com.x.svc;\n\nimport com.x.base.Port;\n\npublic enum Color implements Port { RED }\n",
+    );
+    write(
+        tmp.path(),
+        pt,
+        "package com.x.svc;\n\nimport com.x.base.Port;\n\npublic record Pt(int x) implements Port {}\n",
+    );
+    let engine = index(&tmp);
+    assert_eq!(
+        edges_of(engine.runtime().unwrap(), EdgeKind::Implements),
+        [
+            (format!("{color}:Color"), format!("{PORT_FILE}:Port:interface")),
+            (format!("{pt}:Pt"), format!("{PORT_FILE}:Port:interface")),
+        ]
+    );
+}
+
+#[test]
+fn an_interface_constants_type_and_an_annotated_type_argument_are_type_uses() {
+    // `Dto DEFAULT = null;` in an interface is a `constant_declaration`, not a
+    // field; `List<@NonNull Dto>` wraps its argument in an annotated type.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), DTO_FILE, DTO);
+    let consts = "src/main/java/com/x/svc/Consts.java";
+    let holder = "src/main/java/com/x/svc/Holder.java";
+    write(
+        tmp.path(),
+        consts,
+        "package com.x.svc;\n\npublic interface Consts {\n    Dto DEFAULT = null;\n}\n",
+    );
+    write(
+        tmp.path(),
+        holder,
+        "package com.x.svc;\n\nimport java.util.List;\n\npublic class Holder {\n    private List<@NonNull Dto> xs;\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        rows_of(rt, EdgeKind::TypeUses, consts),
+        [("Dto".to_string(), RefForm::Path, true)]
+    );
+    assert_eq!(
+        rows_of(rt, EdgeKind::TypeUses, holder),
+        [
+            ("Dto".to_string(), RefForm::Path, true),
+            ("List".to_string(), RefForm::Path, false),
+        ]
+    );
+}
+
+#[test]
+fn a_type_use_binds_an_interface_and_a_nested_type_but_never_a_same_named_method() {
+    // `TypeUses` admits every type-like kind — an interface, a nested class
+    // reached through the lexical chain — and nothing else: the method `Req()`
+    // in `Svc`'s own scope is not the type `Req`.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), PORT_FILE, PORT);
+    write(tmp.path(), REQ_FILE, REQ);
+    let user = "src/main/java/com/x/svc/User.java";
+    write(
+        tmp.path(),
+        user,
+        "package com.x.svc;\n\nimport com.x.base.Port;\n\npublic class User {\n    static class Inner {}\n    private Port port;\n    private Inner inner;\n    void Req() {}\n    void use(Req r) {}\n}\n",
+    );
+    let engine = index(&tmp);
+    assert_eq!(
+        relations_out_of(engine.runtime().unwrap(), user),
+        [
+            (
+                EdgeKind::TypeUses,
+                format!("{user}:inner"),
+                format!("{user}:Inner:class")
+            ),
+            (
+                EdgeKind::TypeUses,
+                format!("{user}:port"),
+                format!("{PORT_FILE}:Port:interface")
+            ),
+            (
+                EdgeKind::TypeUses,
+                format!("{user}:use"),
+                format!("{REQ_FILE}:Req:class")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_wildcard_import_binds_a_relation_cold_and_on_sync() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        SVC_FILE,
+        "package com.x.svc;\n\nimport com.x.base.*;\n\npublic class Svc implements Port {}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(edges_of(rt, EdgeKind::Implements).is_empty(), "precondition");
+    write(tmp.path(), PORT_FILE, PORT);
+    engine.sync(&[PORT_FILE.into()]);
+    let bound = [(
+        format!("{SVC_FILE}:Svc"),
+        format!("{PORT_FILE}:Port:interface"),
+    )];
+    assert_eq!(edges_of(rt, EdgeKind::Implements), bound);
+    let cold = TempDir::new().unwrap();
+    for rel in [SVC_FILE, PORT_FILE] {
+        write(cold.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
+    }
+    let engine = index(&cold);
+    assert_eq!(edges_of(engine.runtime().unwrap(), EdgeKind::Implements), bound);
+}
