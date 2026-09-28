@@ -607,6 +607,34 @@ fn only_a_package_shaped_language_row_carries_a_residue_and_it_is_deterministic(
     assert_eq!(java_residue(&a).unbound, java.calls.references - java.calls.bound);
 }
 
+/// The residue is an additive readout: when it cannot be decided — here the
+/// configuration naming the binding policy is unreadable — `status` still
+/// answers with its counts, states no residue, and says why on its warnings
+/// (ADR-14), rather than one decided under a policy the pass does not use.
+#[test]
+fn an_unreadable_config_states_no_residue_and_says_why() {
+    let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
+    let engine = index(tmp.path());
+    write(tmp.path(), ".logos/config.toml", "this is [not toml\n");
+    let status = engine.status();
+    assert!(status.indexed, "the status around the residue still answers");
+    let java = status
+        .resolution_by_language
+        .iter()
+        .find(|row| row.language == "java")
+        .expect("a java row");
+    assert!(java.calls.references > 0, "the counts are still stated");
+    assert!(java.call_residue.is_none(), "no residue under an unknown policy");
+    assert!(
+        status
+            .warnings
+            .iter()
+            .any(|w| w.contains("call residue is not stated") && w.contains("configuration")),
+        "{:?}",
+        status.warnings
+    );
+}
+
 // ── sync ≡ reindex ─────────────────────────────────────────────────────────
 
 /// Every edge and every non-Symbol ledger row, by symbol — the store's whole
