@@ -14,6 +14,10 @@
 ;                      (`org.springframework.web…`, `static a.b.C.m`);
 ;                      canonicalised (dots → `::`) into the ledger form feeding
 ;                      the binder and the framework candidacy gate (FR-FW-04).
+;   @ref.import.static — the `static` keyword, present in the same match for a
+;                      static import; with the wildcard marker it makes the glob
+;                      a static one (every static member of the type, not just
+;                      its member types).
 ;   @ref.import.asterisk — present in the same match when the declaration ends
 ;                      in `.*` (CR-149): the path before it (`a.b.*` → `a::b`,
 ;                      `static a.b.C.*` → `a::b::C`) is then recorded as a glob —
@@ -38,6 +42,7 @@
   name: (identifier) @ref.method)
 
 (import_declaration
+  "static"? @ref.import.static
   (scoped_identifier) @ref.import
   (asterisk)? @ref.import.asterisk)
 

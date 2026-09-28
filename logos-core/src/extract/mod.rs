@@ -1455,12 +1455,16 @@ fn collect_refs(
                     if segments.is_empty() {
                         continue;
                     }
-                    let wildcard = m
-                        .captures
-                        .iter()
-                        .any(|c| capture_names[c.index as usize] == "ref.import.asterisk");
-                    let (form, alias) = if wildcard {
-                        (RefForm::Glob, None)
+                    let marked =
+                        |name: &str| m.captures.iter().any(|c| capture_names[c.index as usize] == name);
+                    // A static wildcard brings in every static member of its
+                    // type, a plain one only types: the `*` alias
+                    // (`STATIC_WILDCARD_ALIAS`) carries the difference into
+                    // the ledger, which has no other column for it.
+                    let (form, alias) = if marked("ref.import.asterisk") {
+                        let every_static_member = marked("ref.import.static")
+                            .then(|| crate::resolve::STATIC_WILDCARD_ALIAS.to_string());
+                        (RefForm::Glob, every_static_member)
                     } else {
                         (RefForm::Path, segments.last().cloned())
                     };

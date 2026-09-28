@@ -354,6 +354,20 @@ fn jdk_spring_and_lombok_imports_stay_unbound_even_beside_a_same_named_workspace
 }
 
 #[test]
+fn a_non_static_type_wildcard_brings_member_types_not_methods_into_scope() {
+    // `import com.x.svc.Svc.*;` imports `Svc`'s member TYPES; only
+    // `import static` brings in `util()` (JLS 7.5.2 vs 7.5.4).
+    let tmp = single_module(
+        "package com.x.web;\n\nimport com.x.svc.Svc.*;\n\npublic class Ctl {\n    public String get() { return util(); }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(callers_of(rt, &format!("{SVC_FILE}:util:method")).is_empty());
+    // The row still names the type, so it binds to it.
+    assert_eq!(import_rows(rt, "com::x::svc::Svc"), [(RefForm::Glob, true)]);
+}
+
+#[test]
 fn an_import_followed_by_a_comment_is_still_recorded_and_bound() {
     // A comment is a named node: an import pattern anchored on its path being
     // the declaration's last child would drop both of these rows.

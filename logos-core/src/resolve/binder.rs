@@ -215,9 +215,20 @@ const MAX_CONTAINS_DEPTH: u32 = 64;
 struct FileScope {
     /// In-scope name → the `::`-split path it abbreviates.
     aliases: HashMap<String, Vec<String>>,
-    /// Glob-imported module paths (`use m::*` → `["m"]`), unresolved form.
+    /// Glob-imported module paths (`use m::*` → `["m"]`), unresolved form. For a
+    /// package-shaped file (CR-149) these are the non-static wildcards
+    /// (`import a.b.*`, `import a.b.C.*`), which bring **types** into scope only.
     globs: Vec<Vec<String>>,
+    /// A package-shaped file's **static** wildcards (`import static a.b.C.*`,
+    /// recorded with the alias `*`, [`STATIC_WILDCARD_ALIAS`]): every static
+    /// member of the named type comes into scope, methods and fields included.
+    static_globs: Vec<Vec<String>>,
 }
+
+/// The alias a static wildcard import's `Glob` row carries — "every static
+/// member name of the type" (CR-149). A non-static wildcard, and every other
+/// language's glob, carries none.
+pub(crate) const STATIC_WILDCARD_ALIAS: &str = "*";
 
 /// One node's binding-relevant facts.
 #[derive(Debug)]
@@ -564,10 +575,11 @@ impl Index {
                 .and_then(|i| i.file_path.as_deref())
                 .is_some_and(|p| self.layout.is_package_shaped(p))
         };
-        if !scope.globs.is_empty()
+        if !(scope.globs.is_empty() && scope.static_globs.is_empty())
             && scope
                 .globs
                 .iter()
+                .chain(&scope.static_globs)
                 .flatten()
                 .flat_map(|seg| super::tokens(seg))
                 .any(|t| dirty.contains(&t))
@@ -929,6 +941,9 @@ fn build_file_scopes(refs: &[UnresolvedRefRow]) -> HashMap<i64, FileScope> {
         let scope = file_scopes.entry(file_id).or_default();
         let path: Vec<String> = r.target.split("::").map(str::to_string).collect();
         match r.form {
+            RefForm::Glob if r.alias.as_deref() == Some(STATIC_WILDCARD_ALIAS) => {
+                scope.static_globs.push(path)
+            }
             RefForm::Glob => scope.globs.push(path),
             _ => {
                 if let Some(alias) = &r.alias {
@@ -2445,10 +2460,11 @@ impl Ctx<'_> {
     }
 
     /// What the file's wildcards bring into view under `name` ([CR-149]):
-    /// for a glob naming a type (`import static a.b.C.*`), `C`'s members named
-    /// `name`; for one naming a package (`import a.b.*`), the package's
-    /// top-level types named `name`. `types_only` keeps type-like candidates
-    /// alone — a path head must be a type. Deduplicated and id-sorted across
+    /// for a glob naming a type, `C`'s members named `name` — every static
+    /// member for `import static a.b.C.*`, member types only for
+    /// `import a.b.C.*`; for one naming a package (`import a.b.*`), the
+    /// package's top-level types named `name`. `types_only` keeps type-like
+    /// candidates alone — a path head must be a type. Deduplicated and id-sorted across
     /// every glob, so the caller's exactly-one test is over the union; `None`
     /// when a glob's own type name is ambiguous, which no wider rung may
     /// overrule ([NFR-RA-05]).
@@ -2464,13 +2480,20 @@ impl Ctx<'_> {
         let Some(scope) = self.scope() else {
             return Some(Vec::new());
         };
-        let admits = |id: &NodeId| {
-            self.ix.info.get(id).is_some_and(|i| {
-                want.admits(i.kind) && (!types_only || is_type_like(i.kind))
-            })
-        };
+        // A non-static wildcard imports types only — a static one, every static
+        // member — so a method is only ever reached through `import static`.
+        let globs = scope
+            .globs
+            .iter()
+            .map(|g| (g, true))
+            .chain(scope.static_globs.iter().map(|g| (g, types_only)));
         let mut found: Vec<NodeId> = Vec::new();
-        for glob in &scope.globs {
+        for (glob, types_only) in globs {
+            let admits = |id: &NodeId| {
+                self.ix.info.get(id).is_some_and(|i| {
+                    want.admits(i.kind) && (!types_only || is_type_like(i.kind))
+                })
+            };
             match self.resolve_fqn(glob, Want::Any) {
                 Res::Found(ty) if self.ix.info.get(&ty).is_some_and(|i| is_type_like(i.kind)) => {
                     found.extend(self.ix.members_named(ty, name, want).into_iter().filter(admits));
