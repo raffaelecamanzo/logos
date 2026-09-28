@@ -518,6 +518,26 @@ fn a_bare_call_two_static_imports_supply_is_overload_ambiguous() {
     assert_eq!(nonzero(&residue), reasons(&[(R::OverloadAmbiguous, 2)]));
 }
 
+/// A nested type its in-graph outer type does not declare — a generated
+/// Lombok builder — is a type no file here declares: `external-type`.
+#[test]
+fn a_nested_type_its_in_graph_outer_type_does_not_declare_is_external_type() {
+    let residue = residue_of(
+        &[
+            (
+                "src/main/java/com/x/m/Outer.java",
+                "package com.x.m;\n\npublic class Outer {\n    public void own() {}\n}\n",
+            ),
+            (
+                CALLER,
+                "package com.x.app;\n\nimport com.x.m.Outer.Builder;\n\npublic class Caller {\n    private Builder builder;\n    public void c() { builder.build(); }\n}\n",
+            ),
+        ],
+        CALLER,
+    );
+    assert_eq!(nonzero(&residue), reasons(&[(R::ExternalType, 1)]));
+}
+
 // ── type-in-another-member: only a workspace can tell it from external ────
 
 fn git_init(dir: &Path) {
