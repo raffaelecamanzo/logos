@@ -2391,7 +2391,7 @@ impl Ctx<'_> {
             },
             None => return Res::Ambiguous,
         }
-        if self.policy == BindingPolicy::Aggressive && !self.no_workspace_fallback.get() {
+        if self.policy == BindingPolicy::Aggressive {
             return self.unique_by_name(name, want);
         }
         Res::NotFound

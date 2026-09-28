@@ -313,3 +313,90 @@ fn without_the_layout_no_package_rung_exists() {
     );
     bound(bind_from_svc(java(), &[], &import), 7, 5);
 }
+
+/// Bind `r` from the class `Svc` (node 8) under `policy`, over the fixture plus
+/// `extra` nodes (each contained by the node paired with it) and `imports`.
+fn bind_from_svc_under(
+    policy: BindingPolicy,
+    extra: &[(NodeRow, i64)],
+    imports: &[UnresolvedRefRow],
+    r: &UnresolvedRefRow,
+) -> Outcome {
+    let (mut nodes, mut edges) = fixture();
+    for (n, parent) in extra {
+        if *parent != 0 {
+            edges.push(contains(*parent, n.id.0));
+        }
+        nodes.push(n.clone());
+    }
+    let mut refs = imports.to_vec();
+    refs.push(r.clone());
+    let ix = Index::build_with_layout(&nodes, &edges, &refs, java());
+    bind(r, &ix, policy)
+}
+
+#[test]
+fn the_package_rungs_workspace_fallback_is_aggressive_only_and_never_for_a_receiver_call() {
+    // `go` is declared once in the workspace (`com.y.Only.go`) and nowhere in
+    // `com.x.svc`'s scope. A bare `go()` from `Svc` binds to it only under the
+    // aggressive policy's name fallback — never under balanced (FR-RS-03), and
+    // never for a receiver call `x.go()` at any policy (CR-066, FR-RS-06).
+    let bare = row(1, SVC_FILE, 8, "go", RefForm::Path, EdgeKind::Calls);
+    assert_eq!(
+        bind_from_svc_under(BindingPolicy::Balanced, &[], &[], &bare),
+        Outcome::Unbound
+    );
+    bound(
+        bind_from_svc_under(BindingPolicy::Aggressive, &[], &[], &bare),
+        8,
+        15,
+    );
+    let receiver = row(2, SVC_FILE, 8, "go", RefForm::Method, EdgeKind::Calls);
+    assert_eq!(
+        bind_from_svc_under(BindingPolicy::Aggressive, &[], &[], &receiver),
+        Outcome::Unbound
+    );
+}
+
+#[test]
+fn an_ambiguous_static_wildcard_that_could_supply_the_name_stops_the_aggressive_fallback() {
+    // `import static com.y.Only.*` where `com.y.Only` is declared twice (a
+    // `src/test` copy without `go`): the main declaration could supply `go`, so
+    // the wildcard's ambiguity is final — the aggressive name fallback, which
+    // would find the one `go` in the workspace, must not overrule it
+    // (NFR-RA-05).
+    let dup_file = "src/test/java/com/y/Only.java";
+    let extra = [
+        (node(30, "Only", NodeKind::Module, dup_file), 0),
+        (node(31, "Only", NodeKind::Class, dup_file), 30),
+    ];
+    let mut glob = row(
+        100,
+        SVC_FILE,
+        7,
+        "com::y::Only",
+        RefForm::Glob,
+        EdgeKind::Imports,
+    );
+    glob.alias = Some(super::STATIC_WILDCARD_ALIAS.to_string());
+    let bare = row(1, SVC_FILE, 8, "go", RefForm::Path, EdgeKind::Calls);
+    assert_eq!(
+        bind_from_svc_under(BindingPolicy::Aggressive, &extra, &[glob], &bare),
+        Outcome::Unbound
+    );
+    // Without the duplicate, the same wildcard supplies `go` outright.
+    let mut glob = row(
+        100,
+        SVC_FILE,
+        7,
+        "com::y::Only",
+        RefForm::Glob,
+        EdgeKind::Imports,
+    );
+    glob.alias = Some(super::STATIC_WILDCARD_ALIAS.to_string());
+    bound(
+        bind_from_svc_under(BindingPolicy::Balanced, &[], &[glob], &bare),
+        8,
+        15,
+    );
+}
