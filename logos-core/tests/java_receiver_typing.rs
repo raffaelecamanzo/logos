@@ -662,3 +662,57 @@ fn a_variable_is_typed_only_where_it_is_declared_in_scope_and_readably() {
         .collect();
     assert!(wrong.is_empty(), "{wrong:?}");
 }
+
+/// A declared type the file QUALIFIES keeps no typing through its simple name:
+/// `com.b.Mailer other` beside `import com.x.mail.Mailer` would be re-qualified
+/// by the import to the other class, and `Map.Entry e` by the same package to
+/// an in-house `Entry` (S-467 review, [NFR-RA-05]). The simple declarations
+/// beside them still type.
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+const QUALIFIED_FILE: &str = "src/main/java/com/x/svc/Qualified.java";
+const QUALIFIED: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+import java.util.Map;\n\
+\n\
+public class Qualified {\n\
+    private Mailer mine;\n\
+    private com.x.other.Mailer other;\n\
+    void a() { other.send(); }\n\
+    void b(Map.Entry<String, String> e) { e.getValue(); }\n\
+    void c() { com.x.other.Mailer local = null; local.send(); }\n\
+    void d() { mine.send(); }\n\
+}\n";
+
+#[test]
+fn a_qualified_declared_type_is_never_re_qualified_through_its_simple_name() {
+    let tmp = fixture();
+    write(tmp.path(), QUALIFIED_FILE, QUALIFIED);
+    write(
+        tmp.path(),
+        "src/main/java/com/x/other/Mailer.java",
+        "package com.x.other;\n\npublic class Mailer {\n    public void send() {}\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/main/java/com/x/svc/Entry.java",
+        "package com.x.svc;\n\npublic class Entry {\n    public String getValue() { return null; }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        calls_from(rt, QUALIFIED_FILE),
+        [
+            row("a", "send", RefForm::Method),
+            row("b", "getValue", RefForm::Method),
+            row("c", "send", RefForm::Method),
+            row("d", "Mailer::send", RefForm::Path),
+        ]
+    );
+    let wrong: Vec<_> = call_edges(rt)
+        .into_iter()
+        .filter(|(s, _)| s.starts_with(QUALIFIED_FILE) && !s.ends_with(":d"))
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:?}");
+}

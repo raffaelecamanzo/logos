@@ -28,8 +28,9 @@
 //!
 //! Everything else keeps its bare row: a chained call (no marker); a name the
 //! file also declares where [`DeclaredTypes`] cannot read its type (an untyped
-//! lambda parameter, a for-each, catch, pattern or varargs variable — the
-//! `unproven` marker); a variable declared nowhere in scope at the call (an
+//! lambda parameter, a for-each, catch, pattern or varargs variable, one
+//! declared with a qualified type the simple name would lose — the `unproven`
+//! marker); a variable declared nowhere in scope at the call (an
 //! inherited or outer class's field); a name declared with two disagreeing
 //! types; a generic type variable, an array, `var`; and any `this` / `super` /
 //! bare call inside an anonymous class body, whose class has no name.
@@ -78,7 +79,9 @@ pub(super) struct Receivers<'tree> {
     shapes: HashMap<usize, Shape>,
     /// Every name the file declares in a way [`DeclaredTypes`] does not read — an
     /// untyped lambda parameter, a for-each variable, a catch parameter, a
-    /// pattern variable, a varargs parameter. File-scoped, like
+    /// pattern variable, a varargs parameter, a qualified declared type
+    /// (`com.b.Mailer`), whose simple name the imports would re-qualify to
+    /// another class. File-scoped, like
     /// [`DeclaredTypes`]: the type the file declares for that name elsewhere is
     /// not proven to be this one's, so the name is poisoned for the whole file.
     unproven: HashSet<String>,

@@ -62,7 +62,10 @@
 ;                            read its type: an untyped lambda parameter
 ;                            (`x -> x.send()`), a for-each variable, a catch
 ;                            parameter, a pattern variable, a varargs
-;                            parameter. The type the file declares for that
+;                            parameter — or a name declared with a QUALIFIED
+;                            type (`com.b.Mailer other`, `Map.Entry e`), whose
+;                            simple name the file's imports would re-qualify to
+;                            another class. The type the file declares for that
 ;                            name elsewhere is not proven to be this one's.
 ;
 ; Anything else — a chained call, `a.b.send()`, `Outer.this.send()` — carries
@@ -83,6 +86,18 @@
 (type_pattern (identifier) @ref.receiver.unproven)
 (record_pattern_component (identifier) @ref.receiver.unproven)
 (spread_parameter (variable_declarator name: (identifier) @ref.receiver.unproven))
+(field_declaration
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  declarator: (variable_declarator name: (identifier) @ref.receiver.unproven))
+(local_variable_declaration
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  declarator: (variable_declarator name: (identifier) @ref.receiver.unproven))
+(formal_parameter
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  name: (identifier) @ref.receiver.unproven)
+(resource
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  name: (identifier) @ref.receiver.unproven)
 
 (import_declaration
   "static"? @ref.import.static
