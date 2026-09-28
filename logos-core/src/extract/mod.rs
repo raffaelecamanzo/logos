@@ -76,6 +76,9 @@ pub mod broker;
 // PUBLIC because the reference-workspace operand-resolvability harness must
 // count the arm's corpus with the arm's own rule rather than a second copy of it.
 pub mod composer;
+// Java receiver typing (S-467, CR-150 §3.2 A): retypes a receiver call's row to
+// a type-qualified Path-form `T::name` where the file proves `T`.
+mod receiver;
 mod shape;
 // Extraction-time test-marker evidence (S-027, FR-EX-06): the per-function
 // `test_evidence` flag captured while the AST is in hand — the input the
@@ -1362,12 +1365,23 @@ fn collect_refs(
         ImportSpecifier::Path => ImportBindings::collect(query, root, source, decls, semantics),
         ImportSpecifier::Name => ImportBindings::default(),
     };
+    // Receiver typing (S-467) — only for a query that names receiver shapes.
+    let mut receivers = receiver::Receivers::for_query(capture_names);
     let mut out: Vec<RefFact> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
         for cap in m.captures {
             let node = cap.node;
+            let capture = capture_names[cap.index as usize];
+            // A receiver marker records no row of its own: it is read before
+            // the per-row scope walk below, which it does not need.
+            if receiver::is_marker(capture) {
+                if let Some(receivers) = receivers.as_mut() {
+                    receivers.mark(capture, node, source);
+                }
+                continue;
+            }
             let Some(source_symbol) = enclosing_symbol(node) else {
                 continue; // no attributable scope (file-module symbol failed)
             };
@@ -1375,7 +1389,7 @@ fn collect_refs(
             let Ok(text) = node.utf8_text(source) else {
                 continue; // non-UTF-8 slice — skip defensively
             };
-            match capture_names[cap.index as usize] {
+            match capture {
                 "ref.call" => {
                     let segments = split_path_text(text);
                     if segments.is_empty() {
@@ -1394,6 +1408,9 @@ fn collect_refs(
                     let target = imports
                         .named_target(node, &target)
                         .map_or(target.clone(), str::to_string);
+                    if let Some(receivers) = receivers.as_mut() {
+                        receivers.site(out.len(), node.parent());
+                    }
                     out.push(RefFact {
                         source: source_symbol,
                         target,
@@ -1433,7 +1450,15 @@ fn collect_refs(
                     // is not loosened.
                     let target = match rust_dyn_receiver_trait(node, source) {
                         Some(trait_name) => format!("{trait_name}::{name}"),
-                        None => name.to_string(),
+                        None => {
+                            // A Java receiver whose type the file proves is
+                            // retyped to a Path-form `T::name` after the walk
+                            // (S-467, `receiver`) — never a Method-form `::`.
+                            if let Some(receivers) = receivers.as_mut() {
+                                receivers.site(out.len(), node.parent());
+                            }
+                            name.to_string()
+                        }
                     };
                     out.push(RefFact {
                         source: source_symbol,
@@ -1486,6 +1511,13 @@ fn collect_refs(
                     } else {
                         (RefForm::Path, segments.last().cloned())
                     };
+                    if let (Some(receivers), RefForm::Path, Some(name)) =
+                        (receivers.as_mut(), form, alias.as_deref())
+                    {
+                        if !marked("ref.import.static") {
+                            receivers.type_import(name);
+                        }
+                    }
                     out.push(RefFact {
                         source: source_symbol,
                         alias,
@@ -1595,6 +1627,17 @@ fn collect_refs(
                 _ => {} // a capture this pass does not consume
             }
         }
+    }
+
+    if let Some(receivers) = receivers {
+        let file = receiver::FileDecls {
+            root,
+            source,
+            decls,
+            symbols,
+            id_to_idx: &id_to_idx,
+        };
+        receivers.retype(&mut out, &file);
     }
 
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
@@ -1722,7 +1765,6 @@ fn type_parameters_in_scope(node: Node<'_>, source: &[u8]) -> HashSet<String> {
 ///
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-#[allow(dead_code)] // consumed by S-467 (Sprint 81, Iteration 3); pinned by its unit test.
 pub(crate) fn declared_superclass<'a>(refs: &'a [RefFact], class: &LogosSymbol) -> Option<&'a str> {
     let mut supers = refs
         .iter()
