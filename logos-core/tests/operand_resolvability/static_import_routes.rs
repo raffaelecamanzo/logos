@@ -40,6 +40,7 @@ use logos_core::Engine;
 use tempfile::TempDir;
 
 use super::corpus_root;
+use super::cross_member_type_refs::{consumer_tree, Tree};
 
 /// One mapping annotation whose path is written as a concatenation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,11 +297,15 @@ fn strip_strings(text: &str) -> String {
     out
 }
 
-/// A main-tree Java file: under a `src/main/` directory, outside build output.
+/// Directories [`java_files`] never descends into: build output and tool state.
+const SKIPPED_DIRS: [&str; 5] = ["target", "build", ".git", ".logos", "node_modules"];
+
+/// A main-tree Java file — the main tree by [S-471]'s segment rule
+/// ([`consumer_tree`]), shared rather than restated.
+///
+/// [S-471]: ../../../docs/planning/journal.md#s-471-measure-cross-member-type-references-over-the-reference-estate
 fn is_main_tree_java(rel: &str) -> bool {
-    rel.ends_with(".java")
-        && rel.contains("src/main/")
-        && !rel.split('/').any(|seg| matches!(seg, "target" | "build" | ".git" | ".logos" | "node_modules"))
+    rel.ends_with(".java") && consumer_tree(rel) == Tree::Main
 }
 
 /// Every `.java` file under `dir`, as paths relative to it, sorted.
@@ -318,7 +323,7 @@ fn java_files(dir: &Path) -> Vec<String> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if kind.is_dir() {
-                if !matches!(name.as_ref(), "target" | "build" | ".git" | ".logos" | "node_modules") {
+                if !SKIPPED_DIRS.contains(&name.as_ref()) {
                     stack.push(path);
                 }
             } else if name.ends_with(".java") {
@@ -587,7 +592,7 @@ fn a_sites_path_shape_keeps_its_literals_and_matches_only_its_route() {
 fn only_a_main_tree_java_file_is_read() {
     assert!(is_main_tree_java("api/src/main/java/a/B.java"));
     assert!(!is_main_tree_java("api/src/test/java/a/B.java"));
-    assert!(!is_main_tree_java("api/target/src/main/java/a/B.java"));
+    assert!(!is_main_tree_java("api/xsrc/main/java/a/B.java"), "a segment, not a substring");
     assert!(!is_main_tree_java("api/src/main/java/a/B.kt"));
 }
 
