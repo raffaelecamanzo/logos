@@ -1,0 +1,187 @@
+S-471 T1 — RECORDED FINDING: CR-152 SECTION 3.2 A1, THE THREE HALVES
+=====================================================================
+
+Measured (UTC):  2026-09-28T15:45:25Z
+Measured by:     Dev Session 1.3 (sprint-81, branch sprint-81-I1-S3), logos-core at
+                 1.5.0 + this branch (no schema migration on it)
+Floors:          cross_member_type_refs_floor.txt, declared 2026-09-28T15:35:58Z and
+                 committed alone (1b95d6e1) before any measurement code existed;
+                 one appendix (2026-09-28T15:56:08Z) makes the empty Avro namespace
+                 precise and moved no figure.
+Estate:          a private byte-for-byte copy (`cp -Rp`, 2026-09-28) of
+                 ~/source/pec-services at ~/source/.estate-copies/pec-services-S-471.
+                 84 clones, 83 manifest members; every member store at schema v22,
+                 the binary's, opened through `SqliteGraphStore::open_readonly` — none
+                 refused, none migrated, no engine started.
+Command:         LOGOS_REF_WORKSPACE=~/source/.estate-copies/pec-services-S-471 \
+                   cargo test -p logos-core --test operand_resolvability \
+                   measure_cross_member_type_refs_over_the_reference_workspace -- --nocapture
+
+
+VERDICT — ALL THREE HALVES HOLD. CR-152 IS NOT FALSIFIED.
+---------------------------------------------------------
+
+Reach: measured 434, floor >= 300 — HOLDS
+Explanation: measured 52 of 52 (100.0 %), floor >= 75 % — HOLDS
+Precision ceiling: measured 131 of 2492 (5.3 %), ceiling <= 10 % — HOLDS
+
+The lines above are reproduced by string equality by the estate test; a run that
+prints any other line fails until this file is re-recorded.
+
+Consequence: the gate clears S-472..S-474 (the cross-member type overlay) for
+planning. ADR-70 stays Proposed — it moves to Accepted on delivery of the overlay
+story, as CR-152 section 5.2 records; nothing is superseded. Whether to plan them is
+the stakeholder decision CR-152 section 10 keeps open (priority Could): this gate
+answers only whether the evidence permits it.
+
+
+DENOMINATORS
+------------
+
+  Members:              83 manifest members, 83 stores read, 59 committing
+                        Java/Kotlin source (S-411's `members_with_source`, narrowed
+                        to the java and kotlin plugins); every one of the 59 holds at
+                        least one import row, and no member outside them does.
+  Import rows:          24,732 (`imports`, `resolved = false`, `.java`/`.kt`).
+  Declaring files:      1,891 main-tree source files; 70 `.avsc`, 77 record/enum
+                        types; 1,880 fully-qualified names with an owner.
+  Build relation:       the shipped join over 83 of 83 members read — 64 pairs
+                        (dependency 52, managed 13), 66 of 1,728 referenced artifacts
+                        to another member, 118 to a declared platform, 7 to a
+                        colliding artifact.
+
+
+ROWS — CLASS × CONSUMER TREE (product rule)
+-------------------------------------------
+
+    self-owned     4432  (main 2767 · test 1665 · other 0)   apart: CR-149's population
+    exactly-one    2361  (main 1196 · test 1165 · other 0)
+    ambiguous       131  (main   67 · test   64 · other 0)
+    no owner      17808  (main 10271 · test 7537 · other 0)  apart: JDK, Spring, …
+
+    exactly-one by backing: source 1678 · avro 683
+    exactly-one by naming:  exact 2356 · enclosing fallback 5
+
+
+HALF 1 — REACH: 434 (floor 300)
+-------------------------------
+
+    main-tree exactly-one triples by pair:
+        build 379 · build into a declared platform 31 · collision-backed 24 ·
+        type-only 3 (never Reach)
+    Reach by backing:   source 294 · avro 140 · both 0
+    Reach pairs:        80 directed
+    Reach by provider:  mailbox-kafka-models 145 · official-log-batch-lib 64 ·
+        archive-kafka-models 30 · reporting-domain 29 · poste-pec-common 27 ·
+        mailbox-domain 24 · official-log-ingestion-domain 24 ·
+        official-log-kafka-models 22 · reporting-kafka-models 14 ·
+        official-log-export-domain 13 · notification-kafka-models 12 ·
+        notification-domain 11 · filters-domain 8 · filters-kafka-models 7 ·
+        mailserver-common 4
+    Test-tree triples of an admitted pair: 372, of which 55 are not also main-tree
+        (never Reach, printed for the adjudicator).
+
+  The 24 collision-backed triples are the three `mailbox-*` → `mailbox-domain` pairs
+  CR-152 section 2.1 names — mailbox-api 9, mailbox-manager 9,
+  mailbox-unread-mail-batch 6: the build relation refuses their coordinate because
+  `deprecated-mailbox-core` produces it too, and the type owner is exactly-one.
+
+
+HALF 2 — EXPLANATION: 52 of 52 (floor 75 %)
+-------------------------------------------
+
+  Every non-platform build pair carrying a `dependency` edge has at least one Reach
+  triple. No pair is unexplained.
+
+
+HALF 3 — PRECISION CEILING: 131 of 2,492 = 5.3 % (ceiling 10 %)
+---------------------------------------------------------------
+
+  All 131 ambiguous rows (main 67 · test 64) name one of SIX types, each owned by
+  exactly `deprecated-mailbox-core` and `mailbox-domain` — the same duplication that
+  produces the build relation's collision:
+
+      59  …commondomain.repository.mailbox.MailboxRepository
+      55  …commondomain.exception.ResourceNotFoundException
+      11  …commondomain.exception.ExistingResourceException
+       3  …commondomain.model.dto.configuration.MultipleMongoProperties
+       2  …commondomain.configuration.MongoMailboxConfiguration
+       1  …commondomain.configuration.AbstractMongoConfiguration
+
+  (prefix `com.sourcesense.poste.pec.mailbox.core.`). The ceiling holds with one
+  duplicated library; a second such fork would move it by its own row count.
+
+
+REFUSALS
+--------
+
+  Package/directory disagreements: 0 of 1,891 main-tree source files. Corroborated
+  outside the harness by an independent scan of the copy (every `src/main/{java,
+  kotlin}` file, first `package` statement against its directory): 1,927 files, 0
+  without a statement, 0 disagreeing — the 36 extra files are the non-member fork
+  below.
+  Unparseable `.avsc`: 0 of 70.
+
+
+RECONCILIATION — BY NAME, AGAINST CR-152 SECTION 2.1
+----------------------------------------------------
+
+  The census's own rule (package check off, no pair restriction), run over the same
+  rows, reproduces every section 2.1 figure exactly:
+
+      main-tree triples     437  (census 437)
+      directed pairs         81  (census 81), all 81 with main-tree evidence
+      exactly-one rows    2,361  (census 2,361): source 1,678 · avro 683 ·
+                                 main-tree 1,196 — each equal to the census
+      ambiguous rows        131  (census 131), of 2,492 (census 2,492)
+      self-owned rows     4,432  (census 4,432)
+
+  The four non-build pairs, named:
+      mailbox-api → mailbox-domain                 collision-backed (in Reach)
+      mailbox-manager → mailbox-domain             collision-backed (in Reach)
+      mailbox-unread-mail-batch → mailbox-domain   collision-backed (in Reach)
+      official-log-legal-storage-batch
+        → postel-cpx-creation-lib                  type-only (not in Reach)
+  No other census-rule pair is a non-build pair.
+
+  437 − 434 = 3, and every one of the three is attributed:
+      3 triples of the type-only pair official-log-legal-storage-batch →
+        postel-cpx-creation-lib (no direct build declaration, CR-152 section 2.1).
+      0 triples removed by a package/directory refusal (there are none).
+      0 unattributed; 0 Reach triples the census rule does not count.
+
+  Why the Reach figure sits at 99 % of the census, not the ~70 % CR-152 section 3.2
+  A1 allowed for: of the four mechanisms that floor was set to absorb, this estate
+  exercises only one. Package/directory disagreements: 0. Unparseable Avro: 0. The
+  static-member / nested-type fallback: 5 rows, admitted by the metric's own "or a
+  static member of T". The build restriction removed 3.
+
+  The raw ledger holds 25,114 unresolved JVM import rows across 84 stores; the 382
+  not counted here are the non-member clone `archive-api-logiclens-fork` (not in the
+  manifest), exactly as its own store reports.
+
+
+WHAT THIS FINDING DOES NOT ESTABLISH
+------------------------------------
+
+  - CRA-01 (Avro-generated classes keep the schema's namespace + name): validated at
+    configuration level only. The four `*-kafka-models` members holding `.avsc`
+    (archive, filters, mailbox, official-log) configure `avro-maven-plugin` with
+    `goal schema` and `sourceDirectory src/main/resources`, no template or namespace
+    override — the plugin default. No Maven build was run, so the 140 Avro-backed
+    Reach triples rest on that default.
+  - These rows are the estate as indexed by logos 1.5.0, before S-465 rekeys Java
+    modules by package. S-465 binds intra-member imports (the self-owned rows); a
+    cross-member import cannot bind inside its member, so the exactly-one population
+    is not expected to move, but it was not re-measured after S-465.
+  - The harness's owner rule is its own (CR-152 section 7). The product's declared-
+    type facts (S-472) must derive source names from S-465's package-shaped module
+    key, not from this module.
+
+
+LIVE ESTATE
+-----------
+
+  ~/source/pec-services was never opened by the harness. It was snapshotted (path,
+  size, mtime of every file: 22,766 files) before the copy and re-checked after the
+  measurement was recorded; see the implementation notes for the comparison.

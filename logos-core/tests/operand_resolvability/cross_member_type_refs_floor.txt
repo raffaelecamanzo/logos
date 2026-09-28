@@ -224,3 +224,17 @@ package check switched off, and no pair restriction — and prints, by name:
 
 A difference the run cannot attribute to a named mechanism is printed as such and
 is never absorbed into a figure.
+
+
+APPENDIX — 2026-09-28T15:56:08Z, Dev Session 1.3 (one term made precise; no bound
+moved)
+----------------------------------------------------------------------------------
+
+"AVRO-BACKED" above says a name without a `.` takes "the object's own `namespace`,
+else the nearest enclosing named type's namespace". The harness reads an EMPTY
+`namespace` (`"namespace": ""`) as the Avro specification defines it: the null
+namespace, inheriting nothing — not as an absent key. Found while writing the
+mutation sweep, before the verdict was recorded; on the measured estate it changes
+nothing (70 `.avsc`, 77 record/enum types, the same before and after). The three
+bounds and every other term above are unchanged, and the text above this appendix
+is byte-identical to its first commit.

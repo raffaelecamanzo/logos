@@ -286,6 +286,17 @@ mod client_call_gate;
 #[path = "operand_resolvability/vendored_spec_contracts.rs"]
 mod vendored_spec_contracts;
 
+/// S-471's cross-member type-reference gate — its own module, so CR-152's three
+/// halves do not co-edit the file S-411's or S-456's arms own. Reads S-411's
+/// `members_with_source` and the shipped `ConfigCorpus` walk, and the shipped
+/// federation's build-relation join over member stores opened read-only; it
+/// starts no engine.
+///
+/// `#[path]`-attached for the same reason every sibling above is: a plain
+/// `tests/cross_member_type_refs.rs` would become a second cargo test target.
+#[path = "operand_resolvability/cross_member_type_refs.rs"]
+mod cross_member_type_refs;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
