@@ -39,6 +39,7 @@ fn federated_tools() -> Vec<rmcp::model::Tool> {
         links: Vec::new(),
         governance: Default::default(),
         warm_concurrency: None,
+        member_kinds: Default::default(),
     };
     LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy)).list_tools()
 }

@@ -572,6 +572,7 @@ mod tests {
             links: Vec::new(),
             governance,
             warm_concurrency: None,
+            member_kinds: Default::default(),
         }
     }
 

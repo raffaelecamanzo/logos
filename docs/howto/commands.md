@@ -1175,6 +1175,15 @@ on a zero denominator, the excluded count is **still** reported — "0 measured,
 N excluded" is the informative statement. The same absent-not-zero rule governs
 `egress_resolution`.
 
+Some members are not services: a documentation repository, or a mock. If the
+manifest declares one of them `kind = "documentation"` or `"mock"`, its
+contract-surface rows leave these figures. They are reported under
+`coverage.declared_apart`, with a `summary` stating the count over its
+denominator. Undeclared members that hold API documents and no runnable source
+are listed under `kind_candidates` as a hint, and nothing moves until you
+declare them. Both keys are absent when there is nothing to report. See
+[`[workspace.member.<name>] kind`](configuration.md#workspacemembername-kind--documentation-and-mock-members).
+
 ##### Each reference names the other end
 
 `bound: 96` and `ambiguous: 169` are not actionable on their own — the obvious

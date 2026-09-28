@@ -108,6 +108,7 @@ fn registry(names: &[&str]) -> EngineRegistry<FakeEngine> {
         links: Vec::new(),
         governance: Default::default(),
         warm_concurrency: None,
+        member_kinds: Default::default(),
     };
     EngineRegistry::new(federation, RegistryMode::Lazy)
 }
@@ -880,6 +881,7 @@ fn the_rider_carries_every_coverage_figure_verbatim_at_non_zero_values() {
         members_read: 4,
         members_total: 5,
         covers_all_members: false,
+        declared_apart: None,
     };
 
     // Two invocation edges and one contract-surface edge: the seeded-edge figure
@@ -933,6 +935,45 @@ fn the_rider_carries_every_coverage_figure_verbatim_at_non_zero_values() {
     assert_eq!(wire["egress_resolution"], 0.25);
     assert_eq!(wire["egress_resolution_measured"], 16);
     assert_eq!(wire["spec_conformance_ratio"], 0.5);
+
+    // A workspace declaring no member kind (`declared_apart: None` above) puts
+    // the rider on the wire byte-for-byte as it was before S-457 — the literal
+    // is what this same test serialized at `96b7a66` ([FR-WS-32]).
+    //
+    // [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    assert_eq!(
+        serde_json::to_string(&rider).unwrap(),
+        r#"{"bound":11,"ambiguous":12,"unbound":13,"no_provider_in_workspace":14,"resolved_cross_service_edges":7,"bridge_invocation_edges":2,"egress_resolution":0.25,"egress_resolution_measured":16,"spec_conformance_ratio":0.5,"spec_conformance_measured":36,"members_read":9,"members_total":5}"#
+    );
+}
+
+/// A coverage summary that set declared members' rows apart hands the rider
+/// their count and denominator, so a ratio whose population a declaration
+/// shrank never reaches a reachability claim bare ([FR-WS-32], [BR-51]).
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn the_rider_carries_the_declared_apart_count_and_its_denominator() {
+    let mut cov = crate::federation::cross_service_coverage(&registry(&[]).answer());
+    cov.declared_apart = Some(crate::federation::DeclaredApart {
+        members: Vec::new(),
+        rows: 411,
+        contract_surface_rows: 874,
+        counts: Default::default(),
+        summary: String::new(),
+        references: Vec::new(),
+    });
+
+    let rider = CoverageRider::new(&cov, &[], 0, 0);
+
+    assert_eq!(
+        rider.declared_apart,
+        Some(RowsApart { rows: 411, contract_surface_rows: 874 })
+    );
+    let wire = serde_json::to_value(rider).unwrap();
+    assert_eq!(wire["declared_apart"]["rows"], 411);
+    assert_eq!(wire["declared_apart"]["contract_surface_rows"], 874);
 }
 
 /// The verdict's JSON wire spelling is part of the contract every surface reads.

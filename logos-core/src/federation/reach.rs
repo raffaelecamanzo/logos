@@ -406,6 +406,38 @@ pub struct CoverageRider {
     /// nodes and **no** roots — so it can only have suppressed promotions, never
     /// caused a demotion ([ADR-53]).
     pub members_total: u64,
+    /// How many contract-surface rows the four counts above **exclude** because
+    /// their member is declared `documentation` or `mock`, over every
+    /// contract-surface row ([FR-WS-32], [BR-51]).
+    ///
+    /// Carried because this rider publishes [`spec_conformance_ratio`](Self::spec_conformance_ratio)
+    /// and its denominator verbatim from the coverage summary, and those now
+    /// exclude declared members' rows: a ratio whose population shrank by a
+    /// declaration must say so on every surface that prints it. The rows
+    /// themselves are the summary's
+    /// [`declared_apart`](super::coverage::CrossServiceCoverage::declared_apart);
+    /// the rider owes only the figures, for the reason
+    /// [`spec_conformance_measured`](Self::spec_conformance_measured) states.
+    ///
+    /// **Absent** when no member declares such a kind, so an undeclared
+    /// workspace's rider serializes exactly as before.
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_apart: Option<RowsApart>,
+}
+
+/// The rider's projection of [`DeclaredApart`](super::coverage::DeclaredApart):
+/// the rows set apart and the denominator they are stated over ([FR-WS-32]).
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RowsApart {
+    /// Contract-surface rows reported apart.
+    pub rows: u64,
+    /// Every contract-surface row, the headline's and these together.
+    pub contract_surface_rows: u64,
 }
 
 impl CoverageRider {
@@ -441,6 +473,10 @@ impl CoverageRider {
             spec_conformance_measured: coverage.spec_conformance_measured,
             members_read: members_read as u64,
             members_total: members_total as u64,
+            declared_apart: coverage.declared_apart.as_ref().map(|apart| RowsApart {
+                rows: apart.rows,
+                contract_surface_rows: apart.contract_surface_rows,
+            }),
         }
     }
 }

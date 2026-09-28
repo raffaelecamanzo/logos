@@ -1191,6 +1191,7 @@ mod surface_parity {
             links: Vec::new(),
             governance: Default::default(),
             warm_concurrency: None,
+            member_kinds: Default::default(),
         };
         LogosMcp::federated(EngineRegistry::new(federation, RegistryMode::Lazy))
             .list_tools()

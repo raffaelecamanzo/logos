@@ -1104,6 +1104,7 @@ mod tests {
                 links: Vec::new(),
                 governance: Default::default(),
                 warm_concurrency: None,
+                member_kinds: Default::default(),
             };
             let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
             XserviceBacking::federated(

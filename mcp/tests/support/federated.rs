@@ -72,6 +72,7 @@ pub fn registry(name: &str, root: &Path, members: Vec<Member>) -> EngineRegistry
         links: Vec::new(),
         governance: Default::default(),
         warm_concurrency: None,
+        member_kinds: Default::default(),
     };
     EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy)
 }

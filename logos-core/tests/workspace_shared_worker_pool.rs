@@ -174,6 +174,7 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
             links: Vec::new(),
             governance: Default::default(),
             warm_concurrency: None,
+            member_kinds: Default::default(),
         },
         RegistryMode::Lazy,
         budget,

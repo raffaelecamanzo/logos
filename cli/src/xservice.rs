@@ -96,6 +96,14 @@ pub(crate) enum XserviceCommands {
 #[derive(Subcommand)]
 pub(crate) enum WorkspaceCommands {
     /// Per-member index freshness + the 3-state cross-service coverage summary.
+    ///
+    /// A member the manifest declares `kind = "documentation" | "mock"`
+    /// ([FR-WS-32]) has its contract-surface rows reported apart, under
+    /// `coverage.declared_apart`, with their count and denominator;
+    /// `kind_candidates` lists undeclared members holding API documents and no
+    /// runnable source, as a hint that classifies nothing.
+    ///
+    /// [FR-WS-32]: ../../docs/specs/requirements/FR-WS-32.md
     Status,
     /// App-wide cross-service dead code (FR-WS-12): the union of every member's
     /// call graph plus the bridge's edges as extra live roots. Advisory only —

@@ -40,6 +40,7 @@
 //! [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -361,6 +362,106 @@ pub struct WorkspaceSection {
     /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm: Option<Warm>,
+    /// Per-member declarations (`[workspace.member.<name>]`), keyed by the
+    /// member path as written in [`members`](Self::members) (or an
+    /// autodiscovered directory name) — today only the member's
+    /// [`kind`](MemberDecl::kind) ([FR-WS-01], [FR-WS-32]).
+    ///
+    /// A table of tables rather than a richer `members` entry, so `members`
+    /// stays the plain path list [`upsert`] owns and an autodiscovered member —
+    /// listed nowhere — can still be declared. Keys are resolved against the
+    /// member set by [`super::discover`], under the same normalisation
+    /// `default` gets; a key naming no resolved member is dropped there, never
+    /// here, because parsing cannot know the member set.
+    ///
+    /// Absent on every manifest written before the key existed and on every
+    /// manifest `logos init --workspace` creates: a kind is declared by a
+    /// human, never inferred ([ADR-68] point 5).
+    ///
+    /// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub member: BTreeMap<String, MemberDecl>,
+}
+
+/// One `[workspace.member.<name>]` table — what the manifest declares about a
+/// single member ([FR-WS-01], [FR-WS-32]).
+///
+/// Every field is optional, so a bare table is valid and inert, like a bare
+/// `[workspace.warm]`. `deny_unknown_fields` holds here as everywhere in this
+/// module: a misspelt `kinds = …` is rejected at parse time, naming the key.
+///
+/// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberDecl {
+    /// `kind = "documentation" | "mock"` — what the member **is**, as declared
+    /// by whoever knows ([FR-WS-32]). `None` (the key absent) is an ordinary
+    /// member; logos never fills it in.
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<MemberKind>,
+}
+
+/// A declared member kind ([FR-WS-32], [ADR-68] point 5).
+///
+/// **Designed to be extended.** [ADR-69] point 3 adds `platform`, and a
+/// platform member does *not* leave the contract-surface headline — only its
+/// inbound build edges are counted apart. So what a kind does is asked of the
+/// kind ([`leaves_contract_surface_headline`](Self::leaves_contract_surface_headline))
+/// through exhaustive `match`es, never by testing for "any kind declared": a
+/// new variant fails to compile until every such question has an answer for
+/// it.
+///
+/// A malformed value fails the parse naming the key and the legal values
+/// (`unknown variant `docs`, expected `documentation` or `mock``), with the
+/// offending line quoted — the manifest-wide fail-loud posture.
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+/// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+/// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemberKind {
+    /// A documentation repository: it holds API documents that describe
+    /// services, and neither consumes nor provides them.
+    Documentation,
+    /// A stand-in **provider** of an API it mocks — never a consumer of it
+    /// ([ADR-68] point 5).
+    ///
+    /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+    Mock,
+}
+
+impl MemberKind {
+    /// The manifest spelling (`"documentation"`, `"mock"`) — the same token the
+    /// payloads serialize.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Documentation => "documentation",
+            Self::Mock => "mock",
+        }
+    }
+
+    /// Whether a member of this kind has its contract-surface rows reported
+    /// **apart** from the headline and from `spec_conformance_ratio`
+    /// ([FR-WS-32], [BR-51]).
+    ///
+    /// Both kinds today: a documentation repo's spec copies describe services
+    /// rather than consume them, and a mock's are the API it stands in for.
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[must_use]
+    pub fn leaves_contract_surface_headline(self) -> bool {
+        match self {
+            Self::Documentation | Self::Mock => true,
+        }
+    }
 }
 
 /// The `[workspace.warm]` sub-table ([FR-WS-01], [FR-WS-14], [BR-44]).
@@ -486,7 +587,8 @@ fn parse_text(text: &str, path: &Path) -> Result<Manifest, ConfigError> {
 /// Create or incrementally update the manifest at `root` from the approved
 /// member-name set (`logos init --workspace`, [FR-WS-02]): a fresh manifest is
 /// created with `name` and `members`; an existing one keeps its `name`,
-/// `default`, `autodiscover`, `warm`, `links`, and `governance` untouched and
+/// `default`, `autodiscover`, `warm`, per-member `[workspace.member.<name>]`
+/// declarations, `links`, and `governance` untouched and
 /// only has `members` upserted (sorted, de-duplicated). A result byte-identical to what's already
 /// on disk reports [`InitAction::Unchanged`] without writing — the
 /// write-if-different extension of [FR-IN-01]'s write-if-absent posture,
@@ -531,6 +633,13 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
             // The bare table is preserved too, not only a set key — see
             // `Governance::is_unset` for the same distinction stated at length.
             warm: existing.as_ref().and_then(|m| m.workspace.warm),
+            // A member's declared `kind` is human-authored classification this
+            // command must never erase ([FR-WS-32]); carried whole, including a
+            // declaration naming a member the approved set no longer holds —
+            // `upsert` owns `members`, not what a human wrote about them.
+            member: existing
+                .as_ref()
+                .map_or_else(BTreeMap::new, |m| m.workspace.member.clone()),
         },
         links: existing.as_ref().map_or_else(Vec::new, |m| m.links.clone()),
         // Like `links`, the workspace rule family is user-authored policy this
@@ -542,8 +651,9 @@ pub fn upsert(root: &Path, name: &str, members: &[String]) -> Result<InitStep, C
             .map_or_else(Governance::default, |m| m.governance.clone()),
     };
 
-    // The struct holds no maps/floats — every field is a String, Vec<String>,
-    // Option<String>, Option<Autodiscover>, Option<Warm> (an Option<usize>), or
+    // The struct holds no floats — every field is a String, Vec<String>,
+    // Option<String>, Option<Autodiscover>, Option<Warm> (an Option<usize>), a
+    // string-keyed BTreeMap of MemberDecl tables (an Option of a unit enum), or
     // a Vec of Link/governance tables of the same — so TOML serialisation cannot
     // fail in practice.
     let text = toml::to_string_pretty(&manifest)
@@ -1414,6 +1524,7 @@ mod tests {
             "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\ndefault = \"api\"\n\n\
              [workspace.autodiscover]\nenabled = false\n\n\
              [workspace.warm]\nconcurrency = 2\n\n\
+             [workspace.member.api]\nkind = \"mock\"\n\n\
              [[links]]\nrelation = \"http_call\"\nfrom = \"web::c\"\nto = \"api::h\"\n\n\
              [[governance.service_layers]]\nname = \"core\"\nmembers = [\"api\"]\n",
         );
@@ -1427,6 +1538,7 @@ mod tests {
         assert_eq!(m.workspace.default.as_deref(), Some("api"));
         assert!(!m.workspace.autodiscover.as_ref().expect("kept").enabled);
         assert_eq!(m.warm_concurrency(), Some(2));
+        assert_eq!(m.workspace.member["api"].kind, Some(MemberKind::Mock));
         assert_eq!(m.links.len(), 1);
         assert_eq!(m.governance.service_layers.len(), 1);
 
@@ -1456,6 +1568,134 @@ mod tests {
             m.workspace.warm.is_some(),
             "the declared table is carried through"
         );
+    }
+
+    // ── the per-member `kind` declaration (S-457, FR-WS-32) ──────────────
+
+    /// A manifest declaring one member of each kind, beside one it leaves
+    /// undeclared — the shape of the reference estate once its documentation
+    /// repo and its mocks are declared.
+    const KINDS: &str = "[workspace]\nname = \"pec\"\nmembers = [\"api\", \"docs\", \"pecserver-mock\"]\n\n\
+        [workspace.member.docs]\nkind = \"documentation\"\n\n\
+        [workspace.member.pecserver-mock]\nkind = \"mock\"\n";
+
+    /// Both kinds parse under `deny_unknown_fields`, keyed by member path, and a
+    /// member with no table declares nothing.
+    #[test]
+    fn parses_a_member_kind_for_each_variant() {
+        let tmp = TempDir::new().unwrap();
+        let m = parse(&write_manifest(&tmp, KINDS)).expect("both kinds parse");
+
+        assert_eq!(m.workspace.member.len(), 2, "one table per declared member");
+        assert_eq!(m.workspace.member["docs"].kind, Some(MemberKind::Documentation));
+        assert_eq!(m.workspace.member["pecserver-mock"].kind, Some(MemberKind::Mock));
+        assert!(
+            !m.workspace.member.contains_key("api"),
+            "an undeclared member has no table and no kind"
+        );
+    }
+
+    /// A manifest without any `[workspace.member]` table parses exactly as
+    /// before the key existed, and `upsert`'s fresh manifest writes none —
+    /// logos never declares a kind on a human's behalf.
+    #[test]
+    fn a_manifest_without_member_declarations_parses_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let m = parse(&write_manifest(&tmp, "[workspace]\nname = \"a\"\nmembers = [\"x\"]\n"))
+            .expect("parses");
+        assert!(m.workspace.member.is_empty());
+
+        let fresh = TempDir::new().unwrap();
+        upsert(fresh.path(), "pec", &["api".into()]).expect("creates");
+        let text = fs::read_to_string(fresh.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(
+            text, "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n",
+            "a fresh manifest is byte-identical to what it was before the key existed"
+        );
+    }
+
+    /// A value outside the enum is rejected **at parse time**, and the message
+    /// names the key, the offending value and every legal value — the operator
+    /// can fix the line from the message alone.
+    #[test]
+    fn a_malformed_member_kind_is_rejected_at_parse_time_naming_the_field() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(
+            &tmp,
+            "[workspace]\nname = \"a\"\nmembers = [\"docs\"]\n\n[workspace.member.docs]\nkind = \"docs\"\n",
+        );
+        let err = parse(&path).expect_err("an unknown kind must not parse");
+        assert!(matches!(err, ConfigError::Parse { .. }), "exit-2 parse error, got {err:?}");
+        let message = err.to_string();
+        for needle in ["kind", "`docs`", "documentation", "mock"] {
+            assert!(message.contains(needle), "{needle:?} missing from {message:?}");
+        }
+    }
+
+    /// A wrong-typed value is the same fail-loud parse error, naming the key.
+    #[test]
+    fn a_non_string_member_kind_is_rejected_naming_the_field() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(
+            &tmp,
+            "[workspace]\nname = \"a\"\n\n[workspace.member.docs]\nkind = 3\n",
+        );
+        let err = parse(&path).expect_err("a non-string kind must not parse");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("kind"), "{err}");
+    }
+
+    /// A misspelt key inside a member table fails loud under
+    /// `deny_unknown_fields`, naming the key that was written.
+    #[test]
+    fn an_unknown_key_in_a_member_table_fails_loud() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(
+            &tmp,
+            "[workspace]\nname = \"a\"\n\n[workspace.member.docs]\nkinds = \"documentation\"\n",
+        );
+        let err = parse(&path).expect_err("an unknown member key must not parse");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("kinds"), "{err}");
+    }
+
+    /// A bare member table is valid and inert, like a bare `[workspace.warm]`.
+    #[test]
+    fn a_bare_member_table_is_valid_and_declares_no_kind() {
+        let tmp = TempDir::new().unwrap();
+        let m = parse(&write_manifest(
+            &tmp,
+            "[workspace]\nname = \"a\"\n\n[workspace.member.docs]\n",
+        ))
+        .expect("parses");
+        assert_eq!(m.workspace.member["docs"].kind, None);
+    }
+
+    /// `upsert` carries every declaration across an `init --workspace` re-run —
+    /// including one for a member the approved set no longer holds, because the
+    /// command owns `members`, not what a human wrote about them — and the
+    /// rewrite is a fixed point.
+    #[test]
+    fn upsert_preserves_member_kind_declarations() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(&tmp, KINDS);
+
+        let step = upsert(tmp.path(), "ignored", &["api".into(), "docs".into(), "web".into()])
+            .expect("updates");
+        assert_eq!(step.action, InitAction::Updated);
+
+        let m = parse(&tmp.path().join(MANIFEST_FILENAME)).expect("the re-write is valid TOML");
+        assert_eq!(m.workspace.members, ["api", "docs", "web"]);
+        assert_eq!(m.workspace.member["docs"].kind, Some(MemberKind::Documentation));
+        assert_eq!(
+            m.workspace.member["pecserver-mock"].kind,
+            Some(MemberKind::Mock),
+            "a declaration outlives its member's removal from the approved set"
+        );
+
+        let step = upsert(tmp.path(), "ignored", &["api".into(), "docs".into(), "web".into()])
+            .expect("a settled manifest re-runs clean");
+        assert_eq!(step.action, InitAction::Unchanged);
     }
 
     // ── the whole-manifest write path (S-430, FR-UI-38) ──────────────────

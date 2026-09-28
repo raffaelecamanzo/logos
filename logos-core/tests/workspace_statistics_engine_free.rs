@@ -128,6 +128,7 @@ fn the_statistics_aggregate_adds_no_engine_and_no_connection() {
         links: Vec::new(),
         governance: Default::default(),
         warm_concurrency: None,
+        member_kinds: Default::default(),
     };
     let registry = EngineRegistry::<Engine>::with_budget(federation, RegistryMode::Lazy, budget);
 

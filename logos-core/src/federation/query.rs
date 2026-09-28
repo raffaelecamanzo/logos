@@ -29,6 +29,7 @@
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -37,8 +38,9 @@ use crate::model::NodeKind;
 use crate::models::{CallersResult, ImpactResult, SearchResult, StatusInfo};
 use crate::Engine;
 
-use super::bridge::BridgeEdge;
+use super::bridge::{BridgeEdge, BridgeIntake};
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
+use super::manifest::MemberKind;
 use super::open_state::{self, DegradedRollup, MemberOpenState};
 use super::registry::{AnswerScope, EngineRegistry, MemberScoped};
 use super::residue::{AnswerReach, EgressResidue, WorkspaceEgressResidue};
@@ -534,6 +536,109 @@ pub struct WorkspaceStatus {
     ///
     /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
     pub topics: Vec<MemberTopics>,
+    /// Members that **look like** documentation or mock repositories and are
+    /// not declared as either — a hint for a human, never a classification
+    /// ([FR-WS-32], [ADR-68] point 5).
+    ///
+    /// **Absent** when there is none, so a workspace with no such member
+    /// serializes exactly as before. Listing a member here moves nothing: its
+    /// rows stay in the headline until someone declares its kind.
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind_candidates: Option<KindCandidates>,
+}
+
+/// The member-kind **candidate hint** on `workspace status` ([FR-WS-32]).
+///
+/// A candidate is an undeclared member that **holds API documents** — at least
+/// one contract-surface row in [`CrossServiceCoverage::references`], i.e. an
+/// OpenAPI operation its own index holds — and **no runnable source**: none of
+/// the languages its index tags is a code grammar
+/// ([`code_language_names`](crate::plugin::grammars::code_language_names)).
+/// Both halves are read off what the status walk already gathered, so the hint
+/// costs no walk of its own ([NFR-PE-10]). A member whose index is unreadable
+/// is never a candidate: "no runnable source" is a fact about an index, and
+/// there is none to state it about.
+///
+/// It classifies nothing. The logic that decides what a kind *does* reads the
+/// manifest alone; this list is only what a reviewer might want to declare.
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KindCandidates {
+    /// The candidate members' repo-qualified names, in roster order.
+    pub members: Vec<String>,
+    /// The roster size the candidates were drawn from.
+    pub members_total: u64,
+    /// The count, its denominator and what it is, as one line — e.g. `"2 of 84
+    /// members hold API documents and no runnable source and declare no kind
+    /// (a hint, never a classification: declare `[workspace.member.<name>] kind
+    /// = \"documentation\" | \"mock\"` to report a member's rows apart)"`.
+    pub summary: String,
+}
+
+/// The members holding **API documents**, read off the coverage summary: every
+/// member with at least one contract-surface row in the headline's
+/// [`references`](CrossServiceCoverage::references).
+///
+/// A member's operations all produce a row except those resolving to a sole
+/// provider in the same member ([`super::coverage`]'s `tier`) — and that
+/// provider is a route in the member's own source, which already disqualifies
+/// it as a candidate. So no candidate is missed by reading the rows. Declared
+/// members' rows sit in `declared_apart` instead, and a declared member is no
+/// candidate either way.
+fn members_holding_api_documents(coverage: &CrossServiceCoverage) -> BTreeSet<&str> {
+    coverage
+        .references
+        .iter()
+        .filter(|row| row.intake == BridgeIntake::ContractSurface)
+        .map(|row| row.from.member.as_str())
+        .collect()
+}
+
+/// The [`KindCandidates`] over one status walk's freshness rows, or `None` when
+/// no member qualifies ([FR-WS-32]).
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+fn kind_candidates(
+    freshness: &[MemberResult<StatusInfo>],
+    holds_documents: &BTreeSet<&str>,
+    declared: &BTreeMap<String, MemberKind>,
+) -> Option<KindCandidates> {
+    let code = crate::plugin::grammars::code_language_names();
+    let members: Vec<String> = freshness
+        .iter()
+        .filter(|row| !declared.contains_key(&row.member))
+        .filter(|row| holds_documents.contains(row.member.as_str()))
+        .filter(|row| {
+            row.result.as_ref().is_some_and(|info| {
+                !info
+                    .resolution_by_language
+                    .iter()
+                    .any(|language| language.files > 0 && code.contains(&language.language))
+            })
+        })
+        .map(|row| row.member.clone())
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    let members_total = freshness.len() as u64;
+    let summary = format!(
+        "{} of {members_total} members hold API documents and no runnable source and \
+         declare no kind (a hint, never a classification: declare \
+         `[workspace.member.<name>] kind = \"documentation\" | \"mock\"` to report a \
+         member's rows apart)",
+        members.len()
+    );
+    Some(KindCandidates {
+        members,
+        members_total,
+        summary,
+    })
 }
 
 /// The workspace **roster** — the manifest, and nothing but the manifest
@@ -663,6 +768,11 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     // on ([FR-WS-16]).
     let opens = registry.open_states();
     let degraded_rollup = open_state::rollup(&opens);
+    let kind_candidates = kind_candidates(
+        &freshness,
+        &members_holding_api_documents(&coverage),
+        &registry.federation().member_kinds,
+    );
 
     // `zip`, not a name-keyed join: `fan_status` and `open_states` are two
     // projections of the SAME list — both map over `federation.members` in
@@ -691,6 +801,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         members,
         coverage,
         topics,
+        kind_candidates,
     }
 }
 
@@ -749,6 +860,91 @@ mod tests {
             intake: crate::federation::bridge::BridgeIntake::Invocation,
             from_value: crate::resolve::binding::Provenance::Literal,
             to_value: crate::resolve::binding::Provenance::Literal,
+        }
+    }
+
+    // ── the member-kind candidate hint (S-457, FR-WS-32) ─────────────────
+
+    /// A freshness row for `member` whose index tags `languages`, one file each.
+    fn indexed(member: &str, languages: &[&str]) -> MemberResult<StatusInfo> {
+        use crate::models::{LanguageResolution, RelationResolution};
+        MemberResult {
+            member: member.to_string(),
+            result: Some(StatusInfo {
+                indexed: true,
+                resolution_by_language: languages
+                    .iter()
+                    .map(|language| LanguageResolution {
+                        language: (*language).to_string(),
+                        files: 1,
+                        calls: RelationResolution::measured(0, 0, 0, 0),
+                        imports: RelationResolution::measured(0, 0, 0, 0),
+                    })
+                    .collect(),
+                ..StatusInfo::default()
+            }),
+            error: None,
+        }
+    }
+
+    /// Each half of the rule, probed with the member one fact away from
+    /// qualifying: `docs` qualifies; `svc` holds documents beside Java (runnable
+    /// source); `config` has no runnable source but holds no document; `gone`
+    /// holds documents but its index could not be read; `mock` qualifies but is
+    /// already declared. Roster order is kept, and the denominator is the roster.
+    #[test]
+    fn a_candidate_holds_api_documents_and_no_runnable_source_and_declares_no_kind() {
+        let freshness = vec![
+            indexed("config", &["yaml"]),
+            indexed("docs", &["markdown", "yaml"]),
+            MemberResult { member: "gone".to_string(), result: None, error: Some("unreadable".into()) },
+            indexed("mock", &["json"]),
+            indexed("svc", &["java", "yaml"]),
+        ];
+        let holds_documents = BTreeSet::from(["docs", "gone", "mock", "svc"]);
+        let declared = BTreeMap::from([("mock".to_string(), MemberKind::Mock)]);
+
+        let hint = kind_candidates(&freshness, &holds_documents, &declared).expect("docs qualifies");
+        assert_eq!(hint.members, ["docs"]);
+        assert_eq!(hint.members_total, 5);
+        assert!(
+            hint.summary.starts_with("1 of 5 members hold API documents and no runnable source"),
+            "{}",
+            hint.summary
+        );
+        assert!(hint.summary.contains("never a classification"), "{}", hint.summary);
+    }
+
+    /// No qualifying member means no hint on the wire at all.
+    #[test]
+    fn no_candidate_is_no_hint() {
+        let freshness = vec![indexed("svc", &["rust", "yaml"])];
+        assert_eq!(
+            kind_candidates(&freshness, &BTreeSet::from(["svc"]), &BTreeMap::new()),
+            None
+        );
+    }
+
+    /// The code set is read off the plugin descriptors: the code grammars are in
+    /// it, and every data, configuration and documentation grammar is not —
+    /// `shell` included, the near miss: it is executable, but its descriptor
+    /// declares it an artifact grammar, and the descriptor is what decides.
+    #[test]
+    #[cfg(all(
+        feature = "lang-rust",
+        feature = "lang-java",
+        feature = "lang-python",
+        feature = "lang-typescript",
+        feature = "lang-go",
+        feature = "lang-kotlin"
+    ))]
+    fn runnable_source_is_a_code_grammar_and_nothing_else() {
+        let code = crate::plugin::grammars::code_language_names();
+        for language in ["rust", "java", "python", "typescript", "tsx", "go", "kotlin"] {
+            assert!(code.contains(language), "{language} is a code grammar: {code:?}");
+        }
+        for language in ["yaml", "json", "toml", "markdown", "sql", "protobuf", "graphql", "shell"] {
+            assert!(!code.contains(language), "{language} is not runnable source: {code:?}");
         }
     }
 

@@ -565,6 +565,60 @@ fn an_out_of_range_warm_concurrency_is_an_actionable_exit_2() {
     );
 }
 
+/// A declared member `kind` (S-457, FR-WS-32) survives an `init --workspace`
+/// re-run through the real binary. Checked end to end for the same reason as the
+/// warm key above: under `deny_unknown_fields` an unregistered key would fail the
+/// whole manifest, and `upsert` rebuilds the manifest from its struct, so a
+/// field it forgot to carry would be silently erased by the very command a
+/// user runs to add a member.
+#[test]
+fn a_declared_member_kind_survives_enablement_and_a_rerun() {
+    let tmp = two_member_fixture();
+    let manifest = tmp.path().join("logos.workspace.toml");
+    fs::write(
+        &manifest,
+        "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n\n\
+         [workspace.member.api]\nkind = \"documentation\"\n",
+    )
+    .unwrap();
+
+    for run in ["enablement", "re-run"] {
+        let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+        assert_eq!(
+            exit_code(&out),
+            0,
+            "{run}: a registered key must not fail the manifest: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = fs::read_to_string(&manifest).unwrap();
+        assert!(
+            text.contains("[workspace.member.api]") && text.contains("kind = \"documentation\""),
+            "{run}: the declared kind survives the incremental re-write: {text}"
+        );
+        assert!(text.contains("\"web\""), "{run}: `members` was still upserted: {text}");
+    }
+}
+
+/// A malformed `kind` is a config fault — exit 2 — whose message names the key
+/// and the legal values, so the operator fixes it from the message alone.
+#[test]
+fn a_malformed_member_kind_is_an_actionable_exit_2() {
+    let tmp = two_member_fixture();
+    fs::write(
+        tmp.path().join("logos.workspace.toml"),
+        "[workspace]\nname = \"pec\"\nmembers = [\"api\"]\n\n\
+         [workspace.member.api]\nkind = \"docs\"\n",
+    )
+    .unwrap();
+
+    let out = logos(tmp.path(), &["init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&out), 2, "a config fault is exit 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needle in ["kind", "`docs`", "documentation", "mock"] {
+        assert!(stderr.contains(needle), "{needle:?} missing from: {stderr}");
+    }
+}
+
 // ── the working-tree footprint (S-333, FR-WS-02, FR-IN-04) ──────────────────
 
 /// Enabling N members leaves N repositories git-dirty; the report says so, in

@@ -29,9 +29,20 @@
 //! reported in its own bucket, excluded from the `spec_conformance_ratio`
 //! denominator, so a sparse workspace reads as *measured*, not broken.
 //!
+//! # Declared documentation/mock members are reported apart ([FR-WS-32])
+//! A member the manifest declares `kind = "documentation" | "mock"` still has
+//! every one of its contract-surface consumers classified — by the same `tier`
+//! — but the rows are filed into [`DeclaredApart`] instead of the headline, at
+//! the one place a row is filed (`Tally::record`). Every headline figure and
+//! `spec_conformance_ratio` therefore exclude them, and `DeclaredApart` states
+//! them with their count and denominator, so nothing is dropped.
+//!
+//! [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+//!
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +55,7 @@ use super::bridge::{
     member_corpora, read_members, sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts,
     MemberCorpus, PortableKey, ProviderIndex, Role,
 };
+use super::manifest::MemberKind;
 use super::registry::{AnswerScope, MemberEngine};
 
 /// Why one cross-boundary reference did not bind ([FR-WS-05], [ADR-53]).
@@ -899,6 +911,12 @@ impl ClassificationCounts {
         }
     }
 
+    /// Every row counted here, in all four buckets — the denominator a
+    /// [`DeclaredApart`] count is stated over.
+    fn rows(self) -> u64 {
+        self.bound + self.ambiguous + self.unbound + self.no_provider_in_workspace
+    }
+
     /// Field-wise sum — how [`IntakeSplit::total`] recovers the workspace-wide
     /// counts from the split.
     fn plus(self, other: Self) -> Self {
@@ -1252,6 +1270,16 @@ pub struct CrossServiceCoverage {
     /// same field — one line, in both outputs, that can never regress on one
     /// surface while the other stays honest ([CR-111] §4.4).
     ///
+    /// When a declared member kind set rows apart
+    /// ([`declared_apart`](Self::declared_apart)), the line ends with that count
+    /// over its denominator — `"…; 411 of 868 contract-surface rows reported apart
+    /// by declared member kind"` — so a surface rendering only this line still
+    /// says the population shrank ([BR-51], [FR-WS-32]). Without a declaration the
+    /// line is unchanged.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    ///
     /// [CR-120]: ../../../docs/requests/CR-120-invocation-arms-report-their-own-refusals.md
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [CR-111]: ../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
@@ -1274,6 +1302,81 @@ pub struct CrossServiceCoverage {
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub covers_all_members: bool,
+    /// The contract-surface rows of members **declared** `documentation` or
+    /// `mock`, reported apart — excluded from every count above and from
+    /// [`spec_conformance_ratio`](Self::spec_conformance_ratio), and stated here
+    /// with their own count and denominator ([FR-WS-32], [BR-51]).
+    ///
+    /// **Absent** when no member declares such a kind, so a workspace without
+    /// `[workspace.member.<name>] kind` declarations serializes byte-for-byte as
+    /// it did before the key existed.
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_apart: Option<DeclaredApart>,
+}
+
+/// The contract-surface rows of members **declared** `documentation` or
+/// `mock`, reported apart from the headline ([FR-WS-32], [FR-WS-05], [BR-51]).
+///
+/// A documentation repository's spec copies describe services and a mock's are
+/// the API it stands in for; neither is a statement about the product's own
+/// declared contracts, and on the reference estate one documentation repo held
+/// 411 of 868 contract-surface rows ([CR-147] §2.1). So a declared member's
+/// contract-surface rows are filed **here** instead of into
+/// [`by_intake`](CrossServiceCoverage::by_intake)`.contract_surface` — and
+/// therefore out of the four headline counts and
+/// [`spec_conformance_ratio`](CrossServiceCoverage::spec_conformance_ratio),
+/// which are derived from that split. Nothing is dropped: every row moved is in
+/// [`references`](Self::references), counted in [`counts`](Self::counts), and
+/// stated over its denominator in [`summary`](Self::summary), never bare.
+///
+/// Only the declared member's **consumer** rows move. Its routes stay in the
+/// provider index, so another member's bind against one is unchanged; and its
+/// invocation rows stay where they were, so neither
+/// `resolved_cross_service_edges` nor `egress_resolution` can move by a
+/// declaration. Whether a kind sets rows apart is asked of the kind
+/// ([`MemberKind::leaves_contract_surface_headline`]), never assumed of every
+/// declaration.
+///
+/// [CR-147]: ../../../docs/requests/CR-147-vendored-specs-declare-contracts-and-name-externals.md
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[derive(Debug, Clone, Serialize)]
+pub struct DeclaredApart {
+    /// Every member whose declared kind sets its rows apart, with its kind and
+    /// the rows it contributed (possibly `0`), in member-name order.
+    pub members: Vec<DeclaredMemberRows>,
+    /// Contract-surface rows reported apart — the sum of [`counts`](Self::counts).
+    pub rows: u64,
+    /// The denominator [`rows`](Self::rows) is stated over: every
+    /// contract-surface row, the headline's and these together.
+    pub contract_surface_rows: u64,
+    /// The rows set apart, in the headline's four buckets.
+    pub counts: ClassificationCounts,
+    /// The count and its denominator as one line, e.g. `"411 of 868
+    /// contract-surface rows reported apart from 1 declared member
+    /// (documentation: 1); the headline and spec_conformance_ratio exclude
+    /// them"` — the [`spec_conformance_summary`](CrossServiceCoverage::spec_conformance_summary)
+    /// shape, so no surface renders the count without its scale ([BR-51]).
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    pub summary: String,
+    /// The rows themselves, sorted by endpoint like the headline's.
+    pub references: Vec<ReferenceCoverage>,
+}
+
+/// One declared member in [`DeclaredApart::members`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeclaredMemberRows {
+    /// The member's repo-qualified name.
+    pub member: String,
+    /// Its declared kind.
+    pub kind: MemberKind,
+    /// The contract-surface rows it contributed to [`DeclaredApart::rows`].
+    pub rows: u64,
 }
 
 /// The spec-conformance figures read back out of a **serialized** coverage
@@ -1362,7 +1465,12 @@ pub struct SpecConformanceReading {
 /// the shared [`PortableKey`], then classifies **every** `ApiOperation`
 /// consumer node — including ones the bridge's edge computation silently
 /// drops (an uncomposable template, no candidate, an intra-repo-only match) —
-/// so no cross-boundary reference goes unaccounted for.
+/// so no cross-boundary reference goes unaccounted for. A declared
+/// documentation/mock member's contract-surface rows are classified the same way
+/// and reported in [`declared_apart`](CrossServiceCoverage::declared_apart)
+/// rather than the headline ([FR-WS-32]).
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
 ///
 /// A member that fails to start or whose surface read fails is skipped
 /// (degraded, not fatal), exactly as [`ContractBridge::edges`](super::bridge::ContractBridge::edges)
@@ -1420,7 +1528,7 @@ where
 
     sort_buckets(&mut providers);
 
-    let mut tally = Tally::default();
+    let mut tally = Tally::setting_apart(&answer.registry().federation().member_kinds);
 
     for (member, name, symbol) in consumer_refs {
         let from = BridgeEndpoint {
@@ -2364,9 +2472,74 @@ fn record_broker(
 struct Tally {
     references: Vec<ReferenceCoverage>,
     by_intake: IntakeSplit,
+    /// The declared members' contract-surface rows, filed apart ([FR-WS-32]).
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    apart: ApartTally,
+}
+
+/// The rows [`Tally::record`] files apart instead of into the headline, and the
+/// members whose rows those are ([`DeclaredApart`]).
+#[derive(Default)]
+struct ApartTally {
+    /// The members whose contract-surface rows go apart, with their kinds.
+    /// Empty ⇒ nothing is set apart and [`DeclaredApart`] is absent.
+    kinds: BTreeMap<String, MemberKind>,
+    counts: ClassificationCounts,
+    references: Vec<ReferenceCoverage>,
+}
+
+impl ApartTally {
+    /// Seal the rows set apart, stating them over `headline` — the headline's
+    /// own contract-surface counts — so the denominator is every
+    /// contract-surface row. `None` when no member's kind sets rows apart.
+    fn finish(mut self, headline: ClassificationCounts) -> Option<DeclaredApart> {
+        if self.kinds.is_empty() {
+            return None;
+        }
+        self.references.sort_by(|a, b| a.from.cmp(&b.from));
+        let members: Vec<DeclaredMemberRows> = self
+            .kinds
+            .iter()
+            .map(|(member, kind)| DeclaredMemberRows {
+                member: member.clone(),
+                kind: *kind,
+                rows: self.references.iter().filter(|r| &r.from.member == member).count() as u64,
+            })
+            .collect();
+        let rows = self.counts.rows();
+        let contract_surface_rows = headline.rows() + rows;
+        Some(DeclaredApart {
+            summary: summarize_declared_apart(rows, contract_surface_rows, &self.kinds),
+            members,
+            rows,
+            contract_surface_rows,
+            counts: self.counts,
+            references: self.references,
+        })
+    }
 }
 
 impl Tally {
+    /// A tally that files the contract-surface rows of every member whose
+    /// declared kind [leaves the headline](MemberKind::leaves_contract_surface_headline)
+    /// apart from it ([FR-WS-32]).
+    ///
+    /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+    fn setting_apart(member_kinds: &BTreeMap<String, MemberKind>) -> Self {
+        Self {
+            apart: ApartTally {
+                kinds: member_kinds
+                    .iter()
+                    .filter(|(_, kind)| kind.leaves_contract_surface_headline())
+                    .map(|(member, kind)| (member.clone(), *kind))
+                    .collect(),
+                ..ApartTally::default()
+            },
+            ..Self::default()
+        }
+    }
+
     fn record(
         &mut self,
         relation: String,
@@ -2374,6 +2547,19 @@ impl Tally {
         state: CoverageState,
         provenance: RowProvenance,
     ) {
+        // A declared member's contract-surface row is filed apart, HERE, the one
+        // place a row is filed — so no loop above can put one in the headline by
+        // taking a path that forgot to ask ([FR-WS-32]). Its invocation rows are
+        // not the question and stay where they are.
+        if provenance.intake == BridgeIntake::ContractSurface
+            && self.apart.kinds.contains_key(&from.member)
+        {
+            self.apart.counts.record(&state);
+            self.apart
+                .references
+                .push(ReferenceCoverage::new(relation, from, state, provenance));
+            return;
+        }
         // The row's own intake selects the population, so the count and the
         // discriminator the row publishes are read from one value — a split a
         // consumer could not reproduce from `references` would be worse than none.
@@ -2438,12 +2624,23 @@ impl Tally {
         let total = self.by_intake.total();
         let denom = total.bound + total.ambiguous + total.unbound;
         let spec_conformance_ratio = (denom > 0).then(|| total.bound as f64 / denom as f64);
-        let spec_conformance_summary = summarize_spec_conformance(
+        // Sealed before the summary is composed so the summary can state it: a
+        // ratio whose population a declaration shrank must say so in the one line
+        // every surface renders, not only in a sibling key a renderer may ignore
+        // ([BR-51], [FR-WS-32]). Absent ⇒ the line is exactly what it always was.
+        let declared_apart = self.apart.finish(self.by_intake.contract_surface);
+        let mut spec_conformance_summary = summarize_spec_conformance(
             total.bound,
             denom,
             total.no_provider_in_workspace,
             spec_conformance_ratio,
         );
+        if let Some(apart) = &declared_apart {
+            spec_conformance_summary.push_str(&format!(
+                "; {} of {} contract-surface rows reported apart by declared member kind",
+                apart.rows, apart.contract_surface_rows
+            ));
+        }
 
         // The successor headline ([CR-120], [BR-51], [CR-127]). Its two figures
         // have different numerators on purpose — resolved *edges* against
@@ -2489,6 +2686,7 @@ impl Tally {
             members_read: members_read as u64,
             members_total: members_total as u64,
             covers_all_members: members_read == members_total,
+            declared_apart,
         }
     }
 }
@@ -2711,6 +2909,38 @@ fn summarize_spec_conformance(bound: u64, denom: u64, excluded: u64, ratio: Opti
     }
 }
 
+/// Compose the [`DeclaredApart::summary`] line: the rows set apart over every
+/// contract-surface row, the declared members by kind, and what they are
+/// excluded from — one string, so the count is never rendered bare ([BR-51]).
+///
+/// The kinds are listed in [`MemberKind`] order with each one's member count,
+/// and only the kinds actually declared, so the line grows with the enum
+/// without naming a kind nobody used.
+///
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+fn summarize_declared_apart(
+    rows: u64,
+    contract_surface_rows: u64,
+    kinds: &BTreeMap<String, MemberKind>,
+) -> String {
+    let mut by_kind: BTreeMap<MemberKind, u64> = BTreeMap::new();
+    for kind in kinds.values() {
+        *by_kind.entry(*kind).or_default() += 1;
+    }
+    let listed = by_kind
+        .iter()
+        .map(|(kind, n)| format!("{}: {n}", kind.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let members = kinds.len();
+    let plural = if members == 1 { "" } else { "s" };
+    format!(
+        "{rows} of {contract_surface_rows} contract-surface rows reported apart from \
+         {members} declared member{plural} ({listed}); the headline and \
+         spec_conformance_ratio exclude them"
+    )
+}
+
 /// Compose the [`CrossServiceCoverage::resolved_edges_summary`] line — the
 /// **structural** form of [BR-51]: the resolved-edge count and the egress
 /// resolution rate in one string, so a surface physically cannot render the count
@@ -2875,6 +3105,7 @@ mod tests {
 
     use super::super::bridge::ContractNode;
     use super::super::registry::{EngineRegistry, RegistryMode};
+    use super::super::manifest::MemberKind;
     use super::super::{Federation, Member};
     use crate::model::LogosSymbol;
 
@@ -3043,6 +3274,7 @@ mod tests {
             links: Vec::new(),
             governance: Default::default(),
             warm_concurrency: None,
+            member_kinds: Default::default(),
         }
     }
 
@@ -6181,6 +6413,7 @@ mod tests {
                 invocation: ClassificationCounts::default(),
             },
             references: Vec::new(),
+            apart: ApartTally::default(),
         };
         let cov = tally.finish(83, 83);
 
@@ -6212,6 +6445,7 @@ mod tests {
                 invocation: ClassificationCounts::default(),
             },
             references: Vec::new(),
+            apart: ApartTally::default(),
         };
         let cov = tally.finish(1, 1);
 
@@ -8717,4 +8951,251 @@ mod tests {
         let scan = engine.scan(true).expect("scan runs on the single-root path");
         assert!(scan.warnings.iter().all(|w| !w.contains("workspace")));
     }
+
+    // ── S-457 / FR-WS-32: a declared documentation/mock member's rows are
+    //    reported apart, with their count and denominator, never bare ──────
+
+    /// The registry over `names` with `kinds` declared — the resolved map
+    /// `discover` would have produced from `[workspace.member.<name>] kind`.
+    fn registry_declaring(names: &[&str], kinds: &[(&str, MemberKind)]) -> EngineRegistry<FakeEngine> {
+        let mut federation = fed(names);
+        federation.member_kinds = kinds
+            .iter()
+            .map(|(member, kind)| ((*member).to_string(), *kind))
+            .collect();
+        EngineRegistry::new(federation, RegistryMode::Lazy)
+    }
+
+    /// The fixture every test below runs over: `api` declares two operations,
+    /// `docs` holds a copy of one of them plus one no member serves unambiguously,
+    /// `web` and `shop` serve the routes, and `shop` makes one outbound call so the
+    /// invocation half of the headline is non-empty.
+    ///
+    /// Undeclared, the contract-surface rows are: `api GET /users` bound,
+    /// `api DELETE /users` no-provider, `docs GET /users` bound, `docs GET
+    /// /orders` ambiguous (web and shop both serve it).
+    fn docs_workspace() {
+        reset();
+        set_member(
+            "api",
+            vec![
+                op("GET /users/{id}", "local api_get"),
+                op("DELETE /users/{id}", "local api_delete"),
+            ],
+        );
+        set_member(
+            "docs",
+            vec![
+                op("GET /users/{id}", "local docs_get"),
+                op("GET /orders", "local docs_orders"),
+            ],
+        );
+        set_member(
+            "web",
+            vec![
+                route("GET /users/{id}", "local web_users"),
+                route("GET /orders", "local web_orders"),
+            ],
+        );
+        set_member("shop", vec![route("GET /orders", "local shop_orders")]);
+        set_consumers("shop", vec![http_call("GET /users/{id}", "local shop_calls_users")]);
+    }
+
+    const DOCS_WORKSPACE: [&str; 4] = ["api", "docs", "shop", "web"];
+
+    /// **The acceptance criterion.** Declaring `docs` a documentation member
+    /// moves its two contract-surface rows out of the headline and out of
+    /// `spec_conformance_ratio`, into `declared_apart` with their count and the
+    /// denominator they are stated over — and moves nothing else: the invocation
+    /// headline and every other member's row are identical either way.
+    #[test]
+    fn a_declared_documentation_member_leaves_the_headline_and_the_ratio() {
+        docs_workspace();
+        let before = cross_service_coverage(&registry(&DOCS_WORKSPACE).answer());
+        docs_workspace();
+        let after = cross_service_coverage(
+            &registry_declaring(&DOCS_WORKSPACE, &[("docs", MemberKind::Documentation)]).answer(),
+        );
+
+        // Undeclared: docs is half the contract-surface headline.
+        assert_eq!(
+            before.by_intake.contract_surface,
+            ClassificationCounts { bound: 2, ambiguous: 1, unbound: 0, no_provider_in_workspace: 1 }
+        );
+        assert_eq!(before.spec_conformance_ratio, Some(0.75), "3 bound of 4 measured, docs included");
+        assert!(before.declared_apart.is_none(), "nothing declared, nothing set apart");
+
+        // Declared: its rows are gone from every headline figure.
+        assert_eq!(
+            after.by_intake.contract_surface,
+            ClassificationCounts { bound: 1, ambiguous: 0, unbound: 0, no_provider_in_workspace: 1 }
+        );
+        assert_eq!(after.spec_conformance_measured, 2, "api GET + shop's bound call");
+        assert_eq!(after.spec_conformance_ratio, Some(1.0));
+        assert_eq!(
+            after.spec_conformance_summary,
+            "1.000 (2 of 2 measured; 1 excluded as no-provider-in-workspace); \
+             2 of 4 contract-surface rows reported apart by declared member kind",
+            "the one line every surface renders states the rows set apart (BR-51)"
+        );
+        assert_eq!(
+            before.spec_conformance_summary,
+            "0.750 (3 of 4 measured; 1 excluded as no-provider-in-workspace)",
+            "undeclared, the line is exactly what it always was"
+        );
+        assert!(
+            after.references.iter().all(|row| row.from.member != "docs"),
+            "no docs row is left in the headline's rows"
+        );
+
+        // ...and reported apart, with count and denominator.
+        let apart = after.declared_apart.as_ref().expect("a declaration sets rows apart");
+        assert_eq!(apart.rows, 2);
+        assert_eq!(apart.contract_surface_rows, 4, "every contract-surface row, both sides");
+        assert_eq!(
+            apart.counts,
+            ClassificationCounts { bound: 1, ambiguous: 1, unbound: 0, no_provider_in_workspace: 0 }
+        );
+        assert_eq!(
+            apart.members,
+            vec![DeclaredMemberRows {
+                member: "docs".to_string(),
+                kind: MemberKind::Documentation,
+                rows: 2,
+            }]
+        );
+        assert_eq!(
+            apart.references.iter().map(|r| r.from.symbol.as_str()).collect::<Vec<_>>(),
+            ["local docs_get", "local docs_orders"]
+        );
+        assert_eq!(
+            apart.summary,
+            "2 of 4 contract-surface rows reported apart from 1 declared member \
+             (documentation: 1); the headline and spec_conformance_ratio exclude them"
+        );
+
+        // Nothing else moved: the invocation half, the edge headline, and every
+        // row that was not docs'.
+        assert_eq!(after.by_intake.invocation, before.by_intake.invocation);
+        assert_eq!(after.resolved_cross_service_edges, before.resolved_cross_service_edges);
+        assert_eq!(after.resolved_edges_summary, before.resolved_edges_summary);
+        assert_eq!(after.egress_resolution, before.egress_resolution);
+        let not_docs: Vec<_> = before.references.iter().filter(|r| r.from.member != "docs").collect();
+        assert_eq!(after.references.iter().collect::<Vec<_>>(), not_docs);
+    }
+
+    /// Both kinds set rows apart, each declared member is listed with its own
+    /// row count — `0` included, never omitted — and the summary names each
+    /// declared kind once with its member count.
+    #[test]
+    fn each_declared_member_is_listed_with_its_kind_and_rows_even_at_zero() {
+        docs_workspace();
+        let cov = cross_service_coverage(
+            &registry_declaring(
+                &DOCS_WORKSPACE,
+                &[("docs", MemberKind::Documentation), ("shop", MemberKind::Mock)],
+            )
+            .answer(),
+        );
+        let apart = cov.declared_apart.expect("declared");
+        assert_eq!(
+            apart.members,
+            vec![
+                DeclaredMemberRows { member: "docs".into(), kind: MemberKind::Documentation, rows: 2 },
+                DeclaredMemberRows { member: "shop".into(), kind: MemberKind::Mock, rows: 0 },
+            ],
+            "shop holds only a route: it is declared, and contributes no row"
+        );
+        assert_eq!(
+            apart.summary,
+            "2 of 4 contract-surface rows reported apart from 2 declared members \
+             (documentation: 1, mock: 1); the headline and spec_conformance_ratio exclude them"
+        );
+    }
+
+    /// Each declared kind is listed once with **its own member count** — two
+    /// mocks read `mock: 2`, the shape of the reference estate, where both
+    /// candidate members are mocks — beside the total of declared members.
+    #[test]
+    fn the_summary_counts_the_members_of_each_declared_kind() {
+        docs_workspace();
+        let cov = cross_service_coverage(
+            &registry_declaring(
+                &DOCS_WORKSPACE,
+                &[
+                    ("docs", MemberKind::Documentation),
+                    ("shop", MemberKind::Mock),
+                    ("web", MemberKind::Mock),
+                ],
+            )
+            .answer(),
+        );
+        assert_eq!(
+            cov.declared_apart.expect("declared").summary,
+            "2 of 4 contract-surface rows reported apart from 3 declared members \
+             (documentation: 1, mock: 2); the headline and spec_conformance_ratio exclude them"
+        );
+    }
+
+    /// A declared member's **genuinely unbound** row — an operation whose
+    /// template never composed (`path-not-composed`) — is set apart and counted in
+    /// both the apart rows and their denominator, like every other bucket. The
+    /// reference estate's apart set holds one such row.
+    #[test]
+    fn a_declared_members_unbound_row_counts_in_the_rows_and_the_denominator() {
+        docs_workspace();
+        set_member(
+            "docs",
+            vec![
+                op("GET /users/{id}", "local docs_get"),
+                op("GET /orders", "local docs_orders"),
+                // No `ApiPath` parent: the bare method name reduces to no key.
+                op("post", "local docs_orphan"),
+            ],
+        );
+        let cov = cross_service_coverage(
+            &registry_declaring(&DOCS_WORKSPACE, &[("docs", MemberKind::Documentation)]).answer(),
+        );
+        let apart = cov.declared_apart.expect("declared");
+        assert_eq!(
+            apart.counts,
+            ClassificationCounts { bound: 1, ambiguous: 1, unbound: 1, no_provider_in_workspace: 0 }
+        );
+        assert_eq!((apart.rows, apart.contract_surface_rows), (3, 5));
+        assert_eq!(apart.references.len(), 3, "every row counted is a row listed");
+    }
+
+    /// Only a declared member's **consumer** rows move. Its routes stay in the
+    /// provider index, so a mock that serves an operation another member
+    /// declares still ties that operation exactly as it did undeclared — the
+    /// declaration changes what is counted, never what binds.
+    #[test]
+    fn a_declared_members_routes_still_bind_and_tie_other_members() {
+        docs_workspace();
+        let before = cross_service_coverage(&registry(&DOCS_WORKSPACE).answer());
+        docs_workspace();
+        let after = cross_service_coverage(
+            &registry_declaring(&DOCS_WORKSPACE, &[("shop", MemberKind::Mock)]).answer(),
+        );
+        assert_eq!(after.references, before.references, "every row, byte for byte");
+        assert_eq!(after.by_intake, before.by_intake);
+        assert_eq!(after.declared_apart.expect("declared").rows, 0);
+    }
+
+    /// **No declaration, no change on the wire.** The coverage payload over the
+    /// fixture serializes exactly as it did before the key existed — pinned against the bytes the pre-S-457 code emitted for
+    /// this same fixture (captured at `96b7a66`), not against today's own output.
+    #[test]
+    fn a_workspace_without_declarations_serializes_byte_for_byte_as_before() {
+        docs_workspace();
+        let cov = cross_service_coverage(&registry(&DOCS_WORKSPACE).answer());
+        let json = serde_json::to_string(&cov).unwrap();
+        assert_eq!(json, PRE_S457_COVERAGE_JSON);
+    }
+
+    /// The coverage payload [`docs_workspace`] serialized to under the code at
+    /// `96b7a66`, before S-457 — generated by running this same fixture against
+    /// that tree, so the assertion above compares against a vintage it cannot
+    /// have produced itself.
+    const PRE_S457_COVERAGE_JSON: &str = r#"{"references":[{"relation":"route","from":{"member":"api","symbol":"local api_delete"},"bucket":"unbound","state":"unbound","reason":"no-provider-in-workspace","intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"api","symbol":"local api_get"},"bucket":"bound","state":"bound","to":{"member":"web","symbol":"local web_users"},"intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"docs","symbol":"local docs_get"},"bucket":"bound","state":"bound","to":{"member":"web","symbol":"local web_users"},"intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"docs","symbol":"local docs_orders"},"bucket":"ambiguous","state":"unbound","reason":"ambiguous","intake":"contract-surface","candidates":{"disposition":"tied-between","providers":[{"member":"shop","symbol":"local shop_orders"},{"member":"web","symbol":"local web_orders"}],"total":2,"omitted":0,"summary":"2 tied providers, all listed; none bound"},"provenance":"literal"},{"relation":"route","from":{"member":"shop","symbol":"local shop_calls_users"},"bucket":"bound","state":"bound","to":{"member":"web","symbol":"local web_users"},"intake":"invocation","provenance":"literal"}],"bound":3,"ambiguous":1,"unbound":0,"no_provider_in_workspace":1,"by_intake":{"contract_surface":{"bound":2,"ambiguous":1,"unbound":0,"no_provider_in_workspace":1},"invocation":{"bound":1,"ambiguous":0,"unbound":0,"no_provider_in_workspace":0}},"resolved_cross_service_edges":1,"egress_resolution":1.0,"egress_resolution_measured":1,"resolved_edges_summary":"1 resolved cross-service edge; egress resolution 1.000 (1 of 1 egress site resolved)","spec_conformance_ratio":0.75,"spec_conformance_measured":4,"spec_conformance_summary":"0.750 (3 of 4 measured; 1 excluded as no-provider-in-workspace)","members_read":4,"members_total":4,"covers_all_members":true}"#;
 }
