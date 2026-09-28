@@ -167,6 +167,21 @@ fn an_array_declaration_keeps_its_dimensions_and_disagrees_with_a_scalar() {
     assert_eq!(types.field("mixed"), Some("Props"), "the field alone is scalar");
 }
 
+/// Only an EMPTY bracket pair is an array dimension: a bracket with something
+/// inside is another grammar's type argument or size (Go `Producer[T]`,
+/// `map[string]V`, Python `List[int]`, Rust `&[T]`), whose simple name must
+/// read as it did before S-467 — `DeclaredTypes` serves every language's
+/// accessor and broker arm.
+#[test]
+fn only_an_empty_bracket_pair_writes_array_dimensions() {
+    for array in ["Foo[]", "Foo [ ]", "List<Foo>[]", "Foo[][]"] {
+        assert!(writes_dimensions(array), "{array}");
+    }
+    for scalar in ["Foo", "Map<K, Foo[]>", "Producer[T]", "map[string]V", "List[int]", "&[T]", "[u8; 4]"] {
+        assert!(!writes_dimensions(scalar), "{scalar}");
+    }
+}
+
 /// `declares` separates a name the file declares with disagreeing types — a
 /// variable of unknown type — from one it never declares, which receiver
 /// typing (S-467) may read as a type name.

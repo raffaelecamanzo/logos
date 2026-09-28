@@ -323,27 +323,34 @@ fn field_position(node: Node<'_>) -> bool {
     true
 }
 
-/// Whether a declared type's text writes array dimensions — a `[` outside its
-/// generic arguments: `Foo[]` and `List<Foo>[]` do, `Map<K, Foo[]>` does not.
-/// Read from the text rather than a grammar field, because the field naming
-/// them is one grammar's vocabulary ([NFR-MA-01]); the other place dimensions
-/// can be written, after the declared name (`Foo a[]`), is read the same way.
+/// Whether a declared type's text writes array dimensions — an EMPTY `[]`
+/// pair outside its generic arguments: `Foo[]`, `Foo [ ]` and `List<Foo>[]` do;
+/// `Map<K, Foo[]>` does not, and neither does a bracket with something inside
+/// it, which in other grammars is a type argument or a size, never a Java
+/// dimension (Go's `Producer[T]` and `map[string]V`, Python's `List[int]`,
+/// Rust's `&[T]`) — `DeclaredTypes` serves them all, and their types read as
+/// they always did. Read from the text rather than a grammar field, because
+/// the field naming them is one grammar's vocabulary ([NFR-MA-01]); the other
+/// place dimensions can be written, after the declared name (`Foo a[]`), is
+/// read the same way.
 ///
 /// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
 fn writes_dimensions(type_text: &str) -> bool {
     let mut depth = 0usize;
-    type_text.chars().any(|c| match c {
-        '<' => {
-            depth += 1;
-            false
+    let mut chars = type_text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            '[' if depth == 0 => {
+                if chars.clone().find(|c| !c.is_whitespace()) == Some(']') {
+                    return true;
+                }
+            }
+            _ => {}
         }
-        '>' => {
-            depth = depth.saturating_sub(1);
-            false
-        }
-        '[' => depth == 0,
-        _ => false,
-    })
+    }
+    false
 }
 
 /// The outermost node around `node` that declares a callable — the highest
