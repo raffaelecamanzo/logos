@@ -893,6 +893,28 @@ mod tests {
         }
     }
 
+    /// A foreign constant's operands count into the asking fold's budget as a
+    /// local constant's do: a constant already half the budget wide fits once
+    /// and not twice.
+    #[test]
+    fn a_foreign_constants_operands_count_into_the_budget() {
+        let src = "class H { X + X }";
+        let imports = [import("a.b.G.X", true, false)];
+        let wide = |_: &[String], _: &str| {
+            Some(ForeignConstant { operands: MAX_OPERANDS / 2 + 1, ..g_x() })
+        };
+        let names = Names::new(
+            src,
+            "src/main/java/a/c/H.java",
+            &[ScopeCapture { start: 0, end: src.len(), decl: None, name: Some("H".into()), opaque: false }],
+            &[],
+        )
+        .with_reach(Reach { imports: &imports, package: None, lookup: &wide });
+        let once = src.find('X').expect("in fixture");
+        assert_eq!(names.fold(once, once + 1).map(|(t, _)| t).as_deref(), Some("x"));
+        assert_eq!(names.fold(once, src.len() - 2), None, "twice exceeds the budget");
+    }
+
     #[test]
     fn a_repeated_static_import_is_one_import() {
         let imports = [import("a.b.G.X", true, false), import("a.b.G.X", true, false)];
