@@ -1351,6 +1351,19 @@ mod tests {
         );
     }
 
+    /// Every member degraded — nothing read — joins without underflowing the
+    /// candidate denominator, names every member unread and lists no candidate.
+    #[test]
+    fn a_workspace_with_no_member_read_joins_to_nothing_and_names_them_all() {
+        let roster = fed(&["a", "b"], &[]).members;
+        let relation = join(&roster, &BTreeMap::new(), &[]);
+        assert_eq!(relation.headline.members.unread, ["a", "b"]);
+        assert_eq!(relation.headline.members.read, 0);
+        assert!(relation.headline.platform_candidates.is_empty());
+        assert!(relation.headline.summary.contains("over 0 of 2 members read"));
+        assert!(relation.per_member().is_empty());
+    }
+
     /// A workspace with no manifest joins to an empty relation with its
     /// denominators stated, and serializes with no platform key.
     #[test]
