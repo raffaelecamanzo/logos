@@ -307,6 +307,11 @@
 ;                            The interpreter finds `C`'s file only inside the
 ;                            member being indexed, through the package-shaped
 ;                            module key (S-465), never by splitting a path;
+;   @fw.const.package      — the file's `package` declaration (S-470). The
+;                            interpreter reads a file's package from its path,
+;                            through the same key, and only checks it against
+;                            this: a file whose declaration disagrees with its
+;                            directory reaches, and is reached by, nothing;
 ;   @fw.const.import.static / @fw.const.import.asterisk — markers present in
 ;                            the same match for a static import and for a
 ;                            wildcard. A wildcard never supplies a constant: it
@@ -376,6 +381,9 @@
   "static"? @fw.const.import.static
   (scoped_identifier) @fw.const.import
   (asterisk)? @fw.const.import.asterisk)
+
+; The file's package declaration, qualified or not.
+(package_declaration [(scoped_identifier) (identifier)] @fw.const.package)
 
 ; Spring stereotype class: the wired application building block (FR-FW-02).
 ; `@fw.component.base` exists only for the predicate.

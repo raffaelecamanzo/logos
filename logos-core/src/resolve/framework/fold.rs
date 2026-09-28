@@ -136,9 +136,10 @@ pub(super) struct ForeignConstant {
 pub(super) struct Reach<'r> {
     pub(super) imports: &'r [ImportCapture],
     /// The package this file declares by its location
-    /// ([`PackageLayout::package_of`](crate::resolve::package_key::PackageLayout::package_of));
-    /// `None` outside a package-shaped layout, which leaves the same-package
-    /// rung unavailable.
+    /// ([`PackageLayout::package_of`](crate::resolve::package_key::PackageLayout::package_of)),
+    /// when its `package` declaration agrees; `None` otherwise — a
+    /// non-package-shaped language, or a file whose declaration names another
+    /// package — which leaves the same-package rung unavailable.
     pub(super) package: Option<Vec<String>>,
     pub(super) lookup: &'r dyn Fn(&[String], &str) -> Option<ForeignConstant>,
 }

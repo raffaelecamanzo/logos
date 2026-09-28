@@ -384,6 +384,9 @@ struct FileMatches {
     /// declaration — where imports live. What the file imports is then
     /// unknown, so the fold reaches through no import at all (S-470).
     imports_unreadable: bool,
+    /// The package the file declares (`@fw.const.package`, S-470) — `None`
+    /// when it declares none (the unnamed package).
+    const_package: Option<Vec<String>>,
     /// Byte ranges of opaque prefixes written inside an annotation the parser
     /// had to recover from an error: never folded, so they stay opaque and
     /// refuse (see [`fold_constants`]).
@@ -666,6 +669,8 @@ struct MemberConstants<'a> {
 /// A declaring file's text and its `@fw.const` facts, read once per pass.
 struct DeclaringFile {
     source: String,
+    /// The package it declares; empty for the unnamed package.
+    package: Vec<String>,
     scopes: Vec<fold::ScopeCapture>,
     fields: Vec<fold::FieldCapture>,
 }
@@ -709,8 +714,14 @@ impl MemberConstants<'_> {
             };
             let rel = self.index.file_of(*type_node)?;
             let file = cached(&self.files, rel.to_string(), || self.declaring_file(rel))?;
+            let (type_name, package) = fqn.split_last()?;
+            // The FQN index keys the type by its file's path; a file whose
+            // declaration names another package is not that type.
+            if file.package != package {
+                return None;
+            }
             fold::Names::new(&file.source, rel, &file.scopes, &file.fields)
-                .member_constant(fqn.last()?, name)
+                .member_constant(type_name, name)
         })
     }
 
@@ -722,6 +733,7 @@ impl MemberConstants<'_> {
         facts.folds.then(|| {
             Arc::new(DeclaringFile {
                 source,
+                package: facts.const_package.unwrap_or_default(),
                 scopes: facts.const_scopes,
                 fields: facts.const_fields,
             })
@@ -940,7 +952,10 @@ fn fold_constants(
     let names = match member.filter(|_| !out.imports_unreadable) {
         Some(member) => names.with_reach(fold::Reach {
             imports: &imports,
-            package: member.layout.package_of(rel),
+            package: member
+                .layout
+                .package_of(rel)
+                .filter(|package| *package == out.const_package.clone().unwrap_or_default()),
             lookup: &lookup,
         }),
         None => names,
@@ -1475,6 +1490,11 @@ fn generic_match(
                 "fw.const.name" => &mut const_name,
                 "fw.const.value" => &mut const_value,
                 "fw.const.import" => &mut const_import,
+                "fw.const.package" => {
+                    out.const_package =
+                        Some(crate::extract::refs::split_path_text(text(cap.node, src)));
+                    continue;
+                }
                 "fw.const.scope.opaque" => {
                     const_opaque = true;
                     continue;

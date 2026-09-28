@@ -70,7 +70,8 @@
 ;                       each import (`.import`, with `.import.static` /
 ;                       `.import.asterisk` markers, S-470), through which a
 ;                       constant another file of the member declares is
-;                       reached. The Java query's `@fw.const` section is the reference
+;                       reached, and the file's `.package` declaration, which
+;                       the fold checks against the package its path names. The Java query's `@fw.const` section is the reference
 ;                       glossary. Capturing ANY of them opts the dialect into
 ;                       folding; capturing none keeps every opaque path and
 ;                       prefix unfolded, which is how Kotlin stays out of scope.

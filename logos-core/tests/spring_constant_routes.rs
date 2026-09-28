@@ -545,3 +545,38 @@ fn a_constant_built_from_a_third_files_constant_is_refused_and_counted() {
         "a constant two files away",
     );
 }
+
+/// A file's package is read from its path (S-465's key) and checked against its
+/// `package` declaration: where the two disagree, Java would bind another type
+/// than the index names, so the fold refuses rather than pick. Two shapes — a
+/// declaring file whose declaration names another package than its directory,
+/// and a handler whose own does — each beside a correctly placed near miss.
+#[test]
+fn a_file_whose_package_declaration_disagrees_with_its_path_is_refused() {
+    let g = |package: &str, value: &str| {
+        format!("package {package};\n\npublic class G {{\n    public static final String X = \"{value}\";\n}}\n")
+    };
+    let qualified = r#"G.X + "/s""#;
+    // `a/c/G.java` declares `a.legacy`; javac's `a.c.G` is in `a/other/`.
+    assert_refused_once(
+        &[
+            ("src/main/java/a/c/G.java", &g("a.legacy", "/wrong")),
+            ("src/main/java/a/other/G.java", &g("a.c", "/right")),
+            (&api_file("c"), &api("a.c", "", qualified)),
+        ],
+        "a declaring file placed under another package's directory",
+    );
+    assert_refused_once(
+        &[
+            ("src/main/java/a/c/G.java", &g("a.c", "/g")),
+            (&api_file("c"), &api("a.elsewhere", "", qualified)),
+        ],
+        "a handler declaring another package than its directory",
+    );
+    let (_tmp, engine, stats) = index(&[
+        ("src/main/java/a/c/G.java", &g("a.c", "/g")),
+        (&api_file("c"), &api("a.c", "", qualified)),
+    ]);
+    assert_eq!(route_names(engine.runtime().unwrap()), ["GET /v1/g/s"]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
