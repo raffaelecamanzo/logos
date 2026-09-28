@@ -271,6 +271,29 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The file extensions (normalised: lower-case, no leading dot) whose loaded
+    /// plugin declares a **package-shaped** module path
+    /// ([`PackageModules`](super::PackageModules); [CR-149]), each mapped to its
+    /// plugin's source roots in declaration order.
+    ///
+    /// The binder's twin of
+    /// [`specifier_target_extensions`](Self::specifier_target_extensions),
+    /// consumed through [`crate::resolve::package_key::PackageLayout`]. Every
+    /// extension absent from the map keeps the default module model.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    pub fn package_source_roots(&self) -> std::collections::HashMap<String, Vec<String>> {
+        self.plugins
+            .iter()
+            .filter_map(|p| Some((p, p.semantics().package_modules.as_ref()?)))
+            .flat_map(|(p, pm)| {
+                p.extensions()
+                    .iter()
+                    .map(move |e| (normalize_ext(e), pm.source_roots.clone()))
+            })
+            .collect()
+    }
+
     /// Grammars skipped at load due to an ABI mismatch ([FR-PL-03]).
     pub fn skipped(&self) -> &[SkippedGrammar] {
         &self.skipped
@@ -658,6 +681,24 @@ mod tests {
         );
         for ext in ["rs", "py", "java", "kt", "cs", "php", "rb", "scala"] {
             assert!(!exts.contains_key(ext), "`{ext}` specifiers are names");
+        }
+    }
+
+    /// Only Java declares a package-shaped module path (CR-149), under its two
+    /// Maven roots; every other grammar — Rust above all, and Kotlin, which is
+    /// package-shaped too but not opted in — keeps the default module model.
+    #[test]
+    fn package_source_roots_collects_only_the_opted_in_java_grammar() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let roots = reg.package_source_roots();
+        #[cfg(feature = "lang-java")]
+        assert_eq!(
+            roots.get("java").map(Vec::as_slice),
+            Some(["src/main/java".to_string(), "src/test/java".to_string()].as_slice())
+        );
+        for ext in ["rs", "py", "ts", "go", "kt", "cs", "php", "rb", "scala"] {
+            assert!(!roots.contains_key(ext), "`{ext}` keeps the default module model");
         }
     }
 

@@ -18,8 +18,8 @@ use std::sync::Arc;
 use tree_sitter::{Language, Query};
 
 use super::manifest::{
-    ConfigDescriptor, ExportConvention, ImportSpecifier, PluginManifest, PropertiesDescriptor,
-    TestConvention,
+    ConfigDescriptor, ExportConvention, ImportSpecifier, PackageModules, PluginManifest,
+    PropertiesDescriptor, TestConvention,
 };
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
@@ -37,6 +37,11 @@ pub struct Semantics {
     /// Extensions a relative path specifier may spell for the imported file
     /// itself (S-439; see [`PluginManifest::specifier_extensions`]).
     pub specifier_extensions: Vec<String>,
+    /// Whether, and under which source roots, this language's module path is
+    /// package-shaped (CR-149; see [`PluginManifest::package_modules`]) —
+    /// consumed by the binder's module key through
+    /// [`crate::resolve::package_key`].
+    pub package_modules: Option<PackageModules>,
     /// Keywords that increment cyclomatic complexity for this language.
     /// Carried declaratively now; consumed by the complexity metric (S-011+).
     pub complexity_keywords: Vec<String>,
@@ -242,6 +247,7 @@ impl CompiledPlugin {
             module_separator: manifest.module_separator,
             import_specifier: manifest.import_specifier,
             specifier_extensions: manifest.specifier_extensions,
+            package_modules: manifest.package_modules,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,
             abi_version: manifest.abi_version,

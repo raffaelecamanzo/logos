@@ -64,6 +64,19 @@ http_client_detectors = [
   "java::net::http",
 ]
 
+# A Java file's module identity follows its PACKAGE (CR-149, FR-RS-01): under a
+# Maven source root the path after the root is the package, so
+# `src/main/java/com/x/Svc.java` keys as `com::x::Svc` — the name its imports
+# spell — rather than the default model's `main::java::com::x::Svc`, under which
+# no Java import could ever bind. A multi-module repository's
+# `mailbox-core/src/main/java/…` keys the same way under its own crate. A Java
+# file outside both roots keeps the default key, which is already the package for
+# a flat or `src/`-rooted layout. Both roots are listed because a test type sees
+# its production package: one fully-qualified name declared under both is
+# ambiguous and binds neither (NFR-RA-05).
+[package_modules]
+source_roots = ["src/main/java", "src/test/java"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"

@@ -134,6 +134,36 @@ pub enum ImportSpecifier {
     Path,
 }
 
+/// The `[package_modules]` descriptor sub-table: this language's module path is
+/// **package-shaped** under the named source roots ([CR-149], [FR-RS-01]).
+///
+/// The binder's default module model is Rust's — the directory before the last
+/// `src/` names the crate and every later directory is a module — which keys
+/// `src/main/java/com/x/Svc.java` as `main::java::com::x::Svc`, so the import
+/// `com.x.Svc` could never descend to it. A language declaring this table has
+/// each file under one of `source_roots` keyed by the path *after* the root
+/// instead (`com::x::Svc`), which is the name its imports spell. A file of the
+/// language outside every root keeps the default key, which is already
+/// package-shaped for a flat or `src/`-rooted layout.
+///
+/// Absent (the default) leaves a language's module keys exactly as they were
+/// ([NFR-MA-01]). The one derivation of a package from a path is
+/// [`crate::resolve::package_key`]; this table is only its data.
+///
+/// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+/// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageModules {
+    /// Project-relative directory sequences a package path starts beneath, each
+    /// `/`-separated with no leading or trailing `/` (`"src/main/java"`). Matched
+    /// as whole path segments anywhere in a file's path, so a Maven module's
+    /// `mailbox-core/src/main/java/…` is keyed like a root-level one, under its
+    /// own crate.
+    pub source_roots: Vec<String>,
+}
+
 /// How a language marks a function as a test — the declarative rule behind the
 /// extraction-time test-marker evidence flag ([FR-EX-06], [ADR-18], [CR-001]).
 ///
@@ -255,6 +285,13 @@ pub struct PluginManifest {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     #[serde(default)]
     pub specifier_extensions: Vec<String>,
+    /// Whether, and under which source roots, this language's module path is
+    /// package-shaped ([`PackageModules`], [CR-149]). `None` when the
+    /// `[package_modules]` table is omitted — the default module model.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    #[serde(default)]
+    pub package_modules: Option<PackageModules>,
     /// The tree-sitter ABI version this grammar was generated against. Asserted
     /// against the compiled grammar at load ([FR-PL-02], `abi::assert_abi`).
     pub abi_version: usize,
@@ -815,6 +852,27 @@ impl PluginManifest {
                 "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
             ));
         }
+        // A package-shaped module path needs at least one root to strip, and
+        // each root is matched as whole path segments — so an entry that could
+        // never equal a segment sequence (empty, absolute, `..`, a backslash, an
+        // empty segment) is a descriptor bug, not a root that silently matches
+        // nothing.
+        if let Some(pm) = &self.package_modules {
+            if pm.source_roots.is_empty() {
+                return bail(
+                    "`[package_modules]` must declare at least one `source_roots` entry"
+                        .to_string(),
+                );
+            }
+            if let Some(bad) = pm.source_roots.iter().find(|r| {
+                r.contains('\\') || r.split('/').any(|seg| seg.is_empty() || seg == "..")
+            }) {
+                return bail(format!(
+                    "`[package_modules]` source root '{bad}' must be a relative `/`-separated \
+                     directory path (no empty segment, no leading or trailing `/`, no `..`)"
+                ));
+            }
+        }
         // Every declared capability must have a query backing it, so a `logos
         // languages` capability claim can never be a query the engine cannot
         // run.
@@ -1062,6 +1120,45 @@ mod tests {
         // name grammar it always had (S-439, NFR-MA-01).
         assert_eq!(m.import_specifier, ImportSpecifier::Name);
         assert!(m.specifier_extensions.is_empty());
+        // …and the default module model: no package-shaped path (CR-149).
+        assert!(m.package_modules.is_none());
+    }
+
+    /// A package-shaped module path is descriptor data (CR-149, NFR-MA-01):
+    /// the table parses into its roots, and a root that could never equal a
+    /// path-segment sequence — or no root at all — fails loudly by file.
+    #[test]
+    fn a_package_shaped_module_path_is_declared_under_named_source_roots() {
+        let java = format!(
+            "{GOOD}\n[package_modules]\nsource_roots = [\"src/main/java\", \"src/test/java\"]\n"
+        );
+        let m = PluginManifest::parse("java/plugin.toml", &java).unwrap();
+        assert_eq!(
+            m.package_modules.map(|p| p.source_roots),
+            Some(vec!["src/main/java".to_string(), "src/test/java".to_string()])
+        );
+
+        for bad in [
+            "[]",
+            "[\"\"]",
+            "[\"/src\"]",
+            "[\"src/\"]",
+            "[\"src//java\"]",
+            "[\"../src\"]",
+            "[\"src\\\\java\"]",
+        ] {
+            let toml = format!("{GOOD}\n[package_modules]\nsource_roots = {bad}\n");
+            let err = PluginManifest::parse("java/plugin.toml", &toml)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("java/plugin.toml") && err.contains("package_modules"),
+                "{bad}: {err}"
+            );
+        }
+        let unknown =
+            format!("{GOOD}\n[package_modules]\nsource_roots = [\"src\"]\nroots = [\"x\"]\n");
+        assert!(PluginManifest::parse("java/plugin.toml", &unknown).is_err());
     }
 
     /// The specifier grammar is declared apart from the member-path separator
