@@ -71,6 +71,18 @@
 //! to one member's own base-url namespace, and every overriding value is printed
 //! with its file so an adjudicator can see it.
 //!
+//! # A private copy only — and the gate refuses anything else
+//!
+//! This is the one estate gate in the target that reads through member
+//! **engines**, the product path, so it opens member databases, and opening one
+//! below the binary's schema version migrates it forward (a store this binary
+//! migrated can no longer be opened by an older installed `logos`). Before any
+//! engine starts, every member store is opened read-only and its
+//! `PRAGMA user_version` compared with the version a fresh store gets from this
+//! binary ([`refuse_a_store_that_would_migrate`], S-463's
+//! `build_dependency_estate` guard); one lower store fails the run naming it.
+//! Populate a private copy first (a `logos health` per member with this binary).
+//!
 //! [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
 //! [CR-147]: ../../../docs/requests/CR-147-vendored-specs-declare-contracts-and-name-externals.md
 //! [S-411]: ../../../docs/planning/journal.md#s-411-measure-config-declared-coupling-over-the-reference-estate
@@ -1182,6 +1194,40 @@ pub fn verdict_line(half: &str, measured: usize, floor: usize) -> String {
 
 // ── The estate read ────────────────────────────────────────────────────────
 
+fn user_version(db: &Path) -> i64 {
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap_or_else(|e| panic!("open {} read-only: {e}", db.display()));
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0)).expect("read user_version")
+}
+
+/// The schema version this binary gives a fresh store — derived, never pinned.
+fn latest_schema_version() -> i64 {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    drop(Engine::start(tmp.path()).expect("a fresh engine starts"));
+    user_version(&tmp.path().join(".logos").join("logos.db"))
+}
+
+/// Refuse before any engine starts if a member store would migrate — so pointing
+/// the gate at a live estate can never advance its graphs.
+pub fn refuse_a_store_that_would_migrate(members: &[logos_core::federation::Member]) {
+    let latest = latest_schema_version();
+    let behind: Vec<String> = members
+        .iter()
+        .filter_map(|m| {
+            let db = m.root.join(".logos").join("logos.db");
+            let v = db.is_file().then(|| user_version(&db))?;
+            (v < latest).then(|| format!("{} (v{v})", m.name))
+        })
+        .collect();
+    assert!(
+        behind.is_empty(),
+        "{} member store(s) are below schema v{latest} and would be MIGRATED by this run: {}. \
+         Run on a private copy whose stores this binary has already reconciled.",
+        behind.len(),
+        behind.join(", ")
+    );
+}
+
 /// Read the estate into a [`Census`]: the product's coverage rows, every member's
 /// contract surface and ledger, the committed configuration and the overlays.
 pub fn census(root: &Path) -> Census {
@@ -1206,6 +1252,7 @@ pub fn census(root: &Path) -> Census {
         );
     }
 
+    refuse_a_store_that_would_migrate(&federation.members);
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
     let answer = registry.answer();
     let coverage = cross_service_coverage(&answer);
