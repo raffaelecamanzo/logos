@@ -121,6 +121,9 @@ export interface StubOptions {
   buildDependency?: BuildDependencyHeadline;
   /** The `workspace/build-deps` answer (S-464). */
   buildDeps?: XserviceBuildDeps;
+  /** Answer `workspace/build-deps` with this HTTP status instead of `buildDeps`
+   *  (a failed read), or `"pending"` to never answer it (a read in flight). */
+  buildDepsStatus?: number | "pending";
 }
 
 /**
@@ -138,6 +141,7 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
     degradedRollup,
     buildDependency,
     buildDeps,
+    buildDepsStatus,
   } = opts;
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
@@ -153,7 +157,11 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
       if (url.startsWith("/api/v1/workspace/status"))
         return json(status(coverage, topics, degradedRollup, buildDependency));
       if (url.startsWith("/api/v1/workspace/route-providers")) return json({ providers });
-      if (url.startsWith("/api/v1/workspace/build-deps")) return json(buildDeps ?? {});
+      if (url.startsWith("/api/v1/workspace/build-deps")) {
+        if (buildDepsStatus === "pending") return new Promise<Response>(() => {});
+        if (buildDepsStatus !== undefined) return json({ error: "boom" }, false, buildDepsStatus);
+        return json(buildDeps ?? {});
+      }
       if (url.startsWith("/api/v1/workspace/impact")) return json(impact);
       return json({});
     }),

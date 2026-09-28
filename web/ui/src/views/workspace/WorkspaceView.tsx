@@ -665,12 +665,18 @@ function ServiceMap({
         </div>
       </details>
 
-      {showBuild && !deps && (
-        depsError ? (
-          <ErrorPanel>The build relation could not be read: {depsError.message}</ErrorPanel>
-        ) : (
-          <LoadingState label="Reading the build relation…" />
-        )
+      {/* A failed read is stated whatever the toggle says: the cross-context hint is
+          read from the same answer and shown with the toggle off, so an unstated
+          failure would read as "no hint" (NFR-CC-04). Only a workspace whose status
+          carries a build headline ever reads the relation, so a manifest-less one
+          never reaches this. */}
+      {depsError ? (
+        <ErrorPanel>
+          The build relation could not be read: {depsError.message} — the build layer and the
+          cross-context model hint are unknown, not absent.
+        </ErrorPanel>
+      ) : (
+        showBuild && !deps && <LoadingState label="Reading the build relation…" />
       )}
 
       {layer && layer.collapsed.length > 0 && (

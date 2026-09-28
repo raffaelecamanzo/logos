@@ -1428,6 +1428,32 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     expect(screen.queryByRole("button", { name: "archive-kafka-models" })).toBeNull();
   });
 
+  it("states a FAILED build read with the toggle off — never a silent 'no hint'", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDepsStatus: 500 });
+    mount();
+    const toggle = await screen.findByRole("checkbox", { name: /draw what each member builds against/i });
+    expect(toggle).not.toBeChecked();
+    expect(await screen.findByText(/the build relation could not be read/i)).toHaveTextContent(
+      /unknown, not absent/,
+    );
+    expect(screen.queryByText("Cross-context model hint")).toBeNull();
+    // On, it still says so — no spinner in its place, and nothing drawn.
+    await userEvent.click(toggle);
+    expect(screen.getByText(/the build relation could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByText(/reading the build relation/i)).toBeNull();
+    expect(buildEdges()).toEqual([]);
+  });
+
+  it("shows the build read IN FLIGHT once the toggle is on, and nothing drawn yet", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDepsStatus: "pending" });
+    mount();
+    const toggle = await screen.findByRole("checkbox", { name: /draw what each member builds against/i });
+    expect(screen.queryByText(/reading the build relation/i)).toBeNull();
+    await userEvent.click(toggle);
+    expect(screen.getByText(/reading the build relation/i)).toBeInTheDocument();
+    expect(buildEdges()).toEqual([]);
+  });
+
   it("states the build headline on the coverage tab, apart from every runtime board", async () => {
     stubApi({ coverage: COVERAGE, providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
     mount();
