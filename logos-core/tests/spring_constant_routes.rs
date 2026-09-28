@@ -630,3 +630,33 @@ fn a_local_constant_built_from_a_static_imported_one_folds() {
     assert_eq!(route_names(engine.runtime().unwrap()), ["GET /m/{emailAddress}/size"]);
     assert_eq!(stats.routes_not_composed, 0);
 }
+
+/// A type-level `@RequestMapping` prefix built from another file's constant
+/// composes like a written one — through a static import and through a
+/// qualified single-type-imported type — because the prefix fold reads the
+/// same reach as a method path's.
+#[test]
+fn a_type_level_prefix_folds_through_a_static_import_or_a_qualified_imported_type() {
+    for (imports, prefix) in [
+        (STATIC_IMPORT, r#""/v1/{" + EMAIL + "}""#),
+        ("import a.b.GlobalControllerAdvice;\n", r#""/v1/{" + GlobalControllerAdvice.EMAIL + "}""#),
+    ] {
+        let handler = format!(
+            "package a.c;\n\n\
+             {imports}\
+             import org.springframework.web.bind.annotation.GetMapping;\n\
+             import org.springframework.web.bind.annotation.RequestMapping;\n\n\
+             @RequestMapping({prefix})\n\
+             public interface MailboxApiV1 {{\n    \
+                 @GetMapping(\"/size\")\n    \
+                 String size();\n\
+             }}\n"
+        );
+        let (_tmp, engine, stats) = index(&[
+            (ADVICE_FILE, &advice(r#""emailAddress""#)),
+            (&api_file("c"), &handler),
+        ]);
+        assert_eq!(route_names(engine.runtime().unwrap()), ["GET /v1/{emailAddress}/size"], "{prefix}");
+        assert_eq!(stats.routes_not_composed, 0, "{prefix}");
+    }
+}
