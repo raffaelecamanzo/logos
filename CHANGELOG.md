@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-09-28
+
 ### Added
 
 - **Members that build against each other.** Indexing reads each member's Maven `pom.xml` and
