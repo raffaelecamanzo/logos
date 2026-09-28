@@ -88,10 +88,10 @@
 //! [`EdgeKind::RoutesTo`]: crate::model::EdgeKind::RoutesTo
 //! [`EdgeKind::References`]: crate::model::EdgeKind::References
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -513,6 +513,8 @@ pub fn run(
         registry,
         layout: &layout,
         index: &index,
+        files: Mutex::default(),
+        constants: Mutex::default(),
     };
 
     let scanned: Vec<(i64, &str, FileMatches)> = runtime.worker_pool().install(|| {
@@ -655,39 +657,75 @@ struct MemberConstants<'a> {
     registry: &'a LanguageRegistry,
     layout: &'a PackageLayout,
     index: &'a binder::Index,
+    /// Each declaring file's facts, by project-relative path.
+    files: Cache<String, Arc<DeclaringFile>>,
+    /// Each `(type FQN, constant name)` answer.
+    constants: Cache<(Vec<String>, String), fold::ForeignConstant>,
 }
 
-/// One scanned file's answers from [`MemberConstants::constant`], keyed by
-/// `(type FQN, constant name)`: the paths of a file usually repeat a constant.
-type ConstantCache = RefCell<HashMap<(Vec<String>, String), Option<fold::ForeignConstant>>>;
+/// A declaring file's text and its `@fw.const` facts, read once per pass.
+struct DeclaringFile {
+    source: String,
+    scopes: Vec<fold::ScopeCapture>,
+    fields: Vec<fold::FieldCapture>,
+}
+
+/// A pass-wide cache: `None` for a key whose answer is "no" — also worth
+/// remembering.
+type Cache<K, V> = Mutex<HashMap<K, Option<V>>>;
+
+/// The cached answer for `key`, computing it **outside** the lock on a miss.
+/// Every answer here is a pure function of the files on disk, so two workers
+/// racing on one key compute the same value and either insert is correct.
+fn cached<K: Eq + std::hash::Hash, V: Clone>(
+    cache: &Cache<K, V>,
+    key: K,
+    compute: impl FnOnce() -> Option<V>,
+) -> Option<V> {
+    if let Some(known) = cache.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return known.clone();
+    }
+    let value = compute();
+    cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, value.clone());
+    value
+}
 
 impl MemberConstants<'_> {
     /// The constant `name` declared by the top-level type `fqn`, folded in its
     /// own file; `None` unless the member declares that type exactly once and
     /// its body declares `name` as a constant that folds there.
-    fn constant(&self, cache: &ConstantCache, fqn: &[String], name: &str) -> Option<fold::ForeignConstant> {
-        let key = (fqn.to_vec(), name.to_string());
-        if let Some(known) = cache.borrow().get(&key) {
-            return known.clone();
-        }
-        let found = self.fold_in_declaring_file(fqn, name);
-        cache.borrow_mut().insert(key, found.clone());
-        found
+    ///
+    /// Each answer is computed once per pass, and each declaring file read and
+    /// parsed once per pass, however many handler files use it: a central
+    /// paths class used by every controller would otherwise be re-parsed once
+    /// per controller and constant.
+    fn constant(&self, fqn: &[String], name: &str) -> Option<fold::ForeignConstant> {
+        cached(&self.constants, (fqn.to_vec(), name.to_string()), || {
+            let [type_node] = self.index.package_types(fqn) else {
+                return None;
+            };
+            let rel = self.index.file_of(*type_node)?;
+            let file = cached(&self.files, rel.to_string(), || self.declaring_file(rel))?;
+            fold::Names::new(&file.source, rel, &file.scopes, &file.fields)
+                .member_constant(fqn.last()?, name)
+        })
     }
 
-    fn fold_in_declaring_file(&self, fqn: &[String], name: &str) -> Option<fold::ForeignConstant> {
-        let [type_node] = self.index.package_types(fqn) else {
-            return None;
-        };
-        let rel = self.index.file_of(*type_node)?;
-        let type_name = fqn.last()?;
+    /// Read and scan the file at `rel` for its constant facts; `None` when it
+    /// cannot be read, has no frameworks query, or its dialect does not fold.
+    fn declaring_file(&self, rel: &str) -> Option<Arc<DeclaringFile>> {
         let (plugin, source) = read_member_file(self.registry, self.root, rel)?;
         let facts = collect_matches(&mut Parser::new(), plugin, &source)?;
-        if !facts.folds {
-            return None;
-        }
-        fold::Names::new(&source, rel, &facts.const_scopes, &facts.const_fields)
-            .member_constant(type_name, name)
+        facts.folds.then(|| {
+            Arc::new(DeclaringFile {
+                source,
+                scopes: facts.const_scopes,
+                fields: facts.const_fields,
+            })
+        })
     }
 }
 
@@ -898,8 +936,7 @@ fn fold_constants(
     // Another file's constants are reachable only from a scan of the member's
     // graph (S-470); a store-less scan folds what its own file proves.
     let imports = std::mem::take(&mut out.const_imports);
-    let cache = RefCell::new(HashMap::new());
-    let lookup = |fqn: &[String], name: &str| member.and_then(|m| m.constant(&cache, fqn, name));
+    let lookup = |fqn: &[String], name: &str| member.and_then(|m| m.constant(fqn, name));
     let names = match member.filter(|_| !out.imports_unreadable) {
         Some(member) => names.with_reach(fold::Reach {
             imports: &imports,
