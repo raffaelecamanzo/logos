@@ -1,0 +1,312 @@
+S-456 T1 — THE THREE FLOORS OF CR-147 SECTION 3.2 B1, DECLARED BEFORE THE RUN
+============================================================================
+
+Declared (UTC):  2026-09-27T22:13:34Z
+Declared by:     Dev Session 1.1 (sprint-80, branch sprint-80-I1-S1)
+Story:           S-456 — Measure vendored-spec contracts, the external join and
+                 own-spec ties
+Gate decides:    CR-147 section 3.2 B1. Each half gates its own delivery story and
+                 one clearing does not carry another:
+                   Declared contracts      -> S-458 (CR-147 section 3.2 C)
+                   Invocation → external   -> S-459 (CR-147 section 3.2 D)
+                   Own-spec ties           -> S-460 (CR-147 section 3.2 E)
+                 Below a floor that half is recorded FALSIFIED with its evidence
+                 and date, the matching ADR-68 decision point is SUPERSEDED IN
+                 PLACE and never deleted, and its delivery story stays UNPLANNED.
+                 Above a floor that half stays Proposed; its delivery story
+                 accepts it at delivery. Nothing is built by this gate.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 clones,
+83 manifest members after the CR-147 section 2.3 fork exclusion. Read-only against
+the estate: the harness opens member engines, so the recorded run is made on a
+private byte-for-byte copy (`cp -Rp`) of the estate, named in the finding.
+
+This file is committed in this session's FIRST commit, before any measurement code
+exists, so the ordering is auditable in git history rather than asserted. It is
+TRACKED and lives under `logos-core/tests/`, never under the symlinked `docs/`:
+public CI has no private docs, and a floor it cannot read is a test that goes red
+only there.
+
+
+THE THREE FLOORS
+----------------
+
+    >= 3 Declared contracts on the pec-services estate.
+
+    >= 15 Invocation → external rows on the pec-services estate.
+
+    >= 45 Own-spec ties on the pec-services estate.
+
+The half names above are CR-147 section 3.2 B1's first column, verbatim. The
+metric each one counts is that table's second column, verbatim:
+
+  Declared contracts — "Distinct ordered pairs (holder A, contract C) where A is a
+  runnable, non-documentation, non-mock member holding a spec document D that it
+  does not implement, and C is either the member whose own spec equals D (document
+  identity, ≥ 90 % of D's operations) or a named external grouping D's copies"
+
+  Invocation → external — "Invocation-intake `no-provider-in-workspace` REST rows
+  whose composed path equals an operation of a vendored external contract held by
+  the **same** member, exactly, under a base path committed in application config
+  **or** a deploy overlay"
+
+  Own-spec ties — "Contract-surface ambiguous rows whose holder is among the tied
+  providers and holds the spec under its own `src/main/resources`"
+
+The census column (4 / 21 / 62) is an UPPER BOUND from ad-hoc scripts and is NOT a
+floor (CR-147 section 3.2 B1; the census-as-floor rule recorded for S-397). The
+floors are CR-147's, not chosen here; this file fixes what their terms mean.
+
+
+WHERE EVERY ROW COMES FROM
+--------------------------
+
+Every "row", "operation", "tie" and "provider" below is the SHIPPED product's, read
+through the product's own seams over the estate's member graphs:
+
+  - coverage rows: `federation::cross_service_coverage`, unchanged — the rows
+    `workspace status --json` publishes. Its bucket, reason, intake, tied
+    candidates and configuration provenance are taken as the product states them.
+  - spec documents and their operations: each member's
+    `MemberContracts::contract_surface`, the read the bridge itself matches on.
+    An `ApiOperation` is named `"METHOD /template"` there.
+  - call-site templates: each member's `MemberContracts::invocation_refs`, the one
+    ledger seam the bridge and the coverage tier share.
+
+The harness re-classifies nothing the product classifies. Where it needs a fact the
+product does not publish on a row, it derives it from those reads and says so.
+
+
+"OPERATION KEY" MEANS, EXACTLY
+------------------------------
+
+The pair (upper-cased METHOD, positional template), where the template is the
+shipped `resolve::route_template::normalize_template` applied to the operation's
+path. Parameter names never matter (`{id}` and `{userId}` are one key). An
+operation whose template does not normalize has no key and is counted apart as
+un-keyable; it can neither support nor defeat an identity.
+
+
+"SPEC DOCUMENT" AND "HOLDER" MEAN, EXACTLY
+------------------------------------------
+
+A spec document D is one FILE of one member holding at least one `ApiOperation`,
+identified by (member, member-relative path). The path is the file descriptor of
+the operation's SCIP symbol. The member is D's HOLDER. D's operation set is the set
+of its operations' keys.
+
+A document held twice (two files, or the same file in two members) is two
+documents. Grouping copies is the external's job, below.
+
+
+"IMPLEMENTS" MEANS, EXACTLY
+---------------------------
+
+For each operation of D held by A, the product's coverage tier already says whether
+A provides it:
+
+  - no coverage row for the operation  -> the tier's `None`: A's own route is the
+                                          SOLE provider (intra-repo). A provides it.
+  - `ambiguous`, A among `tied-between` -> A provides it (tied).
+  - anything else                      -> A does not provide it.
+
+A IMPLEMENTS D when A provides >= 90 % of D's keyed operations. D is then an OWN
+SPEC of A.
+
+A DOES NOT IMPLEMENT D when A provides NONE of D's keyed operations. D is then a
+VENDORED document of A.
+
+A document between the two (A provides some, under 90 %) is PARTIALLY IMPLEMENTED:
+it is neither an own spec nor vendored, is enumerated in its own split, and counts
+toward nothing. "Does not implement" is read literally rather than as "under 90 %"
+so that a spec running ahead of its own implementation is never reported as a
+contract its holder consumes.
+
+
+"RUNNABLE" MEANS, EXACTLY
+-------------------------
+
+S-411's definition, reused through its function, unchanged: the member commits,
+outside a documentation tree (`identity::is_documentation`), at least one file the
+language plugin registry claims as source.
+
+
+"DOCUMENTATION" AND "MOCK" MEAN, EXACTLY
+----------------------------------------
+
+A member listed in `vendored_spec_contracts_declared_kinds.txt`, committed beside
+this file, with kind `documentation` or `mock`. NEVER a heuristic: the list is a
+declaration a human made, and the harness only reads it (CR-147 section 3.2 A: "the
+kind is declared, never inferred"). A listed name that is not a workspace member is
+a failure, not a silent no-op.
+
+The CANDIDATE list — members holding a spec document and no runnable source — is
+computed and PRINTED as a report beside the declaration. It never subtracts
+anything; a difference between the candidates and the declaration is shown, and a
+human adjudicates it.
+
+
+HALF 1 — "DECLARED CONTRACT" MEANS, EXACTLY
+-------------------------------------------
+
+One distinct ORDERED pair (A, C) for which ALL of the following hold:
+
+  1. A is a workspace member, runnable, and not declared documentation or mock.
+  2. A holds a spec document D that A does not implement (a VENDORED document).
+  3. C is one of:
+
+     (i) DOCUMENT IDENTITY — the member M != A whose own spec D' scores highest,
+         where score = |keys(D) ∩ keys(D')| / |keys(D)|, provided that score is
+         >= 90 %. M must not itself be declared documentation or mock: a mock is a
+         stand-in for the external it mocks (ADR-68 point 5), so its copy joins
+         that external's group below. Two members at the SAME best score resolve
+         to NEITHER; the collision is enumerated and D falls through to (ii).
+
+     (ii) NAMED EXTERNAL — otherwise, the external E identified by D's copies:
+          the connected component containing D in the graph whose nodes are every
+          spec document in the workspace that is not an own spec (vendored,
+          partially implemented, or held by any member at all, documentation and
+          mock included), and whose edges join two documents when >= 90 % of the
+          keys of AT LEAST ONE of them appear in the other. Containment rather
+          than symmetric equality, because a newer version of an external API is
+          a superset of an older one (webmail's two PSS versions share 80 of 81
+          and 80 of 93 operations: one external, not two). The component, not the
+          document, is the contract: two copies of one external held by one
+          member are ONE pair.
+
+  THE GRAIN IS THE ORDERED PAIR. The external's display name is the spec
+  `info.title` most common across the component's copies, unless it is the
+  springdoc default `OpenAPI definition`, else the document stem of the first copy
+  in path order. The name is a label; the component decides the pair.
+
+  SPLITS, printed and never counted toward the floor:
+    - document-identity pairs vs named-external pairs;
+    - pairs a documentation or mock holder would contribute, subtracted and
+      enumerated;
+    - pairs a non-runnable holder would contribute, subtracted and enumerated;
+    - partially implemented documents, enumerated;
+    - identity collisions, enumerated.
+
+
+HALF 2 — "INVOCATION → EXTERNAL ROW" MEANS, EXACTLY
+---------------------------------------------------
+
+One coverage row, counted once, for which ALL of the following hold:
+
+  1. Its intake is `invocation`, its relation `route`, its reason
+     `no-provider-in-workspace` — as the product classified it.
+
+  2. Its COMPOSED PATH P is known. The row carries its call site's symbol and its
+     configuration evidence; the call site's ledger target (`"METHOD template"`)
+     is read from the same member's `invocation_refs`, joined on the symbol and
+     on the set of placeholder keys the row's evidence names. P is that template
+     with each `${key}` replaced by the row's evidence value for the key, and is
+     known only when every such key carries exactly ONE value. A row whose
+     evidence diverges across profiles, or whose join is not unique, is not
+     composed and is enumerated apart. A literal row is its template as written.
+
+  3. Its member A holds, as a VENDORED document classified in half 1 as a NAMED
+     EXTERNAL (A therefore runnable and not declared documentation or mock), a
+     document with an operation whose key equals (METHOD, normalize(B + P)),
+     where B is the row's COMMITTED BASE PATH (below). Equality is exact on the
+     key. SUFFIX MATCHING IS NEVER ADMITTED.
+
+  "COMMITTED BASE PATH" MEANS, EXACTLY. The call's BASE-URL KEYS are A's
+  application-configuration keys whose committed value is a URL and whose parent
+  namespace equals the parent namespace of a placeholder key the row's evidence
+  names, both read in Spring's relaxed form (lower-cased, `-` removed): the
+  parent of `pec-server.base-url` and of `pecserver.urigetmailboxpath` is
+  `pecserver`. A deploy overlay OVERRIDES such a key when one of A's committed
+  overlay values sits under a key whose last segment, read as an environment
+  variable (`_` to `.`, relaxed), or whose dotted tail, equals the base-url key's
+  relaxed form (`PECSERVER_BASEURL` overrides `pec-server.base-url`). The URL
+  PATH of each committed value is taken (`https://h:8443/prov` -> `/prov`,
+  `http://localhost:8082` -> the empty path). Then:
+
+    - if any overlay overrides a base-url key, the candidate base paths are the
+      distinct paths of the OVERRIDING OVERLAY values — an environment variable
+      beats `application.yml` at deploy time, which is how Spring resolves it;
+    - otherwise they are the distinct paths of the application-config values,
+      across every profile.
+
+  B exists only when that set holds exactly ONE path. Every overlay's path must
+  agree (ADR-68 point 3): two or more is a REFUSAL, enumerated with each path and
+  the file committing it. A call with no base-url key has no committed base path.
+
+  Deploy overlays are read by S-411's overlay walk, reused through its function,
+  unchanged (`hidden(false)`, `.git` excluded, `identity::deploy_role` files,
+  documentation trees skipped).
+
+  SPLITS, printed and never counted toward the floor. Every row of (1) falls in
+  exactly one:
+    - EXACT UNDER A COMMITTED BASE PATH — the counted rows, each with its base
+      path and the file committing it;
+    - SUFFIX-ONLY — an operation of the same member's external, same METHOD,
+      whose template ends, at a segment boundary, with normalize(P) and is longer
+      than it, with no committed base path supplying the prefix;
+    - BASE PATH OVERSHOOTS — normalize(P) alone equals an operation but B is not
+      empty, so B + P does not;
+    - REFUSED, BASE PATHS DISAGREE;
+    - NO COMMITTED BASE-URL KEY;
+    - NOT COMPOSED (divergent evidence, or no unique ledger join);
+    - NO MATCH in the member's externals;
+    - THE MEMBER HOLDS NO NAMED EXTERNAL.
+  And one counterfactual, printed beside the verdict: the exact count if only
+  application configuration were read (the reading CR-147 section 2.1 calls
+  suffix inference for `pecserver-facade`).
+
+
+HALF 3 — "OWN-SPEC TIE" MEANS, EXACTLY
+--------------------------------------
+
+One coverage row for which ALL of the following hold:
+
+  1. Its intake is `contract-surface` and its bucket `ambiguous` — as the product
+     classified it.
+  2. Its holder (the row's `from` member) is among its `tied-between` providers.
+  3. The spec document the row's operation belongs to lies under a
+     `src/main/resources/` directory of the holder — at the member root or in one
+     of its build modules (`api/src/main/resources/openapi/v1.yaml` counts), and
+     nowhere else (`src/test/resources`, documentation trees and root-level copies
+     do not).
+
+  SPLITS, printed and never counted toward the floor. Every row of (1) falls in
+  exactly one:
+    - OWN-SPEC TIES — the counted rows, by holder;
+    - HOLDER IS A CANDIDATE, SPEC NOT UNDER ITS MAIN RESOURCES;
+    - HOLDER IS NOT A CANDIDATE — enumerated by holder, documentation and mock
+      holders named as such.
+
+
+RECONCILIATION — BY NAME, NOT A FLOOR
+--------------------------------------
+
+CR-147 section 2.1 names two figures the run must reproduce or explain by
+mechanism, and each is printed against its own measured counterpart:
+
+  - `webmail` -> `mailbox-aggregator-api` by document identity, 31 of 31
+    operations; and 15 of those 31 tied per-operation between
+    `mailbox-aggregator-api` and the services it fronts.
+  - `pecserver-facade`: 20 of its 21 `no-provider-in-workspace` calls equal an
+    operation of its vendored PSS spec under `/prov`.
+
+A difference is a finding to explain, never a reason to change a definition above.
+
+
+HONESTY NOTE — WHAT WAS SEEN BEFORE THIS FILE WAS WRITTEN
+---------------------------------------------------------
+
+No measurement code existed when this file was written. Exploratory reads did
+precede it and are declared here so an adjudicator can weigh them:
+`workspace status --json` from logos 1.4.27 over the estate copy (it reproduces
+CR-147 section 2.1: contract-surface 81 / 140 / 1 / 646, invocation
+no-provider 44), and the committed configuration of `pecserver-facade` and
+`notification-adapter`. The latter showed one thing that bears on half 2:
+`notification-adapter`'s only overlay (`.helm/values.yaml`) commits
+`NOTIFICATIONGATEWAY_API_BASEURL` with the path `/api`, which its vendored spec's
+operations do not carry. Under the overlay-overrides rule fixed above, that call
+is a BASE PATH OVERSHOOT and not an exact row, where CR-147 section 2.1 counted it
+as exact under application config. The rule was fixed on the ground stated above
+(it is how the deployed service resolves its base URL, and it is the reading that
+makes `/prov` provable at all), not on its yield, and both readings are printed so
+the choice is visible in the report rather than buried in the count.
