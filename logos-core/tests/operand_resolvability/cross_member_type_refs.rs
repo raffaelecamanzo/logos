@@ -936,9 +936,33 @@ pub fn reconcile(product: &Judgement, census: &Judgement, decl: &Declarations) -
     let product_main = product.main_triples();
     let reach = product.reach();
     let census_main = census.main_triples();
-    let mechanism = |(_, _, t): &Triple| match refused_by_name.get(t) {
-        Some(files) => Mechanism::PackageRefusal(files.clone()),
-        None => Mechanism::Unattributed,
+    // Every name a triple's rows touched: the type they named and each row's own
+    // target. A refusal of the target's exact owner moves a row onto its
+    // enclosing name, so the refused file is found under the target, not the
+    // type the triple ends up naming.
+    let mut names: BTreeMap<Triple, BTreeSet<String>> = BTreeMap::new();
+    for j in [product, census] {
+        for (row, judged) in &j.rows {
+            if let (RowClass::ExactlyOne { provider, .. }, Some((t, _))) = (&judged.class, &judged.named) {
+                let triple = (row.consumer.clone(), provider.clone(), t.clone());
+                names.entry(triple).or_default().extend([t.clone(), row.target.clone()]);
+            }
+        }
+    }
+    let mechanism = |triple: &Triple| {
+        let files: BTreeSet<String> = names
+            .get(triple)
+            .into_iter()
+            .flatten()
+            .filter_map(|n| refused_by_name.get(n))
+            .flatten()
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            Mechanism::Unattributed
+        } else {
+            Mechanism::PackageRefusal(files.into_iter().collect())
+        }
     };
     let mut out = Reconciliation::default();
     for triple in census_main.keys().filter(|t| !reach.contains(*t)) {
@@ -1942,6 +1966,25 @@ mod tests {
             )],
             "a refusal that removes a co-owner makes an ambiguous type exactly-one"
         );
+
+        // A refusal of a target's exact owner moves the row onto its enclosing
+        // name: the new triple is attributed to the refused file too.
+        let decl = Declarations {
+            sources: vec![
+                src("lib", "src/main/java/com/l/Svc/Inner.java", Some("com.other")),
+                src("util", "src/main/java/com/l/Svc.java", Some("com.l")),
+            ],
+            avro: vec![],
+        };
+        let rows = vec![row("app", "src/main/java/A.java", "com.l.Svc.Inner")];
+        let mut pairs = relation_pairs();
+        pairs.build.insert(pair("app", "util"), false);
+        let product = judge(&rows, &OwnerIndex::build(&decl, Rule::Product), &pairs);
+        let census = judge(&rows, &OwnerIndex::build(&decl, Rule::Census), &pairs);
+        let rec = reconcile(&product, &census, &decl);
+        let refused = Mechanism::PackageRefusal(vec!["lib/src/main/java/com/l/Svc/Inner.java".into()]);
+        assert_eq!(rec.missing, vec![(t("app", "lib", "com.l.Svc.Inner"), refused.clone())]);
+        assert_eq!(rec.extra, vec![(t("app", "util", "com.l.Svc"), refused)]);
     }
 
     // ── The store guard ─────────────────────────────────────────────────────
