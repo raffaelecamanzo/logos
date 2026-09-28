@@ -10,19 +10,19 @@
 ;                      never takes its target from the file's imports, so the
 ;                      two shapes must stay apart: recorded alike, `List.of()`
 ;                      bound to a statically imported in-house `of`.
-;   @ref.import      — a single-type or single-static import's scoped path
+;   @ref.import      — an import declaration's scoped path
 ;                      (`org.springframework.web…`, `static a.b.C.m`);
 ;                      canonicalised (dots → `::`) into the ledger form feeding
 ;                      the binder and the framework candidacy gate (FR-FW-04).
-;   @ref.import.glob — a wildcard import's scoped path, the name before `.*`
-;                      (`a.b.*` → `a::b`, `static a.b.C.*` → `a::b::C`),
-;                      recorded as a glob (CR-149): it names a package or a type
-;                      whose members it brings into scope, never one declaration.
+;   @ref.import.asterisk — present in the same match when the declaration ends
+;                      in `.*` (CR-149): the path before it (`a.b.*` → `a::b`,
+;                      `static a.b.C.*` → `a::b::C`) is then recorded as a glob —
+;                      it names a package or a type whose members it brings into
+;                      scope, never one declaration.
 ;
-; The two import patterns partition `import_declaration`: the trailing `.`
-; anchor makes `@ref.import` match only when the path is the declaration's LAST
-; named child, which a wildcard's `asterisk` child never lets it be — so no
-; import is captured twice.
+; One pattern, with the wildcard as an optional marker rather than a second
+; pattern kept apart by a last-child anchor: a comment is a named node too, so
+; `import a.b.C /* why */;` would slip past such an anchor and record nothing.
 ;
 ; Droppable on disk at `.logos/plugins/java/queries/references.scm`.
 ;
@@ -38,12 +38,8 @@
   name: (identifier) @ref.method)
 
 (import_declaration
-  (scoped_identifier) @ref.import .)
-
-(import_declaration
-  (scoped_identifier) @ref.import.glob
-  .
-  (asterisk))
+  (scoped_identifier) @ref.import
+  (asterisk)? @ref.import.asterisk)
 
 ;   @ref.access — an own-field access (`this.x`): a method reading a field of
 ;                 its own class (CR-005, FR-EX-08). `field_access` is a distinct

@@ -1440,12 +1440,12 @@ fn collect_refs(
                 // because its use-trees (groups, renames, globs) need a
                 // structural walk no text split can express.
                 //
-                // `ref.import.glob` is the same specifier written before a
-                // wildcard (a Java `import a.b.*`, CR-149): it names a scope
-                // whose members come into view, not one declaration, so it is a
-                // `Glob` row and introduces no alias — `b` is not a name the
-                // file can now use.
-                capture @ ("ref.import" | "ref.import.glob") => {
+                // A match that also carries `ref.import.asterisk` wrote the
+                // specifier before a wildcard (a Java `import a.b.*`, CR-149):
+                // it names a scope whose members come into view, not one
+                // declaration, so it is a `Glob` row and introduces no alias —
+                // `b` is not a name the file can now use.
+                "ref.import" => {
                     let segments = match semantics.import_specifier {
                         ImportSpecifier::Path => {
                             specifier_segments(text, &semantics.specifier_extensions)
@@ -1455,7 +1455,11 @@ fn collect_refs(
                     if segments.is_empty() {
                         continue;
                     }
-                    let (form, alias) = if capture == "ref.import.glob" {
+                    let wildcard = m
+                        .captures
+                        .iter()
+                        .any(|c| capture_names[c.index as usize] == "ref.import.asterisk");
+                    let (form, alias) = if wildcard {
                         (RefForm::Glob, None)
                     } else {
                         (RefForm::Path, segments.last().cloned())

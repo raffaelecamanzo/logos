@@ -354,6 +354,19 @@ fn jdk_spring_and_lombok_imports_stay_unbound_even_beside_a_same_named_workspace
 }
 
 #[test]
+fn an_import_followed_by_a_comment_is_still_recorded_and_bound() {
+    // A comment is a named node: an import pattern anchored on its path being
+    // the declaration's last child would drop both of these rows.
+    let tmp = single_module(
+        "package com.x.web;\n\nimport com.x.svc.Svc /* why */;\nimport com.x.svc.* /* all */;\n\npublic class Ctl {}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(import_rows(rt, "com::x::svc::Svc"), [(RefForm::Path, true)]);
+    assert_eq!(import_rows(rt, "com::x::svc"), [(RefForm::Glob, false)]);
+}
+
+#[test]
 fn a_spring_controller_behind_a_wildcard_import_is_still_a_framework_candidate() {
     // Spring candidacy reads import-prefix rows in the ledger by target text
     // (FR-FW-04), whatever their form: recording the wildcard as a glob must not
