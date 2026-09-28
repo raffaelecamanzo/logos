@@ -88,14 +88,17 @@ pub struct FrameworkStats {
     pub components: u64,
     /// Route registrations the pass **refused** this run because a
     /// class-/interface-level path prefix governed them but was not a
-    /// resolvable literal (FR-FW-05, S-329). Promoting the method path alone
+    /// resolvable literal (FR-FW-05, S-329), plus every method-level path
+    /// element written as an expression that did not fold to one (S-469). The
+    /// grains differ on purpose: a refused prefix counts once per registration,
+    /// a refused method path once per list element. Promoting a partial path
     /// would advertise a provider at an address the service does not serve, so
     /// the registration is dropped instead and counted here (NFR-RA-05). This
     /// count **is** the reported grain FR-FW-05 asks for, and it is the only
     /// one: a refused registration promotes no node, so the cross-service
     /// coverage tier has no provider to label and never reports a
     /// `path-not-composed` reason for it (S-378). Zero on every codebase whose
-    /// prefixes are written literals.
+    /// prefixes and paths are written literals or fold.
     pub routes_not_composed: u64,
     /// Wall-clock cost of the whole pass for this run (OQ-07 evidence).
     pub duration_ms: u64,

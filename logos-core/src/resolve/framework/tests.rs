@@ -17,7 +17,7 @@ fn scan_lang(ext: &str, source: &str) -> FileMatches {
         .for_extension(ext)
         .unwrap_or_else(|| panic!("{ext} plugin"));
     let mut parser = Parser::new();
-    scan_source(&mut parser, plugin, source)
+    scan_source(&mut parser, plugin, &format!("src/Fixture.{ext}"), source)
 }
 
 /// Scan a Rust source snippet with the compiled-in plugin set.
@@ -361,6 +361,7 @@ fn dedup_prefers_the_proven_handler_and_is_first_wins_otherwise() {
         end_line: line,
         origin: PathOrigin::default(),
         at: 0,
+        folded_from: Vec::new(),
     };
 
     // Handler-less first, handler-bearing second: the upgrade fires.
@@ -405,6 +406,7 @@ fn outranked_positional_paths_are_dropped_only_within_their_own_site() {
         end_line: 1,
         origin: PathOrigin { site, named },
         at: site.unwrap_or(0),
+        folded_from: Vec::new(),
     };
 
     let mut routes = vec![
@@ -444,6 +446,7 @@ fn a_dropped_positional_match_hands_its_proven_handler_to_the_survivor() {
             named,
         },
         at: 7,
+        folded_from: Vec::new(),
     };
 
     let mut routes = vec![
@@ -506,6 +509,7 @@ fn scope(start: usize, end: usize, literals: &[(&str, usize, usize)], opaque: &[
                 start: *s,
                 end: *e,
                 resolvable: is_resolvable_prefix(text),
+                folded_from: Vec::new(),
             })
             .collect(),
         opaque: opaque.to_vec(),
@@ -523,6 +527,7 @@ fn route_at(path: &str, at: usize) -> RouteMatch {
         end_line: 1,
         origin: PathOrigin::default(),
         at,
+        folded_from: Vec::new(),
     }
 }
 
@@ -1025,6 +1030,7 @@ fn a_second_language_inherits_composition_from_its_query_alone() {
     let matches = scan_source(
         &mut parser,
         plugin,
+        "src/UserController.kt",
         r#"
 @RequestMapping("/v1/")
 class UserController {
@@ -1591,8 +1597,9 @@ mod java_spring {
     #[test]
     fn non_literal_named_paths_promote_nothing() {
         // The header's honesty claim: a constant reference or a concatenation
-        // leaves no literal, so nothing is promoted — never a guessed path
-        // (NFR-RA-05).
+        // that does not fold leaves no literal, so nothing is promoted — never
+        // a guessed path (NFR-RA-05). None of these names a constant the file
+        // declares; that each is *counted* is `java_constant_fold`'s to pin.
         for arguments in [
             r#"value = BASE + "/x""#,
             "value = BASE",
@@ -1611,8 +1618,8 @@ mod java_spring {
     #[test]
     fn a_mixed_list_promotes_only_its_literal_elements() {
         // The other half of the same claim: a list mixing a literal and a
-        // non-literal promotes what it can establish and drops the rest
-        // silently. Reporting that as `path-not-composed` is S-329's.
+        // non-literal promotes what it can establish. The refused element is
+        // counted since S-469 (`java_constant_fold`).
         let got = java_routes(&in_class(
             r#"    @GetMapping(value = {"/a", BASE + "/b"})
     public String get() { return ""; }"#,
@@ -2451,6 +2458,493 @@ public class Outer {
     }
 }
 
+// ── Java Spring paths folded from `String` constants (S-469) ─────────────────
+
+/// A mapping path written as a `+` chain of literals and same-type `String`
+/// constants folds to one literal and composes exactly as a written one; any
+/// other non-literal path is refused and **counted** rather than dropped
+/// ([FR-FW-05], [NFR-RA-05], [CR-151]).
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+#[cfg(feature = "lang-java")]
+mod java_constant_fold {
+    use super::*;
+
+    /// The path every fold fixture below is built to reach.
+    const FOLDED: &str = "/v1/users/{userId}/x";
+
+    /// One promoted route as `(path, method, handler)`.
+    type Triple = (String, String, Option<String>);
+
+    /// `(path, method, handler)` of each promoted route, plus the refusals.
+    fn fold_scan(source: &str) -> (Vec<Triple>, Vec<RouteRefusal>) {
+        let m = scan_lang("java", source);
+        (sorted_triples(&m), m.refusals)
+    }
+
+    fn get(path: &str, handler: &str) -> Triple {
+        (path.to_string(), "GET".to_string(), Some(handler.to_string()))
+    }
+
+    /// One fixture per path form, each over a class `static final` constant,
+    /// under the type's literal `@RequestMapping` prefix.
+    #[test]
+    fn every_path_form_folds_a_same_class_constant_and_composes_with_the_prefix() {
+        for arguments in [
+            r#""/users/{" + USER_ID + "}/x""#,
+            r#"value = "/users/{" + USER_ID + "}/x""#,
+            r#"path = "/users/{" + USER_ID + "}/x""#,
+            r#"value = {"/users/{" + USER_ID + "}/x"}"#,
+        ] {
+            let (routes, refusals) = fold_scan(&format!(
+                "@RequestMapping(\"/v1\")\n@RestController\npublic class C {{\n    \
+                 private static final String USER_ID = \"userId\";\n\n    \
+                 @GetMapping({arguments})\n    public String get() {{ return \"\"; }}\n}}\n"
+            ));
+            assert_eq!(routes, vec![get(FOLDED, "get")], "{arguments}");
+            assert!(refusals.is_empty(), "{arguments}: {refusals:?}");
+        }
+    }
+
+    /// The estate's same-type shape (`mailbox-api`'s `MailboxOperationApiV1`):
+    /// an interface whose `String` field is implicitly `static final`, used by
+    /// a mapping declared on the interface itself — in every path form.
+    #[test]
+    fn every_path_form_folds_an_interface_constant() {
+        for arguments in [
+            r#""/users/{" + USER_ID + "}/x""#,
+            r#"value = "/users/{" + USER_ID + "}/x""#,
+            r#"path = "/users/{" + USER_ID + "}/x""#,
+            r#"value = {"/users/{" + USER_ID + "}/x"}"#,
+        ] {
+            let (routes, refusals) = fold_scan(&format!(
+                "@RequestMapping(\"/v1\")\npublic interface Api {{\n    \
+                 String USER_ID = \"userId\";\n\n    \
+                 @GetMapping({arguments})\n    String get();\n}}\n"
+            ));
+            assert_eq!(routes, vec![get(FOLDED, "get")], "{arguments}");
+            assert!(refusals.is_empty(), "{arguments}: {refusals:?}");
+        }
+    }
+
+    /// `final static` is as legal as `static final`, and a constant may be
+    /// built from another constant of the same type.
+    #[test]
+    fn modifier_order_and_a_constant_built_from_constants_both_fold() {
+        let (routes, refusals) = fold_scan(
+            r#"public class C {
+    static final String USERS = "/v1/users";
+    final static String USER = USERS + "/{" + "userId" + "}";
+
+    @GetMapping(USER + "/x")
+    public String get() { return ""; }
+}
+"#,
+        );
+        assert_eq!(routes, vec![get(FOLDED, "get")]);
+        assert!(refusals.is_empty(), "{refusals:?}");
+    }
+
+    /// Every refusal shape the acceptance criteria name promotes nothing and
+    /// counts exactly one — never a partial path.
+    #[test]
+    fn a_method_path_that_does_not_fold_is_refused_and_counted_once() {
+        for (label, members) in [
+            ("a method call", r#"    @GetMapping(value = Paths.users())"#),
+            (
+                "a non-final field",
+                "    static String USERS = \"/users\";\n    @GetMapping(value = USERS)",
+            ),
+            (
+                "a non-static final field",
+                "    final String USERS = \"/users\";\n    @GetMapping(value = USERS)",
+            ),
+            (
+                "a non-String constant",
+                "    static final int USERS = 1;\n    @GetMapping(value = \"/users/\" + USERS)",
+            ),
+            ("an out-of-type constant", "    @GetMapping(value = Paths.USERS)"),
+            ("an undeclared name", r#"    @GetMapping(value = "/users/{" + ID + "}")"#),
+            (
+                "a constant whose initializer does not fold",
+                "    static final String USERS = Paths.BASE + \"/users\";\n    @GetMapping(USERS)",
+            ),
+            (
+                "a cyclic pair of constants",
+                "    static final String A = B;\n    static final String B = A;\n    @GetMapping(A)",
+            ),
+            // A valid tree four constants wide and eight deep: unbounded, it
+            // folds 65,536 copies of "/a" into a 131,072-character path, so
+            // only the operand budget refuses it (a wider one would hang the
+            // indexer).
+            (
+                "a constant tree past the operand budget",
+                "    static final String A0 = \"/a\";\n    static final String A1 = A0 + A0 + A0 + A0;\n    \
+                 static final String A2 = A1 + A1 + A1 + A1;\n    static final String A3 = A2 + A2 + A2 + A2;\n    \
+                 static final String A4 = A3 + A3 + A3 + A3;\n    static final String A5 = A4 + A4 + A4 + A4;\n    \
+                 static final String A6 = A5 + A5 + A5 + A5;\n    static final String A7 = A6 + A6 + A6 + A6;\n    \
+                 static final String A8 = A7 + A7 + A7 + A7;\n    @GetMapping(A8)",
+            ),
+            // Another type in the same file is still another type — reaching it
+            // is S-470's shape, not this story's.
+            (
+                "another type of the same file",
+                "    @GetMapping(\"/{\" + Paths.ID + \"}\")",
+            ),
+            // A field named like the type obscures it (JLS §6.4.2): `C.ID`
+            // would read `ID` off the String `C`, so it is not `C`'s constant.
+            (
+                "a qualifier obscured by a same-named field",
+                "    static final String C = \"/c\";\n    static final String ID = \"id\";\n    @GetMapping(\"/{\" + C.ID + \"}\")",
+            ),
+        ] {
+            let (routes, refusals) = fold_scan(&format!(
+                "class Paths {{\n    static final String ID = \"id\";\n}}\n\n\
+                 public class C {{\n{members}\n    public String get() {{ return \"\"; }}\n}}\n"
+            ));
+            assert!(routes.is_empty(), "{label}: {routes:?}");
+            assert_eq!(refusals, [RouteRefusal::PathNotFolded], "{label}");
+        }
+    }
+
+    /// A written literal belongs to the literal patterns even where the fold
+    /// could not read it: an escape sequence is promoted verbatim, as before
+    /// S-469, and is **not** also counted as a refused fold. The opaque
+    /// patterns match it too (a literal is an `expression`), which is what the
+    /// identity rule in `fold_constants` exists for.
+    #[test]
+    fn a_written_literal_the_fold_cannot_read_is_promoted_and_not_counted() {
+        let (routes, refusals) = fold_scan(
+            "public class C {\n    @GetMapping(value = {\"/a\\tb\", \"/c\"})\n    \
+             public String get() { return \"\"; }\n}\n",
+        );
+        assert_eq!(routes, vec![get("/a\\tb", "get"), get("/c", "get")]);
+        assert!(refusals.is_empty(), "{refusals:?}");
+    }
+
+    /// A mixed list promotes its literal and folded elements and counts each
+    /// refused one — a refused path element is its own unstated address.
+    #[test]
+    fn a_mixed_list_promotes_what_folds_and_counts_each_refused_element() {
+        let (routes, refusals) = fold_scan(
+            r#"public class C {
+    static final String B = "/b";
+
+    @GetMapping(value = {"/a", B, Paths.C, OTHER + "/d"})
+    public String get() { return ""; }
+}
+"#,
+        );
+        assert_eq!(routes, vec![get("/a", "get"), get("/b", "get")]);
+        assert_eq!(
+            refusals,
+            [RouteRefusal::PathNotFolded, RouteRefusal::PathNotFolded]
+        );
+    }
+
+    /// Java scoping decides what a name binds to, and the fold refuses wherever
+    /// that answer is not provable from the file.
+    #[test]
+    fn a_name_the_file_cannot_prove_is_refused() {
+        for (label, source) in [
+            // A supertype may declare `ID`, and an inherited field would hide
+            // the enclosing type's — so the enclosing one is not the answer.
+            (
+                "inherited from a superclass",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public static class C extends Base {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+            (
+                "inherited from an interface",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public static class C implements Api {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+            // The other type kinds that may inherit a name, one row each —
+            // every `@fw.const.scope.opaque` pattern is pinned by its own row.
+            (
+                "an interface extending another",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public interface Api extends Base {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        String get();\n    }\n}\n",
+            ),
+            (
+                "a record implementing an interface",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public record R() implements Api {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+            (
+                "an enum",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public enum E {\n        A;\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+            (
+                "an anonymous class",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 Object o = new Base() {\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    };\n}\n",
+            ),
+            // A non-constant field of the inner type shadows the outer
+            // constant; skipping past it would fold the wrong declaration.
+            (
+                "shadowed by a non-constant field",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public static class C {\n        String ID;\n        \
+                 @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+            // A type's own annotation is resolved outside its body (JLS §6.3),
+            // so a top-level class cannot name its own constant unqualified.
+            (
+                "a type annotation naming its own member unqualified",
+                "@RequestMapping(BASE)\npublic class C {\n    static final String BASE = \"/v1\";\n    \
+                 @GetMapping(\"/users\")\n    public String get() { return \"\"; }\n}\n",
+            ),
+        ] {
+            let (routes, refusals) = fold_scan(source);
+            assert!(routes.is_empty(), "{label}: {routes:?}");
+            assert_eq!(refusals.len(), 1, "{label}: {refusals:?}");
+        }
+    }
+
+    /// A constant declared inside a nested `@interface` is that annotation
+    /// type's member, not the enclosing class's (review of S-469: it was filed
+    /// under the class and folded). Java binds `ID` here to the enclosing
+    /// class's constant, or — beside an inherited `BASE` — to the supertype's.
+    #[test]
+    fn a_nested_annotation_types_constant_is_not_the_enclosing_classs() {
+        let (routes, refusals) = fold_scan(
+            "public class Outer {\n    static final String ID = \"outer\";\n    \
+             public static class C {\n        @interface Marker { String ID = \"m\"; }\n        \
+             @GetMapping(\"/{\" + ID + \"}\")\n        public String get() { return \"\"; }\n    }\n}\n",
+        );
+        assert_eq!(routes, vec![get("/{outer}", "get")]);
+        assert!(refusals.is_empty(), "{refusals:?}");
+
+        // Beside a supertype, the annotation type's constant must not stand
+        // in for the inherited one: refused, never `/fabricated`.
+        let (routes, refusals) = fold_scan(
+            "public class C extends Base {\n    @interface Marker { String BASE = \"/fabricated\"; }\n    \
+             @GetMapping(BASE)\n    public String get() { return \"\"; }\n    \
+             @GetMapping(C.BASE)\n    public String get2() { return \"\"; }\n}\n",
+        );
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded, RouteRefusal::PathNotFolded]);
+    }
+
+    /// A path the parser only recovered from an error is not read: a Unicode
+    /// escape in an identifier (`BASEASE` is `BASEASE` to javac) parses as
+    /// the identifier `BASE` beside an `ERROR` node, and folding that identifier
+    /// would promote a different constant's value (review of S-469). The
+    /// registration is refused and counted instead, for a method path and for a
+    /// class prefix alike.
+    #[test]
+    fn a_path_recovered_from_a_parse_error_is_refused_not_folded() {
+        let constants = "    static final String BASE = \"/fab\";\n    static final String BASEASE = \"/real\";\n";
+        let (routes, refusals) = fold_scan(&format!(
+            "public class C {{\n{constants}    @GetMapping(BASE\\u0041SE)\n    \
+             public String get() {{ return \"\"; }}\n}}\n"
+        ));
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded]);
+
+        let (routes, refusals) = fold_scan(&format!(
+            "public class Outer {{\n{constants}    @RequestMapping(BASE\\u0041SE)\n    public static class C {{\n        \
+             @GetMapping(\"/users\")\n        public String get() {{ return \"\"; }}\n    }}\n}}\n"
+        ));
+        assert!(routes.iter().all(|r| !r.0.starts_with("/fab")), "{routes:?}");
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotComposed]);
+
+        // A constant whose initializer holds the escape has no value the fold
+        // may read: `A` is `BASEASE`'s value to javac, never `BASE`'s.
+        let (routes, refusals) = fold_scan(&format!(
+            "public class C {{\n{constants}    static final String A = BASE\\u0041SE;\n    \
+             @GetMapping(A)\n    public String get() {{ return \"\"; }}\n}}\n"
+        ));
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded]);
+    }
+
+    /// The positive twins of the scoping refusals: a type declaring the
+    /// constant itself wins over anything it inherits, and an enclosing type's
+    /// constant is visible to a nested type that inherits nothing.
+    #[test]
+    fn an_own_or_enclosing_constant_folds() {
+        for (label, source, path) in [
+            (
+                "own constant beside a supertype",
+                "public class C extends Base {\n    static final String ID = \"id\";\n    \
+                 @GetMapping(\"/{\" + ID + \"}\")\n    public String get() { return \"\"; }\n}\n",
+                "/{id}",
+            ),
+            (
+                "enclosing type's constant",
+                "public class Outer {\n    static final String ID = \"id\";\n    \
+                 public static class C {\n        @GetMapping(\"/{\" + ID + \"}\")\n        \
+                 public String get() { return \"\"; }\n    }\n}\n",
+                "/{id}",
+            ),
+            (
+                "qualified by its own type",
+                "public class C {\n    static final String ID = \"id\";\n    \
+                 @GetMapping(\"/{\" + C.ID + \"}\")\n    public String get() { return \"\"; }\n}\n",
+                "/{id}",
+            ),
+        ] {
+            let (routes, refusals) = fold_scan(source);
+            assert_eq!(routes, vec![get(path, "get")], "{label}");
+            assert!(refusals.is_empty(), "{label}: {refusals:?}");
+        }
+    }
+
+    /// A class-level prefix built from same-type constants composes — through
+    /// the qualified form a type's own annotation needs, or from an enclosing
+    /// type — while an unfoldable prefix is still refused as `PathNotComposed`.
+    #[test]
+    fn a_prefix_built_from_same_type_constants_composes() {
+        for (label, source) in [
+            (
+                "qualified own constant",
+                "@RequestMapping(C.BASE + \"/users\")\npublic class C {\n    \
+                 static final String BASE = \"/v1\";\n    \
+                 @GetMapping(\"/{\" + \"userId\" + \"}/x\")\n    public String get() { return \"\"; }\n}\n",
+            ),
+            (
+                "enclosing type's constant, named form",
+                "public class Outer {\n    static final String BASE = \"/v1/users\";\n    \
+                 @RequestMapping(value = BASE)\n    public static class C {\n        \
+                 @GetMapping(\"/{userId}/x\")\n        public String get() { return \"\"; }\n    }\n}\n",
+            ),
+        ] {
+            let (routes, refusals) = fold_scan(source);
+            assert_eq!(routes, vec![get(FOLDED, "get")], "{label}");
+            assert!(refusals.is_empty(), "{label}: {refusals:?}");
+        }
+
+        let (routes, refusals) = fold_scan(
+            "@RequestMapping(ApiPaths.USERS + \"/v1\")\npublic class C {\n    \
+             @GetMapping(\"/users\")\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotComposed]);
+    }
+
+    /// A folded prefix is judged exactly like a written one: folding a
+    /// placeholder does not make it a joinable address.
+    #[test]
+    fn a_folded_prefix_is_still_judged_as_an_address() {
+        let (routes, refusals) = fold_scan(
+            "@RequestMapping(C.BASE)\npublic class C {\n    \
+             static final String BASE = \"${api.base}\";\n    \
+             @GetMapping(\"/users\")\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotComposed]);
+    }
+
+    /// The depth bound is sixteen constants on one chain: `A15` (sixteen,
+    /// counting `A0`) folds and `A16` is refused. The refusal is about the
+    /// asking chain, not the constants on it — a path that meets `A16` first
+    /// does not stop a later path folding `A15` through the very same
+    /// constants.
+    #[test]
+    fn a_chain_through_more_than_sixteen_constants_is_refused() {
+        let mut members = String::from("    static final String A0 = \"/a\";\n");
+        for k in 1..=16 {
+            members.push_str(&format!("    static final String A{k} = A{};\n", k - 1));
+        }
+        let (routes, refusals) = fold_scan(&format!(
+            "public class C {{\n{members}    @GetMapping(A16)\n    public String deep() {{ return \"\"; }}\n    \
+             @GetMapping(A15)\n    public String bounded() {{ return \"\"; }}\n}}\n"
+        ));
+        assert_eq!(routes, vec![get("/a", "bounded")]);
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded]);
+    }
+
+    /// A folded path is trimmed exactly as a written one is, prefix or not: the
+    /// route is named `GET /users/{id}`, never with the blanks the literals
+    /// carried, which no consumer would match.
+    #[test]
+    fn a_folded_path_is_trimmed_like_a_written_one() {
+        let (routes, refusals) = fold_scan(
+            "public class C {\n    static final String ID = \"id\";\n    \
+             @GetMapping(\" /users/{\" + ID + \"} \")\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert_eq!(routes, vec![get("/users/{id}", "get")]);
+        assert!(refusals.is_empty(), "{refusals:?}");
+    }
+
+    /// Provenance: a folded route names every constant it used and the file
+    /// declaring it, the prefix's included; a written route names none.
+    #[test]
+    fn a_folded_route_records_its_constants_and_a_literal_route_none() {
+        let m = scan_lang(
+            "java",
+            "@RequestMapping(C.BASE)\npublic class C {\n    \
+             static final String BASE = \"/v1\";\n    \
+             static final String USER_ID = \"userId\";\n    \
+             @GetMapping(\"/users/{\" + USER_ID + \"}/x\")\n    public String folded() { return \"\"; }\n    \
+             @GetMapping(\"/users\")\n    public String written() { return \"\"; }\n}\n",
+        );
+        let constant = |name: &str| FoldedConstant {
+            name: name.to_string(),
+            file: "src/Fixture.java".to_string(),
+        };
+        let by_path: std::collections::BTreeMap<&str, &Vec<FoldedConstant>> = m
+            .routes
+            .iter()
+            .map(|r| (r.path.as_str(), &r.folded_from))
+            .collect();
+        assert_eq!(
+            by_path.get(FOLDED).map(|v| v.as_slice()),
+            Some([constant("USER_ID"), constant("BASE")].as_slice()),
+            "{by_path:?}"
+        );
+        // Composed with the folded prefix, so it carries BASE — and nothing of
+        // its own.
+        assert_eq!(
+            by_path.get("/v1/users").map(|v| v.as_slice()),
+            Some([constant("BASE")].as_slice()),
+            "{by_path:?}"
+        );
+
+        let literal = scan_lang(
+            "java",
+            "@RequestMapping(\"/v1\")\npublic class C {\n    \
+             @GetMapping(\"/users\")\n    public String written() { return \"\"; }\n}\n",
+        );
+        assert_eq!(literal.routes.len(), 1, "{:?}", literal.routes);
+        assert!(literal.routes[0].folded_from.is_empty(), "{:?}", literal.routes);
+    }
+
+    /// The store-free projection carries the provenance too — it is what the
+    /// reference-estate measurement ([S-470]) reads.
+    ///
+    /// [S-470]: ../../../docs/planning/journal.md#s-470-a-static-imported-same-member-constant-folds-measured-on-the-reference-estate
+    #[test]
+    fn the_projection_carries_the_provenance() {
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("java").expect("java plugin");
+        let routes = routes_in_source(
+            plugin,
+            "src/Api.java",
+            "public interface Api {\n    String ID = \"id\";\n    \
+             @GetMapping(\"/v1/{\" + ID + \"}\")\n    String get();\n}\n",
+        );
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        assert_eq!(routes[0].path, "/v1/{id}");
+        assert_eq!(
+            routes[0].folded_from,
+            [FoldedConstant { name: "ID".to_string(), file: "src/Api.java".to_string() }]
+        );
+    }
+}
+
 // ── Kotlin Spring mapping annotations (S-330) ────────────────────────────────
 
 /// Kotlin's Spring query is annotation-compatible with Java's but sits on a
@@ -3052,8 +3546,9 @@ class UserController : UserApi {
     /// surprise.
     #[test]
     fn the_headers_documented_capture_gaps_are_real_and_promote_nothing() {
-        // A positional array method path. Java's positional pattern has the
-        // same gap for `{…}`, so the two languages agree.
+        // A positional array method path. Java reads `{…}` since S-469; the
+        // divergence is pinned by
+        // `a_positional_list_method_path_is_read_in_java_and_not_yet_in_kotlin`.
         let positional_list = scan_lang(
             "kt",
             &in_prefixed_class(
@@ -3669,6 +4164,107 @@ mod jvm_parity {
         );
     }
 
+    /// The one place the two JVM dialects **deliberately** part (S-469,
+    /// [CR-151] §3.3). A method path written as an expression is captured,
+    /// folded or refused and **counted** in Java; Kotlin's query captures no
+    /// opaque method path and no `@fw.const.*` fact, so there it still promotes
+    /// nothing and counts nothing, as before. Both halves are asserted here —
+    /// the routes still agree, the refusal counts do not — so the divergence
+    /// is a pinned decision rather than a row quietly dropped from
+    /// `PAIRED_FIXTURES`. When a Kotlin CR brings `const val` and templates
+    /// into scope, this test is the one to invert.
+    ///
+    /// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
+    #[test]
+    fn a_non_literal_method_path_is_counted_in_java_and_not_yet_in_kotlin() {
+        // (label, kotlin, java, promoted routes on both sides, Java refusals)
+        let rows: &[(&str, &str, &str, usize, usize)] = &[
+            (
+                "non-literal named method paths",
+                "class C {\n    @GetMapping(value = BASE)\n    fun a(): String { return \"\" }\n    @GetMapping(value = BASE + \"/x\")\n    fun b(): String { return \"\" }\n    @GetMapping(value = Paths.USERS)\n    fun c(): String { return \"\" }\n}\n",
+                "public class C {\n    @GetMapping(value = BASE)\n    public String a() { return \"\"; }\n    @GetMapping(value = BASE + \"/x\")\n    public String b() { return \"\"; }\n    @GetMapping(value = Paths.USERS)\n    public String c() { return \"\"; }\n}\n",
+                0,
+                3,
+            ),
+            (
+                "mixed list method path",
+                "class C {\n    @GetMapping(value = [\"/a\", BASE + \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
+                "public class C {\n    @GetMapping(value = {\"/a\", BASE + \"/b\"})\n    public String get() { return \"\"; }\n}\n",
+                1,
+                1,
+            ),
+        ];
+        for &(label, kotlin, java, routes, java_refusals) in rows {
+            let (kt, java_side) = (promoted("kt", kotlin), promoted("java", java));
+            assert_eq!(kt.0, java_side.0, "{label}: the promoted routes still agree");
+            assert_eq!(kt.0.len(), routes, "{label}: {:?}", kt.0);
+            assert_eq!(kt.1, 0, "{label}: Kotlin counts nothing yet");
+            assert_eq!(java_side.1, java_refusals, "{label}: Java counts each refused path");
+            assert_eq!((kt.2, kt.3), (java_side.2, java_side.3), "{label}");
+        }
+    }
+
+    /// A positional list method path is read in Java since S-469 (review of
+    /// S-469: its non-literal elements were dropped with no trace, which
+    /// [FR-FW-05] forbids) and not yet in Kotlin, whose query captures neither
+    /// `["/a", "/b"]` nor its elements. The literal list promotes one route per
+    /// element in Java and nothing in Kotlin; a mixed list promotes the literal
+    /// element and counts the refused one in Java.
+    ///
+    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+    #[test]
+    fn a_positional_list_method_path_is_read_in_java_and_not_yet_in_kotlin() {
+        let literal = promoted(
+            "java",
+            "public class C {\n    @GetMapping({\"/a\", \"/b\"})\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert_eq!(
+            literal.0,
+            ["GET /a -> Some(\"get\")", "GET /b -> Some(\"get\")"],
+            "{literal:?}"
+        );
+        assert_eq!(literal.1, 0, "{literal:?}");
+        let kotlin = promoted(
+            "kt",
+            "class C {\n    @GetMapping([\"/a\", \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
+        );
+        assert_eq!(kotlin, (Vec::new(), 0, Vec::new(), 0));
+
+        let mixed = promoted(
+            "java",
+            "public class C {\n    static final String B = \"/b\";\n    \
+             @GetMapping({\"/a\", B + \"/x\", OTHER})\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert_eq!(
+            mixed.0,
+            ["GET /a -> Some(\"get\")", "GET /b/x -> Some(\"get\")"],
+            "{mixed:?}"
+        );
+        assert_eq!(mixed.1, 1, "OTHER is counted: {mixed:?}");
+    }
+
+    /// The fold is opted into by the query, not by the language: a prefix of
+    /// literals only (`"/v1" + "/x"`) is foldable text in either syntax, yet
+    /// Kotlin — whose query names no `@fw.const.*` capture — still refuses it,
+    /// exactly as before S-469, while Java composes it.
+    #[test]
+    fn only_a_dialect_that_captures_constants_folds_a_prefix() {
+        let kt = scan_lang(
+            "kt",
+            "@RequestMapping(\"/v1\" + \"/x\")\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
+        );
+        assert!(kt.routes.is_empty(), "{:?}", kt.routes);
+        assert_eq!(kt.refusals, [RouteRefusal::PathNotComposed]);
+
+        let java = scan_lang(
+            "java",
+            "@RequestMapping(\"/v1\" + \"/x\")\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
+        );
+        let paths: Vec<&str> = java.routes.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, ["/v1/x/users"]);
+        assert!(java.refusals.is_empty(), "{:?}", java.refusals);
+    }
+
     /// The candidacy gate and the method table are *shared*, not merely
     /// similar: a route promoted from Kotlin has cleared the same
     /// `org::springframework` ledger fingerprint and been named by the same
@@ -4080,24 +4676,6 @@ mod jvm_parity {
             true,
         ),
         (
-            "positional array method path is captured by neither language",
-            "class C {\n    @GetMapping([\"/a\", \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
-            "public class C {\n    @GetMapping({\"/a\", \"/b\"})\n    public String get() { return \"\"; }\n}\n",
-            false,
-        ),
-        (
-            "non-literal named method paths promote nothing",
-            "class C {\n    @GetMapping(value = BASE)\n    fun a(): String { return \"\" }\n    @GetMapping(value = BASE + \"/x\")\n    fun b(): String { return \"\" }\n    @GetMapping(value = Paths.USERS)\n    fun c(): String { return \"\" }\n}\n",
-            "public class C {\n    @GetMapping(value = BASE)\n    public String a() { return \"\"; }\n    @GetMapping(value = BASE + \"/x\")\n    public String b() { return \"\"; }\n    @GetMapping(value = Paths.USERS)\n    public String c() { return \"\"; }\n}\n",
-            false,
-        ),
-        (
-            "mixed list method path",
-            "class C {\n    @GetMapping(value = [\"/a\", BASE + \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
-            "public class C {\n    @GetMapping(value = {\"/a\", BASE + \"/b\"})\n    public String get() { return \"\"; }\n}\n",
-            true,
-        ),
-        (
             "paths converging after composition collapse",
             "@RequestMapping(\"/v1\")\nclass C {\n    @GetMapping(value = \"/users\")\n    fun listUsers(): String { return \"\" }\n    @GetMapping(value = \"users\")\n    fun listUsersAgain(): String { return \"\" }\n}\n",
             "@RequestMapping(\"/v1\")\npublic class C {\n    @GetMapping(value = \"/users\")\n    public String listUsers() { return \"\"; }\n    @GetMapping(value = \"users\")\n    public String listUsersAgain() { return \"\"; }\n}\n",
@@ -4162,12 +4740,12 @@ class MailboxApiV1 {
         let mut parser = Parser::new();
         // Every projected field is compared, `line` included: a field the
         // projection carries but no assertion reads can be silently zeroed.
-        let scanned: Vec<(String, String, u32)> = scan_source(&mut parser, plugin, SPRING_CONTROLLER)
+        let scanned: Vec<(String, String, u32)> = scan_source(&mut parser, plugin, "src/MailboxApiV1.java", SPRING_CONTROLLER)
             .routes
             .into_iter()
             .map(|r| (r.method, r.path, r.start_line))
             .collect();
-        let projected: Vec<(String, String, u32)> = routes_in_source(plugin, SPRING_CONTROLLER)
+        let projected: Vec<(String, String, u32)> = routes_in_source(plugin, "src/MailboxApiV1.java", SPRING_CONTROLLER)
             .into_iter()
             .map(|r| (r.method, r.path, r.line))
             .collect();
@@ -4183,7 +4761,7 @@ class MailboxApiV1 {
         let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
         let plugin = registry.for_extension("java").expect("java plugin");
         let paths: Vec<String> =
-            routes_in_source(plugin, SPRING_CONTROLLER).into_iter().map(|r| r.path).collect();
+            routes_in_source(plugin, "src/MailboxApiV1.java", SPRING_CONTROLLER).into_iter().map(|r| r.path).collect();
         assert!(
             paths.contains(&"/v1/users/{userId}/mailboxes/{mailboxId}".to_string()),
             "composed paths: {paths:?}",
@@ -4198,9 +4776,9 @@ class MailboxApiV1 {
     fn a_concatenated_path_is_dropped_without_costing_its_literal_sibling() {
         // The provider-side gap S-384 measured: `pecserver-facade` registers
         // `value = "/mailboxes/{" + EMAIL_ADDRESS_PARAMETER_NAME + "}/size"`.
-        // The query captures a string literal, so this route is invisible
-        // rather than refused — recorded here so the finding rests on a pinned
-        // behaviour rather than on one reading of one estate file.
+        // The constant reaches that file through a static import, which the
+        // fold does not resolve yet (S-470), so the route is still absent —
+        // refused and counted since S-469, where before it was invisible.
         //
         // The fixture carries a LITERAL sibling beside the concatenated one,
         // and the assertion is an exact equality rather than a negative. That
@@ -4223,7 +4801,7 @@ class Facade {
 }
 "#;
         let paths: Vec<String> =
-            routes_in_source(plugin, source).into_iter().map(|r| r.path).collect();
+            routes_in_source(plugin, "src/Facade.java", source).into_iter().map(|r| r.path).collect();
         assert_eq!(
             paths,
             vec!["/v1/mailboxes/count".to_string()],
