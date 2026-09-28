@@ -7,6 +7,7 @@ import {
   adjacencySet,
   capNotice,
   cloneLoaded,
+  degreeMap,
   edgeColor,
   edgeStyle,
   elementPhrase,
@@ -18,6 +19,7 @@ import {
   nodeSize,
   visibleNodeIds,
 } from "./graphModel.ts";
+import { BUILD_EDGE_TYPE } from "../workspace/serviceMapModel.ts";
 
 const node = (id: string, layer: GraphElementNode["layer"] = "code"): GraphElementNode => ({
   id,
@@ -129,6 +131,16 @@ describe("palettes & sizing", () => {
     expect(edgeColor("subscribes")).toBe("#0891b2");
     expect(edgeStyle("publishes")).toBe("solid");
     expect(edgeStyle("subscribes")).toBe("dashed");
+  });
+
+  it("counts runtime edges toward a node's degree and never a build edge (BR-58)", () => {
+    const set = loadedFrom(
+      [node("a"), node("b"), node("lib")],
+      [edge("a", "b", "route"), edge("a", "lib", BUILD_EDGE_TYPE), edge("b", "lib", BUILD_EDGE_TYPE)],
+    );
+    const deg = degreeMap(set, new Set(["a", "b", "lib"]));
+    expect(deg).toEqual({ a: 1, b: 1 });
+    expect(deg.lib ?? 0).toBe(0);
   });
 
   it("bumps the selected node to at least the focus size", () => {
