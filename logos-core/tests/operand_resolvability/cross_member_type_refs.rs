@@ -126,6 +126,10 @@ pub const RECORDED_REACH_BACKING: (usize, usize, usize) = (294, 140, 0);
 /// Main-tree exactly-one triples by pair: `(build, build into a platform,
 /// collision-backed, type-only)`.
 pub const RECORDED_MAIN_TRIPLE_PAIRS: (usize, usize, usize, usize) = (379, 31, 24, 3);
+/// `(source, avro, both)` backing of the explained pairs.
+pub const RECORDED_EXPLANATION_BACKING: (usize, usize, usize) = (37, 0, 15);
+/// `(source, avro, both)` owner backing of the ambiguous rows.
+pub const RECORDED_AMBIGUOUS_BACKING: (usize, usize, usize) = (131, 0, 0);
 /// `(explained, denominator)` of the Explanation half.
 pub const RECORDED_EXPLANATION: (usize, usize) = (52, 52);
 /// `(ambiguous, cross-member)` rows of the precision ceiling.
@@ -616,7 +620,8 @@ pub fn resolve<'a>(target: &str, index: &'a OwnerIndex) -> Option<(String, Namin
 pub enum RowClass {
     SelfOwned,
     ExactlyOne { provider: String, backing: Backing },
-    Ambiguous { owners: Vec<String> },
+    /// `backing` is every owner's backing merged: `Both` when they differ.
+    Ambiguous { owners: Vec<String>, backing: Backing },
     NoOwner,
 }
 
@@ -630,7 +635,10 @@ pub fn classify(consumer: &str, owners: Option<&Owners>) -> RowClass {
         [(provider, backing)] => {
             RowClass::ExactlyOne { provider: (*provider).clone(), backing: **backing }
         }
-        many => RowClass::Ambiguous { owners: many.iter().map(|(m, _)| (*m).clone()).collect() },
+        many => RowClass::Ambiguous {
+            owners: many.iter().map(|(m, _)| (*m).clone()).collect(),
+            backing: many.iter().map(|(_, b)| **b).reduce(Backing::with).expect("two or more owners"),
+        },
     }
 }
 
@@ -847,6 +855,37 @@ impl Judgement {
         let unexplained: Vec<_> =
             self.dependency.iter().filter(|p| !explaining.contains(*p)).cloned().collect();
         (self.dependency.len() - unexplained.len(), self.dependency.len(), unexplained)
+    }
+
+    /// Explained pairs by the backing of the Reach triples explaining them —
+    /// `(source, avro, both)`, `both` when a pair's triples mix the two.
+    pub fn explanation_backing(&self) -> (usize, usize, usize) {
+        let backing: BTreeMap<Triple, Backing> =
+            self.exactly_one().map(|(t, _, _, b, _)| (t, b)).collect();
+        let mut per_pair: BTreeMap<(String, String), Backing> = BTreeMap::new();
+        for t in self.reach() {
+            let b = backing[&t];
+            let key = (t.0, t.1);
+            if self.dependency.contains(&key) {
+                per_pair.entry(key).and_modify(|m| *m = m.with(b)).or_insert(b);
+            }
+        }
+        let n = |want| per_pair.values().filter(|b| **b == want).count();
+        (n(Backing::Source), n(Backing::Avro), n(Backing::Both))
+    }
+
+    /// Ambiguous rows by their owners' merged backing — `(source, avro, both)`.
+    pub fn ambiguous_backing(&self) -> (usize, usize, usize) {
+        let backings: Vec<Backing> = self
+            .rows
+            .iter()
+            .filter_map(|(_, j)| match j.class {
+                RowClass::Ambiguous { backing, .. } => Some(backing),
+                _ => None,
+            })
+            .collect();
+        let n = |want| backings.iter().filter(|b| **b == want).count();
+        (n(Backing::Source), n(Backing::Avro), n(Backing::Both))
     }
 
     /// **Precision ceiling**: `(ambiguous rows, cross-member rows)`, every tree.
@@ -1233,6 +1272,12 @@ fn report(root: &Path, e: &Estate, product: &Judgement, census: &Judgement, rec:
     // ── Explanation
     let (explained, denominator, unexplained) = product.explanation();
     println!("\n  {}", verdict_line(HALF_EXPLANATION, EXPLANATION_FLOOR, explained, denominator));
+    let (source, avro, both) = product.explanation_backing();
+    println!(
+        "    explained pairs by backing: source {source} · avro {avro} · both {both}; every \
+         explaining triple is main-tree (Reach), and every pair a non-platform `dependency` \
+         build pair by the denominator's definition"
+    );
     for (a, b) in &unexplained {
         println!("    unexplained: {a} → {b}");
     }
@@ -1240,9 +1285,14 @@ fn report(root: &Path, e: &Estate, product: &Judgement, census: &Judgement, rec:
     // ── Precision
     let (ambiguous, cross) = product.precision();
     println!("\n  {}", verdict_line(HALF_PRECISION, PRECISION_CEILING, ambiguous, cross));
+    let (source, avro, both) = product.ambiguous_backing();
+    println!(
+        "    ambiguous rows by owner backing: source {source} · avro {avro} · both {both}; an \
+         ambiguous row has no one provider, so no pair class"
+    );
     let mut ambiguous_types: BTreeMap<(String, Vec<String>), usize> = BTreeMap::new();
     for (_, j) in &product.rows {
-        if let (RowClass::Ambiguous { owners }, Some((t, _))) = (&j.class, &j.named) {
+        if let (RowClass::Ambiguous { owners, .. }, Some((t, _))) = (&j.class, &j.named) {
             *ambiguous_types.entry((t.clone(), owners.clone())).or_default() += 1;
         }
     }
@@ -1408,6 +1458,8 @@ fn measure_cross_member_type_refs_over_the_reference_workspace() {
     assert_eq!(product.main_triple_pairs(), RECORDED_MAIN_TRIPLE_PAIRS, "the pair split drifted");
     assert_eq!((explained, denominator), RECORDED_EXPLANATION, "Explanation drifted");
     assert_eq!((ambiguous, cross), RECORDED_PRECISION, "precision rows drifted");
+    assert_eq!(product.explanation_backing(), RECORDED_EXPLANATION_BACKING, "explained-pair backing drifted");
+    assert_eq!(product.ambiguous_backing(), RECORDED_AMBIGUOUS_BACKING, "ambiguous-row backing drifted");
     assert_eq!(
         estate.decl.package_refusals().len(),
         RECORDED_PACKAGE_REFUSALS,
@@ -1789,7 +1841,7 @@ mod tests {
         assert_eq!(class("app", "com.s.Shared"), RowClass::SelfOwned);
         assert_eq!(
             class("app", "com.d.Dup"),
-            RowClass::Ambiguous { owners: vec!["lib".into(), "util".into()] }
+            RowClass::Ambiguous { owners: vec!["lib".into(), "util".into()], backing: Backing::Source }
         );
         assert_eq!(class("app", "org.springframework.Bean"), RowClass::NoOwner);
         // The provider importing its own type is self-owned.
@@ -1983,6 +2035,43 @@ mod tests {
         let (explained, denominator, unexplained) = j.explanation();
         assert_eq!((explained, denominator), (0, 1));
         assert_eq!(unexplained, vec![pair("app", "lib")]);
+    }
+
+    #[test]
+    fn the_explanation_and_ceiling_halves_carry_their_backing_splits() {
+        let decl = Declarations {
+            sources: vec![
+                src("lib", "src/main/java/com/l/Svc.java", Some("com.l")),
+                src("lib", "src/main/java/com/d/Dup.java", Some("com.d")),
+                src("util", "src/main/java/com/d/Dup.java", Some("com.d")),
+                src("util", "src/main/java/com/e/Mix.java", Some("com.e")),
+                src("common", "src/main/java/com/c/Base.java", Some("com.c")),
+            ],
+            avro: vec![
+                avsc("lib", &["com.l.Evt"]),
+                avsc("models", &["com.m.Mail", "com.e.Mix"]),
+            ],
+        };
+        let mut pairs = relation_pairs();
+        pairs.build.insert(pair("app", "models"), false);
+        pairs.dependency.insert(pair("app", "models"));
+        let rows = vec![
+            // app → lib: one source and one Avro triple — a `both` pair.
+            row("app", "src/main/java/A.java", "com.l.Svc"),
+            row("app", "src/main/java/A.java", "com.l.Evt"),
+            // app → models: Avro only.
+            row("app", "src/main/java/A.java", "com.m.Mail"),
+            // app → common: a Reach triple of a platform pair, outside the
+            // denominator — it explains nothing and carries no backing split.
+            row("app", "src/main/java/A.java", "com.c.Base"),
+            // Ambiguous: two source owners, and a source + Avro pair of owners.
+            row("app", "src/main/java/A.java", "com.d.Dup"),
+            row("app", "src/test/java/T.java", "com.e.Mix"),
+        ];
+        let j = judge(&rows, &OwnerIndex::build(&decl, Rule::Product), &pairs);
+        assert_eq!(j.explanation(), (2, 2, vec![]));
+        assert_eq!(j.explanation_backing(), (0, 1, 1), "models is Avro-only; lib mixes the two");
+        assert_eq!(j.ambiguous_backing(), (1, 0, 1), "Dup has two source owners; Mix one of each");
     }
 
     #[test]

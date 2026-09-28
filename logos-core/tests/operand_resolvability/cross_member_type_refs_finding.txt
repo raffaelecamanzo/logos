@@ -93,6 +93,13 @@ HALF 2 — EXPLANATION: 52 of 52 (floor 75 %)
   Every non-platform build pair carrying a `dependency` edge has at least one Reach
   triple. No pair is unexplained.
 
+    explained pairs by backing: source 37 · avro 0 · both 15 (a pair's Reach
+        triples mix source- and Avro-backed types) — no pair is explained by Avro
+        types alone
+    every explaining triple is main-tree (Reach is main-tree by definition), and
+        every pair is a non-platform `dependency` build pair by the denominator's
+        definition, so the tree and pair splits are single-valued here
+
 
 HALF 3 — PRECISION CEILING: 131 of 2,492 = 5.3 % (ceiling 10 %)
 ---------------------------------------------------------------
@@ -108,7 +115,13 @@ HALF 3 — PRECISION CEILING: 131 of 2,492 = 5.3 % (ceiling 10 %)
        2  …commondomain.configuration.MongoMailboxConfiguration
        1  …commondomain.configuration.AbstractMongoConfiguration
 
-  (prefix `com.sourcesense.poste.pec.mailbox.core.`). The ceiling holds with one
+  (prefix `com.sourcesense.poste.pec.mailbox.core.`).
+
+    ambiguous rows by owner backing: source 131 · avro 0 · both 0
+    ambiguous rows by consumer tree: main 67 · test 64
+    an ambiguous row has no one provider, so it has no pair class
+
+  The ceiling holds with one
   duplicated library; a second such fork would move it by its own row count.
 
 
