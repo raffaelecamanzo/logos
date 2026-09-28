@@ -284,6 +284,54 @@ fn a_cycle_in_extends_terminates_and_binds_nothing() {
     assert_eq!(nonzero(&java_residue(&engine)), reasons(&[(R::SupertypeUnreached, 1)]));
 }
 
+/// An interface's super-interfaces form one level: a name only one of them
+/// declares binds to it, and a name both declare is ambiguous — never a pick
+/// of the first ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn an_interfaces_super_interfaces_are_one_level_and_a_name_both_declare_is_ambiguous() {
+    const USE_FILE: &str = "src/main/java/com/x/i/Use.java";
+    let tmp = tree(&[
+        (
+            "src/main/java/com/x/i/A.java",
+            "package com.x.i;\n\npublic interface A {\n    void a();\n    void same();\n}\n",
+        ),
+        (
+            "src/main/java/com/x/i/B.java",
+            "package com.x.i;\n\npublic interface B {\n    void b();\n    void same();\n}\n",
+        ),
+        (
+            "src/main/java/com/x/i/C.java",
+            "package com.x.i;\n\npublic interface C extends A, B {}\n",
+        ),
+        (
+            USE_FILE,
+            "package com.x.i;\n\
+             \n\
+             public class Use {\n\
+                 private C c;\n\
+                 public void ua() { c.a(); }\n\
+                 public void ub() { c.b(); }\n\
+                 public void us() { c.same(); }\n\
+             }\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let from_use: Vec<(String, String)> = call_edges(engine.runtime().unwrap())
+        .into_iter()
+        .filter(|(s, _)| s.starts_with(USE_FILE))
+        .collect();
+    assert_eq!(
+        from_use,
+        [
+            edge(USE_FILE, "ua", "src/main/java/com/x/i/A.java", "a"),
+            edge(USE_FILE, "ub", "src/main/java/com/x/i/B.java", "b"),
+        ]
+    );
+    assert_eq!(nonzero(&java_residue(&engine)), reasons(&[(R::OverloadAmbiguous, 1)]));
+}
+
 // ── one no-edge fixture per residue reason, each on a cold index ──────────
 
 /// Index `files`, assert no `Calls` edge leaves `caller`, and return the Java
