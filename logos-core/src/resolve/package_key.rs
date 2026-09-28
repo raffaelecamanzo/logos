@@ -1,7 +1,7 @@
 //! The **package-shaped** module key ([CR-149], [FR-RS-01]) — the one place a
 //! package is derived from a file path.
 //!
-//! The binder's default module model is Rust's (`binder::default_layout`): the
+//! The binder's default module model is Rust's ([`module_key_for_file`]): the
 //! directory before the last `src/` names the crate, every later directory is a
 //! module. A language whose plugin declares `[package_modules]`
 //! ([`PackageModules`](crate::plugin::PackageModules)) is keyed instead by the
@@ -21,7 +21,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::binder::{default_layout, module_key_for_file};
 use crate::plugin::LanguageRegistry;
 
 /// A module identity: `(crate name, module path segments)` — the binder's
@@ -135,19 +134,75 @@ fn rooted(path: &str, roots: &[Vec<String>]) -> Option<(String, Vec<String>, Opt
         .max()?;
     let crate_name = match start {
         0 => "crate".to_string(),
-        i => dirs[i - 1].replace('-', "_"),
+        i => normalize_crate(dirs[i - 1]),
     };
     let package = dirs[start + len..]
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-    let stem = Path::new(file)
+    Some((crate_name, package, Some(file_stem(file))))
+}
+
+/// Derive a file's module identity from its project-relative path, by the
+/// **default** (Rust) module model.
+///
+/// The segment before the last `src/` names the crate (normalised `-` → `_`,
+/// `crate` when there is none); segments after it are modules, with the
+/// `mod`/`lib`/`main` stems naming their enclosing module rather than adding a
+/// segment. `logos-core/src/extract/mod.rs` → `("logos_core", ["extract"])`.
+///
+/// A package-shaped language's files are keyed by
+/// [`PackageLayout::module_key`] instead ([CR-149]), which falls back to this
+/// for every other file. Rust's model and the package model live side by side
+/// in this module, so there is one home for path → module key.
+///
+/// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+pub(crate) fn module_key_for_file(path: &str) -> ModuleKey {
+    let (crate_name, mut mods, stem) = default_layout(path);
+    if let Some(stem) = stem.filter(|s| !matches!(s.as_str(), "mod" | "lib" | "main")) {
+        mods.push(stem);
+    }
+    (crate_name, mods)
+}
+
+/// The default model's parts of `path`: the crate, the module directories after
+/// its last `src/`, and the file stem (`None` when nothing follows the crate
+/// root) — before the `mod`/`lib`/`main` fold [`module_key_for_file`] applies.
+/// Shared with [`PackageLayout::module_key`] so the two models agree on every
+/// file outside a package root.
+fn default_layout(path: &str) -> (String, Vec<String>, Option<String>) {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let (crate_name, mods_start) = match segs.iter().rposition(|s| *s == "src") {
+        Some(0) => ("crate".to_string(), 1),
+        Some(pos) => (normalize_crate(segs[pos - 1]), pos + 1),
+        None => ("crate".to_string(), 0),
+    };
+    let mut mods: Vec<String> = segs
+        .get(mods_start..)
+        .unwrap_or_default()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let stem = mods.pop().map(|last| file_stem(&last));
+    (crate_name, mods, stem)
+}
+
+/// Normalise a crate directory name to its extern-path form (`-` → `_`) —
+/// shared by both models, and by the binder's crate-name path heads.
+pub(crate) fn normalize_crate(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// A file name without its extension (`Svc.java` → `Svc`; the name itself when
+/// it has none) — the module stem both models append.
+fn file_stem(name: &str) -> String {
+    Path::new(name)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or(file)
-        .to_string();
-    Some((crate_name, package, Some(stem)))
+        .unwrap_or(name)
+        .to_string()
 }
+
 
 // The fixtures are Maven paths, so the layout is the one the loaded Java
 // descriptor declares — read from the registry, never spelled here: this

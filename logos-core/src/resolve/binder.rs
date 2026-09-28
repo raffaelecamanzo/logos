@@ -68,13 +68,13 @@ use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, RefForm};
 
 use super::go_module::GoModule;
-use super::package_key::PackageLayout;
+use super::package_key::{module_key_for_file, normalize_crate, ModuleKey, PackageLayout};
 use super::route_method::preferred_candidates;
 use super::route_template::route_key;
 use crate::extract::refs::is_relative_head;
 
 /// A module's identity: `(crate name, module path segments)`.
-type ModKey = (String, Vec<String>);
+type ModKey = ModuleKey;
 
 /// `Contains` membership: scope → name → member nodes, each list id-sorted for
 /// a deterministic candidate order ([NFR-RA-06]).
@@ -1056,60 +1056,6 @@ fn exactly_one(candidates: &[NodeId]) -> Res {
         [] => Res::NotFound,
         _ => Res::Ambiguous,
     }
-}
-
-/// Derive a file's module identity from its project-relative path, by the
-/// **default** (Rust) module model.
-///
-/// The segment before the last `src/` names the crate (normalised `-` → `_`,
-/// `crate` when there is none); segments after it are modules, with the
-/// `mod`/`lib`/`main` stems naming their enclosing module rather than adding a
-/// segment. `logos-core/src/extract/mod.rs` → `("logos_core", ["extract"])`.
-///
-/// A package-shaped language's files are keyed by
-/// [`PackageLayout::module_key`] instead ([CR-149]), which falls back to this
-/// for every other file.
-///
-/// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
-pub(super) fn module_key_for_file(path: &str) -> ModKey {
-    let (crate_name, mut mods, stem) = default_layout(path);
-    if let Some(stem) = stem.filter(|s| !matches!(s.as_str(), "mod" | "lib" | "main")) {
-        mods.push(stem);
-    }
-    (crate_name, mods)
-}
-
-/// The default model's parts of `path`: the crate, the module directories after
-/// its last `src/`, and the file stem (`None` when nothing follows the crate
-/// root) — before the `mod`/`lib`/`main` fold [`module_key_for_file`] applies.
-/// Shared with [`PackageLayout::module_key`] so the two models agree on every
-/// file outside a package root.
-pub(super) fn default_layout(path: &str) -> (String, Vec<String>, Option<String>) {
-    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let (crate_name, mods_start) = match segs.iter().rposition(|s| *s == "src") {
-        Some(0) => ("crate".to_string(), 1),
-        Some(pos) => (normalize_crate(segs[pos - 1]), pos + 1),
-        None => ("crate".to_string(), 0),
-    };
-    let mut mods: Vec<String> = segs
-        .get(mods_start..)
-        .unwrap_or_default()
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    let stem = mods.pop().map(|last| {
-        Path::new(&last)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&last)
-            .to_string()
-    });
-    (crate_name, mods, stem)
-}
-
-/// Normalise a crate directory name to its extern-path form (`-` → `_`).
-fn normalize_crate(name: &str) -> String {
-    name.replace('-', "_")
 }
 
 /// Bind one ledger row against the index under `policy`.
