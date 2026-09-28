@@ -119,7 +119,8 @@ pub(super) struct ForeignConstant {
     pub(super) text: String,
     /// Its provenance: the constants its value was built from, then itself.
     pub(super) used: Vec<FoldedConstant>,
-    /// Operands its fold read, counted into the asking fold's budget.
+    /// Operands its fold read, counted into the asking fold's budget exactly
+    /// as the same constant's would be were it declared in the asking file.
     pub(super) operands: usize,
 }
 
@@ -334,6 +335,14 @@ impl<'s> Names<'s> {
         let Outcome::Folded(folded) = self.constant(value, 1) else {
             return None;
         };
+        Some(self.contribution(&folded, name))
+    }
+
+    /// What the folded constant `name` of this file contributes where it is
+    /// used: its text, its provenance — the constants it was built from, then
+    /// itself — and the operands its fold read. The one reading of a constant
+    /// both for a use in this file and for a use from another (S-470).
+    fn contribution(&self, folded: &Folded, name: &str) -> ForeignConstant {
         let mut used = folded.used.clone();
         let own = FoldedConstant {
             name: name.to_string(),
@@ -342,11 +351,11 @@ impl<'s> Names<'s> {
         if !used.contains(&own) {
             used.push(own);
         }
-        Some(ForeignConstant {
+        ForeignConstant {
             text: folded.text.clone(),
             used,
-            operands: folded.operands + 1,
-        })
+            operands: folded.operands,
+        }
     }
 
     /// Fold the expression at `start..end` to one literal, recording each
@@ -383,36 +392,20 @@ impl<'s> Names<'s> {
                     (name, self.resolve_qualified(owner, name, at))
                 }
             };
-            let used: Vec<FoldedConstant> = match value {
+            let (constant, height) = match value {
                 None => return Outcome::Refused,
-                Some(Binding::Local(value)) => {
-                    let constant = match self.constant(value, chain + 1) {
-                        Outcome::Folded(constant) => constant,
-                        other => return other,
-                    };
-                    folded.text.push_str(&constant.text);
-                    folded.operands += constant.operands;
-                    folded.height = folded.height.max(constant.height);
-                    constant
-                        .used
-                        .iter()
-                        .cloned()
-                        .chain(std::iter::once(FoldedConstant {
-                            name: name.to_string(),
-                            file: self.rel.to_string(),
-                        }))
-                        .collect()
-                }
+                Some(Binding::Local(value)) => match self.constant(value, chain + 1) {
+                    Outcome::Folded(constant) => (self.contribution(&constant, name), constant.height),
+                    other => return other,
+                },
                 // Folded in its own file, whose depth bound it met there; here
                 // it is one constant deep.
-                Some(Binding::Foreign(constant)) => {
-                    folded.text.push_str(&constant.text);
-                    folded.operands += constant.operands;
-                    folded.height = folded.height.max(1);
-                    constant.used
-                }
+                Some(Binding::Foreign(constant)) => (constant, 1),
             };
-            for used in used {
+            folded.text.push_str(&constant.text);
+            folded.operands += constant.operands;
+            folded.height = folded.height.max(height);
+            for used in constant.used {
                 if !folded.used.contains(&used) {
                     folded.used.push(used);
                 }
@@ -945,6 +938,9 @@ mod tests {
         );
         let x = names.member_constant("G", "X").expect("folds");
         assert_eq!(x.text, "email");
+        // `P + "mail"` reads two operands and `P`'s initializer one: what a
+        // use of `X` in its own file adds to the asking fold's budget too.
+        assert_eq!(x.operands, 3);
         let names_used: Vec<&str> = x.used.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names_used, ["P", "X"]);
         assert!(x.used.iter().all(|c| c.file == "src/main/java/a/b/G.java"));
