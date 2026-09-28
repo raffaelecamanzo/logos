@@ -939,9 +939,11 @@ pub(crate) async fn workspace_route_providers(
 /// A **build** dependency, never a runtime coupling ([BR-58]): the service map
 /// draws it only behind a legend toggle that is off by default, and no runtime
 /// figure reads it. The relation is joined on the first request and cached on
-/// member sync-stamps in the holder beside the bridge ([ADR-52]), so serving
-/// the SPA costs nothing until the layer is asked for. The same read-model the
-/// CLI and MCP print.
+/// member sync-stamps in the holder beside the bridge ([ADR-52]): nothing is
+/// read at startup. The SPA requests it when the service map opens over a
+/// workspace whose status carries a build headline — before the toggle, since
+/// the cross-context hint is shown whatever the toggle says — and never over one
+/// without. The same read-model the CLI and MCP print.
 ///
 /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
 /// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
