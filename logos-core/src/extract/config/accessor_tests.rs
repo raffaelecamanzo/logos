@@ -153,6 +153,10 @@ fn an_array_declaration_keeps_its_dimensions_and_disagrees_with_a_scalar() {
           private Props onDeclarator[];\n\
           private java.util.List<Props>[] generic;\n\
           private java.util.Map<String, Props[]> keyed;\n\
+          private Props spaced [];\n\
+          private Props annotated @Deprecated [];\n\
+          private Props commented /* why */ [];\n\
+          private Props indexed = rows[0];\n\
           private Props mixed;\n\
           void go(Props[] mixed) { }\n\
         }";
@@ -163,6 +167,10 @@ fn an_array_declaration_keeps_its_dimensions_and_disagrees_with_a_scalar() {
     assert_eq!(types.get("onDeclarator"), Some("Props[]"));
     assert_eq!(types.get("generic"), Some("List[]"));
     assert_eq!(types.get("keyed"), Some("Map"), "an array type ARGUMENT is not an array");
+    for after_the_name in ["spaced", "annotated", "commented"] {
+        assert_eq!(types.get(after_the_name), Some("Props[]"), "{after_the_name}");
+    }
+    assert_eq!(types.get("indexed"), Some("Props"), "an initializer's brackets are no dimension");
     assert_eq!(types.get("mixed"), None, "a `Props` and a `Props[]` disagree");
     assert_eq!(types.field("mixed"), Some("Props"), "the field alone is scalar");
 }

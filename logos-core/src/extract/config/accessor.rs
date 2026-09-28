@@ -226,10 +226,12 @@ impl DeclaredTypes {
             // An array of `Foo` is not a `Foo` (S-467): its dimensions stay in the
             // recorded name, so it disagrees with a scalar `Foo` and names no type
             // a call could be typed by.
-            let array = writes_dimensions(type_text) || src[name_node.end_byte()..]
-                .iter()
-                .find(|b| !b.is_ascii_whitespace())
-                == Some(&b'[');
+            // After the name, up to its initializer: `a[]`, `a @Ann []` and
+            // `a /* why */ []` all declare an array; `a = rows[0]` does not.
+            let after_name = std::str::from_utf8(&src[name_node.end_byte()..node.end_byte()])
+                .unwrap_or_default();
+            let before_initializer = after_name.split('=').next().unwrap_or_default();
+            let array = writes_dimensions(type_text) || writes_dimensions(before_initializer);
             let declared = if array {
                 format!("{declared}[]")
             } else {
