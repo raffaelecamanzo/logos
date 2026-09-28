@@ -68,6 +68,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use crate::extract::build_manifest::ReferenceKind;
 use crate::graph_store::BuildManifestRow;
 
 use super::bridge::{current_stamps, read_members, MemberContracts, StampCache};
@@ -97,26 +98,31 @@ impl BuildEdgeKind {
     pub const ALL: [Self; 4] = [Self::Parent, Self::Dependency, Self::Managed, Self::BomImport];
 
     /// The fact vocabulary token — the same one the payloads serialize.
+    ///
+    /// Taken from the writer's own [`ReferenceKind::as_str`], the vocabulary
+    /// migration 22's CHECK is pinned against, so the join can never drift
+    /// from what the indexer stores (a drifted token would file every
+    /// reference as refused).
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Parent => "parent",
-            Self::Dependency => "dependency",
-            Self::Managed => "managed",
-            Self::BomImport => "bom-import",
-        }
+        self.fact_kind().as_str()
     }
 
     /// The kind a fact vocabulary token (`build_artifacts.kind`) names, or
-    /// `None` for any other text. Migration 22's CHECK admits only these four.
+    /// `None` for any other text — the inverse of [`as_str`](Self::as_str),
+    /// derived from it rather than written out a second time.
     #[must_use]
     pub fn from_fact(token: &str) -> Option<Self> {
-        match token {
-            "parent" => Some(Self::Parent),
-            "dependency" => Some(Self::Dependency),
-            "managed" => Some(Self::Managed),
-            "bom-import" => Some(Self::BomImport),
-            _ => None,
+        Self::ALL.into_iter().find(|kind| kind.as_str() == token)
+    }
+
+    /// The reader's kind this edge kind is joined from.
+    fn fact_kind(self) -> ReferenceKind {
+        match self {
+            Self::Parent => ReferenceKind::Parent,
+            Self::Dependency => ReferenceKind::Dependency,
+            Self::Managed => ReferenceKind::Managed,
+            Self::BomImport => ReferenceKind::BomImport,
         }
     }
 }
@@ -977,6 +983,16 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
         }
         assert_eq!(BuildEdgeKind::from_fact("bom_import"), None, "the near miss");
+        // Every kind the reader writes has an edge kind: none is silently refused.
+        for written in [
+            ReferenceKind::Parent,
+            ReferenceKind::Dependency,
+            ReferenceKind::Managed,
+            ReferenceKind::BomImport,
+        ] {
+            let kind = BuildEdgeKind::from_fact(written.as_str()).expect("joinable");
+            assert_eq!(kind.as_str(), written.as_str());
+        }
     }
 
     /// A manifest the reader could not parse is recorded but read: it counts in
