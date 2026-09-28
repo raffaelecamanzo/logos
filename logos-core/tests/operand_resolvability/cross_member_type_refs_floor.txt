@@ -1,0 +1,240 @@
+S-471 T1 — THE THREE FLOORS OF CR-152 SECTION 3.2 A1, DECLARED BEFORE THE RUN
+============================================================================
+
+Declared (UTC):  2026-09-28T15:35:58Z
+Declared by:     Dev Session 1.3 (sprint-81, branch sprint-81-I1-S3)
+Story:           S-471 — Measure cross-member type references over the reference
+                 estate
+Gate decides:    CR-152 section 3.2 A1. ALL THREE halves must hold for S-472..S-474
+                 (the cross-member type overlay) to be planned; the halves do not
+                 gate separate deliveries (CR-152 section 3.2, "All three halves
+                 must hold"). Below a floor, or above the ceiling, CR-152 is
+                 recorded FALSIFIED with its evidence and date, ADR-70 is
+                 SUPERSEDED IN PLACE and never deleted, and S-472..S-474 stay
+                 UNPLANNED. Nothing is built by this gate.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), 84 clones, 83
+manifest members. Read-only: the recorded run is made on a private byte-for-byte copy
+(`cp -Rp`) of the estate, named in the finding, and the live estate is verified
+unmodified afterwards.
+
+This file is committed in this session's FIRST commit, before any measurement code
+exists, so the ordering is auditable in git history rather than asserted. It is
+TRACKED and lives under `logos-core/tests/`, never under the symlinked `docs/`:
+public CI has no private docs, and a floor it cannot read is a test that goes red
+only there.
+
+
+THE THREE FLOORS
+----------------
+
+    >= 300 Reach triples on the pec-services estate.
+
+    >= 75 % Explanation of the measured non-platform `dependency` build pairs.
+
+    <= 10 % Precision ceiling of the cross-member import rows with an in-workspace
+            owner (a CEILING: this half fails ABOVE it).
+
+The half names above are CR-152 section 3.2 A1's first column, verbatim. The metric
+each one counts is that table's second column, verbatim:
+
+  Reach — "Distinct triples (consumer member A, provider member B, fully-qualified
+  type T) such that a **main-tree** Java/Kotlin `Imports` row of A names T or a
+  static member of T; T is declared by exactly one member B ≠ A, either by a
+  main-tree source file at its package path or by an `.avsc` record/enum whose
+  namespace + name equals T; and (A, B) is a build pair or a build collision one of
+  whose producers is B"
+
+  Explanation — "Non-platform build pairs carrying a `dependency` edge for which at
+  least one Reach triple exists, over the non-platform `dependency` build pairs
+  measured on the same run"
+
+  Precision ceiling — "Cross-member import rows whose type is declared by more than
+  one other member, as a share of all cross-member import rows whose type has any
+  in-workspace owner"
+
+The census column (437 / 52 of 52 / 131 of 2,492 = 5.3 %) is an UPPER BOUND from
+ad-hoc scripts over a permissive owner rule and is NOT a floor (CR-152 section 2.4;
+the census-as-floor rule recorded for S-397). The floors are CR-152's, not chosen
+here; this file fixes what their terms mean.
+
+Percentages are decided in integers, never rounded: Explanation holds iff
+100 * explained >= 75 * denominator and the denominator is non-zero; the Precision
+ceiling holds iff 100 * ambiguous <= 10 * denominator and the denominator is
+non-zero. A zero denominator is FALSIFIED, never vacuously held.
+
+
+WHERE EVERY ROW COMES FROM
+--------------------------
+
+  - Member stores: each member's `.logos/logos.db`, opened through the shipped
+    `SqliteGraphStore::open_readonly` — SQLITE_OPEN_READ_ONLY, `query_only`, and a
+    REFUSAL of any store whose `PRAGMA user_version` is not this binary's schema
+    version. A refused store fails the run naming the member; the harness never
+    calls `SqliteGraphStore::open` and never starts an `Engine` over a member, so
+    it can never migrate a store. A member with no store fails the run too: a
+    partial workspace is a different estate.
+
+  - Import rows: the store's `unresolved_refs` (the shipped `GraphStore::
+    unresolved_refs`), joined to `files` (`GraphStore::indexed_files`) through
+    `file_id`.
+
+  - Declaring files: the member's committed file roster from the shipped
+    `ConfigCorpus::discover` walk — `.gitignore` honoured, so Maven's generated
+    `target/` sources are absent by construction. The declaration is the harness's
+    own derivation (CR-152 section 7: "the gate harness may derive names
+    independently, but only the harness"); nothing in `logos-core/src` gains a
+    second fully-qualified-name rule.
+
+  - The build relation: the shipped `federation::build_deps::join`, called over
+    every member's `GraphStore::build_manifests` read through the same read-only
+    stores, with the manifest's declared member kinds. Never a pom re-parse. A
+    member the join reports unread fails the run.
+
+
+"IMPORT ROW" MEANS, EXACTLY
+---------------------------
+
+One `unresolved_refs` row with kind `imports`, `resolved = false`, whose file's
+member-relative path ends in `.java` or `.kt`. Its TARGET T0 is the row's target
+text with every `::` read as `.` (the Java and Kotlin queries canonicalise dots to
+`::`). A row is counted once; rows are never deduplicated by text.
+
+Its CONSUMER TREE is:
+  - `main`  — the path is `src/main/…` or contains `/src/main/`;
+  - `test`  — the path is `src/test/…` or contains `/src/test/`;
+  - `other` — neither. Counted apart; never main-tree.
+
+
+"DECLARES T" MEANS, EXACTLY
+---------------------------
+
+SOURCE-BACKED. Member M declares T when its roster holds a file whose
+member-relative path contains the segment pair `src/main/java/` or `src/main/kotlin/`
+(at the start or after a `/`), whose extension is `.java` or `.kt`, and whose
+path-derived name equals T: the segments after that root joined by `.`, the last
+one being the file stem. ONE CONDITION MORE THAN THE CENSUS: the file's declared
+package — its first `package a.b.c` statement, `;` optional — must equal the
+path-derived package (no package statement is the default package, agreeing only
+with a file directly under the root). A file whose declared package DISAGREES with
+its directory declares NOTHING: it is REFUSED, counted, enumerated, and every row
+and triple the census's permissive rule would have given it is enumerated in the
+reconciliation (CR-152 section 3.2 A1, "which the product must refuse and the
+script never checks").
+
+AVRO-BACKED. Member M declares T when its roster holds an `.avsc` file, anywhere,
+that parses as JSON and contains an object with `"type"` equal to `"record"` or
+`"enum"` and a string `"name"`, whose full name equals T. The full name is `name`
+when it contains a `.`; otherwise the object's own `namespace`, else the nearest
+enclosing named type's namespace, then `.`, then `name`; with no namespace at all,
+`name` alone. A top-level JSON array (a union schema) is read element by element;
+named types nested anywhere inside a record's fields are read too. An `.avsc` that
+does not parse is REFUSED, counted and enumerated.
+
+T's OWNERS are every member that declares it, by either backing. A provider's
+BACKING for T is `source`, `avro`, or `both`.
+
+
+"NAMES T OR A STATIC MEMBER OF T" MEANS, EXACTLY
+------------------------------------------------
+
+If T0 has at least one owner, the row names T = T0 (EXACT). Otherwise, if T0 has at
+least two segments and its enclosing name — T0 without its last segment — has at
+least one owner, the row names T = that enclosing name (ENCLOSING FALLBACK: a
+static-member import, or a nested type, which the row's text cannot tell apart).
+Otherwise the row has NO OWNER. One level only. The exact/fallback split is
+printed.
+
+
+ROW CLASSES, IN ORDER
+---------------------
+
+  SELF-OWNED  — the consumer A is among T's owners (whatever other owners T has).
+                Intra-member, CR-149's population, reported apart, never counted
+                in any half.
+  EXACTLY-ONE — T has exactly one owner B, and B != A. A cross-member row.
+  AMBIGUOUS   — T has two or more owners, none of them A. A cross-member row.
+  NO OWNER    — no owner, exact or enclosing. Reported apart.
+
+"Cross-member import rows whose type has any in-workspace owner" = EXACTLY-ONE +
+AMBIGUOUS, over every consumer tree (main, test and other alike, as the census
+counted them).
+
+
+"BUILD PAIR" AND "COLLISION-BACKED" MEAN, EXACTLY
+-------------------------------------------------
+
+For an EXACTLY-ONE row of consumer A and owner B:
+
+  BUILD            — the build relation holds at least one `builds-against(A → B)`
+                     edge, of any kind. Edges into a declared `platform` member are
+                     build edges (counted apart in the build headline, never out of
+                     the relation) and count here; the platform split is printed.
+  COLLISION-BACKED — otherwise, A references a coordinate the product's join files
+                     as a COLLISION (produced by two or more members), and B is one
+                     of that coordinate's producers. "A references it" is decided
+                     by the product's own filing: the join run with only A's
+                     references kept reports that collision with a non-zero
+                     reference count.
+  TYPE-ONLY        — neither. Reported apart with its count; never in Reach.
+
+
+REACH, EXPLANATION AND THE CEILING, EXACTLY
+-------------------------------------------
+
+  REACH       = the number of distinct (A, B, T) over MAIN-tree EXACTLY-ONE rows
+                whose pair is BUILD or COLLISION-BACKED.
+
+  EXPLANATION = over the DENOMINATOR "distinct directed (from, to) pairs of the
+                build relation holding at least one `dependency` edge with
+                `platform = false`", the pairs (A, B) with at least one Reach
+                triple.
+
+  CEILING     = AMBIGUOUS rows over EXACTLY-ONE + AMBIGUOUS rows.
+
+
+SPLITS, PRINTED AND NEVER COUNTED TOWARD A FLOOR
+------------------------------------------------
+
+  - source-backed vs Avro-backed (vs both) owners, per half;
+  - main-tree vs test-tree (vs other) consumers;
+  - build-pair vs collision-backed vs type-only pairs, with the platform share of
+    the build pairs;
+  - exact vs enclosing-fallback rows;
+  - self-owned and no-owner rows, counted apart;
+  - package/directory disagreement refusals and unparseable `.avsc` refusals,
+    enumerated.
+
+
+RECONCILIATION — BY NAME, AGAINST CR-152 SECTION 2.1
+----------------------------------------------------
+
+The run ALSO computes the census's own rule — the same rows and owners with the
+package check switched off, and no pair restriction — and prints, by name:
+
+  - its main-tree triple count against the census's 437, and its directed pairs
+    against the census's 81;
+  - every census-rule main-tree triple NOT in Reach, each with the mechanism that
+    removed it: a package/directory refusal, a type-only pair, or the owner set
+    changed by a refusal;
+  - the four non-build pairs the census names — `mailbox-api`, `mailbox-manager`,
+    `mailbox-unread-mail-batch` → `mailbox-domain` (the `deprecated-mailbox-core`
+    collision) and `official-log-legal-storage-batch` → `postel-cpx-creation-lib`
+    (no direct build declaration) — each with the pair class this run gives it.
+
+A difference the run cannot attribute to a named mechanism is printed as such and
+is never absorbed into a figure.
+
+
+APPENDIX — 2026-09-28T15:56:08Z, Dev Session 1.3 (one term made precise; no bound
+moved)
+----------------------------------------------------------------------------------
+
+"AVRO-BACKED" above says a name without a `.` takes "the object's own `namespace`,
+else the nearest enclosing named type's namespace". The harness reads an EMPTY
+`namespace` (`"namespace": ""`) as the Avro specification defines it: the null
+namespace, inheriting nothing — not as an absent key. Found while writing the
+mutation sweep, before the verdict was recorded; on the measured estate it changes
+nothing (70 `.avsc`, 77 record/enum types, the same before and after). The three
+bounds and every other term above are unchanged, and the text above this appendix
+is byte-identical to its first commit.
