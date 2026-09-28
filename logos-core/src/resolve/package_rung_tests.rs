@@ -1,9 +1,10 @@
 //! The package-shaped scope rungs (S-465, CR-149, FR-RS-03, NFR-RA-05), over a
-//! synthetic snapshot — the rungs no Java extraction reaches yet: a bare or
-//! type-qualified **type** name is a reference S-466 / S-467 capture, so the
-//! same-package and package-wildcard rungs are pinned here, against the ledger
-//! shapes those stories will emit, rather than end-to-end in
-//! `tests/java_imports.rs`.
+//! synthetic snapshot: a bare or type-qualified **type** name is a reference
+//! S-466 (type relations) and S-467 (a typed receiver's `T::m`) capture, so the
+//! same-package and package-wildcard rungs are pinned here at the binder level,
+//! against the ledger shapes those stories emit. The import-then-same-package
+//! order for a `T::m` call is also pinned end to end, in
+//! `tests/java_receiver_typing.rs`.
 //!
 //! ```text
 //! com.x.web  src/main/java/com/x/web/Ctl.java     (module 1) ─ class Ctl (2)

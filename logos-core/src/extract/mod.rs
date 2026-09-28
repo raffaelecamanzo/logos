@@ -1314,7 +1314,10 @@ fn file_module_name(path_segments: &[&str]) -> String {
 /// deduplicated, and sorted into the canonical `(source, target, form, kind)`
 /// order ([NFR-RA-06]). In such a language a call **through** an import is
 /// recorded qualified by the module it names, `<import target>::<name>`, and a
-/// JSX tag naming a local value records nothing ([`ImportBindings`], S-440).
+/// JSX tag naming a local value records nothing ([`ImportBindings`], S-440). In
+/// a language whose query names its receiver shapes (`@ref.receiver.*`, Java),
+/// a call whose receiver's type the file proves is recorded type-qualified,
+/// `T::<name>` in Path form, in place of its bare row ([`receiver`], S-467).
 fn collect_refs(
     query: &Query,
     root: Node<'_>,
