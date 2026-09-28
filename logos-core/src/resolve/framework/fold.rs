@@ -46,9 +46,18 @@ use std::collections::{HashMap, HashSet};
 use super::FoldedConstant;
 
 /// How deep one constant's initializer may refer to another before the fold
-/// gives up. Real constants nest one or two levels; the bound exists so a
-/// pathological or cyclic file cannot recurse without limit.
+/// gives up. Real constants nest one or two levels; the bound is what stops a
+/// cyclic pair (`A = B; B = A`), because a branch that fails ends the whole
+/// fold.
 const MAX_DEPTH: usize = 16;
+
+/// How many operands one fold may read, counting every expansion of every
+/// constant. Depth alone does not bound the work: a *valid* tree of constants
+/// each concatenating six of the level below expands 6^16 operands within the
+/// depth bound, and a candidate file is untrusted input to the indexer. A real
+/// mapping path reads a handful; the budget refuses the rest, counted like any
+/// other refusal.
+const MAX_OPERANDS: usize = 4096;
 
 /// One `@fw.const.scope` match: a type body, as one query match described it.
 /// Several matches describe one body (the named boundary, a supertype marker),
@@ -169,8 +178,8 @@ impl<'s> Names<'s> {
     /// constant it used; `None` when any operand does not fold.
     pub(super) fn fold(&self, start: usize, end: usize) -> Option<(String, Vec<FoldedConstant>)> {
         let mut used = Vec::new();
-        let mut visiting = HashSet::new();
-        let text = self.fold_range(start, end, 0, &mut visiting, &mut used)?;
+        let mut budget = MAX_OPERANDS;
+        let text = self.fold_range(start, end, 0, &mut budget, &mut used)?;
         let mut seen = HashSet::new();
         used.retain(|c: &FoldedConstant| seen.insert(c.clone()));
         Some((text, used))
@@ -181,7 +190,7 @@ impl<'s> Names<'s> {
         start: usize,
         end: usize,
         depth: usize,
-        visiting: &mut HashSet<usize>,
+        budget: &mut usize,
         used: &mut Vec<FoldedConstant>,
     ) -> Option<String> {
         if depth > MAX_DEPTH {
@@ -191,6 +200,7 @@ impl<'s> Names<'s> {
         let operands = parse_chain(text, start)?;
         let mut folded = String::new();
         for operand in operands {
+            *budget = budget.checked_sub(1)?;
             let (name, value) = match operand {
                 Operand::Literal(content) => {
                     folded.push_str(content);
@@ -201,13 +211,10 @@ impl<'s> Names<'s> {
                     (name, self.resolve_qualified(owner, name, at)?)
                 }
             };
-            // A constant whose initializer reaches itself has no value.
-            if !visiting.insert(value.0) {
-                return None;
-            }
-            let part = self.fold_range(value.0, value.1, depth + 1, visiting, used);
-            visiting.remove(&value.0);
-            folded.push_str(&part?);
+            // A constant whose initializer reaches itself never bottoms out:
+            // the depth bound refuses it.
+            let part = self.fold_range(value.0, value.1, depth + 1, budget, used)?;
+            folded.push_str(&part);
             used.push(FoldedConstant {
                 name: name.to_string(),
                 file: self.rel.to_string(),

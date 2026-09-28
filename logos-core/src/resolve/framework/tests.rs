@@ -2575,11 +2575,16 @@ mod java_constant_fold {
                 "a cyclic pair of constants",
                 "    static final String A = B;\n    static final String B = A;\n    @GetMapping(A)",
             ),
-            // Six self-references per level: without the cycle guard the fold
-            // would expand 6^17 operands before the depth bound stopped it.
+            // A valid tree four constants wide and eight deep: it folds to a
+            // 65,536-character path when nothing bounds the work, so only the
+            // operand budget refuses it (a wider one would hang the indexer).
             (
-                "a branching self-reference",
-                "    static final String A = A + A + A + A + A + A;\n    @GetMapping(A)",
+                "a constant tree past the operand budget",
+                "    static final String A0 = \"/a\";\n    static final String A1 = A0 + A0 + A0 + A0;\n    \
+                 static final String A2 = A1 + A1 + A1 + A1;\n    static final String A3 = A2 + A2 + A2 + A2;\n    \
+                 static final String A4 = A3 + A3 + A3 + A3;\n    static final String A5 = A4 + A4 + A4 + A4;\n    \
+                 static final String A6 = A5 + A5 + A5 + A5;\n    static final String A7 = A6 + A6 + A6 + A6;\n    \
+                 static final String A8 = A7 + A7 + A7 + A7;\n    @GetMapping(A8)",
             ),
             // Another type in the same file is still another type — reaching it
             // is S-470's shape, not this story's.
