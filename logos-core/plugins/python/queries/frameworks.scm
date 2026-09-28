@@ -13,6 +13,17 @@
 ;   @fw.route.path.named — the same, for a path written as a *named* argument
 ;                       (Java/Kotlin `value =`/`path =`). Outranks a plain
 ;                       @fw.route.path at the same @fw.route.anchor (S-328);
+;   @fw.route.path.opaque / @fw.route.path.named.opaque — a path in the same
+;                       two positions written as an *expression* (a constant, a
+;                       concatenation), S-469. Never promoted as written: in a
+;                       dialect that captures `@fw.const.*` facts (below) the
+;                       pass folds it to a literal or refuses it and counts it
+;                       in `routes_not_composed`, once per list element; a
+;                       dialect without those facts refuses and counts every
+;                       one. An opaque capture at exactly a literal path's
+;                       bytes is that literal and is skipped, so a supertype
+;                       pattern (`(expression)`) may overlap the literal ones.
+;                       Anchor it like the literal patterns (see next entry);
 ;   @fw.route.anchor  — optional; the registration site (the annotation, the
 ;                       call) that paths are ranked within. Only a query whose
 ;                       patterns can both match one site needs it — but then it
@@ -37,11 +48,13 @@
 ;                       short of the body contains no handler and silently
 ;                       composes nothing;
 ;   @fw.route.prefix.opaque — a prefix argument that is NOT a written literal
-;                       (a constant, a concatenation). Its mere PRESENCE marks
-;                       the scope non-composable: with no literal alongside it,
-;                       routes inside are refused rather than promoted at a
-;                       partial path (`path-not-composed`, FR-WS-05,
-;                       NFR-RA-05). Capture it only where the argument really
+;                       (a constant, a concatenation). In a folding dialect the
+;                       pass first tries to fold it (S-469) and composes the
+;                       result like a written prefix; otherwise, and whenever
+;                       it does not fold, its PRESENCE marks the scope
+;                       non-composable: with no literal alongside it, routes
+;                       inside are refused rather than promoted at a partial
+;                       path (`path-not-composed`, FR-WS-05, NFR-RA-05). Capture it only where the argument really
 ;                       is in the path position — marking a `method =` argument
 ;                       opaque would refuse a whole controller. A prefix whose
 ;                       *text* names an unresolved reference — `${…}`, `#{…}`,
@@ -49,12 +62,27 @@
 ;                       interpreter without any capture at all (S-330), which is
 ;                       what covers the fragments a grammar models no node for;
 ;   @fw.component.name — a component declaration's name;
-;   @fw.component.base — predicate-only helper, not consumed by the pass.
+;   @fw.component.base — predicate-only helper, not consumed by the pass;
+;   @fw.const.*       — the facts a constant fold needs (S-469, CR-151): type
+;                       bodies (`.scope`, `.scope.decl`, `.scope.name`,
+;                       `.scope.opaque`), every field (`.field`) and each
+;                       compile-time `String` constant (`.name`, `.value`). The
+;                       Java query's `@fw.const` section is the reference
+;                       glossary. Capturing ANY of them opts the dialect into
+;                       folding; capturing none keeps every opaque path and
+;                       prefix unfolded, which is how Kotlin stays out of scope.
+;                       Opting in also adopts the one expression text the fold
+;                       reads: a `+` chain of `"…"` literals (no escapes, no
+;                       text blocks), simple names and `Type.NAME`, with
+;                       parentheses. A dialect whose strings interpolate
+;                       (`"$X"`) or use other quotes cannot fold by data alone.
 ;
 ; Any other `@fw.route.*` / `@fw.component.*` capture is predicate-only too —
 ; the Java query's `@fw.route.key` filters argument names with `#any-of?`, and
-; its `@fw.route.prefix.name`/`@fw.route.prefix.key` pin which class-level
-; annotation is a prefix.
+; its `@fw.route.prefix.key` pins which class-level argument is a prefix.
+; `@fw.route.prefix.name` pins which annotation is a prefix and is also read
+; once: its parent is the annotation, which the pass checks for a parse error
+; before folding the prefix (S-469).
 ;
 ; Composition itself — separator normalisation across all four slash cases, the
 ; prefix-as-whole-path fallback for an annotation that named none, the
