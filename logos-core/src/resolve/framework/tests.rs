@@ -2575,9 +2575,10 @@ mod java_constant_fold {
                 "a cyclic pair of constants",
                 "    static final String A = B;\n    static final String B = A;\n    @GetMapping(A)",
             ),
-            // A valid tree four constants wide and eight deep: it folds to a
-            // 65,536-character path when nothing bounds the work, so only the
-            // operand budget refuses it (a wider one would hang the indexer).
+            // A valid tree four constants wide and eight deep: unbounded, it
+            // folds 65,536 copies of "/a" into a 131,072-character path, so
+            // only the operand budget refuses it (a wider one would hang the
+            // indexer).
             (
                 "a constant tree past the operand budget",
                 "    static final String A0 = \"/a\";\n    static final String A1 = A0 + A0 + A0 + A0;\n    \
