@@ -1803,6 +1803,9 @@ mod tests {
             // A producer of the colliding coordinate that also references it.
             ("legacy".into(), vec![manifest(("g", "domain"), &[("dependency", "g", "domain")])]),
             ("web".into(), vec![manifest(("g", "web"), &[("managed", "g", "lib")])]),
+            // A second collision nobody references: it backs no pair.
+            ("fork-a".into(), vec![manifest(("g", "shared"), &[])]),
+            ("fork-b".into(), vec![manifest(("g", "shared"), &[])]),
         ];
         let roster: Vec<Member> = facts
             .iter()
@@ -1833,6 +1836,10 @@ mod tests {
         // the other producer, never toward itself.
         assert_eq!(pairs.class("legacy", "domain"), PairClass::CollisionBacked);
         assert_eq!(pairs.class("legacy", "legacy"), PairClass::TypeOnly);
+        // Referencing one colliding coordinate backs nothing toward another's producers.
+        assert_eq!(relation.headline.collisions.len(), 2, "g:domain and g:shared collide");
+        assert_eq!(pairs.class("app", "fork-a"), PairClass::TypeOnly);
+        assert_eq!(pairs.class("legacy", "fork-b"), PairClass::TypeOnly);
         assert_eq!(
             pairs.dependency,
             [pair("app", "lib")].into_iter().collect(),
