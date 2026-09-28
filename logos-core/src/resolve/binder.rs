@@ -512,6 +512,13 @@ impl Index {
         self.types_by_fqn.get(fqn).map_or(&[], Vec::as_slice)
     }
 
+    /// The project-relative file of node `id`, when it has one — how the
+    /// framework pass reads a [`package_types`](Index::package_types) answer's
+    /// file (S-470) without a second node → file map.
+    pub(crate) fn file_of(&self, id: NodeId) -> Option<&str> {
+        self.info.get(&id).and_then(|info| info.file_path.as_deref())
+    }
+
     /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when
     /// zero or several carry the name — the never-fabricate acceptance rule
     /// ([NFR-RA-05]) applied to trait resolution: a `dyn T` call whose trait is

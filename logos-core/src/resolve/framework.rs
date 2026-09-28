@@ -513,10 +513,6 @@ pub fn run(
         registry,
         layout: &layout,
         index: &index,
-        file_of: nodes
-            .iter()
-            .filter_map(|n| n.file_path.as_deref().map(|path| (n.id, path)))
-            .collect(),
     };
 
     let scanned: Vec<(i64, &str, FileMatches)> = runtime.worker_pool().install(|| {
@@ -659,8 +655,6 @@ struct MemberConstants<'a> {
     registry: &'a LanguageRegistry,
     layout: &'a PackageLayout,
     index: &'a binder::Index,
-    /// Each node's project-relative file.
-    file_of: HashMap<NodeId, &'a str>,
 }
 
 /// One scanned file's answers from [`MemberConstants::constant`], keyed by
@@ -685,7 +679,7 @@ impl MemberConstants<'_> {
         let [type_node] = self.index.package_types(fqn) else {
             return None;
         };
-        let rel = *self.file_of.get(type_node)?;
+        let rel = self.index.file_of(*type_node)?;
         let type_name = fqn.last()?;
         let (plugin, source) = read_member_file(self.registry, self.root, rel)?;
         let facts = collect_matches(&mut Parser::new(), plugin, &source)?;
