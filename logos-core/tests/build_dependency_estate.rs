@@ -253,10 +253,10 @@ fn replay_collisions_resolved_to_one_producer(root: &Path, relation: &BuildDepen
             .map(|e| format!("{} → {} {}", e.from, e.to, e.kind.as_str()))
             .collect();
         println!(
-            "\n## Replay: every collision resolved to its {label} producer {:?}\n  {}\n  \
+            "\n## Replay: every collision resolved to its {label} producer {:?}\n  {:?}\n  \
              non-hub dependency pairs {} over {} members; edges gained: {:?}",
             keep,
-            format!("{:?}", all.headline.build_dependency_pairs),
+            all.headline.build_dependency_pairs,
             non_hub_dep.len(),
             members.len(),
             gained
