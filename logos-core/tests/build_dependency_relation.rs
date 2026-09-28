@@ -344,3 +344,30 @@ fn a_fully_indexed_manifest_less_workspace_reads_every_member_and_shows_no_secti
     assert_eq!((read.read, read.members, read.with_manifests), (4, 4, 0));
     assert!(read.unread.is_empty() && read.unread_reasons.is_empty(), "{read:?}");
 }
+
+/// **A never-indexed member is "not yet extracted" too** — nothing has read its
+/// manifests, so it is unread with that reason and keeps the section present,
+/// on a workspace whose only other member holds no manifest at all. One full
+/// index and it reads, with 0 manifests, and the section goes.
+#[test]
+fn a_never_indexed_member_is_unread_not_yet_extracted_until_it_is_indexed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for name in ["indexed", "cold"] {
+        let dir = root.join(name);
+        git_init(&dir);
+        write(&dir, "src/lib.rs", "pub fn f() {}\n");
+    }
+    index_member(&root.join("indexed"));
+    let manifest = "[workspace]\nname = \"acme\"\nmembers = [\"indexed\", \"cold\"]\n";
+
+    let status = status_over(root, manifest);
+    let read = &status["build_dependency"]["members"];
+    assert_eq!(read["unread"], serde_json::json!(["cold"]), "{status:#}");
+    assert_eq!(read["unread_reasons"]["cold"], "build facts not yet extracted");
+    assert_eq!((&read["read"], &read["with_manifests"]), (&serde_json::json!(1), &serde_json::json!(0)));
+
+    index_member(&root.join("cold"));
+    let status = status_over(root, manifest);
+    assert!(status.get("build_dependency").is_none(), "every member read, none holds a manifest: {status:#}");
+}

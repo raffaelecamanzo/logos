@@ -201,7 +201,9 @@ kind = "platform"
   is counted as `to_collision`, never guessed onto one of them.
 - **No build manifest, nothing changes.** `build_dependency` is absent from the
   status payload when every member was read and none holds a `pom.xml` or
-  `build.gradle(.kts)`. A member whose facts could not be read keeps the
+  `build.gradle(.kts)`. A member that has never been indexed has not been read,
+  so it keeps the section present, reason `"build facts not yet extracted"`,
+  until its first `logos index`. A member whose facts could not be read keeps the
   section present. It is named under `build_dependency.members.unread`, and
   `build_dependency.members.unread_reasons` gives the reason.
 - **An upgraded store is "not yet extracted" until it is fully re-read.** A
