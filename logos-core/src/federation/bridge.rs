@@ -473,7 +473,10 @@ impl MemberContracts for crate::Engine {
             "reading a member's build-manifest facts requires a long-lived engine \
              (Engine::start) with a read-only pool",
         )?;
-        // One read: the marker and the rows it vouches for, from one snapshot.
+        // One pooled read, two statements (no read transaction, so not one
+        // snapshot). Marker first: it is never removed, and a full walk commits
+        // it in the same batch as its facts, so rows read after it are at least
+        // as fresh as the facts it vouches for.
         runtime.submit_read(|store| {
             if !store.build_facts_extracted()? {
                 return Ok(None);
