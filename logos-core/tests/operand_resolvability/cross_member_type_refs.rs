@@ -1203,13 +1203,8 @@ fn report(root: &Path, e: &Estate, product: &Judgement, census: &Judgement, rec:
     let reach = product.reach();
     let main = product.main_triples();
     let one: Vec<_> = product.exactly_one().collect();
-    let backing_of: BTreeMap<Triple, Backing> =
-        one.iter().map(|(t, _, _, b, _)| (t.clone(), *b)).collect();
     println!("\n  {}", verdict_line(HALF_REACH, REACH_FLOOR, reach.len(), 0));
-    println!(
-        "    main-tree triples by pair: {}",
-        render_counts(&count_by(main.values().map(|p| p.label())))
-    );
+    println!("    main-tree triples by pair: {}", render_pair_split(product.main_triple_pairs()));
     let off_build = count_by(
         main.iter()
             .filter(|(_, p)| !matches!(p, PairClass::Build { .. }))
@@ -1218,10 +1213,8 @@ fn report(root: &Path, e: &Estate, product: &Judgement, census: &Judgement, rec:
     for (pair, n) in &off_build {
         println!("      not a build pair: {pair}: {n} triple(s)");
     }
-    println!(
-        "    Reach by backing: {}",
-        render_counts(&count_by(reach.iter().map(|t| backing_of[t].label())))
-    );
+    let (source, avro, both) = product.reach_backing();
+    println!("    Reach by backing: source {source} · avro {avro} · both {both}");
     let test_triples: BTreeSet<Triple> = one
         .iter()
         .filter(|(_, tree, p, ..)| *tree == Tree::Test && p.admitted())
@@ -1302,7 +1295,7 @@ fn report(root: &Path, e: &Estate, product: &Judgement, census: &Judgement, rec:
     );
     println!(
         "    census-rule main-tree triples by pair: {}",
-        render_counts(&count_by(census_main.values().map(|p| p.label())))
+        render_pair_split(census.main_triple_pairs())
     );
     let non_build: BTreeSet<&(String, String)> = census_pairs
         .iter()
@@ -1345,6 +1338,14 @@ fn report(root: &Path, e: &Estate, product: &Judgement, census: &Judgement, rec:
     for (t, m) in &rec.extra {
         println!("      {} → {} : {}  [{m:?}]", t.0, t.1, t.2);
     }
+}
+
+/// [`Judgement::main_triple_pairs`], rendered — the figure the gate pins.
+fn render_pair_split((build, platform, collision, type_only): (usize, usize, usize, usize)) -> String {
+    format!(
+        "build {build} · build into a platform {platform} · collision-backed {collision} · \
+         type-only {type_only} (never Reach)"
+    )
 }
 
 fn mechanism_label(m: &Mechanism) -> &'static str {
