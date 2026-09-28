@@ -373,6 +373,10 @@ struct FileMatches {
     /// (`@fw.const.*`).
     const_scopes: Vec<fold::ScopeCapture>,
     const_fields: Vec<fold::FieldCapture>,
+    /// Byte ranges of opaque prefixes written inside an annotation the parser
+    /// had to recover from an error: never folded, so they stay opaque and
+    /// refuse (see [`fold_constants`]).
+    unreadable_prefix_spans: HashSet<(usize, usize)>,
     /// `true` once the dialect's query captured any `@fw.const.*` fact — the
     /// opt-in that makes [`fold_constants`] run at all (a Kotlin, Rust or
     /// TypeScript query names none, so their scans are untouched by S-469).
@@ -791,9 +795,10 @@ fn fold_constants(out: &mut FileMatches, source: &str, rel: &str) {
     for scope in &mut out.prefixes {
         let mut still_opaque = Vec::with_capacity(scope.opaque.len());
         for (start, end) in std::mem::take(&mut scope.opaque) {
-            let folded = (!literal_prefix_spans.contains(&(start, end)))
-                .then(|| names.fold(start, end))
-                .flatten();
+            let folded = (!literal_prefix_spans.contains(&(start, end))
+                && !out.unreadable_prefix_spans.contains(&(start, end)))
+            .then(|| names.fold(start, end))
+            .flatten();
             match folded {
                 Some((text, folded_from)) => {
                     let text = text.trim().to_string();
@@ -1267,6 +1272,9 @@ fn generic_match(
     let mut prefix_nodes: Vec<Node<'_>> = Vec::new();
     let mut prefix_scope: Option<Node<'_>> = None;
     let mut prefix_opaque: Vec<(usize, usize)> = Vec::new();
+    // Predicate-only for the query; read here for its parent, the annotation,
+    // to tell whether the parser recovered an error inside it.
+    let mut prefix_name: Option<Node<'_>> = None;
     let mut anchor_node: Option<Node<'_>> = None;
     let mut method_node: Option<Node<'_>> = None;
     let mut handler_node: Option<Node<'_>> = None;
@@ -1332,6 +1340,7 @@ fn generic_match(
             "fw.route.method" => &mut method_node,
             "fw.route.handler" => &mut handler_node,
             "fw.route.prefix.scope" => &mut prefix_scope,
+            "fw.route.prefix.name" => &mut prefix_name,
             "fw.component.name" => &mut component_node,
             // Auxiliary captures (`fw.component.base`, `fw.route.key`,
             // `fw.route.prefix.name`, …) exist only for the query's own
@@ -1354,13 +1363,15 @@ fn generic_match(
         });
     }
     // A constant's declarator is also every-field's: `Names::new` pairs the two
-    // by the name's start byte.
+    // by the name's start byte. A declarator the parser recovered from an error
+    // still shadows, but has no value the fold may read.
     if let Some(field) = const_name.or(const_field) {
         out.const_fields.push(fold::FieldCapture {
             name: text(field, src).trim().to_string(),
             at: field.start_byte(),
             value: const_name
                 .and(const_value)
+                .filter(|v| !recovered_from_error(*v))
                 .map(|v| (v.start_byte(), v.end_byte())),
         });
     }
@@ -1369,6 +1380,13 @@ fn generic_match(
     // nothing by itself; it only tells [`compose_prefixes`] which byte range
     // its path governs.
     if let Some(scope) = prefix_scope {
+        // The annotation holding the prefix is the name capture's parent.
+        if prefix_name
+            .and_then(|name| name.parent())
+            .is_some_and(|annotation| annotation.has_error())
+        {
+            out.unreadable_prefix_spans.extend(prefix_opaque.iter().copied());
+        }
         out.prefixes.push(PrefixScope {
             start: scope.start_byte(),
             end: scope.end_byte(),
@@ -1415,6 +1433,14 @@ fn generic_match(
             // A path written as an expression is not pathless: it waits for
             // the fold, which promotes or counts it (S-469).
             if !opaque_path_nodes.is_empty() {
+                // An annotation the parser recovered from an error does not
+                // state its path: an escape it could not read (`BASE\u0041SE`)
+                // leaves a stray identifier that would fold as another name.
+                if anchor_node.is_some_and(|a| a.has_error()) {
+                    out.refusals
+                        .extend(opaque_path_nodes.iter().map(|_| RouteRefusal::PathNotFolded));
+                    return true;
+                }
                 for (node, named) in opaque_path_nodes {
                     out.opaque_paths.push((
                         RouteMatch {
@@ -1463,6 +1489,16 @@ fn generic_match(
         }
     }
     true
+}
+
+/// `true` when the parser recovered an error in a constant's initializer or in
+/// the declaration around it — the node, its declarator, the declaration — so
+/// its text is not what the source states. The recovery can put the `ERROR`
+/// node beside the declarator (`String A = BASE\u0041SE;`), not inside it.
+fn recovered_from_error(node: Node<'_>) -> bool {
+    std::iter::successors(Some(node), |n| n.parent())
+        .take(3)
+        .any(|n| n.has_error())
 }
 
 /// Apply the named-over-positional precedence rule (FR-FW-05): at a

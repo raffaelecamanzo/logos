@@ -2735,6 +2735,40 @@ mod java_constant_fold {
         assert_eq!(refusals, [RouteRefusal::PathNotFolded, RouteRefusal::PathNotFolded]);
     }
 
+    /// A path the parser only recovered from an error is not read: a Unicode
+    /// escape in an identifier (`BASEASE` is `BASEASE` to javac) parses as
+    /// the identifier `BASE` beside an `ERROR` node, and folding that identifier
+    /// would promote a different constant's value (review of S-469). The
+    /// registration is refused and counted instead, for a method path and for a
+    /// class prefix alike.
+    #[test]
+    fn a_path_recovered_from_a_parse_error_is_refused_not_folded() {
+        let constants = "    static final String BASE = \"/fab\";\n    static final String BASEASE = \"/real\";\n";
+        let (routes, refusals) = fold_scan(&format!(
+            "public class C {{\n{constants}    @GetMapping(BASE\\u0041SE)\n    \
+             public String get() {{ return \"\"; }}\n}}\n"
+        ));
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded]);
+
+        let (routes, refusals) = fold_scan(&format!(
+            "public class Outer {{\n{constants}    @RequestMapping(BASE\\u0041SE)\n    public static class C {{\n        \
+             @GetMapping(\"/users\")\n        public String get() {{ return \"\"; }}\n    }}\n}}\n"
+        ));
+        assert!(routes.iter().all(|r| !r.0.starts_with("/fab")), "{routes:?}");
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotComposed]);
+
+        // A constant whose initializer holds the escape has no value the fold
+        // may read: `A` is `BASEASE`'s value to javac, never `BASE`'s.
+        let (routes, refusals) = fold_scan(&format!(
+            "public class C {{\n{constants}    static final String A = BASE\\u0041SE;\n    \
+             @GetMapping(A)\n    public String get() {{ return \"\"; }}\n}}\n"
+        ));
+        assert!(routes.is_empty(), "{routes:?}");
+        assert_eq!(refusals, [RouteRefusal::PathNotFolded]);
+    }
+
     /// The positive twins of the scoping refusals: a type declaring the
     /// constant itself wins over anything it inherits, and an enclosing type's
     /// constant is visible to a nested type that inherits nothing.
