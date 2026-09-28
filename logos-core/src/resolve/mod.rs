@@ -579,9 +579,12 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 /// `status` row ([`LanguageResolution::call_residue`]), keyed by `files.language`.
 ///
 /// Each unbound `Calls` row of a package-shaped file is re-walked by the binder
-/// under `policy`, against an index built exactly as [`run`] builds it, and
-/// counted under the reason the walk gave up with ([`binder::residue`]) — so a
-/// reason can never describe a path the bind did not take. The population is
+/// under `policy` and counted under the reason the walk gave up with
+/// ([`binder::residue`]), so a reason can never describe a path the bind did not
+/// take. The index is [`run`]'s, built with the same package layout, minus the
+/// path-specifier and imported-binding scopes `run` chains on: those are read
+/// only for a path-grammar (TypeScript, JavaScript, Go) file, never for a
+/// package-shaped row. The population is
 /// the per-language ledger's: rows of a file that records a language, so
 /// `unbound` equals the row's `calls.references − calls.bound`.
 ///

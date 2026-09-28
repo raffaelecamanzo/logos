@@ -1329,9 +1329,10 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
     }))
 }
 
-/// [`bind`], and the [`Residue`] the lookup that gave up recorded — `None`
-/// when no package-shaped member lookup gave up (every Rust row, and every row
-/// that binds).
+/// [`bind`], and the [`Residue`] the first package-shaped call lookup that gave
+/// up recorded — `None` when none did (every Rust row). Meaningful only for an
+/// [`Outcome::Unbound`]: a row that binds may still carry the miss of a rung it
+/// tried first (one of two static imports naming an external type).
 fn bind_traced(
     r: &UnresolvedRefRow,
     ix: &Index,
@@ -1731,9 +1732,10 @@ struct Ctx<'a> {
     /// never names its own nested type.
     lexical_start: Cell<NodeId>,
     /// Why a package-shaped call lookup gave up, when one did (S-468,
-    /// [`Residue`]) — the first reason recorded wins, since the lookups that
-    /// run after it only widen the search the bind already lost. Read by
-    /// [`residue`] alone; binding never consults it.
+    /// [`Residue`]) — the first reason recorded wins: it is the rung that
+    /// decided the row, and a later one only widens a search that rung already
+    /// lost. Read by [`residue`] alone, and only for a row that stays unbound;
+    /// binding never consults it.
     miss: RefCell<Option<Residue>>,
 }
 
