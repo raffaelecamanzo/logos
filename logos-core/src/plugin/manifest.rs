@@ -852,25 +852,9 @@ impl PluginManifest {
                 "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
             ));
         }
-        // A package-shaped module path needs at least one root to strip, and
-        // each root is matched as whole path segments — so an entry that could
-        // never equal a segment sequence (empty, absolute, `..`, a backslash, an
-        // empty segment) is a descriptor bug, not a root that silently matches
-        // nothing.
         if let Some(pm) = &self.package_modules {
-            if pm.source_roots.is_empty() {
-                return bail(
-                    "`[package_modules]` must declare at least one `source_roots` entry"
-                        .to_string(),
-                );
-            }
-            if let Some(bad) = pm.source_roots.iter().find(|r| {
-                r.contains('\\') || r.split('/').any(|seg| seg.is_empty() || seg == "..")
-            }) {
-                return bail(format!(
-                    "`[package_modules]` source root '{bad}' must be a relative `/`-separated \
-                     directory path (no empty segment, no leading or trailing `/`, no `..`)"
-                ));
+            if let Err(detail) = validate_package_modules(pm) {
+                return bail(detail);
             }
         }
         // Every declared capability must have a query backing it, so a `logos
@@ -964,6 +948,32 @@ impl PluginManifest {
     }
 }
 
+
+/// The `[package_modules]` table's rules (S-465, CR-149): at least one root to
+/// strip, and each root matchable as whole path segments — so an entry that
+/// could never equal a segment sequence (empty, absolute, `..`, a backslash, an
+/// empty segment) is a descriptor bug, not a root that silently matches nothing.
+///
+/// Its own function for the reason [`validate_properties`] is: inline, these
+/// rows pushed [`PluginManifest::validate`] past the `max_cc = 50` rule.
+fn validate_package_modules(pm: &PackageModules) -> Result<(), String> {
+    if pm.source_roots.is_empty() {
+        return Err(
+            "`[package_modules]` must declare at least one `source_roots` entry".to_string(),
+        );
+    }
+    if let Some(bad) = pm
+        .source_roots
+        .iter()
+        .find(|r| r.contains('\\') || r.split('/').any(|seg| seg.is_empty() || seg == ".."))
+    {
+        return Err(format!(
+            "`[package_modules]` source root '{bad}' must be a relative `/`-separated \
+             directory path (no empty segment, no leading or trailing `/`, no `..`)"
+        ));
+    }
+    Ok(())
+}
 
 /// The `[properties]` table's typo and shape rules (S-381, S-398).
 ///
