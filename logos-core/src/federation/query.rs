@@ -39,6 +39,8 @@ use crate::models::{CallersResult, ImpactResult, SearchResult, StatusInfo};
 use crate::Engine;
 
 use super::bridge::{BridgeEdge, BridgeIntake, MemberContracts};
+use crate::graph_store::BuildManifestRow;
+
 use super::build_deps::{self, BuildDependencyHeadline, MemberBuildFacts};
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
 use super::manifest::MemberKind;
@@ -146,23 +148,41 @@ fn fan_status(
     let freshness = answer
         .fan_out(|_, engine| (engine.try_status(), engine.build_manifests()))
         .into_iter()
-        .map(|scoped| {
-            let member = scoped.member;
-            let value = scoped.value.map(|(status, facts)| {
-                match facts {
-                    Ok(rows) => build_facts.push((member.clone(), rows)),
-                    Err(err) => tracing::warn!(
-                        member = %member,
-                        "reading a workspace member's build-manifest facts failed; \
-                         the build-dependency headline reports it unread: {err:#}"
-                    ),
-                }
-                status
-            });
-            flatten_status(MemberScoped { member, value })
-        })
+        .map(|scoped| split_status_and_facts(scoped, &mut build_facts))
         .collect();
     (freshness, build_facts)
+}
+
+/// One member of the freshness walk: its freshness row, with its build facts
+/// pushed onto `build_facts` only when they were read ([FR-WS-33]).
+///
+/// A facts read that failed — or an engine that never started — pushes
+/// nothing, so the join names the member unread instead of counting it read
+/// with no manifests; the freshness row is exactly what [`flatten_status`]
+/// makes of the status half either way. Split out from [`fan_status`] so all
+/// three channels are assertable without a corrupt on-disk store, as
+/// [`flatten_status`] is.
+///
+/// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+fn split_status_and_facts(
+    scoped: MemberScoped<
+        anyhow::Result<(anyhow::Result<StatusInfo>, anyhow::Result<Vec<BuildManifestRow>>)>,
+    >,
+    build_facts: &mut Vec<MemberBuildFacts>,
+) -> MemberResult<StatusInfo> {
+    let member = scoped.member;
+    let value = scoped.value.map(|(status, facts)| {
+        match facts {
+            Ok(rows) => build_facts.push((member.clone(), rows)),
+            Err(err) => tracing::warn!(
+                member = %member,
+                "reading a workspace member's build-manifest facts failed; \
+                 the build-dependency headline reports it unread: {err:#}"
+            ),
+        }
+        status
+    });
+    flatten_status(MemberScoped { member, value })
 }
 
 /// Collapse the two nested failure channels of a fanned [`Engine::try_status`]
@@ -927,6 +947,37 @@ mod tests {
             warm_concurrency: None,
             member_kinds: Default::default(),
         }
+    }
+
+    /// The three channels of one freshness-walk member: facts read (pushed),
+    /// facts unreadable on a live engine (not pushed — the member reads
+    /// unread — and its freshness row untouched), and an engine that never
+    /// started (not pushed, error row).
+    #[test]
+    fn a_failed_build_facts_read_is_unread_and_leaves_the_freshness_row_alone() {
+        let scoped = |value| MemberScoped { member: "api".to_string(), value };
+        let mut facts = Vec::new();
+
+        let row = split_status_and_facts(
+            scoped(Ok((Ok(StatusInfo::default()), Ok(Vec::new())))),
+            &mut facts,
+        );
+        assert!(row.result.is_some() && row.error.is_none());
+        assert_eq!(facts.len(), 1, "facts read are pushed, even when empty");
+
+        let row = split_status_and_facts(
+            scoped(Ok((Ok(StatusInfo::default()), Err(anyhow::anyhow!("store read failed"))))),
+            &mut facts,
+        );
+        assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
+        assert_eq!(facts.len(), 1, "an unreadable member is never counted read");
+
+        let row = split_status_and_facts(scoped(Err(anyhow::anyhow!("store is corrupt"))), &mut facts);
+        assert!(row.error.is_some());
+        assert_eq!(facts.len(), 1);
+
+        let headline = build_dependency_headline(&two_member_federation(), &[]).unwrap();
+        assert_eq!(headline.members.unread, ["a", "b"], "no fact pushed ⇒ named unread");
     }
 
     /// Every member read and none holds a manifest: the section is absent. One
