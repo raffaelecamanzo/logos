@@ -36,6 +36,11 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   - the signal score of a Java repository moves with all of these.
 
   Rust, and every other language, is unchanged: this repository's own index is byte-identical.
+- **Known limitation: a sync can leave a stale Java call edge until the next full `index`.**
+  `logos sync` re-binds the calls a hierarchy edit moves, but it does not remove an edge the
+  call bound before. This happens when a class in the middle of a hierarchy gains an override
+  (the call then has an edge to both methods), drops its `extends`, or is deleted. A full
+  `logos index` has no stale edge. The same holds for a method that gains an overload.
 
 ## [1.5.0] — 2026-09-28
 

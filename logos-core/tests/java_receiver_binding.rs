@@ -1125,3 +1125,117 @@ fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
         .expect("a java row");
     assert_eq!(residue.unbound, java.calls.references - java.calls.bound);
 }
+
+/// **Known pre-existing gap, pinned — the supertype walk's shapes of it**
+/// (coordinator decision 12; the same commit semantics as the overload pin
+/// above). A sync that moves the hierarchy re-selects every package-shaped
+/// call (`is_affected` rule 5) and re-binds it correctly, but the commit only
+/// inserts the new edge and flips the row's `resolved` flag: an edge the row
+/// bound before survives wherever its target node does. A mid-chain `Mid`
+/// gaining an override of `start()` therefore leaves each inherited call with
+/// **two** edges — the new nearest `Mid.start` and the stale `Base.start` —
+/// where a cold index has only `Mid.start`. When the gap is fixed this fails
+/// and becomes the sync ≡ reindex assertion.
+#[test]
+fn known_gap_sync_keeps_the_old_edge_when_a_mid_chain_type_gains_an_override() {
+    let tmp = hierarchy();
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let old = edge(LEAF_FILE, "viaInherited", BASE_FILE, "start");
+    assert!(call_edges(rt).contains(&old));
+    write(
+        tmp.path(),
+        MID_FILE,
+        "package com.x.base;\n\npublic class Mid extends Base {\n    public void start() {}\n    public void stop() {}\n}\n",
+    );
+    engine.sync(&[MID_FILE.into()]);
+    let new = edge(LEAF_FILE, "viaInherited", MID_FILE, "start");
+    let cold = cold_facts(&tmp, &HIERARCHY_FILES);
+    assert_ne!(binding_facts(rt), cold, "the gap is closed — assert sync ≡ reindex instead");
+    let synced = call_edges(rt);
+    assert!(synced.contains(&new) && synced.contains(&old), "{synced:?}");
+    let cold_engine = {
+        let dir = TempDir::new().unwrap();
+        for rel in HIERARCHY_FILES {
+            write(dir.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
+        }
+        (index(dir.path()), dir)
+    };
+    let cold_edges = call_edges(cold_engine.0.runtime().unwrap());
+    assert!(cold_edges.contains(&new) && !cold_edges.contains(&old), "{cold_edges:?}");
+}
+
+/// **Known pre-existing gap, pinned** — the same commit semantics when a
+/// mid-chain type **drops** its superclass: the inherited calls are
+/// re-selected and re-bind to nothing (`resolved` flips to false), but their
+/// edges into `Base.start` stay; a cold index has none.
+#[test]
+fn known_gap_sync_keeps_the_edge_when_a_mid_chain_type_drops_its_superclass() {
+    let tmp = hierarchy();
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let stale = edge(USER_FILE, "run", BASE_FILE, "start");
+    assert!(call_edges(rt).contains(&stale));
+    write(
+        tmp.path(),
+        MID_FILE,
+        "package com.x.base;\n\npublic class Mid {\n    public void stop() {}\n}\n",
+    );
+    engine.sync(&[MID_FILE.into()]);
+    assert!(
+        call_rows(rt, USER_FILE).contains(&(
+            "run".to_string(),
+            "Leaf::start".to_string(),
+            RefForm::Path,
+            false
+        )),
+        "the row is re-selected and unbinds"
+    );
+    assert!(call_edges(rt).contains(&stale), "the gap is closed — assert sync ≡ reindex instead");
+    let cold = cold_facts(&tmp, &HIERARCHY_FILES);
+    assert!(
+        !cold.0.iter().any(|(_, t, k)| k == "calls" && t.contains("Base#start")),
+        "a cold index binds nothing into `Base.start`: {:?}",
+        cold.0
+    );
+}
+
+/// **Known pre-existing gap, pinned** — a supertype **between** the caller's
+/// type and the declaring one is deleted. The row names neither deleted file's
+/// type, and only the hierarchy tokens (every `Extends` target, bound or not)
+/// re-select it; it re-binds to nothing, but its edge into `Root.start`
+/// survives, since `Root` is untouched.
+#[test]
+fn known_gap_sync_keeps_the_edge_when_a_supertype_between_is_deleted() {
+    const ROOT: &str = "src/main/java/com/x/h/Root.java";
+    const BASE: &str = "src/main/java/com/x/h/Base.java";
+    const MID: &str = "src/main/java/com/x/h/Mid.java";
+    const USER: &str = "src/main/java/com/x/h/User.java";
+    let tmp = tree(&[
+        (ROOT, "package com.x.h;\n\npublic class Root {\n    public void start() {}\n}\n"),
+        (BASE, "package com.x.h;\n\npublic class Base extends Root {}\n"),
+        (MID, "package com.x.h;\n\npublic class Mid extends Base {}\n"),
+        (
+            USER,
+            "package com.x.h;\n\npublic class User {\n    private Mid mid;\n    public void run() { mid.start(); }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let stale = edge(USER, "run", ROOT, "start");
+    assert!(call_edges(rt).contains(&stale));
+    fs::remove_file(tmp.path().join(BASE)).unwrap();
+    engine.sync(&[BASE.into()]);
+    assert!(
+        call_rows(rt, USER).contains(&(
+            "run".to_string(),
+            "Mid::start".to_string(),
+            RefForm::Path,
+            false
+        )),
+        "the hierarchy tokens re-select the row, and it unbinds"
+    );
+    assert!(call_edges(rt).contains(&stale), "the gap is closed — assert sync ≡ reindex instead");
+    let cold = cold_facts(&tmp, &[ROOT, MID, USER]);
+    assert!(!cold.0.iter().any(|(_, _, k)| k == "calls"), "{:?}", cold.0);
+}
