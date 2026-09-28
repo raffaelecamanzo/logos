@@ -1428,6 +1428,23 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     expect(screen.queryByRole("button", { name: "archive-kafka-models" })).toBeNull();
   });
 
+  it("renders NO hint card when no member depends on two contexts' model libraries", async () => {
+    stubApi({
+      providers: [BINDING],
+      buildDependency: BUILD_HEADLINE,
+      buildDeps: { ...BUILD_DEPS, cross_context: [] },
+    });
+    mount();
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /draw what each member builds against/i }),
+    );
+    // The relation arrived (its layer is drawn), and still no card: an empty hint
+    // is not a "0 members" statement.
+    expect(await screen.findByRole("table", { name: /accessible twin of the build layer/i })).toBeInTheDocument();
+    expect(screen.queryByText("Cross-context model hint")).toBeNull();
+    expect(screen.queryByText(/depend on the model libraries/)).toBeNull();
+  });
+
   it("states a FAILED build read with the toggle off — never a silent 'no hint'", async () => {
     stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDepsStatus: 500 });
     mount();
