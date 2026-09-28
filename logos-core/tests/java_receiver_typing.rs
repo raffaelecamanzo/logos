@@ -852,3 +852,42 @@ fn a_proof_still_types_beside_the_shapes_that_look_like_refusals() {
         [row("a", "S3Client::send", RefForm::Path), row("b", "$Proxy::send", RefForm::Path)]
     );
 }
+
+/// An inner class reads its outer class's field — a `@Nested` test class and
+/// its outer test's collaborators — and that field is in scope, unless the
+/// inner class inherits: a supertype may declare a same-named field this file
+/// cannot see, which shadows the outer one (S-467 review).
+const NESTED_FILE: &str = "src/main/java/com/x/svc/NestedT.java";
+const NESTED: &str = "package com.x.svc;\n\
+\n\
+import com.x.base.Base2;\n\
+import com.x.mail.Mailer;\n\
+\n\
+public class NestedT {\n\
+    private Mailer m;\n\
+    class Plain {\n\
+        void go() { m.send(); }\n\
+    }\n\
+    class Inherits extends Base2 {\n\
+        void go() { m.send(); }\n\
+    }\n\
+}\n";
+
+#[test]
+fn an_outer_classs_field_is_in_scope_through_inner_classes_that_inherit_nothing() {
+    let tmp = fixture();
+    write(tmp.path(), NESTED_FILE, NESTED);
+    write(tmp.path(), SCOPED[1].0, SCOPED[1].1);
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let rows = calls_from(rt, NESTED_FILE);
+    assert_eq!(
+        rows,
+        [row("go", "Mailer::send", RefForm::Path), row("go", "send", RefForm::Method)]
+    );
+    // The typed row is `Plain.go`'s: it binds to the imported `Mailer`.
+    let edges = call_edges(rt);
+    let from_go: Vec<_> = edges.iter().filter(|(s, _)| s.starts_with(NESTED_FILE)).collect();
+    assert_eq!(from_go.len(), 1, "{from_go:?}");
+    assert_eq!(from_go[0].1, format!("{MAILER_FILE}:send"));
+}

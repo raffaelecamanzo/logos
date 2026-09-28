@@ -200,6 +200,13 @@ impl<'tree> Receivers<'tree> {
                 && r.alias.as_deref() == Some(STATIC_WILDCARD_ALIAS)
         });
 
+        // Every class that records a supertype: its fields may be shadowed by
+        // an inherited one this file cannot see.
+        let supertyped: HashSet<&str> = refs
+            .iter()
+            .filter(|r| matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements))
+            .map(|r| r.source.as_str())
+            .collect();
         // A callable's own declarations, keyed by the callable — the scope a
         // simple-name receiver must be declared in (see `declared_in_scope`).
         let mut scopes: HashMap<usize, DeclaredTypes> = HashMap::new();
@@ -219,7 +226,7 @@ impl<'tree> Receivers<'tree> {
                 // call — the file-wide type is then its type, because every
                 // declaration of the name in the file agrees. Declared nowhere
                 // in scope, it is inherited or an outer class's: unproven.
-                Shape::Name(x) if types().declares(x) => declared_in_scope(invocation, x, file, &mut scopes)
+                Shape::Name(x) if types().declares(x) => declared_in_scope(invocation, x, file, &supertyped, &mut scopes)
                     .then(|| types().get(x))
                     .flatten()
                     .filter(|t| provable(t))
@@ -292,18 +299,34 @@ fn enclosing_class(invocation: Node<'_>, file: &FileDecls<'_, '_>) -> Option<usi
 }
 
 /// Whether `name`, a variable the file declares, is declared in scope at
-/// `invocation`: as a field of the enclosing class, or anywhere in the outermost
-/// callable around the call (its parameters, its locals, a local or anonymous
-/// class's members) — read by [`DeclaredTypes`] over that callable alone, so the
-/// rule for what a declaration is stays the one [`DeclaredTypes::build`] has.
+/// `invocation`: anywhere in the outermost callable around the call (its
+/// parameters, its locals, a local or anonymous class's members) — read by
+/// [`DeclaredTypes`] over that callable alone, so the rule for what a
+/// declaration is stays the one [`DeclaredTypes::build`] has — or as a field of
+/// the enclosing class, or of a class enclosing THAT one reached only through
+/// classes that inherit nothing (`supertyped`: a class recording an `extends`
+/// or `implements` row may inherit a same-named field from another file, which
+/// would shadow the outer one). A `@Nested` test class reading its outer
+/// class's field is the shape this admits.
 fn declared_in_scope(
     invocation: Node<'_>,
     name: &str,
     file: &FileDecls<'_, '_>,
+    supertyped: &HashSet<&str>,
     scopes: &mut HashMap<usize, DeclaredTypes>,
 ) -> bool {
-    if enclosing_class(invocation, file).is_some_and(|i| declares_field(file.decls, i, name)) {
-        return true;
+    let mut class = enclosing_class(invocation, file);
+    while let Some(i) = class {
+        if declares_field(file.decls, i, name) {
+            return true;
+        }
+        let inherits = file.symbols[i]
+            .as_ref()
+            .is_none_or(|s| supertyped.contains(s.as_str()));
+        if inherits {
+            break;
+        }
+        class = outer_class(file.decls, i);
     }
     outermost_callable(invocation).is_some_and(|callable| {
         scopes
@@ -311,6 +334,18 @@ fn declared_in_scope(
             .or_insert_with(|| DeclaredTypes::build(callable, file.source))
             .declares(name)
     })
+}
+
+/// The class-like declaration enclosing the one at `class`, if any.
+fn outer_class(decls: &[Decl<'_>], class: usize) -> Option<usize> {
+    let mut at = decls[class].parent;
+    while let Some(i) = at {
+        if is_class_like(decls[i].kind) {
+            return Some(i);
+        }
+        at = decls[i].parent;
+    }
+    None
 }
 
 /// Whether the class at `class` declares a field named `name` itself.
@@ -331,14 +366,7 @@ fn declares_member(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
 /// a nested, inner or local class, whose bare calls the outer class's members
 /// can also answer.
 fn nested(decls: &[Decl<'_>], class: usize) -> bool {
-    let mut at = decls[class].parent;
-    while let Some(i) = at {
-        if is_class_like(decls[i].kind) {
-            return true;
-        }
-        at = decls[i].parent;
-    }
-    false
+    outer_class(decls, class).is_some()
 }
 
 /// Whether the file declares a class-like type named `name`.
