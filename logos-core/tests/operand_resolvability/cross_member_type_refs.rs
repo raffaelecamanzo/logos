@@ -1906,8 +1906,13 @@ mod tests {
         assert!(unexplained.is_empty());
         // Without the Reach row, the same pair is unexplained — and a test-tree
         // triple of the same pair never explains it.
-        let rows: Vec<Row> = fixture_rows().into_iter().filter(|r| r.consumer != "app").collect();
+        let mut rows: Vec<Row> = fixture_rows().into_iter().filter(|r| r.consumer != "app").collect();
+        rows.push(row("app", "src/test/java/com/a/T.java", "com.l.Svc"));
         let j = judge(&rows, &index(), &relation_pairs());
+        assert!(
+            j.exactly_one().any(|((a, b, _), tree, ..)| a == "app" && b == "lib" && tree == Tree::Test),
+            "the fixture holds a test-tree app → lib triple"
+        );
         let (explained, denominator, unexplained) = j.explanation();
         assert_eq!((explained, denominator), (0, 1));
         assert_eq!(unexplained, vec![pair("app", "lib")]);
