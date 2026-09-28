@@ -353,26 +353,64 @@ fn code_only(text: &str) -> String {
     out
 }
 
-/// The package a Java/Kotlin file declares — its first code line, when that is
+/// The package a Java/Kotlin file declares — its first statement, when that is
 /// a `package` statement — or `None` for the default package.
 ///
-/// Comments are skipped ([`code_only`]) and so are annotation lines (Kotlin's
-/// `@file:JvmName`, Java's `package-info` annotations), which may precede the
-/// statement. Kotlin's backtick escapes are dropped.
+/// Scanned as tokens over [`code_only`]'s comment-free text, never by line:
+/// annotations may precede the statement (Kotlin's `@file:JvmName(…)`, Java's
+/// `package-info` `@XmlSchema(…)`), each with a balanced argument list that
+/// may span lines. The name is identifiers joined by `.`, whitespace allowed
+/// around the dots as Java allows it, Kotlin's backtick escapes dropped; it
+/// ends at the first token that continues neither (`;`, or Kotlin's newline).
 pub fn declared_package(text: &str) -> Option<String> {
-    for line in code_only(text).lines() {
-        let code = line.trim();
-        if code.is_empty() || code.starts_with('@') {
-            continue;
+    let code = code_only(text);
+    let mut rest = code.trim_start();
+    while let Some(after) = rest.strip_prefix('@') {
+        let name_end = after
+            .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':')))
+            .unwrap_or(after.len());
+        rest = after[name_end..].trim_start();
+        if rest.starts_with('(') {
+            let mut depth = 0usize;
+            let close = rest.char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            })?;
+            rest = rest[close + 1..].trim_start();
         }
-        let rest = code.strip_prefix("package")?;
-        if !rest.starts_with(char::is_whitespace) {
-            return None;
-        }
-        let name = rest.split(';').next().unwrap_or("").trim().replace('`', "");
-        return (!name.is_empty()).then_some(name);
     }
-    None
+    let after = rest.strip_prefix("package")?;
+    if !after.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut name = String::new();
+    let mut s = after.trim_start();
+    loop {
+        let end = s
+            .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '$' | '`')))
+            .unwrap_or(s.len());
+        if end == 0 {
+            break;
+        }
+        name.push_str(&s[..end].replace('`', ""));
+        match s[end..].trim_start().strip_prefix('.') {
+            Some(tail) => {
+                name.push('.');
+                s = tail.trim_start();
+            }
+            None => break,
+        }
+    }
+    (!name.is_empty() && !name.ends_with('.')).then_some(name)
 }
 
 /// Every record/enum full name an `.avsc` document declares, or the parse
@@ -1511,6 +1549,15 @@ mod tests {
         );
         // …and a `//` inside a block comment ends nothing.
         assert_eq!(declared_package("/* http://x.y\n package no; */\npackage com.z;").as_deref(), Some("com.z"));
+        // An annotation's argument list may span lines, before Java's
+        // `package-info` statement and Kotlin's file annotations alike.
+        let jaxb = "@XmlSchema(\n    namespace = \"http://example.com/ns\",\n    elementFormDefault = XmlNsForm.QUALIFIED)\npackage com.x.jaxb;\n";
+        assert_eq!(declared_package(jaxb).as_deref(), Some("com.x.jaxb"));
+        let suppress = "@file:Suppress(\n    \"UNCHECKED_CAST\",\n    \"unused\"\n)\npackage com.x.k\n\nimport a.B\n";
+        assert_eq!(declared_package(suppress).as_deref(), Some("com.x.k"));
+        // Whitespace Java allows inside the name, and a statement split over lines.
+        assert_eq!(declared_package("package com . x ;").as_deref(), Some("com.x"));
+        assert_eq!(declared_package("package\ncom.x;").as_deref(), Some("com.x"));
         // `packageX` is not a package statement.
         assert_eq!(declared_package("packages.foo;\n"), None);
         assert_eq!(declared_package(""), None);
