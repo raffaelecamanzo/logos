@@ -539,11 +539,16 @@ mod tests {
     use tempfile::TempDir;
 
     /// Run a git command in `cwd`, panicking on failure — fixtures only.
+    ///
+    /// Auto-maintenance is off: a `commit` otherwise spawns a detached
+    /// `git maintenance run --auto` whose `objects/maintenance.lock` can appear
+    /// and vanish while a test is snapshotting the tree.
     fn sh_git(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
             .arg("-C")
             .arg(cwd)
             .args(["-c", "user.email=test@logos", "-c", "user.name=logos-test"])
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .args(args)
             .output()
             .expect("git is on PATH");
@@ -916,7 +921,8 @@ mod tests {
     }
 
     /// A recursive sorted listing of every path under `root` — used to assert
-    /// discovery is side-effect-free.
+    /// discovery is side-effect-free. A `.git` directory is listed but not
+    /// descended: its internals belong to git, not to discovery.
     fn dir_snapshot(root: &Path) -> Vec<PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             let mut entries: Vec<PathBuf> = match fs::read_dir(dir) {
@@ -926,7 +932,7 @@ mod tests {
             entries.sort();
             for p in entries {
                 out.push(p.clone());
-                if p.is_dir() {
+                if p.is_dir() && p.file_name().is_none_or(|n| n != ".git") {
                     walk(&p, out);
                 }
             }
