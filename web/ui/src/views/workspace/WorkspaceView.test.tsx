@@ -1398,7 +1398,7 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     expect(screen.getByText(/HTTP \(OpenAPI ↔ route\)/)).toBeInTheDocument();
 
     const collapsed = screen.getAllByTestId("collapsed-platform").map((e) => e.textContent);
-    expect(collapsed).toEqual(["web (1 member build against it)"]);
+    expect(collapsed).toEqual(["web (1 member builds against it)"]);
 
     const table = screen.getByRole("table", { name: /accessible twin of the build layer/i });
     const cells = [...within(table).getAllByRole("cell")].map((c) => c.textContent);
@@ -1428,6 +1428,33 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     expect(screen.queryByRole("button", { name: "archive-kafka-models" })).toBeNull();
   });
 
+  it("agrees the verb with the count: one member builds/depends, two members build/depend", async () => {
+    stubApi({ providers: [BINDING], buildDependency: BUILD_HEADLINE, buildDeps: BUILD_DEPS });
+    mount();
+    expect(await screen.findByText(/^1 member depends on the model libraries/)).toBeInTheDocument();
+    cleanup();
+
+    const batchRow = { ...PLATFORM_ROW, from: "batch" };
+    stubApi({
+      providers: [BINDING],
+      buildDependency: BUILD_HEADLINE,
+      buildDeps: {
+        ...BUILD_DEPS,
+        members: [
+          ...BUILD_DEPS.members,
+          { member: "batch", builds_against: [batchRow], built_against_by: [] },
+        ],
+        cross_context: [...BUILD_DEPS.cross_context, { ...BUILD_DEPS.cross_context[0], member: "web" }],
+      },
+    });
+    mount();
+    expect(await screen.findByText(/^2 members depend on the model libraries/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: /draw what each member builds against/i }));
+    expect(screen.getAllByTestId("collapsed-platform").map((e) => e.textContent)).toEqual([
+      "web (2 members build against it)",
+    ]);
+  });
+
   it("renders NO hint card when no member depends on two contexts' model libraries", async () => {
     stubApi({
       providers: [BINDING],
@@ -1442,7 +1469,7 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     // is not a "0 members" statement.
     expect(await screen.findByRole("table", { name: /accessible twin of the build layer/i })).toBeInTheDocument();
     expect(screen.queryByText("Cross-context model hint")).toBeNull();
-    expect(screen.queryByText(/depend on the model libraries/)).toBeNull();
+    expect(screen.queryByText(/depends? on the model/)).toBeNull();
   });
 
   it("states a FAILED build read with the toggle off — never a silent 'no hint'", async () => {

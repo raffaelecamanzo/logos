@@ -315,8 +315,8 @@ function CrossContextHintCard({ hints }: { hints: CrossContextHint[] }) {
   return (
     <Card title="Cross-context model hint">
       <p className="muted">
-        {hints.length} member{hints.length === 1 ? "" : "s"} depend on the model libraries of two
-        or more bounded contexts — a context is named by its model library&apos;s coordinate,{" "}
+        {hints.length} {hints.length === 1 ? "member depends" : "members depend"} on the model
+        libraries of two or more bounded contexts — a context is named by its model library&apos;s coordinate,{" "}
         <span className="mono">&lt;group&gt;.&lt;context&gt;:kafka-models</span> or{" "}
         <span className="mono">&lt;context&gt;-kafka-models</span>. A hint for review, drawn as no
         edge: a build dependency is not a runtime coupling.
@@ -685,8 +685,8 @@ function ServiceMap({
           {layer.collapsed.map((c, i) => (
             <span key={c.member} data-testid="collapsed-platform">
               {i > 0 && ", "}
-              <span className="mono">{c.member}</span> ({c.inbound} member
-              {c.inbound === 1 ? "" : "s"} build against it)
+              <span className="mono">{c.member}</span> ({c.inbound}{" "}
+              {c.inbound === 1 ? "member builds" : "members build"} against it)
             </span>
           ))}{" "}
           — declared <span className="mono">platform</span>, so their inbound build edges are
