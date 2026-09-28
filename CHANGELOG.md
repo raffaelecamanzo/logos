@@ -18,9 +18,11 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 - **A typed Java call binds through its receiver's class and that class's superclasses.**
   `service.send()` on a receiver the file declares binds to that class's `send()`. If the
   class does not declare it, the call binds to the one `send()` of its nearest superclass in
-  the repository. `super.m()` and an inherited `m()` bind the same way. An overloaded method,
-  a JDK or library type, a type another member declares, and a superclass outside the
-  repository still bind nothing.
+  the repository. `super.m()` and an inherited `m()` bind the same way. None of these binds:
+  a method overloaded on one class, a JDK or library type, a type another member declares,
+  or a superclass outside the repository. The nearest class that declares the name decides,
+  without reading arity or visibility. An overload split across a class and its superclass
+  therefore binds the nearer one.
 - **`status` states why the rest stays unbound.** The Java row of `resolution_by_language`
   carries `call_residue`: the unbound calls, and how many stay unbound for each reason
   (`no-receiver-evidence`, `external-type`, `type-in-another-member`, `overload-ambiguous`,

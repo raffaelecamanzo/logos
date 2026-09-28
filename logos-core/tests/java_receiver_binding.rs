@@ -1239,3 +1239,47 @@ fn known_gap_sync_keeps_the_edge_when_a_supertype_between_is_deleted() {
     let cold = cold_facts(&tmp, &[ROOT, MID, USER]);
     assert!(!cold.0.iter().any(|(_, _, k)| k == "calls"), "{:?}", cold.0);
 }
+
+/// **Known limitation, pinned — deferred for a decision (S-468 review).** The
+/// walk decides on the nearest level holding exactly one callable of the name,
+/// as CR-150 §3.2 B specifies, and it reads no signature or visibility. So an
+/// overload split across levels binds the nearer one whatever the arity —
+/// `leaf.send("to")` binds `Mid.send(int)` though Java calls the inherited
+/// `Base.send(String)` — and a `private` method of a supertype, which is not
+/// inherited, is still a candidate. Arity selection is out of CR-150's scope
+/// (§3.3) and the graph records no visibility beyond `exported`. When either is
+/// narrowed this fails and states the new rule.
+#[test]
+fn known_limitation_a_cross_level_overload_or_a_private_supertype_method_binds_the_nearer_level() {
+    for modifier in ["public", "private"] {
+        let tmp = tree(&[
+            (
+                "src/main/java/com/x/o/Base.java",
+                "package com.x.o;\n\npublic class Base {\n    public void send(String to) {}\n}\n",
+            ),
+            (
+                "src/main/java/com/x/o/Mid.java",
+                &format!("package com.x.o;\n\npublic class Mid extends Base {{\n    {modifier} void send(int n) {{}}\n}}\n"),
+            ),
+            (
+                "src/main/java/com/x/o/Leaf.java",
+                "package com.x.o;\n\npublic class Leaf extends Mid {}\n",
+            ),
+            (
+                "src/main/java/com/x/o/Caller.java",
+                "package com.x.o;\n\npublic class Caller {\n    private Leaf leaf;\n    public void m() { leaf.send(\"to\"); }\n}\n",
+            ),
+        ]);
+        let engine = index(tmp.path());
+        assert_eq!(
+            call_edges(engine.runtime().unwrap()),
+            [edge(
+                "src/main/java/com/x/o/Caller.java",
+                "m",
+                "src/main/java/com/x/o/Mid.java",
+                "send"
+            )],
+            "{modifier}: the nearer level decides"
+        );
+    }
+}
