@@ -8,7 +8,8 @@
 ; v1 policy: constructors are deliberately NOT captured — a constructor
 ; shares its class's name, and a second same-named node would make every
 ; `ClassName` reference ambiguous under the binder's exactly-one-or-nothing
-; rule (NFR-RA-05). `new ClassName()` references stay honestly unresolved.
+; rule (NFR-RA-05). `new ClassName()` is recorded as an `Instantiates` of the
+; class itself (references.scm, S-466).
 
 (class_declaration
   name: (identifier) @symbol.class)
