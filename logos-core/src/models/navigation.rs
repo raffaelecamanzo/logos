@@ -1033,6 +1033,122 @@ pub struct LanguageResolution {
     pub calls: RelationResolution,
     /// The `Imports` relation.
     pub imports: RelationResolution,
+    /// Why this language's unbound `Calls` rows stay unbound, by reason (S-468,
+    /// [FR-RS-10], [CR-150] §3.2 C) — present on the `status` row of a
+    /// **package-shaped** language (Java) and absent from every other row.
+    ///
+    /// A status-only extension: the reasons are decided by re-walking each
+    /// unbound row through the binder, which needs the whole graph, so the
+    /// relational answers — which attach these rows from the three aggregate
+    /// reads alone ([S-442]) — carry the counts above and not this.
+    ///
+    /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+    /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+    /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_residue: Option<CallResidue>,
+}
+
+/// The reasons a package-shaped language's unbound `Calls` rows stay unbound
+/// (S-468, [FR-RS-10], [CR-150] §3.2 C), each counted over one denominator —
+/// [`unbound`](Self::unbound), the language's `calls.references − calls.bound`.
+///
+/// The reasons partition the denominator: `unbound = Σ reasons + unclassified`.
+///
+/// | reason | the row stays unbound because |
+/// |---|---|
+/// | `no-receiver-evidence` | the file proves no receiver type (a bare Method-form row, or a bare call naming no import) |
+/// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member |
+/// | `type-in-another-member` | the receiver's type is declared by another workspace member (workspace scope only) |
+/// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name |
+/// | `type-ambiguous` | the type's name reaches two declarations here (a `src/main` and a `src/test` class of one name) |
+/// | `supertype-unreached` | the type is here, and neither it nor any supertype reached here declares the name — the chain leaves the repository, stops at an interface, or cycles |
+///
+/// **Scope.** One repository's graph cannot tell another member's type from a
+/// library's, so a `status` read outside a workspace has `scope: "repository"`
+/// and no `type-in-another-member` entry — its `external-type` includes them.
+/// A workspace `status` compares every member's declared types and moves those
+/// rows to `type-in-another-member`, with `scope: "workspace"`.
+///
+/// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CallResidue {
+    /// Unbound `Calls` rows of the language — the denominator of every reason.
+    pub unbound: u64,
+    /// Rows per reason, keyed by the reason token; every reason of the scope is
+    /// present, a `0` included — each is a count the classification made.
+    pub reasons: std::collections::BTreeMap<String, u64>,
+    /// Unbound rows no reason is assigned to: a capture-before-delete row
+    /// awaiting its target, or a row the ledger holds unbound that the binder
+    /// binds now (a graph bound by an older binary, or a sync that did not
+    /// re-select it). `0` on a graph freshly indexed by this binary.
+    pub unclassified: u64,
+    /// Over what the external/other-member split was decided: `"repository"`
+    /// or `"workspace"`.
+    pub scope: String,
+    /// The `external-type` rows grouped by the fully-qualified names each could
+    /// be — what a workspace sorts into `type-in-another-member`. Not
+    /// serialised.
+    #[serde(skip)]
+    pub(crate) external_candidates: Vec<(Vec<Vec<String>>, u64)>,
+    /// Every fully-qualified name a top-level type of this repository is
+    /// declared under — the other half of that comparison. Not serialised.
+    #[serde(skip)]
+    pub(crate) declared_types: Vec<Vec<String>>,
+}
+
+impl CallResidue {
+    /// The reason a row whose receiver the file does not prove stays unbound.
+    pub const NO_RECEIVER_EVIDENCE: &'static str = "no-receiver-evidence";
+    /// The reason a row whose type no file here declares stays unbound.
+    pub const EXTERNAL_TYPE: &'static str = "external-type";
+    /// The reason a row whose type another workspace member declares stays
+    /// unbound.
+    pub const TYPE_IN_ANOTHER_MEMBER: &'static str = "type-in-another-member";
+    /// The reason an overloaded target stays unbound.
+    pub const OVERLOAD_AMBIGUOUS: &'static str = "overload-ambiguous";
+    /// The reason a row whose type is declared twice here stays unbound.
+    pub const TYPE_AMBIGUOUS: &'static str = "type-ambiguous";
+    /// The reason a row whose declaring supertype is not reached stays unbound.
+    pub const SUPERTYPE_UNREACHED: &'static str = "supertype-unreached";
+    /// The scope a single repository's `status` decides the split over.
+    pub const REPOSITORY: &'static str = "repository";
+    /// The scope a workspace `status` decides the split over.
+    pub const WORKSPACE: &'static str = "workspace";
+
+    /// The reasons a repository-scoped readout counts, in token order.
+    pub const REPOSITORY_REASONS: [&'static str; 5] = [
+        Self::EXTERNAL_TYPE,
+        Self::NO_RECEIVER_EVIDENCE,
+        Self::OVERLOAD_AMBIGUOUS,
+        Self::SUPERTYPE_UNREACHED,
+        Self::TYPE_AMBIGUOUS,
+    ];
+
+    /// Move every `external-type` row whose type could be one `elsewhere`
+    /// declares — another member's declared names — to
+    /// `type-in-another-member`, and mark the residue workspace-scoped. A
+    /// candidate matches when it, or a leading run of its segments (an outer
+    /// type, for a nested one), is declared elsewhere.
+    pub(crate) fn split_by_workspace(&mut self, elsewhere: &dyn Fn(&[String]) -> bool) {
+        let moved: u64 = self
+            .external_candidates
+            .iter()
+            .filter(|(candidates, _)| {
+                candidates
+                    .iter()
+                    .any(|fqn| (1..=fqn.len()).any(|k| elsewhere(&fqn[..k])))
+            })
+            .map(|(_, rows)| rows)
+            .sum();
+        if let Some(external) = self.reasons.get_mut(Self::EXTERNAL_TYPE) {
+            *external -= moved;
+        }
+        self.reasons
+            .insert(Self::TYPE_IN_ANOTHER_MEMBER.to_string(), moved);
+        self.scope = Self::WORKSPACE.to_string();
+    }
 }
 
 /// One relation class's resolution over one language: the ledger's numerator

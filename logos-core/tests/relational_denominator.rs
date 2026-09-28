@@ -486,6 +486,7 @@ fn measured_selects_the_anchor_rows_or_names_why_there_are_none() {
         files: 1,
         calls: RelationResolution::measured(2, 1, 1, 0),
         imports: RelationResolution::measured(0, 0, 0, 0),
+        call_residue: None,
     };
     let rows = || vec![row("go"), row("rust"), row("tsx")];
     let some = |l: &str| Some(l.to_string());

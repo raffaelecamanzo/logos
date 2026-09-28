@@ -116,7 +116,7 @@ use rayon::prelude::*;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
 use crate::model::EdgeKind;
-use crate::models::navigation::{LanguageResolution, RelationResolution};
+use crate::models::navigation::{CallResidue, LanguageResolution, RelationResolution};
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
 use crate::plugin::LanguageRegistry;
 use crate::runtime::Runtime;
@@ -271,11 +271,15 @@ pub fn run(
     let selected: Vec<&UnresolvedRefRow> = match delta {
         None => snap.refs.iter().collect(),
         Some(d) if d.changed_paths.is_empty() && d.dirty_tokens.is_empty() => Vec::new(),
-        Some(d) => snap
-            .refs
-            .iter()
-            .filter(|&r| is_affected(r, d, &snap.file_paths, &index))
-            .collect(),
+        Some(d) => {
+            // Decided once per run, not per row: whether the change moved a
+            // type of the package-shaped hierarchy a supertype walk climbs.
+            let hierarchy_moved = index.hierarchy_touched(&d.dirty_tokens);
+            snap.refs
+                .iter()
+                .filter(|&r| is_affected(r, d, &snap.file_paths, &index, hierarchy_moved))
+                .collect()
+        }
     };
 
     // Parallel compute on the shared worker pool (AQ-04): pure binding against
@@ -403,6 +407,12 @@ fn is_bound(o: &binder::Outcome) -> bool {
 /// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
+/// 5. **Hierarchy** (S-468) — `hierarchy_moved`: the sync dirtied a type of the
+///    package-shaped `Extends` hierarchy, and `r` is a call from a
+///    package-shaped file. Such a call may bind through a supertype walk that
+///    crosses the moved type while spelling none of its names — `Leaf::start`
+///    reaching `Base.start` through a `Mid` that just gained `extends Base`.
+///    Every other language's selection is unchanged.
 ///
 /// Every other row provably keeps its binding (its source is in an untouched file
 /// and no key it reads changed), so it is skipped — that is where the work goes.
@@ -413,12 +423,16 @@ fn is_affected(
     delta: &Delta,
     file_paths: &HashMap<i64, String>,
     index: &binder::Index,
+    hierarchy_moved: bool,
 ) -> bool {
     if let Some(path) = r.file_id.and_then(|id| file_paths.get(&id)) {
         if delta.changed_paths.contains(path) {
             return true;
         }
         if is_import_scoped(r) && index.is_path_specifier_file(path) {
+            return true;
+        }
+        if hierarchy_moved && r.kind == EdgeKind::Calls && index.is_package_shaped(path) {
             return true;
         }
     }
@@ -553,8 +567,128 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
             files: row.files,
             calls: measured(row.calls),
             imports: measured(row.imports),
+            call_residue: None,
         })
         .collect())
+}
+
+/// Why each package-shaped language's unbound `Calls` rows stay unbound, by
+/// reason ([FR-RS-10], [S-468], [CR-150] §3.2 C) — the `call_residue` of the
+/// `status` row ([`LanguageResolution::call_residue`]), keyed by `files.language`.
+///
+/// Each unbound `Calls` row of a package-shaped file is re-walked by the binder
+/// under `policy`, against an index built exactly as [`run`] builds it, and
+/// counted under the reason the walk gave up with ([`binder::residue`]) — so a
+/// reason can never describe a path the bind did not take. The population is
+/// the per-language ledger's: rows of a file that records a language, so
+/// `unbound` equals the row's `calls.references − calls.bound`.
+///
+/// Empty — and nothing is read beyond one ledger scan — when no file is
+/// package-shaped, so a Rust-only graph pays for none of it. A pure read that
+/// persists nothing ([ADR-28]); it is `status`'s alone, because the relational
+/// answers attach their rows from the aggregate reads and must stay cheap.
+///
+/// The split between `external-type` and `type-in-another-member` needs the
+/// other members' declared types, so it is decided by the workspace
+/// ([`CallResidue::split_by_workspace`]); here every such row is
+/// `external-type`, under `scope: "repository"`.
+///
+/// # Errors
+/// Returns an error if the graph cannot be read.
+///
+/// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+/// [S-468]: ../../../docs/planning/journal.md#s-468-a-type-qualified-java-call-binds-among-its-types-members-and-in-repo-supertypes
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+/// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+/// [`LanguageResolution::call_residue`]: crate::models::LanguageResolution::call_residue
+/// [`CallResidue::split_by_workspace`]: crate::models::CallResidue::split_by_workspace
+pub(crate) fn call_residue_by_language(
+    store: &dyn GraphStore,
+    registry: &LanguageRegistry,
+    policy: BindingPolicy,
+) -> Result<BTreeMap<String, CallResidue>> {
+    let layout = package_key::PackageLayout::from_registry(registry);
+    let files: HashMap<i64, String> = store
+        .indexed_files()?
+        .into_iter()
+        .filter(|f| layout.is_package_shaped(&f.path))
+        .map(|f| (f.id, f.path))
+        .collect();
+    if files.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut paths: Vec<String> = files.values().cloned().collect();
+    paths.sort();
+    let mut language_of: HashMap<String, String> = HashMap::new();
+    // Chunked: the reader binds one parameter per path.
+    for chunk in paths.chunks(500) {
+        for (path, language) in store.file_languages(chunk)? {
+            if let Some(language) = language {
+                language_of.insert(path, language);
+            }
+        }
+    }
+
+    let (nodes, edges, refs) = (store.all_nodes()?, store.all_edges()?, store.unresolved_refs()?);
+    let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout);
+    let declared = index.declared_type_names();
+
+    let mut out: BTreeMap<String, CallResidue> = BTreeMap::new();
+    let mut external: BTreeMap<String, BTreeMap<Vec<Vec<String>>, u64>> = BTreeMap::new();
+    for language in language_of.values() {
+        out.entry(language.clone()).or_insert_with(|| CallResidue {
+            unbound: 0,
+            reasons: CallResidue::REPOSITORY_REASONS
+                .iter()
+                .map(|reason| ((*reason).to_string(), 0))
+                .collect(),
+            unclassified: 0,
+            scope: CallResidue::REPOSITORY.to_string(),
+            external_candidates: Vec::new(),
+            declared_types: declared.clone(),
+        });
+    }
+    for r in &refs {
+        if r.kind != EdgeKind::Calls || r.resolved {
+            continue;
+        }
+        let Some(language) = r
+            .file_id
+            .and_then(|id| files.get(&id))
+            .and_then(|path| language_of.get(path))
+        else {
+            continue;
+        };
+        let Some(residue) = out.get_mut(language) else {
+            continue;
+        };
+        residue.unbound += 1;
+        let reason = match binder::residue(r, &index, policy) {
+            None => {
+                residue.unclassified += 1;
+                continue;
+            }
+            Some(binder::Residue::NoReceiverEvidence) => CallResidue::NO_RECEIVER_EVIDENCE,
+            Some(binder::Residue::ExternalType { candidates }) => {
+                *external
+                    .entry(language.clone())
+                    .or_default()
+                    .entry(candidates)
+                    .or_default() += 1;
+                CallResidue::EXTERNAL_TYPE
+            }
+            Some(binder::Residue::OverloadAmbiguous) => CallResidue::OVERLOAD_AMBIGUOUS,
+            Some(binder::Residue::TypeAmbiguous) => CallResidue::TYPE_AMBIGUOUS,
+            Some(binder::Residue::SupertypeUnreached) => CallResidue::SUPERTYPE_UNREACHED,
+        };
+        *residue.reasons.entry(reason.to_string()).or_default() += 1;
+    }
+    for (language, by_candidates) in external {
+        if let Some(residue) = out.get_mut(&language) {
+            residue.external_candidates = by_candidates.into_iter().collect();
+        }
+    }
+    Ok(out)
 }
 
 /// One class's raw counts, classified.

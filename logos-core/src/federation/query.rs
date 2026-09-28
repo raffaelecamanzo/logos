@@ -846,7 +846,8 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     // One scope over all four walks below — the unit "once per answer" is
     // measured in. It is dropped with this call, so the next one re-attempts.
     let answer = registry.answer();
-    let (freshness, build_facts) = fan_status(&answer);
+    let (mut freshness, build_facts) = fan_status(&answer);
+    split_call_residue_across_members(&mut freshness);
     let coverage = cross_service_coverage(&answer);
     let topics = workspace_topics(&answer);
 
@@ -897,6 +898,41 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         topics,
         kind_candidates,
         build_dependency,
+    }
+}
+
+/// Sort every member's `external-type` call residue into the rows whose type
+/// **another member** declares — `type-in-another-member` — and the rest
+/// (S-468, [FR-RS-10], [CR-150] §3.2 C). A member's own graph cannot tell the
+/// two apart; the workspace can, from the fully-qualified names each member's
+/// residue row states it declares, read in the same freshness walk.
+///
+/// The union of every member's declared names is enough: a row is
+/// `external-type` only when its own member declares none of the names it
+/// could be, so any declarer of one of them is another member.
+///
+/// A member whose status was not read declares nothing here, so a row naming
+/// only its types stays `external-type`: the split under-counts rather than
+/// guesses ([NFR-RA-05]).
+///
+/// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn split_call_residue_across_members(freshness: &mut [MemberResult<StatusInfo>]) {
+    let declared: std::collections::HashSet<Vec<String>> = freshness
+        .iter()
+        .filter_map(|row| row.result.as_ref())
+        .flat_map(|info| &info.resolution_by_language)
+        .filter_map(|language| language.call_residue.as_ref())
+        .flat_map(|residue| residue.declared_types.iter().cloned())
+        .collect();
+    for residue in freshness
+        .iter_mut()
+        .filter_map(|row| row.result.as_mut())
+        .flat_map(|info| &mut info.resolution_by_language)
+        .filter_map(|language| language.call_residue.as_mut())
+    {
+        residue.split_by_workspace(&|fqn: &[String]| declared.contains(fqn));
     }
 }
 
@@ -1094,6 +1130,7 @@ mod tests {
                         files: 1,
                         calls: RelationResolution::measured(0, 0, 0, 0),
                         imports: RelationResolution::measured(0, 0, 0, 0),
+                        call_residue: None,
                     })
                     .collect(),
                 ..StatusInfo::default()

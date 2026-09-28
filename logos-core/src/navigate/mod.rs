@@ -2004,8 +2004,31 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
     // the row one global `resolution_coverage` averages away. Three aggregate
     // reads on the RO pool, whose `query_only` connections make "persists
     // nothing" structural rather than a promise.
-    let resolution_by_language =
+    let mut resolution_by_language =
         runtime.submit_read(|store| crate::resolve::coverage_by_language(store))?;
+
+    // Why a package-shaped language's calls stay unbound, by reason (FR-RS-10,
+    // S-468): a re-walk of the unbound rows under the policy the resolution
+    // pass binds with. Only a graph holding a package-shaped file pays for it;
+    // a registry-less engine or an unreadable config states no residue rather
+    // than one decided under the wrong policy, and says why.
+    if let Some(registry) = engine.registry() {
+        match crate::config::load_config_from_root(engine.root()) {
+            Ok(config) => {
+                let policy = config.resolution.policy;
+                let mut residues = runtime.submit_read(move |store| {
+                    crate::resolve::call_residue_by_language(store, registry, policy)
+                })?;
+                for row in &mut resolution_by_language {
+                    row.call_residue = residues.remove(&row.language);
+                }
+            }
+            Err(err) => warnings.push(format!(
+                "the per-language call residue is not stated: the configuration could not \
+                 be read ({err})"
+            )),
+        }
+    }
 
     Ok(StatusInfo {
         indexed,

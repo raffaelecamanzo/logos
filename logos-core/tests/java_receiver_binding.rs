@@ -1,0 +1,764 @@
+//! A type-qualified Java call binds among its type's members and in-repository
+//! supertypes (S-468, CR-150 §3.2 B–C, FR-RS-10, UAT-RS-05, FR-RS-09,
+//! NFR-RA-05, NFR-RA-06) — exercised end to end through the public [`Engine`]
+//! façade against real temp-directory fixtures.
+//!
+//! S-467 records a call whose receiver the file proves as `T::m` (Path form).
+//! Before S-468 the package rung bound such a row only to a callable `T`
+//! declares itself; an inherited `m`, a `super.m()` into a class that inherits
+//! it, or a typed receiver whose class inherits the method stayed unbound. Here
+//! the binder walks `T`'s in-repository `Extends` chain (S-466), nearest first,
+//! bounded and cycle-guarded, and binds on the first level holding exactly one
+//! callable `m`.
+//!
+//! What stays unbound is stated by reason on the Java row of the per-language
+//! readout ([FR-RS-09]): `no-receiver-evidence`, `external-type`,
+//! `type-in-another-member`, `overload-ambiguous`, `type-ambiguous`,
+//! `supertype-unreached` — one no-edge fixture each, every one asserted on a
+//! **cold** index. On `sync`, a bound row whose target gains a same-named
+//! sibling keeps its old edge where a cold index leaves it unbound — the
+//! pre-existing commit-semantics gap (S-439), pinned here by the test named for
+//! it rather than mistaken for a regression.
+//!
+//! [FR-RS-09]: ../../docs/specs/requirements/FR-RS-09.md
+
+#![cfg(all(feature = "lang-java", feature = "lang-rust"))]
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use logos_core::federation::{discover, workspace_status, EngineRegistry, RegistryMode};
+use logos_core::model::{EdgeKind, NodeId, RefForm};
+use logos_core::models::CallResidue;
+use logos_core::Engine;
+use logos_core::Runtime;
+use tempfile::TempDir;
+
+fn write(root: &Path, rel: &str, contents: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+fn index(tmp: &Path) -> Engine {
+    let engine = Engine::start(tmp).expect("engine starts");
+    engine.index();
+    engine
+}
+
+/// A fresh directory holding exactly `files`.
+fn tree(files: &[(&str, &str)]) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    for (rel, text) in files {
+        write(tmp.path(), rel, text);
+    }
+    tmp
+}
+
+/// Every bound `Calls` edge as `(source file:name, target file:name)`, sorted.
+fn call_edges(rt: &Runtime) -> Vec<(String, String)> {
+    rt.submit_read(move |store| {
+        let label: HashMap<NodeId, String> = store
+            .all_nodes()?
+            .into_iter()
+            .map(|n| (n.id, format!("{}:{}", n.file_path.unwrap_or_default(), n.name)))
+            .collect();
+        let mut out: Vec<(String, String)> = store
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.kind == EdgeKind::Calls)
+            .map(|e| (label[&e.source].clone(), label[&e.target].clone()))
+            .collect();
+        out.sort();
+        Ok(out)
+    })
+    .expect("read runs")
+}
+
+/// The `Calls` ledger rows sourced in `file`: `(source name, target, form,
+/// resolved)`, sorted.
+fn call_rows(rt: &Runtime, file: &str) -> Vec<(String, String, RefForm, bool)> {
+    let needle = file.to_string();
+    let mut rows: Vec<(String, String, RefForm, bool)> = rt
+        .submit_read(move |store| {
+            let sources: HashMap<String, (String, String)> = store
+                .all_nodes()?
+                .into_iter()
+                .map(|n| {
+                    let file = n.file_path.unwrap_or_default();
+                    (n.symbol.as_str().to_string(), (file, n.name))
+                })
+                .collect();
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.kind == EdgeKind::Calls && r.form != RefForm::Symbol)
+                .filter_map(|r| {
+                    let (f, name) = sources.get(&r.source_symbol)?;
+                    (*f == needle).then(|| (name.clone(), r.target, r.form, r.resolved))
+                })
+                .collect())
+        })
+        .expect("read runs");
+    rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    rows
+}
+
+fn edge(from_file: &str, from: &str, to_file: &str, to: &str) -> (String, String) {
+    (format!("{from_file}:{from}"), format!("{to_file}:{to}"))
+}
+
+/// The `Calls` residue the Java row of `status` carries.
+fn java_residue(engine: &Engine) -> CallResidue {
+    engine
+        .status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "java")
+        .expect("a java row")
+        .call_residue
+        .expect("the java row states its call residue")
+}
+
+/// The reasons of `residue` whose count is not zero.
+fn nonzero(residue: &CallResidue) -> BTreeMap<String, u64> {
+    residue
+        .reasons
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(k, n)| (k.clone(), *n))
+        .collect()
+}
+
+fn reasons(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
+    pairs.iter().map(|(k, n)| ((*k).to_string(), *n)).collect()
+}
+
+// ── UAT-RS-05: two classes each declaring `send()` ───────────────────────
+
+const MAILER_FILE: &str = "src/main/java/com/x/mail/Mailer.java";
+const PAGER_FILE: &str = "src/main/java/com/x/mail/Pager.java";
+const CLIENT_FILE: &str = "src/main/java/com/x/app/Client.java";
+
+const MAILER: &str = "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n}\n";
+const PAGER: &str = "package com.x.mail;\n\npublic class Pager {\n    public void send() {}\n}\n";
+const CLIENT: &str = "package com.x.app;\n\
+\n\
+import com.x.mail.Mailer;\n\
+import com.x.mail.Pager;\n\
+\n\
+public class Client {\n\
+    private Mailer mailer;\n\
+    private Pager pager;\n\
+    public void viaMailer() { mailer.send(); }\n\
+    public void viaPager() { pager.send(); }\n\
+    public void viaParam(Pager given) { given.send(); }\n\
+    public void viaLocal() { Mailer local = new Mailer(); local.send(); }\n\
+    public void viaThisField() { this.pager.send(); }\n\
+    public void viaUndeclared() { x.send(); }\n\
+}\n";
+
+#[test]
+fn uat_rs_05_each_typed_call_binds_its_own_classs_send_and_an_untyped_one_stays_unresolved() {
+    let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+
+    let from_client: Vec<(String, String)> = call_edges(rt)
+        .into_iter()
+        .filter(|(s, _)| s.starts_with(CLIENT_FILE))
+        .collect();
+    assert_eq!(
+        from_client,
+        [
+            edge(CLIENT_FILE, "viaLocal", MAILER_FILE, "send"),
+            edge(CLIENT_FILE, "viaMailer", MAILER_FILE, "send"),
+            edge(CLIENT_FILE, "viaPager", PAGER_FILE, "send"),
+            edge(CLIENT_FILE, "viaParam", PAGER_FILE, "send"),
+            edge(CLIENT_FILE, "viaThisField", PAGER_FILE, "send"),
+        ]
+    );
+    // The undeclared receiver keeps its bare Method-form row, unresolved.
+    assert!(call_rows(rt, CLIENT_FILE).contains(&(
+        "viaUndeclared".to_string(),
+        "send".to_string(),
+        RefForm::Method,
+        false
+    )));
+    assert_eq!(nonzero(&java_residue(&engine)), reasons(&[("no-receiver-evidence", 1)]));
+}
+
+// ── the in-repository supertype walk ──────────────────────────────────────
+
+const BASE_FILE: &str = "src/main/java/com/x/base/Base.java";
+const MID_FILE: &str = "src/main/java/com/x/base/Mid.java";
+const LEAF_FILE: &str = "src/main/java/com/x/app/Leaf.java";
+const USER_FILE: &str = "src/main/java/com/x/app/User.java";
+
+const BASE: &str = "package com.x.base;\n\
+\n\
+public class Base {\n\
+    public void start() {}\n\
+    public void stop() {}\n\
+}\n";
+const MID: &str = "package com.x.base;\n\
+\n\
+public class Mid extends Base {\n\
+    public void stop() {}\n\
+}\n";
+const LEAF: &str = "package com.x.app;\n\
+\n\
+import com.x.base.Mid;\n\
+\n\
+public class Leaf extends Mid {\n\
+    public void viaSuper() { super.start(); }\n\
+    public void viaInherited() { start(); }\n\
+    public void viaThis() { this.start(); }\n\
+    public void nearest() { stop(); }\n\
+}\n";
+const USER: &str = "package com.x.app;\n\
+\n\
+public class User {\n\
+    private Leaf leaf;\n\
+    public void run() { leaf.start(); }\n\
+    public void halt() { leaf.stop(); }\n\
+}\n";
+
+fn hierarchy() -> TempDir {
+    tree(&[(BASE_FILE, BASE), (MID_FILE, MID), (LEAF_FILE, LEAF), (USER_FILE, USER)])
+}
+
+#[test]
+fn super_and_inherited_calls_bind_to_the_in_repo_superclass_method_nearest_first() {
+    let tmp = hierarchy();
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let edges = call_edges(rt);
+    for expected in [
+        // `super.start()` in `Leaf` is `Mid::start`: `Mid` inherits it from `Base`.
+        edge(LEAF_FILE, "viaSuper", BASE_FILE, "start"),
+        // An unqualified inherited call, two levels up.
+        edge(LEAF_FILE, "viaInherited", BASE_FILE, "start"),
+        edge(LEAF_FILE, "viaThis", BASE_FILE, "start"),
+        // Nearest first: `Mid` overrides `stop`, so `Base.stop` is never reached.
+        edge(LEAF_FILE, "nearest", MID_FILE, "stop"),
+        // A typed receiver whose class inherits the method, from another file.
+        edge(USER_FILE, "run", BASE_FILE, "start"),
+        edge(USER_FILE, "halt", MID_FILE, "stop"),
+    ] {
+        assert!(edges.contains(&expected), "{expected:?} not in {edges:?}");
+    }
+    assert!(
+        !edges.contains(&edge(LEAF_FILE, "nearest", BASE_FILE, "stop"))
+            && !edges.contains(&edge(USER_FILE, "halt", BASE_FILE, "stop")),
+        "an overridden method binds the nearest level only: {edges:?}"
+    );
+    assert_eq!(nonzero(&java_residue(&engine)), BTreeMap::new());
+}
+
+#[test]
+fn a_cycle_in_extends_terminates_and_binds_nothing() {
+    let tmp = tree(&[
+        (
+            "src/main/java/com/x/A.java",
+            "package com.x;\n\npublic class A extends B {}\n",
+        ),
+        (
+            "src/main/java/com/x/B.java",
+            "package com.x;\n\npublic class B extends A {}\n",
+        ),
+        (
+            "src/main/java/com/x/C.java",
+            "package com.x;\n\npublic class C {\n    private A a;\n    public void m() { a.go(); }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(
+        call_edges(rt).is_empty(),
+        "a cyclic hierarchy declares no `go`: {:?}",
+        call_edges(rt)
+    );
+    assert_eq!(nonzero(&java_residue(&engine)), reasons(&[("supertype-unreached", 1)]));
+}
+
+// ── one no-edge fixture per residue reason, each on a cold index ──────────
+
+/// Index `files`, assert no `Calls` edge leaves `caller`, and return the Java
+/// row's residue.
+fn residue_of(files: &[(&str, &str)], caller: &str) -> CallResidue {
+    let tmp = tree(files);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let from_caller: Vec<(String, String)> = call_edges(rt)
+        .into_iter()
+        .filter(|(s, _)| s.starts_with(caller))
+        .collect();
+    assert!(from_caller.is_empty(), "no edge may leave {caller}: {from_caller:?}");
+    let residue = java_residue(&engine);
+    assert_eq!(residue.scope, "repository");
+    assert_eq!(
+        residue.unbound,
+        residue.reasons.values().sum::<u64>() + residue.unclassified,
+        "the reasons partition the unbound rows"
+    );
+    residue
+}
+
+const CALLER: &str = "src/main/java/com/x/app/Caller.java";
+
+#[test]
+fn an_unproven_receiver_is_no_receiver_evidence() {
+    let residue = residue_of(
+        &[(
+            CALLER,
+            "package com.x.app;\n\npublic class Caller {\n    public void m() { x.send(); x.make().done(); }\n}\n",
+        )],
+        CALLER,
+    );
+    // An undeclared receiver `x` (`send`, `make`) and a chained call (`done`).
+    assert_eq!(nonzero(&residue), reasons(&[("no-receiver-evidence", 3)]));
+    assert_eq!(residue.unbound, 3);
+}
+
+#[test]
+fn a_jdk_or_library_type_and_its_super_call_are_external_type() {
+    let residue = residue_of(
+        &[(
+            CALLER,
+            "package com.x.app;\n\
+             \n\
+             import java.util.List;\n\
+             import org.springframework.Thing;\n\
+             \n\
+             public class Caller extends Thing {\n\
+                 private List<String> items;\n\
+                 public void m() { items.clear(); }\n\
+                 public void s() { super.init(); }\n\
+             }\n",
+        )],
+        CALLER,
+    );
+    assert_eq!(nonzero(&residue), reasons(&[("external-type", 2)]));
+}
+
+#[test]
+fn an_overloaded_target_on_the_type_or_on_a_supertype_is_overload_ambiguous() {
+    let residue = residue_of(
+        &[
+            (
+                "src/main/java/com/x/mail/Mailer.java",
+                "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n    public void send(String to) {}\n}\n",
+            ),
+            (
+                "src/main/java/com/x/mail/Base.java",
+                "package com.x.mail;\n\npublic class Base {\n    public void go() {}\n    public void go(int n) {}\n}\n",
+            ),
+            (
+                "src/main/java/com/x/mail/Kid.java",
+                "package com.x.mail;\n\npublic class Kid extends Base {}\n",
+            ),
+            (
+                CALLER,
+                "package com.x.app;\n\
+                 \n\
+                 import com.x.mail.Kid;\n\
+                 import com.x.mail.Mailer;\n\
+                 \n\
+                 public class Caller {\n\
+                     private Mailer mailer;\n\
+                     private Kid kid;\n\
+                     public void m() { mailer.send(); }\n\
+                     public void k() { kid.go(); }\n\
+                 }\n",
+            ),
+        ],
+        CALLER,
+    );
+    assert_eq!(nonzero(&residue), reasons(&[("overload-ambiguous", 2)]));
+}
+
+#[test]
+fn a_type_declared_twice_under_one_name_is_type_ambiguous() {
+    let residue = residue_of(
+        &[
+            (
+                "src/main/java/com/x/mail/Mailer.java",
+                "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n}\n",
+            ),
+            (
+                "src/test/java/com/x/mail/Mailer.java",
+                "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n}\n",
+            ),
+            (
+                CALLER,
+                "package com.x.app;\n\nimport com.x.mail.Mailer;\n\npublic class Caller {\n    private Mailer mailer;\n    public void m() { mailer.send(); }\n}\n",
+            ),
+        ],
+        CALLER,
+    );
+    assert_eq!(nonzero(&residue), reasons(&[("type-ambiguous", 1)]));
+}
+
+#[test]
+fn an_inherited_call_through_an_external_superclass_and_an_interface_without_the_method_are_supertype_unreached(
+) {
+    let residue = residue_of(
+        &[
+            (
+                "src/main/java/com/x/app/Port.java",
+                "package com.x.app;\n\npublic interface Port {\n    void open();\n}\n",
+            ),
+            (
+                CALLER,
+                "package com.x.app;\n\
+                 \n\
+                 import org.springframework.Thing;\n\
+                 \n\
+                 public class Caller extends Thing {\n\
+                     private Port port;\n\
+                     public void m() { init(); }\n\
+                     public void p() { port.close(); }\n\
+                 }\n",
+            ),
+        ],
+        CALLER,
+    );
+    assert_eq!(nonzero(&residue), reasons(&[("supertype-unreached", 2)]));
+}
+
+// ── type-in-another-member: only a workspace can tell it from external ────
+
+fn git_init(dir: &Path) {
+    fs::create_dir_all(dir).expect("mkdir member");
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git init {}", dir.display());
+}
+
+const SHARED_MAILER: &str = "package com.x.shared;\n\npublic class Mailer {\n    public void send() {}\n}\n";
+const CONSUMER: &str = "package com.x.app;\n\
+\n\
+import com.x.shared.Mailer;\n\
+\n\
+public class Consumer {\n\
+    private Mailer mailer;\n\
+    public void m() { mailer.send(); }\n\
+}\n";
+const HEIR: &str = "package com.x.app;\n\
+\n\
+import com.x.shared.Mailer;\n\
+\n\
+public class Heir extends Mailer {\n\
+    public void h() { send(); }\n\
+}\n";
+
+#[test]
+fn a_type_another_member_declares_is_type_in_another_member_in_a_workspace_only() {
+    let ws = TempDir::new().unwrap();
+    let lib = ws.path().join("lib");
+    let app = ws.path().join("app");
+    git_init(&lib);
+    git_init(&app);
+    write(&lib, "src/main/java/com/x/shared/Mailer.java", SHARED_MAILER);
+    write(&app, "src/main/java/com/x/app/Consumer.java", CONSUMER);
+    write(&app, "src/main/java/com/x/app/Heir.java", HEIR);
+    for member in [&lib, &app] {
+        let engine = index(member);
+        let _ = engine.sync(&[] as &[PathBuf]);
+    }
+
+    // Alone, `app` cannot tell another member's type from a library's.
+    let alone = java_residue(&Engine::start(&app).expect("engine starts"));
+    assert_eq!(alone.scope, "repository");
+    assert_eq!(
+        nonzero(&alone),
+        reasons(&[("external-type", 1), ("supertype-unreached", 1)])
+    );
+    assert!(!alone.reasons.contains_key("type-in-another-member"));
+
+    write(
+        ws.path(),
+        "logos.workspace.toml",
+        "[workspace]\nname = \"w\"\nmembers = [\"lib\", \"app\"]\n",
+    );
+    let federation = discover(ws.path()).expect("discovers").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
+    let status = workspace_status(&registry);
+    let app_row = status
+        .members
+        .iter()
+        .find(|m| m.status.member == "app")
+        .and_then(|m| m.status.result.as_ref())
+        .expect("app is read");
+    let residue = app_row
+        .resolution_by_language
+        .iter()
+        .find(|row| row.language == "java")
+        .and_then(|row| row.call_residue.clone())
+        .expect("a java residue");
+    assert_eq!(residue.scope, "workspace");
+    // The typed call names `lib`'s type; the inherited call's superclass is
+    // `lib`'s too, so its walk leaves this member: still supertype-unreached.
+    assert_eq!(
+        nonzero(&residue),
+        reasons(&[("supertype-unreached", 1), ("type-in-another-member", 1)])
+    );
+    assert_eq!(residue.unbound, 2);
+    // `lib` itself calls nothing.
+    let lib_row = status
+        .members
+        .iter()
+        .find(|m| m.status.member == "lib")
+        .and_then(|m| m.status.result.as_ref())
+        .expect("lib is read");
+    let lib_residue = lib_row
+        .resolution_by_language
+        .iter()
+        .find(|row| row.language == "java")
+        .and_then(|row| row.call_residue.clone())
+        .expect("a java residue");
+    assert_eq!(lib_residue.unbound, 0);
+}
+
+// ── the readout: Java only, and deterministic ─────────────────────────────
+
+#[test]
+fn only_a_package_shaped_language_row_carries_a_residue_and_it_is_deterministic() {
+    let mut files: Vec<(&str, &str)> = vec![
+        (BASE_FILE, BASE),
+        (MID_FILE, MID),
+        (LEAF_FILE, LEAF),
+        (USER_FILE, USER),
+        (MAILER_FILE, MAILER),
+        (PAGER_FILE, PAGER),
+        (CLIENT_FILE, CLIENT),
+    ];
+    files.push(("src/lib.rs", "pub fn f() { g(); }\npub fn g() { x.h(); }\n"));
+    let first = tree(&files);
+    let second = tree(&files);
+    let a = index(first.path());
+    let b = index(second.path());
+
+    let rows = a.status().resolution_by_language;
+    let rust = rows.iter().find(|r| r.language == "rust").expect("a rust row");
+    assert!(rust.call_residue.is_none(), "Rust states no Java residue");
+    assert_eq!(java_residue(&a), java_residue(&b));
+    assert_eq!(binding_facts(a.runtime().unwrap()), binding_facts(b.runtime().unwrap()));
+    // The residue's denominator is the ledger's own unbound count.
+    let java = rows.iter().find(|r| r.language == "java").expect("a java row");
+    assert_eq!(java_residue(&a).unbound, java.calls.references - java.calls.bound);
+}
+
+// ── sync ≡ reindex ─────────────────────────────────────────────────────────
+
+/// Every edge and every non-Symbol ledger row, by symbol — the store's whole
+/// binding state.
+fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
+    rt.submit_read(|store| {
+        let sym: HashMap<NodeId, String> = store
+            .all_nodes()?
+            .into_iter()
+            .map(|n| (n.id, n.symbol.as_str().to_string()))
+            .collect();
+        let mut edges: Vec<(String, String, String)> = store
+            .all_edges()?
+            .into_iter()
+            .map(|e| {
+                (
+                    sym[&e.source].clone(),
+                    sym[&e.target].clone(),
+                    e.kind.as_str().to_string(),
+                )
+            })
+            .collect();
+        edges.sort();
+        let mut refs: Vec<String> = store
+            .unresolved_refs()?
+            .into_iter()
+            .filter(|r| r.form != RefForm::Symbol)
+            .map(|r| {
+                format!(
+                    "{} {} {:?} {:?} {}",
+                    r.source_symbol, r.target, r.form, r.kind, r.resolved
+                )
+            })
+            .collect();
+        refs.sort();
+        Ok((edges, refs))
+    })
+    .expect("read runs")
+}
+
+/// The binding state of a cold index over the Java files `tmp` holds now.
+fn cold_facts(tmp: &TempDir, files: &[&str]) -> (Vec<(String, String, String)>, Vec<String>) {
+    let cold = TempDir::new().unwrap();
+    for rel in files {
+        if let Ok(text) = fs::read_to_string(tmp.path().join(rel)) {
+            write(cold.path(), rel, &text);
+        }
+    }
+    let engine = index(cold.path());
+    binding_facts(engine.runtime().unwrap())
+}
+
+const HIERARCHY_FILES: [&str; 4] = [BASE_FILE, MID_FILE, LEAF_FILE, USER_FILE];
+
+#[test]
+fn sync_equals_a_full_reindex_after_a_supertype_gains_the_method() {
+    let tmp = hierarchy();
+    write(
+        tmp.path(),
+        BASE_FILE,
+        "package com.x.base;\n\npublic class Base {\n    public void stop() {}\n}\n",
+    );
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(
+        !call_edges(rt).contains(&edge(LEAF_FILE, "viaInherited", BASE_FILE, "start")),
+        "precondition: `start` is declared nowhere yet"
+    );
+    write(tmp.path(), BASE_FILE, BASE);
+    engine.sync(&[BASE_FILE.into()]);
+    assert!(call_edges(rt).contains(&edge(LEAF_FILE, "viaInherited", BASE_FILE, "start")));
+    assert!(call_edges(rt).contains(&edge(USER_FILE, "run", BASE_FILE, "start")));
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &HIERARCHY_FILES));
+}
+
+#[test]
+fn sync_equals_a_full_reindex_after_a_mid_chain_type_gains_its_superclass() {
+    // `Mid` first extends nothing: `Leaf`'s inherited `start()` is unreachable.
+    // Giving `Mid` its superclass changes no name `Leaf` or `User` writes — the
+    // hierarchy itself moved, and that alone must re-select their rows.
+    let tmp = hierarchy();
+    write(
+        tmp.path(),
+        MID_FILE,
+        "package com.x.base;\n\npublic class Mid {\n    public void stop() {}\n}\n",
+    );
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(
+        !call_edges(rt).contains(&edge(USER_FILE, "run", BASE_FILE, "start")),
+        "precondition: the chain stops at `Mid`"
+    );
+    write(tmp.path(), MID_FILE, MID);
+    engine.sync(&[MID_FILE.into()]);
+    for expected in [
+        edge(LEAF_FILE, "viaInherited", BASE_FILE, "start"),
+        edge(LEAF_FILE, "viaSuper", BASE_FILE, "start"),
+        edge(USER_FILE, "run", BASE_FILE, "start"),
+    ] {
+        assert!(call_edges(rt).contains(&expected), "{expected:?} after sync");
+    }
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &HIERARCHY_FILES));
+}
+
+#[test]
+fn sync_equals_a_full_reindex_after_a_supertype_loses_the_method() {
+    let tmp = hierarchy();
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(call_edges(rt).contains(&edge(USER_FILE, "run", BASE_FILE, "start")));
+    write(
+        tmp.path(),
+        BASE_FILE,
+        "package com.x.base;\n\npublic class Base {\n    public void stop() {}\n}\n",
+    );
+    engine.sync(&[BASE_FILE.into()]);
+    assert!(!call_edges(rt).iter().any(|(_, t)| t.ends_with(":start")));
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &HIERARCHY_FILES));
+}
+
+/// **Known pre-existing gap, pinned — not an S-468 regression** (coordinator
+/// decision 12; commit semantics since S-439, reproduced by S-467 on
+/// `Clock.now()`). A bound row whose target type gains a same-named overload is
+/// re-selected on `sync` and re-binds to nothing, but the commit only flips its
+/// `resolved` flag: the edge it bound before stays. A cold index over the same
+/// files leaves the call unbound as `overload-ambiguous`. When the gap is fixed
+/// this test fails and becomes the plain sync ≡ reindex assertion.
+#[test]
+fn known_gap_sync_keeps_the_edge_of_a_call_whose_target_gains_an_overload() {
+    let files = [MAILER_FILE, PAGER_FILE, CLIENT_FILE];
+    let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let bound = edge(CLIENT_FILE, "viaMailer", MAILER_FILE, "send");
+    assert!(call_edges(rt).contains(&bound));
+
+    write(
+        tmp.path(),
+        MAILER_FILE,
+        "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n    public void send(String to) {}\n}\n",
+    );
+    engine.sync(&[MAILER_FILE.into()]);
+
+    let cold = TempDir::new().unwrap();
+    for rel in files {
+        write(cold.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
+    }
+    let cold_engine = index(cold.path());
+    let cold_edges = call_edges(cold_engine.runtime().unwrap());
+    assert!(
+        !cold_edges.iter().any(|(s, _)| *s == bound.0),
+        "a cold index leaves the overloaded call unbound: {cold_edges:?}"
+    );
+    assert_eq!(
+        java_residue(&cold_engine).reasons["overload-ambiguous"],
+        2,
+        "viaMailer and viaLocal both name the overloaded `send`"
+    );
+    // The gap: the synced store still holds an edge from `viaMailer` into
+    // `Mailer`'s `send` — its old target node survived the re-extraction, or a
+    // same-named one replaced it — while the ledger row reads unresolved.
+    let synced = call_edges(rt);
+    assert!(
+        synced.iter().any(|(s, t)| *s == bound.0 && t.starts_with(MAILER_FILE)),
+        "the gap is closed — replace this pin with a sync ≡ reindex assertion: {synced:?}"
+    );
+    assert!(call_rows(rt, CLIENT_FILE).contains(&(
+        "viaMailer".to_string(),
+        "Mailer::send".to_string(),
+        RefForm::Path,
+        false
+    )));
+}
+
+/// A capture-before-delete `Symbol` row ([ADR-10]) is counted in the ledger's
+/// unbound figure but is no call site — it waits for its exact target symbol to
+/// return. It is reported apart, as `unclassified`, so the reasons still
+/// partition the denominator.
+///
+/// [ADR-10]: ../../docs/specs/architecture/decisions/ADR-10.md
+#[test]
+fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
+    let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
+    let engine = index(tmp.path());
+    // `Mailer.send` becomes `Mailer.post`: the two edges into `send` are
+    // captured as `Symbol` rows before the node goes, and nothing answers them.
+    write(
+        tmp.path(),
+        MAILER_FILE,
+        "package com.x.mail;\n\npublic class Mailer {\n    public void post() {}\n}\n",
+    );
+    engine.sync(&[MAILER_FILE.into()]);
+    let residue = java_residue(&engine);
+    assert_eq!(residue.unclassified, 2, "{residue:?}");
+    assert_eq!(
+        nonzero(&residue),
+        reasons(&[("no-receiver-evidence", 1), ("supertype-unreached", 2)])
+    );
+    assert_eq!(residue.unbound, residue.reasons.values().sum::<u64>() + residue.unclassified);
+    let java = engine
+        .status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "java")
+        .expect("a java row");
+    assert_eq!(residue.unbound, java.calls.references - java.calls.bound);
+}

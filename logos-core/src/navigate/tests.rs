@@ -491,6 +491,7 @@ fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure(
         files: 3,
         calls: RelationResolution::measured(20, 7, 7, cross_file),
         imports: RelationResolution::measured(0, 0, 0, 0),
+        call_residue: None,
     };
     let over = |rows: Vec<LanguageResolution>| {
         let anchors: Vec<Option<String>> = rows.iter().map(|r| Some(r.language.clone())).collect();

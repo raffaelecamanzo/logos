@@ -13,6 +13,30 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **A typed Java call binds through its receiver's class and that class's superclasses.**
+  `service.send()` on a receiver the file declares binds to that class's `send()`. If the
+  class does not declare it, the call binds to the one `send()` of its nearest superclass in
+  the repository. `super.m()` and an inherited `m()` bind the same way. An overloaded method,
+  a JDK or library type, a type another member declares, and a superclass outside the
+  repository still bind nothing.
+- **`status` states why the rest stays unbound.** The Java row of `resolution_by_language`
+  carries `call_residue`: the unbound calls, and how many stay unbound for each reason
+  (`no-receiver-evidence`, `external-type`, `type-in-another-member`, `overload-ambiguous`,
+  `type-ambiguous`, `supertype-unreached`). Outside a workspace, another member's type counts
+  as `external-type`.
+- **Java figures move on the first re-index, and the move is a correction.** A Java method
+  that was called only through a typed or inherited call gains its first inbound `Calls` edge,
+  so:
+  - fan-in and fan-out rise;
+  - `callers`, `callees` and `impact` answers grow;
+  - class coupling rises;
+  - methods reported dead only because their callers never bound stop being dead;
+  - the signal score of a Java repository moves with all of these.
+
+  Rust, and every other language, is unchanged: this repository's own index is byte-identical.
+
 ## [1.5.0] — 2026-09-28
 
 ### Added

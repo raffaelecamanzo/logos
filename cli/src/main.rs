@@ -1830,6 +1830,7 @@ mod surface_parity {
             files: 1,
             calls: RelationResolution::measured(references, bound, same, cross),
             imports: RelationResolution::measured(0, 0, 0, 0),
+            call_residue: None,
         })
         .collect();
 

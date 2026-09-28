@@ -58,7 +58,7 @@
 //! [AR-05]: ../../../docs/specs/architecture.md#13-risk-register
 //! [`BindingPolicy`]: crate::config::BindingPolicy
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -135,6 +135,43 @@ enum Res {
     Found(NodeId),
     NotFound,
     Ambiguous,
+}
+
+/// Why a package-shaped `Calls` row stays unbound (S-468, [CR-150] §3.2 C,
+/// [FR-RS-10]) — the reason the per-language readout counts it under
+/// ([FR-RS-09]). Recorded by the lookup that gave up, on the same walk that
+/// binds, so the reason can never describe a different path than the bind took.
+///
+/// `type-in-another-member` is not here: one member's graph cannot tell another
+/// member's type from a library's. An [`ExternalType`](Residue::ExternalType)
+/// carries the names it tried, and a workspace sorts them against what the other
+/// members declare.
+///
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+/// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+/// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Residue {
+    /// The file proves no receiver type: a bare Method-form row, or a bare call
+    /// that names no import.
+    NoReceiverEvidence,
+    /// The receiver's type is declared by no file of this graph — the JDK, a
+    /// library, a generated type, or another member. `candidates` are the
+    /// fully-qualified names the type could be, in the order its scope reads
+    /// them; a type nested under an in-graph type that does not declare it has
+    /// none.
+    ExternalType { candidates: Vec<Vec<String>> },
+    /// The type (or the nearest supertype level holding the name) declares two
+    /// or more callables of that name.
+    OverloadAmbiguous,
+    /// The type's name reaches two in-graph declarations (a `src/main` and a
+    /// `src/test` class of one fully-qualified name).
+    TypeAmbiguous,
+    /// The type is in the graph, and neither it nor any in-graph supertype
+    /// declares the name: the chain leaves the graph (a JDK, library or
+    /// other-member superclass, the implicit `Object`), stops at an interface,
+    /// or cycles.
+    SupertypeUnreached,
 }
 
 /// Which node kinds satisfy a lookup.
@@ -223,6 +260,14 @@ const MAX_ALIAS_DEPTH: u8 = 8;
 /// nesting depth (markdown headings reach 6; module nesting follows directory
 /// depth).
 const MAX_CONTAINS_DEPTH: u32 = 64;
+
+/// Hard cap on the levels [`Ctx::type_member`] climbs a Java type's in-repository
+/// `Extends` chain (S-468, [CR-150] §3.2 B) — a bound beside the cycle guard,
+/// far above any real hierarchy depth, so no malformed hierarchy can make the
+/// walk unbounded.
+///
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+const MAX_SUPERTYPE_DEPTH: usize = 64;
 
 /// The per-file scope facts derived from the ledger's import rows.
 ///
@@ -368,6 +413,24 @@ pub(crate) struct Index {
     /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
     /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
     impls_by_trait_method: HashMap<(NodeId, String), Vec<NodeId>>,
+    /// A package-shaped type → the in-repository types its `Extends` rows bind
+    /// to, id-sorted (S-468, [CR-150] §3.2 B): one superclass for a class, the
+    /// super-interfaces for an interface. Bound from the `Extends` ledger rows
+    /// by S-466's own rule ([`bind`]) while the index is built, so it is
+    /// available on the very first index pass, before any `Extends` edge is
+    /// committed — the [`impls_by_trait_method`](Index::impls_by_trait_method)
+    /// precedent. An unbound `Extends` (a JDK, library or other-member
+    /// superclass) contributes nothing: the walk ends there.
+    ///
+    /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+    supertypes: HashMap<NodeId, Vec<NodeId>>,
+    /// The name tokens of the package-shaped type hierarchy: every `Extends`
+    /// row's target, bound or not (S-468). A sync dirtying one of them may move
+    /// a supertype walk whose row spells none of them
+    /// ([`Index::hierarchy_touched`]). A type's own name is not needed: a walk
+    /// that crosses a type other than its start crosses it as some `Extends`
+    /// row's target, and a row starting at a type spells that type's name.
+    hierarchy_tokens: HashSet<String>,
 }
 
 impl Index {
@@ -423,7 +486,7 @@ impl Index {
         let impls_by_trait_method =
             build_impls_by_trait_method(refs, &by_symbol, &by_name, &info, &layout);
 
-        Index {
+        let mut index = Index {
             by_symbol,
             info,
             parent,
@@ -443,7 +506,13 @@ impl Index {
             layout,
             types_by_fqn,
             impls_by_trait_method,
-        }
+            supertypes: HashMap::new(),
+            hierarchy_tokens: HashSet::new(),
+        };
+        let (supertypes, hierarchy_tokens) = build_supertypes(refs, &index);
+        index.supertypes = supertypes;
+        index.hierarchy_tokens = hierarchy_tokens;
+        index
     }
 
     /// Declare which files write their import specifiers as paths, and the Go
@@ -531,6 +600,40 @@ impl Index {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub(crate) fn package_types(&self, fqn: &[String]) -> &[NodeId] {
         self.types_by_fqn.get(fqn).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every fully-qualified name a top-level package-shaped type of this graph
+    /// is declared under, sorted — what a workspace compares across members to
+    /// tell a type another member declares from one no member does (S-468,
+    /// [CR-150] §3.2 C). Read off the same index the import rungs bind against,
+    /// never a second derivation.
+    ///
+    /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+    pub(crate) fn declared_type_names(&self) -> Vec<Vec<String>> {
+        let mut names: Vec<Vec<String>> = self.types_by_fqn.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Whether `dirty` — the tokens a sync added or removed — names a type an
+    /// `Extends` row of the package-shaped hierarchy names (S-468). A supertype walk that crosses
+    /// such a type can change its answer although the calling row spells none
+    /// of its names, so the incremental run re-binds every package-shaped call
+    /// when this holds (`resolve::is_affected`).
+    pub(crate) fn hierarchy_touched(&self, dirty: &HashSet<String>) -> bool {
+        self.hierarchy_tokens.iter().any(|t| dirty.contains(t))
+    }
+
+    /// Whether the file at `path` is keyed by its package ([CR-149]).
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    pub(crate) fn is_package_shaped(&self, path: &str) -> bool {
+        self.layout.is_package_shaped(path)
+    }
+
+    /// The in-repository supertypes of `ty` its `Extends` rows bind to.
+    fn supertypes_of(&self, ty: NodeId) -> &[NodeId] {
+        self.supertypes.get(&ty).map_or(&[], Vec::as_slice)
     }
 
     /// The project-relative file of node `id`, when it has one — how the
@@ -1078,6 +1181,49 @@ fn build_impls_by_trait_method(
     map
 }
 
+/// The package-shaped type hierarchy (S-468, [CR-150] §3.2 B): each type's
+/// in-repository supertypes, and the name tokens a sync must watch to keep a
+/// walk over it fresh ([`Index::supertypes`], [`Index::hierarchy_tokens`]).
+///
+/// Each `Extends` row is bound by [`bind`] itself — S-466's type-relation arm,
+/// which reads the source's scope and package key and never the policy-gated
+/// name fallback (`package_key_only`), so the policy passed here moves nothing.
+/// A row of any other language is skipped: its source is not package-shaped,
+/// and the map stays empty for a graph without one, exactly as before.
+///
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+fn build_supertypes(
+    refs: &[UnresolvedRefRow],
+    ix: &Index,
+) -> (HashMap<NodeId, Vec<NodeId>>, HashSet<String>) {
+    let mut supertypes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut tokens: HashSet<String> = HashSet::new();
+    for r in refs {
+        if r.kind != EdgeKind::Extends {
+            continue;
+        }
+        let Some(source) = ix.by_symbol.get(&r.source_symbol).and_then(|id| ix.info.get(id)) else {
+            continue;
+        };
+        if !source
+            .file_path
+            .as_deref()
+            .is_some_and(|p| ix.layout.is_package_shaped(p))
+        {
+            continue;
+        }
+        tokens.extend(super::tokens(&r.target));
+        if let Outcome::Bound { source, target, .. } = bind(r, ix, BindingPolicy::Strict) {
+            supertypes.entry(source).or_default().push(target);
+        }
+    }
+    for ids in supertypes.values_mut() {
+        ids.sort_unstable();
+        ids.dedup();
+    }
+    (supertypes, tokens)
+}
+
 /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when zero
 /// or several carry it — the single source of truth for the never-fabricate
 /// trait-resolution rule ([NFR-RA-05]) shared by [`Index::trait_by_name`] (query
@@ -1145,20 +1291,57 @@ fn exactly_one(candidates: &[NodeId]) -> Res {
 
 /// Bind one ledger row against the index under `policy`.
 pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> Outcome {
+    bind_traced(r, ix, policy).0
+}
+
+/// Why `r` — a `Calls` row from a package-shaped source — stays unbound
+/// (S-468, [CR-150] §3.2 C), or `None` when it is no such row, or when it binds
+/// now: a capture-before-delete `Symbol` row, or a row the ledger holds unbound
+/// that this binder binds (a graph bound by an older binary, or a sync that did
+/// not re-select it). The readout counts those apart as unclassified.
+///
+/// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> Option<Residue> {
+    if r.kind != EdgeKind::Calls || r.form == RefForm::Symbol {
+        return None;
+    }
+    let (outcome, miss) = bind_traced(r, ix, policy);
+    if outcome != Outcome::Unbound {
+        return None;
+    }
+    let source_file = ix
+        .by_symbol
+        .get(&r.source_symbol)
+        .and_then(|id| ix.info.get(id))
+        .and_then(|i| i.file_path.as_deref())?;
+    if !ix.layout.is_package_shaped(source_file) {
+        return None;
+    }
+    Some(miss.unwrap_or(match r.form {
+        // A type-qualified row the walk gave up on without naming why: its
+        // head was never reached as a type (an import chain past the alias
+        // depth). Reported where the type is sought, never as a guess at a
+        // member.
+        RefForm::Path if r.target.contains("::") => Residue::ExternalType {
+            candidates: Vec::new(),
+        },
+        _ => Residue::NoReceiverEvidence,
+    }))
+}
+
+/// [`bind`], and the [`Residue`] the lookup that gave up recorded — `None`
+/// when no package-shaped member lookup gave up (every Rust row, and every row
+/// that binds).
+fn bind_traced(
+    r: &UnresolvedRefRow,
+    ix: &Index,
+    policy: BindingPolicy,
+) -> (Outcome, Option<Residue>) {
     // No source node, no edge — a captured ref whose source file was removed
     // stays unbound (and harmless) until its file returns.
     let Some(&source) = ix.by_symbol.get(&r.source_symbol) else {
-        return Outcome::Unbound;
+        return (Outcome::Unbound, None);
     };
-    let bound = |target: NodeId| Outcome::Bound {
-        source,
-        target,
-        kind: r.kind,
-        // Non-artifact binds carry no payload; an artifact bind routes through
-        // `Ctx::resolve_artifact` below, which stamps the relation class.
-        payload: r.payload.clone(),
-    };
-
     let source_info = ix.info.get(&source);
     let source_package = source_info
         .and_then(|i| i.file_path.as_deref())
@@ -1175,6 +1358,22 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
         bare_path_call: Cell::new(false),
         package_key_only: relation.is_some(),
         lexical_start: Cell::new(source),
+        miss: RefCell::new(None),
+    };
+    let outcome = bind_in(&ctx, r, relation);
+    (outcome, ctx.miss.into_inner())
+}
+
+/// The body of [`bind`], against a context built for `r`.
+fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outcome {
+    let (source, ix) = (ctx.source, ctx.ix);
+    let bound = |target: NodeId| Outcome::Bound {
+        source,
+        target,
+        kind: r.kind,
+        // Non-artifact binds carry no payload; an artifact bind routes through
+        // `Ctx::resolve_artifact` below, which stamps the relation class.
+        payload: r.payload.clone(),
     };
 
     // A cross-artifact reference (CR-011, FR-CG-07): bind under the same
@@ -1531,11 +1730,29 @@ struct Ctx<'a> {
     /// §8.1.4), so `class Svc implements Callback { interface Callback {} }`
     /// never names its own nested type.
     lexical_start: Cell<NodeId>,
+    /// Why a package-shaped call lookup gave up, when one did (S-468,
+    /// [`Residue`]) — the first reason recorded wins, since the lookups that
+    /// run after it only widen the search the bind already lost. Read by
+    /// [`residue`] alone; binding never consults it.
+    miss: RefCell<Option<Residue>>,
 }
 
 impl Ctx<'_> {
     fn scope(&self) -> Option<&FileScope> {
         self.file_id.and_then(|id| self.ix.file_scopes.get(&id))
+    }
+
+    /// Record why a call lookup (`want` = [`Want::Callable`]) gave up, unless an
+    /// earlier step already did. A lookup for any other kind records nothing:
+    /// its miss is a sub-step (a glob's own type, an import's target), not the
+    /// call's.
+    fn note(&self, want: Want, why: impl FnOnce() -> Residue) {
+        if want == Want::Callable {
+            let mut miss = self.miss.borrow_mut();
+            if miss.is_none() {
+                *miss = Some(why());
+            }
+        }
     }
 
     /// The source's crate and module path (the `self`/`super`/relative base).
@@ -2578,9 +2795,48 @@ impl Ctx<'_> {
                     return decided;
                 }
             }
-            None => return Res::Ambiguous,
+            None => {
+                self.note(want, || Residue::TypeAmbiguous);
+                return Res::Ambiguous;
+            }
         }
-        self.resolve_fqn(segs, want)
+        let resolved = self.resolve_fqn(segs, want);
+        if resolved == Res::NotFound {
+            // No rung reached a type for the head (a type that was reached
+            // recorded its own reason first): the receiver's type is declared
+            // by no file here.
+            self.note(want, || Residue::ExternalType {
+                candidates: self.type_candidates(package, segs),
+            });
+        }
+        resolved
+    }
+
+    /// The fully-qualified names the type of a call `segs` (the receiver type
+    /// segments, then the member) could be, in the order the source's scope
+    /// reads them: the source's own package, each non-static wildcard, then the
+    /// path as written. Its single-type import never appears here — an
+    /// imported head is expanded and resolved as the path written.
+    fn type_candidates(&self, package: &[String], segs: &[String]) -> Vec<Vec<String>> {
+        let Some((_, ty)) = segs.split_last() else {
+            return Vec::new();
+        };
+        let mut candidates: Vec<Vec<String>> = Vec::new();
+        let mut push = |prefix: &[String]| {
+            let mut fqn = prefix.to_vec();
+            fqn.extend(ty.iter().cloned());
+            if !candidates.contains(&fqn) {
+                candidates.push(fqn);
+            }
+        };
+        push(package);
+        if let Some(scope) = self.scope() {
+            for glob in &scope.globs {
+                push(glob);
+            }
+        }
+        push(&[]);
+        candidates
     }
 
     /// `segs` read as a fully-qualified name ([CR-149]): the **longest** prefix
@@ -2616,10 +2872,18 @@ impl Ctx<'_> {
     /// [`Res::Ambiguous`] for two candidates. Every segment but the last must
     /// name exactly one nested type; the last names a member admitted by
     /// `want`, and an empty `rest` is the type itself.
+    ///
+    /// A **call** (`want` = [`Want::Callable`]) takes its last segment through
+    /// [`type_member`](Ctx::type_member): the type's own callable, else its
+    /// in-repository supertypes' (S-468). Every other lookup reads the type's
+    /// own members only, as before.
     fn walk_from(&self, candidates: &[NodeId], rest: &[String], want: Want) -> Option<Res> {
         let mut cursor = match exactly_one(candidates) {
             Res::NotFound => return None,
-            Res::Ambiguous => return Some(Res::Ambiguous),
+            Res::Ambiguous => {
+                self.note(want, || Residue::TypeAmbiguous);
+                return Some(Res::Ambiguous);
+            }
             Res::Found(ty) => ty,
         };
         let Some((last, inner)) = rest.split_last() else {
@@ -2629,10 +2893,74 @@ impl Ctx<'_> {
         for seg in inner {
             match exactly_one(&self.member_types(cursor, seg)) {
                 Res::Found(nested) => cursor = nested,
-                other => return Some(other),
+                other => {
+                    self.note(want, || match other {
+                        Res::Ambiguous => Residue::TypeAmbiguous,
+                        // A nested type its in-graph outer type does not
+                        // declare: generated (a Lombok builder) or inherited.
+                        _ => Residue::ExternalType {
+                            candidates: Vec::new(),
+                        },
+                    });
+                    return Some(other);
+                }
             }
         }
+        if want == Want::Callable {
+            return Some(self.type_member(cursor, last));
+        }
         Some(exactly_one(&self.ix.members_named(cursor, last, want)))
+    }
+
+    /// The one callable `name` of type `ty` (S-468, [CR-150] §3.2 B, [FR-RS-10]):
+    /// exactly one among `ty`'s own `Contains` children; failing that, the
+    /// in-repository `Extends` chain ([`Index::supertypes`]) climbed nearest
+    /// first, binding on the first level that holds exactly one.
+    ///
+    /// Two or more at the deciding level is an ambiguity, never a pick
+    /// ([NFR-RA-05]): an overload stays unbound, and a same-named method
+    /// further up is never reached past it. A level is every supertype of the
+    /// level below — one superclass, or an interface's super-interfaces, whose
+    /// candidates are pooled. The walk is cycle-guarded (a type is visited
+    /// once) and bounded by [`MAX_SUPERTYPE_DEPTH`]; it ends where the chain
+    /// leaves the graph, which is the honest miss [`Residue::SupertypeUnreached`]
+    /// names. An interface's implementations are never reached: the walk goes
+    /// up, not across ([CR-150] §3.3).
+    ///
+    /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+    /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn type_member(&self, ty: NodeId, name: &str) -> Res {
+        let mut level = vec![ty];
+        let mut seen: HashSet<NodeId> = HashSet::from([ty]);
+        for _ in 0..MAX_SUPERTYPE_DEPTH {
+            let mut found: Vec<NodeId> = level
+                .iter()
+                .flat_map(|&t| self.ix.members_named(t, name, Want::Callable))
+                .collect();
+            found.sort_unstable();
+            found.dedup();
+            match exactly_one(&found) {
+                Res::NotFound => {}
+                Res::Ambiguous => {
+                    self.note(Want::Callable, || Residue::OverloadAmbiguous);
+                    return Res::Ambiguous;
+                }
+                decided => return decided,
+            }
+            let mut next: Vec<NodeId> = level
+                .iter()
+                .flat_map(|&t| self.ix.supertypes_of(t).iter().copied())
+                .filter(|s| seen.insert(*s))
+                .collect();
+            if next.is_empty() {
+                break;
+            }
+            next.sort_unstable();
+            level = next;
+        }
+        self.note(Want::Callable, || Residue::SupertypeUnreached);
+        Res::NotFound
     }
 
     /// The type-like members of `scope` named `name`.
