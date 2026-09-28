@@ -200,7 +200,9 @@ kind = "platform"
   `build_dependency.collisions` with both producers, and every reference to it
   is counted as `to_collision`, never guessed onto one of them.
 - **No build manifest, nothing changes.** `build_dependency` is absent from the
-  status payload when no member holds a `pom.xml` or `build.gradle(.kts)`.
+  status payload when every member was read and none holds a `pom.xml` or
+  `build.gradle(.kts)`. A member whose facts could not be read keeps the
+  section present, named under `build_dependency.members.unread`.
 
 ### The warm sidecar
 

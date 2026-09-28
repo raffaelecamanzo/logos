@@ -1185,7 +1185,8 @@ declare them. Both keys are absent when there is nothing to report. See
 [`[workspace.member.<name>] kind`](configuration.md#workspacemembername-kind--documentation-and-mock-members).
 
 Members also build against each other. When any member holds a `pom.xml` or
-`build.gradle(.kts)`, the `--json` payload carries a `build_dependency` section:
+`build.gradle(.kts)` — or a member's facts could not be read, which is never
+reported as "none" — the `--json` payload carries a `build_dependency` section:
 `build_dependency_pairs` by kind (`parent`, `dependency`, `managed`,
 `bom-import`) beside the `references` it was joined from and the `members`
 read, the `collisions` (a coordinate two members produce, resolved to

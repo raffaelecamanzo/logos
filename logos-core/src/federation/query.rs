@@ -583,7 +583,11 @@ pub struct WorkspaceStatus {
     ///
     /// **Never a runtime figure** ([BR-58]): it sits beside
     /// [`coverage`](Self::coverage), and nothing in coverage reads it. Absent
-    /// when no member holds a build manifest.
+    /// only when every member was read and none holds a build manifest; a
+    /// member whose facts could not be read keeps it present, naming the
+    /// member under `members.unread` ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     ///
     /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
     /// [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
@@ -852,16 +856,23 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
 }
 
 /// The `build_dependency` headline over the facts the freshness walk read, or
-/// `None` when no member read holds a build manifest — so a workspace without
-/// one serializes exactly as before the relation existed ([FR-WS-33]).
+/// `None` when every member was read and none holds a build manifest — so a
+/// workspace without one serializes exactly as before the relation existed
+/// ([FR-WS-33]).
+///
+/// A member whose facts could not be read keeps the headline present: "unread"
+/// is not "no manifests", and dropping the section would leave the failure in a
+/// log line only ([NFR-CC-04]).
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn build_dependency_headline(
     federation: &super::Federation,
     facts: &[MemberBuildFacts],
 ) -> Option<BuildDependencyHeadline> {
     let relation = build_deps::join(&federation.members, &federation.member_kinds, facts);
-    (relation.headline.members.with_manifests > 0).then_some(relation.headline)
+    let members = &relation.headline.members;
+    (members.with_manifests > 0 || !members.unread.is_empty()).then_some(relation.headline)
 }
 
 /// The bridge edge set the query surface stitches over, resolved once per call
@@ -898,6 +909,45 @@ pub fn reachability_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── the build-dependency headline on the status payload (S-463) ─────
+
+    fn two_member_federation() -> super::super::Federation {
+        let root = std::path::PathBuf::from("/ws");
+        super::super::Federation {
+            name: "w".to_string(),
+            members: ["a", "b"]
+                .iter()
+                .map(|n| super::super::Member { name: (*n).to_string(), root: root.join(n) })
+                .collect(),
+            root,
+            default: None,
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+            member_kinds: Default::default(),
+        }
+    }
+
+    /// Every member read and none holds a manifest: the section is absent. One
+    /// member unread: it is present and names that member — an unread member
+    /// could hold manifests nobody saw, so it must never read as "none".
+    #[test]
+    fn an_unread_member_keeps_the_build_dependency_headline_on_the_payload() {
+        let federation = two_member_federation();
+        let all_read = [("a".to_string(), Vec::new()), ("b".to_string(), Vec::new())];
+        assert!(build_dependency_headline(&federation, &all_read).is_none());
+
+        let headline = build_dependency_headline(&federation, &[("a".to_string(), Vec::new())])
+            .expect("an unread member keeps the section");
+        assert_eq!(headline.members.unread, ["b"]);
+        assert_eq!((headline.members.read, headline.members.with_manifests), (1, 0));
+
+        let none_read = build_dependency_headline(&federation, &[]).expect("present");
+        assert_eq!(none_read.members.unread, ["a", "b"]);
+        assert!(none_read.platform_candidates.is_empty(), "no member read, no candidate");
+        assert!(none_read.summary.contains("over 0 of 2 members read"), "{}", none_read.summary);
+    }
 
     use crate::federation::BridgeEndpoint;
     use crate::model::LogosSymbol;
