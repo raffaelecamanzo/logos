@@ -1041,21 +1041,29 @@ mod tests {
 
     /// A refused **produced** fact (every Gradle one, and a Maven one whose key
     /// did not resolve) is no producer: a reference to that coordinate is
-    /// external, never an edge.
+    /// external, never an edge. The refusal alone decides it — the Maven fixture
+    /// keeps both key fields filled, so no missing field can stand in for it.
     #[test]
     fn a_refused_produced_fact_produces_nothing() {
-        let roster = fed(&["lib", "app"], &[]).members;
+        let roster = fed(&["lib", "tool", "app"], &[]).members;
         let mut gradle_produced = produced(G, "lib");
         gradle_produced.resolution = "refused".to_string();
         gradle_produced.artifact_id = None;
         gradle_produced.reason = Some("the artifact name comes from settings.gradle".into());
+        let mut maven_refused = produced(G, "tool");
+        maven_refused.resolution = "refused".to_string();
+        maven_refused.reason = Some("`${revision}` is not defined in the member".into());
         let facts = vec![
             ("lib".to_string(), vec![manifest("gradle", "build.gradle", vec![gradle_produced])]),
-            ("app".to_string(), vec![pom(vec![produced(G, "app"), dependency(G, "lib")])]),
+            ("tool".to_string(), vec![pom(vec![maven_refused])]),
+            (
+                "app".to_string(),
+                vec![pom(vec![produced(G, "app"), dependency(G, "lib"), dependency(G, "tool")])],
+            ),
         ];
         let relation = join(&roster, &BTreeMap::new(), &facts);
-        assert!(relation.edges.is_empty());
-        assert_eq!(relation.headline.references.external, 1);
+        assert!(relation.edges.is_empty(), "{:?}", relation.edges);
+        assert_eq!(relation.headline.references.external, 2);
     }
 
     /// Gradle's two non-coordinate shapes are filed apart and never joined: a
