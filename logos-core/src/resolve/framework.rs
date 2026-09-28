@@ -188,8 +188,9 @@ struct PathOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouteRefusal {
     /// A class- or interface-level path prefix governs the registration but is
-    /// not a resolvable literal — a constant reference, a property
-    /// placeholder, a concatenation. The handler's real address is
+    /// not a resolvable literal and does not fold to one (S-469) — a constant
+    /// or concatenation the fold cannot prove, a property placeholder (written
+    /// or folded). The handler's real address is
     /// `<unknown>/method-path`, so **no** path is promoted: promoting the
     /// method path alone would advertise a provider at an address the service
     /// does not serve, which is the approximate match [NFR-RA-05] forbids (and
