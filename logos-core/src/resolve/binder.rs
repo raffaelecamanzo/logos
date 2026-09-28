@@ -162,7 +162,7 @@ pub(crate) enum Residue {
     /// none.
     ExternalType { candidates: Vec<Vec<String>> },
     /// The type (or the nearest supertype level holding the name) declares two
-    /// or more callables of that name.
+    /// or more callables of that name, or two static imports each supply one.
     OverloadAmbiguous,
     /// The type's name reaches two in-graph declarations (a `src/main` and a
     /// `src/test` class of one fully-qualified name).
@@ -2734,7 +2734,12 @@ impl Ctx<'_> {
             }
             imported.sort();
             imported.dedup();
-            return exactly_one(&imported);
+            let decided = exactly_one(&imported);
+            if decided == Res::Ambiguous {
+                // Two imports each supply a callable of this name.
+                self.note(want, || Residue::OverloadAmbiguous);
+            }
+            return decided;
         }
         let same_package: Vec<NodeId> = self
             .package_type(package, name)
@@ -2749,9 +2754,19 @@ impl Ctx<'_> {
         match self.glob_members(name, want, false) {
             Some(found) => match exactly_one(&found) {
                 Res::NotFound => {}
+                Res::Ambiguous => {
+                    // Two wildcards each supply a callable of this name.
+                    self.note(want, || Residue::OverloadAmbiguous);
+                    return Res::Ambiguous;
+                }
                 decided => return decided,
             },
-            None => return Res::Ambiguous,
+            None => {
+                // A wildcard's type is declared twice, and one declaration
+                // could supply the name.
+                self.note(want, || Residue::TypeAmbiguous);
+                return Res::Ambiguous;
+            }
         }
         if self.policy == BindingPolicy::Aggressive && !self.package_key_only {
             return self.unique_by_name(name, want);

@@ -429,6 +429,47 @@ fn an_inherited_call_through_an_external_superclass_and_an_interface_without_the
     assert_eq!(nonzero(&residue), reasons(&[(R::SupertypeUnreached, 2)]));
 }
 
+/// A bare call two static imports (or two static wildcards) each supply is
+/// ambiguous between two same-named callables — `overload-ambiguous`, not
+/// `no-receiver-evidence`: the call names imports, just two of them.
+#[test]
+fn a_bare_call_two_static_imports_supply_is_overload_ambiguous() {
+    let clock = |pkg: &str| {
+        format!("package com.x.{pkg};\n\npublic class Clock {{\n    public static long now() {{ return 0; }}\n}}\n")
+    };
+    let (a, b) = (clock("a"), clock("b"));
+    let residue = residue_of(
+        &[
+            ("src/main/java/com/x/a/Clock.java", &a),
+            ("src/main/java/com/x/b/Clock.java", &b),
+            (
+                CALLER,
+                "package com.x.app;\n\
+                 \n\
+                 import static com.x.a.Clock.now;\n\
+                 import static com.x.b.Clock.now;\n\
+                 \n\
+                 public class Caller {\n\
+                     public void m() { now(); }\n\
+                 }\n",
+            ),
+            (
+                "src/main/java/com/x/app/Other.java",
+                "package com.x.app;\n\
+                 \n\
+                 import static com.x.a.Clock.*;\n\
+                 import static com.x.b.Clock.*;\n\
+                 \n\
+                 public class Other {\n\
+                     public void m() { now(); }\n\
+                 }\n",
+            ),
+        ],
+        CALLER,
+    );
+    assert_eq!(nonzero(&residue), reasons(&[(R::OverloadAmbiguous, 2)]));
+}
+
 // ── type-in-another-member: only a workspace can tell it from external ────
 
 fn git_init(dir: &Path) {

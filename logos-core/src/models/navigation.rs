@@ -1060,7 +1060,7 @@ pub struct LanguageResolution {
 /// | `no-receiver-evidence` | the file proves no receiver type (a bare Method-form row, or a bare call naming no import) |
 /// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member |
 /// | `type-in-another-member` | the receiver's type is declared by another workspace member (workspace scope only) |
-/// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name |
+/// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name — or two static imports each supply one |
 /// | `type-ambiguous` | the type's name reaches two declarations here (a `src/main` and a `src/test` class of one name) |
 /// | `supertype-unreached` | the type is here, and neither it nor any supertype reached here declares the name — the chain leaves the repository, stops at an interface, or cycles |
 ///
@@ -1109,7 +1109,8 @@ pub enum CallResidueReason {
     ExternalType,
     /// The file proves no receiver type.
     NoReceiverEvidence,
-    /// The deciding level declares two or more callables of that name.
+    /// The deciding level declares two or more callables of that name, or two
+    /// imports each supply one.
     OverloadAmbiguous,
     /// Neither the type nor a supertype reached here declares the name.
     SupertypeUnreached,
