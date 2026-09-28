@@ -344,10 +344,8 @@ fn writes_dimensions(type_text: &str) -> bool {
         match c {
             '<' => depth += 1,
             '>' => depth = depth.saturating_sub(1),
-            '[' if depth == 0 => {
-                if chars.clone().find(|c| !c.is_whitespace()) == Some(']') {
-                    return true;
-                }
+            '[' if depth == 0 && chars.clone().find(|c| !c.is_whitespace()) == Some(']') => {
+                return true;
             }
             _ => {}
         }
