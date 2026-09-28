@@ -1275,6 +1275,20 @@ mod tests {
             [PlatformCandidate { member: "hub".into(), in_degree: 7, of: 9 }]
         );
 
+        // An unread roster member is no member "that could have one": `of`
+        // stays 8, and `lib`'s 2 of 8 still clears the quarter.
+        let mut names_unread = names.clone();
+        names_unread.push("broken");
+        let relation = join(&fed(&names_unread, &[]).members, &BTreeMap::new(), &facts[..9]);
+        assert_eq!(relation.headline.members.unread, ["broken"]);
+        assert_eq!(
+            relation.headline.platform_candidates,
+            [
+                PlatformCandidate { member: "hub".into(), in_degree: 7, of: 8 },
+                PlatformCandidate { member: "lib".into(), in_degree: 2, of: 8 },
+            ]
+        );
+
         // Declared as anything, it is no longer a candidate.
         let kinds = BTreeMap::from([("hub".to_string(), MemberKind::Platform)]);
         assert!(join(&fed(&names_10, &[]).members, &kinds, &facts)
