@@ -580,3 +580,27 @@ fn a_file_whose_package_declaration_disagrees_with_its_path_is_refused() {
     assert_eq!(route_names(engine.runtime().unwrap()), ["GET /v1/g/s"]);
     assert_eq!(stats.routes_not_composed, 0);
 }
+
+/// Two constants of one declaring type in one path: each folds to its own
+/// value — the per-pass answer is keyed by type **and** name.
+#[test]
+fn two_constants_of_one_declaring_type_each_fold_to_their_own_value() {
+    let advice_file = "package a.b;\n\n\
+        public class GlobalControllerAdvice {\n    \
+            public static final String USER = \"userId\";\n    \
+            public static final String EMAIL = \"emailAddress\";\n\
+        }\n";
+    let (_tmp, engine, stats) = index(&[
+        (ADVICE_FILE, advice_file),
+        (
+            &api_file("c"),
+            &api(
+                "a.c",
+                "import static a.b.GlobalControllerAdvice.USER;\nimport static a.b.GlobalControllerAdvice.EMAIL;\n",
+                r#""/u/{" + USER + "}/m/{" + EMAIL + "}""#,
+            ),
+        ),
+    ]);
+    assert_eq!(route_names(engine.runtime().unwrap()), ["GET /v1/u/{userId}/m/{emailAddress}"]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
