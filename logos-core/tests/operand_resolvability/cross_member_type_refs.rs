@@ -1664,10 +1664,16 @@ mod tests {
     #[test]
     fn a_member_declaring_a_type_by_source_and_by_avro_backs_it_with_both() {
         let decl = Declarations {
-            sources: vec![src("models", "src/main/java/com/m/Mail.java", Some("com.m"))],
+            sources: vec![
+                src("models", "src/main/java/com/m/Mail.java", Some("com.m")),
+                // One member declaring a type twice with one backing stays that backing.
+                src("models", "src/main/java/com/m/Twin.java", Some("com.m")),
+                src("models", "other-mod/src/main/java/com/m/Twin.java", Some("com.m")),
+            ],
             avro: vec![
-                avsc("models", &["com.m.Mail", "com.m.Only"]),
+                avsc("models", &["com.m.Mail", "com.m.Only", "com.m.Pair"]),
                 avsc("other", &["com.m.Only"]),
+                avsc("models", &["com.m.Pair"]),
             ],
         };
         let index = OwnerIndex::build(&decl, Rule::Product);
@@ -1675,6 +1681,8 @@ mod tests {
         let only = index.owners("com.m.Only").unwrap();
         assert_eq!(only.len(), 2);
         assert_eq!(only.get("other"), Some(&Backing::Avro));
+        assert_eq!(index.owners("com.m.Twin").unwrap().get("models"), Some(&Backing::Source));
+        assert_eq!(index.owners("com.m.Pair").unwrap().get("models"), Some(&Backing::Avro));
     }
 
     // ── Rows ────────────────────────────────────────────────────────────────
