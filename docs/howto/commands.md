@@ -29,7 +29,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`stats`](#stats) | ✅ | Usage/performance statistics |
 | [`languages`](#languages) | ✅ | Registered language grammars |
 | [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`, requires a `--features ui` build) |
-| [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` (`--repo` to scope) |
+| [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` / `build-deps` (`--repo` to scope) |
 | [`workspace status`](#workspace-status) | ✅ | Per-member freshness, warm state and open state + the 3-state cross-service coverage summary — exits 1 if a member could not be opened |
 | [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
 | [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |
@@ -1238,7 +1238,10 @@ neither), the `platform_candidates` by in-degree, and — when a member is
 declared `kind = "platform"` — its inbound pairs under `platform_apart`. It is
 a build dependency, never a runtime coupling: no build edge enters the figures
 above. Its `summary` states the pairs by kind beside the denominator in one
-line — read that rather than recomposing the two. The rows behind it are
+line — read that rather than recomposing the two. **After upgrading from a release before
+the build relation**, a member's facts exist only once that member has been
+fully re-read: run `logos index` or `logos health` in each member. Until then an upgraded member reads as
+holding no manifest, and the section is absent or its pairs short. The rows behind it are
 [`xservice build-deps`](#xservice-workspace-federation-queries); the web
 coverage tab renders the same section as its own card, after every runtime
 board. A workspace with no build manifest prints exactly what it printed

@@ -109,6 +109,11 @@
 //!   cargo test -p logos-core --test operand_resolvability -- --nocapture
 //! ```
 //!
+//! Point it at a **private copy** of the workspace, never a live one: the
+//! vendored-spec gate reads through member engines and refuses to run over a
+//! store below this binary's schema version, because opening it would migrate it
+//! (see `vendored_spec_contracts`'s "A private copy only").
+//!
 //! The classifier's own rules are pinned by fixture tests that always run, one
 //! per language the corpus contains, so no reported column rests on an
 //! unexercised code path. A `LOGOS_REF_WORKSPACE` that is set but does not

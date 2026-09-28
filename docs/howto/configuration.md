@@ -203,6 +203,10 @@ kind = "platform"
   status payload when every member was read and none holds a `pom.xml` or
   `build.gradle(.kts)`. A member whose facts could not be read keeps the
   section present, named under `build_dependency.members.unread`.
+- **An upgraded store starts with no facts.** A member indexed by a release
+  before the build relation carries no build facts until it is fully re-read
+  (`logos index` or `logos health` in that member). Until then it reads as a
+  member with no manifest, so re-read every member after upgrading.
 
 ### The warm sidecar
 

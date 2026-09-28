@@ -273,10 +273,15 @@ export function nodeIdsWithinDepth(set: LoadedSet, rootId: string, depth: number
   return seen;
 }
 
-/** Visible-degree of each node (edges with both endpoints visible) — drives sizing. */
+/** Visible-degree of each node (edges with both endpoints visible) — drives sizing.
+ *
+ *  The service map's `build` layer (S-464) is drawn but never counted: node size
+ *  reads as coupling degree, and a build dependency is never a runtime coupling
+ *  (BR-58), so switching the layer on must not grow a node. */
 export function degreeMap(set: LoadedSet, visible: Set<string>): Record<string, number> {
   const deg: Record<string, number> = {};
   for (const e of set.edges) {
+    if (e.edge_type === "build") continue;
     if (visible.has(e.source) && visible.has(e.target)) {
       deg[e.source] = (deg[e.source] || 0) + 1;
       deg[e.target] = (deg[e.target] || 0) + 1;
