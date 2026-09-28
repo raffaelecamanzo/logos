@@ -215,6 +215,14 @@ const MAX_CONTAINS_DEPTH: u32 = 64;
 struct FileScope {
     /// In-scope name → the `::`-split path it abbreviates.
     aliases: HashMap<String, Vec<String>>,
+    /// In-scope name → **every** path the file's imports give it, in ledger
+    /// order. The package rung reads this, not the first-wins `aliases`: two
+    /// static imports may name one method overloaded across two types
+    /// (`import static a.A.m; import static b.B.m;`, CR-149), and that name is
+    /// then ambiguous rather than the first import's ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    alias_expansions: HashMap<String, Vec<Vec<String>>>,
     /// Glob-imported module paths (`use m::*` → `["m"]`), unresolved form. For a
     /// package-shaped file (CR-149) these are the non-static wildcards
     /// (`import a.b.*`, `import a.b.C.*`), which bring **types** into scope only.
@@ -587,9 +595,25 @@ impl Index {
         {
             return true;
         }
+        // A package-shaped row reads every expansion of its head, not only the
+        // first (`FileScope::alias_expansions`), so each must be able to select it.
+        let first = r.target.split("::").next().unwrap_or_default();
+        if scope
+            .alias_expansions
+            .get(first)
+            .is_some_and(|all| all.len() > 1)
+            && scope.alias_expansions[first]
+                .iter()
+                .flatten()
+                .flat_map(|seg| super::tokens(seg))
+                .any(|t| dirty.contains(&t))
+            && package_shaped()
+        {
+            return true;
+        }
         // Chase the head segment through `as`-alias rewrites: each hop's path may
         // name something dirty even though the written target does not.
-        let mut head = r.target.split("::").next().unwrap_or_default().to_string();
+        let mut head = first.to_string();
         for _ in 0..MAX_ALIAS_DEPTH {
             let Some(path) = scope.aliases.get(&head) else {
                 return false;
@@ -947,6 +971,11 @@ fn build_file_scopes(refs: &[UnresolvedRefRow]) -> HashMap<i64, FileScope> {
             RefForm::Glob => scope.globs.push(path),
             _ => {
                 if let Some(alias) = &r.alias {
+                    scope
+                        .alias_expansions
+                        .entry(alias.clone())
+                        .or_default()
+                        .push(path.clone());
                     scope.aliases.entry(alias.clone()).or_insert(path);
                 }
             }
@@ -2316,8 +2345,9 @@ impl Ctx<'_> {
     /// A bare name from a package-shaped source, after the lexical chain
     /// ([CR-149], [FR-RS-03]) — Java's scope order for a simple name:
     ///
-    /// 1. **imported** — a single-type or single-static import naming it (the
-    ///    file's aliases), resolved through [`resolve_path`](Ctx::resolve_path);
+    /// 1. **imported** — every single-type or single-static import naming it
+    ///    (the file's alias expansions), each resolved through
+    ///    [`resolve_path`](Ctx::resolve_path), exactly-one across all of them;
     /// 2. **same package** — a top-level type of the source's own package,
     ///    visible without an import;
     /// 3. **on-demand** — a member of a type, or a type of a package, the file
@@ -2343,11 +2373,20 @@ impl Ctx<'_> {
         if self.no_workspace_fallback.get() {
             return Res::NotFound;
         }
-        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(name)) {
+        let expansions = self.scope().and_then(|s| s.alias_expansions.get(name));
+        let mut imported: Vec<NodeId> = Vec::new();
+        for alias_path in expansions.into_iter().flatten() {
             match self.resolve_path(alias_path, want, depth - 1) {
+                Res::Found(id) => imported.push(id),
+                Res::Ambiguous => return Res::Ambiguous,
                 Res::NotFound => {}
-                decided => return decided,
             }
+        }
+        imported.sort();
+        imported.dedup();
+        match exactly_one(&imported) {
+            Res::NotFound => {}
+            decided => return decided,
         }
         let same_package: Vec<NodeId> = self
             .package_type(package, name)

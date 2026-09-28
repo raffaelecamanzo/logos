@@ -191,6 +191,35 @@ fn a_static_import_binds_to_the_member_and_the_call_through_it_binds() {
 }
 
 #[test]
+fn a_name_two_static_imports_give_is_ambiguous_not_the_first_imports() {
+    // `m` is overloaded across `A` and `B`; the file imports both. Which one
+    // `m("s")` means is an overload decision the graph cannot make, so the call
+    // binds neither — never the first import's (NFR-RA-05). Both imports bind.
+    let tmp = TempDir::new().unwrap();
+    let a = "src/main/java/com/x/a/A.java";
+    let b = "src/main/java/com/x/b/B.java";
+    write(
+        tmp.path(),
+        a,
+        "package com.x.a;\n\npublic class A {\n    public static int m(int x) { return x; }\n}\n",
+    );
+    write(tmp.path(), b, "package com.x.b;\n\npublic class B {\n    public static String m(String s) { return s; }\n}\n");
+    write(
+        tmp.path(),
+        CTL_FILE,
+        "package com.x.web;\n\nimport static com.x.a.A.m;\nimport static com.x.b.B.m;\n\npublic class Ctl {\n    public String get() { return m(\"s\"); }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        imports_of(rt, CTL_FILE),
+        [format!("{a}:m:method"), format!("{b}:m:method")]
+    );
+    assert!(callers_of(rt, &format!("{a}:m:method")).is_empty());
+    assert!(callers_of(rt, &format!("{b}:m:method")).is_empty());
+}
+
+#[test]
 fn a_receiver_call_never_binds_through_a_static_import_of_its_name() {
     // `List.of(…)` and `svc.helper()` name `java.util.List.of` and a member of
     // whatever `svc` is — never the statically imported in-house `of` /
@@ -598,4 +627,47 @@ fn sync_re_decides_a_wildcard_call_when_its_imported_type_becomes_ambiguous() {
         binding_facts(rt).1,
         cold_facts(&tmp, &[SVC_FILE, CTL_FILE, dup]).1
     );
+}
+
+#[test]
+fn sync_re_decides_a_call_whose_second_static_import_stops_being_ambiguous() {
+    // `m()` reaches `B.m` only through the file's SECOND static import (the
+    // ledger orders `com::…` before `org::…`). While `org.y.b.B` is declared
+    // twice the call is ambiguous; deleting the test
+    // copy — a file that declares no `m` — must re-decide it, so the row is
+    // selected by the second expansion's tokens (`Index::ref_affected`): the
+    // first expansion shares no token with the deleted file's path or names.
+    let tmp = TempDir::new().unwrap();
+    let a = "src/main/java/com/x/a/A.java";
+    let b = "src/main/java/org/y/b/B.java";
+    let b_dup = "src/test/java/org/y/b/B.java";
+    write(
+        tmp.path(),
+        a,
+        "package com.x.a;\n\npublic class A {\n    public static int other() { return 1; }\n}\n",
+    );
+    write(
+        tmp.path(),
+        b,
+        "package org.y.b;\n\npublic class B {\n    public static String m() { return \"b\"; }\n}\n",
+    );
+    write(tmp.path(), b_dup, "package org.y.b;\n\npublic class B {}\n");
+    write(
+        tmp.path(),
+        CTL_FILE,
+        "package com.x.web;\n\nimport static com.x.a.A.m;\nimport static org.y.b.B.m;\n\npublic class Ctl {\n    public String get() { return m(); }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(
+        callers_of(rt, &format!("{b}:m:method")).is_empty(),
+        "precondition: ambiguous"
+    );
+    fs::remove_file(tmp.path().join(b_dup)).unwrap();
+    engine.sync(&[b_dup.into()]);
+    assert_eq!(
+        callers_of(rt, &format!("{b}:m:method")),
+        [format!("{CTL_FILE}:get")]
+    );
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &[a, b, CTL_FILE]));
 }
