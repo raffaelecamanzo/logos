@@ -1685,6 +1685,57 @@ mod tests {
         assert_eq!(index.owners("com.m.Pair").unwrap().get("models"), Some(&Backing::Avro));
     }
 
+    /// The estate read's declaration pass over a real directory, through the
+    /// shipped corpus walk: member attribution, the members filter, nested
+    /// module roots, test trees, and `.avsc` refusal plumbing.
+    #[test]
+    fn declarations_attribute_each_file_to_its_member_and_refuse_a_broken_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("lib/core/src/main/java/com/l/Svc.java", "package com.l;\nclass Svc {}\n");
+        write("lib/src/main/avro/good.avsc", r#"{"type":"record","name":"M","namespace":"com.m","fields":[]}"#);
+        write("lib/src/main/avro/bad.avsc", "{ nope");
+        write("app/src/main/kotlin/com/a/K.kt", "package com.b\n");
+        write("app/src/test/java/com/a/T.java", "package com.a;\n");
+        write("outsider/src/main/java/com/o/O.java", "package com.o;\n");
+        let members: BTreeSet<String> = ["lib", "app"].iter().map(|m| (*m).to_string()).collect();
+
+        let mut decl = declarations(root, &members, &ConfigCorpus::discover(root));
+        decl.sources.sort_by(|a, b| a.path.cmp(&b.path));
+        decl.avro.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            decl.sources,
+            vec![
+                SourceFile {
+                    member: "lib".into(),
+                    path: "core/src/main/java/com/l/Svc.java".into(),
+                    path_package: "com.l".into(),
+                    name: "Svc".into(),
+                    declared_package: Some("com.l".into()),
+                },
+                SourceFile {
+                    member: "app".into(),
+                    path: "src/main/kotlin/com/a/K.kt".into(),
+                    path_package: "com.a".into(),
+                    name: "K".into(),
+                    declared_package: Some("com.b".into()),
+                },
+            ],
+            "member-relative paths; the test tree and the non-member are not declarations"
+        );
+        assert_eq!(decl.package_refusals().len(), 1, "K.kt declares com.b under com/a");
+        assert_eq!(decl.avro.len(), 2);
+        assert_eq!(decl.avro[0].path, "src/main/avro/bad.avsc");
+        assert!(decl.avro[0].types.is_err(), "a broken schema is refused, never skipped");
+        assert_eq!(decl.avro[1].types, Ok(vec!["com.m.M".to_string()]));
+        assert_eq!(decl.avro_refusals().len(), 1);
+    }
+
     // ── Rows ────────────────────────────────────────────────────────────────
 
     fn index() -> OwnerIndex {
