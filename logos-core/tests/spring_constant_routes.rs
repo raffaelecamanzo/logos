@@ -683,3 +683,27 @@ fn a_type_name_the_handlers_file_declares_twice_is_refused_not_imported() {
         "a qualifier declared twice in the handler's file",
     );
 }
+
+/// Inheritance anywhere around the path counts, not only in its innermost
+/// body: a handler nested in a class with a supertype might see an inherited
+/// member type named like the imported one, so the qualified import is
+/// refused there too.
+#[test]
+fn an_inheriting_enclosing_class_blocks_a_qualified_import_in_a_nested_class() {
+    let imported = "package a.b;\n\npublic class G {\n    public static final String X = \"/imported\";\n}\n";
+    let handler = "package a.c;\n\n\
+        import a.b.G;\n\
+        import org.springframework.web.bind.annotation.GetMapping;\n\
+        import org.springframework.web.bind.annotation.RestController;\n\n\
+        public class Outer extends Base {\n    \
+            @RestController\n    \
+            public static class H {\n        \
+                @GetMapping(G.X + \"/s\")\n        \
+                public String s() { return \"\"; }\n    \
+            }\n\
+        }\n";
+    assert_refused_once(
+        &[("src/main/java/a/b/G.java", imported), ("src/main/java/a/c/Outer.java", handler)],
+        "an inheriting enclosing class",
+    );
+}
