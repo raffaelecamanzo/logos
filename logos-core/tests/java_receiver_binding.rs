@@ -31,7 +31,7 @@ use std::process::Command;
 
 use logos_core::federation::{discover, workspace_status, EngineRegistry, RegistryMode};
 use logos_core::model::{EdgeKind, NodeId, RefForm};
-use logos_core::models::CallResidue;
+use logos_core::models::{CallResidue, CallResidueReason as R, ResidueScope};
 use logos_core::Engine;
 use logos_core::Runtime;
 use tempfile::TempDir;
@@ -123,17 +123,17 @@ fn java_residue(engine: &Engine) -> CallResidue {
 }
 
 /// The reasons of `residue` whose count is not zero.
-fn nonzero(residue: &CallResidue) -> BTreeMap<String, u64> {
+fn nonzero(residue: &CallResidue) -> BTreeMap<R, u64> {
     residue
         .reasons
         .iter()
         .filter(|(_, n)| **n > 0)
-        .map(|(k, n)| (k.clone(), *n))
+        .map(|(k, n)| (*k, *n))
         .collect()
 }
 
-fn reasons(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
-    pairs.iter().map(|(k, n)| ((*k).to_string(), *n)).collect()
+fn reasons(pairs: &[(R, u64)]) -> BTreeMap<R, u64> {
+    pairs.iter().copied().collect()
 }
 
 // ── UAT-RS-05: two classes each declaring `send()` ───────────────────────
@@ -187,7 +187,7 @@ fn uat_rs_05_each_typed_call_binds_its_own_classs_send_and_an_untyped_one_stays_
         RefForm::Method,
         false
     )));
-    assert_eq!(nonzero(&java_residue(&engine)), reasons(&[("no-receiver-evidence", 1)]));
+    assert_eq!(nonzero(&java_residue(&engine)), reasons(&[(R::NoReceiverEvidence, 1)]));
 }
 
 // ── the in-repository supertype walk ──────────────────────────────────────
@@ -281,7 +281,7 @@ fn a_cycle_in_extends_terminates_and_binds_nothing() {
         "a cyclic hierarchy declares no `go`: {:?}",
         call_edges(rt)
     );
-    assert_eq!(nonzero(&java_residue(&engine)), reasons(&[("supertype-unreached", 1)]));
+    assert_eq!(nonzero(&java_residue(&engine)), reasons(&[(R::SupertypeUnreached, 1)]));
 }
 
 // ── one no-edge fixture per residue reason, each on a cold index ──────────
@@ -298,7 +298,7 @@ fn residue_of(files: &[(&str, &str)], caller: &str) -> CallResidue {
         .collect();
     assert!(from_caller.is_empty(), "no edge may leave {caller}: {from_caller:?}");
     let residue = java_residue(&engine);
-    assert_eq!(residue.scope, "repository");
+    assert_eq!(residue.scope, ResidueScope::Repository);
     assert_eq!(
         residue.unbound,
         residue.reasons.values().sum::<u64>() + residue.unclassified,
@@ -319,7 +319,7 @@ fn an_unproven_receiver_is_no_receiver_evidence() {
         CALLER,
     );
     // An undeclared receiver `x` (`send`, `make`) and a chained call (`done`).
-    assert_eq!(nonzero(&residue), reasons(&[("no-receiver-evidence", 3)]));
+    assert_eq!(nonzero(&residue), reasons(&[(R::NoReceiverEvidence, 3)]));
     assert_eq!(residue.unbound, 3);
 }
 
@@ -341,7 +341,7 @@ fn a_jdk_or_library_type_and_its_super_call_are_external_type() {
         )],
         CALLER,
     );
-    assert_eq!(nonzero(&residue), reasons(&[("external-type", 2)]));
+    assert_eq!(nonzero(&residue), reasons(&[(R::ExternalType, 2)]));
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn an_overloaded_target_on_the_type_or_on_a_supertype_is_overload_ambiguous() {
         ],
         CALLER,
     );
-    assert_eq!(nonzero(&residue), reasons(&[("overload-ambiguous", 2)]));
+    assert_eq!(nonzero(&residue), reasons(&[(R::OverloadAmbiguous, 2)]));
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn a_type_declared_twice_under_one_name_is_type_ambiguous() {
         ],
         CALLER,
     );
-    assert_eq!(nonzero(&residue), reasons(&[("type-ambiguous", 1)]));
+    assert_eq!(nonzero(&residue), reasons(&[(R::TypeAmbiguous, 1)]));
 }
 
 #[test]
@@ -426,7 +426,7 @@ fn an_inherited_call_through_an_external_superclass_and_an_interface_without_the
         ],
         CALLER,
     );
-    assert_eq!(nonzero(&residue), reasons(&[("supertype-unreached", 2)]));
+    assert_eq!(nonzero(&residue), reasons(&[(R::SupertypeUnreached, 2)]));
 }
 
 // ── type-in-another-member: only a workspace can tell it from external ────
@@ -475,12 +475,12 @@ fn a_type_another_member_declares_is_type_in_another_member_in_a_workspace_only(
 
     // Alone, `app` cannot tell another member's type from a library's.
     let alone = java_residue(&Engine::start(&app).expect("engine starts"));
-    assert_eq!(alone.scope, "repository");
+    assert_eq!(alone.scope, ResidueScope::Repository);
     assert_eq!(
         nonzero(&alone),
-        reasons(&[("external-type", 1), ("supertype-unreached", 1)])
+        reasons(&[(R::ExternalType, 1), (R::SupertypeUnreached, 1)])
     );
-    assert!(!alone.reasons.contains_key("type-in-another-member"));
+    assert!(!alone.reasons.contains_key(&R::TypeInAnotherMember));
 
     write(
         ws.path(),
@@ -502,12 +502,12 @@ fn a_type_another_member_declares_is_type_in_another_member_in_a_workspace_only(
         .find(|row| row.language == "java")
         .and_then(|row| row.call_residue.clone())
         .expect("a java residue");
-    assert_eq!(residue.scope, "workspace");
+    assert_eq!(residue.scope, ResidueScope::Workspace);
     // The typed call names `lib`'s type; the inherited call's superclass is
     // `lib`'s too, so its walk leaves this member: still supertype-unreached.
     assert_eq!(
         nonzero(&residue),
-        reasons(&[("supertype-unreached", 1), ("type-in-another-member", 1)])
+        reasons(&[(R::SupertypeUnreached, 1), (R::TypeInAnotherMember, 1)])
     );
     assert_eq!(residue.unbound, 2);
     // `lib` itself calls nothing.
@@ -709,7 +709,7 @@ fn known_gap_sync_keeps_the_edge_of_a_call_whose_target_gains_an_overload() {
         "a cold index leaves the overloaded call unbound: {cold_edges:?}"
     );
     assert_eq!(
-        java_residue(&cold_engine).reasons["overload-ambiguous"],
+        java_residue(&cold_engine).reasons[&R::OverloadAmbiguous],
         2,
         "viaMailer and viaLocal both name the overloaded `send`"
     );
@@ -751,7 +751,7 @@ fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
     assert_eq!(residue.unclassified, 2, "{residue:?}");
     assert_eq!(
         nonzero(&residue),
-        reasons(&[("no-receiver-evidence", 1), ("supertype-unreached", 2)])
+        reasons(&[(R::NoReceiverEvidence, 1), (R::SupertypeUnreached, 2)])
     );
     assert_eq!(residue.unbound, residue.reasons.values().sum::<u64>() + residue.unclassified);
     let java = engine

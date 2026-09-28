@@ -116,7 +116,9 @@ use rayon::prelude::*;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
 use crate::model::EdgeKind;
-use crate::models::navigation::{CallResidue, LanguageResolution, RelationResolution};
+use crate::models::navigation::{
+    CallResidue, CallResidueReason, LanguageResolution, RelationResolution, ResidueScope,
+};
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
 use crate::plugin::LanguageRegistry;
 use crate::runtime::Runtime;
@@ -634,17 +636,16 @@ pub(crate) fn call_residue_by_language(
     let declared = index.declared_type_names();
 
     let mut out: BTreeMap<String, CallResidue> = BTreeMap::new();
-    let mut external: BTreeMap<String, BTreeMap<Vec<Vec<String>>, u64>> = BTreeMap::new();
     for language in language_of.values() {
         out.entry(language.clone()).or_insert_with(|| CallResidue {
             unbound: 0,
             reasons: CallResidue::REPOSITORY_REASONS
                 .iter()
-                .map(|reason| ((*reason).to_string(), 0))
+                .map(|reason| (*reason, 0))
                 .collect(),
             unclassified: 0,
-            scope: CallResidue::REPOSITORY.to_string(),
-            external_candidates: Vec::new(),
+            scope: ResidueScope::Repository,
+            external_candidates: BTreeMap::new(),
             declared_types: declared.clone(),
         });
     }
@@ -668,25 +669,16 @@ pub(crate) fn call_residue_by_language(
                 residue.unclassified += 1;
                 continue;
             }
-            Some(binder::Residue::NoReceiverEvidence) => CallResidue::NO_RECEIVER_EVIDENCE,
+            Some(binder::Residue::NoReceiverEvidence) => CallResidueReason::NoReceiverEvidence,
             Some(binder::Residue::ExternalType { candidates }) => {
-                *external
-                    .entry(language.clone())
-                    .or_default()
-                    .entry(candidates)
-                    .or_default() += 1;
-                CallResidue::EXTERNAL_TYPE
+                *residue.external_candidates.entry(candidates).or_default() += 1;
+                CallResidueReason::ExternalType
             }
-            Some(binder::Residue::OverloadAmbiguous) => CallResidue::OVERLOAD_AMBIGUOUS,
-            Some(binder::Residue::TypeAmbiguous) => CallResidue::TYPE_AMBIGUOUS,
-            Some(binder::Residue::SupertypeUnreached) => CallResidue::SUPERTYPE_UNREACHED,
+            Some(binder::Residue::OverloadAmbiguous) => CallResidueReason::OverloadAmbiguous,
+            Some(binder::Residue::TypeAmbiguous) => CallResidueReason::TypeAmbiguous,
+            Some(binder::Residue::SupertypeUnreached) => CallResidueReason::SupertypeUnreached,
         };
-        *residue.reasons.entry(reason.to_string()).or_default() += 1;
-    }
-    for (language, by_candidates) in external {
-        if let Some(residue) = out.get_mut(&language) {
-            residue.external_candidates = by_candidates.into_iter().collect();
-        }
+        *residue.reasons.entry(reason).or_default() += 1;
     }
     Ok(out)
 }

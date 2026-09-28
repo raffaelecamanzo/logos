@@ -1076,54 +1076,68 @@ pub struct LanguageResolution {
 pub struct CallResidue {
     /// Unbound `Calls` rows of the language — the denominator of every reason.
     pub unbound: u64,
-    /// Rows per reason, keyed by the reason token; every reason of the scope is
-    /// present, a `0` included — each is a count the classification made.
-    pub reasons: std::collections::BTreeMap<String, u64>,
+    /// Rows per reason; every reason of the scope is present, a `0` included —
+    /// each is a count the classification made.
+    pub reasons: std::collections::BTreeMap<CallResidueReason, u64>,
     /// Unbound rows no reason is assigned to: a capture-before-delete row
     /// awaiting its target, or a row the ledger holds unbound that the binder
     /// binds now (a graph bound by an older binary, or a sync that did not
     /// re-select it). `0` on a graph freshly indexed by this binary.
     pub unclassified: u64,
-    /// Over what the external/other-member split was decided: `"repository"`
-    /// or `"workspace"`.
-    pub scope: String,
+    /// Over what the external/other-member split was decided.
+    pub scope: ResidueScope,
     /// The `external-type` rows grouped by the fully-qualified names each could
     /// be — what a workspace sorts into `type-in-another-member`. Not
     /// serialised.
     #[serde(skip)]
-    pub(crate) external_candidates: Vec<(Vec<Vec<String>>, u64)>,
+    pub(crate) external_candidates: std::collections::BTreeMap<Vec<Vec<String>>, u64>,
     /// Every fully-qualified name a top-level type of this repository is
     /// declared under — the other half of that comparison. Not serialised.
     #[serde(skip)]
     pub(crate) declared_types: Vec<Vec<String>>,
 }
 
-impl CallResidue {
-    /// The reason a row whose receiver the file does not prove stays unbound.
-    pub const NO_RECEIVER_EVIDENCE: &'static str = "no-receiver-evidence";
-    /// The reason a row whose type no file here declares stays unbound.
-    pub const EXTERNAL_TYPE: &'static str = "external-type";
-    /// The reason a row whose type another workspace member declares stays
-    /// unbound.
-    pub const TYPE_IN_ANOTHER_MEMBER: &'static str = "type-in-another-member";
-    /// The reason an overloaded target stays unbound.
-    pub const OVERLOAD_AMBIGUOUS: &'static str = "overload-ambiguous";
-    /// The reason a row whose type is declared twice here stays unbound.
-    pub const TYPE_AMBIGUOUS: &'static str = "type-ambiguous";
-    /// The reason a row whose declaring supertype is not reached stays unbound.
-    pub const SUPERTYPE_UNREACHED: &'static str = "supertype-unreached";
-    /// The scope a single repository's `status` decides the split over.
-    pub const REPOSITORY: &'static str = "repository";
-    /// The scope a workspace `status` decides the split over.
-    pub const WORKSPACE: &'static str = "workspace";
+/// Why a package-shaped `Calls` row stays unbound — a key of
+/// [`CallResidue::reasons`], serialised as its kebab-case token (S-468,
+/// [FR-RS-10]). Declared in token order, so the map's order is the tokens'.
+///
+/// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CallResidueReason {
+    /// The receiver's type is declared by no file of this repository.
+    ExternalType,
+    /// The file proves no receiver type.
+    NoReceiverEvidence,
+    /// The deciding level declares two or more callables of that name.
+    OverloadAmbiguous,
+    /// Neither the type nor a supertype reached here declares the name.
+    SupertypeUnreached,
+    /// The type's name reaches two declarations here.
+    TypeAmbiguous,
+    /// Another workspace member declares the receiver's type (workspace scope
+    /// only).
+    TypeInAnotherMember,
+}
 
+/// Over what a [`CallResidue`]'s external/other-member split was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResidueScope {
+    /// One repository's graph: another member's type reads `external-type`.
+    Repository,
+    /// A workspace `status`, which compared every member's declared types.
+    Workspace,
+}
+
+impl CallResidue {
     /// The reasons a repository-scoped readout counts, in token order.
-    pub const REPOSITORY_REASONS: [&'static str; 5] = [
-        Self::EXTERNAL_TYPE,
-        Self::NO_RECEIVER_EVIDENCE,
-        Self::OVERLOAD_AMBIGUOUS,
-        Self::SUPERTYPE_UNREACHED,
-        Self::TYPE_AMBIGUOUS,
+    pub const REPOSITORY_REASONS: [CallResidueReason; 5] = [
+        CallResidueReason::ExternalType,
+        CallResidueReason::NoReceiverEvidence,
+        CallResidueReason::OverloadAmbiguous,
+        CallResidueReason::SupertypeUnreached,
+        CallResidueReason::TypeAmbiguous,
     ];
 
     /// Move every `external-type` row whose type could be one `elsewhere`
@@ -1142,12 +1156,12 @@ impl CallResidue {
             })
             .map(|(_, rows)| rows)
             .sum();
-        if let Some(external) = self.reasons.get_mut(Self::EXTERNAL_TYPE) {
+        if let Some(external) = self.reasons.get_mut(&CallResidueReason::ExternalType) {
             *external -= moved;
         }
         self.reasons
-            .insert(Self::TYPE_IN_ANOTHER_MEMBER.to_string(), moved);
-        self.scope = Self::WORKSPACE.to_string();
+            .insert(CallResidueReason::TypeInAnotherMember, moved);
+        self.scope = ResidueScope::Workspace;
     }
 }
 
