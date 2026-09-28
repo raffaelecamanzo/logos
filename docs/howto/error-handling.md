@@ -143,6 +143,7 @@ A degraded result is *correct about what it could do*, not a defect:
 |---|---|---|
 | `no Logos index found under <path>: run `logos index`` | No `.logos/logos.db` yet (exit 3) | `logos index` |
 | An `error:` about a corrupt/unreadable store (exit 3) | The store failed an integrity check | `rm .logos/logos.db && logos index` |
+| `… graph store … is at schema vN, expected vM …` (exit 3) | The store was upgraded by a newer Logos than the binary now running it — for example 1.4.27 opening a store that 1.4.28 migrated to v22. Schema upgrades are forward-only | Run the newer binary; to go back to the older one, `rm .logos/logos.db && logos index` with it |
 | `invalid TOML in .logos/config.toml: …` | A syntax error or unknown key (exit 2) | Fix the key/line the message names |
 | `glob pattern … escapes the project root` | An `exclude`/path glob with `..` or an absolute path (exit 2) | Make the pattern project-relative |
 | `unknown node kind "<x>"` | A bad `--kind`/`kind:` filter (exit 2 / `invalid_params`) | Use one of the listed kinds |

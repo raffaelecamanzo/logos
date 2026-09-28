@@ -13,6 +13,36 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **Members that build against each other.** Indexing reads each member's Maven `pom.xml` and
+  Gradle `build.gradle` / `build.gradle.kts` into member-local facts: the artifacts it produces
+  and the ones it references, by kind (`parent`, `dependency`, `managed`, `bom-import`) and
+  scope. An unresolved `${…}` coordinate is refused with a reason, never guessed; Gradle
+  support is read but reported unexercised.
+- **A `builds-against` relation across workspace members**, with its own headline
+  `build_dependency_pairs` split by kind beside its denominator. An artifact produced by two
+  members resolves to neither, and the collision is reported. A build dependency is never a
+  runtime coupling: it never enters `resolved_cross_service_edges`, egress resolution, a
+  provider bucket or a bridge edge.
+- **`logos xservice build-deps`** (`--json`, `--repo <member>`) and its MCP twin list what each
+  member builds against and what builds against it. `workspace status` gains a
+  `build_dependency` section. The web service map gains a `build` edge layer behind a legend
+  toggle that is off by default, with platform members collapsed, and a cross-context model
+  hint that is never drawn as an edge.
+- **A member can declare its kind** in `logos.workspace.toml`: `kind = "documentation"`,
+  `"mock"` or `"platform"`. Documentation and mock members leave the contract-surface headline
+  and `spec_conformance_ratio`, and their rows are reported apart with their count. A platform
+  member's inbound build edges are counted apart. `workspace status` lists candidates for each
+  and never classifies a member itself.
+
+### Changed
+
+- **Graph store schema version 22** (forward-only) adds the build-manifest facts. After
+  upgrading, each member with build manifests reads *unread — build facts not yet extracted*
+  until `logos index` or `logos health` runs in it; it is never reported as having no
+  manifests. An older binary cannot open a store at version 22.
+
 ## [1.4.27] — 2026-09-27
 
 ### Added
