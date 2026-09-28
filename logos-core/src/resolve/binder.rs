@@ -1146,6 +1146,7 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
         no_workspace_fallback: Cell::new(false),
         bare_path_call: Cell::new(false),
         package_key_only: relation.is_some(),
+        lexical_start: Cell::new(source),
     };
 
     // A cross-artifact reference (CR-011, FR-CG-07): bind under the same
@@ -1494,6 +1495,14 @@ struct Ctx<'a> {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     package_key_only: bool,
+    /// Where [`resolve_name`](Ctx::resolve_name)'s lexical chain — and a
+    /// package-shaped path's lexical head — starts: the source itself, except
+    /// while a Java type relation is read in its declaration's **header** (S-466),
+    /// where it is the declaration's enclosing scope. A class's member types are
+    /// in scope in its body, not in its `extends`/`implements` clause (JLS §6.3,
+    /// §8.1.4), so `class Svc implements Callback { interface Callback {} }`
+    /// never names its own nested type.
+    lexical_start: Cell<NodeId>,
 }
 
 impl Ctx<'_> {
@@ -1545,8 +1554,17 @@ impl Ctx<'_> {
             let base = &mods[..mods.len() - supers];
             return self.descend(krate, base, &segs[supers..], want);
         }
-        // 4) A `use`-alias head: substitute and resolve the expansion
-        //    (depth-limited — an import cycle terminates as NotFound).
+        // 4) A package-shaped source (CR-149): the rest of the path is decided
+        //    by the package rungs alone, in the language's own order — its
+        //    lexical, imported, same-package and on-demand heads, then the
+        //    fully-qualified name. The module tree below names no package
+        //    directory, and the workspace suffix match would read a
+        //    fully-qualified name as a guess.
+        if let Some(package) = &self.source_package {
+            return self.resolve_package_path(package, segs, want, depth);
+        }
+        // 4b) A `use`-alias head: substitute and resolve the expansion
+        //     (depth-limited — an import cycle terminates as NotFound).
         if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
             let mut expanded = alias_path.clone();
             expanded.extend(rest.iter().cloned());
@@ -1554,13 +1572,6 @@ impl Ctx<'_> {
                 Res::NotFound => {} // fall through to wider scopes
                 decided => return decided,
             }
-        }
-        // 4b) A package-shaped source (CR-149): the rest of the path is decided
-        //     by the package rung alone — the module tree below names no
-        //     package directory, and the workspace suffix match would read a
-        //     fully-qualified name as a guess.
-        if let Some(package) = &self.source_package {
-            return self.resolve_package_path(package, segs, want);
         }
         // 5) A crate-name head (`logos_core::…`).
         let norm = normalize_crate(head);
@@ -1602,12 +1613,25 @@ impl Ctx<'_> {
     ///
     /// A `Path` row takes the source's own scope order — the lexical chain (a
     /// nested or same-file type), then S-465's package rungs: single-type
-    /// imports, the source's package, its wildcards, and for a qualified name
-    /// the fully-qualified index ([`resolve_package_path`](Ctx::resolve_package_path)).
-    /// Every candidate list is filtered by `want` before the exactly-one test, so
-    /// a same-named type of the wrong kind is no candidate at all. A type with
-    /// no source here — the JDK, a library, a generated class — resolves to
-    /// nothing and stays in `unresolved_refs` ([NFR-RA-05]).
+    /// imports (final for the name they import), the source's package, its
+    /// wildcards, and for a qualified name the fully-qualified index
+    /// ([`resolve_package_path`](Ctx::resolve_package_path)). `want` filters
+    /// the candidates of every rung, so a same-named type of the wrong kind is
+    /// no candidate at all (on the fully-qualified rung it is applied after
+    /// the exactly-one test, so a `src/main`/`src/test` pair stays ambiguous).
+    /// A type with no source here — the JDK, a library, a generated class —
+    /// resolves to nothing and stays in `unresolved_refs` ([NFR-RA-05]).
+    ///
+    /// **Header scope.** An `Extends` or `Implements` names its type in the
+    /// declaration's header, where the declaration's own member types are not
+    /// in scope (JLS §6.3): it is read from the enclosing scope
+    /// ([`lexical_start`](Ctx::lexical_start)). A `TypeUses` sourced at a type
+    /// may come from either place — a superclass's type argument (header) or a
+    /// constructor parameter (body; constructors are not nodes) — and one row
+    /// cannot say which, so it binds only where both readings agree, or where
+    /// the header reading finds nothing (a header name that resolves only to a
+    /// member type does not compile). Two different types is a refusal, never
+    /// a pick ([NFR-RA-05]).
     ///
     /// A capture-before-delete `Symbol` row ([ADR-10]) is still a pure lookup,
     /// but of a target whose kind the relation also admits: an edit that turns
@@ -1628,7 +1652,28 @@ impl Ctx<'_> {
                 _ => Res::NotFound,
             };
         }
-        self.resolve_path(&split(&r.target), want, MAX_ALIAS_DEPTH)
+        let segs = split(&r.target);
+        let header = || -> Res {
+            let Some(&enclosing) = self.ix.parent.get(&self.source) else {
+                return Res::NotFound;
+            };
+            self.lexical_start.set(enclosing);
+            let resolved = self.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
+            self.lexical_start.set(self.source);
+            resolved
+        };
+        match r.kind {
+            EdgeKind::Extends | EdgeKind::Implements => header(),
+            EdgeKind::TypeUses
+                if self.ix.info.get(&self.source).is_some_and(|i| is_type_like(i.kind)) =>
+            {
+                match (self.resolve_path(&segs, want, MAX_ALIAS_DEPTH), header()) {
+                    (Res::Found(body), Res::Found(head)) if body != head => Res::Ambiguous,
+                    (body, _) => body,
+                }
+            }
+            _ => self.resolve_path(&segs, want, MAX_ALIAS_DEPTH),
+        }
     }
 
     /// Resolve a member-access fact to the one `Field` of the source method's
@@ -2335,8 +2380,10 @@ impl Ctx<'_> {
     /// only for the former, gated on [`bare_path_call`](Ctx::bare_path_call).
     fn resolve_name(&self, name: &str, want: Want, depth: u8) -> Res {
         // 1) Lexical Contains chain, innermost first: nested decls of the
-        //    source itself, then each enclosing scope up to the file module.
-        let mut cursor = Some(self.source);
+        //    source itself (or of its enclosing scope, for a declaration's
+        //    header — `lexical_start`), then each enclosing scope up to the
+        //    file module.
+        let mut cursor = Some(self.lexical_start.get());
         while let Some(scope) = cursor {
             let members = self.prefer_free_functions(self.ix.members_named(scope, name, want));
             match exactly_one(&members) {
@@ -2397,13 +2444,19 @@ impl Ctx<'_> {
     ///
     /// 1. **imported** — every single-type or single-static import naming it
     ///    (the file's alias expansions), each resolved through
-    ///    [`resolve_path`](Ctx::resolve_path), exactly-one across all of them;
+    ///    [`resolve_path`](Ctx::resolve_path), exactly-one across all of them.
+    ///    **Final** when the file imports the name at all: a single-type or
+    ///    single-static import shadows the package and the wildcards (JLS
+    ///    §6.4.1), so an import of the JDK's `Map` or a library's `Message`
+    ///    that binds nothing here leaves the name unresolved rather than
+    ///    reaching a same-package or wildcard type of that name (S-466 review);
     /// 2. **same package** — a top-level type of the source's own package,
     ///    visible without an import;
     /// 3. **on-demand** — a member of a type, or a type of a package, the file
     ///    imports with a wildcard ([`glob_members`](Ctx::glob_members));
-    /// 4. the policy-gated workspace name fallback, exactly as for every other
-    ///    language.
+    /// 4. the policy-gated workspace name fallback, as for every other
+    ///    language — except for a Java type relation, which binds by scope and
+    ///    package key only ([`package_key_only`](Ctx::package_key_only)).
     ///
     /// A **receiver**-method call ([`RefForm::Method`]) takes none of these
     /// rungs: its target is its receiver's type's member ([CR-150]), which no
@@ -2423,20 +2476,18 @@ impl Ctx<'_> {
         if self.no_workspace_fallback.get() {
             return Res::NotFound;
         }
-        let expansions = self.scope().and_then(|s| s.alias_expansions.get(name));
-        let mut imported: Vec<NodeId> = Vec::new();
-        for alias_path in expansions.into_iter().flatten() {
-            match self.resolve_path(alias_path, want, depth - 1) {
-                Res::Found(id) => imported.push(id),
-                Res::Ambiguous => return Res::Ambiguous,
-                Res::NotFound => {}
+        if let Some(expansions) = self.scope().and_then(|s| s.alias_expansions.get(name)) {
+            let mut imported: Vec<NodeId> = Vec::new();
+            for alias_path in expansions {
+                match self.resolve_path(alias_path, want, depth - 1) {
+                    Res::Found(id) => imported.push(id),
+                    Res::Ambiguous => return Res::Ambiguous,
+                    Res::NotFound => {}
+                }
             }
-        }
-        imported.sort();
-        imported.dedup();
-        match exactly_one(&imported) {
-            Res::NotFound => {}
-            decided => return decided,
+            imported.sort();
+            imported.dedup();
+            return exactly_one(&imported);
         }
         let same_package: Vec<NodeId> = self
             .package_type(package, name)
@@ -2461,18 +2512,35 @@ impl Ctx<'_> {
         Res::NotFound
     }
 
-    /// A multi-segment path from a package-shaped source ([CR-149]), after its
-    /// alias head was tried: a head naming a type of the source's own package,
-    /// else one a wildcard brings into view, else the whole path read as a
-    /// fully-qualified name ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung
-    /// whose head names a type decides — a simple type name obscures a package
-    /// of the same spelling, as the language rules it.
+    /// A multi-segment path from a package-shaped source ([CR-149]), its head
+    /// read in the language's order for a simple type name (JLS §6.5.5): a
+    /// member type in lexical scope (`Inner.Deep` inside `Outer`); else the
+    /// file's single-type import of it — **final**, as in
+    /// [`resolve_package_name`](Ctx::resolve_package_name), so `Map.Entry`
+    /// under `import java.util.Map` never reaches a same-package `Map`; else a
+    /// type of the source's own package; else one a wildcard brings into view;
+    /// else the whole path read as a fully-qualified name
+    /// ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung whose head names a
+    /// type decides — a simple type name obscures a package of the same
+    /// spelling, as the language rules it.
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
-    fn resolve_package_path(&self, package: &[String], segs: &[String], want: Want) -> Res {
+    fn resolve_package_path(&self, package: &[String], segs: &[String], want: Want, depth: u8) -> Res {
         let Some((head, rest)) = segs.split_first() else {
             return Res::NotFound;
         };
+        let mut cursor = Some(self.lexical_start.get());
+        while let Some(scope) = cursor {
+            if let Some(decided) = self.walk_from(&self.member_types(scope, head), rest, want) {
+                return decided;
+            }
+            cursor = self.ix.parent.get(&scope).copied();
+        }
+        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
+            let mut expanded = alias_path.clone();
+            expanded.extend(rest.iter().cloned());
+            return self.resolve_path(&expanded, want, depth - 1);
+        }
         if let Some(decided) = self.walk_from(self.package_type(package, head), rest, want) {
             return decided;
         }

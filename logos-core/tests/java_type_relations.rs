@@ -611,3 +611,142 @@ fn sync_equals_a_full_reindex_after_a_related_type_changes_kind() {
     );
     assert_eq!(binding_facts(rt), cold_facts(&tmp));
 }
+
+/// The type-relation edges out of `file`, across the four kinds, as
+/// `(kind, source, target)`, sorted.
+fn relations_out_of(rt: &Runtime, file: &str) -> Vec<(EdgeKind, String, String)> {
+    let mut out: Vec<(EdgeKind, String, String)> = TYPE_RELATIONS
+        .iter()
+        .flat_map(|k| {
+            edges_of(rt, *k)
+                .into_iter()
+                .filter(|(s, _)| s.starts_with(file))
+                .map(move |(s, t)| (*k, s, t))
+        })
+        .collect();
+    out.sort_by(|a, b| (a.0.as_i32(), &a.1, &a.2).cmp(&(b.0.as_i32(), &b.1, &b.2)));
+    out
+}
+
+#[test]
+fn an_import_of_an_external_type_shadows_a_same_package_type_of_that_name() {
+    // JLS §6.4.1: `import org.lib.Message` shadows the package's own `Message`,
+    // and `import java.util.Map` its own `Map` — even though neither import
+    // binds here. The package's types are the near miss (S-466 review).
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/main/java/com/x/Message.java", "package com.x;\n\npublic class Message {}\n");
+    write(
+        tmp.path(),
+        "src/main/java/com/x/Map.java",
+        "package com.x;\n\npublic class Map { public static class Entry {} }\n",
+    );
+    let handler = "src/main/java/com/x/Handler.java";
+    write(
+        tmp.path(),
+        handler,
+        "package com.x;\n\nimport org.lib.Message;\nimport java.util.Map;\n\npublic class Handler {\n    private Message msg;\n    private Map.Entry<String, String> e;\n    public void on() { Object o = new Message(); }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(relations_out_of(rt, handler), []);
+    assert_eq!(
+        rows_of(rt, EdgeKind::TypeUses, handler),
+        [
+            ("Map::Entry".to_string(), RefForm::Path, false),
+            ("Message".to_string(), RefForm::Path, false),
+            ("Object".to_string(), RefForm::Path, false),
+            ("String".to_string(), RefForm::Path, false),
+        ]
+    );
+    assert_eq!(
+        rows_of(rt, EdgeKind::Instantiates, handler),
+        [("Message".to_string(), RefForm::Path, false)]
+    );
+}
+
+#[test]
+fn a_declarations_header_never_names_its_own_member_type() {
+    // JLS §6.3: a class's member types are in scope in its body, not in its
+    // `extends`/`implements` clause. `Client implements Callback` is the
+    // top-level interface, never `Client.Callback`; `Svc extends Base<Item>`'s
+    // `Item` row reads the top-level `Item` in the header and `Svc.Item` in the
+    // body, so it binds neither. A constructor parameter typed by a nested
+    // `Builder` — a body use with nothing to shadow — still binds it.
+    let tmp = TempDir::new().unwrap();
+    let dir = "src/main/java/com/x";
+    write(tmp.path(), &format!("{dir}/Item.java"), "package com.x;\n\npublic class Item {}\n");
+    write(tmp.path(), &format!("{dir}/Base.java"), "package com.x;\n\npublic class Base<T> {}\n");
+    write(tmp.path(), &format!("{dir}/Callback.java"), "package com.x;\n\npublic interface Callback {}\n");
+    write(
+        tmp.path(),
+        &format!("{dir}/Svc.java"),
+        "package com.x;\n\npublic class Svc extends Base<Item> { public static class Item {} }\n",
+    );
+    write(
+        tmp.path(),
+        &format!("{dir}/Client.java"),
+        "package com.x;\n\npublic class Client implements Callback { public interface Callback {} }\n",
+    );
+    write(
+        tmp.path(),
+        &format!("{dir}/Foo.java"),
+        "package com.x;\n\npublic class Foo {\n    public Foo(Builder b) {}\n    public static class Builder {}\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        relations_out_of(rt, &format!("{dir}/Client.java")),
+        [(
+            EdgeKind::Implements,
+            format!("{dir}/Client.java:Client"),
+            format!("{dir}/Callback.java:Callback:interface")
+        )]
+    );
+    assert_eq!(
+        relations_out_of(rt, &format!("{dir}/Svc.java")),
+        [(
+            EdgeKind::Extends,
+            format!("{dir}/Svc.java:Svc"),
+            format!("{dir}/Base.java:Base:class")
+        )]
+    );
+    assert_eq!(
+        rows_of(rt, EdgeKind::TypeUses, &format!("{dir}/Svc.java")),
+        [("Item".to_string(), RefForm::Path, false)]
+    );
+    assert_eq!(
+        relations_out_of(rt, &format!("{dir}/Foo.java")),
+        [(
+            EdgeKind::TypeUses,
+            format!("{dir}/Foo.java:Foo"),
+            format!("{dir}/Foo.java:Builder:class")
+        )]
+    );
+}
+
+#[test]
+fn a_qualified_type_name_reads_its_head_as_a_member_type_in_scope_first() {
+    // JLS §6.5.5: `Inner.Deep` inside `Outer` is `Outer.Inner.Deep`, never the
+    // same-package `Inner`'s `Deep`.
+    let tmp = TempDir::new().unwrap();
+    let outer = "src/main/java/com/x/Outer.java";
+    write(
+        tmp.path(),
+        outer,
+        "package com.x;\n\npublic class Outer {\n    static class Inner { static class Deep {} }\n    private Inner.Deep d;\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/main/java/com/x/Inner.java",
+        "package com.x;\n\npublic class Inner { public static class Deep {} }\n",
+    );
+    let engine = index(&tmp);
+    assert_eq!(
+        relations_out_of(engine.runtime().unwrap(), outer),
+        [(
+            EdgeKind::TypeUses,
+            format!("{outer}:d"),
+            format!("{outer}:Deep:class")
+        )]
+    );
+}
