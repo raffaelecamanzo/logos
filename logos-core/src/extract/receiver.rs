@@ -4,9 +4,10 @@
 //! the receiver was discarded, so the binder could not tell one class's
 //! `send()` from another's. Where the FILE proves the receiver's type `T`, the
 //! row [`collect_refs`](super::collect_refs) pushed for that site is retyped
-//! in place to a type-qualified PATH-form `T::send`, which the binder resolves
-//! among `T`'s members (S-468). One row per site: the typed row replaces the
-//! bare one, never joins it.
+//! in place to a type-qualified PATH-form `T::send`. The binder's package rung
+//! (S-465) already binds it to `T`'s one own `send`; S-468 adds the in-repo
+//! supertype walk and the residue reasons. One row per site: the typed row
+//! replaces the bare one, never joins it.
 //!
 //! **Path form deliberately.** A Method-form target containing `::` is the
 //! binder's Rust trait-object dispatch branch (S-281, [FR-RS-08]); a Java row
@@ -16,7 +17,12 @@
 //! **Which calls, and what proves `T`** — the query names each receiver shape
 //! with an `@ref.receiver.*` marker capture (Java's `references.scm`); a grammar
 //! that captures none is untouched, which is what keeps every other language's
-//! output byte-identical. The proofs:
+//! output byte-identical. The markers are this module's only grammar input of
+//! its own, but not its only one: the anonymous-body stop
+//! ([`anonymous_class_body`]) and the type-parameter scan
+//! ([`type_parameters_in_scope`]) are shared helpers that read Java's node
+//! shapes, and `var` is Java's word — a second grammar opting in would need
+//! them generalised first. The proofs:
 //!
 //! | marker | receiver | `T` |
 //! |---|---|---|
@@ -24,7 +30,7 @@
 //! | `field` | `this.x.send()` | [`DeclaredTypes::field`] (S-398), where the enclosing class declares the field `x` itself |
 //! | `this` | `this.send()` | the enclosing class |
 //! | `super` | `super.send()` | the enclosing class's `extends`, as S-466's row records it ([`declared_superclass`]) |
-//! | `implicit` | `send()` | the enclosing class, when nothing else in scope could supply `send` |
+//! | `implicit` | `send()` | the enclosing class, when it declares `send` itself, or when nothing else in scope — an outer class, a static import — could supply `send` |
 //!
 //! Everything else keeps its bare row: a chained call (no marker); a name the
 //! file also declares where [`DeclaredTypes`] cannot read its type (an untyped
@@ -124,8 +130,8 @@ impl<'tree> Receivers<'tree> {
         })
     }
 
-    /// Record one marker capture. Matched on the whole capture name: this
-    /// module names no grammar node kind or field, only the query's markers.
+    /// Record one marker capture, matched on the whole capture name — never on
+    /// a node kind or a grammar field.
     pub(super) fn mark(&mut self, capture: &str, node: Node<'tree>, source: &[u8]) {
         let text = || node.utf8_text(source).ok().map(|t| t.trim().to_string());
         if capture == "ref.receiver.unproven" {

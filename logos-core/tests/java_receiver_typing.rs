@@ -112,8 +112,7 @@ const AUDIT: &str = "package com.x.svc;\n\npublic class Audit {\n    public void
 const CLOCK: &str = "package com.x.util;\n\npublic class Clock {\n    public static long now() { return 0; }\n}\n";
 const BASE: &str = "package com.x.base;\n\npublic class Base {\n    public void start() {}\n}\n";
 
-/// One method per receiver shape of CR-150 §3.2 A, each calling through
-/// exactly one receiver, so a site is one row.
+/// One method per receiver shape of CR-150 §3.2 A, each with one call site.
 const SVC: &str = "package com.x.svc;\n\
 \n\
 import com.x.base.Base;\n\
@@ -266,14 +265,15 @@ fn an_unprovable_receiver_keeps_the_bare_method_form_row() {
 }
 
 /// The enclosing class is `this` only where the file can name it, and a bare
-/// call is the enclosing class's only where nothing else in scope could supply
-/// the name:
+/// call is the enclosing class's only where the class declares the name
+/// itself or nothing else in scope could supply it:
 ///
 /// * an anonymous class body's `this` is the anonymous class — no name;
 /// * a nested class's bare `outerOnly()` is the OUTER class's method, which a
 ///   lexical scope walk finds and `Inner::outerOnly` would not;
 /// * a statically imported `now()` is the import's, when the class declares no
-///   `now` of its own — and the class's own `tick()` shadows the import.
+///   `now` of its own; the class's own `tick()`, which no import names, is
+///   the class's. (An own member shadowing an import is `EDGE`'s `own`.)
 const SCOPE_FILE: &str = "src/main/java/com/x/svc/Scope.java";
 const SCOPE: &str = "package com.x.svc;\n\
 \n\
@@ -362,10 +362,11 @@ fn a_static_type_name_is_typed_through_the_files_import_or_own_declaration_only(
 
 #[test]
 fn a_site_records_one_row_and_the_ledger_count_is_unchanged() {
-    // One row per call site across every fixture file: each method above calls
-    // each name through exactly one receiver, so the ledger's `Calls` count is
-    // the site count, exactly as it was when every receiver call was a bare
-    // Method-form row (measured against the pre-S-467 extraction: 9 + 8 + 6 + 3).
+    // One row per call site across every fixture file — no method here calls a
+    // name through two receivers the ledger's dedup key would split or merge
+    // (`Scope.run`'s `helper()` and `this.helper()` stay two rows by form) — so
+    // the `Calls` count is exactly what it was when every receiver call was a
+    // bare row (measured against the pre-S-467 extraction: 9 + 8 + 6 + 3).
     let tmp = fixture();
     write(tmp.path(), REFUSE_FILE, REFUSE);
     write(tmp.path(), T_FILE, T_CLASS);

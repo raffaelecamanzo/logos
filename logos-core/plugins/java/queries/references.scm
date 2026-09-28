@@ -4,8 +4,9 @@
 ;                      hierarchy binds it — the enclosing class, then a static
 ;                      import naming it (CR-149) — as every other language's
 ;                      plain call is (Go, Python, PHP, Ruby, C). Recorded as
-;                      `Enclosing::list` instead where the enclosing class is
-;                      the only scope that could supply it (S-467).
+;                      `Enclosing::list` instead where the enclosing class
+;                      declares `list` itself, or no other scope (an outer
+;                      class, a static import) could supply it (S-467).
 ;   @ref.method      — a receiver invocation's name (`service.list()`,
 ;                      `List.of()`); a bare Method-form row unless its
 ;                      receiver's type is proven (the `@ref.receiver.*` markers
@@ -56,8 +57,9 @@
 ;                            positions only (S-398).
 ;   @ref.receiver.this     — `this.send()`: the enclosing class.
 ;   @ref.receiver.super    — `super.send()`: the enclosing class's `extends`.
-;   @ref.receiver.implicit — `send()`: the enclosing class, where nothing else
-;                            in scope could supply the name.
+;   @ref.receiver.implicit — `send()`: the enclosing class, where it declares
+;                            the name itself or nothing else in scope (an
+;                            outer class, a static import) could supply it.
 ;   @ref.receiver.refused  — `Outer.super.send()` (the `super` after a
 ;                            qualifying name, not a field of it): its receiver
 ;                            is `Outer`'s superclass, which the `name` marker on
