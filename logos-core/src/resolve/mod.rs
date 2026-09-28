@@ -43,7 +43,7 @@
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
-pub(crate) use binder::STATIC_WILDCARD_ALIAS;
+pub(crate) use binder::{is_class_like, STATIC_WILDCARD_ALIAS};
 /// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
 /// function the intra-repo promotion pass, the federation bridge and the
 /// coverage read-model all resolve a broker topic operand through, so a `Topic`

@@ -183,7 +183,9 @@ impl DeclaredTypes {
     /// its parent's — one hop, which is what a C-family declarator needs
     /// (`private Foo bar;` field-names the type on the declaration and the name
     /// on the declarator) and what a parameter does not (it carries both). A
-    /// node that declares a callable is skipped entirely.
+    /// node that declares a callable is skipped entirely. An array declaration
+    /// records its element's simple name with `[]` kept (S-467), so it is never
+    /// read as a declaration of its element type.
     ///
     /// Every binding is recorded twice when it is declared at a **field
     /// position** — see [`field_position`] for what that means and what it
@@ -213,18 +215,31 @@ impl DeclaredTypes {
             let Some(name) = name_node.utf8_text(src).ok().map(str::trim) else {
                 continue;
             };
-            let declared = node
+            let type_text = node
                 .child_by_field_name(TYPE_FIELD)
                 .or_else(|| node.parent()?.child_by_field_name(TYPE_FIELD))
-                .and_then(|n| n.utf8_text(src).ok())
-                .map(simple_type_name)
-                .filter(|t| !t.is_empty());
-            let Some(declared) = declared else {
+                .and_then(|n| n.utf8_text(src).ok());
+            let declared = type_text.map(simple_type_name).filter(|t| !t.is_empty());
+            let (Some(type_text), Some(declared)) = (type_text, declared) else {
                 continue;
             };
-            record(&mut types.by_name, name, declared);
+            // An array of `Foo` is not a `Foo` (S-467): its dimensions stay in the
+            // recorded name, so it disagrees with a scalar `Foo` and names no type
+            // a call could be typed by.
+            // After the name, up to its initializer: `a[]`, `a @Ann []` and
+            // `a /* why */ []` all declare an array; `a = rows[0]` does not.
+            let after_name = std::str::from_utf8(&src[name_node.end_byte()..node.end_byte()])
+                .unwrap_or_default();
+            let before_initializer = after_name.split('=').next().unwrap_or_default();
+            let array = writes_dimensions(type_text) || writes_dimensions(before_initializer);
+            let declared = if array {
+                format!("{declared}[]")
+            } else {
+                declared.to_string()
+            };
+            record(&mut types.by_name, name, &declared);
             if field_position(node) {
-                record(&mut types.fields_by_name, name, declared);
+                record(&mut types.fields_by_name, name, &declared);
             }
         }
         types
@@ -235,6 +250,14 @@ impl DeclaredTypes {
     /// must not ask this one.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.by_name.get(name)?.as_deref()
+    }
+
+    /// Whether this file declares `name` at all — with one type or with two
+    /// that disagree. What separates a poisoned name, which is a variable whose
+    /// type is unknown, from one the file never declares, which may be a type
+    /// (S-467).
+    pub fn declares(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
     }
 
     /// The simple type this file declares for `name` **as a field**, when it
@@ -300,6 +323,51 @@ fn field_position(node: Node<'_>) -> bool {
         at = current.parent();
     }
     true
+}
+
+/// Whether a declared type's text writes array dimensions — an EMPTY `[]`
+/// pair outside its generic arguments: `Foo[]`, `Foo [ ]` and `List<Foo>[]` do;
+/// `Map<K, Foo[]>` does not, and neither does a bracket with something inside
+/// it, which in other grammars is a type argument or a size, never a Java
+/// dimension (Go's `Producer[T]` and `map[string]V`, Python's `List[int]`,
+/// Rust's `&[T]`) — `DeclaredTypes` serves them all, and their types read as
+/// they always did. Read from the text rather than a grammar field, because
+/// the field naming them is one grammar's vocabulary ([NFR-MA-01]); the other
+/// place dimensions can be written, after the declared name (`Foo a[]`), is
+/// read the same way.
+///
+/// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
+fn writes_dimensions(type_text: &str) -> bool {
+    let mut depth = 0usize;
+    let mut chars = type_text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            '[' if depth == 0 && chars.clone().find(|c| !c.is_whitespace()) == Some(']') => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The outermost node around `node` that declares a callable — the highest
+/// ancestor field-naming `parameters` — or [`None`] at a field position (see
+/// [`field_position`]). The scope a name used at `node` can be declared in
+/// below its type's own members: a method's parameters and locals, and the
+/// members of any local or anonymous class inside it (S-467).
+pub(crate) fn outermost_callable(node: Node<'_>) -> Option<Node<'_>> {
+    let mut found = None;
+    let mut at = Some(node);
+    while let Some(current) = at {
+        if current.child_by_field_name(PARAMETERS_FIELD).is_some() {
+            found = Some(current);
+        }
+        at = current.parent();
+    }
+    found
 }
 
 /// The simple name of a possibly-generic, possibly-qualified type:

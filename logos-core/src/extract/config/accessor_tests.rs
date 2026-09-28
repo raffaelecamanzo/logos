@@ -142,6 +142,73 @@ fn a_name_declared_under_two_types_resolves_to_nothing_and_an_agreeing_pair_stil
     );
 }
 
+/// An array of `Props` is not a `Props` (S-467): its dimensions — written on
+/// the type or on the declarator — stay in the recorded name, so an
+/// array-typed receiver is never read as its element type, and an array
+/// declaration disagrees with a scalar one of the same name.
+#[test]
+fn an_array_declaration_keeps_its_dimensions_and_disagrees_with_a_scalar() {
+    let source = "public class Caller {\n\
+          private Props[] onType;\n\
+          private Props onDeclarator[];\n\
+          private java.util.List<Props>[] generic;\n\
+          private java.util.Map<String, Props[]> keyed;\n\
+          private Props spaced [];\n\
+          private Props annotated @Deprecated [];\n\
+          private Props commented /* why */ [];\n\
+          private Props indexed = rows[0];\n\
+          private java.util.List<java.util.Map<String, Props>[]> deep;\n\
+          private Props mixed;\n\
+          void go(Props[] mixed) { }\n\
+        }";
+    let tree = parse(source);
+    let types = DeclaredTypes::build(tree.root_node(), source.as_bytes());
+
+    assert_eq!(types.get("onType"), Some("Props[]"));
+    assert_eq!(types.get("onDeclarator"), Some("Props[]"));
+    assert_eq!(types.get("generic"), Some("List[]"));
+    assert_eq!(types.get("keyed"), Some("Map"), "an array type ARGUMENT is not an array");
+    for after_the_name in ["spaced", "annotated", "commented"] {
+        assert_eq!(types.get(after_the_name), Some("Props[]"), "{after_the_name}");
+    }
+    assert_eq!(types.get("indexed"), Some("Props"), "an initializer's brackets are no dimension");
+    assert_eq!(types.get("deep"), Some("List"), "an array inside NESTED generics is an argument");
+    assert_eq!(types.get("mixed"), None, "a `Props` and a `Props[]` disagree");
+    assert_eq!(types.field("mixed"), Some("Props"), "the field alone is scalar");
+}
+
+/// Only an EMPTY bracket pair is an array dimension: a bracket with something
+/// inside is another grammar's type argument or size (Go `Producer[T]`,
+/// `map[string]V`, Python `List[int]`, Rust `&[T]`), whose simple name must
+/// read as it did before S-467 — `DeclaredTypes` serves every language's
+/// accessor and broker arm.
+#[test]
+fn only_an_empty_bracket_pair_writes_array_dimensions() {
+    for array in ["Foo[]", "Foo [ ]", "List<Foo>[]", "Foo[][]"] {
+        assert!(writes_dimensions(array), "{array}");
+    }
+    for scalar in ["Foo", "Map<K, Foo[]>", "Producer[T]", "map[string]V", "List[int]", "&[T]", "[u8; 4]"] {
+        assert!(!writes_dimensions(scalar), "{scalar}");
+    }
+}
+
+/// `declares` separates a name the file declares with disagreeing types — a
+/// variable of unknown type — from one it never declares, which receiver
+/// typing (S-467) may read as a type name.
+#[test]
+fn a_poisoned_name_is_still_declared_and_an_undeclared_one_is_not() {
+    let source = "public class Caller {\n\
+          private Props api;\n\
+          void go(Other api) { }\n\
+        }";
+    let tree = parse(source);
+    let types = DeclaredTypes::build(tree.root_node(), source.as_bytes());
+
+    assert_eq!(types.get("api"), None);
+    assert!(types.declares("api"));
+    assert!(!types.declares("Props"));
+}
+
 // ── The chain: accessor → field → owning class → prefix → canonical key ─────
 
 /// The positive case, end to end, and the key is **canonical**: the source

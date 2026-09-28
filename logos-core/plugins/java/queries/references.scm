@@ -3,10 +3,14 @@
 ;   @ref.call        — a receiver-less invocation's name (`list()`): the scope
 ;                      hierarchy binds it — the enclosing class, then a static
 ;                      import naming it (CR-149) — as every other language's
-;                      plain call is (Go, Python, PHP, Ruby, C).
+;                      plain call is (Go, Python, PHP, Ruby, C). Recorded as
+;                      `Enclosing::list` instead where the enclosing class
+;                      declares `list` itself, or no other scope (an outer
+;                      class, a static import) could supply it (S-467).
 ;   @ref.method      — a receiver invocation's name (`service.list()`,
-;                      `List.of()`); name-only, policy-gated binding (receiver
-;                      typing is a resolution concern, CR-150). A receiver call
+;                      `List.of()`); a bare Method-form row unless its
+;                      receiver's type is proven (the `@ref.receiver.*` markers
+;                      below, S-467 / CR-150). A receiver call
 ;                      never takes its target from the file's imports, so the
 ;                      two shapes must stay apart: recorded alike, `List.of()`
 ;                      bound to a statically imported in-house `of`.
@@ -37,6 +41,71 @@
 (method_invocation
   object: (_)
   name: (identifier) @ref.method)
+
+;   Receiver shapes (S-467, CR-150 §3.2 A) — MARKERS, recording nothing on
+;   their own. Each names the receiver of the `method_invocation` whose
+;   `@ref.method` / `@ref.call` row above `collect_refs` may retype to a
+;   type-qualified PATH-form `T::name` (`extract::receiver`), when the file
+;   proves `T`. The captured node's parent is the invocation — for
+;   `@ref.receiver.field`, its grandparent.
+;
+;   @ref.receiver.name     — a simple name (`mailer.send()`, `Clock.now()`): a
+;                            variable the file declares with one type, else a
+;                            type its single-type import or own declaration
+;                            names.
+;   @ref.receiver.field    — `this.x.send()`: the field `x`, from field
+;                            positions only (S-398).
+;   @ref.receiver.this     — `this.send()`: the enclosing class.
+;   @ref.receiver.super    — `super.send()`: the enclosing class's `extends`.
+;   @ref.receiver.implicit — `send()`: the enclosing class, where it declares
+;                            the name itself or nothing else in scope (an
+;                            outer class, a static import) could supply it.
+;   @ref.receiver.refused  — `Outer.super.send()` (the `super` after a
+;                            qualifying name, not a field of it): its receiver
+;                            is `Outer`'s superclass, which the `name` marker on
+;                            the same invocation would read as `Outer` itself.
+;                            Overrides every other marker.
+;   @ref.receiver.unproven — a name declared where `DeclaredTypes` does not
+;                            read its type: an untyped lambda parameter
+;                            (`x -> x.send()`), a for-each variable, a catch
+;                            parameter, a pattern variable, a varargs
+;                            parameter — or a name declared with a QUALIFIED
+;                            type (`com.b.Mailer other`, `Map.Entry e`), whose
+;                            simple name the file's imports would re-qualify to
+;                            another class. The type the file declares for that
+;                            name elsewhere is not proven to be this one's.
+;
+; Anything else — a chained call, `a.b.send()`, `Outer.this.send()` — carries
+; no marker and keeps its bare row.
+
+(method_invocation object: (identifier) @ref.receiver.name)
+(method_invocation object: (this) @ref.receiver.this)
+(method_invocation object: (super) @ref.receiver.super)
+(method_invocation
+  object: (field_access object: (this) field: (identifier) @ref.receiver.field))
+(method_invocation !object name: (identifier) @ref.receiver.implicit)
+(method_invocation object: (_) (super) @ref.receiver.refused)
+(lambda_expression parameters: (identifier) @ref.receiver.unproven)
+(lambda_expression
+  parameters: (inferred_parameters (identifier) @ref.receiver.unproven))
+(enhanced_for_statement name: (identifier) @ref.receiver.unproven)
+(catch_formal_parameter name: (identifier) @ref.receiver.unproven)
+(instanceof_expression name: (identifier) @ref.receiver.unproven)
+(type_pattern (identifier) @ref.receiver.unproven)
+(record_pattern_component (identifier) @ref.receiver.unproven)
+(spread_parameter (variable_declarator name: (identifier) @ref.receiver.unproven))
+(field_declaration
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  declarator: (variable_declarator name: (identifier) @ref.receiver.unproven))
+(local_variable_declaration
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  declarator: (variable_declarator name: (identifier) @ref.receiver.unproven))
+(formal_parameter
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  name: (identifier) @ref.receiver.unproven)
+(resource
+  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
+  name: (identifier) @ref.receiver.unproven)
 
 (import_declaration
   "static"? @ref.import.static
