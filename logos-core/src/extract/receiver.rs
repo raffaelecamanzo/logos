@@ -32,7 +32,8 @@
 //! declared with a qualified type the simple name would lose — the `unproven`
 //! marker); a variable declared nowhere in scope at the call (an
 //! inherited or outer class's field); a name declared with two disagreeing
-//! types; a generic type variable, an array, `var`; and any `this` / `super` /
+//! types; a generic type variable, an array, `var`; `Outer.super.send()` (the
+//! `refused` marker), whose receiver is `Outer`'s superclass; and any `this` / `super` /
 //! bare call inside an anonymous class body, whose class has no name.
 //!
 //! `T` is written as the file names it (`Mailer`, or `a::b::Mailer` from a
@@ -85,6 +86,9 @@ pub(super) struct Receivers<'tree> {
     /// [`DeclaredTypes`]: the type the file declares for that name elsewhere is
     /// not proven to be this one's, so the name is poisoned for the whole file.
     unproven: HashSet<String>,
+    /// Invocations a `refused` marker names: never retyped, whatever other
+    /// marker the same invocation carries (`Outer.super.send()`).
+    refused: HashSet<usize>,
     /// The names the file's NON-static single-type imports bring into scope — a
     /// static import names a member, never a type.
     type_imports: HashSet<String>,
@@ -114,6 +118,7 @@ impl<'tree> Receivers<'tree> {
         capture_names.iter().any(|c| is_marker(c)).then(|| Self {
             shapes: HashMap::new(),
             unproven: HashSet::new(),
+            refused: HashSet::new(),
             type_imports: HashSet::new(),
             sites: Vec::new(),
         })
@@ -135,6 +140,12 @@ impl<'tree> Receivers<'tree> {
             "ref.receiver.field" => node.parent().and_then(|p| p.parent()),
             _ => node.parent(),
         };
+        if capture == "ref.receiver.refused" {
+            if let Some(invocation) = invocation {
+                self.refused.insert(invocation.id());
+            }
+            return;
+        }
         let shape = match capture {
             "ref.receiver.name" => text().map(Shape::Name),
             "ref.receiver.field" => text().map(Shape::Field),
@@ -188,6 +199,9 @@ impl<'tree> Receivers<'tree> {
         let mut scopes: HashMap<usize, DeclaredTypes> = HashMap::new();
         let mut typed: Vec<(usize, String)> = Vec::new();
         for &(row, invocation) in &self.sites {
+            if self.refused.contains(&invocation.id()) {
+                continue;
+            }
             let Some(shape) = self.shapes.get(&invocation.id()) else {
                 continue;
             };

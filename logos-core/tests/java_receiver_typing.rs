@@ -716,3 +716,41 @@ fn a_qualified_declared_type_is_never_re_qualified_through_its_simple_name() {
         .collect();
     assert!(wrong.is_empty(), "{wrong:?}");
 }
+
+/// `Outer.super.start()` calls `Outer`'s SUPERCLASS's `start`, but its receiver
+/// parses as the name `Outer` followed by `super`: read as a simple name it was
+/// typed `Outer::start`, a type proof naming `Outer`'s own override (S-467
+/// review, [NFR-RA-05]). It keeps its bare row; a plain `super.start()` still
+/// types.
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+const OUTER_FILE: &str = "src/main/java/com/x/svc/Outer.java";
+const OUTER: &str = "package com.x.svc;\n\
+\n\
+import com.x.base.Base;\n\
+\n\
+public class Outer extends Base {\n\
+    public void start() {}\n\
+    void plain() { super.start(); }\n\
+    class Inner {\n\
+        void go() { Outer.super.start(); }\n\
+    }\n\
+}\n";
+
+#[test]
+fn a_qualified_super_call_is_never_typed_as_its_qualifying_class() {
+    let tmp = fixture();
+    write(tmp.path(), OUTER_FILE, OUTER);
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        calls_from(rt, OUTER_FILE),
+        [
+            row("go", "start", RefForm::Method),
+            row("plain", "Base::start", RefForm::Path),
+        ]
+    );
+    // No edge is asserted: the bare row still takes the binder's pre-existing
+    // lexical receiver-method rung (the CR-066 path this story leaves as it
+    // was), which is a binding question, not this extraction's.
+}
