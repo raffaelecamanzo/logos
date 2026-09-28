@@ -153,6 +153,10 @@ fn fan_status(
     (freshness, build_facts)
 }
 
+/// What the freshness walk reads off one member's engine: its freshness read and
+/// its build-manifest facts, each with its own failure channel.
+type StatusAndFacts = (anyhow::Result<StatusInfo>, anyhow::Result<Vec<BuildManifestRow>>);
+
 /// One member of the freshness walk: its freshness row, with its build facts
 /// pushed onto `build_facts` only when they were read ([FR-WS-33]).
 ///
@@ -165,9 +169,7 @@ fn fan_status(
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 fn split_status_and_facts(
-    scoped: MemberScoped<
-        anyhow::Result<(anyhow::Result<StatusInfo>, anyhow::Result<Vec<BuildManifestRow>>)>,
-    >,
+    scoped: MemberScoped<anyhow::Result<StatusAndFacts>>,
     build_facts: &mut Vec<MemberBuildFacts>,
 ) -> MemberResult<StatusInfo> {
     let member = scoped.member;
