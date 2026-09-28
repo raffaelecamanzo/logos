@@ -191,6 +191,29 @@ fn a_static_import_binds_to_the_member_and_the_call_through_it_binds() {
 }
 
 #[test]
+fn a_receiver_call_never_binds_through_a_static_import_of_its_name() {
+    // `List.of(…)` and `svc.helper()` name `java.util.List.of` and a member of
+    // whatever `svc` is — never the statically imported in-house `of` /
+    // `helper` of the same name, single or on demand (NFR-RA-05). The bare
+    // `helper()` beside them is the call the import does name.
+    let svc = "package com.x.svc;\n\npublic class Svc {\n    public static String of(int a) { return \"o\"; }\n    public static String helper() { return \"h\"; }\n}\n";
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), SVC_FILE, svc);
+    write(
+        tmp.path(),
+        CTL_FILE,
+        "package com.x.web;\n\nimport java.util.List;\nimport static com.x.svc.Svc.of;\nimport static com.x.svc.Svc.*;\n\npublic class Ctl {\n    private Object svc;\n    public Object a() { return List.of(1, 2); }\n    public Object b() { return svc.helper(); }\n    public Object c() { return helper(); }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert!(callers_of(rt, &format!("{SVC_FILE}:of:method")).is_empty());
+    assert_eq!(
+        callers_of(rt, &format!("{SVC_FILE}:helper:method")),
+        [format!("{CTL_FILE}:c")]
+    );
+}
+
+#[test]
 fn a_wildcard_import_is_a_glob_and_brings_the_types_members_into_scope() {
     let tmp = single_module(
         "package com.x.web;\n\nimport com.x.svc.*;\nimport static com.x.svc.Svc.*;\n\npublic class Ctl {\n    public String get() { return util(); }\n}\n",

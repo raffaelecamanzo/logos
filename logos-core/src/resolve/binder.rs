@@ -2308,15 +2308,26 @@ impl Ctx<'_> {
     /// 3. **on-demand** — a member of a type, or a type of a package, the file
     ///    imports with a wildcard ([`glob_members`](Ctx::glob_members));
     /// 4. the policy-gated workspace name fallback, exactly as for every other
-    ///    language (and off for a receiver-method call, [CR-066]).
+    ///    language.
+    ///
+    /// A **receiver**-method call ([`RefForm::Method`]) takes none of these
+    /// rungs: its target is its receiver's type's member ([CR-150]), which no
+    /// import names, and the workspace fallback is off for it anyway ([CR-066]).
     ///
     /// Each rung is exactly-one; a known ambiguity stops the walk ([NFR-RA-05]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
+    /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn resolve_package_name(&self, package: &[String], name: &str, want: Want, depth: u8) -> Res {
+        // A receiver call (`x.m()`, `List.of()`) is decided by its receiver's
+        // type, never by what the file imports: a static import of `of` says
+        // nothing about `List.of`. Only the lexical chain above spoke for it.
+        if self.no_workspace_fallback.get() {
+            return Res::NotFound;
+        }
         if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(name)) {
             match self.resolve_path(alias_path, want, depth - 1) {
                 Res::NotFound => {}

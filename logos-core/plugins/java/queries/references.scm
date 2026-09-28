@@ -1,8 +1,15 @@
 ; Java reference-extraction query (S-015, capability = "references").
 ;
-;   @ref.method      — a method invocation's name (`service.list()`, `list()`);
-;                      name-only, policy-gated binding (receiver typing is a
-;                      resolution concern).
+;   @ref.call        — a receiver-less invocation's name (`list()`): the scope
+;                      hierarchy binds it — the enclosing class, then a static
+;                      import naming it (CR-149) — as every other language's
+;                      plain call is (Go, Python, PHP, Ruby, C).
+;   @ref.method      — a receiver invocation's name (`service.list()`,
+;                      `List.of()`); name-only, policy-gated binding (receiver
+;                      typing is a resolution concern, CR-150). A receiver call
+;                      never takes its target from the file's imports, so the
+;                      two shapes must stay apart: recorded alike, `List.of()`
+;                      bound to a statically imported in-house `of`.
 ;   @ref.import      — a single-type or single-static import's scoped path
 ;                      (`org.springframework.web…`, `static a.b.C.m`);
 ;                      canonicalised (dots → `::`) into the ledger form feeding
@@ -23,6 +30,11 @@
 ; constructor nodes exist to bind them to — see symbols.scm).
 
 (method_invocation
+  !object
+  name: (identifier) @ref.call)
+
+(method_invocation
+  object: (_)
   name: (identifier) @ref.method)
 
 (import_declaration
