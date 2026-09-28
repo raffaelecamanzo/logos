@@ -1464,12 +1464,19 @@ mod tests {
             ]
         );
 
-        // Declared as anything, it is no longer a candidate.
-        let kinds = BTreeMap::from([("hub".to_string(), MemberKind::Platform)]);
-        assert!(join(&fed(&names_10, &[]).members, &kinds, &facts)
-            .headline
-            .platform_candidates
-            .is_empty());
+        // Declared as anything, it is no longer a candidate — every kind, not
+        // only `platform`: a human who declared the member already decided.
+        for kind in [MemberKind::Platform, MemberKind::Documentation, MemberKind::Mock] {
+            let kinds = BTreeMap::from([("hub".to_string(), kind)]);
+            let candidates = join(&fed(&names_10, &[]).members, &kinds, &facts)
+                .headline
+                .platform_candidates;
+            assert!(
+                candidates.iter().all(|c| c.member != "hub"),
+                "a hub declared {} is still listed: {candidates:?}",
+                kind.as_str()
+            );
+        }
     }
 
     /// One inbound edge is never a hub, whatever share it is: in a three-member

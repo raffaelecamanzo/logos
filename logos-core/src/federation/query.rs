@@ -586,8 +586,9 @@ pub struct WorkspaceStatus {
     ///
     /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
     pub topics: Vec<MemberTopics>,
-    /// Members that **look like** documentation or mock repositories and are
-    /// not declared as either — a hint for a human, never a classification
+    /// Members that **look like** documentation or mock repositories and
+    /// declare no kind (of any kind, `platform` included) — a hint for a human,
+    /// never a classification
     /// ([FR-WS-32], [ADR-68] point 5).
     ///
     /// **Absent** when there is none, so a workspace with no such member
@@ -1052,25 +1053,31 @@ mod tests {
     /// Each half of the rule, probed with the member one fact away from
     /// qualifying: `docs` qualifies; `svc` holds documents beside Java (runnable
     /// source); `config` has no runnable source but holds no document; `gone`
-    /// holds documents but its index could not be read; `mock` qualifies but is
-    /// already declared. Roster order is kept, and the denominator is the roster.
+    /// holds documents but its index could not be read; `mock` and `hub` qualify
+    /// but are already declared — `hub` as `platform`, a kind that sets no row
+    /// apart, and still a declaration. Roster order is kept, and the denominator
+    /// is the roster.
     #[test]
     fn a_candidate_holds_api_documents_and_no_runnable_source_and_declares_no_kind() {
         let freshness = vec![
             indexed("config", &["yaml"]),
             indexed("docs", &["markdown", "yaml"]),
             MemberResult { member: "gone".to_string(), result: None, error: Some("unreadable".into()) },
+            indexed("hub", &["yaml"]),
             indexed("mock", &["json"]),
             indexed("svc", &["java", "yaml"]),
         ];
-        let holds_documents = BTreeSet::from(["docs", "gone", "mock", "svc"]);
-        let declared = BTreeMap::from([("mock".to_string(), MemberKind::Mock)]);
+        let holds_documents = BTreeSet::from(["docs", "gone", "hub", "mock", "svc"]);
+        let declared = BTreeMap::from([
+            ("hub".to_string(), MemberKind::Platform),
+            ("mock".to_string(), MemberKind::Mock),
+        ]);
 
         let hint = kind_candidates(&freshness, &holds_documents, &declared).expect("docs qualifies");
         assert_eq!(hint.members, ["docs"]);
-        assert_eq!(hint.members_total, 5);
+        assert_eq!(hint.members_total, 6);
         assert!(
-            hint.summary.starts_with("1 of 5 members hold API documents and no runnable source"),
+            hint.summary.starts_with("1 of 6 members hold API documents and no runnable source"),
             "{}",
             hint.summary
         );
