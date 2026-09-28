@@ -65,9 +65,12 @@
 ;   @fw.component.base — predicate-only helper, not consumed by the pass;
 ;   @fw.const.*       — the facts a constant fold needs (S-469, CR-151): type
 ;                       bodies (`.scope`, `.scope.decl`, `.scope.name`,
-;                       `.scope.opaque`), every field (`.field`) and each
-;                       compile-time `String` constant (`.name`, `.value`). The
-;                       Java query's `@fw.const` section is the reference
+;                       `.scope.opaque`), every field (`.field`), each
+;                       compile-time `String` constant (`.name`, `.value`) and
+;                       each import (`.import`, with `.import.static` /
+;                       `.import.asterisk` markers, S-470), through which a
+;                       constant another file of the member declares is
+;                       reached. The Java query's `@fw.const` section is the reference
 ;                       glossary. Capturing ANY of them opts the dialect into
 ;                       folding; capturing none keeps every opaque path and
 ;                       prefix unfolded, which is how Kotlin stays out of scope.

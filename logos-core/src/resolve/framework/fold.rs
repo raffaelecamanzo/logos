@@ -11,10 +11,14 @@
 //! - the expression is read as a `+` chain of operands, each a string literal, a
 //!   simple name, or a `Type.NAME` qualified name, with parentheses grouping;
 //! - a name folds only when it binds, by Java's own scoping, to exactly one
-//!   compile-time `String` constant declared in an enclosing type — the same
-//!   type's `static final String`, or an interface's implicit constant;
+//!   compile-time `String` constant — the same type's `static final String` or
+//!   an interface's implicit constant, declared in an enclosing type (S-469),
+//!   or one another file of the member declares, reached through a single-type
+//!   static import or a qualified `Type.NAME` whose type the file imports or
+//!   shares a package with (S-470, [`Reach`]);
 //! - anything else is `None`: a method call, a number, a non-final or non-String
-//!   field, a constant of another type, a name a supertype might supply.
+//!   field, a name a supertype might supply, a wildcard import's name, a
+//!   constant of another member or a library, a name two declarations offer.
 //!
 //! # Exact or nothing ([NFR-RA-05])
 //!
@@ -97,6 +101,72 @@ pub(super) struct FieldCapture {
     pub(super) value: Option<(usize, usize)>,
 }
 
+/// One import declaration (`@fw.const.import`, S-470): the path it names, split
+/// into segments, and whether it is static and whether it is a wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImportCapture {
+    /// `import static a.b.C.X;` → `[a, b, C, X]`; a wildcard's path stops before
+    /// the `*`.
+    pub(super) path: Vec<String>,
+    pub(super) is_static: bool,
+    pub(super) wildcard: bool,
+    /// `false` when the parser recovered an error inside the declaration: what
+    /// it imports is then unknown, so nothing may be resolved through imports.
+    pub(super) readable: bool,
+}
+
+impl ImportCapture {
+    /// An import the file may declare but that could not be read — an error the
+    /// parser recovered where imports live.
+    pub(super) fn unreadable() -> Self {
+        ImportCapture {
+            path: Vec::new(),
+            is_static: false,
+            wildcard: false,
+            readable: false,
+        }
+    }
+}
+
+/// A constant another file of the member declares, already folded in that file
+/// ([`Names::member_constant`]) — what [`Reach::lookup`] answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ForeignConstant {
+    pub(super) text: String,
+    /// Its provenance: the constants its value was built from, then itself.
+    pub(super) used: Vec<FoldedConstant>,
+    /// Operands its fold read, counted into the asking fold's budget.
+    pub(super) operands: usize,
+}
+
+/// Where a name this file does not declare may still come from (S-470): the
+/// file's imports, its package, and a lookup of one type's constant elsewhere
+/// in the member.
+///
+/// `lookup(type_fqn, name)` answers only for a type declared **exactly once** in
+/// the member being indexed; a type of another member or of a library, and a
+/// type two files declare, answer `None`. Its caller, not this module, owns how
+/// a fully-qualified name becomes a file — through the package-shaped module key
+/// ([`PackageLayout`](crate::resolve::package_key::PackageLayout)), the one
+/// derivation there is.
+pub(super) struct Reach<'r> {
+    pub(super) imports: &'r [ImportCapture],
+    /// The package this file declares by its location
+    /// ([`PackageLayout::package_of`](crate::resolve::package_key::PackageLayout::package_of));
+    /// `None` outside a package-shaped layout, which leaves the same-package
+    /// rung unavailable.
+    pub(super) package: Option<Vec<String>>,
+    pub(super) lookup: &'r dyn Fn(&[String], &str) -> Option<ForeignConstant>,
+}
+
+/// What an operand's name binds to.
+enum Binding {
+    /// A constant of this file: its initializer's byte range.
+    Local((usize, usize)),
+    /// A constant of another file of the member, folded there.
+    Foreign(ForeignConstant),
+}
+
 /// A type body with everything it declares.
 #[derive(Debug)]
 struct Scope {
@@ -139,6 +209,9 @@ enum Outcome {
 pub(super) struct Names<'s> {
     src: &'s str,
     rel: &'s str,
+    /// Where a name the file does not declare may come from; `None` limits the
+    /// fold to this file (S-469's reach).
+    reach: Option<Reach<'s>>,
     /// Sorted by `(start, end)`; bodies nest and never partially overlap.
     scopes: Vec<Scope>,
     /// Scope indices by type name, for the qualified form.
@@ -235,6 +308,7 @@ impl<'s> Names<'s> {
         Names {
             src,
             rel,
+            reach: None,
             scopes,
             by_name,
             field_names,
@@ -243,6 +317,51 @@ impl<'s> Names<'s> {
             #[cfg(test)]
             expansions: std::cell::Cell::new(0),
         }
+    }
+
+    /// Let a name this file does not declare resolve through its imports and
+    /// package to a constant of another file of the member (S-470).
+    pub(super) fn with_reach(mut self, reach: Reach<'s>) -> Self {
+        self.reach = Some(reach);
+        self
+    }
+
+    /// The constant `name` that the top-level type `type_name` of this file
+    /// declares, folded here — what another file of the member reaches through
+    /// a static import or a qualified `Type.NAME` (S-470). `None` unless the
+    /// file declares that type once at top level and its own body declares
+    /// `name` once, as a constant that folds.
+    ///
+    /// Its caller builds these names with no [`Reach`], so a constant built
+    /// from a third file's constant through *this* file's imports is refused
+    /// rather than chased: a cross-file fold goes one file deep, which also
+    /// makes a cycle between files impossible.
+    pub(super) fn member_constant(&self, type_name: &str, name: &str) -> Option<ForeignConstant> {
+        let mut top_level = self
+            .by_name
+            .get(type_name)?
+            .iter()
+            .filter(|&&index| self.scopes[index].parent.is_none());
+        let (Some(&index), None) = (top_level.next(), top_level.next()) else {
+            return None;
+        };
+        let value = only_constant(self.scopes[index].declared.get(name)?)?;
+        let Outcome::Folded(folded) = self.constant(value, 1) else {
+            return None;
+        };
+        let mut used = folded.used.clone();
+        let own = FoldedConstant {
+            name: name.to_string(),
+            file: self.rel.to_string(),
+        };
+        if !used.contains(&own) {
+            used.push(own);
+        }
+        Some(ForeignConstant {
+            text: folded.text.clone(),
+            used,
+            operands: folded.operands + 1,
+        })
     }
 
     /// Fold the expression at `start..end` to one literal, recording each
@@ -279,20 +398,36 @@ impl<'s> Names<'s> {
                     (name, self.resolve_qualified(owner, name, at))
                 }
             };
-            let Some(value) = value else {
-                return Outcome::Refused;
+            let used: Vec<FoldedConstant> = match value {
+                None => return Outcome::Refused,
+                Some(Binding::Local(value)) => {
+                    let constant = match self.constant(value, chain + 1) {
+                        Outcome::Folded(constant) => constant,
+                        other => return other,
+                    };
+                    folded.text.push_str(&constant.text);
+                    folded.operands += constant.operands;
+                    folded.height = folded.height.max(constant.height);
+                    constant
+                        .used
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(FoldedConstant {
+                            name: name.to_string(),
+                            file: self.rel.to_string(),
+                        }))
+                        .collect()
+                }
+                // Folded in its own file, whose depth bound it met there; here
+                // it is one constant deep.
+                Some(Binding::Foreign(constant)) => {
+                    folded.text.push_str(&constant.text);
+                    folded.operands += constant.operands;
+                    folded.height = folded.height.max(1);
+                    constant.used
+                }
             };
-            let constant = match self.constant(value, chain + 1) {
-                Outcome::Folded(constant) => constant,
-                other => return other,
-            };
-            folded.text.push_str(&constant.text);
-            folded.operands += constant.operands;
-            folded.height = folded.height.max(constant.height);
-            for used in constant.used.iter().cloned().chain(std::iter::once(FoldedConstant {
-                name: name.to_string(),
-                file: self.rel.to_string(),
-            })) {
+            for used in used {
                 if !folded.used.contains(&used) {
                     folded.used.push(used);
                 }
@@ -348,42 +483,112 @@ impl<'s> Names<'s> {
     /// enclosing type body that declares it wins; a body that does not declare
     /// it but may inherit it ends the search with a refusal, because the
     /// inherited field would hide any outer one.
-    fn resolve_simple(&self, name: &str, at: usize) -> Option<(usize, usize)> {
+    ///
+    /// A name no enclosing body declares — and no body on the way might
+    /// inherit — is then looked up among the file's **single-type static
+    /// imports** (S-470), which is where Java looks next: exactly one import
+    /// naming it, of a type the member declares once. A static wildcard never
+    /// supplies it, and two imports of the name from different types are two
+    /// visible declarations; both refuse.
+    fn resolve_simple(&self, name: &str, at: usize) -> Option<Binding> {
         let mut current = innermost(&self.scopes, at);
         while let Some(index) = current {
             let scope = &self.scopes[index];
             if let Some(declarators) = scope.declared.get(name) {
-                return only_constant(declarators);
+                return only_constant(declarators).map(Binding::Local);
             }
             if scope.opaque {
                 return None;
             }
             current = scope.parent;
         }
-        None
+        let reach = self.readable_reach()?;
+        let owner = only_one(
+            reach
+                .imports
+                .iter()
+                .filter(|i| i.is_static && !i.wildcard && i.path.last().map(String::as_str) == Some(name))
+                .map(|i| &i.path[..i.path.len() - 1]),
+        )?;
+        (reach.lookup)(owner, name).map(Binding::Foreign)
     }
 
-    /// Bind `Owner.NAME`: `Owner` must be a type declared once in this file
-    /// whose declaration encloses `at` (the annotated type itself or a type
-    /// around it), not obscured by a field of the same name, and `NAME` must be
-    /// a constant its own body declares. A constant it would only inherit is
-    /// refused, as is every other type — that reach is [S-470]'s.
+    /// Bind `Owner.NAME`.
     ///
-    /// [S-470]: ../../../../docs/planning/journal.md#s-470-a-static-imported-same-member-constant-folds-measured-on-the-reference-estate
-    fn resolve_qualified(&self, owner: &str, name: &str, at: usize) -> Option<(usize, usize)> {
+    /// When `Owner` is a type this file declares, it must be declared once,
+    /// its declaration must enclose `at` (the annotated type itself or a type
+    /// around it), and `NAME` must be a constant its own body declares; a
+    /// constant it would only inherit is refused (S-469).
+    ///
+    /// Otherwise `Owner` is a type of another file of the member (S-470),
+    /// named the way Java finds a type name: a single-type `import …Owner;`,
+    /// else the file's own package. It is refused wherever `Owner` might name
+    /// something else first — a field of this file (JLS §6.4.2), anything a
+    /// static import brings in, or a member type an enclosing body might
+    /// inherit.
+    fn resolve_qualified(&self, owner: &str, name: &str, at: usize) -> Option<Binding> {
         if self.field_names.contains(owner) {
             return None;
         }
-        let [index] = self.by_name.get(owner)?.as_slice() else {
-            return None;
-        };
-        let scope = &self.scopes[*index];
-        let (decl_start, decl_end) = scope.decl?;
-        if !(decl_start <= at && at < decl_end) {
+        if let Some(declared) = self.by_name.get(owner) {
+            let [index] = declared.as_slice() else {
+                return None;
+            };
+            let scope = &self.scopes[*index];
+            let (decl_start, decl_end) = scope.decl?;
+            if !(decl_start <= at && at < decl_end) {
+                return None;
+            }
+            return only_constant(scope.declared.get(name)?).map(Binding::Local);
+        }
+        let reach = self.readable_reach()?;
+        if self.may_inherit_around(at)
+            || reach
+                .imports
+                .iter()
+                .any(|i| i.is_static && (i.wildcard || i.path.last().map(String::as_str) == Some(owner)))
+        {
             return None;
         }
-        only_constant(scope.declared.get(name)?)
+        let imported = reach
+            .imports
+            .iter()
+            .filter(|i| !i.is_static && !i.wildcard && i.path.last().map(String::as_str) == Some(owner))
+            .map(|i| i.path.as_slice());
+        let fqn = match only_one(imported.clone()) {
+            Some(path) => path.to_vec(),
+            None if imported.count() == 0 => {
+                let mut fqn = reach.package.clone()?;
+                fqn.push(owner.to_string());
+                fqn
+            }
+            None => return None,
+        };
+        (reach.lookup)(&fqn, name).map(Binding::Foreign)
     }
+
+    /// The reach, when every import the file declares could be read — an
+    /// import the parser recovered from an error might import anything.
+    fn readable_reach(&self) -> Option<&Reach<'s>> {
+        self.reach
+            .as_ref()
+            .filter(|reach| reach.imports.iter().all(|i| i.readable))
+    }
+
+    /// `true` when a body enclosing `at` may inherit members this file does not
+    /// model — a supertype's member type named like an imported one would
+    /// shadow the import.
+    fn may_inherit_around(&self, at: usize) -> bool {
+        std::iter::successors(innermost(&self.scopes, at), |&index| self.scopes[index].parent)
+            .any(|index| self.scopes[index].opaque)
+    }
+}
+
+/// The one distinct item `items` yields; `None` for none or for two different
+/// ones. A repeated import is one import (Java admits the duplicate).
+fn only_one<T: PartialEq>(mut items: impl Iterator<Item = T>) -> Option<T> {
+    let first = items.next()?;
+    items.all(|other| other == first).then_some(first)
 }
 
 /// The index of the innermost scope whose body contains byte `at`: the last
@@ -598,6 +803,183 @@ mod tests {
             assert_eq!(names, ["A", "B"]);
         }
         assert_eq!(names.expansions.get(), 2, "A and B, once each");
+    }
+
+    // ── The reach into other files of the member (S-470) ────────────────────
+
+    fn import(path: &str, is_static: bool, wildcard: bool) -> ImportCapture {
+        ImportCapture {
+            path: path.split('.').map(str::to_string).collect(),
+            is_static,
+            wildcard,
+            readable: true,
+        }
+    }
+
+    /// The one foreign constant the fixtures' lookup knows: `a.b.G.X`.
+    fn g_x() -> ForeignConstant {
+        ForeignConstant {
+            text: "x".to_string(),
+            used: vec![FoldedConstant {
+                name: "X".to_string(),
+                file: "src/main/java/a/b/G.java".to_string(),
+            }],
+            operands: 1,
+        }
+    }
+
+    /// Fold `path`, written inside the body of `class H { <body> <path> }` in
+    /// package `a.c` with `imports`; the lookup answers only `a.b.G.X`.
+    /// Returns the fold and every `(type.name)` the lookup was asked for.
+    fn fold_with_imports(
+        body: &[(&str, &str)],
+        imports: &[ImportCapture],
+        opaque: bool,
+        path: &str,
+    ) -> (Option<(String, Vec<FoldedConstant>)>, Vec<String>) {
+        let mut src = String::from("class H { ");
+        let mut fields = Vec::new();
+        for (name, value) in body {
+            fields.push(FieldCapture {
+                name: name.to_string(),
+                at: src.len(),
+                value: Some((src.len() + name.len() + 3, src.len() + name.len() + 3 + value.len())),
+            });
+            src.push_str(&format!("{name} = {value}; "));
+        }
+        let path_at = src.len();
+        src.push_str(path);
+        let path_end = src.len();
+        src.push_str(" }");
+        let asked = RefCell::new(Vec::new());
+        let lookup = |fqn: &[String], name: &str| {
+            asked.borrow_mut().push(format!("{}.{name}", fqn.join(".")));
+            (fqn == ["a", "b", "G"] && name == "X").then(g_x)
+        };
+        let names = Names::new(
+            &src,
+            "src/main/java/a/c/H.java",
+            &[ScopeCapture { start: 0, end: src.len(), decl: None, name: Some("H".into()), opaque }],
+            &fields,
+        )
+        .with_reach(Reach {
+            imports,
+            package: Some(vec!["a".into(), "c".into()]),
+            lookup: &lookup,
+        });
+        let folded = names.fold(path_at, path_end);
+        (folded, asked.into_inner())
+    }
+
+    const G_X: &str = "import static a.b.G.X";
+
+    #[test]
+    fn a_single_static_import_supplies_a_name_the_file_does_not_declare() {
+        let (folded, asked) =
+            fold_with_imports(&[], &[import("a.b.G.X", true, false)], false, r#""/{" + X + "}""#);
+        let (text, used) = folded.expect("folds");
+        assert_eq!(text, "/{x}");
+        // Provenance names the declaring file, not the handler's.
+        assert_eq!(used, g_x().used);
+        assert_eq!(asked, ["a.b.G.X"], "{G_X}");
+    }
+
+    #[test]
+    fn the_files_own_declaration_shadows_a_static_import_and_is_not_looked_up() {
+        let (folded, asked) = fold_with_imports(
+            &[("X", r#""own""#)],
+            &[import("a.b.G.X", true, false)],
+            false,
+            "X",
+        );
+        assert_eq!(folded.map(|(t, _)| t).as_deref(), Some("own"));
+        assert!(asked.is_empty(), "{asked:?}");
+    }
+
+    /// Each shape that must refuse without folding a guessed declaration.
+    #[test]
+    fn a_name_the_imports_do_not_prove_is_refused() {
+        let unreadable = ImportCapture::unreadable();
+        for (why, imports, opaque, path) in [
+            ("static wildcard only", vec![import("a.b.G", true, true)], false, "X"),
+            ("no import at all", vec![], false, "X"),
+            (
+                "two types' static imports",
+                vec![import("a.b.G.X", true, false), import("a.b.K.X", true, false)],
+                false,
+                "X",
+            ),
+            ("an unreadable import", vec![import("a.b.G.X", true, false), unreadable.clone()], false, "X"),
+            ("a body that may inherit X", vec![import("a.b.G.X", true, false)], true, "X"),
+            ("a non-static import of a member", vec![import("a.b.G.X", false, false)], false, "X"),
+            // Qualified:
+            ("G obscured by a static import", vec![import("a.b.G", false, false), import("z.Q.G", true, false)], false, "G.X"),
+            ("G possibly a static-wildcard field", vec![import("a.b.G", false, false), import("z.Q", true, true)], false, "G.X"),
+            ("two single-type imports of G", vec![import("a.b.G", false, false), import("z.G", false, false)], false, "G.X"),
+            ("an inherited member type G", vec![import("a.b.G", false, false)], true, "G.X"),
+            ("an unreadable import (qualified)", vec![import("a.b.G", false, false), unreadable], false, "G.X"),
+        ] {
+            let (folded, _) = fold_with_imports(&[], &imports, opaque, path);
+            assert_eq!(folded, None, "{why}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_static_import_is_one_import() {
+        let imports = [import("a.b.G.X", true, false), import("a.b.G.X", true, false)];
+        let (folded, _) = fold_with_imports(&[], &imports, false, "X");
+        assert_eq!(folded.map(|(t, _)| t).as_deref(), Some("x"));
+    }
+
+    /// `G.X` names the single-type-imported `a.b.G`; without the import, `G`
+    /// is the file's own package's `a.c.G`, which the lookup does not know.
+    #[test]
+    fn a_qualified_type_is_named_by_its_single_type_import_else_by_the_package() {
+        let (folded, asked) = fold_with_imports(&[], &[import("a.b.G", false, false)], false, "G.X");
+        assert_eq!(folded.map(|(t, _)| t).as_deref(), Some("x"));
+        assert_eq!(asked, ["a.b.G.X"]);
+
+        let (folded, asked) = fold_with_imports(&[], &[import("a.b.Other", false, false)], false, "G.X");
+        assert_eq!(folded, None);
+        assert_eq!(asked, ["a.c.G.X"], "the same package, not a guess");
+
+        // A field named `G` obscures the type (JLS 6.4.2): no lookup at all.
+        let (folded, asked) =
+            fold_with_imports(&[("G", r#""g""#)], &[import("a.b.G", false, false)], false, "G.X");
+        assert_eq!(folded, None);
+        assert!(asked.is_empty(), "{asked:?}");
+    }
+
+    /// The declaring side: a top-level type's own constant, folded with the
+    /// file's own constants and naming itself last in its provenance.
+    #[test]
+    fn a_member_constant_is_a_top_level_types_own_folded_constant() {
+        let src = r#"class G { P = "e"; X = P + "mail"; class N { Y = "n"; } }"#;
+        let at = |needle: &str| src.find(needle).expect("in fixture");
+        let field = |name: &str, value: &str| FieldCapture {
+            name: name.to_string(),
+            at: at(&format!("{name} =")),
+            value: Some((at(value), at(value) + value.len())),
+        };
+        let names = Names::new(
+            src,
+            "src/main/java/a/b/G.java",
+            &[
+                ScopeCapture { start: 0, end: src.len(), decl: None, name: Some("G".into()), opaque: false },
+                ScopeCapture { start: at("class N"), end: at(" }") + 2, decl: None, name: Some("N".into()), opaque: false },
+            ],
+            &[field("P", r#""e""#), field("X", r#"P + "mail""#), field("Y", r#""n""#)],
+        );
+        let x = names.member_constant("G", "X").expect("folds");
+        assert_eq!(x.text, "email");
+        let names_used: Vec<&str> = x.used.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names_used, ["P", "X"]);
+        assert!(x.used.iter().all(|c| c.file == "src/main/java/a/b/G.java"));
+        // A nested type is not a top-level type another file imports by FQN,
+        // and a constant only a nested body declares is not the type's.
+        assert_eq!(names.member_constant("N", "Y"), None);
+        assert_eq!(names.member_constant("G", "Y"), None);
+        assert_eq!(names.member_constant("Missing", "X"), None);
     }
 
     #[test]

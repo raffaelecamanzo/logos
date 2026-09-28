@@ -17,7 +17,7 @@ fn scan_lang(ext: &str, source: &str) -> FileMatches {
         .for_extension(ext)
         .unwrap_or_else(|| panic!("{ext} plugin"));
     let mut parser = Parser::new();
-    scan_source(&mut parser, plugin, &format!("src/Fixture.{ext}"), source)
+    scan_source(&mut parser, plugin, &format!("src/Fixture.{ext}"), source, None)
 }
 
 /// Scan a Rust source snippet with the compiled-in plugin set.
@@ -1038,6 +1038,7 @@ class UserController {
     fun listUsers(): String { return "" }
 }
 "#,
+        None,
     );
     assert_eq!(
         route_triples(matches),
@@ -4740,7 +4741,7 @@ class MailboxApiV1 {
         let mut parser = Parser::new();
         // Every projected field is compared, `line` included: a field the
         // projection carries but no assertion reads can be silently zeroed.
-        let scanned: Vec<(String, String, u32)> = scan_source(&mut parser, plugin, "src/MailboxApiV1.java", SPRING_CONTROLLER)
+        let scanned: Vec<(String, String, u32)> = scan_source(&mut parser, plugin, "src/MailboxApiV1.java", SPRING_CONTROLLER, None)
             .routes
             .into_iter()
             .map(|r| (r.method, r.path, r.start_line))

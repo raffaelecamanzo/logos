@@ -25,8 +25,11 @@
 ; reference or a concatenation (`value = "/users/{" + USER_ID + "}"`) — is
 ; captured as `@fw.route.path.opaque` / `@fw.route.path.named.opaque` (S-469,
 ; CR-151). The shared interpreter folds it when every operand is a literal or a
-; same-type `String` constant declared below (`@fw.const.*`), and otherwise
-; refuses it and counts it in `routes_not_composed`: never dropped silently. In
+; `String` constant it can prove — declared in an enclosing type (S-469), or in
+; another type of the same member reached by a single-type static import or a
+; qualified `Type.X` (S-470) — from the facts captured below (`@fw.const.*`),
+; and otherwise refuses it and counts it in `routes_not_composed`: never dropped
+; silently. In
 ; a *mixed* list (`value = {"/a", BASE + "/b"}`, or positional
 ; `{"/a", BASE + "/b"}`) each element is judged on its own — `/a` is promoted and
 ; `BASE + "/b"` is folded or counted. The positional list form is read since
@@ -295,7 +298,20 @@
 ;                            `static final String` field, or any interface
 ;                            `String` field, which Java makes implicitly
 ;                            `public static final`) and its initializer;
-;   @fw.const.type         — predicate-only.
+;   @fw.const.type         — predicate-only;
+;   @fw.const.import       — an import declaration's path (S-470): where a name
+;                            the file does not declare may still come from. A
+;                            single-type `import static a.b.C.X;` makes `X` the
+;                            constant `X` of type `a.b.C`; a single-type
+;                            `import a.b.C;` makes the qualified `C.X` name it.
+;                            The interpreter finds `C`'s file only inside the
+;                            member being indexed, through the package-shaped
+;                            module key (S-465), never by splitting a path;
+;   @fw.const.import.static / @fw.const.import.asterisk — markers present in
+;                            the same match for a static import and for a
+;                            wildcard. A wildcard never supplies a constant: it
+;                            only tells the interpreter that a name might come
+;                            from somewhere it cannot prove, so it refuses.
 ;
 ; A query that captures none of these opts out of folding altogether, which is
 ; how the Kotlin query keeps its `const val` and string templates out of scope
@@ -351,6 +367,15 @@
     name: (identifier) @fw.const.name
     value: (_) @fw.const.value))
   (#any-of? @fw.const.type "String" "java.lang.String"))
+
+; Every import declaration, with its markers as optional children of one pattern
+; — the shape `references.scm` uses, for the reason it gives: a comment is a
+; named node too, so a second pattern kept apart by a last-child anchor would
+; miss `import a.b.C /* why */;`.
+(import_declaration
+  "static"? @fw.const.import.static
+  (scoped_identifier) @fw.const.import
+  (asterisk)? @fw.const.import.asterisk)
 
 ; Spring stereotype class: the wired application building block (FR-FW-02).
 ; `@fw.component.base` exists only for the predicate.
