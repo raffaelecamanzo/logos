@@ -14,9 +14,7 @@
 ;
 ; Deliberately NOT captured: functional `RouterFunction` routing
 ; (`RouterFunctions.route(GET("/p"), handler)`), whose builder chain names no
-; annotated handler method to link; and a *positional list* method path
-; (`@GetMapping({"/a", "/b"})`), in either its literal or its expression form —
-; a gap this file shares with the Kotlin query, pinned by the paired fixtures.
+; annotated handler method to link.
 ;
 ; Captured, but NOT interpreted: a property placeholder (`value =
 ; "${api.base}/x"`) is a written literal, so a method path holding one is
@@ -29,8 +27,11 @@
 ; CR-151). The shared interpreter folds it when every operand is a literal or a
 ; same-type `String` constant declared below (`@fw.const.*`), and otherwise
 ; refuses it and counts it in `routes_not_composed`: never dropped silently. In
-; a *mixed* list (`value = {"/a", BASE + "/b"}`) each element is judged on its
-; own — `/a` is promoted and `BASE + "/b"` is folded or counted.
+; a *mixed* list (`value = {"/a", BASE + "/b"}`, or positional
+; `{"/a", BASE + "/b"}`) each element is judged on its own — `/a` is promoted and
+; `BASE + "/b"` is folded or counted. The positional list form is read since
+; S-469; the Kotlin query does not read it yet (`["/a", "/b"]` promotes nothing
+; there), a divergence pinned in the JVM parity tests.
 ;
 ; A class-level prefix is stricter, because a prefix is *joined* rather than
 ; promoted as written: a prefix that is not a resolvable literal path — and does
@@ -48,7 +49,10 @@
     (annotation
       name: (identifier) @fw.route.method
       arguments: (annotation_argument_list
-        (string_literal) @fw.route.path)) @fw.route.anchor)
+        [
+          (string_literal) @fw.route.path
+          (element_value_array_initializer (string_literal) @fw.route.path)
+        ])) @fw.route.anchor)
   name: (identifier) @fw.route.handler)
 
 ; The same annotation in its **named** form — what contract-first code and
@@ -102,7 +106,10 @@
     (annotation
       name: (identifier) @fw.route.method
       arguments: (annotation_argument_list
-        (expression) @fw.route.path.opaque)) @fw.route.anchor)
+        [
+          (expression) @fw.route.path.opaque
+          (element_value_array_initializer (expression) @fw.route.path.opaque)
+        ])) @fw.route.anchor)
   name: (identifier) @fw.route.handler)
 
 ((method_declaration

@@ -3479,8 +3479,9 @@ class UserController : UserApi {
     /// surprise.
     #[test]
     fn the_headers_documented_capture_gaps_are_real_and_promote_nothing() {
-        // A positional array method path. Java's positional pattern has the
-        // same gap for `{…}`, so the two languages agree.
+        // A positional array method path. Java reads `{…}` since S-469; the
+        // divergence is pinned by
+        // `a_positional_list_method_path_is_read_in_java_and_not_yet_in_kotlin`.
         let positional_list = scan_lang(
             "kt",
             &in_prefixed_class(
@@ -4136,6 +4137,45 @@ mod jvm_parity {
         }
     }
 
+    /// A positional list method path is read in Java since S-469 (review of
+    /// S-469: its non-literal elements were dropped with no trace, which
+    /// [FR-FW-05] forbids) and not yet in Kotlin, whose query captures neither
+    /// `["/a", "/b"]` nor its elements. The literal list promotes one route per
+    /// element in Java and nothing in Kotlin; a mixed list promotes the literal
+    /// element and counts the refused one in Java.
+    ///
+    /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+    #[test]
+    fn a_positional_list_method_path_is_read_in_java_and_not_yet_in_kotlin() {
+        let literal = promoted(
+            "java",
+            "public class C {\n    @GetMapping({\"/a\", \"/b\"})\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert_eq!(
+            literal.0,
+            ["GET /a -> Some(\"get\")", "GET /b -> Some(\"get\")"],
+            "{literal:?}"
+        );
+        assert_eq!(literal.1, 0, "{literal:?}");
+        let kotlin = promoted(
+            "kt",
+            "class C {\n    @GetMapping([\"/a\", \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
+        );
+        assert_eq!(kotlin, (Vec::new(), 0, Vec::new(), 0));
+
+        let mixed = promoted(
+            "java",
+            "public class C {\n    static final String B = \"/b\";\n    \
+             @GetMapping({\"/a\", B + \"/x\", OTHER})\n    public String get() { return \"\"; }\n}\n",
+        );
+        assert_eq!(
+            mixed.0,
+            ["GET /a -> Some(\"get\")", "GET /b/x -> Some(\"get\")"],
+            "{mixed:?}"
+        );
+        assert_eq!(mixed.1, 1, "OTHER is counted: {mixed:?}");
+    }
+
     /// The fold is opted into by the query, not by the language: a prefix of
     /// literals only (`"/v1" + "/x"`) is foldable text in either syntax, yet
     /// Kotlin — whose query names no `@fw.const.*` capture — still refuses it,
@@ -4567,12 +4607,6 @@ mod jvm_parity {
             "@RestController\nclass UserController {\n    @GetMapping(\"/users\")\n    fun listUsers(): String { return \"\" }\n}\n",
             "@RestController\npublic class UserController {\n    @GetMapping(\"/users\")\n    public String listUsers() { return \"\"; }\n}\n",
             true,
-        ),
-        (
-            "positional array method path is captured by neither language",
-            "class C {\n    @GetMapping([\"/a\", \"/b\"])\n    fun get(): String { return \"\" }\n}\n",
-            "public class C {\n    @GetMapping({\"/a\", \"/b\"})\n    public String get() { return \"\"; }\n}\n",
-            false,
         ),
         (
             "paths converging after composition collapse",
