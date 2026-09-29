@@ -1765,6 +1765,25 @@ log:
     }
 
     #[test]
+    fn every_skip_shape_under_reads_and_says_why() {
+        // Each row turns a would-be binding into a counted skip. Deleting any
+        // one of these rules would bind text the shipped parser never reads.
+        for (text, shape) in [
+            ("l:\n- *ref\n", Shape::AnchorOrAlias),
+            ("l:\n- &a\n  k: v\n", Shape::AnchorOrAlias),
+            ("l:\n- http://mailbox-api\n  /x\n", Shape::MultiLineScalar),
+            ("l:\n-x\n", Shape::Unreadable),
+            ("l:\n- \"a:b\": c\n", Shape::Unreadable),
+        ] {
+            let r = read_items(text);
+            assert!(r.values.is_empty(), "{text:?} -> {:?}", r.values);
+            assert_eq!(skipped(&r, shape), 1, "{text:?} -> {:?}", r.coverage);
+        }
+        // A quoted scalar carrying `: ` is a scalar, not a mapping.
+        assert_eq!(value(&read_items("l:\n- \"x: y\"\n"), "l[0]"), ["x: y"]);
+    }
+
+    #[test]
     fn a_nested_sequence_stays_unbound_and_keeps_its_siblings_positions() {
         let r = read_items("matrix:\n- - a\n  - b\n- name: x\n  tags:\n  - t1\n");
         // Item 1 is still `[1]`: the index is the item's POSITION, never the
