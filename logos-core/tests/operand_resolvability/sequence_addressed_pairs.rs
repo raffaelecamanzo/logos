@@ -2008,6 +2008,21 @@ spec:
     }
 
     #[test]
+    fn only_a_helm_expression_counts_as_templated() {
+        // The finding's "every unbound ceiling line is a template" is read off
+        // this count; on the estate it equals the unbound total, so only a
+        // fixture can tell the filter from a plain length.
+        let line = |v: &str| SequenceHost {
+            member: "m".to_string(),
+            file: "f".to_string(),
+            value: v.to_string(),
+        };
+        let (templated_line, plain_line) = (line("{{ .host | quote }}"), line("mailbox-api.ns"));
+        assert_eq!(templated(&[&templated_line, &plain_line]), 1);
+        assert_eq!(templated(&[&plain_line]), 0);
+    }
+
+    #[test]
     fn the_ceiling_reconciles_line_by_line_within_one_file() {
         let line = |f: &str, v: &str| SequenceHost {
             member: "m".to_string(),
