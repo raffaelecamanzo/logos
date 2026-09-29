@@ -267,6 +267,12 @@ fn a_spec_title_is_read_from_the_members_own_file_only() {
     std::fs::write(tmp.path().join("outside.yaml"), "info:\n  title: Outside\n").unwrap();
     assert_eq!(read_title(&member, "spec/api.yaml").as_deref(), Some("Inside"));
     assert_eq!(read_title(&member, "../outside.yaml"), None, "`..` is refused");
+    let absolute = tmp.path().join("outside.yaml");
+    assert_eq!(
+        read_title(&member, absolute.to_str().unwrap()),
+        None,
+        "an absolute path would replace the member root under `join`, so it is refused"
+    );
     assert_eq!(read_title(&member, "spec/missing.yaml"), None);
 }
 
