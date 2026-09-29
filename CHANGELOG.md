@@ -66,6 +66,12 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   - methods reported dead only because their callers never bound stop being dead;
   - the signal score of a Java repository moves with all of these.
 
+  Some figures fall instead. A typed call used to fall through to a same-named method in lexical
+  scope, often the calling method itself: `delegate.write()` inside `write()` bound to that
+  `write()`. Those edges were fabrications and are gone (355 on the reference estate: 324
+  self-edges, 31 to a sibling method). A method "called" only through one loses fan-in, drops
+  out of `callers` and `impact` answers, and can newly be reported dead.
+
   Rust, and every other language, is unchanged: this repository's own index is byte-identical.
 - **Known limitation: a sync can leave a stale Java call edge until the next full `index`.**
   `logos sync` re-binds the calls a hierarchy edit moves, but it does not remove an edge the
