@@ -208,7 +208,11 @@ it is the evidence that is too thin. `scan --json` and `quality-report --json`
 carry the reason and the count as `modularity_not_applicable`, for example
 `{"edges": 3, "min_edges": 5, "reason": "3 of 5 dependency edges — too few for
 community structure"}` (`null` when Modularity applies), and the dashboard's
-Health view shows **not applicable** with that reason in place of a score. The
+Health view shows **not applicable** with that reason in place of a score.
+`evolution` marks the same point's Modularity entry `not_applicable` with that
+reason and reports no delta for it across a drop-out, and `gate`'s per-metric
+regression detail never names a Modularity that is not applicable on either
+side — a dimension outside the signal is not a movement of the signal. The
 other seven dimensions always apply.
 
 This is the never-fabricate guarantee (see [usage.md](usage.md)) applied to the
