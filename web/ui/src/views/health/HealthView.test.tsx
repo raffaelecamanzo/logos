@@ -1,4 +1,5 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
@@ -175,6 +176,20 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     // Every other row still renders its score.
     const acyclicity = within(grid).getByText("Acyclicity").closest("tr") as HTMLElement;
     expect(within(acyclicity).queryByText("not applicable")).toBeNull();
+  });
+
+  it("sorts a CR-156 not-applicable Modularity with the unscored rows, never by its computed value", async () => {
+    const user = userEvent.setup();
+    const m = clone();
+    // A high computed value that would rank last ascending if it were scored.
+    m.scan.metrics.modularity = mv(0.95);
+    m.scan.metrics.modularity_not_applicable = { edges: 4, min_edges: 5, reason: "4 of 5 dependency edges — too few for community structure" };
+    stub(m);
+    render(<HealthView />);
+    const grid = await screen.findByRole("table", { name: "Quality metrics" });
+    await user.click(within(grid).getByRole("button", { name: /Score/ }));
+    const firstRow = within(grid).getAllByRole("row")[1];
+    expect(within(firstRow).getByText("Modularity")).toBeInTheDocument();
   });
 
   it("renders the evolution trend table oldest-first with signed deltas", async () => {
