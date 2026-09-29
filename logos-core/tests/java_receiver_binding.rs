@@ -1283,6 +1283,42 @@ fn known_gap_sync_keeps_the_edge_when_a_supertype_between_is_deleted() {
     assert!(!cold.0.iter().any(|(_, _, k)| k == "calls"), "{:?}", cold.0);
 }
 
+/// **Known limitation, pinned — deferred for a decision (sprint-81 review).**
+/// A member type a class inherits from an in-repository superclass does not
+/// shadow a same-package type of that name (JLS §8.5, §6.4.1): the lexical rung
+/// reads the enclosing classes' own member types only. S-466 recorded this for
+/// type relations; receiver typing carries it into `Calls`, so `e.go()` on a
+/// field of the inherited `Base.Entry` binds the same-package `Entry.go`.
+/// Reading inherited member types needs the walk over `Index::supertypes` in
+/// the lexical rung, a sync-selection rule for rows whose meaning depends on a
+/// supertype's members, and a decision on a supertype outside the repository
+/// (refusing there, as the constant fold does, gives up every simple type name
+/// in a class that extends a library type). When it is fixed this fails and
+/// states the new rule.
+#[test]
+fn known_limitation_an_inherited_member_type_does_not_shadow_a_same_package_type() {
+    const BASE: &str = "src/main/java/com/x/a/Base.java";
+    const ENTRY: &str = "src/main/java/com/x/b/Entry.java";
+    const SVC: &str = "src/main/java/com/x/b/Svc.java";
+    let tmp = tree(&[
+        (
+            BASE,
+            "package com.x.a;\n\npublic class Base {\n    public static class Entry {\n        public void go() {}\n    }\n}\n",
+        ),
+        (ENTRY, "package com.x.b;\n\npublic class Entry {\n    public void go() {}\n}\n"),
+        (
+            SVC,
+            "package com.x.b;\n\nimport com.x.a.Base;\n\npublic class Svc extends Base {\n    private Entry e;\n    public void f() { e.go(); }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        call_edges(engine.runtime().unwrap()),
+        [edge(SVC, "f", ENTRY, "go")],
+        "the limitation is closed — expect `Base.Entry.go`, or no edge"
+    );
+}
+
 /// **Known limitation, pinned — deferred for a decision (S-468 review).** The
 /// walk decides on the nearest level holding exactly one callable of the name,
 /// as CR-150 §3.2 B specifies, and it reads no signature or visibility. So an

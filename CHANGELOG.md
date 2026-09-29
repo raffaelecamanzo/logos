@@ -51,7 +51,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   a method overloaded on one class, a JDK or library type, a type another member declares,
   or a superclass outside the repository. The nearest class that declares the name decides,
   without reading arity or visibility. An overload split across a class and its superclass
-  therefore binds the nearer one.
+  therefore binds the nearer one. A nested type a class inherits does not yet hide a
+  same-package type of the same name, so a receiver typed with that name binds the
+  same-package type's method.
 - **`status` states why the rest stays unbound.** The Java row of `resolution_by_language`
   carries `call_residue`: the unbound calls, and how many stay unbound for each reason
   (`no-receiver-evidence`, `external-type`, `type-in-another-member`, `overload-ambiguous`,
