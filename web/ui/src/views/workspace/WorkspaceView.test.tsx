@@ -1696,9 +1696,22 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
       name: "Documents by which api declares a contract with web",
       hidden: true,
     });
-    expect(within(identity).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toContain(
+    // The whole row: the vendored DOCUMENT, then what it declares — a missing
+    // or empty document cell must fail here, not pass a `toContain`.
+    expect(within(identity).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
+      "specs/web.yaml",
       "Document identity: 3 of 3 operations match web's own api/openapi.yaml",
-    );
+    ]);
+    // An external target: the document, and the external named WITH its
+    // identity — two externals here are both titled PSS.
+    const external = within(card).getByRole("table", {
+      name: "Documents by which web declares a contract with PSS (web:legacy/pss.yaml)",
+      hidden: true,
+    });
+    expect(within(external).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
+      "legacy/pss.yaml",
+      "Named external PSS web:legacy/pss.yaml",
+    ]);
 
     // The bound call: target, matched operation, base path and its source.
     const calls = within(card).getByRole("table", {
