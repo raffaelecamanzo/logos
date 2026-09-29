@@ -10,8 +10,7 @@ index, honor the same configuration, and record into the same local stats.
 cd /path/to/project
 logos index          # build the code graph (full rebuild, idempotent)
 logos status         # health: file/node/edge counts, resolution coverage, freshness
-logos sync           # after edits: incrementally fold changed files in
-logos sync src/a.rs  # or sync specific paths
+logos sync src/a.rs  # after edits: fold the changed paths in (a bare `sync` reads none)
 ```
 
 `logos index` walks the tree (gitignore-aware, symlink-contained), extracts

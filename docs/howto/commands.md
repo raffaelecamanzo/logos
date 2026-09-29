@@ -319,13 +319,20 @@ it to see where a cold index spends its time before optimizing.
 ### `sync [PATHS]...`
 
 ```bash
-logos sync                 # all changed files
-logos sync src/auth.rs     # specific paths
+logos sync src/auth.rs src/db.rs   # fold in exactly these paths
 ```
 
 Incremental fold-in of changes — much faster than a full `index` on large
 trees. Deleted files' symbols are captured before removal so inbound
 references degrade gracefully rather than dangle.
+
+`sync` reconciles **exactly the paths it is given** and never sweeps the rest of
+the tree. With no path it re-reads no file, so `logos sync` alone does not pick up
+an edit. The paths usually come from somewhere else: the watcher under
+`logos serve` passes each debounced batch, and the managed git hooks pass the
+files a commit or merge changed. To fold in every change at once, run a
+reconcile-then-score command such as `logos scan` (see
+[usage.md](usage.md)), or rebuild with `logos index`.
 
 ### `status`
 
