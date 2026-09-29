@@ -619,6 +619,14 @@ pub struct MetricSnapshotRow {
     ///
     /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
     pub modularity_normalized: f64,
+    /// `Some(false)` when Modularity was not applicable ([CR-156]: fewer than
+    /// five edges), `Some(true)` when it applied, `None` on a row persisted
+    /// before migration 23 (read as applicable). The gate's regression detail
+    /// and the evolution series read it so a dimension outside the signal is
+    /// never reported as a movement of the signal.
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    pub modularity_applicable: Option<bool>,
     /// Cycle count — multi-node SCCs (`len > 1`) only; self-recursion
     /// excluded ([FR-QM-02], metric-semantics v4).
     ///
@@ -3174,7 +3182,7 @@ impl GraphStore for SqliteGraphStore {
                     depth_raw, depth_normalized, \
                     equality_raw, equality_normalized, \
                     redundancy_raw, redundancy_normalized, \
-                    thresholds_hash, aggregate_signal \
+                    thresholds_hash, aggregate_signal, modularity_applicable \
              FROM metric_snapshots ORDER BY id",
         )?;
         let rows = stmt
@@ -3201,6 +3209,7 @@ impl GraphStore for SqliteGraphStore {
                     redundancy_normalized: row.get(18)?,
                     thresholds_hash: row.get(19)?,
                     aggregate_signal: row.get(20)?,
+                    modularity_applicable: row.get::<_, Option<i64>>(21)?.map(|n| n != 0),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -3217,7 +3226,7 @@ impl GraphStore for SqliteGraphStore {
                     m.depth_raw, m.depth_normalized, \
                     m.equality_raw, m.equality_normalized, \
                     m.redundancy_raw, m.redundancy_normalized, \
-                    m.thresholds_hash, m.aggregate_signal \
+                    m.thresholds_hash, m.aggregate_signal, m.modularity_applicable \
              FROM baseline b \
              JOIN metric_snapshots m ON m.id = b.snapshot_id \
              WHERE b.scope = ?1",
@@ -3245,6 +3254,7 @@ impl GraphStore for SqliteGraphStore {
                 redundancy_normalized: row.get(18)?,
                 thresholds_hash: row.get(19)?,
                 aggregate_signal: row.get(20)?,
+                modularity_applicable: row.get::<_, Option<i64>>(21)?.map(|n| n != 0),
             })
         })
         .optional()

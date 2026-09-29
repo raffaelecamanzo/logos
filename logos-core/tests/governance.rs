@@ -2953,3 +2953,57 @@ fn a_run_finding_fewer_violations_lowers_the_marker_count() {
         before.violation_count
     );
 }
+
+// ── CR-156: a not-applicable Modularity is not a regression of the signal ────
+
+/// A graph that stays below five edges keeps Modularity out of the aggregate on
+/// both sides of a gate, so the gate's per-metric regression detail must not
+/// name it — the drop that failed this gate is Depth's (two layers where there
+/// was one), and naming Modularity first, at four times Depth's delta, blames a
+/// dimension that contributed nothing ([CR-156], [NFR-CC-04]). The evolution
+/// series reports the same Modularity as not applicable with its reason and no
+/// delta across the drop-out, rather than as a movement of 0.333 → 0.
+///
+/// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn a_not_applicable_modularity_is_never_a_gate_regression_or_an_evolution_delta() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/core.rs", "pub fn base() {}\n");
+    write(tmp.path(), "src/sub/mid.rs", "pub fn mid() {\n    let _ = 1;\n}\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    engine.gate(None, true, true).expect("gate --save");
+    let before = engine.latest_metrics().unwrap().expect("a snapshot");
+    assert!(before.modularity_not_applicable.is_some(), "m = {} < 5", before.edge_count);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    write(
+        tmp.path(),
+        "src/sub/mid.rs",
+        "use crate::core::base;\npub fn mid() {\n    base();\n}\n",
+    );
+    let gate = engine.gate(None, false, true).expect("gate");
+    let after = engine.latest_metrics().unwrap().expect("a snapshot");
+    let na = after.modularity_not_applicable.clone().expect("still m < 5");
+    assert!(
+        after.modularity.normalized < before.modularity.normalized,
+        "the fixture moves the computed Modularity, so an unfiltered detail would name it"
+    );
+    assert!(
+        gate.regressions.iter().all(|r| r.metric != "modularity"),
+        "a not-applicable Modularity is not a regression of the signal: {:?}",
+        gate.regressions
+    );
+
+    let evolution = engine.evolution(None).expect("evolution");
+    let last = evolution.snapshots.last().expect("a point");
+    let modularity = &last.metric_deltas[0];
+    assert_eq!(modularity.metric, "modularity");
+    assert_eq!(modularity.not_applicable, Some(na), "evolution names the drop-out and its m");
+    assert_eq!(modularity.delta, None, "no movement is reported for a dimension outside the signal");
+    assert!(
+        last.metric_deltas[1..].iter().all(|d| d.not_applicable.is_none()),
+        "only Modularity can be not applicable"
+    );
+}

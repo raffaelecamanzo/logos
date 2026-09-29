@@ -1311,8 +1311,17 @@ pub struct MetricDelta {
     pub metric: String,
     /// This snapshot's normalized [0,1] value.
     pub normalized: f64,
-    /// `normalized − previous.normalized`; `None` for the first point.
+    /// `normalized − previous.normalized`; `None` for the first point, and
+    /// for Modularity whenever it is not applicable at either point — a
+    /// dimension outside the signal has no movement of the signal to report.
     pub delta: Option<f64>,
+    /// `Some` on the Modularity entry of a snapshot where it was **not
+    /// applicable** ([CR-156]): the reason and the m-of-5 count, beside the
+    /// computed `normalized` value it still stores. `None` for every other
+    /// metric and for an applicable Modularity.
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    pub not_applicable: Option<ModularityNotApplicable>,
 }
 
 /// Dependency structure matrix (FR-GV-07).
