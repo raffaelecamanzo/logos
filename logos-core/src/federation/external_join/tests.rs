@@ -303,6 +303,28 @@ fn an_environment_only_base_path_is_refused() {
     ));
 }
 
+/// **Mixed profiles**: the main profile reads the base URL from the
+/// environment and a test profile commits a literal one. The literal does not
+/// prove the base — one indirection refuses the key, as a placeholder refuses
+/// any configuration key — and the refusal names the indirection.
+#[test]
+fn an_indirection_in_one_profile_is_not_proven_by_another_profiles_literal() {
+    let facts = BaseFacts {
+        application: vec![
+            value("pec-server.base-url", "${PECSERVER_BASEURL}", APP),
+            value("pec-server.base-url", "http://localhost:50000", "src/test/resources/application-it.yml"),
+            value("pec-server.uri-get-mailbox-path", "/domain/{domain}/user/{user}", APP),
+        ],
+        overlays: Vec::new(),
+    };
+    assert_eq!(
+        base_reading(&keys(&["pec-server.uri-get-mailbox-path"]), &facts),
+        Err(JoinRefusal::BasePathUncommitted {
+            sources: vec![BaseSource { file: APP.into(), key: "pecserver.baseurl".into() }],
+        })
+    );
+}
+
 /// A `${…}` inside the base URL's **path** is environment state too: an
 /// overlay committing `https://pss/${PSS_CONTEXT}` proves no base path, and is
 /// refused as such rather than read as the path `/${PSS_CONTEXT}`.

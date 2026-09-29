@@ -314,7 +314,9 @@ fn committed_path(value: &str) -> Option<String> {
 /// ([`overlay_overrides`]) replaces the application value — decided by the
 /// **key**, so an overriding overlay committing no URL path proves nothing and
 /// does not let the application value back in; beside overlays that do commit a
-/// path, it adds nothing.
+/// path, it adds nothing. An application source committing the key as a `${…}`
+/// indirection refuses it even beside another profile's literal, as a
+/// placeholder refuses any configuration key.
 pub fn base_reading(call_keys: &BTreeSet<String>, facts: &BaseFacts) -> Result<BasePathEvidence, JoinRefusal> {
     let parents: BTreeSet<&str> = call_keys.iter().map(|k| parent(k)).filter(|p| !p.is_empty()).collect();
     let base_values: Vec<&CommittedValue> = facts
@@ -337,6 +339,17 @@ pub fn base_reading(call_keys: &BTreeSet<String>, facts: &BaseFacts) -> Result<B
     } else {
         (overriding, BaseOrigin::DeployOverlay)
     };
+    // One application source committing the key as an indirection refuses the
+    // key whatever the others commit — the rule `Agreement::Placeholder` applies
+    // to every configuration key — so a test profile's literal URL cannot prove
+    // the base of a call whose main profile reads it from the environment.
+    if origin == BaseOrigin::ApplicationConfig {
+        let indirect: BTreeSet<BaseSource> =
+            chosen.iter().filter(|v| is_indirection(&v.value)).map(|v| v.source()).collect();
+        if !indirect.is_empty() {
+            return Err(JoinRefusal::BasePathUncommitted { sources: indirect.into_iter().collect() });
+        }
+    }
     let mut by_path: BTreeMap<String, BTreeSet<BaseSource>> = BTreeMap::new();
     for v in &chosen {
         if let Some(path) = committed_path(&v.value) {
