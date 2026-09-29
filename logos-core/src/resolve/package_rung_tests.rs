@@ -401,3 +401,31 @@ fn an_ambiguous_static_wildcard_that_could_supply_the_name_stops_the_aggressive_
         15,
     );
 }
+
+/// A capture-before-delete `Extends` row targets a whole symbol, whose path
+/// segments (`src`, `main`, `java`, the package) every Java file shares. It
+/// adds no hierarchy token, so a sync of an unrelated Java file does not
+/// re-select every package-shaped call; the source's own `Path` row still
+/// names its supertype's token (sprint-81 review).
+#[test]
+fn a_captured_extends_row_adds_no_hierarchy_token() {
+    let (nodes, edges) = fixture();
+    let dirty: std::collections::HashSet<String> = ["src/main/java/com/y/Only.java", "Only"]
+        .iter()
+        .flat_map(|s| super::tokens(s))
+        .collect();
+    let path_row = row(1, SVC_FILE, 8, "Base", RefForm::Path, EdgeKind::Extends);
+    let captured = row(
+        2,
+        SVC_FILE,
+        8,
+        "logos . . . src/main/java/com/x/base/`Base.java`/Base#",
+        RefForm::Symbol,
+        EdgeKind::Extends,
+    );
+    let ix = Index::build_with_layout(&nodes, &edges, &[path_row.clone(), captured], java());
+    assert!(!ix.hierarchy_touched(&dirty), "an unrelated Java file moved the hierarchy");
+    let base: std::collections::HashSet<String> = super::tokens("Base").into_iter().collect();
+    let ix = Index::build_with_layout(&nodes, &edges, &[path_row], java());
+    assert!(ix.hierarchy_touched(&base), "the Path row's own target still counts");
+}

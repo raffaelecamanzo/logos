@@ -1191,7 +1191,17 @@ fn build_impls_by_trait_method(
 /// A row of any other language is skipped: its source is not package-shaped,
 /// and the map stays empty for a graph without one, exactly as before.
 ///
+/// Only the subtype's own rows count. A capture-before-delete `Symbol` row
+/// ([ADR-10]) is filed under the **supertype's** file and outlives the
+/// subtype's `extends` clause until that file is re-extracted, so reading it
+/// would lend a type a supertype it no longer declares — and bind new calls
+/// through it — where a cold index has none. Its target is also a whole
+/// symbol, whose path tokens would re-select every package-shaped call on
+/// every Java sync. The source's own `Path` row is always present while the
+/// clause is, so skipping the capture loses no supertype.
+///
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+/// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
 fn build_supertypes(
     refs: &[UnresolvedRefRow],
     ix: &Index,
@@ -1199,7 +1209,7 @@ fn build_supertypes(
     let mut supertypes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let mut tokens: HashSet<String> = HashSet::new();
     for r in refs {
-        if r.kind != EdgeKind::Extends {
+        if r.kind != EdgeKind::Extends || r.form == RefForm::Symbol {
             continue;
         }
         let Some(source) = ix.by_symbol.get(&r.source_symbol).and_then(|id| ix.info.get(id)) else {
