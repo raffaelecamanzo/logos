@@ -406,3 +406,29 @@ fn the_headline_is_stated_over_every_spec_document_read() {
          identity; declared by vendored specs, never observed calls"
     );
 }
+
+/// A resolved tie is looked up by holder **and** operation: symbols are
+/// member-local, so the identified member's own spec and the holder's copy can
+/// carry the very same symbol (both at `src/v1.yaml`). Only the holder's
+/// operation is resolved.
+#[test]
+fn a_resolved_tie_is_the_holders_even_where_the_symbol_is_shared() {
+    let path = "src/v1.yaml";
+    let tied = OperationProviders::Tied(vec![endpoint("agg", "a/r.yaml", 0), endpoint("core", "c/r.yaml", 0)]);
+    let held = ops(0, 10);
+    let mut facts: Vec<SpecOperation> = held
+        .iter()
+        .enumerate()
+        .map(|(n, (m, t))| op("agg", path, n, (m, t), if n == 0 { tied.clone() } else { OperationProviders::Holder }))
+        .collect();
+    facts.extend(
+        held.iter()
+            .enumerate()
+            .map(|(n, (m, t))| op("web", path, n, (m, t), if n == 0 { tied.clone() } else { OperationProviders::Elsewhere })),
+    );
+
+    let r = derive(&facts, &no_kinds(), no_titles);
+    let shared = symbol(path, 0, "GET");
+    assert!(r.resolved_tie("web", &shared).is_some(), "web's copy resolves its tie");
+    assert!(r.resolved_tie("agg", &shared).is_none(), "agg's own row, same symbol, is not web's tie");
+}
