@@ -660,6 +660,21 @@ fn modularity_applicability_persists_and_a_pre_migration_row_reads_applicable() 
         scanned.edge_count
     );
     assert_eq!(scanned.modularity_not_applicable, None);
+    // The JSON contract the web UI types declare (`ModularityNotApplicable |
+    // null`): an applicable Modularity is a present `null`, never an omitted key,
+    // on both the snapshot (`scan --json`) and the readout (`quality-report --json`).
+    let snapshot_json = serde_json::to_value(&scanned).unwrap();
+    assert_eq!(
+        snapshot_json.get("modularity_not_applicable"),
+        Some(&serde_json::Value::Null),
+        "scan --json carries an explicit null when Modularity applies"
+    );
+    let readout_json = serde_json::to_value(engine.quality_readout().expect("readout")).unwrap();
+    assert_eq!(
+        readout_json.get("modularity_not_applicable"),
+        Some(&serde_json::Value::Null),
+        "quality-report --json carries an explicit null when Modularity applies"
+    );
     assert_eq!(latest_modularity_flag(large.path()), Some(1), "persisted as 1");
     assert_eq!(
         engine.latest_metrics().unwrap().unwrap().modularity_not_applicable,
