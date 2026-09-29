@@ -295,6 +295,13 @@ fn is_indirection(value: &str) -> bool {
     value.contains("${")
 }
 
+/// The base path a value commits: its [`url_path`], unless that path itself
+/// carries a `${…}` indirection (`https://pss/${PSS_CONTEXT}`) — environment
+/// state, not a committed path.
+fn committed_path(value: &str) -> Option<String> {
+    url_path(value).filter(|path| !is_indirection(path))
+}
+
 /// Read a call's committed base path from its member's `facts`: the path and
 /// its evidence, or the refusal naming why none is proven
 /// ([`NoBaseKey`](JoinRefusal::NoBaseKey),
@@ -332,7 +339,7 @@ pub fn base_reading(call_keys: &BTreeSet<String>, facts: &BaseFacts) -> Result<B
     };
     let mut by_path: BTreeMap<String, BTreeSet<BaseSource>> = BTreeMap::new();
     for v in &chosen {
-        if let Some(path) = url_path(&v.value) {
+        if let Some(path) = committed_path(&v.value) {
             by_path.entry(path).or_default().insert(v.source());
         }
     }

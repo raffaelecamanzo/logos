@@ -303,6 +303,23 @@ fn an_environment_only_base_path_is_refused() {
     ));
 }
 
+/// A `${…}` inside the base URL's **path** is environment state too: an
+/// overlay committing `https://pss/${PSS_CONTEXT}` proves no base path, and is
+/// refused as such rather than read as the path `/${PSS_CONTEXT}`.
+#[test]
+fn a_placeholder_in_the_base_urls_path_is_uncommitted() {
+    let facts = BaseFacts {
+        application: facade_app(),
+        overlays: vec![value("envFrom.PECSERVER_BASEURL", "https://pss.example/${PSS_CONTEXT}", "deploy-coll/values.yaml")],
+    };
+    assert_eq!(
+        base_reading(&keys(&["pec-server.uri-get-mailbox-path"]), &facts),
+        Err(JoinRefusal::BasePathUncommitted {
+            sources: vec![BaseSource { file: "deploy-coll/values.yaml".into(), key: "envfrom.pecserverbaseurl".into() }],
+        })
+    );
+}
+
 /// A literal target names no key, so it proves no base path — even when its
 /// path is exactly an operation's.
 #[test]
