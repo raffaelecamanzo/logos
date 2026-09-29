@@ -306,40 +306,60 @@ fn line_kind(line: &str) -> LineKind {
     }
 }
 
-/// The key of a mapping item's first line under YAML's rule — a `:` followed by
-/// whitespace or the end of the line — or `None` for a plain scalar.
+/// What an item's first line is under YAML's rule for a mapping key — a `:`
+/// followed by whitespace or the end of the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemHead<'a> {
+    /// A mapping entry with this key.
+    Mapping(&'a str),
+    /// A plain or quoted scalar.
+    Scalar,
+    /// A mapping entry whose key is not one token (`- a b: c`). The shipped
+    /// key split refuses such a key at mapping level; read as a scalar
+    /// instead, the whole line would become a wrong value.
+    Unreadable,
+}
+
+/// The [`ItemHead`] of a mapping item's first line.
 ///
 /// Not the shipped key split, deliberately: that one cuts at the FIRST `:`, so
 /// `- http://mailbox-api:8080` would read as a mapping `{http: //mailbox-api:8080}`
 /// and fabricate a `hosts[0].http` key out of a URL. At mapping level the
 /// shipped parser never meets that shape; inside a sequence it is the commonest
 /// scalar there is.
-fn mapping_item_key(body: &str) -> Option<&str> {
+fn mapping_item_key(body: &str) -> ItemHead<'_> {
     let is_value_colon = |after: &str| after.is_empty() || after.starts_with([' ', '\t']);
     for quote in ['"', '\''] {
         if let Some(rest) = body.strip_prefix(quote) {
-            let end = rest.find(quote)?;
+            let Some(end) = rest.find(quote) else { return ItemHead::Scalar };
             // `"u\": http://x"` is ONE string whose first quote is escaped.
             // Ending the key at that quote would read `{u\: http://x"}` — an
             // invented key and an admitted URL. Left a scalar instead, the
             // shipped parser's escape refusal declines it, as it declines an
             // escaped value at mapping level.
             if quote == '"' && rest[..end].contains('\\') {
-                return None;
+                return ItemHead::Scalar;
             }
             let after = rest[end + 1..].trim_start_matches([' ', '\t']);
-            return after
-                .strip_prefix(':')
-                .filter(|a| is_value_colon(a))
-                .map(|_| &rest[..end]);
+            return match after.strip_prefix(':') {
+                Some(a) if is_value_colon(a) => ItemHead::Mapping(&rest[..end]),
+                _ => ItemHead::Scalar,
+            };
         }
     }
-    let colon = body
+    let Some(colon) = body
         .char_indices()
         .find(|(i, c)| *c == ':' && is_value_colon(&body[i + 1..]))
-        .map(|(i, _)| i)?;
+        .map(|(i, _)| i)
+    else {
+        return ItemHead::Scalar;
+    };
     let key = &body[..colon];
-    (!key.is_empty() && !key.contains(char::is_whitespace)).then_some(key)
+    if key.is_empty() || key.contains(char::is_whitespace) {
+        ItemHead::Unreadable
+    } else {
+        ItemHead::Mapping(key)
+    }
 }
 
 /// Decide what one item is, from the text after its dash and its continuation
@@ -372,10 +392,11 @@ fn plan_item(after_dash: &str, continuation: &[&str]) -> Result<ItemKind, Shape>
         _ => {}
     }
     match mapping_item_key(body) {
-        Some(key) if key.contains(':') => Err(Shape::Unreadable),
-        Some(_) => Ok(ItemKind::Mapping),
-        None if !content.is_empty() => Err(Shape::MultiLineScalar),
-        None => Ok(ItemKind::Scalar),
+        ItemHead::Mapping(key) if key.contains(':') => Err(Shape::Unreadable),
+        ItemHead::Mapping(_) => Ok(ItemKind::Mapping),
+        ItemHead::Unreadable => Err(Shape::Unreadable),
+        ItemHead::Scalar if !content.is_empty() => Err(Shape::MultiLineScalar),
+        ItemHead::Scalar => Ok(ItemKind::Scalar),
     }
 }
 
@@ -1729,6 +1750,18 @@ log:
         assert_eq!(skipped(&r, Shape::NothingRead), 1);
         // The near miss: the same shape without the escape IS a mapping.
         assert_eq!(keys(&read_items("l:\n- \"u\": http://mailbox-api/x\n")), ["l[0].u"]);
+    }
+
+    #[test]
+    fn a_mapping_item_whose_key_is_not_one_token_binds_nothing() {
+        // `{"a b": c}` in YAML — never the scalar `"a b: c"`, and never a URL.
+        for text in ["l:\n- a b: c\n", "l:\n- http://mailbox-api/a b: c\n"] {
+            let r = read_items(text);
+            assert!(r.values.is_empty(), "{text:?} -> {:?}", r.values);
+            assert_eq!(skipped(&r, Shape::Unreadable), 1, "{text:?}");
+        }
+        // The near miss: no value colon, so a plain scalar.
+        assert_eq!(value(&read_items("l:\n- a b:c\n"), "l[0]"), ["a b:c"]);
     }
 
     #[test]
