@@ -707,6 +707,41 @@ fn scan_on_an_indexed_fixture_succeeds_with_a_freshness_line() {
     assert!(json["signal"].is_u64(), "a non-empty fixture has a signal");
 }
 
+/// `scan --json` and `quality-report --json` both render a Modularity that is
+/// not applicable ([CR-156]): the fixture's few edges sit below the five
+/// Modularity needs, and each surface carries the reason with the m-of-5 count,
+/// `m` being the very `edge_count` the scan scored — while the computed
+/// Modularity pair is still present beside it.
+///
+/// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+#[test]
+fn scan_and_quality_report_render_a_not_applicable_modularity() {
+    let tmp = fixture();
+    logos(tmp.path(), &["index", "--quiet"]);
+
+    let out = logos(tmp.path(), &["scan", "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let scan: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let metrics = &scan["metrics"];
+    let m = metrics["edge_count"].as_u64().expect("edge_count");
+    assert!(m < 5, "the three-file chain has m = {m} < 5 edges");
+    let expected = serde_json::json!({
+        "edges": m,
+        "min_edges": 5,
+        "reason": format!("{m} of 5 dependency edges — too few for community structure"),
+    });
+    assert_eq!(metrics["modularity_not_applicable"], expected, "scan --json");
+    assert!(
+        metrics["modularity"]["normalized"].is_f64(),
+        "the computed Modularity pair is still reported"
+    );
+
+    let out = logos(tmp.path(), &["quality-report", "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let readout: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(readout["modularity_not_applicable"], expected, "quality-report --json");
+}
+
 #[test]
 fn non_stub_subcommands_emit_valid_json_with_json_flag() {
     // The sprint test plan: "Pass --json on every subcommand and assert JSON

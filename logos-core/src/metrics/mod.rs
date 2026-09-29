@@ -10,7 +10,9 @@
 //!    file, so intra-directory dependency edges count as community-internal
 //!    (the rolled-up "module self-loops" the SRS §7.4 trap warns about — drop
 //!    them and Q ≈ 0 always). Normalized `(Q+0.5)/1.5` clamped to [0,1];
-//!    `m == 0` → `1/3`.
+//!    `m == 0` → `1/3`. **Not applicable** below [`MODULARITY_MIN_EDGES`]
+//!    edges (m = 0 included, [CR-156], metric-semantics v6): the computed pair
+//!    is kept, but the dimension drops out of the aggregate.
 //! 2. **Acyclicity** ([FR-QM-02], [ADR-61], extends [ADR-30]) — count of
 //!    `tarjan_scc` components with `len > 1` **whose members span more than one
 //!    directory** (a cross-module dependency cycle); a singleton self-loop /
@@ -42,21 +44,25 @@
 //!    no class-like container exists.
 //! 10. **Uniqueness** ([FR-QM-13]) — `1 − near-clone ratio`.
 //!
-//! # Aggregation (metric-semantics v5, [FR-QM-06], [FR-QM-14], [ADR-12], [ADR-21])
+//! # Aggregation (metric-semantics v6, [FR-QM-06], [FR-QM-14], [ADR-12], [ADR-21])
 //!
 //! `signal = exp((Σ ln nᵢ)/k) · 10000` over the **applicable** dimensions in
 //! **canonical order** (the five original metrics, then nesting, conciseness,
 //! cohesion, focus, uniqueness), rounded to an integer ([ADR-08]). `k` is the
-//! count of applicable dimensions (10, or 9/8 when Cohesion/Focus drop out).
-//! Three guards:
+//! count of applicable dimensions (10, or fewer as Modularity, Cohesion and
+//! Focus drop out). Three guards:
 //!
-//! - **Zero short-circuit (original five only)** — if any *original* `nᵢ == 0.0`
-//!   the signal is `0` *before* any `ln` runs (a hard systemic pathology
-//!   collapses the score; anti-gaming, [ADR-21]). The new five are floored, never
-//!   `0`, so they drag but never alone collapse the signal.
+//! - **Zero short-circuit (applicable original five only)** — if any
+//!   *applicable original* `nᵢ == 0.0` the signal is `0` *before* any `ln` runs
+//!   (a hard systemic pathology collapses the score; anti-gaming, [ADR-21]). The
+//!   new five are floored, never `0`, so they drag but never alone collapse the
+//!   signal.
 //! - **Applicability drop-out** — Cohesion/Focus with no construct store NULL +
 //!   a `false` flag and drop out of the denominator ([ADR-21]); a class-less repo
-//!   gets a deterministic 9-dimension mean ([UAT-QM-10]).
+//!   gets a deterministic 9-dimension mean ([UAT-QM-10]). Modularity on a graph
+//!   with fewer than [`MODULARITY_MIN_EDGES`] edges drops out the same way — out
+//!   of the denominator *and* out of the short-circuit — but keeps its computed
+//!   values beside a `false` `modularity_applicable` flag ([CR-156]).
 //! - **Empty-graph sentinel** — `node_count == 0` stores `empty = 1`,
 //!   `aggregate_signal = NULL`, and surfaces as `"n/a"` rather than the
 //!   misleading ~8033 a naive mean of the guard values would produce
@@ -102,6 +108,7 @@
 //! [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
 //! [ADR-30]: ../../../docs/specs/architecture/decisions/ADR-30.md
 //! [CR-022]: ../../../docs/requests/CR-022-acyclicity-self-recursion-exclusion.md
+//! [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 //! [AA-03]: ../../../docs/specs/architecture.md#24-assumptions
 //! [FR-DB-06]: ../../../docs/specs/requirements/FR-DB-06.md
 //! [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
@@ -133,7 +140,9 @@ use petgraph::visit::EdgeRef;
 use crate::graph_store::{EdgeRow, FunctionMetricRow, NewMetricSnapshot, NodeRow};
 use crate::hydrate::GraphView;
 use crate::model::{EdgeKind, NodeId, NodeKind};
-use crate::models::quality::{MetricSnapshot, MetricValue, Offender, WorstOffenders};
+use crate::models::quality::{
+    MetricSnapshot, MetricValue, ModularityNotApplicable, Offender, WorstOffenders,
+};
 use crate::runtime::Runtime;
 
 mod extended;
@@ -162,6 +171,22 @@ const UNBOUND_DIR: &str = "<unbound>";
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
 const ORIGINAL_METRIC_COUNT: usize = 5;
+
+/// The fewest edges Modularity's graph needs for Modularity to apply
+/// ([CR-156], metric-semantics v6).
+///
+/// Below it Newman's Q has no community structure to measure: a library whose
+/// one to four edges all cross between two directories scores Q = −0.5, which
+/// normalizes to exactly 0 and — through the [ADR-12] short-circuit — zeroed
+/// the whole signal of an ordinary model → enum layering. Such a graph drops
+/// Modularity out of the aggregate instead ([ADR-21] rule 2). A fixed constant
+/// of the metric semantics, deliberately not a `rules.toml` knob: a tunable
+/// threshold on the one dimension that can zero the signal is a gaming surface.
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+/// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
+pub const MODULARITY_MIN_EDGES: u64 = 5;
 
 /// The metrics-semantics version stamped on every snapshot ([FR-GV-10]).
 ///
@@ -207,7 +232,17 @@ const ORIGINAL_METRIC_COUNT: usize = 5;
 ///     graph rather than the symbol-level call graph: a long call chain confined
 ///     to one directory rolls up to a single module vertex (depth 1) instead of
 ///     reporting intra-file call length as architectural layering.
+/// - **v6** — Modularity is **not applicable** on a graph with fewer than
+///   [`MODULARITY_MIN_EDGES`] edges ([CR-156], [ADR-21] rule 2): it keeps its
+///   computed pair on the snapshot but leaves both the geometric mean and the
+///   [ADR-12] zero short-circuit, so a small library whose one to four edges all
+///   cross two directories no longer scores 0. An edgeless non-empty graph drops
+///   it too (the neutral 1/3 no longer enters the mean). Every graph with
+///   m ≥ 5 scores byte-identically to v5; a v5 baseline is still incomparable, so
+///   the first post-upgrade gate auto-re-baselines ([FR-GV-10]).
 ///
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
 /// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
@@ -224,7 +259,7 @@ const ORIGINAL_METRIC_COUNT: usize = 5;
 /// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
 /// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
 /// [ADR-62]: ../../../docs/specs/architecture/decisions/ADR-62.md
-pub const METRIC_SEMANTICS_VERSION: i64 = 5;
+pub const METRIC_SEMANTICS_VERSION: i64 = 6;
 
 /// Compute the five metrics and the aggregate signal over the **production
 /// scope** of a hydrated dependency view — pure, no I/O ([FR-QM-01]..[FR-QM-06],
@@ -284,6 +319,9 @@ pub fn compute(
     // Canonical metric order (ADR-08): modularity, acyclicity, depth,
     // equality, redundancy.
     let modularity = modularity(&graph, &dirs);
+    // CR-156: below MODULARITY_MIN_EDGES the graph has no community structure to
+    // measure, so Modularity drops out (ADR-21 rule 2) — its computed pair stays.
+    let modularity_not_applicable = ModularityNotApplicable::for_edges(graph.edge_count() as u64);
     // Acyclicity counts cross-module SCCs (>1 directory, ADR-61) over the
     // symbol-level SCC set — the single narrowed source the DSM and the
     // `max_cycles` rule read. Depth measures architectural layering over its own
@@ -313,19 +351,18 @@ pub fn compute(
         None
     } else {
         Some(aggregate(
-            [
-                modularity.normalized,
-                acyclicity.normalized,
-                depth.normalized,
-                equality.normalized,
-                redundancy.normalized,
-            ],
+            &applicable_original_dimensions(
+                &modularity,
+                modularity_not_applicable.is_none(),
+                [&acyclicity, &depth, &equality, &redundancy],
+            ),
             &applicable_new_dimensions(&nesting, &conciseness, &cohesion, &focus, &uniqueness),
         ))
     };
 
     MetricSnapshot {
         modularity,
+        modularity_not_applicable,
         acyclicity,
         depth,
         equality,
@@ -343,6 +380,29 @@ pub fn compute(
         empty,
         aggregate_signal,
     }
+}
+
+/// The normalized values of the **applicable** original dimensions, in canonical
+/// order (modularity, acyclicity, depth, equality, redundancy) — Modularity
+/// contributes only when applicable ([CR-156]), exactly as Cohesion/Focus do in
+/// [`applicable_new_dimensions`]. Acyclicity, Depth, Equality and Redundancy
+/// always apply. What this returns is both the set the geometric mean spans and
+/// the set the [ADR-12] zero short-circuit inspects, so a not-applicable
+/// Modularity leaves both by one mechanism.
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+fn applicable_original_dimensions(
+    modularity: &MetricValue,
+    modularity_applicable: bool,
+    always: [&MetricValue; ORIGINAL_METRIC_COUNT - 1],
+) -> Vec<f64> {
+    let mut dims = Vec::with_capacity(ORIGINAL_METRIC_COUNT);
+    if modularity_applicable {
+        dims.push(modularity.normalized);
+    }
+    dims.extend(always.iter().map(|v| v.normalized));
+    dims
 }
 
 /// The normalized values of the **applicable** new dimensions, in canonical
@@ -420,6 +480,9 @@ pub fn snapshot(
                 empty: row.empty,
                 modularity_raw: row.modularity.0,
                 modularity_normalized: row.modularity.1,
+                // Modularity keeps its computed pair even when it is not
+                // applicable (CR-156); only the flag records the drop-out.
+                modularity_applicable: Some(row.modularity_applicable),
                 acyclicity_raw: row.acyclicity.0,
                 acyclicity_normalized: row.acyclicity.1,
                 depth_raw: row.depth.0,
@@ -674,6 +737,9 @@ struct OwnedSnapshotFields {
     test_function_count: i64,
     empty: bool,
     modularity: (f64, f64),
+    /// `false` = Modularity dropped out of the mean (fewer than
+    /// [`MODULARITY_MIN_EDGES`] edges, CR-156); the pair above is kept.
+    modularity_applicable: bool,
     acyclicity: (f64, f64),
     depth: (f64, f64),
     equality: (f64, f64),
@@ -699,6 +765,7 @@ impl OwnedSnapshotFields {
             test_function_count: snapshot.test_function_count as i64,
             empty: snapshot.empty,
             modularity: pair(&snapshot.modularity),
+            modularity_applicable: snapshot.modularity_not_applicable.is_none(),
             acyclicity: pair(&snapshot.acyclicity),
             depth: pair(&snapshot.depth),
             equality: pair(&snapshot.equality),
@@ -810,8 +877,13 @@ fn directory_of(path: &str) -> String {
 /// rolled-up self-loop mandate) and `d_c` sums vertex degrees. Community sums
 /// iterate a `BTreeMap` so the float reduction is canonical ([ADR-08]).
 ///
+/// Always computes the pair, at every size: whether it *applies* is decided
+/// beside it in [`compute`] ([`MODULARITY_MIN_EDGES`], [CR-156]), so a
+/// not-applicable Modularity still persists the values it would have scored.
+///
 /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
 /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 fn modularity(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
     let m = graph.edge_count();
     if m == 0 {
@@ -1078,23 +1150,27 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
 }
 
 /// The applicable-dimension geometric-mean aggregate, rounded to the 0–10000
-/// integer signal (metric-semantics v5, [FR-QM-06], [FR-QM-14], [ADR-12],
+/// integer signal (metric-semantics v6, [FR-QM-06], [FR-QM-14], [ADR-12],
 /// [ADR-21], [ADR-08]).
 ///
-/// `original` are the five original metrics in canonical order; `new_dims` are
-/// the **applicable** new dimensions in canonical order (Cohesion/Focus omitted
-/// when they dropped out, [ADR-21]). The reduction:
+/// `original` are the **applicable** original metrics in canonical order
+/// (Modularity omitted when not applicable, [CR-156] —
+/// [`applicable_original_dimensions`]); `new_dims` are the **applicable** new
+/// dimensions in canonical order (Cohesion/Focus omitted when they dropped out,
+/// [ADR-21]). The reduction:
 ///
-/// 1. **Zero short-circuit (original five only, [ADR-21]).** If any *original*
-///    metric is `0.0`, the signal is `0` — a hard zero in a systemic-pathology
-///    metric collapses the score *and* keeps `ln(0) = −∞` out of the reduction.
-///    The new five are floored at [`extended::DIMENSION_FLOOR`], never `0`, so
-///    they never trigger this — they drag but never alone collapse the signal.
+/// 1. **Zero short-circuit (applicable original metrics only, [ADR-21]).** If
+///    any applicable *original* metric is `0.0`, the signal is `0` — a hard zero
+///    in a systemic-pathology metric collapses the score *and* keeps
+///    `ln(0) = −∞` out of the reduction. A not-applicable Modularity is not in
+///    `original`, so it cannot trigger this ([CR-156]). The new five are floored
+///    at [`extended::DIMENSION_FLOOR`], never `0`, so they never trigger it —
+///    they drag but never alone collapse the signal.
 /// 2. **Geometric mean over the applicable dimensions.** Sum `ln nᵢ` over the
-///    original five then the applicable new dims, in canonical order, and divide
-///    by the *count of applicable dimensions* (10, or 9/8 when Cohesion/Focus
-///    drop out) — a deterministic, honest n-dimension mean ([FR-QM-14],
-///    [UAT-QM-10]).
+///    applicable original metrics then the applicable new dims, in canonical
+///    order, and divide by the *count of applicable dimensions* (10, or fewer as
+///    Modularity, Cohesion and Focus drop out) — a deterministic, honest
+///    n-dimension mean ([FR-QM-14], [UAT-QM-10]).
 ///
 /// The empty-graph sentinel is handled by the caller ([ADR-12]); this function
 /// is only reached for a non-empty production graph.
@@ -1104,17 +1180,20 @@ fn redundancy(functions: &[&FunctionMetricRow]) -> MetricValue {
 /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
-fn aggregate(original: [f64; ORIGINAL_METRIC_COUNT], new_dims: &[f64]) -> u32 {
-    // Zero short-circuit scoped to the original five (ADR-21): a floored new
-    // dimension can never be 0, so only an original hard zero collapses here.
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+fn aggregate(original: &[f64], new_dims: &[f64]) -> u32 {
+    // Zero short-circuit scoped to the applicable original metrics (ADR-21,
+    // CR-156): a floored new dimension can never be 0, and a not-applicable
+    // Modularity is not in `original`, so only an applicable original hard zero
+    // collapses here.
     if original.contains(&0.0) {
         return 0;
     }
-    // Log-space sum in canonical order: original five, then the applicable new
-    // dimensions. The denominator is the number of dimensions that actually
-    // entered (applicability drop-out, FR-QM-14).
+    // Log-space sum in canonical order: applicable originals, then the
+    // applicable new dimensions. The denominator is the number of dimensions
+    // that actually entered (applicability drop-out, FR-QM-14).
     let ln_sum: f64 = original.iter().chain(new_dims.iter()).map(|n| n.ln()).sum();
-    let count = (ORIGINAL_METRIC_COUNT + new_dims.len()) as f64;
+    let count = (original.len() + new_dims.len()) as f64;
     let signal = ((ln_sum / count).exp() * 10_000.0).round();
     // exp of a non-positive mean never exceeds 1.0 (and the floored inputs keep it
     // well above 0), but clamp both ends defensively so the persisted CHECK

@@ -70,8 +70,9 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvaluatedSetAbsence,
     EvolutionPoint, EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta,
-    MetricRegression, MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult,
-    SessionInfo, SignalAbsence, TemporalTier, VerifyCensus, VerifyReport, Violation,
+    MetricRegression, MetricSnapshot, MetricValue, ModularityNotApplicable, QualityReadout,
+    RulesReport, ScanResult, SessionInfo, SignalAbsence, TemporalTier, VerifyCensus, VerifyReport,
+    Violation,
 };
 use crate::runtime::Runtime;
 
@@ -1985,6 +1986,13 @@ fn metric_snapshot_from_row(row: LatestMetricSnapshot) -> MetricSnapshot {
     };
     MetricSnapshot {
         modularity: mv(row.modularity_raw, row.modularity_normalized),
+        // CR-156: only an explicit `0` drops Modularity out; a `NULL` flag is a
+        // row scored under semantics ≤ 5, when Modularity always applied. `m` is
+        // the snapshot's own edge count — the graph Modularity was computed on.
+        modularity_not_applicable: match row.modularity_applicable {
+            Some(false) => ModularityNotApplicable::for_edges(row.edge_count as u64),
+            Some(true) | None => None,
+        },
         acyclicity: mv(row.acyclicity_raw, row.acyclicity_normalized),
         depth: mv(row.depth_raw, row.depth_normalized),
         equality: mv(row.equality_raw, row.equality_normalized),
@@ -2409,6 +2417,9 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         delta,
         freshness: fresh.line(),
         violations,
+        // The drop-out of the very snapshot the signal came from (CR-156), never
+        // re-derived from a second reading of the edge count.
+        modularity_not_applicable: metrics.modularity_not_applicable.clone(),
         violation_count,
         check,
         warnings,

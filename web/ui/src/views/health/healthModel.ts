@@ -278,6 +278,10 @@ export interface MetricRow {
   name: string;
   /** `null` renders a muted `n/a`, never a zero (ADR-21, NFR-CC-04). */
   value: MetricValue | null;
+  /** The server's reason when the dimension is computed but not applicable
+   *  (CR-156: Modularity on too few edges) — rendered in place of a score, with
+   *  the computed `value` still shown beside it; `null` when it applies. */
+  notApplicable: string | null;
 }
 
 /**
@@ -285,7 +289,7 @@ export interface MetricRow {
  * roll-up). `cohesion`/`focus` are `Option` drop-outs carried through as `null`.
  */
 export function metricRows(m: MetricSnapshot): MetricRow[] {
-  return [
+  const rows: Omit<MetricRow, "notApplicable">[] = [
     { name: "Modularity", value: m.modularity },
     { name: "Acyclicity", value: m.acyclicity },
     { name: "Depth", value: m.depth },
@@ -297,6 +301,10 @@ export function metricRows(m: MetricSnapshot): MetricRow[] {
     { name: "Focus", value: m.focus },
     { name: "Uniqueness", value: m.uniqueness },
   ];
+  return rows.map((r) => ({
+    ...r,
+    notApplicable: r.name === "Modularity" ? (m.modularity_not_applicable?.reason ?? null) : null,
+  }));
 }
 
 /** One structural dimension's drill-down source, projected from the scan. */

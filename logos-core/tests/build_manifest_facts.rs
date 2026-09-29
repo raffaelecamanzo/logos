@@ -128,12 +128,15 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// Take a member store back to what the release before migration 22 left on
 /// disk: both build tables absent (their one index goes with them), migration
 /// 22 unrecorded, `user_version` 21 — and so no extraction marker. The exact
-/// inverse of migration 22, which is two `CREATE TABLE`s and one index; the
-/// next [`Engine::start`] re-applies it, as it does on a real upgrade.
+/// inverse of migration 22, which is two `CREATE TABLE`s and one index, and of
+/// migration 23 (S-487), which only adds `metric_snapshots.modularity_applicable`;
+/// the next [`Engine::start`] re-applies both, as it does on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE build_artifacts; DROP TABLE build_manifests; \
+        "ALTER TABLE metric_snapshots DROP COLUMN modularity_applicable; \
+         DELETE FROM schema_versions WHERE version = 23; \
+         DROP TABLE build_artifacts; DROP TABLE build_manifests; \
          DELETE FROM schema_versions WHERE version = 22; \
          DELETE FROM project_metadata WHERE key = '{BUILD_FACTS_EXTRACTED_KEY}'; \
          PRAGMA user_version = 21;"
@@ -358,7 +361,7 @@ fn only_a_full_walk_marks_an_upgraded_members_build_facts_extracted() {
         Engine::start(root).expect("engine starts").index();
         downgrade_to_v21(root);
 
-        let engine = Engine::start(root).expect("the upgraded store opens at v22");
+        let engine = Engine::start(root).expect("the upgraded store opens at the latest version");
         let rt = engine.runtime().unwrap();
         assert!(manifests(rt).is_empty(), "migration 22 creates the tables empty");
         assert_eq!(extraction_marker(root), None, "an upgraded store records no extraction");

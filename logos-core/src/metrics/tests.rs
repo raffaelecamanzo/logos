@@ -325,13 +325,16 @@ fn unbound_directory_membership_follows_the_partition() {
     );
 }
 
-/// The metric-semantics version pins at 5 ([CR-087], [ADR-61]): narrowing
-/// Acyclicity to cross-module cycles is a semantics change, so the constant
-/// advanced 4 → 5, and the first post-upgrade gate auto-re-baselines
-/// ([FR-GV-10]) exactly as the v2/v3/v4 bumps did.
+/// The metric-semantics version pins at 6 ([CR-156]): Modularity dropping out
+/// of a graph with fewer than five edges changes what the signal measures for
+/// every such graph, so the constant advanced 5 → 6 and the first post-upgrade
+/// gate auto-re-baselines ([FR-GV-10]) exactly as the v2..v5 bumps did (v5 was
+/// [CR-087]'s cross-module Acyclicity, [ADR-61]).
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 #[test]
-fn metric_semantics_version_is_v5() {
-    assert_eq!(super::METRIC_SEMANTICS_VERSION, 5);
+fn metric_semantics_version_is_v6() {
+    assert_eq!(super::METRIC_SEMANTICS_VERSION, 6);
 }
 
 // ── FR-QM-03 / UAT-QM-03: depth over the module-rollup condensation ───────────
@@ -736,7 +739,14 @@ fn identical_input_yields_an_identical_pinned_signal() {
     // the module graph lifted its normalized 8/11 → 4/5 (depth 3 → 2) — a
     // metric-semantics change, not a regression (the gate auto-re-baselines,
     // FR-GV-10).
-    assert_eq!(first.aggregate_signal, Some(8311));
+    //
+    // Metric-semantics v6 (CR-156): the fixture has m = 4 edges, below the
+    // five Modularity needs, so Modularity is not applicable — its computed Q
+    // stays on the snapshot but leaves the mean, which now spans SEVEN
+    // dimensions: exp(ln(1·4/5·38/48·3/4·1·1·1)/7)·10000 ≈ 8991 (v5: 8311).
+    assert_eq!(first.modularity.raw, 0.21875, "the computed Q is kept");
+    assert!(first.modularity_not_applicable.is_some(), "m = 4 < 5 (CR-156)");
+    assert_eq!(first.aggregate_signal, Some(8991));
     // The applicable-dimension provenance: Cohesion/Focus are n/a here.
     assert!(
         first.cohesion.is_none(),
@@ -1331,21 +1341,32 @@ fn empty_graph_sentinel_is_unchanged_by_the_extended_set() {
 fn aggregate_denominator_follows_applicability_drop_out() {
     // No Class/Struct → Cohesion and Focus both n/a; the three other new dims
     // are all 1.0 (no nesting/brain/clone inputs), so the signal equals the
-    // five-original geometric mean re-meaned over eight dimensions.
+    // five-original geometric mean re-meaned over eight dimensions. Five edges,
+    // so Modularity applies (CR-156 drops it below 5) and only Cohesion/Focus —
+    // the drop-out this test is about — leave the denominator.
     let nodes = [
         node(1, "a", NodeKind::Function, Some("x/a.rs")),
         node(2, "b", NodeKind::Function, Some("x/b.rs")),
+        node(3, "c", NodeKind::Function, Some("x/c.rs")),
     ];
-    let edges = [edge(1, 2, EdgeKind::Calls)];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 3, EdgeKind::Calls),
+        edge(1, 3, EdgeKind::Calls),
+        edge(2, 1, EdgeKind::Calls),
+        edge(3, 2, EdgeKind::Calls),
+    ];
     let funcs = [
         func(1, Some(2), Some(false), Some(false)),
         func(2, Some(3), Some(false), Some(false)),
+        func(3, Some(4), Some(false), Some(false)),
     ];
     let r = run(&nodes, &edges, &funcs);
     assert!(
         r.cohesion.is_none() && r.focus.is_none(),
         "class-less → 8 dimensions"
     );
+    assert_eq!(r.modularity_not_applicable, None, "m = 5 → Modularity applies");
 
     // Recompute the expected signal directly from the five original normalized
     // values plus three 1.0 dimensions, over eight (NFR-RA-06 cross-check).
@@ -1373,15 +1394,24 @@ fn aggregate_denominator_follows_applicability_drop_out() {
 fn aggregate_nine_dimension_mean_when_only_cohesion_drops_out() {
     // A struct container (Focus applies) with one production method; no Class, so
     // Cohesion is n/a. Nesting/Conciseness/Uniqueness are all 1.0 (clean inputs).
-    let nodes = [
+    // The method calls five free functions so the dependency graph has five
+    // edges and Modularity applies (CR-156 drops it below 5): Cohesion is the
+    // only drop-out, which is what this test pins.
+    let mut nodes = vec![
         node(1, "S", NodeKind::Struct, Some("x/a.rs")),
         node(2, "m", NodeKind::Method, Some("x/a.rs")),
     ];
-    let edges = [edge(1, 2, EdgeKind::Contains)];
-    let funcs = [func(2, Some(2), Some(false), Some(false))];
+    let mut edges = vec![edge(1, 2, EdgeKind::Contains)];
+    let mut funcs = vec![func(2, Some(2), Some(false), Some(false))];
+    for id in 3..=7 {
+        nodes.push(node(id, &format!("f{id}"), NodeKind::Function, Some("y/f.rs")));
+        edges.push(edge(2, id, EdgeKind::Calls));
+        funcs.push(func(id, Some(2), Some(false), Some(false)));
+    }
     let r = run(&nodes, &edges, &funcs);
     assert!(r.cohesion.is_none(), "no Class → Cohesion drops out");
     let focus = r.focus.expect("a Struct → Focus applies (k = 9)");
+    assert_eq!(r.modularity_not_applicable, None, "m = 5 → Modularity applies");
 
     // Direct k = 9 cross-check: original five + Focus + three 1.0 new dims.
     let dims = [
@@ -1811,5 +1841,218 @@ fn promoted_broker_vertices_leave_the_metric_snapshot_byte_identical() {
         render(&before),
         "promoting a broker topic moved the gated signal — the file-less Topic vertex \
          is polluting the `<unbound>` community and depressing modularity"
+    );
+}
+
+
+// ── CR-156: Modularity drops out of a graph too small for community structure ─
+
+/// `m` edges, every one crossing from `alpha` into `beta` (the CR-156 shape: a
+/// model depending on its enum), over four vertices per side; every function is
+/// clean (CC 2, live, unique) so the only structure scored is the crossing.
+fn crossing_fixture(
+    m: i64,
+) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let mut nodes = Vec::new();
+    let mut functions = Vec::new();
+    for i in 1..=5 {
+        nodes.push(node(i, &format!("a{i}"), NodeKind::Function, Some(&format!("alpha/a{i}.rs"))));
+        nodes.push(node(10 + i, &format!("b{i}"), NodeKind::Function, Some(&format!("beta/b{i}.rs"))));
+        functions.push(func(i, Some(2), Some(false), Some(false)));
+        functions.push(func(10 + i, Some(2), Some(false), Some(false)));
+    }
+    let edges = (1..=m).map(|i| edge(i, 10 + i, EdgeKind::Calls)).collect();
+    (nodes, edges, functions)
+}
+
+/// The geometric mean over `dims`, rounded to the 0–10000 signal — the direct
+/// cross-check every drop-out test compares the engine against.
+fn geometric_signal(dims: &[f64]) -> u32 {
+    let ln_sum: f64 = dims.iter().map(|n| n.ln()).sum();
+    ((ln_sum / dims.len() as f64).exp() * 10_000.0).round() as u32
+}
+
+/// m = 1, 2, 3 and 4 edges all crossing two directories: Modularity is not
+/// applicable, keeps its computed Q = −0.5 / normalized 0, and the signal is the
+/// geometric mean of the SEVEN remaining applicable dimensions (the fixture has
+/// no class, so Cohesion/Focus are out too) — never 0 through Modularity
+/// ([CR-156], [FR-QM-01], [FR-QM-06]).
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
+/// [FR-QM-06]: ../../../docs/specs/requirements/FR-QM-06.md
+#[test]
+fn modularity_is_not_applicable_below_five_edges() {
+    for m in 1..=4_i64 {
+        let (nodes, edges, functions) = crossing_fixture(m);
+        let r = run(&nodes, &edges, &functions);
+        assert_eq!(r.edge_count, m as u64, "m = {m}: the graph Modularity is computed on");
+        assert_eq!(
+            r.modularity_not_applicable,
+            crate::models::quality::ModularityNotApplicable::for_edges(m as u64),
+            "m = {m} < 5 → Modularity is not applicable"
+        );
+        let na = r.modularity_not_applicable.as_ref().expect("m < 5 drops out");
+        assert_eq!((na.edges, na.min_edges), (m as u64, 5), "the reason carries m and the threshold");
+        assert_eq!(
+            na.reason,
+            format!("{m} of 5 dependency edges — too few for community structure")
+        );
+        // The computed values are kept, not blanked: an all-crossing
+        // two-community graph is Q = −0.5 → normalized exactly 0.
+        assert_eq!(r.modularity.raw, -0.5, "m = {m}: the computed Q is kept");
+        assert_eq!(r.modularity.normalized, 0.0, "m = {m}: the computed normalized value is kept");
+
+        assert!(r.cohesion.is_none() && r.focus.is_none(), "class-less fixture");
+        let expected = geometric_signal(&[
+            r.acyclicity.normalized,
+            r.depth.normalized,
+            r.equality.normalized,
+            r.redundancy.normalized,
+            r.nesting.normalized,
+            r.conciseness.normalized,
+            r.uniqueness.normalized,
+        ]);
+        assert_eq!(
+            r.aggregate_signal,
+            Some(expected),
+            "m = {m}: the signal is the mean of the remaining seven dimensions"
+        );
+        assert_ne!(r.aggregate_signal, Some(0), "m = {m}: never 0 through Modularity");
+    }
+}
+
+/// A non-empty graph with no edges (m = 0) drops Modularity the same way: its
+/// computed neutral 1/3 is kept on the snapshot but no longer enters the mean,
+/// so gaining a first edge can never *raise* the signal ([CR-156] §3.2 point 2).
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+#[test]
+fn modularity_is_not_applicable_on_an_edgeless_graph() {
+    let (nodes, edges, functions) = crossing_fixture(0);
+    let r = run(&nodes, &edges, &functions);
+    assert!(!r.empty, "ten vertices: not the empty sentinel");
+    assert_eq!(r.edge_count, 0);
+    let na = r.modularity_not_applicable.as_ref().expect("m = 0 is inside the rule");
+    assert_eq!((na.edges, na.min_edges), (0, 5));
+    assert_eq!(r.modularity.normalized, 0.5 / 1.5, "the computed 1/3 is kept");
+    let expected = geometric_signal(&[
+        r.acyclicity.normalized,
+        r.depth.normalized,
+        r.equality.normalized,
+        r.redundancy.normalized,
+        r.nesting.normalized,
+        r.conciseness.normalized,
+        r.uniqueness.normalized,
+    ]);
+    assert_eq!(r.aggregate_signal, Some(expected), "1/3 no longer enters the mean");
+}
+
+/// m = 5 all-crossing edges sits AT the threshold: Modularity applies, normalizes
+/// to 0, and the [ADR-12] short-circuit still collapses the signal — the
+/// anti-gaming guard is intact above the threshold ([CR-156]).
+///
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+#[test]
+fn modularity_at_five_edges_applies_and_still_short_circuits() {
+    let (nodes, edges, functions) = crossing_fixture(5);
+    let r = run(&nodes, &edges, &functions);
+    assert_eq!(r.edge_count, 5);
+    assert_eq!(r.modularity_not_applicable, None, "m = 5 → applicable");
+    assert_eq!(r.modularity.normalized, 0.0, "all-crossing → normalized 0");
+    assert_eq!(r.aggregate_signal, Some(0), "an applicable zero still short-circuits");
+}
+
+/// A graph with m ≥ 5 scores exactly as metric-semantics v5 did: every
+/// dimension's raw/normalized bits and the signal below were captured by running
+/// this fixture through the **unchanged v5 engine** before CR-156 was
+/// implemented, so the pin is the old code's output, not a re-derivation of it
+/// ([CR-156] §6 AC 3, [ADR-08]).
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
+#[test]
+fn a_graph_at_or_above_five_edges_is_byte_identical_to_semantics_v5() {
+    let nodes = [
+        node(1, "a1", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "a2", NodeKind::Function, Some("alpha/b.rs")),
+        node(3, "b1", NodeKind::Function, Some("beta/c.rs")),
+        node(4, "b2", NodeKind::Method, Some("beta/d.rs")),
+        node(5, "g1", NodeKind::Function, Some("gamma/e.rs")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Calls),
+        edge(2, 1, EdgeKind::Calls),
+        edge(3, 4, EdgeKind::Calls),
+        edge(1, 3, EdgeKind::Imports),
+        edge(3, 5, EdgeKind::Calls),
+        edge(4, 5, EdgeKind::Calls),
+    ];
+    let functions = [
+        func(1, Some(3), Some(false), Some(false)),
+        func(2, Some(5), Some(false), Some(true)),
+        func(3, Some(2), Some(false), Some(false)),
+        func(4, Some(2), Some(false), Some(false)),
+        func(5, Some(1), Some(false), Some(false)),
+    ];
+    let r = run(&nodes, &edges, &functions);
+    assert_eq!(r.edge_count, 6, "m = 6 ≥ 5");
+    assert_eq!(r.modularity_not_applicable, None, "m ≥ 5 → applicable");
+
+    let bits = |v: &crate::models::quality::MetricValue| (v.raw.to_bits(), v.normalized.to_bits());
+    assert_eq!(bits(&r.modularity), (0x3fbffffffffffffb, 0x3fdaaaaaaaaaaaa9));
+    assert_eq!(bits(&r.acyclicity), (0x0000000000000000, 0x3ff0000000000000));
+    assert_eq!(bits(&r.depth), (0x4008000000000000, 0x3fe745d1745d1746));
+    assert_eq!(bits(&r.equality), (0x3fd1b91b91b91b94, 0x3fe7237237237236));
+    assert_eq!(bits(&r.redundancy), (0x3fc999999999999a, 0x3fe999999999999a));
+    assert_eq!(bits(&r.nesting), (0x0000000000000000, 0x3ff0000000000000));
+    assert_eq!(bits(&r.conciseness), (0x0000000000000000, 0x3ff0000000000000));
+    assert_eq!(bits(&r.uniqueness), (0x0000000000000000, 0x3ff0000000000000));
+    assert_eq!(r.aggregate_signal, Some(8044), "the v5 signal, unchanged under v6");
+}
+
+/// A hard zero on Acyclicity, Depth, Equality or Redundancy still collapses the
+/// signal whether or not Modularity applies: only a not-applicable Modularity
+/// leaves the short-circuit set ([CR-156] §3.2 point 5, [ADR-12]). None of the
+/// four reaches exactly 0 from a real graph (each has a positive floor in
+/// practice), so the guard is exercised at the aggregate itself.
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+#[test]
+fn a_zero_on_the_other_originals_short_circuits_at_any_m() {
+    use crate::models::quality::MetricValue;
+    let v = |normalized: f64| MetricValue { raw: 0.0, normalized };
+    let new_dims = [1.0, 1.0, 1.0];
+    for zeroed in 0..4 {
+        let mut others = [v(0.9), v(0.9), v(0.9), v(0.9)];
+        others[zeroed] = v(0.0);
+        let [a, d, e, r] = &others;
+        for modularity_applicable in [true, false] {
+            let originals = super::applicable_original_dimensions(
+                &v(0.5),
+                modularity_applicable,
+                [a, d, e, r],
+            );
+            assert_eq!(
+                super::aggregate(&originals, &new_dims),
+                0,
+                "a zero at original position {} short-circuits (modularity applicable: \
+                 {modularity_applicable})",
+                zeroed + 1
+            );
+        }
+    }
+    // …and a zero Modularity short-circuits only while it applies.
+    let others = [v(0.9), v(0.9), v(0.9), v(0.9)];
+    let [a, d, e, r] = &others;
+    let applicable = super::applicable_original_dimensions(&v(0.0), true, [a, d, e, r]);
+    let dropped = super::applicable_original_dimensions(&v(0.0), false, [a, d, e, r]);
+    assert_eq!(super::aggregate(&applicable, &new_dims), 0);
+    assert_eq!(dropped.len(), 4, "a not-applicable Modularity leaves the set");
+    assert_eq!(
+        super::aggregate(&dropped, &new_dims),
+        geometric_signal(&[0.9, 0.9, 0.9, 0.9, 1.0, 1.0, 1.0])
     );
 }

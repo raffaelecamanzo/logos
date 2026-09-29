@@ -26,6 +26,7 @@ function mv(n: number): MetricValue {
 function snapshot(over: Partial<MetricSnapshot> = {}): MetricSnapshot {
   return {
     modularity: mv(0.9),
+    modularity_not_applicable: null,
     acyclicity: mv(0.8),
     depth: mv(0.7),
     equality: mv(0.6),
@@ -118,6 +119,16 @@ describe("metricRows", () => {
     expect(rows.find((r) => r.name === "Cohesion")?.value).toBeNull();
     expect(rows.find((r) => r.name === "Focus")?.value).toBeNull();
     expect(rows.find((r) => r.name === "Uniqueness")?.value).toEqual(mv(0.7));
+  });
+  it("marks a CR-156 Modularity drop-out with its reason while keeping the computed pair", () => {
+    const na = { edges: 3, min_edges: 5, reason: "3 of 5 dependency edges — too few for community structure" };
+    const rows = metricRows(snapshot({ modularity: mv(0), modularity_not_applicable: na }));
+    const modularity = rows.find((r) => r.name === "Modularity");
+    expect(modularity?.notApplicable).toBe("3 of 5 dependency edges — too few for community structure");
+    expect(modularity?.value).toEqual(mv(0));
+    // Only Modularity carries the reason; an applicable dimension carries none.
+    expect(rows.filter((r) => r.notApplicable !== null).map((r) => r.name)).toEqual(["Modularity"]);
+    expect(metricRows(snapshot()).every((r) => r.notApplicable === null)).toBe(true);
   });
 });
 

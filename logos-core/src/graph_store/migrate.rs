@@ -2503,6 +2503,90 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 22");
     }
 
+    /// Migration 23 ([CR-156], S-487) adds `metric_snapshots.modularity_applicable`
+    /// and nothing else: every pre-migration snapshot row survives byte for byte
+    /// with the new column `NULL` — which the read path takes as **applicable**,
+    /// since those rows were scored under metric-semantics ≤ 5, when Modularity
+    /// always applied. The flag admits 0/1 only.
+    ///
+    /// [CR-156]: ../../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    #[test]
+    fn migration_23_adds_modularity_applicable_and_pre_migration_rows_read_applicable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..22]).unwrap();
+        // A v5 snapshot, every CR-005 column populated, Cohesion dropped out.
+        conn.execute(
+            "INSERT INTO metric_snapshots (
+                 id, created_at, node_count, edge_count, function_count,
+                 test_function_count, metric_version, empty,
+                 modularity_raw, modularity_normalized,
+                 acyclicity_raw, acyclicity_normalized,
+                 depth_raw, depth_normalized,
+                 equality_raw, equality_normalized,
+                 redundancy_raw, redundancy_normalized,
+                 nesting_raw, nesting_normalized,
+                 conciseness_raw, conciseness_normalized,
+                 cohesion_raw, cohesion_normalized, cohesion_applicable,
+                 focus_raw, focus_normalized, focus_applicable,
+                 uniqueness_raw, uniqueness_normalized,
+                 thresholds_hash, aggregate_signal)
+             VALUES (1, 1000, 14, 1, 9, 2, 5, 0,
+                     -0.5, 0.0, 0.0, 1.0, 2.0, 0.8, 0.1, 0.9, 0.0, 1.0,
+                     0.0, 1.0, 0.0, 1.0,
+                     NULL, NULL, 0,
+                     0.0, 1.0, 1,
+                     0.0, 1.0,
+                     'h', 0)",
+            [],
+        )
+        .unwrap();
+        let before = read_table(&conn, "metric_snapshots", "id");
+        assert!(
+            conn.query_row("SELECT modularity_applicable FROM metric_snapshots", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .is_err(),
+            "the flag does not exist at v22"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..23]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 23, "22 → 23, exactly one step");
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 23", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 23 is recorded once and never re-applied");
+
+        // Every pre-migration column verbatim; the one new column is NULL.
+        let after = read_table(&conn, "metric_snapshots", "id");
+        assert_eq!(after.len(), before.len());
+        for (old, new) in before.iter().zip(&after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one column added");
+            assert_eq!(&new[..old.len()], &old[..], "every existing column verbatim");
+            assert_eq!(new[old.len()], "NULL", "a pre-migration row carries no flag");
+        }
+
+        // A v6 not-applicable row round-trips; the CHECK admits 0/1 only.
+        conn.execute(
+            "UPDATE metric_snapshots SET modularity_applicable = 0 WHERE id = 1",
+            [],
+        )
+        .expect("0 is admitted");
+        conn.execute(
+            "UPDATE metric_snapshots SET modularity_applicable = 1 WHERE id = 1",
+            [],
+        )
+        .expect("1 is admitted");
+        assert!(
+            conn.execute(
+                "UPDATE metric_snapshots SET modularity_applicable = 2 WHERE id = 1",
+                [],
+            )
+            .is_err(),
+            "modularity_applicable is constrained to 0/1"
+        );
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

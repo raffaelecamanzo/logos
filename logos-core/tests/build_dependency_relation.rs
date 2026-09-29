@@ -233,12 +233,15 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// Take a member store back to what the release before migration 22 left on
 /// disk: both build tables absent (their one index goes with them), migration
 /// 22 unrecorded, `user_version` 21 — and so no extraction marker. The exact
-/// inverse of migration 22; the next open re-applies it, as a real upgrade
-/// does. Duplicated from `build_manifest_facts.rs` (no shared test module).
+/// inverse of migrations 22 and 23 (23, S-487, only adds
+/// `metric_snapshots.modularity_applicable`); the next open re-applies both, as
+/// a real upgrade does. Duplicated from `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE build_artifacts; DROP TABLE build_manifests; \
+        "ALTER TABLE metric_snapshots DROP COLUMN modularity_applicable; \
+         DELETE FROM schema_versions WHERE version = 23; \
+         DROP TABLE build_artifacts; DROP TABLE build_manifests; \
          DELETE FROM schema_versions WHERE version = 22; \
          DELETE FROM project_metadata WHERE key = '{BUILD_FACTS_EXTRACTED_KEY}'; \
          PRAGMA user_version = 21;"
@@ -258,7 +261,7 @@ fn user_version(member: &Path) -> i64 {
 /// release before migration 22 — `lib`, `app` building against it, and a
 /// manifest-less `docs`:
 ///
-/// 1. opened at v22, every member is **unread** with the reason "build facts
+/// 1. opened at the latest version (v23), every member is **unread** with the reason "build facts
 ///    not yet extracted", never "read, 0 manifests" — and the section is
 ///    present, because an unread member could hold manifests nobody saw;
 /// 2. a partial sync naming `app`'s pom records its facts but not the marker,
@@ -292,7 +295,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 22, "{name} was opened at v22");
+        assert_eq!(user_version(&root.join(name)), 23, "{name} was opened at the latest version (v23)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

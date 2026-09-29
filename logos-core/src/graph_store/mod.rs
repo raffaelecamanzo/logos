@@ -663,8 +663,9 @@ pub struct MetricSnapshotRow {
 }
 
 /// The most-recent persisted `metric_snapshots` row with the **full** CR-005
-/// dimension set — every persisted dimension (all ten) plus the two
-/// applicability flags ([FR-QM-09]..[FR-QM-14]).
+/// dimension set — every persisted dimension (all ten) plus the three
+/// applicability flags: Cohesion's and Focus's ([FR-QM-09]..[FR-QM-14]) and
+/// Modularity's (migration 23, CR-156).
 ///
 /// Unlike [`MetricSnapshotRow`] — which deliberately surfaces only the original
 /// five for the gate/evolution series — this read model carries the structural
@@ -700,6 +701,13 @@ pub struct LatestMetricSnapshot {
     pub aggregate_signal: Option<i64>,
     pub modularity_raw: f64,
     pub modularity_normalized: f64,
+    /// `Some(false)` when Modularity was not applicable ([CR-156]: fewer than
+    /// five edges) — its value columns are still populated; `Some(true)` when it
+    /// applied; `None` on a row persisted before migration 23, which the read
+    /// path takes as applicable.
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    pub modularity_applicable: Option<bool>,
     pub acyclicity_raw: f64,
     pub acyclicity_normalized: f64,
     pub depth_raw: f64,
@@ -763,6 +771,13 @@ pub struct NewMetricSnapshot<'a> {
     pub modularity_raw: f64,
     /// Normalized modularity.
     pub modularity_normalized: f64,
+    /// `Some(false)` when Modularity was not applicable ([CR-156]: fewer than
+    /// [`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES) edges) —
+    /// the raw/normalized pair above is persisted either way; `Some(true)` when
+    /// it applied. `None` persists `NULL`, the pre-migration-23 reading.
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    pub modularity_applicable: Option<bool>,
     /// Raw cycle count.
     pub acyclicity_raw: f64,
     /// Normalized acyclicity.
@@ -3249,7 +3264,7 @@ impl GraphStore for SqliteGraphStore {
                     conciseness_raw, conciseness_normalized, \
                     cohesion_raw, cohesion_normalized, cohesion_applicable, \
                     focus_raw, focus_normalized, focus_applicable, \
-                    uniqueness_raw, uniqueness_normalized \
+                    uniqueness_raw, uniqueness_normalized, modularity_applicable \
              FROM metric_snapshots ORDER BY id DESC LIMIT 1",
         )?;
         stmt.query_row([], |row| {
@@ -3287,6 +3302,7 @@ impl GraphStore for SqliteGraphStore {
                 focus_applicable: opt_bool(26)?,
                 uniqueness_raw: row.get(27)?,
                 uniqueness_normalized: row.get(28)?,
+                modularity_applicable: opt_bool(29)?,
             })
         })
         .optional()
@@ -4284,10 +4300,10 @@ impl BatchWriter<'_> {
                   cohesion_raw, cohesion_normalized, cohesion_applicable, \
                   focus_raw, focus_normalized, focus_applicable, \
                   uniqueness_raw, uniqueness_normalized, \
-                  thresholds_hash, aggregate_signal) \
+                  thresholds_hash, aggregate_signal, modularity_applicable) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
                          ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, \
-                         ?30, ?31, ?32)",
+                         ?30, ?31, ?32, ?33)",
                 rusqlite::params![
                     snapshot.created_at,
                     snapshot.commit_sha,
@@ -4321,6 +4337,7 @@ impl BatchWriter<'_> {
                     snapshot.uniqueness_normalized,
                     snapshot.thresholds_hash,
                     snapshot.aggregate_signal,
+                    snapshot.modularity_applicable.map(i64::from),
                 ],
             )
             .context("inserting metric snapshot")?;
