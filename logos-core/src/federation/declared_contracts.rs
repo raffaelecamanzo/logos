@@ -680,19 +680,7 @@ pub fn derive(
 ) -> DeclaredContractRelation {
     let docs = documents(operations);
     let standing = |member: &str| Standing::of(kinds.get(member).copied());
-
-    let mut accounting = DocumentAccounting { documents: docs.len() as u64, ..Default::default() };
-    for d in &docs {
-        let bucket = match (standing(&d.member), d.implementation()) {
-            (Standing::Out, _) => &mut accounting.documentation,
-            (Standing::StandIn, _) => &mut accounting.mock,
-            (Standing::Consumer, Implementation::Own) => &mut accounting.own,
-            (Standing::Consumer, Implementation::Vendored) => &mut accounting.vendored,
-            (Standing::Consumer, Implementation::Partial) => &mut accounting.partial,
-            (Standing::Consumer, Implementation::Unjudged) => &mut accounting.unjudged,
-        };
-        *bucket += 1;
-    }
+    let accounting = account(&docs, standing);
 
     // The members a document can identify: an ordinary member's own specs.
     let own: Vec<&Document> = docs
@@ -712,73 +700,118 @@ pub fn derive(
         .collect();
     let keysets: Vec<&BTreeSet<OperationKey>> = pool.iter().map(|d| &d.keys).collect();
     let component = copy_components(&keysets);
+    let groups = name_groups(&pool, &component, &mut title);
 
-    let mut groups: BTreeMap<usize, Vec<&Document>> = BTreeMap::new();
-    for (i, d) in pool.iter().enumerate() {
-        groups.entry(component[i]).or_default().push(d);
-    }
-    // Every group's id and name, whether or not anyone declares it yet.
-    let mut named: BTreeMap<usize, (ExternalId, String, Vec<ExternalCopy>)> = BTreeMap::new();
-    for (c, copies) in &groups {
-        let copies: Vec<ExternalCopy> = copies
-            .iter()
-            .map(|d| ExternalCopy {
-                member: d.member.clone(),
-                document: d.path.clone(),
-                title: title(&d.member, &d.path),
-            })
-            .collect();
-        let labels: Vec<(&str, Option<&str>)> =
-            copies.iter().map(|c| (c.document.as_str(), c.title.as_deref())).collect();
-        let name = external_name(&labels);
-        // `pool` is in `(member, path)` order, so a group's first copy is its
-        // smallest.
-        let id = ExternalId::of(&copies[0].member, &copies[0].document);
-        named.insert(*c, (id, name, copies));
-    }
-
-    let mut contracts = Vec::new();
-    let mut collisions = Vec::new();
-    let mut resolved_ties = Vec::new();
-    let mut declared_by: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
-    let mut stand_ins: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
-    for (i, d) in pool.iter().enumerate() {
+    let mut declared = Declarations::default();
+    for (d, group) in pool.iter().zip(&component) {
         match standing(&d.member) {
-            Standing::StandIn => {
-                stand_ins.entry(component[i]).or_default().insert(d.member.clone());
-                continue;
+            Standing::StandIn => declared.stand_in(*group, d),
+            Standing::Out => {}
+            Standing::Consumer if d.implementation() == Implementation::Vendored => {
+                declared.declare(d, *group, &own, &groups);
             }
-            Standing::Out => continue,
             Standing::Consumer => {}
         }
-        if d.implementation() != Implementation::Vendored {
-            continue;
+    }
+    declared.finish(accounting, groups)
+}
+
+/// File every document into exactly one [`DocumentAccounting`] bucket.
+fn account(docs: &[Document], standing: impl Fn(&str) -> Standing) -> DocumentAccounting {
+    let mut accounting = DocumentAccounting { documents: docs.len() as u64, ..Default::default() };
+    for d in docs {
+        let bucket = match (standing(&d.member), d.implementation()) {
+            (Standing::Out, _) => &mut accounting.documentation,
+            (Standing::StandIn, _) => &mut accounting.mock,
+            (Standing::Consumer, Implementation::Own) => &mut accounting.own,
+            (Standing::Consumer, Implementation::Vendored) => &mut accounting.vendored,
+            (Standing::Consumer, Implementation::Partial) => &mut accounting.partial,
+            (Standing::Consumer, Implementation::Unjudged) => &mut accounting.unjudged,
+        };
+        *bucket += 1;
+    }
+    accounting
+}
+
+/// One copy group's identity, display name and copies.
+type NamedGroup = (ExternalId, String, Vec<ExternalCopy>);
+
+/// Name every copy group, whether or not anyone declares it yet, keyed by its
+/// component. `pool` is in `(member, path)` order, so a group's first copy is
+/// its smallest and names its [`ExternalId`].
+fn name_groups(
+    pool: &[&Document],
+    component: &[usize],
+    title: &mut impl FnMut(&str, &str) -> Option<String>,
+) -> BTreeMap<usize, NamedGroup> {
+    let mut members: BTreeMap<usize, Vec<&Document>> = BTreeMap::new();
+    for (d, group) in pool.iter().zip(component) {
+        members.entry(*group).or_default().push(d);
+    }
+    members
+        .into_iter()
+        .map(|(group, docs)| {
+            let copies: Vec<ExternalCopy> = docs
+                .iter()
+                .map(|d| ExternalCopy {
+                    member: d.member.clone(),
+                    document: d.path.clone(),
+                    title: title(&d.member, &d.path),
+                })
+                .collect();
+            let labels: Vec<(&str, Option<&str>)> =
+                copies.iter().map(|c| (c.document.as_str(), c.title.as_deref())).collect();
+            let name = external_name(&labels);
+            let id = ExternalId::of(&copies[0].member, &copies[0].document);
+            (group, (id, name, copies))
+        })
+        .collect()
+}
+
+/// The ties of `d` that document identity resolves to `member`: those in which
+/// `member` is **exactly one** of the tied candidates — this document only.
+fn resolve_ties<'a>(d: &'a Document, member: &'a str) -> impl Iterator<Item = ResolvedTie> + 'a {
+    d.ties.iter().filter_map(move |(operation, candidates)| {
+        let mut hits = candidates.iter().filter(|c| c.member == member);
+        match (hits.next(), hits.next()) {
+            (Some(provider), None) => Some(ResolvedTie {
+                holder: d.member.clone(),
+                document: d.path.clone(),
+                operation: operation.clone(),
+                provider: provider.clone(),
+            }),
+            _ => None,
         }
-        let target = match resolve_identity(d, &own) {
+    })
+}
+
+/// The relation as it is accumulated over the copy pool.
+#[derive(Default)]
+struct Declarations {
+    contracts: Vec<DeclaredContract>,
+    collisions: Vec<IdentityCollision>,
+    resolved_ties: Vec<ResolvedTie>,
+    declared_by: BTreeMap<usize, BTreeSet<String>>,
+    stand_ins: BTreeMap<usize, BTreeSet<String>>,
+}
+
+impl Declarations {
+    /// A mock's copy: it stands in for its group and declares nothing.
+    fn stand_in(&mut self, group: usize, d: &Document) {
+        self.stand_ins.entry(group).or_default().insert(d.member.clone());
+    }
+
+    /// A vendored document: a contract to the member document identity names,
+    /// else to its group's external (a collision reported on the way).
+    fn declare(&mut self, d: &Document, group: usize, own: &[&Document], groups: &BTreeMap<usize, NamedGroup>) {
+        let target = match resolve_identity(d, own) {
             Identity::Member { member, path, shared, total } => {
-                // The holder's document's ties that include the identified
-                // member resolve to its one candidate there — this document
-                // only, and only where that member is exactly one candidate.
-                for (operation, candidates) in &d.ties {
-                    if let [provider] = candidates
-                        .iter()
-                        .filter(|c| c.member == member)
-                        .collect::<Vec<_>>()
-                        .as_slice()
-                    {
-                        resolved_ties.push(ResolvedTie {
-                            holder: d.member.clone(),
-                            document: d.path.clone(),
-                            operation: operation.clone(),
-                            provider: (*provider).clone(),
-                        });
-                    }
-                }
+                self.resolved_ties.extend(resolve_ties(d, &member));
                 ContractTarget::Member { member, document: path, shared: shared as u64, total: total as u64 }
             }
             identity => {
                 if let Identity::Collision { members, shared, total } = identity {
-                    collisions.push(IdentityCollision {
+                    self.collisions.push(IdentityCollision {
                         holder: d.member.clone(),
                         document: d.path.clone(),
                         members,
@@ -786,12 +819,12 @@ pub fn derive(
                         total: total as u64,
                     });
                 }
-                declared_by.entry(component[i]).or_default().insert(d.member.clone());
-                let (id, name, _) = &named[&component[i]];
+                self.declared_by.entry(group).or_default().insert(d.member.clone());
+                let (id, name, _) = &groups[&group];
                 ContractTarget::External { external: id.clone(), name: name.clone() }
             }
         };
-        contracts.push(DeclaredContract {
+        self.contracts.push(DeclaredContract {
             holder: d.member.clone(),
             document: d.path.clone(),
             provenance: VENDORED_SPEC,
@@ -800,42 +833,61 @@ pub fn derive(
         });
     }
 
-    // The registry: every group someone declares or stands in for.
-    let mut externals: Vec<NamedExternal> = named
-        .into_iter()
-        .filter_map(|(c, (id, name, copies))| {
-            let declared_by = declared_by.remove(&c).unwrap_or_default();
-            let stand_ins = stand_ins.remove(&c).unwrap_or_default();
-            (!declared_by.is_empty() || !stand_ins.is_empty()).then(|| NamedExternal {
-                id,
-                name,
-                copies,
-                declared_by: declared_by.into_iter().collect(),
-                stand_ins: stand_ins.into_iter().collect(),
+    /// Seal the relation: the registry holds every group someone declares or
+    /// stands in for, and the headline is stated over `accounting`.
+    fn finish(mut self, accounting: DocumentAccounting, groups: BTreeMap<usize, NamedGroup>) -> DeclaredContractRelation {
+        let mut externals: Vec<NamedExternal> = groups
+            .into_iter()
+            .filter_map(|(group, (id, name, copies))| {
+                let declared_by = self.declared_by.remove(&group).unwrap_or_default();
+                let stand_ins = self.stand_ins.remove(&group).unwrap_or_default();
+                (!declared_by.is_empty() || !stand_ins.is_empty()).then(|| NamedExternal {
+                    id,
+                    name,
+                    copies,
+                    declared_by: declared_by.into_iter().collect(),
+                    stand_ins: stand_ins.into_iter().collect(),
+                })
             })
-        })
-        .collect();
-    externals.sort_by(|a, b| a.id.cmp(&b.id));
-    resolved_ties.sort_by(|a, b| {
-        (&a.holder, &a.document, &a.operation).cmp(&(&b.holder, &b.document, &b.operation))
-    });
+            .collect();
+        externals.sort_by(|a, b| a.id.cmp(&b.id));
+        self.resolved_ties.sort_by(|a, b| {
+            (&a.holder, &a.document, &a.operation).cmp(&(&b.holder, &b.document, &b.operation))
+        });
+        let headline = headline(accounting, &self.contracts, externals.len(), self.collisions.len(), self.resolved_ties.len());
+        DeclaredContractRelation {
+            headline,
+            contracts: self.contracts,
+            externals,
+            collisions: self.collisions,
+            resolved_ties: self.resolved_ties,
+        }
+    }
+}
 
-    let pairs = pairs_of(&contracts);
+/// The headline over the sealed relation's counts.
+fn headline(
+    documents: DocumentAccounting,
+    contracts: &[DeclaredContract],
+    named_externals: usize,
+    identity_collisions: usize,
+    resolved_ties: usize,
+) -> DeclaredContractHeadline {
+    let pairs = pairs_of(contracts);
     let declared_contract_pairs = pairs.len() as u64;
-    let to_member =
-        pairs.iter().filter(|(_, c)| matches!(c, Counterparty::Member(_))).count() as u64;
+    let to_member = pairs.iter().filter(|(_, c)| matches!(c, Counterparty::Member(_))).count() as u64;
     let mut headline = DeclaredContractHeadline {
         declared_contract_pairs,
         to_member,
         to_external: declared_contract_pairs - to_member,
-        documents: accounting,
-        named_externals: externals.len() as u64,
-        identity_collisions: collisions.len() as u64,
-        resolved_ties: resolved_ties.len() as u64,
+        documents,
+        named_externals: named_externals as u64,
+        identity_collisions: identity_collisions as u64,
+        resolved_ties: resolved_ties as u64,
         summary: String::new(),
     };
     headline.summary = summarize(&headline);
-    DeclaredContractRelation { headline, contracts, externals, collisions, resolved_ties }
+    headline
 }
 
 /// Distinct ordered `(holder, target)` pairs: a holder vendoring two copies of
