@@ -1,0 +1,318 @@
+S-475 T1 — THE ADDRESSED-PAIR FLOOR, RE-DECLARED UNREVISED BEFORE THE RE-RUN
+===========================================================================
+
+Declared (UTC):  2026-09-29T09:17:07Z
+Declared by:     Dev Session 1.3 (sprint-82, branch sprint-82-I1-S3)
+Declared at:     logos commit 5e3d0547 (release 1.6.0) — the parent of the commit
+                 that adds this file. The item-scoped reader does not exist at that
+                 commit and is added only by LATER commits on this branch, so the
+                 ordering is auditable in `git log`, not asserted here.
+Story:           S-475 — Re-measure the addressed-pair gate through a
+                 YAML-sequence-reading corpus
+Gate decides:    CR-153 section 3.2 B4. Whether CR-131's config-declared member
+                 map (S-412, S-413, S-414, S-415, S-418) and CR-153's delivery
+                 story S-476 become plannable.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), read-only
+against the estate SOURCE. Nothing under that path is written.
+
+This file is TRACKED, beside S-411's `config_declared_coupling_floor.txt`, and it
+does NOT replace or amend that file. S-411's floor file, its finding file and its
+pinned constants stay byte-identical: S-411's COMMITMENT forbids revising them,
+and this run is a SECOND experiment against the same contract, not an edit of the
+first one's record.
+
+
+THE METRIC AND THE FLOOR, QUOTED VERBATIM FROM CR-131 SECTION 3.2 B1
+---------------------------------------------------------------------
+
+The whole B1 bullet, character for character:
+
+    **B1 (gate).** One read-only measurement over the reference estate, in the `operand_resolvability` harness, reusing the [S-384](../planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus) identity classifier and the shipped corpus code: count ordered member pairs A→B (A ≠ B, B a runnable member, target from a URL- or host-valued committed value in application config *or* a deploy overlay), and topics declared by two or more members through a committed value equal to a topic identity. **Floors, declared here and parsed by the test from a tracked file: 12 addressed pairs and 10 shared topics.** Self-ties, same-tier collisions, out-of-namespace externals and pairs path-matching already binds are each reported apart. Below either floor the corresponding half is recorded falsified and its delivery stories stay unplanned.
+
+Only the ADDRESSED-PAIR half is re-measured. The topic half held at 13 >= 10 on
+S-411 and CR-153 section 3.3 puts it out of scope; its floor is not restated here.
+
+
+THE FLOOR
+---------
+
+    >= 12 ADDRESSED MEMBER PAIRS on the decisive reading defined below.
+
+Unrevised. It is CR-131's figure, carried by CR-153 section 3.2 B1 as "same
+metric, same unrevised floor of 12". Neither CR-153 nor this file derives it,
+lowers it or tunes it to an expected yield.
+
+
+WHAT IS CARRIED OVER UNCHANGED FROM S-411
+------------------------------------------
+
+Every term S-411's declaration fixed is used here AS S-411 FIXED IT, and is not
+restated, so the two runs cannot drift apart on a paraphrase:
+
+  - "ADDRESSED MEMBER PAIR" — its five conditions and its grain, the ORDERED
+    MEMBER PAIR (two keys or six overlays naming one callee are ONE pair);
+  - "RUNNABLE";
+  - "PATH-ONLY-MATCHED", and its SUBTRACTION from the headline;
+  - the six-way split (self-tie, same-tier collision, no-member label, target not
+    runnable, path-only-matched, addressed pair);
+  - the identity classifier: S-384's `identity::Corpus::member_for`, FR-WS-20 AC2
+    AS WRITTEN, over the same S-384 identity corpus;
+  - the deploy-overlay walk: S-411's `walk_overlays`, CALLED, never copied;
+  - both source sets of "COMMITTED VALUE" — application configuration as the
+    shipped `ConfigCorpus::discover` admits it, and committed deploy overlays as
+    `identity::deploy_role` recognises them.
+
+The measurement code CALLS S-411's classifier, walk, admission rule and pair
+logic. A second copy of any of them would be a second metric wearing the first
+one's name.
+
+
+THE ONE CHANGE: THE ITEM-SCOPED SEQUENCE READING (CR-153 SECTION 3.2 A)
+------------------------------------------------------------------------
+
+S-411's declaration wrote down, before its run, that the shipped `parse_yaml`
+binds no scalar under a YAML SEQUENCE. This run changes exactly that and nothing
+else. Every YAML source in both source sets is read as
+
+    what the shipped `parse_yaml` reads, UNCHANGED, key for key and value for
+    value
+  PLUS
+    the scalars of each sequence item, bound under an ITEM-SCOPED KEY.
+
+An ITEM-SCOPED KEY carries the item's zero-based position in its sequence as a
+bracketed index on the sequence's own key: `proxy.upstreams[0].host`,
+`proxy.upstreams[0].port`, `proxy.upstreams[1].host`. Its mapping segments are
+canonicalised by the existing relaxed-binding `canonical_key`; the index is never
+normalised away. A sequence item carries the overlay tag of the file that holds
+it.
+
+Three rules, each chosen so the reading can only UNDER-read, never fabricate:
+
+  1. NEVER COLLAPSE THE INDEX. A key without its index (`proxy.upstreams.host`)
+     is never produced. That is precisely the fabrication the shipped
+     flattener's doc comment records: a `routes:` list that invented a
+     `spring.cloud.gateway.routes.uri` key out of a list element.
+  2. SCALARS IN AN ITEM BIND ONLY UNDER THAT ITEM. An item's continuation lines
+     never register as children of the enclosing mapping.
+  3. A SCALAR SEQUENCE (`- value`) BINDS UNDER `key[i]`. Nested sequences, block
+     scalars, flow sequences (`[a, b]`) and flow mappings (`{a: b}`) stay
+     UNBOUND, as they are today.
+
+One further restriction, stated so it cannot be read as a finding about the
+estate: a sequence binds only when the line immediately before its first item
+(comments and blank lines aside) is the mapping key whose value it is. A sequence
+at the document root, or one whose key the shipped parser does not read, has no
+key to scope its items under and stays unbound, counted.
+
+"COLLAPSED KEY" MEANS, EXACTLY. Any key the sequence reading adds to a source
+that is NOT item-scoped, or any change the sequence reading makes to a key or a
+value the shipped `parse_yaml` produces for the same source. Either is a
+fabrication, and ANY collapsed key on ANY source FAILS THE RUN — it is an
+assertion, not a report line.
+
+
+THE MEMBER POPULATION, FIXED BEFORE THE RUN (CR-153 SECTION 3.2 B2)
+--------------------------------------------------------------------
+
+S-411 counted over the 84 directories under the estate root that hold a `.git`.
+The DECISIVE population here is instead the MEMBERS OF THE CURRENT WORKSPACE
+MANIFEST, `~/source/pec-services/logos.workspace.toml`, enumerated below.
+
+The estate root is NOT a git repository, so the manifest has no commit id of its
+own. It is fixed instead by its content and by the logos commit this declaration
+is made at:
+
+    manifest:       ~/source/pec-services/logos.workspace.toml
+    SHA-256:        9e1873392a2e366d59db7b375b9c55c5f984648cc4718f2a02dab93db7444f49
+    last modified:  2026-09-28 09:43 local
+    declared at:    logos commit 5e3d0547
+
+and by its 83 members, listed verbatim between the two markers below. The test
+PARSES this list. On an estate run it asserts that the live manifest's member set
+is EXACTLY this set: a manifest edited after this declaration changes the
+population, and the run then fails rather than silently measuring a different
+one. The 84th directory, `archive-api-logiclens-fork`, is absent from the list by
+the stakeholder's recorded 2026-09-27 decision, which predates CR-153.
+
+"COUNTED OVER THE MANIFEST POPULATION" MEANS, EXACTLY: an ordered pair (A, B)
+counts only when BOTH A and B are in the list below. Everything else is unchanged
+— in particular the identity classifier still reads S-384's identity corpus over
+the 84 directories, as CR-153 section 3.2 B requires ("everything else
+unchanged: the S-384 identity classifier, ..."). How many pairs a
+manifest-scoped identity registry would ADD — a label that collides only because
+a non-member also claims it — is printed as a SENSITIVITY beside the headline and
+NEVER counts, because it would change the classifier, and because its pairs have
+not been through a path-only subtraction taken without the fork.
+
+MANIFEST MEMBERS — BEGIN (83)
+    agid-volume-counters-batch
+    archive-api
+    archive-feeder
+    archive-kafka-models
+    archive-listener-adapter
+    archive-manager
+    archive-notification-adapter
+    archive-reporting-adapter
+    batch-kafka-models
+    batch-test
+    deprecated-mailbox-core
+    e2e-tests
+    filters-api
+    filters-domain
+    filters-ingestion-cdk
+    filters-kafka-models
+    filters-processor
+    funnel-aggregator-api
+    gen2gen3_devops_utils
+    hermodr-gateway
+    hermodr-mirror
+    legacy-official-log-tools
+    mailbox-aggregate-hermodr-gateway
+    mailbox-aggregator-api
+    mailbox-api
+    mailbox-domain
+    mailbox-kafka-models
+    mailbox-manager
+    mailbox-notification-adapter
+    mailbox-reporting-adapter
+    mailbox-unread-mail-batch
+    mailserver-api
+    mailserver-common
+    mock-legal-storage
+    notification-adapter
+    notification-api
+    notification-domain
+    notification-gateway-mock
+    notification-kafka-models
+    official-log-batch-lib
+    official-log-daily-activities-fetcher-batch
+    official-log-export-api
+    official-log-export-domain
+    official-log-export-job-manager
+    official-log-export-job-worker
+    official-log-export-notification-adapter
+    official-log-export-reporting-adapter
+    official-log-ingestion-batch
+    official-log-ingestion-domain
+    official-log-ingestion-status-batch
+    official-log-journal-api
+    official-log-kafka-models
+    official-log-legal-storage-batch
+    official-log-metrics-adapter
+    pec-agid-statistics-informer
+    pec-services-tools
+    pecserver-facade
+    pecserver-mock
+    pecserver-reporting-adapter
+    poste-pec-common
+    poste-pec-documentation
+    poste-pec-starter
+    postel-cpx-creation-lib
+    ptpec-assistance-tool
+    ptpec-precommit-hooks
+    punctuators-poc
+    reporting-api
+    reporting-archive-data-downsampler
+    reporting-archive-data-projector
+    reporting-data-export-batch
+    reporting-domain
+    reporting-kafka-models
+    reporting-mailbox-data-projector
+    reporting-volume-counters-batch
+    retail-migration-pre-population-script
+    software-architecture-documents
+    spring-cloud-data-flow-helm
+    spring-cloud-data-flow-pecserver-task
+    sprint-review-tools
+    styleguide
+    timestamp-service-client
+    virus-ingestion-batch
+    webmail
+MANIFEST MEMBERS — END
+
+
+THE THREE READINGS, AND WHICH ONE DECIDES
+------------------------------------------
+
+Every run prints all three, side by side, each against the floor:
+
+  DIRECTORY   the 84 `.git` directories — S-411's population, through the new
+              reader. Printed for comparability with S-411. NEVER decisive.
+  MANIFEST    the 83 manifest members listed above, test-harness consumer
+              counted — CR-153 B4's "manifest population" figure.
+  STRICT      the manifest population with the TEST-HARNESS CONSUMER not counted:
+              no pair whose A is `e2e-tests` (the end-to-end suite whose
+              `final-tests/` docker-compose S-411 counted and flagged). The
+              runnable rule constrains only the TARGET, so this is the one
+              consumer the metric admits that is not a production deployment.
+
+THE DECISIVE READING IS STRICT. CR-153 section 3.2 B4 fixes this, before the run:
+"HOLDS only on the directory population or only by counting `e2e-tests`" is
+"recorded FALSIFIED on the decisive reading". So:
+
+  HOLDS      STRICT >= 12. (STRICT is a subset of MANIFEST, so MANIFEST also
+             holds.)
+  FALSIFIED  STRICT < 12, whatever DIRECTORY or MANIFEST read — and when either
+             of them reaches the floor, the record says which, beside the
+             verdict, so the stakeholder can re-decide the population in a later
+             CR and not in this run.
+
+
+WHAT IS PRINTED BESIDE THE VERDICT — REPORTS, NEVER FLOORS
+-----------------------------------------------------------
+
+  - every pair GAINED over S-411's 11, by name, with the item-scoped key, the
+    file and the overlay set that prove it — per reading;
+  - every pair LOST relative to S-411's 11, by name, with the reason it is not
+    counted — per reading;
+  - the reader's own COVERAGE: sequences seen, sequence items bound (mapping
+    items and scalar items), items skipped BY SHAPE, and keys bound;
+  - the RECONCILIATION against S-411's 84 ceiling lines — the `host:`-shaped
+    lines S-411 found inside a sequence item in an admitted deploy file — each
+    either matched by a `host`/`hostname` scalar the reader actually bound in the
+    same file, or listed as not bound with its file and value;
+  - the SENSITIVITY to a manifest-scoped identity registry, described above;
+  - THE GATE'S OWN WALK DENOMINATOR: the files this run's overlay walk visits and
+    the deploy-shaped files it reads. This gate states its own denominator and
+    does NOT re-assert S-411's `RECORDED_CORPUS_ENTRIES` pin, whose drift
+    (18615 -> 18618, Sprint 80 review item D5) is the stakeholder's decision and
+    must not hide this verdict.
+
+None of these can clear or fail the gate. There is exactly one decisive number.
+
+
+WHAT THE CR EXPECTS, AND WHY IT IS NOT A FLOOR
+-----------------------------------------------
+
+CR-153 section 7 predicts, before any reader exists, 11 - 1 (the fork's pair) + 2
+(the two sequence pairs S-411's ceiling judged) = 12 on the manifest population:
+exactly the floor. That is CR-153's expectation, recorded here so the run can be
+read against it. It is NOT an acceptance figure: a measurement of what a
+permissive ceiling can derive is a hypothesis about the reader, and this run
+exists to replace that ceiling with a reader.
+
+
+A RUN THAT SEES NO ESTATE REPORTS *VOID*, NEVER ZERO
+-----------------------------------------------------
+
+Per NFR-CC-04: where `LOGOS_REF_WORKSPACE` is unset the measurement has not been
+performed. The estate arm prints VOID and asserts nothing about the gate. The
+reader carries ALWAYS-RUN fixtures, independent of the estate, for the `routes:`
+fabrication case, a mapping-item sequence, a scalar sequence, a nested sequence
+and a flow sequence, so its rules are pinned on every `cargo test`.
+
+
+COMMITMENT
+----------
+
+The floor is not revised after the run. The constant in the measurement code is
+PARSED from this file, and the decisive population is PARSED from the member list
+above, so neither can be edited to clear a run without this declaration being
+edited too — in the file whose purpose is to say it must not be.
+
+Whatever the verdict, ADR-65 gains a dated appendix recording it; its supersession
+banner stays. Only a HOLDS on the STRICT reading appends the "plannable" banner to
+S-412, S-413, S-414, S-415, S-418 and S-476. If a later run disagrees with what is
+recorded, the procedure is to re-decide CR-153 and ADR-65, not to relax an
+assertion.
