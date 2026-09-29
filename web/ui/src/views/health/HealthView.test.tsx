@@ -156,7 +156,7 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
 
   it("renders a CR-156 Modularity drop-out as not applicable with its reason and m-of-5 count", async () => {
     const m = clone();
-    m.scan.metrics.modularity = mv(0);
+    m.scan.metrics.modularity = { raw: -0.5, normalized: 0 };
     m.scan.metrics.edge_count = 3;
     m.scan.metrics.modularity_not_applicable = { edges: 3, min_edges: 5, reason: "3 of 5 dependency edges — too few for community structure" };
     stub(m);
@@ -169,6 +169,9 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(cells.getByText("not applicable")).toBeInTheDocument();
     expect(cells.getByText("3 of 5 dependency edges — too few for community structure")).toBeInTheDocument();
     expect(cells.queryByRole("meter")).toBeNull();
+    // The computed pair is persisted, not hidden: Normalized and Raw still show it.
+    expect(cells.getByText("0.00")).toBeInTheDocument();
+    expect(cells.getByText("-0.50")).toBeInTheDocument();
     // Every other row still renders its score.
     const acyclicity = within(grid).getByText("Acyclicity").closest("tr") as HTMLElement;
     expect(within(acyclicity).queryByText("not applicable")).toBeNull();
