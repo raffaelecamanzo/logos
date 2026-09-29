@@ -1161,6 +1161,30 @@ without rebuilding. The embedded queries under `logos-core/plugins/` serve as
 reference starting points — each header documents the captures and the known
 v1 limitations.
 
+### Package-shaped module paths (`[package_modules]`)
+
+By default Logos keys a file's module by its path, so `src/main/java/com/x/Svc.java`
+would be `main::java::com::x::Svc` and `import com.x.Svc` could never reach it. A
+plugin can declare instead that its files live under **source roots** and are
+named by their package:
+
+```toml
+[package_modules]
+source_roots = ["src/main/java", "src/test/java"]
+```
+
+A file under one of these roots is keyed by the path after the root, so the file
+above is `com.x.Svc`, the name its imports spell. Java ships with the table; every
+other plugin leaves it out and keeps its module keys unchanged. With it:
+
+- a single-type import binds to the **class** it names, a static import to the
+  member, and a wildcard import (`a.b.*`, `static a.b.C.*`) brings the package's or
+  type's members into scope;
+- a type in the file's own package binds without an import;
+- a type declared under the same fully-qualified name in both `src/main` and
+  `src/test` stays unbound rather than being guessed;
+- JDK, Spring, Lombok and other library imports stay unbound.
+
 ### Outbound HTTP client calls (`invocations`)
 
 `invocations.scm` is the **consumer** side of cross-service coupling: it captures

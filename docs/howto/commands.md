@@ -412,6 +412,26 @@ as a `0` that would read as a measurement:
 A global coverage number cannot express a per-language zero — that is why this
 row set exists. Read it before trusting a relational answer on a given language.
 
+**Java rows also say why a call stays unbound.** The Java row carries a
+`call_residue` object: `unbound` (the row's `calls.references − calls.bound`),
+the count per reason below, and `unclassified` — so `unbound` equals the sum of
+the reasons plus `unclassified`. Its `scope` is `"repository"` for a plain
+`status` and `"workspace"` for `workspace status`: one repository cannot tell
+another member's type from a library's, so only the workspace read has a
+`type-in-another-member` count.
+
+| `call_residue` reason | The call stays unbound because |
+|---|---|
+| `no-receiver-evidence` | the file proves no receiver type (a chained call, an untyped lambda parameter, a generic type variable, a bare call naming no import) |
+| `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member |
+| `type-in-another-member` | another workspace member declares the receiver's type (`workspace status` only) |
+| `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more methods of that name, or two static imports each supply one |
+| `type-ambiguous` | the type's name reaches two declarations (a `src/main` and a `src/test` class of one name) |
+| `supertype-unreached` | neither the type nor any supertype reached in the repository declares the name: the chain leaves the repository, stops at an interface, or cycles |
+
+`call_residue` is computed when `status` runs and never stored, so it costs a
+`status` call a fraction of a second on a Java project and nothing on the others.
+
 ## Navigation
 
 > **Every relational answer carries a `resolution_denominator`.** `callers`,
@@ -951,6 +971,19 @@ specific. Two members owning the same template both via `ANY` leaves the consume
 `ambiguous` with **no edge** — Logos refuses rather than picking one. Expect the
 `ambiguous` count to be non-trivial on a real workspace: that is the refusal
 working, not a defect.
+
+**Provider paths built from string constants (Java).** A Spring mapping whose
+path is a concatenation — `@GetMapping("/users/{" + USER_ID + "}")` — is folded to
+one literal and becomes a `route` like a written path. The constant may be a
+`static final String` of the same class, a field of the same interface, or a
+constant of another type **in the same member**, reached through a single-type
+`import static a.b.Type.X;` or a qualified `Type.X`. A path that cannot be folded
+(a method call, a non-final field, a wildcard static import, a constant from a
+library or another member, two visible declarations of one name) produces **no**
+route and is counted in the run's `routes_not_composed`, so it is never dropped
+silently. Editing only the file that declares the constant re-folds the routes
+that use it on the next `logos sync`. Kotlin concatenated paths are neither folded
+nor counted yet.
 
 
 - **`route-providers`** — the workspace service map: every cross-service binding

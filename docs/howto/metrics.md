@@ -199,6 +199,14 @@ snapshots and the *delta* a change introduces. Practical guidance:
   baseline − margin" rather than a universal constant.
 - A sudden drop traces to exactly one of five named causes — the per-metric
   breakdown in every snapshot says which.
+- **A Java repository's signal moves on its first index with Logos 1.6.** Java
+  imports, typed calls and inherited calls now bind, and fabricated self-calls
+  are gone. Fan-in, coupling, dead code and the signal move with them, in either
+  direction. The move is a correction, not a regression: re-establish the baseline
+  after that first index (`logos gate --save`) instead of chasing the delta. The
+  four new Java type-relation edges (`Extends`, `Implements`, `Instantiates`,
+  `TypeUses`) are fenced out of the metric views, so they do not move the signal
+  by themselves. Rust and every other language are unchanged.
 
 ## Determinism guarantee
 
