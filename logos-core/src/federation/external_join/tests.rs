@@ -705,3 +705,75 @@ fn every_application_profile_read_from_disk_reaches_the_base_reading() {
         })
     );
 }
+
+/// **The wire contract [S-461] renders, pinned byte for byte** — a bound row
+/// and every refusal that carries detail, flattened beside `from` and `target`,
+/// and the headline with every accounting bucket.
+///
+/// [S-461]: ../../../../docs/planning/journal.md#s-461-declared-contracts-and-named-externals-on-every-surface
+#[test]
+fn every_row_shape_serializes_to_the_pinned_wire_form() {
+    let row = |outcome: JoinOutcome| ExternalJoinRow {
+        from: endpoint("facade", "local call"),
+        target: "GET ${pec-server.uri}".into(),
+        outcome,
+    };
+    let json = |outcome| serde_json::to_string(&row(outcome)).unwrap();
+    let head = r#"{"from":{"member":"facade","symbol":"local call"},"target":"GET ${pec-server.uri}","#;
+    let source = || BaseSource { file: "deploy-coll/values.yaml".into(), key: "envfrom.pecserverbaseurl".into() };
+    let cases = [
+        (
+            JoinOutcome::BoundExternal(ExternalBinding {
+                external: ExternalId(PSS.into()),
+                name: "PSS".into(),
+                document: PSS_COPY.into(),
+                operation: "GET /prov/x".into(),
+                base: BasePathEvidence { path: "/prov".into(), origin: BaseOrigin::DeployOverlay, sources: vec![source()] },
+            }),
+            r#""state":"bound-external","external":"pecserver-facade:src/main/resources/pec-server/pss.yaml","name":"PSS","document":"src/main/resources/pec-server/pss.yaml","operation":"GET /prov/x","base":{"path":"/prov","origin":"deploy-overlay","sources":[{"file":"deploy-coll/values.yaml","key":"envfrom.pecserverbaseurl"}]}}"#,
+        ),
+        (
+            JoinOutcome::Refused(JoinRefusal::ExternalNotDeclaredByMember {
+                external: ExternalId("w:p.yaml".into()),
+                name: "PSS".into(),
+                operation: "GET /prov/x".into(),
+            }),
+            r#""state":"refused","reason":"external-not-declared-by-member","external":"w:p.yaml","name":"PSS","operation":"GET /prov/x"}"#,
+        ),
+        (
+            JoinOutcome::Refused(JoinRefusal::BasePathUncommitted { sources: vec![source()] }),
+            r#""state":"refused","reason":"base-path-uncommitted","sources":[{"file":"deploy-coll/values.yaml","key":"envfrom.pecserverbaseurl"}]}"#,
+        ),
+        (
+            JoinOutcome::Refused(JoinRefusal::BasePathsDisagree {
+                paths: vec![BasePath { path: "/prov".into(), file: "a/values.yaml".into(), key: "k".into() }],
+            }),
+            r#""state":"refused","reason":"base-paths-disagree","paths":[{"path":"/prov","file":"a/values.yaml","key":"k"}]}"#,
+        ),
+        (
+            JoinOutcome::Refused(JoinRefusal::SuffixOnly { operation: "GET /prov/x".into(), base_path: String::new() }),
+            r#""state":"refused","reason":"suffix-only","operation":"GET /prov/x","base_path":""}"#,
+        ),
+        (
+            JoinOutcome::Refused(JoinRefusal::SeveralMatches {
+                matches: vec![OperationMatch { external: ExternalId("a:b".into()), operation: "GET /x".into() }],
+            }),
+            r#""state":"refused","reason":"several-matches","matches":[{"external":"a:b","operation":"GET /x"}]}"#,
+        ),
+        (JoinOutcome::Refused(JoinRefusal::NoBaseKey), r#""state":"refused","reason":"no-base-key"}"#),
+    ];
+    for (outcome, tail) in cases {
+        assert_eq!(json(outcome), format!("{head}{tail}"));
+    }
+
+    let joined = derive(
+        &[(endpoint("facade", "local call"), config_call("GET /nowhere", "pec-server.uri"))],
+        &pss_relation(),
+        |_| facade_facts(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&joined.headline).unwrap(),
+        r#"{"bound_external":0,"no_provider_rows":1,"accounting":{"bound_external":0,"no_declared_external":0,"external_not_declared_by_member":0,"no_base_key":0,"base_path_uncommitted":0,"base_paths_disagree":0,"suffix_only":0,"no_match":1,"several_matches":0},"summary":"0 of 1 invocation no-provider-in-workspace REST row bound to a named external their own member declares (refused: 1 no match); declared by vendored specs, never a cross-service edge, and outside egress_resolution"}"#
+    );
+}
