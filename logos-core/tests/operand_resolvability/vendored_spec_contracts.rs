@@ -59,8 +59,12 @@
 //! [`overlay_overrides`] is Spring's environment-variable relaxed binding — the
 //! rule that makes `PECSERVER_BASEURL` in a Helm values file override
 //! `pec-server.base-url` in `application.yml`. It is language judgement of exactly
-//! the kind the parent module's carve-out names, and it must not be lifted into
-//! `logos-core/src`.
+//! the kind the parent module's carve-out names. S-459 built this join into the
+//! product and promoted the rule **verbatim** into
+//! `logos_core::federation::external_join`, on the precedent S-380 set for the
+//! [`canonical_key`] relaxed binding (promoted, not excepted); this harness
+//! imports it from there (with `url_path`, `parent` and `join_base`) rather than
+//! keeping a second copy that could drift.
 //!
 //! The overlay keys reach it **already canonicalised** by the shipped
 //! `parse_yaml` (`_` and `-` dropped per segment), so the environment variable's
@@ -98,6 +102,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use logos_core::extract::config::corpus::canonical_key;
+pub use logos_core::federation::external_join::{join_base, overlay_overrides, parent, url_path};
 use logos_core::federation::{
     cross_service_coverage, discover, BridgeIntake, CoverageState, EngineRegistry,
     MemberContracts, ProviderDisposition, ReferenceCoverage, RegistryMode, UnboundReason,
@@ -765,39 +770,9 @@ pub fn join_ledger<'a>(
     }
 }
 
-/// The URL path of a committed value: `https://h:8443/prov` → `/prov`,
-/// `http://localhost:8082` → `""`. `None` when the value is not a URL with a
-/// literal authority.
-pub fn url_path(value: &str) -> Option<String> {
-    let (scheme, rest) = value.split_once("://")?;
-    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+') {
-        return None;
-    }
-    let cut = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..cut];
-    if authority.is_empty() || authority.contains(['{', '}', '$']) {
-        return None;
-    }
-    let tail = &rest[cut..];
-    let path = tail.split(['?', '#']).next().unwrap_or("");
-    Some(path.trim_end_matches('/').to_string())
-}
-
-/// The parent namespace of a canonical key — everything before its last `.`.
-pub fn parent(key: &str) -> &str {
-    key.rsplit_once('.').map_or("", |(p, _)| p)
-}
-
-/// Whether a canonical overlay key overrides a canonical application key under
-/// Spring's relaxed binding — see the module docs for the dot-free comparison
-/// the shipped parser's canonicalisation forces.
-pub fn overlay_overrides(overlay_key: &str, base_key: &str) -> bool {
-    if overlay_key == base_key || overlay_key.ends_with(&format!(".{base_key}")) {
-        return true;
-    }
-    let last = overlay_key.rsplit('.').next().unwrap_or(overlay_key);
-    !last.is_empty() && last == base_key.replace('.', "")
-}
+// `url_path`, `parent` and `overlay_overrides` were promoted verbatim into
+// `logos_core::federation::external_join` by S-459, which builds this join; they
+// are imported (above) so the harness and the product share one rule.
 
 /// A call's committed base path, under one reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -911,10 +886,7 @@ impl CallClass {
     }
 }
 
-/// Join a base path and a call path: `/prov` + `/domain/{d}` → `/prov/domain/{d}`.
-pub fn join_base(base: &str, path: &str) -> String {
-    format!("{}{path}", base.trim_end_matches('/'))
-}
+// `join_base` was promoted with them (S-459).
 
 /// Judge one composed invocation row against the member's external operations,
 /// given as `(document path, keys)`.

@@ -57,6 +57,7 @@ use super::bridge::{
     MemberCorpus, PortableKey, ProviderIndex, Role,
 };
 use super::declared_contracts::{self, DeclaredContractRelation, OperationProviders, SpecOperation};
+use super::external_join::{self, BaseFacts, BoundExternal, JoinCall};
 use super::manifest::MemberKind;
 use super::registry::{AnswerScope, MemberEngine};
 
@@ -1341,6 +1342,29 @@ pub struct CrossServiceCoverage {
     /// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared_contracts: Option<DeclaredContractRelation>,
+    /// The **external join** — every invocation `no-provider-in-workspace` REST
+    /// row judged against the named externals its own member declares, with the
+    /// [`bound_external`](super::external_join::BoundExternalHeadline::bound_external)
+    /// headline beside its denominator, every such row ([ADR-68] point 3,
+    /// [FR-WS-05], [BR-51]).
+    ///
+    /// **Beside [`egress_resolution`](Self::egress_resolution), never inside
+    /// it.** A bound-external row is still a `no-provider-in-workspace` row above
+    /// — an external is not a member, so no bucket, count or
+    /// [`BridgeEdge`](super::bridge::BridgeEdge) moves ([BR-57], [ADR-52]); the
+    /// binding, its matched operation and its base-path evidence are stated
+    /// here, keyed by the row's `from`.
+    ///
+    /// **Absent** when no member declares a named external, so such a workspace
+    /// serializes byte-for-byte as it did before.
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_external: Option<BoundExternal>,
 }
 
 /// The contract-surface rows of members **declared** `documentation` or
@@ -1504,6 +1528,15 @@ pub struct SpecConformanceReading {
 /// external grouping names, read from the member's own file — and can move no
 /// figure above it.
 ///
+/// That relation then feeds the **external join**
+/// ([`bound_external`](CrossServiceCoverage::bound_external), [ADR-68] point
+/// 3): each invocation `no-provider-in-workspace` REST row is judged against
+/// the externals its own member declares, from the compositions this walk
+/// already resolved and the member's committed base path — read, on this
+/// query, from the files its configuration discovery walk admits, and only for
+/// a member some row of which could match. It moves no row and no figure.
+///
+/// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
 /// [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
 /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
 ///
@@ -1640,10 +1673,21 @@ where
     // below, because `consumer_portable_key` would otherwise decline it and file
     // it under `path-not-composed` — a reason that means *the template would not
     // normalize*, which is exactly what is not yet known about it.
+    // The external join's population ([ADR-68] point 3): each HTTP reference
+    // this loop files `no-provider-in-workspace`, with its own compositions and
+    // keys — read off the same resolution the row is classified by, never a
+    // second one, and paired with the row **per reference**, because two calls in
+    // one method share a `from` ([`JoinCall::target`] tells them apart).
+    let mut join_population: Vec<(BridgeEndpoint, JoinCall)> = Vec::new();
+    let mut awaiting: Option<(usize, JoinCall)> = None;
     for (member, consumer, identity) in inv_consumers {
+        settle_join(&tally, awaiting.take(), &mut join_population);
         // Built once for all three branches below — the endpoint is the same
         // `(member, symbol)` pair whichever one the row takes.
         let from = BridgeEndpoint { member: member.clone(), symbol: consumer.symbol.clone() };
+        if consumer.relation.bridge_namespace() == Some(BridgeNamespace::Http) {
+            awaiting = Some((tally.references.len(), join_call(&consumer, identity.as_ref())));
+        }
         // **The broker arm first, because its rule is not the HTTP arm's.**
         //
         // Until [S-410] this tier resolved the HTTP arm alone, and the comment
@@ -1720,6 +1764,8 @@ where
         }
     }
 
+    settle_join(&tally, awaiting.take(), &mut join_population);
+
     // The recorded refusals on the provider side of an arm ([CR-107]). Reported
     // after the classified rows so the tally's own ordering is untouched;
     // `finish` sorts the references by endpoint regardless.
@@ -1764,8 +1810,45 @@ where
     let declared = declared_contracts::derive(&spec_operations, &federation.member_kinds, |member, document| {
         roots.get(member).and_then(|root| declared_contracts::read_title(root, document))
     });
+    // The external join reads the relation it was just derived from, and each
+    // calling member's committed base path from the files its discovery walk
+    // admits — read here, on the query, never stored ([ADR-68] point 3).
+    coverage.bound_external = external_join::derive(&join_population, &declared, |member| {
+        roots.get(member).map_or_else(BaseFacts::default, |root| BaseFacts::read(root))
+    });
     coverage.declared_contracts = (!declared.is_empty()).then_some(declared);
     coverage
+}
+
+/// What the external join judges one HTTP reference by: its stored target, and
+/// its committed compositions and keys where the walk resolved it through
+/// configuration, else the target itself — a literal names no key.
+fn join_call(consumer: &super::bridge::InvocationRef, identity: Option<&ArmIdentity>) -> JoinCall {
+    let (compositions, keys) = match identity {
+        Some(ArmIdentity::Http(identity)) => (identity.composed.clone(), identity.named_keys.clone()),
+        _ => (vec![consumer.target.clone()], Vec::new()),
+    };
+    JoinCall { target: consumer.target.clone(), compositions, keys }
+}
+
+/// File one HTTP reference into the external join's population if the row the
+/// invocation loop filed for it — at most one, starting at index `at`; none for
+/// an intra-repo resolution — is an invocation `no-provider-in-workspace` REST
+/// row ([ADR-68] point 3).
+///
+/// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+fn settle_join(tally: &Tally, awaiting: Option<(usize, JoinCall)>, into: &mut Vec<(BridgeEndpoint, JoinCall)>) {
+    let Some((at, call)) = awaiting else {
+        return;
+    };
+    let filed = tally.references.get(at).filter(|row| {
+        row.intake == BridgeIntake::Invocation
+            && row.relation == BridgeNamespace::Http.relation()
+            && row.state == CoverageState::Unbound { reason: UnboundReason::NoProviderInWorkspace }
+    });
+    if let Some(row) = filed {
+        into.push((row.from.clone(), call));
+    }
 }
 
 /// The provider verdict the declared-contract relation reads off one
@@ -2767,6 +2850,8 @@ impl Tally {
             // Derived from the walk by `cross_service_coverage`, after the tally
             // is sealed — so nothing above can read it.
             declared_contracts: None,
+            // Joined against that relation, after it — the same reason.
+            bound_external: None,
         }
     }
 }
@@ -4455,6 +4540,18 @@ mod tests {
     /// [S-458]: ../../../docs/planning/journal.md#s-458-a-vendored-spec-is-a-declared-contract-to-a-member-or-a-named-external
     fn rewind_s458(value: &mut serde_json::Value) {
         value.as_object_mut().unwrap().remove("declared_contracts");
+        rewind_s459(value);
+    }
+
+    /// Rewind [S-459]'s `bound_external` join, which exists only where the
+    /// relation [`rewind_s458`] removes declares an external — so the two are
+    /// rewound together, and for the same reason the relation's rider is not
+    /// measured here: on this shape every orphan's external is its own. Its
+    /// size is measured on the private estate copy (S-459 notes).
+    ///
+    /// [S-459]: ../../../docs/planning/journal.md#s-459-a-no-provider-call-binds-to-the-external-its-member-vendors-under-a-committed-base-path
+    fn rewind_s459(value: &mut serde_json::Value) {
+        value.as_object_mut().unwrap().remove("bound_external");
     }
 
     /// **Payload growth, measured against the reference workspace's shape**
@@ -9390,6 +9487,10 @@ mod tests {
             .expect("the fixture declares contracts, so the comparison is not vacuous");
         assert_eq!(relation["headline"]["declared_contract_pairs"], 2);
         assert_eq!(relation["headline"]["resolved_ties"], 2);
+        // S-459's join rides beside the relation: `facade`'s literal PSS call is
+        // judged and refused, and removing the join leaves the same vintage.
+        let join = cov.as_object_mut().unwrap().remove("bound_external").expect("an external is declared");
+        assert_eq!(join["headline"]["no_provider_rows"], 1);
 
         let vintage: serde_json::Value = serde_json::from_str(PRE_S458_COVERAGE_JSON).unwrap();
         for figure in ["resolved_cross_service_edges", "egress_resolution", "egress_resolution_measured"] {
@@ -9510,6 +9611,182 @@ mod tests {
         let documents = &cov.declared_contracts.as_ref().expect("contracts are declared").headline.documents;
         assert_eq!(documents.unjudged, 1, "legacy/api.yaml, no keyed operation: {documents:?}");
         assert_eq!(documents.documents, 5, "agg, web, facade, pss-mock and legacy");
+    }
+
+    // ── S-459 / ADR-68 point 3: a no-provider call binds the external its own
+    //    member vendors, beside every figure and never inside one ─────────────
+
+    /// `pecserver-facade` in miniature: `facade` vendors PSS (`/prov`-prefixed
+    /// paths) and calls it through `pec-server.*` keys, and calls `agg` too, so
+    /// an edge is drawn and `egress_resolution` is non-trivial.
+    fn pss_caller_workspace() {
+        reset();
+        let pss = ["GET /prov/domain/{d}/user/{u}", "POST /prov/session/authenticate"];
+        set_member("facade", pss.iter().enumerate().map(|(n, o)| spec_op("api/pss.yaml", n, o)).collect());
+        set_member("agg", vec![route("GET /folders", "local agg_folders")]);
+        set_consumers(
+            "facade",
+            vec![
+                http_call("GET ${pec-server.uri-get-mailbox}", "local facade_calls_mailbox"),
+                http_call("GET /folders", "local facade_calls_folders"),
+                // A literal whose path is the tail of a PSS operation: judged,
+                // and refused because a literal names no base-url key.
+                http_call("POST /session/authenticate", "local facade_calls_auth_literally"),
+            ],
+        );
+        commit_config(
+            "facade",
+            "pec-server.uri-get-mailbox",
+            &[("src/main/resources/application.yml", None, "/domain/{domain}/user/{user}")],
+        );
+    }
+
+    /// A registry over [`pss_caller_workspace`] whose members live under `root`.
+    fn rooted(root: &Path) -> EngineRegistry<FakeEngine> {
+        let mut federation = fed(&["agg", "facade"]);
+        for m in &mut federation.members {
+            m.root = root.join(&m.name);
+        }
+        federation.root = root.to_path_buf();
+        EngineRegistry::new(federation, RegistryMode::Lazy)
+    }
+
+    /// Commit `facade`'s application config and one deploy overlay under `root`.
+    fn commit_facade_sources(root: &Path) {
+        let facade = root.join("facade");
+        std::fs::create_dir_all(facade.join("src/main/resources")).unwrap();
+        std::fs::create_dir_all(facade.join("deploy-coll")).unwrap();
+        std::fs::write(
+            facade.join("src/main/resources/application.yml"),
+            "pec-server:\n  base-url: http://localhost:8082\n  uri-get-mailbox: /domain/{domain}/user/{user}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            facade.join("deploy-coll/values.yaml"),
+            "envFrom:\n  PECSERVER_BASEURL: 'https://tinvpecprovis01w:8443/prov'\n",
+        )
+        .unwrap();
+    }
+
+    /// **`pecserver-facade`'s PSS call binds `bound-external` under `/prov`
+    /// from `deploy-coll/values.yaml`**, through the coverage tier's own walk:
+    /// the provenance names the overlay, the key and the matched operation;
+    /// the coverage row itself is still `no-provider-in-workspace`.
+    #[test]
+    fn a_no_provider_call_binds_the_external_its_member_vendors_under_the_overlay_base_path() {
+        let tmp = tempfile::Builder::new().prefix("s459-").tempdir().unwrap();
+        commit_facade_sources(tmp.path());
+        pss_caller_workspace();
+        let cov = cross_service_coverage(&rooted(tmp.path()).answer());
+
+        let join = cov.bound_external.as_ref().expect("facade declares an external");
+        assert_eq!((join.headline.bound_external, join.headline.no_provider_rows), (1, 2));
+        let literal =
+            BridgeEndpoint { member: "facade".into(), symbol: LogosSymbol::parse("local facade_calls_auth_literally").unwrap() };
+        assert_eq!(
+            join.rows_of(&literal).map(|r| &r.outcome).collect::<Vec<_>>(),
+            vec![&external_join::JoinOutcome::Refused(external_join::JoinRefusal::NoBaseKey)],
+            "a literal call is judged, and proves no base path"
+        );
+        let from = BridgeEndpoint { member: "facade".into(), symbol: LogosSymbol::parse("local facade_calls_mailbox").unwrap() };
+        let [row] = join.rows_of(&from).collect::<Vec<_>>()[..] else {
+            panic!("one call from that symbol: {join:?}");
+        };
+        let external_join::JoinOutcome::BoundExternal(binding) = &row.outcome else {
+            panic!("the call binds: {join:?}");
+        };
+        assert_eq!(binding.external.0, "facade:api/pss.yaml");
+        assert_eq!(binding.document, "api/pss.yaml");
+        assert_eq!(binding.operation, "GET /prov/domain/{}/user/{}");
+        assert_eq!(binding.base.path, "/prov");
+        assert_eq!(binding.base.origin, external_join::BaseOrigin::DeployOverlay);
+        assert_eq!(
+            binding.base.sources,
+            vec![external_join::BaseSource {
+                file: "deploy-coll/values.yaml".into(),
+                key: "envfrom.pecserverbaseurl".into(),
+            }]
+        );
+        let row = cov.references.iter().find(|r| r.from == from).unwrap();
+        assert_eq!(
+            row.state,
+            CoverageState::Unbound { reason: UnboundReason::NoProviderInWorkspace },
+            "the row does not move: an external is not a member"
+        );
+    }
+
+    /// **Two calls in one method are judged each on its own target.** The
+    /// ledger's call site is the enclosing declaration, so both rows share one
+    /// `from`: the PSS call binds, the unrelated one does not borrow its verdict,
+    /// and the headline counts one of two.
+    #[test]
+    fn two_calls_in_one_method_are_judged_each_on_its_own_target() {
+        let tmp = tempfile::Builder::new().prefix("s459-").tempdir().unwrap();
+        commit_facade_sources(tmp.path());
+        pss_caller_workspace();
+        set_consumers(
+            "facade",
+            vec![
+                http_call("GET ${pec-server.uri-get-mailbox}", "local facade_calls_both"),
+                http_call("DELETE /nothing/here", "local facade_calls_both"),
+            ],
+        );
+        let cov = cross_service_coverage(&rooted(tmp.path()).answer());
+        let join = cov.bound_external.as_ref().expect("facade declares an external");
+        assert_eq!((join.headline.bound_external, join.headline.no_provider_rows), (1, 2));
+        let from = BridgeEndpoint { member: "facade".into(), symbol: LogosSymbol::parse("local facade_calls_both").unwrap() };
+        let judged: Vec<(&str, &str)> = join
+            .rows_of(&from)
+            .map(|r| {
+                let state = match &r.outcome {
+                    external_join::JoinOutcome::BoundExternal(b) => b.operation.as_str(),
+                    external_join::JoinOutcome::Refused(_) => "refused",
+                };
+                (r.target.as_str(), state)
+            })
+            .collect();
+        assert_eq!(
+            judged,
+            vec![("DELETE /nothing/here", "refused"), ("GET ${pec-server.uri-get-mailbox}", "GET /prov/domain/{}/user/{}")]
+        );
+    }
+
+    /// **No `BridgeEdge`, and `bound_external` beside, never inside, every
+    /// figure** ([ADR-68] point 3, [BR-57]). The same workspace with its base
+    /// facts committed (the call binds) and without them (it is refused)
+    /// serializes the whole coverage payload — rows, buckets,
+    /// `resolved_cross_service_edges`, `egress_resolution` — to the same bytes
+    /// once the join is removed, and the bridge draws the same edges, none of
+    /// them from the bound call.
+    ///
+    /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+    /// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn a_bound_external_moves_no_figure_and_draws_no_bridge_edge() {
+        let committed = tempfile::Builder::new().prefix("s459-").tempdir().unwrap();
+        commit_facade_sources(committed.path());
+        let bare = tempfile::Builder::new().prefix("s459-").tempdir().unwrap();
+
+        let payloads = |root: &Path| {
+            pss_caller_workspace();
+            let reg = rooted(root);
+            let mut cov = serde_json::to_value(cross_service_coverage(&reg.answer())).unwrap();
+            let join = cov.as_object_mut().unwrap().remove("bound_external").expect("an external is declared");
+            let edges = serde_json::to_string(&*super::super::bridge::ContractBridge::new().edges(&reg)).unwrap();
+            (cov, join, edges)
+        };
+        let (bound_cov, bound_join, bound_edges) = payloads(committed.path());
+        let (bare_cov, bare_join, bare_edges) = payloads(bare.path());
+
+        assert_eq!(bound_join["headline"]["bound_external"], 1, "the join is not vacuous");
+        assert_eq!(bare_join["headline"]["bound_external"], 0);
+        assert_eq!(bare_join["rows"][0]["reason"], "no-base-key");
+        assert_eq!(bare_join["headline"]["no_provider_rows"], 2);
+        assert_eq!(bound_cov, bare_cov, "binding an external moved a coverage figure");
+        assert_eq!(bound_cov["resolved_cross_service_edges"], 1);
+        assert_eq!(bound_cov["egress_resolution"], 1.0);
+        assert_eq!(bound_edges, bare_edges, "binding an external moved the bridge edge set");
+        assert!(!bound_edges.contains("facade_calls_mailbox"), "no BridgeEdge for an external: {bound_edges}");
     }
 
     /// The coverage payload [`vendored_payloads`] serialized to under the code

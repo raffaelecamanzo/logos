@@ -248,6 +248,8 @@ fn spec_and_source_workspace_status(root: &Path) -> serde_json::Value {
 /// `coverage.declared_contracts` ([FR-WS-31]). That key is taken out and
 /// checked; everything else must still match the pre-S-457 vintage to the byte
 /// — which is S-458's own guarantee that the relation moves no other figure.
+/// S-459's `coverage.bound_external`, joined against that relation, is taken
+/// out and checked the same way.
 ///
 /// [CR-147]: ../../docs/requests/CR-147-vendored-specs-declare-contracts-and-name-externals.md
 /// [FR-WS-31]: ../../docs/specs/requirements/FR-WS-31.md
@@ -263,6 +265,16 @@ fn a_workspace_without_declarations_or_candidates_renders_status_byte_for_byte_a
     assert_eq!(relation["headline"]["declared_contract_pairs"], 1);
     assert_eq!(relation["contracts"][0]["holder"], "api");
     assert_eq!(relation["contracts"][0]["target"]["name"], "User API");
+    // S-459's external join rides beside the relation it reads: `api` declares
+    // an external, so the join is published — over no call at all here, which
+    // it states as its denominator rather than omitting.
+    let join = value["coverage"]
+        .as_object_mut()
+        .expect("a coverage object")
+        .remove("bound_external")
+        .expect("api declares an external, so the join is published (S-459)");
+    assert_eq!(join["headline"]["bound_external"], 0);
+    assert_eq!(join["headline"]["no_provider_rows"], 0);
     let status = masked(value);
     assert_eq!(
         status,

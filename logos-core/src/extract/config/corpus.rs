@@ -178,8 +178,11 @@ impl ConfigCorpus {
     /// every `.java` file to test a needle, and the index reads exactly that
     /// same set once.
     ///
-    /// Read only by the measurement harness and the binding index — production
-    /// ingestion goes through [`source_facts`] and never runs this walk.
+    /// Read by the measurement harness, the binding index and — on the
+    /// cross-service query, never at index or sync time — the external join,
+    /// which opens only the deploy overlays this roster admits
+    /// (`federation::external_join`, S-459). Production ingestion goes through
+    /// [`source_facts`] and never runs this walk.
     ///
     /// [PropertiesIndex::build]: crate::extract::config::binding::PropertiesIndex::build
     /// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
