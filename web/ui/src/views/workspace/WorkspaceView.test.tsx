@@ -1767,6 +1767,17 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     expect(card).toHaveTextContent("A bound call stays under No provider here above");
   });
 
+  it("the coverage tab states the declared headline alone when no member declares a named external", async () => {
+    // Identity-only declarations: the server then sends no join at all.
+    stubApi({ providers: [BINDING], coverage: { ...EMPTY_COVERAGE, declared_contracts: DECLARED_CONTRACTS } });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: "Cross-service coverage" }));
+    const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
+    expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
+    expect(card).not.toHaveTextContent("A bound call stays under");
+    expect(within(card).queryByText(BOUND_EXTERNAL.headline.summary)).toBeNull();
+  });
+
   it("over a relation a mock only stands in for, draws the external with no edge, no edge legend row and no empty twin table", async () => {
     stubApi({
       providers: [BINDING],
