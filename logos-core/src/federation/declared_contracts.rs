@@ -39,7 +39,7 @@
 //! # Member kinds ([ADR-68] point 5)
 //!
 //! What a kind means here is asked of the kind through one exhaustive `match`
-//! ([`Standing::of`]): a `mock` member is a **stand-in provider** — its copies
+//! (`Standing::of`): a `mock` member is a **stand-in provider** — its copies
 //! join the external they stand in for and it declares nothing; a
 //! `documentation` member's copies stay out altogether; a `platform` member is
 //! an ordinary one. A mock or documentation member is never the member a
@@ -47,7 +47,7 @@
 //!
 //! # Built from member-local facts, in memory ([ADR-52])
 //!
-//! [`derive`] is pure. Its inputs are each member's contract-surface operations
+//! [`derive()`] is pure. Its inputs are each member's contract-surface operations
 //! with the coverage tier's provider verdict ([`SpecOperation`]) and the
 //! `info.title` of each document the grouping names ([`read_title`] reads it
 //! from the file in the member's working tree — a display label only, so a
@@ -374,7 +374,7 @@ pub struct DeclaredContractRelation {
 
 impl DeclaredContractRelation {
     /// The distinct ordered `(holder, target)` pairs the headline counts — the
-    /// same set [`derive`] counts, so the two cannot disagree.
+    /// same set [`derive()`] counts, so the two cannot disagree.
     pub fn pairs(&self) -> BTreeSet<(&str, Counterparty<'_>)> {
         pairs_of(&self.contracts)
     }
