@@ -165,13 +165,6 @@ mod tests;
 /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
 const UNBOUND_DIR: &str = "<unbound>";
 
-/// The five original metrics whose hard `0` short-circuits the signal ([ADR-12]
-/// zero short-circuit, scoped to the original five by [ADR-21]).
-///
-/// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
-/// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
-const ORIGINAL_METRIC_COUNT: usize = 5;
-
 /// The fewest edges Modularity's graph needs for Modularity to apply
 /// ([CR-156], metric-semantics v6).
 ///
@@ -352,9 +345,11 @@ pub fn compute(
     } else {
         Some(aggregate(
             &applicable_original_dimensions(
-                &modularity,
-                modularity_not_applicable.is_none(),
-                [&acyclicity, &depth, &equality, &redundancy],
+                modularity_not_applicable.is_none().then_some(&modularity),
+                &acyclicity,
+                &depth,
+                &equality,
+                &redundancy,
             ),
             &applicable_new_dimensions(&nesting, &conciseness, &cohesion, &focus, &uniqueness),
         ))
@@ -388,20 +383,23 @@ pub fn compute(
 /// [`applicable_new_dimensions`]. Acyclicity, Depth, Equality and Redundancy
 /// always apply. What this returns is both the set the geometric mean spans and
 /// the set the [ADR-12] zero short-circuit inspects, so a not-applicable
-/// Modularity leaves both by one mechanism.
+/// Modularity leaves both by one mechanism. `modularity` is `None` when it is
+/// not applicable, the same `Option` shape the sibling takes for Cohesion/Focus.
 ///
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 fn applicable_original_dimensions(
-    modularity: &MetricValue,
-    modularity_applicable: bool,
-    always: [&MetricValue; ORIGINAL_METRIC_COUNT - 1],
+    modularity: Option<&MetricValue>,
+    acyclicity: &MetricValue,
+    depth: &MetricValue,
+    equality: &MetricValue,
+    redundancy: &MetricValue,
 ) -> Vec<f64> {
-    let mut dims = Vec::with_capacity(ORIGINAL_METRIC_COUNT);
-    if modularity_applicable {
-        dims.push(modularity.normalized);
+    let mut dims = Vec::with_capacity(5);
+    if let Some(m) = modularity {
+        dims.push(m.normalized);
     }
-    dims.extend(always.iter().map(|v| v.normalized));
+    dims.extend([acyclicity, depth, equality, redundancy].map(|v| v.normalized));
     dims
 }
 

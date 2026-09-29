@@ -2030,10 +2030,13 @@ fn a_zero_on_the_other_originals_short_circuits_at_any_m() {
         others[zeroed] = v(0.0);
         let [a, d, e, r] = &others;
         for modularity_applicable in [true, false] {
+            let modularity = v(0.5);
             let originals = super::applicable_original_dimensions(
-                &v(0.5),
-                modularity_applicable,
-                [a, d, e, r],
+                modularity_applicable.then_some(&modularity),
+                a,
+                d,
+                e,
+                r,
             );
             assert_eq!(
                 super::aggregate(&originals, &new_dims),
@@ -2047,8 +2050,9 @@ fn a_zero_on_the_other_originals_short_circuits_at_any_m() {
     // …and a zero Modularity short-circuits only while it applies.
     let others = [v(0.9), v(0.9), v(0.9), v(0.9)];
     let [a, d, e, r] = &others;
-    let applicable = super::applicable_original_dimensions(&v(0.0), true, [a, d, e, r]);
-    let dropped = super::applicable_original_dimensions(&v(0.0), false, [a, d, e, r]);
+    let zero = v(0.0);
+    let applicable = super::applicable_original_dimensions(Some(&zero), a, d, e, r);
+    let dropped = super::applicable_original_dimensions(None, a, d, e, r);
     assert_eq!(super::aggregate(&applicable, &new_dims), 0);
     assert_eq!(dropped.len(), 4, "a not-applicable Modularity leaves the set");
     assert_eq!(
