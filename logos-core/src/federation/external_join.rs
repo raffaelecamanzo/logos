@@ -106,8 +106,7 @@ use serde::Serialize;
 use crate::extract::config::corpus::{parse_yaml, ConfigCorpus};
 use crate::resolve::route_template::{normalize_template, parse_method_and_template};
 
-use super::bridge::{BridgeEndpoint, BridgeIntake};
-use super::coverage::{CoverageState, ReferenceCoverage, UnboundReason};
+use super::bridge::BridgeEndpoint;
 use super::declared_contracts::{
     ContractTarget, DeclaredContract, DeclaredContractRelation, ExternalId, OperationKey,
 };
@@ -456,11 +455,16 @@ pub enum JoinOutcome {
     Refused(JoinRefusal),
 }
 
-/// One judged row: the coverage row's consumer end and its outcome.
+/// One judged row: the coverage row's consumer end, the call's own target, and
+/// its outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExternalJoinRow {
-    /// The coverage row's `from` — its call site.
+    /// The coverage row's `from` — the call site's enclosing declaration.
     pub from: BridgeEndpoint,
+    /// The call's stored target (`METHOD /path`, placeholders as written): two
+    /// calls in one method share a `from`, and this is what tells their rows
+    /// apart.
+    pub target: String,
     /// What the join decided.
     #[serde(flatten)]
     pub outcome: JoinOutcome,
@@ -569,17 +573,21 @@ pub struct BoundExternal {
 }
 
 impl BoundExternal {
-    /// The outcome for the call site `from`, if it was judged.
-    pub fn outcome_of(&self, from: &BridgeEndpoint) -> Option<&JoinOutcome> {
-        self.rows.iter().find(|r| &r.from == from).map(|r| &r.outcome)
+    /// Every judged row of the call site `from` — one per call it makes, in
+    /// target order.
+    pub fn rows_of<'a>(&'a self, from: &'a BridgeEndpoint) -> impl Iterator<Item = &'a ExternalJoinRow> {
+        self.rows.iter().filter(move |r| &r.from == from)
     }
 }
 
-/// What the coverage tier knows about one HTTP call site, handed to the join:
-/// its committed compositions (`METHOD /path`) and the canonical keys its
-/// target named.
+/// What the coverage tier knows about one HTTP reference, handed to the join:
+/// its stored target, its committed compositions (`METHOD /path`) and the
+/// canonical keys its target named.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JoinCall {
+    /// The stored target, as the ledger holds it — the reference's identity
+    /// within its enclosing declaration.
+    pub target: String,
     /// A configuration-bound call's committed compositions, or a literal
     /// call's stored target.
     pub compositions: Vec<String>,
@@ -721,14 +729,6 @@ fn judge(
     JoinOutcome::Refused(refusal)
 }
 
-/// Whether a coverage row is in the join's population: an invocation-intake
-/// `route` row with no provider anywhere in the workspace.
-fn in_population(row: &ReferenceCoverage) -> bool {
-    row.intake == BridgeIntake::Invocation
-        && row.relation == "route"
-        && row.state == CoverageState::Unbound { reason: UnboundReason::NoProviderInWorkspace }
-}
-
 /// The one-line summary: the figure, its denominator, the non-zero refusals,
 /// and what it is not.
 fn summarize(accounting: JoinAccounting, rows: u64) -> String {
@@ -748,19 +748,19 @@ fn summarize(accounting: JoinAccounting, rows: u64) -> String {
     )
 }
 
-/// Join every invocation `no-provider-in-workspace` REST row of `rows` against
-/// the externals its own member declares ([ADR-68] point 3).
+/// Join every invocation `no-provider-in-workspace` REST reference against the
+/// externals its own member declares ([ADR-68] point 3).
 ///
-/// `calls` carries each HTTP call site's compositions and keys, as the coverage
-/// tier read them; `facts` reads a member's [`BaseFacts`] and is called at most
+/// `population` is those references, one entry per coverage row — its `from`
+/// and the [`JoinCall`] the coverage tier resolved it by; `facts` reads a
+/// member's [`BaseFacts`] and is called at most
 /// once per member, and only for a member some row of which could match an
 /// operation. `None` when no member declares a named external — the join has
 /// nothing to bind to, and the payload stays as it was.
 ///
 /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
 pub fn derive(
-    rows: &[ReferenceCoverage],
-    calls: &BTreeMap<BridgeEndpoint, JoinCall>,
+    population: &[(BridgeEndpoint, JoinCall)],
     relation: &DeclaredContractRelation,
     mut facts: impl FnMut(&str) -> BaseFacts,
 ) -> Option<BoundExternal> {
@@ -771,18 +771,16 @@ pub fn derive(
     }
     let mut cache = FactsCache { read: &mut facts, by_member: BTreeMap::new() };
     let mut accounting = JoinAccounting::default();
-    let no_call = JoinCall::default();
-    let judged: Vec<ExternalJoinRow> = rows
+    let mut judged: Vec<ExternalJoinRow> = population
         .iter()
-        .filter(|row| in_population(row))
-        .map(|row| {
-            let member = row.from.member.as_str();
-            let call = calls.get(&row.from).unwrap_or(&no_call);
-            let outcome = judge(member, call, relation, &mut cache);
+        .map(|(from, call)| {
+            let outcome = judge(&from.member, call, relation, &mut cache);
             accounting.record(&outcome);
-            ExternalJoinRow { from: row.from.clone(), outcome }
+            ExternalJoinRow { from: from.clone(), target: call.target.clone(), outcome }
         })
         .collect();
+    // The coverage rows' own order (by endpoint), then the call's target.
+    judged.sort_by(|a, b| (&a.from, &a.target).cmp(&(&b.from, &b.target)));
     let no_provider_rows = judged.len() as u64;
     Some(BoundExternal {
         headline: BoundExternalHeadline {

@@ -1673,14 +1673,21 @@ where
     // below, because `consumer_portable_key` would otherwise decline it and file
     // it under `path-not-composed` — a reason that means *the template would not
     // normalize*, which is exactly what is not yet known about it.
-    // Each HTTP call site's compositions and keys, for the external join after
-    // the tally is sealed ([ADR-68] point 3) — read off the same resolution the
-    // row is classified by, never a second one.
-    let mut join_calls: BTreeMap<BridgeEndpoint, JoinCall> = BTreeMap::new();
+    // The external join's population ([ADR-68] point 3): each HTTP reference
+    // this loop files `no-provider-in-workspace`, with its own compositions and
+    // keys — read off the same resolution the row is classified by, never a
+    // second one, and paired with the row **per reference**, because two calls in
+    // one method share a `from` ([`JoinCall::target`] tells them apart).
+    let mut join_population: Vec<(BridgeEndpoint, JoinCall)> = Vec::new();
+    let mut awaiting: Option<(usize, JoinCall)> = None;
     for (member, consumer, identity) in inv_consumers {
+        settle_join(&tally, awaiting.take(), &mut join_population);
         // Built once for all three branches below — the endpoint is the same
         // `(member, symbol)` pair whichever one the row takes.
         let from = BridgeEndpoint { member: member.clone(), symbol: consumer.symbol.clone() };
+        if consumer.relation.bridge_namespace() == Some(BridgeNamespace::Http) {
+            awaiting = Some((tally.references.len(), join_call(&consumer, identity.as_ref())));
+        }
         // **The broker arm first, because its rule is not the HTTP arm's.**
         //
         // Until [S-410] this tier resolved the HTTP arm alone, and the comment
@@ -1712,10 +1719,6 @@ where
             // (S-420, [CR-133]) — so a target the bridge draws an edge for is a
             // row this tier reports bound, and neither tier can classify it alone.
             Some(ArmIdentity::Http(identity)) => {
-                join_calls.entry(from.clone()).or_insert_with(|| JoinCall {
-                    compositions: identity.composed.clone(),
-                    keys: identity.named_keys.clone(),
-                });
                 record_config_bound(&mut tally, &providers, from, &consumer, identity);
                 continue;
             }
@@ -1725,13 +1728,6 @@ where
         }
 
         let relation = arm_relation(consumer.relation);
-        if consumer.relation.bridge_namespace() == Some(BridgeNamespace::Http) {
-            // A literal target names no key, so it proves no base path; the join
-            // still judges it, and says so.
-            join_calls
-                .entry(from.clone())
-                .or_insert_with(|| JoinCall { compositions: vec![consumer.target.clone()], keys: Vec::new() });
-        }
 
         let Some(key) = consumer_portable_key(consumer.relation, &consumer.target) else {
             tally.record(
@@ -1767,6 +1763,8 @@ where
             );
         }
     }
+
+    settle_join(&tally, awaiting.take(), &mut join_population);
 
     // The recorded refusals on the provider side of an arm ([CR-107]). Reported
     // after the classified rows so the tally's own ordering is untouched;
@@ -1815,11 +1813,42 @@ where
     // The external join reads the relation it was just derived from, and each
     // calling member's committed base path from the files its discovery walk
     // admits — read here, on the query, never stored ([ADR-68] point 3).
-    coverage.bound_external = external_join::derive(&coverage.references, &join_calls, &declared, |member| {
+    coverage.bound_external = external_join::derive(&join_population, &declared, |member| {
         roots.get(member).map_or_else(BaseFacts::default, |root| BaseFacts::read(root))
     });
     coverage.declared_contracts = (!declared.is_empty()).then_some(declared);
     coverage
+}
+
+/// What the external join judges one HTTP reference by: its stored target, and
+/// its committed compositions and keys where the walk resolved it through
+/// configuration, else the target itself — a literal names no key.
+fn join_call(consumer: &super::bridge::InvocationRef, identity: Option<&ArmIdentity>) -> JoinCall {
+    let (compositions, keys) = match identity {
+        Some(ArmIdentity::Http(identity)) => (identity.composed.clone(), identity.named_keys.clone()),
+        _ => (vec![consumer.target.clone()], Vec::new()),
+    };
+    JoinCall { target: consumer.target.clone(), compositions, keys }
+}
+
+/// File one HTTP reference into the external join's population if the row the
+/// invocation loop filed for it — at most one, starting at index `at`; none for
+/// an intra-repo resolution — is an invocation `no-provider-in-workspace` REST
+/// row ([ADR-68] point 3).
+///
+/// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+fn settle_join(tally: &Tally, awaiting: Option<(usize, JoinCall)>, into: &mut Vec<(BridgeEndpoint, JoinCall)>) {
+    let Some((at, call)) = awaiting else {
+        return;
+    };
+    let filed = tally.references.get(at).filter(|row| {
+        row.intake == BridgeIntake::Invocation
+            && row.relation == BridgeNamespace::Http.relation()
+            && row.state == CoverageState::Unbound { reason: UnboundReason::NoProviderInWorkspace }
+    });
+    if let Some(row) = filed {
+        into.push((row.from.clone(), call));
+    }
 }
 
 /// The provider verdict the declared-contract relation reads off one
@@ -9655,12 +9684,15 @@ mod tests {
         let literal =
             BridgeEndpoint { member: "facade".into(), symbol: LogosSymbol::parse("local facade_calls_auth_literally").unwrap() };
         assert_eq!(
-            join.outcome_of(&literal),
-            Some(&external_join::JoinOutcome::Refused(external_join::JoinRefusal::NoBaseKey)),
+            join.rows_of(&literal).map(|r| &r.outcome).collect::<Vec<_>>(),
+            vec![&external_join::JoinOutcome::Refused(external_join::JoinRefusal::NoBaseKey)],
             "a literal call is judged, and proves no base path"
         );
         let from = BridgeEndpoint { member: "facade".into(), symbol: LogosSymbol::parse("local facade_calls_mailbox").unwrap() };
-        let Some(external_join::JoinOutcome::BoundExternal(binding)) = join.outcome_of(&from) else {
+        let [row] = join.rows_of(&from).collect::<Vec<_>>()[..] else {
+            panic!("one call from that symbol: {join:?}");
+        };
+        let external_join::JoinOutcome::BoundExternal(binding) = &row.outcome else {
             panic!("the call binds: {join:?}");
         };
         assert_eq!(binding.external.0, "facade:api/pss.yaml");
@@ -9680,6 +9712,42 @@ mod tests {
             row.state,
             CoverageState::Unbound { reason: UnboundReason::NoProviderInWorkspace },
             "the row does not move: an external is not a member"
+        );
+    }
+
+    /// **Two calls in one method are judged each on its own target.** The
+    /// ledger's call site is the enclosing declaration, so both rows share one
+    /// `from`: the PSS call binds, the unrelated one does not borrow its verdict,
+    /// and the headline counts one of two.
+    #[test]
+    fn two_calls_in_one_method_are_judged_each_on_its_own_target() {
+        let tmp = tempfile::Builder::new().prefix("s459-").tempdir().unwrap();
+        commit_facade_sources(tmp.path());
+        pss_caller_workspace();
+        set_consumers(
+            "facade",
+            vec![
+                http_call("GET ${pec-server.uri-get-mailbox}", "local facade_calls_both"),
+                http_call("DELETE /nothing/here", "local facade_calls_both"),
+            ],
+        );
+        let cov = cross_service_coverage(&rooted(tmp.path()).answer());
+        let join = cov.bound_external.as_ref().expect("facade declares an external");
+        assert_eq!((join.headline.bound_external, join.headline.no_provider_rows), (1, 2));
+        let from = BridgeEndpoint { member: "facade".into(), symbol: LogosSymbol::parse("local facade_calls_both").unwrap() };
+        let judged: Vec<(&str, &str)> = join
+            .rows_of(&from)
+            .map(|r| {
+                let state = match &r.outcome {
+                    external_join::JoinOutcome::BoundExternal(b) => b.operation.as_str(),
+                    external_join::JoinOutcome::Refused(_) => "refused",
+                };
+                (r.target.as_str(), state)
+            })
+            .collect();
+        assert_eq!(
+            judged,
+            vec![("DELETE /nothing/here", "refused"), ("GET ${pec-server.uri-get-mailbox}", "GET /prov/domain/{}/user/{}")]
         );
     }
 

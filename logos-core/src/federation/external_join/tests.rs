@@ -12,7 +12,6 @@ use crate::federation::declared_contracts::{
     DeclaredContractHeadline, DocumentAccounting, NamedExternal, VENDORED_SPEC,
 };
 use crate::model::LogosSymbol;
-use crate::resolve::binding::Provenance;
 
 const APP: &str = "src/main/resources/application.yml";
 const PSS_COPY: &str = "src/main/resources/pec-server/pss.yaml";
@@ -115,33 +114,18 @@ fn endpoint(member: &str, symbol: &str) -> BridgeEndpoint {
     BridgeEndpoint { member: member.to_string(), symbol: LogosSymbol::parse(symbol).unwrap() }
 }
 
-fn row(member: &str, symbol: &str, intake: BridgeIntake, reason: UnboundReason) -> ReferenceCoverage {
-    let state = CoverageState::Unbound { reason };
-    ReferenceCoverage {
-        relation: "route".to_string(),
-        from: endpoint(member, symbol),
-        bucket: state.bucket(),
-        state,
-        to: None,
-        intake,
-        candidates: None,
-        provenance: Provenance::Literal,
-    }
-}
-
-fn no_provider(member: &str, symbol: &str) -> ReferenceCoverage {
-    row(member, symbol, BridgeIntake::Invocation, UnboundReason::NoProviderInWorkspace)
-}
-
 fn config_call(composition: &str, key: &str) -> JoinCall {
-    JoinCall { compositions: vec![composition.to_string()], keys: vec![canonical_key(key)] }
+    JoinCall {
+        target: format!("{} ${{{key}}}", composition.split(' ').next().unwrap_or_default()),
+        compositions: vec![composition.to_string()],
+        keys: vec![canonical_key(key)],
+    }
 }
 
 /// Judge one call of `member` over `facts`, through [`derive`].
 fn outcome(member: &str, call: JoinCall, relation: &DeclaredContractRelation, facts: BaseFacts) -> JoinOutcome {
-    let rows = [no_provider(member, "local call")];
-    let calls = BTreeMap::from([(endpoint(member, "local call"), call)]);
-    let joined = derive(&rows, &calls, relation, |_| facts.clone()).expect("an external is declared");
+    let population = [(endpoint(member, "local call"), call)];
+    let joined = derive(&population, relation, |_| facts.clone()).expect("an external is declared");
     joined.rows.into_iter().next().expect("one row judged").outcome
 }
 
@@ -323,7 +307,11 @@ fn an_environment_only_base_path_is_refused() {
 /// path is exactly an operation's.
 #[test]
 fn a_literal_call_proves_no_base_path() {
-    let literal = JoinCall { compositions: vec!["POST /prov/session/authenticate".into()], keys: Vec::new() };
+    let literal = JoinCall {
+        target: "POST /prov/session/authenticate".into(),
+        compositions: vec!["POST /prov/session/authenticate".into()],
+        keys: Vec::new(),
+    };
     assert_eq!(
         outcome("facade", literal, &pss_relation(), facade_facts()),
         JoinOutcome::Refused(JoinRefusal::NoBaseKey)
@@ -363,6 +351,7 @@ fn a_near_miss_is_no_match() {
 #[test]
 fn compositions_binding_two_operations_bind_neither() {
     let two = JoinCall {
+        target: "GET ${pec-server.uri-get-mailbox-path}".into(),
         compositions: vec!["GET /domain/{d}/user/{u}".into(), "POST /session/authenticate".into()],
         keys: vec![canonical_key("pec-server.uri-get-mailbox-path")],
     };
@@ -376,27 +365,18 @@ fn compositions_binding_two_operations_bind_neither() {
 
 // ── The population, the denominator and the reads ──────────────────────────
 
-/// The denominator is every invocation `no-provider-in-workspace` REST row and
-/// nothing else; the accounting sums to it; a member's facts are read once,
-/// and only for a member some row of which could match.
+/// The denominator is every reference the coverage tier hands over; the
+/// accounting sums to it; a member's facts are read once, and only for a member
+/// some row of which could match.
 #[test]
-fn the_denominator_is_every_invocation_no_provider_rest_row_and_facts_are_read_lazily() {
-    let rows = vec![
-        no_provider("facade", "local a"),
-        no_provider("facade", "local b"),
-        no_provider("shop", "local c"),
-        // Out of the population: a contract-surface row, an unbound one, a broker row.
-        row("facade", "local d", BridgeIntake::ContractSurface, UnboundReason::NoProviderInWorkspace),
-        row("facade", "local e", BridgeIntake::Invocation, UnboundReason::PathNotComposed),
-        ReferenceCoverage { relation: "broker-topic".into(), ..no_provider("facade", "local f") },
-    ];
-    let calls = BTreeMap::from([
+fn the_denominator_is_every_handed_reference_and_facts_are_read_lazily() {
+    let population = [
         (endpoint("facade", "local a"), config_call("GET /domain/{d}/user/{u}", "pec-server.uri-get-mailbox-path")),
         (endpoint("facade", "local b"), config_call("POST /session/authenticate", "pec-server.uri-session")),
         (endpoint("shop", "local c"), config_call("GET /orders", "shop.uri-orders")),
-    ]);
+    ];
     let reads = Cell::new(0);
-    let joined = derive(&rows, &calls, &pss_relation(), |member| {
+    let joined = derive(&population, &pss_relation(), |member| {
         assert_eq!(member, "facade", "`shop` could match nothing, so it is never read");
         reads.set(reads.get() + 1);
         facade_facts()
@@ -426,36 +406,36 @@ fn the_denominator_is_every_invocation_no_provider_rest_row_and_facts_are_read_l
          declares (refused: 1 no declared external); declared by vendored specs, never a cross-service edge, \
          and outside egress_resolution"
     );
-    assert!(joined.outcome_of(&endpoint("facade", "local b")).is_some());
-    assert!(joined.outcome_of(&endpoint("facade", "local d")).is_none(), "out of the population");
+    assert_eq!(joined.rows_of(&endpoint("facade", "local b")).count(), 1);
+    assert_eq!(joined.rows_of(&endpoint("facade", "local z")).count(), 0);
 }
 
 /// With no external declared by any member the join has nothing to bind to
 /// and publishes nothing, so such a payload is unchanged.
 #[test]
 fn no_declared_external_publishes_no_join() {
-    let rows = [no_provider("facade", "local a")];
+    let population = [(endpoint("facade", "local a"), JoinCall::default())];
     let to_member = DeclaredContract {
         target: ContractTarget::Member { member: "agg".into(), document: "v1.yaml".into(), shared: 1, total: 1 },
         ..external_contract("web", "spec/agg.yaml", "x", "x", &[("GET", "/mail")])
     };
-    assert!(derive(&rows, &BTreeMap::new(), &relation(vec![to_member]), |_| BaseFacts::default()).is_none());
-    assert!(derive(&rows, &BTreeMap::new(), &relation(Vec::new()), |_| BaseFacts::default()).is_none());
+    assert!(derive(&population, &relation(vec![to_member]), |_| BaseFacts::default()).is_none());
+    assert!(derive(&population, &relation(Vec::new()), |_| BaseFacts::default()).is_none());
 }
 
 /// The wire form: a bound row is `state: bound-external` with its evidence
 /// flattened beside `from`; a refused one is `state: refused` with its reason.
 #[test]
 fn the_wire_form_names_the_state_and_the_reason() {
-    let rows = [no_provider("facade", "local a"), no_provider("facade", "local b")];
-    let calls = BTreeMap::from([
+    let population = [
         (endpoint("facade", "local a"), config_call("GET /domain/{d}/user/{u}", "pec-server.uri-get-mailbox-path")),
         (endpoint("facade", "local b"), config_call("GET /nowhere", "pec-server.uri-nowhere")),
-    ]);
-    let joined = derive(&rows, &calls, &pss_relation(), |_| facade_facts()).unwrap();
+    ];
+    let joined = derive(&population, &pss_relation(), |_| facade_facts()).unwrap();
     let json = serde_json::to_value(&joined).unwrap();
     let bound = &json["rows"][0];
     assert_eq!(bound["state"], "bound-external");
+    assert_eq!(bound["target"], "GET ${pec-server.uri-get-mailbox-path}");
     assert_eq!(bound["external"], PSS);
     assert_eq!(bound["operation"], "GET /prov/domain/{}/user/{}");
     assert_eq!(bound["base"]["origin"], "deploy-overlay");
