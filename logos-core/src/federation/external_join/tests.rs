@@ -678,3 +678,30 @@ fn the_overlay_read_opens_only_walk_admitted_files_and_adds_no_corpus_key() {
         Ok(BasePathEvidence { ref path, origin: BaseOrigin::DeployOverlay, .. }) if path == "/prov"
     ));
 }
+
+/// `BaseFacts::read` reads **every** application profile the walk admits, so
+/// two profiles committing different base paths reach the reading as a named
+/// disagreement.
+#[test]
+fn every_application_profile_read_from_disk_reaches_the_base_reading() {
+    let tmp = tempfile::Builder::new().prefix("s459-").tempdir().unwrap();
+    let root = tmp.path();
+    let write = |rel: &str, text: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(APP, "pec-server:\n  base-url: http://h/v1\n  uri-get: /domain/{d}\n");
+    write("src/main/resources/application-prod.yml", "pec-server:\n  base-url: http://h/v2\n");
+    let facts = BaseFacts::read(root);
+    let key = "pecserver.baseurl".to_string();
+    assert_eq!(
+        base_reading(&keys(&["pec-server.uri-get"]), &facts),
+        Err(JoinRefusal::BasePathsDisagree {
+            paths: vec![
+                BasePath { path: "/v1".into(), file: APP.into(), key: key.clone() },
+                BasePath { path: "/v2".into(), file: "src/main/resources/application-prod.yml".into(), key },
+            ],
+        })
+    );
+}
