@@ -19,7 +19,7 @@ import {
   nodeSize,
   visibleNodeIds,
 } from "./graphModel.ts";
-import { BUILD_EDGE_TYPE } from "../workspace/serviceMapModel.ts";
+import { BUILD_EDGE_TYPE, DECLARED_EDGE_TYPE } from "../workspace/serviceMapModel.ts";
 
 const node = (id: string, layer: GraphElementNode["layer"] = "code"): GraphElementNode => ({
   id,
@@ -141,6 +141,16 @@ describe("palettes & sizing", () => {
     const deg = degreeMap(set, new Set(["a", "b", "lib"]));
     expect(deg).toEqual({ a: 1, b: 1 });
     expect(deg.lib ?? 0).toBe(0);
+  });
+
+  it("never counts a declared contract toward a node's degree either (S-461, BR-57)", () => {
+    const set = loadedFrom(
+      [node("a"), node("b"), node("ext")],
+      [edge("a", "b", "route"), edge("a", "ext", DECLARED_EDGE_TYPE), edge("b", "a", DECLARED_EDGE_TYPE)],
+    );
+    const deg = degreeMap(set, new Set(["a", "b", "ext"]));
+    expect(deg).toEqual({ a: 1, b: 1 });
+    expect(edgeStyle(DECLARED_EDGE_TYPE)).toBe("dotted");
   });
 
   it("bumps the selected node to at least the focus size", () => {

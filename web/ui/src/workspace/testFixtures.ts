@@ -7,8 +7,10 @@
 import { vi } from "vitest";
 
 import type {
+  BoundExternal,
   BuildDependencyHeadline,
   CrossServiceCoverage,
+  DeclaredContractRelation,
   MemberTopics,
   WorkspaceRoster,
   WorkspaceStatus,
@@ -52,6 +54,121 @@ export const EMPTY_COVERAGE: CrossServiceCoverage = {
   members_read: 2,
   members_total: 2,
   covers_all_members: true,
+};
+
+/** The declared-contract relation over the two members (S-461) — the reference
+ *  estate's shapes at this fixture's scale:
+ *
+ *  - `api` holds a copy of `web`'s own spec: document identity, 3 of 3;
+ *  - `api` and `web` each hold a PSS copy — ONE external, two declarers;
+ *  - `web` also holds a second, unrelated document titled PSS — a SECOND
+ *    external with the same name, so anything keyed by name collides here;
+ *  - `pss-mock` (not a roster member) stands in for the first PSS. */
+export const DECLARED_CONTRACTS: DeclaredContractRelation = {
+  headline: {
+    declared_contract_pairs: 4,
+    to_member: 1,
+    to_external: 3,
+    documents: { documents: 6, own: 1, vendored: 4, partial: 0, unjudged: 0, mock: 1, documentation: 0 },
+    named_externals: 2,
+    identity_collisions: 0,
+    resolved_ties: 0,
+    summary:
+      "4 declared contract pairs (1 by document identity, 3 to named externals) from 4 vendored of 6 spec documents; 2 named externals; 0 contract-surface ties resolved by document identity; declared by vendored specs, never observed calls",
+  },
+  contracts: [
+    {
+      holder: "api",
+      document: "pss.yaml",
+      provenance: "vendored-spec",
+      target: { kind: "external", external: "api:pss.yaml", name: "PSS" },
+    },
+    {
+      holder: "api",
+      document: "specs/web.yaml",
+      provenance: "vendored-spec",
+      target: { kind: "member", member: "web", document: "api/openapi.yaml", shared: 3, total: 3 },
+    },
+    {
+      holder: "web",
+      document: "legacy/pss.yaml",
+      provenance: "vendored-spec",
+      target: { kind: "external", external: "web:legacy/pss.yaml", name: "PSS" },
+    },
+    {
+      holder: "web",
+      document: "vendor/pss-copy.yaml",
+      provenance: "vendored-spec",
+      target: { kind: "external", external: "api:pss.yaml", name: "PSS" },
+    },
+  ],
+  externals: [
+    {
+      id: "api:pss.yaml",
+      name: "PSS",
+      copies: [
+        { member: "api", document: "pss.yaml", title: "PSS" },
+        { member: "pss-mock", document: "source.yaml", title: "PSS" },
+        { member: "web", document: "vendor/pss-copy.yaml", title: "PSS" },
+      ],
+      declared_by: ["api", "web"],
+      stand_ins: ["pss-mock"],
+    },
+    {
+      id: "web:legacy/pss.yaml",
+      name: "PSS",
+      copies: [{ member: "web", document: "legacy/pss.yaml", title: "PSS" }],
+      declared_by: ["web"],
+      stand_ins: [],
+    },
+  ],
+  collisions: [],
+  resolved_ties: [],
+};
+
+/** The external join over {@link DECLARED_CONTRACTS} (S-459): `api`'s one
+ *  configuration-composed call binds the first PSS under `/prov`, and a `web`
+ *  call is refused — judged, never drawn. */
+export const BOUND_EXTERNAL: BoundExternal = {
+  headline: {
+    bound_external: 1,
+    no_provider_rows: 2,
+    accounting: {
+      bound_external: 1,
+      no_declared_external: 0,
+      external_not_declared_by_member: 0,
+      no_base_key: 0,
+      base_path_uncommitted: 0,
+      base_paths_disagree: 0,
+      suffix_only: 0,
+      no_match: 1,
+      several_matches: 0,
+    },
+    summary:
+      "1 of 2 invocation no-provider-in-workspace REST rows bound to a named external their own member declares (refused: 1 no match); declared by vendored specs, never a cross-service edge, and outside egress_resolution",
+  },
+  rows: [
+    {
+      from: { member: "api", symbol: "local fetch_mailbox" },
+      target: "GET ${pss.uri-get-mailbox}",
+      state: "bound-external",
+      external: "api:pss.yaml",
+      name: "PSS",
+      document: "pss.yaml",
+      operation: "GET /prov/domain/{}/user/{}",
+      base: {
+        path: "/prov",
+        origin: "deploy-overlay",
+        sources: [{ file: "deploy-coll/values.yaml", key: "envfrom.pssbaseurl" }],
+      },
+    },
+    {
+      from: { member: "web", symbol: "local fetch_folder" },
+      target: "GET /folder",
+      state: "refused",
+      reason: "no-match",
+    },
+  ],
 };
 
 /** No member has promoted a broker topic — the default, and the shape every repo

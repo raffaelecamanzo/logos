@@ -277,3 +277,59 @@ fn xservice_build_deps_says_it_is_a_build_dependency_not_a_runtime_coupling() {
         );
     }
 }
+
+/// S-461 ([BR-57]): the two tools that carry the declared relations name them
+/// and say they are DECLARED, NOT OBSERVED — the sentence an agent must not
+/// miss, because a declared contract row names a holder and a target exactly as
+/// a binding names a consumer and a provider.
+///
+/// Near misses pinned out: "declared" alone matches the `declared_apart`
+/// sentence the status description already carried, and "not observed" alone
+/// would match a sentence asserting the opposite, so each check is the whole
+/// phrase or the backtick-quoted key.
+///
+/// [BR-57]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn route_providers_and_status_name_the_declared_relations_as_declared_not_observed() {
+    let federated = federated_tools();
+    let description = |name: &str| {
+        federated
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.description.as_deref())
+            .unwrap_or_else(|| panic!("the federated backing registers {name}"))
+            .to_string()
+    };
+
+    let route = description("xservice_route_providers");
+    for clause in [
+        "`declared_contracts`",
+        "DECLARED-CONTRACT relation",
+        "`bound_external`",
+        "BOTH ARE DECLARED, NOT OBSERVED",
+        "`declared_scope_note`",
+        "`base`",
+    ] {
+        assert!(route.contains(clause), "xservice_route_providers names {clause}: {route}");
+    }
+    assert!(
+        route.contains("never inside it") && route.contains("no declared contract or bound external is a binding"),
+        "the relations are stated beside the bindings, never as one: {route}",
+    );
+
+    let status = description("workspace_status");
+    for clause in [
+        "`coverage.declared_contracts`",
+        "`headline.declared_contract_pairs`",
+        "`headline.documents`",
+        "`coverage.bound_external`",
+        "`headline.no_provider_rows`",
+        "BOTH ARE DECLARED, NOT OBSERVED",
+    ] {
+        assert!(status.contains(clause), "workspace_status names {clause}: {status}");
+    }
+    assert!(
+        status.contains("a bound-external row stays `no-provider-in-workspace`"),
+        "the status description says the bound row does not move: {status}",
+    );
+}

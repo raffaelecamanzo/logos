@@ -17,8 +17,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
-    app_wide_reachability, discover, open_state, query, workspace_governance, xservice_build_deps,
-    BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope, RegistryMode,
+    app_wide_reachability, cross_service_coverage, discover, open_state, query, workspace_governance,
+    xservice_build_deps, BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope,
+    RegistryMode,
 };
 use logos_core::{model::NodeKind, Engine};
 
@@ -43,6 +44,19 @@ pub(crate) enum XserviceCommands {
     /// emitted as though it had been observed (ADR-64). Worded to match the
     /// `xservice_route_providers` MCP twin, which states the same fact.
     /// `--repo` scopes to routes that member provides.
+    ///
+    /// Beside the bindings, never among them ([BR-57]): `declared_contracts` is
+    /// the declared-contract relation — a spec document a member holds and does
+    /// not implement, naming the member whose own spec it is or a named external
+    /// — and `bound_external` the external join, each `no-provider-in-workspace`
+    /// REST call judged against the externals its own member declares, under a
+    /// committed base path. Both are DECLARED by vendored specs, not observed
+    /// calls; each carries its headline beside its denominator, both are
+    /// workspace-wide under `--repo` (`declared_scope_note` says so), and each
+    /// is absent when there is nothing to report — no vendored or `mock`-held
+    /// spec, no named external a member declares.
+    ///
+    /// [BR-57]: ../../docs/specs/software-spec.md#327-workspace-federation
     #[command(name = "route-providers", alias = "route_providers")]
     RouteProviders {
         /// Scope to routes provided by this workspace member.
@@ -128,6 +142,15 @@ pub(crate) enum WorkspaceCommands {
     /// from — its own section, apart from every runtime figure above ([FR-WS-33],
     /// [BR-58]); `xservice build-deps` lists the rows.
     ///
+    /// When a member holds a vendored spec, `coverage.declared_contracts` states
+    /// `declared_contract_pairs` beside the spec documents read, and
+    /// `coverage.bound_external` the calls bound to a named external beside the
+    /// `no-provider-in-workspace` REST rows they were judged from — beside the
+    /// invocation and contract-surface headlines, never inside them: DECLARED by
+    /// vendored specs, not observed calls ([BR-51], [BR-57]).
+    ///
+    /// [BR-51]: ../../docs/specs/software-spec.md#327-workspace-federation
+    /// [BR-57]: ../../docs/specs/software-spec.md#327-workspace-federation
     /// [FR-WS-32]: ../../docs/specs/requirements/FR-WS-32.md
     /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
     /// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
@@ -184,7 +207,8 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
     match command {
         XserviceCommands::RouteProviders { repo } => {
             let edges = query::edges(&bridge, &registry);
-            out.print(&query::xservice_route_providers(&edges, repo.as_deref()))?;
+            let coverage = cross_service_coverage(&registry.answer());
+            out.print(&query::xservice_route_providers(&edges, repo.as_deref()).with_declared(coverage))?;
         }
         XserviceCommands::Callers {
             symbol,
