@@ -438,3 +438,15 @@ fn a_resolved_tie_is_the_holders_even_where_the_symbol_is_shared() {
     assert!(r.resolved_tie("web", &shared).is_some(), "web's copy resolves its tie");
     assert!(r.resolved_tie("agg", &shared).is_none(), "agg's own row, same symbol, is not web's tie");
 }
+
+/// Containment joins copies in **either** direction: here the newer, larger
+/// version sorts first (`a:` before `web:`) and the older copy it contains
+/// still joins its group.
+#[test]
+fn a_larger_version_sorting_first_still_groups_with_the_copy_it_contains() {
+    let mut facts = vendored("a", "a/pss-v2.yaml", &ops(0, 12));
+    facts.extend(vendored("web", "w/pss-v1.yaml", &ops(0, 10)));
+    let r = derive(&facts, &no_kinds(), no_titles);
+    assert_eq!(r.externals.len(), 1, "one external: {:?}", r.externals);
+    assert_eq!(r.externals[0].copies.len(), 2);
+}
