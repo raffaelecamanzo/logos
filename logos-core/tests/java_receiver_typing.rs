@@ -856,7 +856,9 @@ fn a_proof_still_types_beside_the_shapes_that_look_like_refusals() {
 /// An inner class reads its outer class's field — a `@Nested` test class and
 /// its outer test's collaborators — and that field is in scope, unless the
 /// inner class inherits: a supertype may declare a same-named field this file
-/// cannot see, which shadows the outer one (S-467 review).
+/// cannot see, which shadows the outer one (S-467 review). An interface is a
+/// supertype too — its constant `m` would shadow the field just as a
+/// superclass's would (sprint-81 review).
 const NESTED_FILE: &str = "src/main/java/com/x/svc/NestedT.java";
 const NESTED: &str = "package com.x.svc;\n\
 \n\
@@ -871,6 +873,9 @@ public class NestedT {\n\
     class Inherits extends Base2 {\n\
         void go() { m.send(); }\n\
     }\n\
+    class Implements implements Runnable {\n\
+        void go() { m.send(); }\n\
+    }\n\
 }\n";
 
 #[test]
@@ -883,7 +888,11 @@ fn an_outer_classs_field_is_in_scope_through_inner_classes_that_inherit_nothing(
     let rows = calls_from(rt, NESTED_FILE);
     assert_eq!(
         rows,
-        [row("go", "Mailer::send", RefForm::Path), row("go", "send", RefForm::Method)]
+        [
+            row("go", "Mailer::send", RefForm::Path),
+            row("go", "send", RefForm::Method),
+            row("go", "send", RefForm::Method)
+        ]
     );
     // The typed row is `Plain.go`'s: it binds to the imported `Mailer`.
     let edges = call_edges(rt);
