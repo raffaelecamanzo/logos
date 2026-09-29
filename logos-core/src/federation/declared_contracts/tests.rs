@@ -395,20 +395,36 @@ fn a_document_path_is_the_symbols_file_descriptor() {
 }
 
 /// The headline is stated over its denominator, which accounts for every
-/// document, and says what it is not.
+/// document, and says what it is not. Every figure the line prints differs from
+/// every other (5 · 1 · 4 · 6 · 10 · 3 · 2), so a swapped argument cannot pass.
 #[test]
 fn the_headline_is_stated_over_every_spec_document_read() {
+    let tied = OperationProviders::Tied(vec![endpoint("agg", "a/v1.yaml", 0), endpoint("core", "c/v1.yaml", 0)]);
     let mut facts = own("agg", "a/v1.yaml", &ops(0, 10));
-    facts.extend(vendored("web", "w/agg.yaml", &ops(0, 10)));
-    facts.extend(vendored("web", "w/pss.yaml", &ops(100, 4)));
+    // web's copy of agg's spec, two of its operations tied: 1 identity pair, 2 ties.
+    facts.extend(ops(0, 10).iter().enumerate().map(|(n, (m, t))| {
+        op("web", "w/agg.yaml", n, (m, t), if n < 2 { tied.clone() } else { OperationProviders::Elsewhere })
+    }));
+    // External X, held three times by two holders; Y once.
+    facts.extend(vendored("web", "w/x.yaml", &ops(100, 4)));
+    facts.extend(vendored("web", "w/x2.yaml", &ops(100, 4)));
+    facts.extend(vendored("shop", "s/x.yaml", &ops(100, 4)));
+    facts.extend(vendored("web", "w/y.yaml", &ops(200, 3)));
+    // Two own specs at an equal score: shop's copy collides and falls to Z.
+    facts.extend(own("core", "c/v1.yaml", &ops(300, 10)));
+    facts.extend(own("other", "o/v1.yaml", &ops(300, 10)));
+    facts.extend(vendored("shop", "s/z.yaml", &ops(300, 10)));
     facts.extend(vendored("docs", "d/pss.yaml", &ops(100, 4)));
+
     let r = derive(&facts, &kinds(&[("docs", MemberKind::Documentation)]), no_titles);
-    let d = &r.headline.documents;
+    let h = &r.headline;
+    let d = &h.documents;
     assert_eq!(d.documents, d.own + d.vendored + d.partial + d.unjudged + d.mock + d.documentation);
+    assert_eq!((h.identity_collisions, h.resolved_ties), (1, 2));
     assert_eq!(
-        r.headline.summary,
-        "2 declared contract pairs (1 by document identity, 1 to named externals) from 2 vendored \
-         of 4 spec documents; 1 named externals; 0 contract-surface ties resolved by document \
+        h.summary,
+        "5 declared contract pairs (1 by document identity, 4 to named externals) from 6 vendored \
+         of 10 spec documents; 3 named externals; 2 contract-surface ties resolved by document \
          identity; declared by vendored specs, never observed calls"
     );
 }
