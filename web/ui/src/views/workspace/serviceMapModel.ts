@@ -29,16 +29,15 @@
  */
 
 import type {
-  BasePathEvidence,
   BoundExternal,
   BridgeEdge,
-  BridgeEndpoint,
   BuildEdgeKind,
   BuildsAgainst,
   ConfigValueRefusal,
   DeclaredContract,
   DeclaredContractRelation,
   ExternalId,
+  ExternalJoinRow,
   MemberTopics,
   MemberWarmStateLabel,
   NamedExternal,
@@ -728,20 +727,10 @@ export function externalNodeId(id: ExternalId): string {
 }
 
 /** One bound call on a declared link: a `no-provider-in-workspace` call of the
- *  holder, bound to the link's external under a committed base path. The
- *  coverage row it comes from is unchanged — this is reported beside it. */
-export interface BoundCall {
-  /** The call site's enclosing declaration — the coverage row's `from`. */
-  from: BridgeEndpoint;
-  /** The call's stored target, placeholders as written. */
-  target: string;
-  /** The member's own copy of the external's spec. */
-  document: string;
-  /** The operation it matched. */
-  operation: string;
-  /** The committed base path, its origin and every file and key proving it. */
-  base: BasePathEvidence;
-}
+ *  holder, bound to the link's external under a committed base path — the
+ *  server's own bound join row, narrowed, never a hand-copied twin of it. The
+ *  coverage row it comes from is unchanged; this is reported beside it. */
+export type BoundCall = Extract<ExternalJoinRow, { state: "bound-external" }>;
 
 /** One declared link: every contract `from` declares to one counterparty,
  *  collapsed to a single line. */
@@ -817,13 +806,7 @@ export function declaredLayer(
     if (row.state !== "bound-external") continue;
     const link = byKey.get(keyOf(row.from.member, externalNodeId(row.external)));
     if (!link) continue;
-    link.bound.push({
-      from: row.from,
-      target: row.target,
-      document: row.document,
-      operation: row.operation,
-      base: row.base,
-    });
+    link.bound.push(row);
   }
 
   const links = [...byKey.values()].sort(

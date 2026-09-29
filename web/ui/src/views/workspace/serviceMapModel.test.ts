@@ -892,9 +892,14 @@ describe("declaredLayer (S-461)", () => {
     expect(withCalls.map((l) => [l.from, l.to])).toEqual([
       ["api", { kind: "external", external: "api:pss.yaml", name: "PSS" }],
     ]);
+    // The server's bound row itself, carried whole.
+    expect(withCalls[0].bound).toEqual([BOUND_EXTERNAL.rows[0]]);
     expect(withCalls[0].bound).toEqual([
       {
         from: { member: "api", symbol: "local fetch_mailbox" },
+        state: "bound-external",
+        external: "api:pss.yaml",
+        name: "PSS",
         target: "GET ${pss.uri-get-mailbox}",
         document: "pss.yaml",
         operation: "GET /prov/domain/{}/user/{}",
