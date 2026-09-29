@@ -438,11 +438,22 @@ pub enum JoinRefusal {
     },
     /// Nothing in the member's externals equals or ends with the path.
     NoMatch,
-    /// The call's compositions bind two or more distinct operations.
-    SeveralOperations {
-        /// Each operation, `METHOD /template`.
-        operations: Vec<String>,
+    /// The path equals two or more distinct `(external, operation)` pairs — two
+    /// compositions naming two operations, or two externals the member declares
+    /// carrying one operation. Exactly one is required; each is named.
+    SeveralMatches {
+        /// Every match, in `(external, operation)` order.
+        matches: Vec<OperationMatch>,
     },
+}
+
+/// One `(external, operation)` a call's path equals — a [`JoinRefusal::SeveralMatches`] line.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct OperationMatch {
+    /// The external.
+    pub external: ExternalId,
+    /// The operation, `METHOD /template`.
+    pub operation: String,
 }
 
 /// One row's outcome.
@@ -492,8 +503,8 @@ pub struct JoinAccounting {
     pub suffix_only: u64,
     /// [`JoinRefusal::NoMatch`].
     pub no_match: u64,
-    /// [`JoinRefusal::SeveralOperations`].
-    pub several_operations: u64,
+    /// [`JoinRefusal::SeveralMatches`].
+    pub several_matches: u64,
 }
 
 impl JoinAccounting {
@@ -510,7 +521,7 @@ impl JoinAccounting {
                 JoinRefusal::BasePathsDisagree { .. } => &mut self.base_paths_disagree,
                 JoinRefusal::SuffixOnly { .. } => &mut self.suffix_only,
                 JoinRefusal::NoMatch => &mut self.no_match,
-                JoinRefusal::SeveralOperations { .. } => &mut self.several_operations,
+                JoinRefusal::SeveralMatches { .. } => &mut self.several_matches,
             },
         };
         *bucket += 1;
@@ -528,7 +539,7 @@ impl JoinAccounting {
             base_paths_disagree,
             suffix_only,
             no_match,
-            several_operations,
+            several_matches,
         } = self;
         [
             ("no declared external", no_declared_external),
@@ -538,7 +549,7 @@ impl JoinAccounting {
             ("base paths disagree", base_paths_disagree),
             ("suffix-only", suffix_only),
             ("no match", no_match),
-            ("several operations", several_operations),
+            ("several matches", several_matches),
         ]
     }
 }
@@ -685,7 +696,9 @@ fn judge(
         BaseReading::One { path, origin, sources } => (path, origin, sources),
     };
 
-    let mut bound: BTreeMap<String, &Copy<'_>> = BTreeMap::new();
+    // Keyed by external AND operation: two externals carrying one operation are
+    // two matches, never a first-wins binding.
+    let mut bound: BTreeMap<OperationMatch, &Copy<'_>> = BTreeMap::new();
     let mut not_declared: Option<(&Copy<'_>, String)> = None;
     let mut suffix: Option<String> = None;
     for (method, path) in &paths {
@@ -694,7 +707,8 @@ fn judge(
         };
         let key = (method.clone(), joined);
         for copy in own.iter().filter(|c| c.contract.operations.contains(&key)) {
-            bound.entry(operation_label(&key)).or_insert(copy);
+            let at = OperationMatch { external: copy.external.id.clone(), operation: operation_label(&key) };
+            bound.entry(at).or_insert(copy);
         }
         if not_declared.is_none() {
             not_declared =
@@ -713,7 +727,7 @@ fn judge(
 
     let refusal = match bound.len() {
         1 => {
-            let (operation, copy) = bound.into_iter().next().expect("one operation");
+            let (OperationMatch { operation, .. }, copy) = bound.into_iter().next().expect("one match");
             return JoinOutcome::BoundExternal(ExternalBinding {
                 external: copy.external.id.clone(),
                 name: copy.external.name.clone(),
@@ -732,7 +746,7 @@ fn judge(
             (None, Some(operation)) => JoinRefusal::SuffixOnly { operation, base },
             (None, None) => JoinRefusal::NoMatch,
         },
-        _ => JoinRefusal::SeveralOperations { operations: bound.into_keys().collect() },
+        _ => JoinRefusal::SeveralMatches { matches: bound.into_keys().collect() },
     };
     JoinOutcome::Refused(refusal)
 }

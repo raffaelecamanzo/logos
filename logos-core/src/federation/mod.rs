@@ -163,7 +163,7 @@ pub use declared_contracts::{
 };
 pub use external_join::{
     BaseOrigin, BasePath, BasePathEvidence, BaseSource, BoundExternal, BoundExternalHeadline,
-    ExternalBinding, ExternalJoinRow, JoinAccounting, JoinOutcome, JoinRefusal,
+    ExternalBinding, ExternalJoinRow, JoinAccounting, JoinOutcome, JoinRefusal, OperationMatch,
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
 pub use manifest::{

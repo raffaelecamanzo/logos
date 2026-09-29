@@ -357,8 +357,39 @@ fn compositions_binding_two_operations_bind_neither() {
     };
     assert_eq!(
         outcome("facade", two, &pss_relation(), facade_facts()),
-        JoinOutcome::Refused(JoinRefusal::SeveralOperations {
-            operations: vec!["GET /prov/domain/{}/user/{}".into(), "POST /prov/session/authenticate".into()],
+        JoinOutcome::Refused(JoinRefusal::SeveralMatches {
+            matches: vec![
+                OperationMatch { external: ExternalId(PSS.into()), operation: "GET /prov/domain/{}/user/{}".into() },
+                OperationMatch { external: ExternalId(PSS.into()), operation: "POST /prov/session/authenticate".into() },
+            ],
+        })
+    );
+}
+
+/// **Two externals the member declares that carry the same operation bind
+/// neither**, each named: a member vendoring two PSS versions that document
+/// identity keeps apart holds two externals, and the call's evidence does not
+/// say which one it reaches.
+#[test]
+fn two_declared_externals_carrying_one_operation_bind_neither() {
+    let v1 = "facade:api/pss-v1.yaml";
+    let v2 = "facade:api/pss-v2.yaml";
+    let two = relation(vec![
+        external_contract("facade", "api/pss-v1.yaml", v1, "PSS", &[("GET", "/prov/domain/{}/user/{}"), ("GET", "/prov/v1only")]),
+        external_contract("facade", "api/pss-v2.yaml", v2, "PSS", &[("GET", "/prov/domain/{}/user/{}"), ("GET", "/prov/v2only")]),
+    ]);
+    assert_eq!(
+        outcome(
+            "facade",
+            config_call("GET /domain/{domain}/user/{user}", "pec-server.uri-get-mailbox-path"),
+            &two,
+            facade_facts(),
+        ),
+        JoinOutcome::Refused(JoinRefusal::SeveralMatches {
+            matches: vec![
+                OperationMatch { external: ExternalId(v1.into()), operation: "GET /prov/domain/{}/user/{}".into() },
+                OperationMatch { external: ExternalId(v2.into()), operation: "GET /prov/domain/{}/user/{}".into() },
+            ],
         })
     );
 }
@@ -396,7 +427,7 @@ fn the_denominator_is_every_handed_reference_and_facts_are_read_lazily() {
             + a.base_paths_disagree
             + a.suffix_only
             + a.no_match
-            + a.several_operations,
+            + a.several_matches,
         h.no_provider_rows,
         "every row is in exactly one bucket"
     );
