@@ -82,7 +82,7 @@ use logos_core::federation::discover;
 
 use super::config_declared_coupling::{
     classify_pair, collect_values, judgement, label_state, walk_overlays_with, JudgedTarget,
-    Judgement, PairOutcome, Provenance, Scalar, SequenceHost, SourceSet, Target, WalkCost,
+    Judgement, PairOutcome, Provenance, SequenceHost, SourceSet, Target, WalkCost,
 };
 use super::configuration_agreement::parse_yaml;
 use super::identity::{self, Corpus};
@@ -887,7 +887,6 @@ pub fn remeasure(root: &Path) -> Remeasure {
         .collect();
 
     let mut targets: Vec<Target> = Vec::new();
-    let mut scalars: Vec<Scalar> = Vec::new();
     let mut deploy_coverage = Coverage::default();
     let mut collapsed = Vec::new();
     let mut refused: Vec<(String, Refusal)> = Vec::new();
@@ -950,7 +949,7 @@ pub fn remeasure(root: &Path) -> Remeasure {
                 source: SourceSet::Application,
             },
             &reading.values,
-            &mut scalars,
+            &mut Vec::new(),
             &mut targets,
         );
     }
