@@ -50,7 +50,9 @@
 //! [`derive`] is pure. Its inputs are each member's contract-surface operations
 //! with the coverage tier's provider verdict ([`SpecOperation`]) and the
 //! `info.title` of each document the grouping names ([`read_title`] reads it
-//! from the member's own committed file). The coverage tier builds it on the
+//! from the file in the member's working tree — a display label only, so a
+//! title edited since the last index can label operations indexed before it).
+//! The coverage tier builds it on the
 //! cross-service query, from the walk it already makes; nothing is persisted and
 //! no store is migrated.
 //!
@@ -237,8 +239,10 @@ pub struct ExternalCopy {
     pub title: Option<String>,
 }
 
-/// One named external — an API no member implements, identified across the
-/// copies members hold ([ADR-68] point 1). An external is not a member: it has
+/// One named external — an API no single member's own spec is identified as,
+/// grouped across the copies members hold ([ADR-68] point 1). Usually no member
+/// implements it; a document whose identity collided between members falls
+/// through to one too ([`IdentityCollision`]). An external is not a member: it has
 /// no engine and no [`BridgeEdge`](super::BridgeEdge).
 ///
 /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
