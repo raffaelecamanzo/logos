@@ -240,10 +240,30 @@ fn spec_and_source_workspace_status(root: &Path) -> serde_json::Value {
 /// the comparison is against a vintage the new code cannot have written. Only
 /// the four per-run facts are masked ([`masked`]); every key, every figure and
 /// the key order are compared.
+///
+/// **One key is removed first, and asserted rather than ignored** (S-458).
+/// `api` holds `openapi.yaml` and serves none of it, so under [CR-147] §3.2 F
+/// this fixture is *not* a workspace without vendored specs: its document is a
+/// declared contract to the external it names (`User API`), published as
+/// `coverage.declared_contracts` ([FR-WS-31]). That key is taken out and
+/// checked; everything else must still match the pre-S-457 vintage to the byte
+/// — which is S-458's own guarantee that the relation moves no other figure.
+///
+/// [CR-147]: ../../docs/requests/CR-147-vendored-specs-declare-contracts-and-name-externals.md
+/// [FR-WS-31]: ../../docs/specs/requirements/FR-WS-31.md
 #[test]
 fn a_workspace_without_declarations_or_candidates_renders_status_byte_for_byte_as_before() {
     let tmp = tempfile::tempdir().unwrap();
-    let status = masked(spec_and_source_workspace_status(tmp.path()));
+    let mut value = spec_and_source_workspace_status(tmp.path());
+    let relation = value["coverage"]
+        .as_object_mut()
+        .expect("a coverage object")
+        .remove("declared_contracts")
+        .expect("api's unserved spec is a declared contract (S-458)");
+    assert_eq!(relation["headline"]["declared_contract_pairs"], 1);
+    assert_eq!(relation["contracts"][0]["holder"], "api");
+    assert_eq!(relation["contracts"][0]["target"]["name"], "User API");
+    let status = masked(value);
     assert_eq!(
         status,
         include_str!("golden/workspace_status_pre_s457.json"),

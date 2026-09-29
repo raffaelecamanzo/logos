@@ -286,6 +286,14 @@ mod client_call_gate;
 #[path = "operand_resolvability/vendored_spec_contracts.rs"]
 mod vendored_spec_contracts;
 
+/// S-458's reconciliation of the shipped declared-contract relation with
+/// S-456's harness, by name — its own module so the harness stays the read-only
+/// reference it was delivered as.
+///
+/// `#[path]`-attached for the same reason every sibling above is.
+#[path = "operand_resolvability/declared_contracts_reconciliation.rs"]
+mod declared_contracts_reconciliation;
+
 /// S-471's cross-member type-reference gate — its own module, so CR-152's three
 /// halves do not co-edit the file S-411's or S-456's arms own. Reads S-411's
 /// `members_with_source` and the shipped `ConfigCorpus` walk, and the shipped

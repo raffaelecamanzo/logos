@@ -34,6 +34,14 @@
 //!   coverage read-model with a per-reference reason, a non-gated advisory
 //!   tier over the same contract surfaces the bridge reads ([FR-WS-05],
 //!   [ADR-53]).
+//! - the [`declared_contracts`] — the in-memory **declared-contract relation**:
+//!   a spec document a member holds but does not implement declares
+//!   `declares-contract(A → C)`, provenance `vendored-spec`, to the member
+//!   whose own spec it is by document identity or to a named external grouped
+//!   across copies. Derived by the coverage tier from the walk it already
+//!   makes and published beside its figures with its own
+//!   `declared_contract_pairs` headline; never a binding candidate
+//!   ([FR-WS-31], [BR-57], [ADR-68]).
 //! - the [`reach`] — the app-wide cross-service reachability **union view**: a
 //!   separate, explicitly-labeled union of every member's `Calls`/`RoutesTo`
 //!   adjacency plus the bridge's edges as extra live roots, additive and
@@ -68,6 +76,9 @@
 //! [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 //! [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
+//! [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
+//! [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
+//! [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
 //! [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
 //! [FR-WS-15]: ../../../docs/specs/requirements/FR-WS-15.md
 //! [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
@@ -105,6 +116,7 @@ pub mod broker;
 pub mod build_deps;
 pub mod budget;
 pub mod coverage;
+pub mod declared_contracts;
 pub mod enable;
 pub mod governance;
 pub mod manifest;
@@ -134,6 +146,11 @@ pub use coverage::{
     cross_service_coverage, ClassificationCounts, CoverageState, CrossServiceCoverage,
     DeclaredApart, DeclaredMemberRows, IntakeSplit, ProviderCandidates, ProviderDisposition,
     ReferenceCoverage, SpecConformanceReading, UnboundReason,
+};
+pub use declared_contracts::{
+    ContractTarget, Counterparty, DeclaredContract, DeclaredContractHeadline,
+    DeclaredContractRelation, DocumentAccounting, ExternalCopy, ExternalId, IdentityCollision,
+    NamedExternal, ResolvedTie, VENDORED_SPEC,
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
 pub use manifest::{
