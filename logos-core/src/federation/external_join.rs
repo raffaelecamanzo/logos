@@ -108,7 +108,7 @@ use crate::resolve::route_template::{normalize_template, parse_method_and_templa
 
 use super::bridge::BridgeEndpoint;
 use super::declared_contracts::{
-    ContractTarget, DeclaredContract, DeclaredContractRelation, ExternalId, OperationKey,
+    ContractTarget, DeclaredContract, DeclaredContractRelation, ExternalId, NamedExternal, OperationKey,
 };
 
 // ── Promoted verbatim from the S-456 harness ───────────────────────────────
@@ -595,29 +595,37 @@ pub struct JoinCall {
     pub keys: Vec<String>,
 }
 
-/// One external copy a member holds: the contract and its external.
+/// One vendored copy the join compares a call against: the declaring contract,
+/// whose [`operations`](DeclaredContract::operations) are that holder's copy's,
+/// and the registered external it names.
 struct Copy<'a> {
     contract: &'a DeclaredContract,
-    external: &'a ExternalId,
-    name: &'a str,
+    external: &'a NamedExternal,
 }
 
-impl Copy<'_> {
-    fn operation(&self, (method, template): &OperationKey) -> String {
-        format!("{method} {template}")
-    }
+/// An operation key as the wire names it: `METHOD /positional/{}/template`.
+fn operation_label((method, template): &OperationKey) -> String {
+    format!("{method} {template}")
 }
 
-/// Every external copy, split into the ones `member` itself declares and the
-/// externals only other members declare.
-fn copies_for<'a>(relation: &'a DeclaredContractRelation, member: &str) -> (Vec<Copy<'a>>, Vec<Copy<'a>>) {
-    let all = relation.contracts.iter().filter_map(|contract| match &contract.target {
-        ContractTarget::External { external, name } => Some(Copy { contract, external, name }),
-        ContractTarget::Member { .. } => None,
-    });
-    let (own, others): (Vec<_>, Vec<_>) = all.partition(|c| c.contract.holder == member);
-    let own_externals: BTreeSet<&ExternalId> = own.iter().map(|c| c.external).collect();
-    (own, others.into_iter().filter(|c| !own_externals.contains(c.external)).collect())
+/// The copies `member` itself declares — [`DeclaredContractRelation::externals_declared_by`],
+/// S-458's join API — and the copies of every external only **other** members
+/// declare, which a call can equal only to be refused.
+fn copies_for<'a>(relation: &'a DeclaredContractRelation, member: &'a str) -> (Vec<Copy<'a>>, Vec<Copy<'a>>) {
+    let own: Vec<Copy<'a>> =
+        relation.externals_declared_by(member).map(|(contract, external)| Copy { contract, external }).collect();
+    let own_ids: BTreeSet<&ExternalId> = own.iter().map(|c| &c.external.id).collect();
+    let others = relation
+        .contracts
+        .iter()
+        .filter(|c| c.holder != member)
+        .filter_map(|contract| match &contract.target {
+            ContractTarget::External { external, .. } => relation.external(external).map(|e| Copy { contract, external: e }),
+            ContractTarget::Member { .. } => None,
+        })
+        .filter(|c| !own_ids.contains(&c.external.id))
+        .collect();
+    (own, others)
 }
 
 /// Whether any operation in `copies` has `method` and a template ending with
@@ -686,11 +694,11 @@ fn judge(
         };
         let key = (method.clone(), joined);
         for copy in own.iter().filter(|c| c.contract.operations.contains(&key)) {
-            bound.entry(copy.operation(&key)).or_insert(copy);
+            bound.entry(operation_label(&key)).or_insert(copy);
         }
         if not_declared.is_none() {
             not_declared =
-                others.iter().find(|c| c.contract.operations.contains(&key)).map(|c| (c, c.operation(&key)));
+                others.iter().find(|c| c.contract.operations.contains(&key)).map(|c| (c, operation_label(&key)));
         }
         if suffix.is_none() {
             suffix = own.iter().find_map(|c| {
@@ -698,7 +706,7 @@ fn judge(
                     .operations
                     .iter()
                     .find(|(m, t)| *m == key.0 && t.len() > key.1.len() && t.ends_with(&key.1))
-                    .map(|op| c.operation(op))
+                    .map(operation_label)
             });
         }
     }
@@ -707,8 +715,8 @@ fn judge(
         1 => {
             let (operation, copy) = bound.into_iter().next().expect("one operation");
             return JoinOutcome::BoundExternal(ExternalBinding {
-                external: copy.external.clone(),
-                name: copy.name.to_string(),
+                external: copy.external.id.clone(),
+                name: copy.external.name.clone(),
                 document: copy.contract.document.clone(),
                 operation,
                 base: BasePathEvidence { path: base, origin, sources },
@@ -716,8 +724,8 @@ fn judge(
         }
         0 => match (not_declared, suffix) {
             (Some((copy, operation)), _) => JoinRefusal::ExternalNotDeclaredByMember {
-                external: copy.external.clone(),
-                name: copy.name.to_string(),
+                external: copy.external.id.clone(),
+                name: copy.external.name.clone(),
                 operation,
             },
             _ if own.is_empty() => JoinRefusal::NoDeclaredExternal,
