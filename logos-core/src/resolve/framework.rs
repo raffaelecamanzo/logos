@@ -782,6 +782,12 @@ pub struct ProvidedRoute {
 ///
 /// `rel` is the file's project-relative path. It names the declaring file in a
 /// folded route's provenance and nothing else.
+///
+/// **Store-less, so file-local folds only.** Without a graph there is no
+/// member's constants to reach, so a path built from a constant another file
+/// declares — through `import static a.b.G.X` or a qualified `G.X` (S-470) —
+/// is refused here, while [`run`] folds and promotes it. For such a file this
+/// returns a subset of what the pass promotes.
 pub fn routes_in_source(plugin: &dyn LanguagePlugin, rel: &str, source: &str) -> Vec<ProvidedRoute> {
     let mut parser = Parser::new();
     scan_source(&mut parser, plugin, rel, source, None)
