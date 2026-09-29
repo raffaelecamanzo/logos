@@ -218,6 +218,97 @@ kind = "platform"
   build relation (`xservice build-deps` and the map's build layer) does not see
   a re-read made by another process.
 
+### Vendored specs — declared contracts and named externals
+
+A member that keeps a copy of an API spec it does not implement is saying which
+API it talks to. Logos reads that as a **declared-contract relation**,
+`declares-contract(A → C)` with provenance `vendored-spec`. There is nothing to
+configure beyond the `kind` declarations above: the relation is built in memory
+on the first cross-service query, from spec documents already indexed. Nothing is
+persisted and no store is migrated.
+
+- **What counts as vendored.** Every OpenAPI document a member holds is judged
+  against the coverage tier's own verdict on each of its operations. A document
+  whose holder provides ≥ 90 % of its operations is the member's **own** spec. A
+  document whose holder provides **none** of them is **vendored**, and declares
+  one contract. Anything in between (`partial`), or a document with no keyed
+  operation (`unjudged`), counts toward nothing.
+- **To a member, by document identity.** A vendored document declares a contract
+  to the member whose own spec holds ≥ 90 % of its operations (method and
+  positional template). The score and the matched document are named, e.g.
+  `webmail`'s `mailbox-aggregator.yaml` matches 31 of 31 operations of
+  `mailbox-aggregator-api`'s own `src/main/resources/openapi/v1.yaml`. Two members
+  at the same best score resolve to **neither**; the tie is listed under
+  `collisions` and the document falls through to a named external.
+- **Otherwise, to a named external.** Vendored copies that contain one another
+  (≥ 90 % either way) are grouped into one **named external** — an API no member's
+  own spec is. It is named by the spec's `info.title`, unless that is springdoc's
+  default `OpenAPI definition`, else by the document's file stem (on the reference
+  estate one such copy is named `v1`). **Names are not unique** — the estate has
+  two groups titled `PSS` — so an external is identified by the `member:path` of
+  the first copy in its group, e.g. `pecserver-facade:src/main/resources/pec-server/pec-server-api_v1.yaml`.
+- **Member kinds.** A `kind = "mock"` member is a **stand-in provider**: its
+  copies join the external they stand in for (listed under `stand_ins`), it
+  declares nothing and it is never the member a document identifies. A
+  `kind = "documentation"` member's copies stay out of the relation altogether.
+  A `platform` member is an ordinary one.
+- **Declared, never observed.** The relation has its own headline,
+  `declared_contract_pairs`, over every spec document read (`own`, `vendored`,
+  `partial`, `unjudged`, `mock`, `documentation`, which always sum to
+  `documents`). It never enters `resolved_cross_service_edges`,
+  `egress_resolution`, a coverage bucket or the bridge edge set. Where identity
+  names a member, the holder's contract-surface ties that include that member are
+  reported as resolved on the relation (`resolved_ties`); the coverage row itself
+  stays ambiguous.
+
+On the reference estate (83 members) the headline reads
+`6 declared contract pairs (1 by document identity, 5 to named externals) from 7 vendored of 41 spec documents; 5 named externals; 15 contract-surface ties resolved by document identity`.
+
+#### The external join: a no-provider call bound under a committed base path
+
+A REST call whose provider is outside the workspace is `no-provider-in-workspace`.
+When its member declares a named external, Logos tries to say **which** external
+it calls. The call is bound to that external when its composed path, joined under a
+base path the member's committed sources prove, **equals exactly** one operation
+of an external the member itself declares.
+
+The base path comes from the **base-url key**: an application-configuration key
+that commits a URL (or a `${…}` indirection) in the same namespace as a key the
+call's target names. Its path is then read from:
+
+- **committed deploy overlays**, when any overrides the key: Helm values files
+  (`values` in a YAML file's stem — `values.yaml`, `values_TEMPLATE.yaml`) and
+  `docker-compose*.yml`, among the files the discovery walk admits (hidden
+  directories such as `.helm/` are not), and never under a `docs/`,
+  `documentation/`, `examples/`, `tutorial(s)/` or `src/test/` tree. An
+  overriding overlay replaces the application value; all path-committing
+  overlays must agree. Spring's environment-variable relaxed binding applies, so
+  an overlay's `PECSERVER_BASEURL` overrides `pec-server.base-url`;
+- **the application configuration** otherwise. A base URL with no path
+  (`http://localhost:8083`) is a proven empty base path.
+
+A call that cannot be bound is **refused**, with its reason: `no-declared-external`
+(the member declares no external the path could reach), `external-not-declared-by-member`
+(only another member vendors it), `no-base-key` (no key commits a base URL; a
+literal target names none), `base-path-uncommitted` (the key is committed only as
+an environment indirection, or a `${…}` sits in the URL's path), `base-paths-disagree`
+(each path named with its file and key), `suffix-only` (the joined path is only
+the tail of an operation — never admitted), `several-matches`, or `no-match`.
+
+**The row does not move.** A bound call stays `no-provider-in-workspace` in every
+count; the binding is reported beside it under `coverage.bound_external`, with the
+external, the member's copy, the matched operation and the base path with its
+origin and every file and key. It never becomes a bridge edge. On the reference
+estate: `21 of 32 invocation no-provider-in-workspace REST rows bound to a named external their own member declares (refused: 10 no declared external, 1 no match)`
+— 20 under `/prov` from four agreeing `deploy-*/values.yaml`, one under an
+application-config base URL.
+
+**No vendored spec, nothing changes.** `declared_contracts` is absent when no
+member holds a vendored or `mock`-held spec; `bound_external` is absent when no
+member declares a named external. See
+[`workspace status`](commands.md#workspace-status) and
+[`xservice route-providers`](commands.md#xservice-workspace-federation-queries).
+
 ### The warm sidecar
 
 `.logos.workspace.warm.json` is how a *failed* background warm stays observable

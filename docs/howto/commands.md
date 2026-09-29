@@ -1009,6 +1009,70 @@ nor counted yet.
   never reported as though it had been observed at the call site (ADR-64); see
   the config-bound section below for the estate reading. `--repo X` scopes to
   routes *provided by* member `X`.
+
+  **Declared contracts beside the bindings (since S-461).** When a member holds
+  a vendored spec, the answer gains two keys **beside** `providers`, never among
+  them: `declared_contracts` — each spec document a member holds and does not
+  implement, naming the member whose own spec it is (document identity) or a
+  named external — and `bound_external` — each `no-provider-in-workspace` REST
+  call judged against the externals its own member declares, under a committed
+  base path (see
+  [Vendored specs](configuration.md#vendored-specs--declared-contracts-and-named-externals)).
+  Both are **declared by vendored specs, not observed calls**: no row is a
+  bridge edge, and `providers` is byte-identical with or without them. They are
+  the same bytes `workspace status --json` carries under `coverage`, each with
+  its `headline` beside its denominator. They are **workspace-wide under
+  `--repo`** — a declared contract is not a provided route — and a scoped answer
+  says so in `declared_scope_note`. Each key is absent when there is nothing to
+  report (no vendored or `mock`-held spec; no named external a member
+  declares), so such a workspace answers exactly the keys it did before
+  (`providers`, or `scope` and `providers`). The MCP twin
+  `xservice_route_providers` returns the same payload. The web
+  `/api/v1/workspace/route-providers` route stays edges-only; the service map
+  reads the relations from `workspace/status`.
+
+  ```jsonc
+  // logos xservice route-providers --repo webmail --json (abridged; 83-member estate)
+  { "scope": "webmail", "providers": [],
+    "declared_contracts": {
+      "headline": { "declared_contract_pairs": 6, "to_member": 1, "to_external": 5,
+                    "documents": { "documents": 41, "own": 11, "vendored": 7, "partial": 0, "unjudged": 0, "mock": 3, "documentation": 20 },
+                    "named_externals": 5, "identity_collisions": 0, "resolved_ties": 15,
+                    "summary": "6 declared contract pairs (1 by document identity, 5 to named externals) from 7 vendored of 41 spec documents; 5 named externals; 15 contract-surface ties resolved by document identity; declared by vendored specs, never observed calls" },
+      "contracts": [
+        { "holder": "webmail", "document": "mailbox-aggregator.yaml", "provenance": "vendored-spec",
+          "target": { "kind": "member", "member": "mailbox-aggregator-api", "document": "src/main/resources/openapi/v1.yaml", "shared": 31, "total": 31 } },
+        { "holder": "pecserver-facade", "document": "src/main/resources/pec-server/pec-server-api_v1.yaml", "provenance": "vendored-spec",
+          "target": { "kind": "external", "external": "pecserver-facade:src/main/resources/pec-server/pec-server-api_v1.yaml", "name": "PSS" } }, … ],
+      "externals": [ { "id": "pecserver-facade:src/main/resources/pec-server/pec-server-api_v1.yaml", "name": "PSS",
+                       "copies": [ … ], "declared_by": ["pecserver-facade", "webmail"], "stand_ins": ["pecserver-mock"] }, … ],
+      "collisions": [], "resolved_ties": [ … ] },
+    "bound_external": {
+      "headline": { "bound_external": 21, "no_provider_rows": 32,
+                    "accounting": { "bound_external": 21, "no_declared_external": 10, "external_not_declared_by_member": 0, "no_base_key": 0,
+                                    "base_path_uncommitted": 0, "base_paths_disagree": 0, "suffix_only": 0, "no_match": 1, "several_matches": 0 },
+                    "summary": "21 of 32 invocation no-provider-in-workspace REST rows bound to a named external their own member declares (refused: 10 no declared external, 1 no match); declared by vendored specs, never a cross-service edge, and outside egress_resolution" },
+      "rows": [
+        { "from": { "member": "pecserver-facade", "symbol": "…PecServerApiRestClient#activateMailbox()." },
+          "target": "PUT ${pecserver.uriactivatemailboxpath}", "state": "bound-external",
+          "external": "pecserver-facade:src/main/resources/pec-server/pec-server-api_v1.yaml", "name": "PSS",
+          "document": "src/main/resources/pec-server/pec-server-api_v1.yaml", "operation": "PUT /prov/domain/{}/user/{}",
+          "base": { "path": "/prov", "origin": "deploy-overlay",
+                    "sources": [ { "file": "deploy-coll/values.yaml", "key": "envfrom.pecserverbaseurl" }, … ] } },
+        { "from": { "member": "pecserver-facade", "symbol": "…PecServerApiRestClient#getUnreadMails()." },
+          "target": "GET ${pecserver.urigetunreadmails}", "state": "refused", "reason": "no-match" }, … ] },
+    "declared_scope_note": "`--repo webmail` scopes `providers` to routes webmail provides; `declared_contracts` and `bound_external` are workspace-wide — a declared contract is not a provided route" }
+  ```
+
+  A bound row's `base.origin` is `deploy-overlay` or `application-config`, and
+  `sources` names every file and key that commits the base path; a `path` of
+  `""` is a base URL with no path. A refused row carries a kebab-case `reason`,
+  with detail where there is some (`paths` for `base-paths-disagree`, `sources`
+  for `base-path-uncommitted`, `operation` and `base_path` for `suffix-only`,
+  `matches` for `several-matches`). A bound row stays
+  `no-provider-in-workspace` in `workspace status`'s coverage. `route-providers`
+  pays one extra coverage walk to compute the two relations (on the 83-member
+  estate the `--json` payload grows from 104,984 to 135,708 bytes).
 - **`search`** — full-text search fanned across every member, each hit tagged
   with its member. `--repo X` scopes the fan to member `X`.
 - **`callers`** — direct callers of a symbol per member, plus the cross-service
@@ -1267,6 +1331,37 @@ denominator. Undeclared members that hold API documents and no runnable source
 are listed under `kind_candidates` as a hint, and nothing moves until you
 declare them. Both keys are absent when there is nothing to report. See
 [`[workspace.member.<name>] kind`](configuration.md#workspacemembername-kind--documentation-and-mock-members).
+
+Some members hold a copy of an API spec they do not implement — a **vendored
+spec**. Both renderings (human and
+`--json`) then carry two more keys at the end of `coverage`, each a headline
+beside its own denominator and a composed `summary`:
+
+- **`coverage.declared_contracts`** — the declared-contract relation:
+  `declared_contract_pairs` (split `to_member` by document identity and
+  `to_external`) over `documents`, every spec document read by bucket (`own`,
+  `vendored`, `partial`, `unjudged`, `mock`, `documentation`); plus the
+  `contracts`, the named-external registry (`externals`, each with `id`,
+  `name`, `copies`, `declared_by`, `stand_ins`), identity `collisions` and
+  `resolved_ties`. On the 83-member reference estate:
+  `"6 declared contract pairs (1 by document identity, 5 to named externals) from 7 vendored of 41 spec documents; 5 named externals; 15 contract-surface ties resolved by document identity; declared by vendored specs, never observed calls"`.
+- **`coverage.bound_external`** — the external join: `bound_external` over
+  `no_provider_rows` (the invocation `no-provider-in-workspace` REST rows),
+  with an `accounting` of every refusal that sums to the denominator, and one
+  row per judged call. On the same estate:
+  `"21 of 32 invocation no-provider-in-workspace REST rows bound to a named external their own member declares (refused: 10 no declared external, 1 no match); declared by vendored specs, never a cross-service edge, and outside egress_resolution"`.
+
+Both are **declared, not observed**. A bound call **stays**
+`no-provider-in-workspace` in `references`, `no_provider_in_workspace`,
+`by_intake` and `spec_conformance_summary`; `resolved_cross_service_edges`,
+`egress_resolution` and the bridge edge set never move. `declared_contracts` is
+absent when no member holds a vendored or `mock`-held spec, and `bound_external`
+when no member declares a named external — so a workspace with no vendored spec
+and no `kind` prints exactly what it printed before. The same keys ride
+[`xservice route-providers`](#xservice-workspace-federation-queries), and the web
+coverage tab renders them as their own card. See
+[Vendored specs](configuration.md#vendored-specs--declared-contracts-and-named-externals)
+for what counts as vendored and how a base path is proven.
 
 Members also build against each other. When any member holds a `pom.xml` or
 `build.gradle(.kts)` — or a member's facts could not be read, which is never

@@ -650,7 +650,39 @@ tab gains a **Build dependencies** card after every runtime board, rendering the
 own headline line (pairs by kind beside their denominator), the declared platforms apart,
 the platform candidates and any colliding artifact. A build dependency is never a runtime
 coupling: no runtime figure counts it. A workspace with no build manifest shows no toggle,
-no card and makes no extra request — every panel is exactly as before. In a plain single repo
+no card and makes no extra request — every panel is exactly as before.
+
+**The declared layer (since S-461).** When a member holds a
+[vendored spec](configuration.md#vendored-specs--declared-contracts-and-named-externals),
+the service map draws each declared contract as a **dotted** edge in its own
+`declares-contract` class and hue — to the member whose own spec the document is,
+or to a **named-external node**. External nodes are keyed by identity and
+labelled by name, so the reference estate's two `PSS` groups are two nodes; they
+share the topic hue, and the tooltip gives their kind as `external`. Clicking one
+selects no member. Every registry external gets a node, including one only a
+`mock` stands in for, drawn with no edge. The layer is always on (there is no
+toggle) and does not count toward node size, which reads as observed coupling.
+The legend gains a **Declared contracts** section: the edge row *Declares a
+contract (a vendored spec)* (only when an edge is drawn), the named-external row
+and the server's own headline line. Below the map, a **Declared contracts** card
+holds the accessible twin table (member, *Declares a contract to*, documents,
+calls bound) and, per link, the edge detail: each document with its identity
+score — e.g. *Document identity: 31 of 31 operations match
+mailbox-aggregator-api's own src/main/resources/openapi/v1.yaml* — or the
+external it groups into, and each call bound to that external with its target,
+matched operation, base path (*none (host only)* for a base URL with no path) and
+base-path source (*Deploy overlay* or *Application configuration*, with every
+file and key). A refused call is never drawn; the server's summary counts it. A
+**Named externals** table lists each external's name and id, who declares it, who
+stands in for it and its copies. On the **Cross-service coverage** tab, a
+**Declared contracts and named externals** card follows the runtime boards (before
+the build card) with the two server lines — declared contract pairs over the spec
+documents read, and bound calls over the no-provider REST rows with their
+refusals. A bound call **stays under *No provider here***: the binding is
+reported beside its row, and no runtime figure counts it. A workspace with no
+vendored spec and no `kind` shows no declared edge, legend section or card.
+
+In a plain single repo
 (no manifest) **no selector is rendered and the UI is byte-for-byte unchanged**;
 `--standalone` forces single-repo focus even under a workspace parent. Workspace
 read-models are served under `/api/v1/workspace/*`; the single-root `/api/v1/*`
