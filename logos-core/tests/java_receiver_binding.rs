@@ -1200,6 +1200,49 @@ fn known_gap_sync_keeps_the_edge_when_a_mid_chain_type_drops_its_superclass() {
     );
 }
 
+/// A sync of a supertype's file captures each inbound `Extends` edge as an
+/// exact-symbol row filed under **that** file (capture-before-delete, ADR-10),
+/// and the row outlives the subtype's own `extends` clause until the
+/// supertype's file is re-extracted again. The walk's hierarchy is read from
+/// the subtype's own `Path` rows only, so such a leftover never lends a type a
+/// supertype it no longer declares: a call written afterwards binds exactly as
+/// on a cold index (sprint-81 review).
+#[test]
+fn a_captured_extends_row_never_lends_the_walk_a_superclass_the_subtype_dropped() {
+    const BASE: &str = "src/main/java/com/x/base/Base.java";
+    const LEAF: &str = "src/main/java/com/x/app/Leaf.java";
+    const USER: &str = "src/main/java/com/x/app/User.java";
+    const BASE_EDITED: &str =
+        "package com.x.base;\n\npublic class Base {\n    public void start() {}\n    public void stop() {}\n}\n";
+    const LEAF_BARE: &str = "package com.x.app;\n\npublic class Leaf {}\n";
+    const USER_HALT: &str =
+        "package com.x.app;\n\npublic class User {\n    private Leaf leaf;\n    public void halt() { leaf.stop(); }\n}\n";
+    let tmp = tree(&[
+        (BASE, "package com.x.base;\n\npublic class Base {\n    public void start() {}\n}\n"),
+        (LEAF, "package com.x.app;\n\nimport com.x.base.Base;\n\npublic class Leaf extends Base {}\n"),
+        (
+            USER,
+            "package com.x.app;\n\npublic class User {\n    private Leaf leaf;\n    public void run() { leaf.start(); }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    // Editing Base.java captures `Leaf —Extends→ Base` under Base.java.
+    write(tmp.path(), BASE, BASE_EDITED);
+    engine.sync(&[BASE.into()]);
+    write(tmp.path(), LEAF, LEAF_BARE);
+    engine.sync(&[LEAF.into()]);
+    write(tmp.path(), USER, USER_HALT);
+    engine.sync(&[USER.into()]);
+    let synced = call_edges(rt);
+    assert!(
+        !synced.contains(&edge(USER, "halt", BASE, "stop")),
+        "a Leaf that extends nothing lent `stop` from Base: {synced:?}"
+    );
+    let cold = tree(&[(BASE, BASE_EDITED), (LEAF, LEAF_BARE), (USER, USER_HALT)]);
+    assert_eq!(synced, call_edges(index(cold.path()).runtime().unwrap()));
+}
+
 /// **Known pre-existing gap, pinned** — a supertype **between** the caller's
 /// type and the declaring one is deleted. The row names neither deleted file's
 /// type, and only the hierarchy tokens (every `Extends` target, bound or not)
@@ -1238,6 +1281,42 @@ fn known_gap_sync_keeps_the_edge_when_a_supertype_between_is_deleted() {
     assert!(call_edges(rt).contains(&stale), "the gap is closed — assert sync ≡ reindex instead");
     let cold = cold_facts(&tmp, &[ROOT, MID, USER]);
     assert!(!cold.0.iter().any(|(_, _, k)| k == "calls"), "{:?}", cold.0);
+}
+
+/// **Known limitation, pinned — deferred for a decision (sprint-81 review).**
+/// A member type a class inherits from an in-repository superclass does not
+/// shadow a same-package type of that name (JLS §8.5, §6.4.1): the lexical rung
+/// reads the enclosing classes' own member types only. S-466 recorded this for
+/// type relations; receiver typing carries it into `Calls`, so `e.go()` on a
+/// field of the inherited `Base.Entry` binds the same-package `Entry.go`.
+/// Reading inherited member types needs the walk over `Index::supertypes` in
+/// the lexical rung, a sync-selection rule for rows whose meaning depends on a
+/// supertype's members, and a decision on a supertype outside the repository
+/// (refusing there, as the constant fold does, gives up every simple type name
+/// in a class that extends a library type). When it is fixed this fails and
+/// states the new rule.
+#[test]
+fn known_limitation_an_inherited_member_type_does_not_shadow_a_same_package_type() {
+    const BASE: &str = "src/main/java/com/x/a/Base.java";
+    const ENTRY: &str = "src/main/java/com/x/b/Entry.java";
+    const SVC: &str = "src/main/java/com/x/b/Svc.java";
+    let tmp = tree(&[
+        (
+            BASE,
+            "package com.x.a;\n\npublic class Base {\n    public static class Entry {\n        public void go() {}\n    }\n}\n",
+        ),
+        (ENTRY, "package com.x.b;\n\npublic class Entry {\n    public void go() {}\n}\n"),
+        (
+            SVC,
+            "package com.x.b;\n\nimport com.x.a.Base;\n\npublic class Svc extends Base {\n    private Entry e;\n    public void f() { e.go(); }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        call_edges(engine.runtime().unwrap()),
+        [edge(SVC, "f", ENTRY, "go")],
+        "the limitation is closed — expect `Base.Entry.go`, or no edge"
+    );
 }
 
 /// **Known limitation, pinned — deferred for a decision (S-468 review).** The
