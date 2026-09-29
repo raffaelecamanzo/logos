@@ -55,6 +55,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (20, MIGRATION_20),
     (21, MIGRATION_21),
     (22, MIGRATION_22),
+    (23, MIGRATION_23),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2163,6 +2164,41 @@ CREATE TABLE build_artifacts (
 -- each delete finds its artifacts through this index. Coordinates are NOT
 -- indexed: the workspace join reads every row of a member once, in memory.
 CREATE INDEX idx_build_artifacts_manifest ON build_artifacts(manifest_id);
+";
+
+/// Migration 23 — Modularity's applicability flag (S-487, [CR-156], [ADR-21],
+/// [FR-QM-07]).
+///
+/// Metric-semantics v6 makes Modularity **not applicable** when the graph it is
+/// computed on has fewer than five edges
+/// ([`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES)): the dimension
+/// leaves the aggregate but its computed raw/normalized pair is still persisted,
+/// so the snapshot needs a flag to say which reading of that pair applies. Unlike
+/// the migration-12 Cohesion/Focus flags, the value columns stay populated when
+/// the flag is `0` — Modularity is always computable; it is the *evidence* that
+/// is too thin.
+///
+/// `1` = applied, `0` = dropped out, `NULL` = a row persisted before this
+/// migration. Those rows were scored under metric-semantics ≤ 5, when
+/// Modularity always applied, so the read path takes `NULL` as applicable.
+///
+/// **Purely additive**: one nullable `ALTER TABLE … ADD COLUMN` on the
+/// append-only ledger. No table is rebuilt; every existing row and id is
+/// untouched ([FR-DB-04], [NFR-MA-06]) — asserted on a populated ledger by
+/// `migration_23_adds_modularity_applicable_and_pre_migration_rows_read_applicable`
+/// in [`super::migrate`].
+///
+/// [ADR-21]: ../../../../docs/specs/architecture/decisions/ADR-21.md
+/// [CR-156]: ../../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [FR-QM-07]: ../../../../docs/specs/requirements/FR-QM-07.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_23: &str = "\
+-- CR-156 (metric-semantics v6): Modularity is not applicable below five edges.
+-- 1 = applied, 0 = dropped out of the mean and the zero short-circuit (its
+-- raw/normalized pair is still stored), NULL = scored before this flag existed,
+-- when Modularity always applied.
+ALTER TABLE metric_snapshots ADD COLUMN modularity_applicable INTEGER CHECK (modularity_applicable IN (0,1));
 ";
 
 #[cfg(test)]

@@ -21,7 +21,8 @@
 //! Each dimension normalizes into `[DIMENSION_FLOOR, 1]`: a ratio that reaches 1
 //! (every function deeply nested, say) floors at 0.01 rather than 0, so a new
 //! dimension drags the aggregate hard but can never *alone* collapse it. The
-//! original five keep their [ADR-12] zero short-circuit — the asymmetry is
+//! original five keep their [ADR-12] zero short-circuit while they apply (a
+//! Modularity dropped out below five edges does not, CR-156) — the asymmetry is
 //! deliberate ([ADR-21]: systemic pathologies vs ratio heuristics).
 //!
 //! # Applicability ([ADR-21] drop-out)

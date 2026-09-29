@@ -514,6 +514,7 @@ mod tests {
             delta: Some(134),
             freshness: "assumed-fresh (no reconcile)".to_string(),
             violations: Some(vec!["max_cc: foo is 31".to_string()]),
+            modularity_not_applicable: None,
             violation_count: Some(1),
             check: Some(marker(1, 6 * 86_400)),
             warnings: Vec::new(),

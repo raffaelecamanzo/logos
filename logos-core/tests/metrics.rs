@@ -577,3 +577,107 @@ See the [reference](reference.md) for details.
     );
     assert_metrics_byte_identical(&base, &removed);
 }
+
+// ── CR-156: Modularity's applicability persists and reads back ───────────────
+
+/// The `modularity_applicable` column of the newest `metric_snapshots` row.
+fn latest_modularity_flag(root: &Path) -> Option<i64> {
+    let conn = rusqlite::Connection::open(root.join(".logos/logos.db")).unwrap();
+    conn.query_row(
+        "SELECT modularity_applicable FROM metric_snapshots ORDER BY id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// A graph with fewer than five edges persists `modularity_applicable = 0`
+/// beside its computed Modularity pair, and the read-only accessor reads it back
+/// as not applicable with the same `m`; one with five or more persists `1` and
+/// reads back applicable. A row written before the flag existed (`NULL`) reads
+/// **applicable**, since it was scored when Modularity always applied
+/// ([CR-156], [FR-QM-07]).
+///
+/// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [FR-QM-07]: ../../docs/specs/requirements/FR-QM-07.md
+#[test]
+fn modularity_applicability_persists_and_a_pre_migration_row_reads_applicable() {
+    // Small: one call edge.
+    let small = TempDir::new().unwrap();
+    write(
+        small.path(),
+        "src/lib.rs",
+        "pub fn a() -> u32 {\n    b()\n}\npub fn b() -> u32 {\n    1\n}\n",
+    );
+    let engine = Engine::start(small.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+    let scanned = engine.scan(false).expect("scan runs").metrics;
+    let m = scanned.edge_count;
+    assert!(
+        (1..metrics::MODULARITY_MIN_EDGES).contains(&m),
+        "fixture has 1 ≤ m = {m} < 5"
+    );
+    let na = scanned
+        .modularity_not_applicable
+        .clone()
+        .expect("m < 5 → not applicable");
+    assert_eq!((na.edges, na.min_edges), (m, 5));
+    assert_eq!(latest_modularity_flag(small.path()), Some(0), "persisted as 0");
+    let read = engine.latest_metrics().unwrap().expect("a snapshot exists");
+    assert_eq!(read.modularity_not_applicable, Some(na), "read back not applicable");
+    assert_eq!(
+        read.modularity.normalized.to_bits(),
+        scanned.modularity.normalized.to_bits(),
+        "the computed pair is persisted, not blanked"
+    );
+
+    // A pre-migration row: the flag is NULL → applicable.
+    rusqlite::Connection::open(small.path().join(".logos/logos.db"))
+        .unwrap()
+        .execute("UPDATE metric_snapshots SET modularity_applicable = NULL", [])
+        .unwrap();
+    assert_eq!(
+        engine.latest_metrics().unwrap().unwrap().modularity_not_applicable,
+        None,
+        "a NULL flag (scored under semantics ≤ 5) reads applicable"
+    );
+
+    // Large: six call edges.
+    let large = TempDir::new().unwrap();
+    write(
+        large.path(),
+        "src/lib.rs",
+        "pub fn a() -> u32 {\n    b() + c() + d()\n}\n\
+         pub fn b() -> u32 {\n    c() + d() + e()\n}\n\
+         pub fn c() -> u32 {\n    1\n}\npub fn d() -> u32 {\n    2\n}\npub fn e() -> u32 {\n    3\n}\n",
+    );
+    let engine = Engine::start(large.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+    let scanned = engine.scan(false).expect("scan runs").metrics;
+    assert!(
+        scanned.edge_count >= metrics::MODULARITY_MIN_EDGES,
+        "fixture has m = {} ≥ 5",
+        scanned.edge_count
+    );
+    assert_eq!(scanned.modularity_not_applicable, None);
+    // The JSON contract the web UI types declare (`ModularityNotApplicable |
+    // null`): an applicable Modularity is a present `null`, never an omitted key,
+    // on both the snapshot (`scan --json`) and the readout (`quality-report --json`).
+    let snapshot_json = serde_json::to_value(&scanned).unwrap();
+    assert_eq!(
+        snapshot_json.get("modularity_not_applicable"),
+        Some(&serde_json::Value::Null),
+        "scan --json carries an explicit null when Modularity applies"
+    );
+    let readout_json = serde_json::to_value(engine.quality_readout().expect("readout")).unwrap();
+    assert_eq!(
+        readout_json.get("modularity_not_applicable"),
+        Some(&serde_json::Value::Null),
+        "quality-report --json carries an explicit null when Modularity applies"
+    );
+    assert_eq!(latest_modularity_flag(large.path()), Some(1), "persisted as 1");
+    assert_eq!(
+        engine.latest_metrics().unwrap().unwrap().modularity_not_applicable,
+        None
+    );
+}

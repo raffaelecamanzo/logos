@@ -70,8 +70,9 @@ use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{
     CheckRun, DocGap, DocGapsReport, DoctorReport, DsmReport, DsmRow, EvaluatedSetAbsence,
     EvolutionPoint, EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta,
-    MetricRegression, MetricSnapshot, MetricValue, QualityReadout, RulesReport, ScanResult,
-    SessionInfo, SignalAbsence, TemporalTier, VerifyCensus, VerifyReport, Violation,
+    MetricRegression, MetricSnapshot, MetricValue, ModularityNotApplicable, QualityReadout,
+    RulesReport, ScanResult, SessionInfo, SignalAbsence, TemporalTier, VerifyCensus, VerifyReport,
+    Violation,
 };
 use crate::runtime::Runtime;
 
@@ -1963,6 +1964,22 @@ pub(crate) fn latest_metrics(engine: &Engine) -> Result<Option<MetricSnapshot>> 
     Ok(row.map(metric_snapshot_from_row))
 }
 
+/// Read a persisted `modularity_applicable` flag back as the drop-out it
+/// records ([CR-156]) — the one mapping every snapshot reader shares (the
+/// dashboard read-back, the gate's regression detail, the evolution series).
+///
+/// Only an explicit `0` drops Modularity out; a `NULL` flag is a row scored
+/// under metric-semantics ≤ 5, when Modularity always applied. `m` is the row's
+/// own edge count — the graph Modularity was computed on.
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+fn modularity_drop_out(applicable: Option<bool>, edge_count: i64) -> Option<ModularityNotApplicable> {
+    match applicable {
+        Some(false) => ModularityNotApplicable::for_edges(edge_count as u64),
+        Some(true) | None => None,
+    }
+}
+
 /// Map the persisted [`LatestMetricSnapshot`] columns back into the
 /// [`MetricSnapshot`] read-model. The original five are always present; the
 /// CR-005 structural pairs are `None` only on a pre-v3 snapshot (defaulted to
@@ -1985,6 +2002,10 @@ fn metric_snapshot_from_row(row: LatestMetricSnapshot) -> MetricSnapshot {
     };
     MetricSnapshot {
         modularity: mv(row.modularity_raw, row.modularity_normalized),
+        // CR-156: only an explicit `0` drops Modularity out; a `NULL` flag is a
+        // row scored under semantics ≤ 5, when Modularity always applied. `m` is
+        // the snapshot's own edge count — the graph Modularity was computed on.
+        modularity_not_applicable: modularity_drop_out(row.modularity_applicable, row.edge_count),
         acyclicity: mv(row.acyclicity_raw, row.acyclicity_normalized),
         depth: mv(row.depth_raw, row.depth_normalized),
         equality: mv(row.equality_raw, row.equality_normalized),
@@ -2409,6 +2430,9 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         delta,
         freshness: fresh.line(),
         violations,
+        // The drop-out of the very snapshot the signal came from (CR-156), never
+        // re-derived from a second reading of the edge count.
+        modularity_not_applicable: metrics.modularity_not_applicable.clone(),
         violation_count,
         check,
         warnings,
@@ -2684,6 +2708,10 @@ pub(crate) fn gate(
 /// Per-metric regressions vs the baseline ([FR-GV-05] detail): canonical
 /// metric order, noise-floored.
 fn metric_regressions(base: &MetricSnapshotRow, current: &MetricSnapshot) -> Vec<MetricRegression> {
+    // CR-156: a Modularity that is not applicable on either side is outside the
+    // signal, so its movement is no regression of it (NFR-CC-04).
+    let modularity_applies = current.modularity_not_applicable.is_none()
+        && modularity_drop_out(base.modularity_applicable, base.edge_count).is_none();
     let pairs = [
         (
             METRIC_NAMES[0],
@@ -2713,6 +2741,7 @@ fn metric_regressions(base: &MetricSnapshotRow, current: &MetricSnapshot) -> Vec
     ];
     pairs
         .into_iter()
+        .filter(|(metric, _, _)| modularity_applies || *metric != METRIC_NAMES[0])
         .filter(|(_, baseline, current)| *current < *baseline - METRIC_NOISE)
         .map(|(metric, baseline, current)| MetricRegression {
             metric: metric.to_string(),
@@ -2794,6 +2823,11 @@ fn evolution_point(row: &MetricSnapshotRow, prev: Option<&MetricSnapshotRow>) ->
     };
     let current = normalized(row);
     let previous = prev.map(normalized);
+    // CR-156: a not-applicable Modularity is reported with its reason, and no
+    // delta is reported across a point where it was outside the signal.
+    let not_applicable = modularity_drop_out(row.modularity_applicable, row.edge_count);
+    let previously_applicable =
+        prev.is_none_or(|p| modularity_drop_out(p.modularity_applicable, p.edge_count).is_none());
 
     EvolutionPoint {
         snapshot_id: row.id,
@@ -2810,7 +2844,10 @@ fn evolution_point(row: &MetricSnapshotRow, prev: Option<&MetricSnapshotRow>) ->
             .map(|(i, name)| MetricDelta {
                 metric: (*name).to_string(),
                 normalized: current[i],
-                delta: previous.map(|p| current[i] - p[i]),
+                delta: previous
+                    .filter(|_| i != 0 || (not_applicable.is_none() && previously_applicable))
+                    .map(|p| current[i] - p[i]),
+                not_applicable: if i == 0 { not_applicable.clone() } else { None },
             })
             .collect(),
     }

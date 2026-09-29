@@ -97,6 +97,14 @@ pub struct QualityReadout {
     ///
     /// [BR-41]: ../../../docs/specs/software-spec.md#4-cross-cutting-non-functional-requirements
     pub violations: Option<Vec<String>>,
+    /// `Some` when the freshly computed snapshot found Modularity **not
+    /// applicable** ([CR-156]) — the same value as that snapshot's
+    /// [`MetricSnapshot::modularity_not_applicable`], carried here so the report
+    /// tier, which shows no per-dimension breakdown, still says why a small
+    /// graph's signal spans one dimension fewer. `None` = Modularity applied.
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    pub modularity_not_applicable: Option<ModularityNotApplicable>,
     /// How many violations the last recorded run found in total, before any
     /// display cap — so a truncated list can say what it dropped.
     ///
@@ -953,18 +961,37 @@ pub struct Violation {
 /// equality, redundancy) then the five CR-005 structural dimensions (nesting,
 /// conciseness, cohesion, focus, uniqueness).
 ///
-/// The original five keep the ADR-12 **zero short-circuit** (a hard `0`
-/// collapses the signal — anti-gaming). The new five are **floored at 0.01**
+/// The applicable original five keep the ADR-12 **zero short-circuit** (a hard
+/// `0` collapses the signal — anti-gaming). The new five are **floored at 0.01**
 /// (FR-QM-14): they drag the signal but never alone collapse it. Cohesion and
 /// Focus are [`Option`]: `None` is the **applicability drop-out** (ADR-21) — the
 /// construct does not exist in the repo (no classes / no class-like
 /// containers), the snapshot persists NULL + a `false` applicability flag, and
 /// the dimension drops out of the geometric-mean denominator (a class-less repo
-/// gets a deterministic 9-dimension mean, FR-QM-11/12/14, UAT-QM-10).
+/// gets a deterministic 9-dimension mean, FR-QM-11/12/14, UAT-QM-10). Modularity
+/// takes the same drop-out on a graph with fewer than five edges (CR-156) but
+/// keeps its computed pair — see
+/// [`modularity_not_applicable`](Self::modularity_not_applicable) — and so
+/// leaves the short-circuit as well as the mean.
 #[derive(Debug, Default, Serialize)]
 pub struct MetricSnapshot {
-    /// Newman Q on the directory partition (FR-QM-01).
+    /// Newman Q on the directory partition (FR-QM-01). Always the computed
+    /// pair, including when Modularity is not applicable — see
+    /// [`modularity_not_applicable`](Self::modularity_not_applicable).
     pub modularity: MetricValue,
+    /// `Some` when Modularity is **not applicable** ([CR-156]): the graph it is
+    /// computed on has fewer than [`MODULARITY_MIN_EDGES`] edges, too few for
+    /// community structure. Modularity then leaves both the geometric mean and
+    /// the [ADR-12] zero short-circuit — the [ADR-21] rule-2 drop-out Cohesion
+    /// and Focus take — while [`modularity`](Self::modularity) keeps its
+    /// computed values. `None` = applicable, which is also how a snapshot
+    /// persisted before the flag existed reads.
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
+    /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
+    /// [`MODULARITY_MIN_EDGES`]: crate::metrics::MODULARITY_MIN_EDGES
+    pub modularity_not_applicable: Option<ModularityNotApplicable>,
     /// Cycle count via `tarjan_scc` (FR-QM-02).
     pub acyclicity: MetricValue,
     /// Longest path over the condensation (FR-QM-03).
@@ -1031,6 +1058,42 @@ pub struct MetricSnapshot {
     /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub aggregate_signal: Option<u32>,
+}
+
+/// Why Modularity is not applicable on a snapshot ([CR-156]), carrying the
+/// figures that establish it: the edge count `m` of the graph Modularity was
+/// computed on and the fixed threshold it fell short of.
+///
+/// Built only by [`for_edges`](Self::for_edges), so the reason has one
+/// spelling on every surface that renders it (`scan --json`,
+/// `quality-report --json`, the dashboard).
+///
+/// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModularityNotApplicable {
+    /// `m` — the edges of the production metric graph Modularity was computed on.
+    pub edges: u64,
+    /// The fixed threshold, [`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES).
+    pub min_edges: u64,
+    /// The rendered reason: `"<m> of <min_edges> dependency edges — too few for
+    /// community structure"`.
+    pub reason: String,
+}
+
+impl ModularityNotApplicable {
+    /// The drop-out for a graph of `edges` edges, or `None` when it has at
+    /// least [`MODULARITY_MIN_EDGES`](crate::metrics::MODULARITY_MIN_EDGES) and
+    /// Modularity applies. The single place the threshold is compared.
+    pub fn for_edges(edges: u64) -> Option<Self> {
+        let min_edges = crate::metrics::MODULARITY_MIN_EDGES;
+        (edges < min_edges).then(|| Self {
+            edges,
+            min_edges,
+            reason: format!(
+                "{edges} of {min_edges} dependency edges — too few for community structure"
+            ),
+        })
+    }
 }
 
 /// One metric's raw + normalized pair (FR-QM-07).
@@ -1248,8 +1311,17 @@ pub struct MetricDelta {
     pub metric: String,
     /// This snapshot's normalized [0,1] value.
     pub normalized: f64,
-    /// `normalized − previous.normalized`; `None` for the first point.
+    /// `normalized − previous.normalized`; `None` for the first point, and
+    /// for Modularity whenever it is not applicable at either point — a
+    /// dimension outside the signal has no movement of the signal to report.
     pub delta: Option<f64>,
+    /// `Some` on the Modularity entry of a snapshot where it was **not
+    /// applicable** ([CR-156]): the reason and the m-of-5 count, beside the
+    /// computed `normalized` value it still stores. `None` for every other
+    /// metric and for an applicable Modularity.
+    ///
+    /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+    pub not_applicable: Option<ModularityNotApplicable>,
 }
 
 /// Dependency structure matrix (FR-GV-07).

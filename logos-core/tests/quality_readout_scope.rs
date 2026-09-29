@@ -457,3 +457,34 @@ fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
         "the surface that can establish the cause is untouched by this correction"
     );
 }
+
+/// `quality-report --json` carries Modularity's drop-out when the freshly
+/// computed graph has fewer than five edges: the reason, `m` and the threshold
+/// ride on the readout, so a signal that rose because Modularity left the mean
+/// says why ([CR-156], [NFR-CC-04]).
+///
+/// [CR-156]: ../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn the_readout_names_a_not_applicable_modularity_with_its_count() {
+    let tmp = production_store();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let readout = engine.quality_readout().expect("readout");
+    assert!(readout.signal.is_some(), "the control store scores");
+    let na = readout
+        .modularity_not_applicable
+        .as_ref()
+        .expect("one edge (a → b) is below the five Modularity needs");
+    assert_eq!((na.edges, na.min_edges), (1, 5));
+
+    let json = serde_json::to_value(&readout).unwrap();
+    assert_eq!(
+        json["modularity_not_applicable"],
+        serde_json::json!({
+            "edges": 1,
+            "min_edges": 5,
+            "reason": "1 of 5 dependency edges — too few for community structure"
+        }),
+        "the JSON surface carries the reason and the m-of-5 count"
+    );
+}

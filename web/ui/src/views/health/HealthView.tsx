@@ -297,10 +297,15 @@ function MetricsCard({
       cell: (r) =>
         r.value === null ? (
           <Badge tone="muted">n/a</Badge>
+        ) : r.notApplicable !== null ? (
+          // CR-156: computed but out of the aggregate — name why, never a score bar.
+          <>
+            <Badge tone="muted">not applicable</Badge> <span className="muted">{r.notApplicable}</span>
+          </>
         ) : (
           <ScoreBar value={Math.round(r.value.normalized * 10_000)} max={10_000} label={r.value.normalized.toFixed(2)} />
         ),
-      sortValue: (r) => (r.value === null ? -1 : r.value.normalized),
+      sortValue: (r) => (r.value === null || r.notApplicable !== null ? -1 : r.value.normalized),
     },
     {
       key: "normalized",

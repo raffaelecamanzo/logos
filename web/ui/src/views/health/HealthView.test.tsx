@@ -1,4 +1,5 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
@@ -12,6 +13,7 @@ function mv(n: number): MetricValue {
 function metrics(over: Partial<MetricSnapshot> = {}): MetricSnapshot {
   return {
     modularity: mv(0.9),
+    modularity_not_applicable: null,
     acyclicity: mv(0.8),
     depth: mv(0.7),
     equality: mv(0.6),
@@ -151,6 +153,43 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(within(grid).getAllByText("n/a").length).toBeGreaterThanOrEqual(2);
     // The Cohesion drill-down explains the drop-out, with no offenders table.
     expect(screen.getAllByText(/no applicable construct in this codebase/i).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders a CR-156 Modularity drop-out as not applicable with its reason and m-of-5 count", async () => {
+    const m = clone();
+    m.scan.metrics.modularity = { raw: -0.5, normalized: 0 };
+    m.scan.metrics.edge_count = 3;
+    m.scan.metrics.modularity_not_applicable = { edges: 3, min_edges: 5, reason: "3 of 5 dependency edges — too few for community structure" };
+    stub(m);
+    render(<HealthView />);
+    const grid = await screen.findByRole("table", { name: "Quality metrics" });
+    const row = within(grid).getByText("Modularity").closest("tr");
+    expect(row).not.toBeNull();
+    const cells = within(row as HTMLElement);
+    // The score cell names the drop-out and its evidence — never a 0 score bar.
+    expect(cells.getByText("not applicable")).toBeInTheDocument();
+    expect(cells.getByText("3 of 5 dependency edges — too few for community structure")).toBeInTheDocument();
+    expect(cells.queryByRole("meter")).toBeNull();
+    // The computed pair is persisted, not hidden: Normalized and Raw still show it.
+    expect(cells.getByText("0.00")).toBeInTheDocument();
+    expect(cells.getByText("-0.50")).toBeInTheDocument();
+    // Every other row still renders its score.
+    const acyclicity = within(grid).getByText("Acyclicity").closest("tr") as HTMLElement;
+    expect(within(acyclicity).queryByText("not applicable")).toBeNull();
+  });
+
+  it("sorts a CR-156 not-applicable Modularity with the unscored rows, never by its computed value", async () => {
+    const user = userEvent.setup();
+    const m = clone();
+    // A high computed value that would rank last ascending if it were scored.
+    m.scan.metrics.modularity = mv(0.95);
+    m.scan.metrics.modularity_not_applicable = { edges: 4, min_edges: 5, reason: "4 of 5 dependency edges — too few for community structure" };
+    stub(m);
+    render(<HealthView />);
+    const grid = await screen.findByRole("table", { name: "Quality metrics" });
+    await user.click(within(grid).getByRole("button", { name: /Score/ }));
+    const firstRow = within(grid).getAllByRole("row")[1];
+    expect(within(firstRow).getByText("Modularity")).toBeInTheDocument();
   });
 
   it("renders the evolution trend table oldest-first with signed deltas", async () => {

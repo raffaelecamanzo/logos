@@ -466,9 +466,25 @@ export interface MetricValue {
   normalized: number;
 }
 
+/** Why Modularity is not applicable (mirrors `ModularityNotApplicable`, CR-156):
+ *  the graph it was computed on has fewer edges than it needs for community
+ *  structure. `reason` is the server's one spelling, rendered verbatim. */
+export interface ModularityNotApplicable {
+  /** `m` — the edges of the graph Modularity was computed on. */
+  edges: number;
+  /** The fixed threshold (5). */
+  min_edges: number;
+  /** e.g. "3 of 5 dependency edges — too few for community structure". */
+  reason: string;
+}
+
 /** The per-dimension metric snapshot (mirrors `MetricSnapshot`). */
 export interface MetricSnapshot {
+  /** Always the computed pair — also when Modularity is not applicable. */
   modularity: MetricValue;
+  /** Non-null when Modularity is not applicable (CR-156): it left the aggregate,
+   *  so the grid names the reason instead of scoring it. */
+  modularity_not_applicable: ModularityNotApplicable | null;
   acyclicity: MetricValue;
   depth: MetricValue;
   equality: MetricValue;

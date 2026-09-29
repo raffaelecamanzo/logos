@@ -23,7 +23,20 @@ Newman's Q over the **directory partition**: every symbol belongs to the
 directory of its defining file, and dependency edges inside a directory count
 as community-internal. A codebase whose directories are cohesive units scores
 high; one where every directory reaches into every other scores low.
-Normalized `(Q + 0.5) / 1.5`; an edgeless graph scores the neutral `1/3`.
+Normalized `(Q + 0.5) / 1.5`; an edgeless graph computes the neutral `1/3`.
+
+**Not applicable below 5 edges.** When the graph Modularity is computed on has
+fewer than **5** dependency edges (an edgeless graph included), Modularity is
+**not applicable**: with so few edges there is no community structure to
+measure. A small library whose one to four edges all cross between two
+directories — a model depending on its enum — computes Q = −0.5, which
+normalizes to exactly 0 and would otherwise zero the whole signal. Instead the
+snapshot keeps Modularity's computed values, stores `modularity_applicable = 0`,
+and the dimension leaves both the geometric mean and the zero short-circuit —
+the same drop-out Cohesion and Focus take (see
+[Applicability and the n/a drop-out](#applicability-and-the-na-drop-out)). The
+threshold is a fixed part of the metric semantics (version 6), not a
+`rules.toml` setting. Every graph with 5 or more edges scores exactly as before.
 
 ### 2. Acyclicity — *are there dependency cycles?*
 
@@ -167,7 +180,8 @@ properties follow:
 
 - **A hard zero collapses the signal to 0.** You cannot compensate a
   catastrophic metric (say, rampant cycles) with good scores elsewhere.
-  Anti-gaming by construction.
+  Anti-gaming by construction. A not-applicable Modularity (fewer than 5 edges)
+  is outside this rule: it is not measured, so it cannot be a systemic zero.
 - **Empty graph reports "n/a", not a number.** With zero nodes the snapshot
   stores an explicit empty marker and a NULL signal rather than the
   misleading mid-range value a naive formula would produce.
@@ -185,7 +199,22 @@ have no production methods, has nothing for LCOM4 or god-container detection to
 score. Rather than fabricate a flattering `1.0`, the engine **drops the
 dimension out**: it stores NULL for that metric with an `applicable = 0` flag,
 and the geometric-mean denominator shrinks accordingly — a class-less repo is
-scored on 8 or 9 dimensions, not 10. The other eight dimensions always apply.
+scored on 8 or 9 dimensions, not 10.
+
+Modularity drops out the same way on a graph with fewer than 5 dependency edges,
+with one difference: its computed raw and normalized values are still stored
+(beside `modularity_applicable = 0`), because Modularity is always computable —
+it is the evidence that is too thin. `scan --json` and `quality-report --json`
+carry the reason and the count as `modularity_not_applicable`, for example
+`{"edges": 3, "min_edges": 5, "reason": "3 of 5 dependency edges — too few for
+community structure"}` (`null` when Modularity applies), and the dashboard's
+Health view shows **not applicable** with that reason in place of a score.
+`evolution` marks the same point's Modularity entry `not_applicable` with that
+reason and reports no delta for it across a drop-out, and `gate`'s per-metric
+regression detail never names a Modularity that is not applicable on either
+side — a dimension outside the signal is not a movement of the signal. The
+other seven dimensions always apply.
+
 This is the never-fabricate guarantee (see [usage.md](usage.md)) applied to the
 metric signal: absent data reads as **n/a**, never as a number.
 
@@ -220,8 +249,10 @@ number always means changed code, never floating-point weather.
 
 Every scan will append one row to `metric_snapshots` inside
 `.logos/logos.db` — raw and normalized values for all ten metrics (the five new
-dimensions each carry a raw+normalized pair; Cohesion and Focus also carry an
-`*_applicable` 0/1 flag for the n/a drop-out), node/edge/function counts, the
+dimensions each carry a raw+normalized pair; Cohesion, Focus and Modularity also
+carry an `*_applicable` 0/1 flag for the drop-out — `NULL` on a Modularity row
+written before Logos recorded the flag, read as applicable), node/edge/function
+counts, the
 excluded `test_function_count`, the `metric_version` the row was scored under,
 the `thresholds_hash` of the effective structural thresholds, optional commit
 SHA and label, and the signal. The table is **append-only by construction** (no
@@ -244,7 +275,8 @@ semantics** *and* the **same effective thresholds** (the structural detection
 thresholds plus the two near-clone parameters). Two fields guard this:
 
 - **`metric_version`** records which semantics each row used; the current version
-  is **3** (the ten-dimension signal). A formula change bumps it.
+  is **6** (Modularity not applicable below 5 edges). A formula change bumps it,
+  so the first `gate` after an upgrade that bumps it re-baselines once.
 - **`thresholds_hash`** records the effective `[metric_thresholds]` set the row
   was scored under. Editing any threshold (or a budget that feeds one) changes
   the hash.
