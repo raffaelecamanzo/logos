@@ -273,6 +273,54 @@ fn an_external_the_calling_member_does_not_itself_declare_is_refused() {
     );
 }
 
+/// **Precedence: an exact match to an external another member declares names
+/// that external, even when the member's own copy offers a suffix.** `facade`
+/// vendors a PSS behind a gateway prefix, whose only candidate
+/// `/api/prov/domain/…` merely ends with the joined path; `webmail` vendors the
+/// one the call equals exactly.
+#[test]
+fn an_exact_match_elsewhere_outranks_a_suffix_in_the_members_own_copy() {
+    let web = "webmail:spec/pss.yaml";
+    let rel = relation(vec![
+        external_contract("facade", PSS_COPY, PSS, "PSS", &[("GET", "/api/prov/domain/{}/user/{}")]),
+        external_contract("webmail", "spec/pss.yaml", web, "PSS", &[("GET", "/prov/domain/{}/user/{}")]),
+    ]);
+    assert_eq!(
+        outcome(
+            "facade",
+            config_call("GET /domain/{domain}/user/{user}", "pec-server.uri-get-mailbox-path"),
+            &rel,
+            facade_facts(),
+        ),
+        JoinOutcome::Refused(JoinRefusal::ExternalNotDeclaredByMember {
+            external: ExternalId(web.into()),
+            name: "PSS".into(),
+            operation: "GET /prov/domain/{}/user/{}".into(),
+        })
+    );
+}
+
+/// **Another holder's copy of an external the member itself declares is not
+/// "another member's external".** `webmail`'s copy of the same PSS carries the
+/// operation `facade`'s copy lacks: the call reads against `facade`'s own copy
+/// (no match), never as a refusal naming an external `facade` does declare.
+#[test]
+fn another_holders_copy_of_the_members_own_external_is_not_someone_elses() {
+    let rel = relation(vec![
+        external_contract("facade", PSS_COPY, PSS, "PSS", &[("GET", "/prov/session")]),
+        external_contract("webmail", "spec/pss.yaml", PSS, "PSS", &[("GET", "/prov/domain/{}/user/{}")]),
+    ]);
+    assert_eq!(
+        outcome(
+            "facade",
+            config_call("GET /domain/{domain}/user/{user}", "pec-server.uri-get-mailbox-path"),
+            &rel,
+            facade_facts(),
+        ),
+        JoinOutcome::Refused(JoinRefusal::NoMatch)
+    );
+}
+
 /// **An uncommitted (environment-only) base path is refused**, naming the key
 /// and the file committing the indirection — and an overriding overlay that
 /// commits no URL path is the same refusal: the application URL does not come
