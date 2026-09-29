@@ -60,16 +60,20 @@
 //! base path, and a base path committed only as an environment indirection.
 //! Every refusal is a row with its reason, counted in the denominator.
 //!
-//! # An accepted [NFR-MA-01] carve-out, recorded rather than implied
+//! # Framework vocabulary in core, named rather than implied ([NFR-MA-01])
 //!
 //! [`overlay_overrides`] is Spring's environment-variable relaxed binding — the
-//! rule by which `PECSERVER_BASEURL` overrides `pec-server.base-url`. It is the
-//! environment-variable form of [`canonical_key`], whose Spring relaxed binding
-//! [`corpus`](crate::extract::config::corpus) already carries as a recorded
-//! [NFR-MA-01] exception; this rule joins that exception rather than opening a
-//! new one, and it is named here so a second language's binding convention is
-//! known to need a plugin row. [`is_deploy_overlay`]'s file names are a
-//! directory convention (Helm, Compose), not framework judgement.
+//! rule by which `PECSERVER_BASEURL` overrides `pec-server.base-url`. It is
+//! promoted on the precedent S-380 set for [`canonical_key`]: the relaxed-binding
+//! rules left the S-456 harness's language-judgement list **by promotion, not by
+//! exception**, and this is the environment-variable form of the same binding.
+//! It is **not** one of the three constants the configuration corpus records as
+//! its [NFR-MA-01] exception, and no exception is claimed for it; it is named
+//! here so a second language's binding convention is known to need a plugin
+//! row. Whether it should instead be recorded as a new exception, or moved into
+//! plugin descriptor data, is a decision the S-459 review leaves to a human.
+//! [`is_deploy_overlay`]'s file names are a directory convention (Helm,
+//! Compose), not framework judgement.
 //!
 //! # Promoted from the S-456 harness
 //!

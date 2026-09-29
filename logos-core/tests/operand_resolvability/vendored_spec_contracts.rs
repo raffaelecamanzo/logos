@@ -61,10 +61,10 @@
 //! `pec-server.base-url` in `application.yml`. It is language judgement of exactly
 //! the kind the parent module's carve-out names. S-459 built this join into the
 //! product and promoted the rule **verbatim** into
-//! `logos_core::federation::external_join`, beside the [`canonical_key`] relaxed
-//! binding the configuration corpus already carries as a recorded NFR-MA-01
-//! exception; this harness imports it from there (with `url_path`, `parent` and
-//! `join_base`) rather than keeping a second copy that could drift.
+//! `logos_core::federation::external_join`, on the precedent S-380 set for the
+//! [`canonical_key`] relaxed binding (promoted, not excepted); this harness
+//! imports it from there (with `url_path`, `parent` and `join_base`) rather than
+//! keeping a second copy that could drift.
 //!
 //! The overlay keys reach it **already canonicalised** by the shipped
 //! `parse_yaml` (`_` and `-` dropped per segment), so the environment variable's

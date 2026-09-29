@@ -182,9 +182,11 @@
 //! `pec-server.base-url` in `application.yml`. It is the one entry on this list
 //! that has since been lifted, deliberately and by a story that scoped it: S-459
 //! built the join it serves into `logos-core/src/federation/external_join.rs`,
-//! where it is recorded as part of the configuration corpus's existing NFR-MA-01
-//! carve-out (the `canonical_key` relaxed binding), and the harness now imports
-//! it from there. `SPRINGDOC_DEFAULT_TITLE` and
+//! promoting it on the precedent S-380 set for the `canonical_key` relaxed
+//! binding (by promotion, not by exception — see the Sprint 67 note above), and
+//! the harness now imports it from there. No NFR-MA-01 exception is claimed for
+//! it; whether it needs one, or plugin data, is left to a human by the S-459
+//! review. `SPRINGDOC_DEFAULT_TITLE` and
 //! `MAIN_RESOURCES` in the same module are NOT of this kind and are named only so
 //! the reader does not have to decide that: the first is a sentinel value the
 //! gate refuses to treat as a name, the second a directory convention the
