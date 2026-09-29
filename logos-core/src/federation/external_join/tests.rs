@@ -217,7 +217,7 @@ fn a_suffix_only_match_is_refused() {
         ),
         JoinOutcome::Refused(JoinRefusal::SuffixOnly {
             operation: "GET /prov/domain/{}/user/{}".into(),
-            base: String::new(),
+            base_path: String::new(),
         })
     );
 }

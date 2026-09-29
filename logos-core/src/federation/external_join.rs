@@ -417,8 +417,10 @@ pub enum JoinRefusal {
     SuffixOnly {
         /// The operation it is a suffix of.
         operation: String,
-        /// The base path it was joined under.
-        base: String,
+        /// The base path it was joined under — `base_path`, not `base`, because
+        /// a bound row's `base` is the evidence object and both flatten into one
+        /// row shape.
+        base_path: String,
     },
     /// Nothing in the member's externals equals or ends with the path.
     NoMatch,
@@ -724,7 +726,7 @@ fn judge(
                 operation,
             },
             _ if own.is_empty() => JoinRefusal::NoDeclaredExternal,
-            (None, Some(operation)) => JoinRefusal::SuffixOnly { operation, base },
+            (None, Some(operation)) => JoinRefusal::SuffixOnly { operation, base_path: base },
             (None, None) => JoinRefusal::NoMatch,
         },
         _ => JoinRefusal::SeveralMatches { matches: bound.into_keys().collect() },
