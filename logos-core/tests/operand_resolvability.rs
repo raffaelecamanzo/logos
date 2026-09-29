@@ -307,6 +307,17 @@ mod cross_member_type_refs;
 #[path = "operand_resolvability/static_import_routes.rs"]
 mod static_import_routes;
 
+/// S-475's re-run of S-411's addressed-pair gate through a YAML-sequence-reading
+/// corpus — its own module, so the item-scoped reader does not co-edit the file
+/// S-411's floor, finding and pins live in. Walks the estate through S-411's
+/// `walk_overlays_with` and judges through its classifier and admission rule;
+/// the only new rule is the harness-local sequence reader.
+///
+/// `#[path]`-attached for the same reason every sibling above is: a plain
+/// `tests/sequence_addressed_pairs.rs` would become a second cargo test target.
+#[path = "operand_resolvability/sequence_addressed_pairs.rs"]
+mod sequence_addressed_pairs;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.

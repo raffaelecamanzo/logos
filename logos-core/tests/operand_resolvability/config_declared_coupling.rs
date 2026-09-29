@@ -601,6 +601,34 @@ pub struct Scalar {
 /// of *this* traversal is one of the figures the story asks for and a walk behind
 /// a `OnceLock` another gate already consumed cannot be timed.
 pub(crate) fn walk_overlays(root: &Path, members: &BTreeSet<String>) -> DeployCorpus {
+    walk_overlays_with(root, members, &mut shipped_reading)
+}
+
+/// One source flattened to `key -> values`, the shape every flattener returns.
+pub(crate) type Flattened = BTreeMap<String, BTreeSet<String>>;
+
+/// The shipped flatteners, chosen by extension — the reader S-411's declaration
+/// fixed, and the one [`walk_overlays`] folds every admitted file through.
+fn shipped_reading(rel: &str, text: &str) -> Flattened {
+    if rel.ends_with(".properties") {
+        parse_properties(text)
+    } else {
+        parse_yaml(text)
+    }
+}
+
+/// [`walk_overlays`] with the flattener as a parameter: `read(rel, text)` is
+/// what each admitted deploy file is folded through.
+///
+/// The seam exists so S-475's re-run can put a sequence-reading corpus through
+/// THIS walk — its admission, its documentation guard, its overlay attribution
+/// and its cost counters — rather than through a second copy of it, which would
+/// be a second walk wearing this one's denominator.
+pub(crate) fn walk_overlays_with(
+    root: &Path,
+    members: &BTreeSet<String>,
+    read: &mut dyn FnMut(&str, &str) -> Flattened,
+) -> DeployCorpus {
     let mut out = DeployCorpus::default();
 
     let started = Instant::now();
@@ -652,11 +680,7 @@ pub(crate) fn walk_overlays(root: &Path, members: &BTreeSet<String>) -> DeployCo
         if rel.split('/').any(|seg| seg.starts_with('.') && seg.len() > 1) {
             out.cost.files_in_hidden += 1;
         }
-        let values = if rel.ends_with(".properties") {
-            parse_properties(&text)
-        } else {
-            parse_yaml(&text)
-        };
+        let values = read(&rel, &text);
         read_and_parse += at.elapsed();
         for value in sequence_host_lines(&text) {
             out.sequence_host_ceiling.push(SequenceHost {
@@ -690,11 +714,11 @@ fn collect_overlay(
 
 /// Where one flattened source's values come from — the four fields that are all
 /// that differ between the two source sets.
-struct Provenance<'a> {
-    member: &'a str,
-    file: &'a str,
-    overlay: &'a str,
-    source: SourceSet,
+pub(crate) struct Provenance<'a> {
+    pub(crate) member: &'a str,
+    pub(crate) file: &'a str,
+    pub(crate) overlay: &'a str,
+    pub(crate) source: SourceSet,
 }
 
 /// **The admission rule, in one place.** Fold one flattened source's values into
@@ -708,7 +732,7 @@ struct Provenance<'a> {
 /// that then diverges as a named defect class. Returns the number of scalars
 /// admitted, so the application-side census falls out rather than being counted
 /// a second time.
-fn collect_values(
+pub(crate) fn collect_values(
     at: &Provenance<'_>,
     values: &BTreeMap<String, BTreeSet<String>>,
     scalars: &mut Vec<Scalar>,
