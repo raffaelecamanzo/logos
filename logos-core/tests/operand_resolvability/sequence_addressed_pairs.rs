@@ -2039,5 +2039,9 @@ spec:
         let bound = [host("f1", "h1"), host("f3", "h2")];
         let (matched, unmatched, extra) = reconcile_ceiling(&ceiling, &bound);
         assert_eq!((matched, unmatched.len(), extra.len()), (1, 2, 1));
+        // …and a different value in the same file is not a match either.
+        let other_value = [host("f2", "h9")];
+        let (matched, unmatched, extra) = reconcile_ceiling(&ceiling, &other_value);
+        assert_eq!((matched, unmatched.len(), extra.len()), (0, 3, 1));
     }
 }
