@@ -368,3 +368,33 @@ fn a_workspace_without_vendored_specs_prints_both_commands_unchanged() {
         }
     }
 }
+
+/// AC3's CLI half: `--help` names both relations as declared, not observed —
+/// the MCP descriptions are pinned by `mcp/tests/xservice_roster.rs`, and this
+/// pins the CLI twin so the two cannot drift, as
+/// `xservice_surface.rs`'s route-providers help guard does for the S-420 claim.
+#[test]
+fn the_help_names_both_relations_as_declared_not_observed() {
+    let tmp = TempDir::new().unwrap();
+    let help = |args: &[&str]| {
+        let out = logos(tmp.path(), args);
+        assert!(out.status.success(), "`logos {args:?}` exits 0");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let route = help(&["xservice", "route-providers", "--help"]);
+    for clause in [
+        "`declared_contracts`",
+        "`bound_external`",
+        "`declared_scope_note`",
+        "DECLARED by vendored specs, not observed calls",
+        "never among them",
+    ] {
+        assert!(route.contains(clause), "route-providers --help names {clause}:\n{route}");
+    }
+
+    let status = help(&["workspace", "status", "--help"]);
+    for clause in ["`coverage.declared_contracts`", "`coverage.bound_external`", "DECLARED by vendored specs"] {
+        assert!(status.contains(clause), "workspace status --help names {clause}:\n{status}");
+    }
+}
