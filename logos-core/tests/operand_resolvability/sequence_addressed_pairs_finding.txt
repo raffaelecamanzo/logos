@@ -140,6 +140,15 @@ file, finding file and pinned constants are byte-identical.
   exactly like a template. What guards against a refusal hiding a defect is the
   pinned refusal count, the forgone targets (0) and the items bound.
 
+  THIS REFUSAL WAS ADDED AFTER THE DECLARATION. The declaration committed at
+  2026-09-29T09:17:07Z defines a change to a shipped key as a collapsed key that
+  fails the run, and names no refusal. The first run failed on exactly that
+  (233 keys, all Helm templates); the whole-source refusal came after it. Its
+  measured cost is 0 target values and 0 pairs, and the readings did not move,
+  so the verdict does not depend on it — but whether to accept it as a reader
+  restriction or restore the declared semantics is a stakeholder decision,
+  recorded here and in ADR-65's appendix, not taken by this run.
+
   FOR S-476: the shipped `parse_yaml` fabricates `spec.template.spec.containers.
   image` (and siblings) on every Helm deployment template on this estate. S-411's
   metric consumed those keys unchanged, and none of them is target-valued, so no
