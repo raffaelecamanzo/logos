@@ -179,7 +179,12 @@
 //! Sprint 80 added one, in `vendored_spec_contracts` (S-456):
 //! `overlay_overrides`, Spring's environment-variable relaxed binding — the rule
 //! by which `PECSERVER_BASEURL` in a Helm values file overrides
-//! `pec-server.base-url` in `application.yml`. `SPRINGDOC_DEFAULT_TITLE` and
+//! `pec-server.base-url` in `application.yml`. It is the one entry on this list
+//! that has since been lifted, deliberately and by a story that scoped it: S-459
+//! built the join it serves into `logos-core/src/federation/external_join.rs`,
+//! where it is recorded as part of the configuration corpus's existing NFR-MA-01
+//! carve-out (the `canonical_key` relaxed binding), and the harness now imports
+//! it from there. `SPRINGDOC_DEFAULT_TITLE` and
 //! `MAIN_RESOURCES` in the same module are NOT of this kind and are named only so
 //! the reader does not have to decide that: the first is a sentinel value the
 //! gate refuses to treat as a name, the second a directory convention the
@@ -293,6 +298,13 @@ mod vendored_spec_contracts;
 /// `#[path]`-attached for the same reason every sibling above is.
 #[path = "operand_resolvability/declared_contracts_reconciliation.rs"]
 mod declared_contracts_reconciliation;
+
+/// S-459's reconciliation of the shipped external join with S-456's harness,
+/// by name — its own module, beside S-458's.
+///
+/// `#[path]`-attached for the same reason every sibling above is.
+#[path = "operand_resolvability/external_join_reconciliation.rs"]
+mod external_join_reconciliation;
 
 /// S-471's cross-member type-reference gate — its own module, so CR-152's three
 /// halves do not co-edit the file S-411's or S-456's arms own. Reads S-411's

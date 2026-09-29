@@ -42,6 +42,12 @@
 //!   makes and published beside its figures with its own
 //!   `declared_contract_pairs` headline; never a binding candidate
 //!   ([FR-WS-31], [BR-57], [ADR-68]).
+//! - the [`external_join`] — the **external join**: a `no-provider-in-workspace`
+//!   REST call binds `bound-external` to the named external its own member
+//!   declares, on an exact path under a committed base path — a deploy
+//!   overlay's base-url path admitted for this join only. Reported beside
+//!   `egress_resolution` with its own `bound_external` headline; no
+//!   `BridgeEdge`, no moved row ([FR-WS-05], [FR-WS-19], [ADR-68] point 3).
 //! - the [`reach`] — the app-wide cross-service reachability **union view**: a
 //!   separate, explicitly-labeled union of every member's `Calls`/`RoutesTo`
 //!   adjacency plus the bridge's edges as extra live roots, additive and
@@ -77,6 +83,8 @@
 //! [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
 //! [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
+//! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+//! [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
 //! [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
 //! [FR-UI-37]: ../../../docs/specs/requirements/FR-UI-37.md
@@ -118,6 +126,7 @@ pub mod budget;
 pub mod coverage;
 pub mod declared_contracts;
 pub mod enable;
+pub mod external_join;
 pub mod governance;
 pub mod manifest;
 pub mod open_state;
@@ -151,6 +160,10 @@ pub use declared_contracts::{
     ContractTarget, Counterparty, DeclaredContract, DeclaredContractHeadline,
     DeclaredContractRelation, DocumentAccounting, ExternalCopy, ExternalId, IdentityCollision,
     NamedExternal, ResolvedTie, VENDORED_SPEC,
+};
+pub use external_join::{
+    BaseOrigin, BasePath, BasePathEvidence, BaseSource, BoundExternal, BoundExternalHeadline,
+    ExternalBinding, ExternalJoinRow, JoinAccounting, JoinOutcome, JoinRefusal,
 };
 pub use governance::{workspace_governance, WorkspaceGovernance, WorkspaceViolation};
 pub use manifest::{
