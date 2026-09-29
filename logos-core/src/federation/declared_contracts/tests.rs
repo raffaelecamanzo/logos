@@ -493,3 +493,15 @@ fn a_holder_serving_ninety_percent_of_its_document_holds_its_own_spec() {
         );
     }
 }
+
+/// A workspace whose only fact is a mock's copy still carries the relation: an
+/// external with its stand-in and no contract is something to render.
+#[test]
+fn a_mock_copy_alone_is_a_relation_worth_publishing() {
+    let facts = vendored("gw-mock", "g/gw.yaml", &ops(200, 4));
+    let r = derive(&facts, &kinds(&[("gw-mock", MemberKind::Mock)]), no_titles);
+    assert!(r.contracts.is_empty());
+    assert!(!r.is_empty(), "an external stood in for is published");
+    assert_eq!(r.externals.len(), 1);
+    assert_eq!(r.externals[0].stand_ins, vec!["gw-mock".to_string()]);
+}
