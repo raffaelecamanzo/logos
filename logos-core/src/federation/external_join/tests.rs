@@ -548,7 +548,8 @@ fn application_profiles_committing_different_base_paths_disagree() {
 // ── The admitted files ─────────────────────────────────────────────────────
 
 /// Helm values and Compose files are overlays; a documentation tree's chart,
-/// a raw manifest, an application config file and a non-YAML file are not.
+/// a test tree's fixture, a raw manifest, an application config file and a
+/// non-YAML file are not.
 #[test]
 fn a_deploy_overlay_is_a_values_or_compose_file_outside_a_documentation_tree() {
     for yes in [
@@ -568,6 +569,8 @@ fn a_deploy_overlay_is_a_values_or_compose_file_outside_a_documentation_tree() {
         "src/main/resources/application.yml",
         "values.json",
         "values.yaml.bak",
+        "src/test/resources/values.yaml",
+        "svc/src/test/resources/docker-compose.yml",
     ] {
         assert!(!is_deploy_overlay(no), "{no}");
     }

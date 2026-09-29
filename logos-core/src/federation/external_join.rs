@@ -164,16 +164,18 @@ pub fn join_base(base: &str, path: &str) -> String {
 /// Directories whose charts describe **something else** — a documentation,
 /// example or tutorial tree's complete, valid-looking chart is not this
 /// member's deployment ([S-411]'s finding, where one such chart was read as a
-/// decisive identity).
+/// decisive identity) — and the Maven/Gradle test tree, whose `values.yaml` or
+/// `docker-compose.yml` is a fixture, not a deployment.
 ///
 /// [S-411]: ../../../docs/planning/journal.md#s-411-measure-config-declared-coupling-over-the-reference-estate
-const NOT_DEPLOYMENT_TREES: [&str; 5] = ["documentation/", "examples/", "tutorial/", "tutorials/", "docs/"];
+const NOT_DEPLOYMENT_TREES: [&str; 6] =
+    ["documentation/", "examples/", "tutorial/", "tutorials/", "docs/", "src/test/"];
 
 /// Whether a member-relative path the discovery walk admitted is a **deploy
 /// overlay** this join reads: a Helm values file (`values` anywhere in a YAML
 /// file's stem — `values.yaml`, `values_TEMPLATE.yaml`, `prod-values.yml`) or a
-/// Compose file (`docker-compose*.yml`), outside a documentation, example or
-/// tutorial tree.
+/// Compose file (`docker-compose*.yml`), outside a documentation, example,
+/// tutorial or test tree.
 ///
 /// Narrower than S-456's harness, which read any YAML the configuration corpus
 /// does not own: a raw Kubernetes manifest carries its environment as a
