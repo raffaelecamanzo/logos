@@ -35,9 +35,23 @@ use logos_core::Engine;
 
 use super::vendored_spec_contracts::{judgement, CallClass};
 
-/// `(member, symbol)` → `(base path, origin, operation)` for every row the
-/// shipped join binds, plus its headline `(bound, denominator)`.
-type Bound = BTreeMap<(String, String), (String, BaseOrigin, String)>;
+/// One product binding, reduced to what the harness also names.
+struct Binding {
+    base: String,
+    origin: BaseOrigin,
+    operation: String,
+    document: String,
+    /// Member-relative files committing the base path.
+    files: BTreeSet<String>,
+}
+
+/// `(member, symbol)` → the binding, for every row the shipped join binds, plus
+/// its headline `(bound, denominator)`.
+type Bound = BTreeMap<(String, String), Binding>;
+
+/// `(member, symbol)` → the harness's exact row: `(base, member-relative files,
+/// from an overlay?, document)`.
+type HarnessExact = BTreeMap<(String, String), (String, BTreeSet<String>, bool, String)>;
 
 fn product_bound(root: &std::path::Path) -> (Bound, (u64, u64)) {
     let federation = discover(root).expect("manifest parses").expect("a workspace");
@@ -50,7 +64,13 @@ fn product_bound(root: &std::path::Path) -> (Bound, (u64, u64)) {
         .filter_map(|row| match &row.outcome {
             JoinOutcome::BoundExternal(b) => Some((
                 (row.from.member.clone(), row.from.symbol.as_str().to_string()),
-                (b.base.path.clone(), b.base.origin, b.operation.clone()),
+                Binding {
+                    base: b.base.path.clone(),
+                    origin: b.base.origin,
+                    operation: b.operation.clone(),
+                    document: b.document.clone(),
+                    files: b.base.sources.iter().map(|s| s.file.clone()).collect(),
+                },
             )),
             JoinOutcome::Refused(_) => None,
         })
@@ -70,11 +90,17 @@ fn the_shipped_join_reproduces_s456s_invocation_half_by_name() {
     // The harness first: its registry is dropped before the product opens one.
     let (_, j) = judgement(&root);
     let key = |c: &super::vendored_spec_contracts::JudgedCall| (c.row.member.clone(), c.row.symbol.clone());
-    let harness_exact: BTreeMap<(String, String), String> = j
+    // `(base, member-relative files, from an overlay?, document)` per exact row;
+    // the harness's walk names files root-relative, the product member-relative.
+    let harness_exact: HarnessExact = j
         .calls
         .iter()
         .filter_map(|c| match &c.class {
-            CallClass::Exact { base, .. } => Some((key(c), base.clone())),
+            CallClass::Exact { base, files, overlay, document } => {
+                let prefix = format!("{}/", c.row.member);
+                let files = files.iter().map(|f| f.strip_prefix(&prefix).unwrap_or(f).to_string()).collect();
+                Some((key(c), (base.clone(), files, *overlay, document.clone())))
+            }
             _ => None,
         })
         .collect();
@@ -84,16 +110,19 @@ fn the_shipped_join_reproduces_s456s_invocation_half_by_name() {
     let (product, (bound, rows)) = product_bound(&root);
     println!("S-459 reconciliation over {}:", root.display());
     println!("  product: {bound} of {rows} no-provider REST rows bound; harness exact {}", harness_exact.len());
-    for ((member, symbol), (base, origin, operation)) in &product {
+    for ((member, symbol), b) in &product {
         let mark = if harness_exact.contains_key(&(member.clone(), symbol.clone())) { " " } else { "+" };
-        println!("  {mark} {member:<22} {operation:<48} base {base:?} ({origin:?})  {symbol}");
+        println!("  {mark} {member:<22} {:<48} base {:?} ({:?})  {symbol}", b.operation, b.base, b.origin);
     }
 
-    for (row, base) in &harness_exact {
-        let Some((product_base, _, _)) = product.get(row) else {
+    for (row, (base, files, overlay, document)) in &harness_exact {
+        let Some(b) = product.get(row) else {
             panic!("the harness's exact row {row:?} is not bound by the product");
         };
-        assert_eq!(product_base, base, "{row:?} binds under a different base path");
+        assert_eq!(&b.base, base, "{row:?} binds under a different base path");
+        assert_eq!(&b.document, document, "{row:?} binds to a different copy");
+        assert_eq!(&b.files, files, "{row:?} cites different base-path files");
+        assert_eq!(b.origin == BaseOrigin::DeployOverlay, *overlay, "{row:?} names a different origin");
     }
     for row in product.keys().filter(|row| !harness_exact.contains_key(*row)) {
         assert!(
@@ -101,7 +130,7 @@ fn the_shipped_join_reproduces_s456s_invocation_half_by_name() {
             "{row:?} is bound by the product but the harness reads it exact under neither \
              reading — not the hidden-overlay difference this reconciliation admits"
         );
-        assert_eq!(product[row].1, BaseOrigin::ApplicationConfig, "{row:?}");
+        assert_eq!(product[row].origin, BaseOrigin::ApplicationConfig, "{row:?}");
     }
     assert_eq!(bound as usize, product.len());
 }
