@@ -450,3 +450,30 @@ fn a_larger_version_sorting_first_still_groups_with_the_copy_it_contains() {
     assert_eq!(r.externals.len(), 1, "one external: {:?}", r.externals);
     assert_eq!(r.externals[0].copies.len(), 2);
 }
+
+/// The "implements" band has its own boundary: a holder serving 9 of its 10
+/// operations holds its own spec (a copy can identify it), one serving 8 of 10
+/// is partial and identifies nothing.
+#[test]
+fn a_holder_serving_ninety_percent_of_its_document_holds_its_own_spec() {
+    for (served, own_spec) in [(9, true), (8, false)] {
+        let spec = ops(0, 10);
+        let mut facts: Vec<SpecOperation> = spec
+            .iter()
+            .enumerate()
+            .map(|(n, (m, t))| {
+                let providers = if n < served { OperationProviders::Holder } else { OperationProviders::Elsewhere };
+                op("agg", "a/v1.yaml", n, (m, t), providers)
+            })
+            .collect();
+        facts.extend(vendored("web", "w/agg.yaml", &spec));
+        let r = derive(&facts, &no_kinds(), no_titles);
+        let d = &r.headline.documents;
+        assert_eq!((d.own, d.partial), if own_spec { (1, 0) } else { (0, 1) }, "{served} of 10 served");
+        assert_eq!(
+            matches!(r.contracts_of("web").next().unwrap().target, ContractTarget::Member { .. }),
+            own_spec,
+            "{served} of 10: web's copy identifies agg only when agg holds it as its own spec"
+        );
+    }
+}
