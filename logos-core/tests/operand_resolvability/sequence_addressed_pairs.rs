@@ -1640,6 +1640,7 @@ spring:
             (r.coverage.sequences, r.coverage.mapping_items_bound),
             (1, 2)
         );
+        assert_eq!(r.coverage.keys_bound, 4);
     }
 
     /// The estate's dominant shape: a compact sequence (`- ` at the key's own
@@ -1784,6 +1785,33 @@ log:
     }
 
     #[test]
+    fn coverage_absorbs_every_field_and_keeps_the_first_example() {
+        let one = |n: usize, e: &str| Coverage {
+            sequences: n,
+            mapping_items_bound: n,
+            scalar_items_bound: n,
+            skipped: BTreeMap::from([(Shape::NothingRead, n)]),
+            keys_bound: n,
+            nested_lines_in_items: n,
+            examples: BTreeMap::from([(Shape::NothingRead, e.to_string())]),
+        };
+        let mut total = one(1, "first");
+        total.absorb(&one(2, "second"));
+        assert_eq!(
+            total,
+            Coverage {
+                sequences: 3,
+                mapping_items_bound: 3,
+                scalar_items_bound: 3,
+                skipped: BTreeMap::from([(Shape::NothingRead, 3)]),
+                keys_bound: 3,
+                nested_lines_in_items: 3,
+                examples: BTreeMap::from([(Shape::NothingRead, "first".to_string())]),
+            }
+        );
+    }
+
+    #[test]
     fn a_nested_sequence_stays_unbound_and_keeps_its_siblings_positions() {
         let r = read_items("matrix:\n- - a\n  - b\n- name: x\n  tags:\n  - t1\n");
         // Item 1 is still `[1]`: the index is the item's POSITION, never the
@@ -1916,7 +1944,9 @@ spec:
             "{:?}",
             refusal.forgone
         );
-        assert!(skipped(&r, Shape::SourceRefused) > 0);
+        // Every item the source held — the cut container item, the orphaned
+        // env item after the directive, and the ports item — counted once.
+        assert_eq!(skipped(&r, Shape::SourceRefused), 3, "{:?}", r.coverage);
         // The near miss: the same item without the column-0 directive is read.
         let plain = read_items("spec:\n  containers:\n    - name: app\n      image: repo/app\n");
         assert!(plain.refused.is_none());
