@@ -1,0 +1,204 @@
+S-475 — THE ADDRESSED-PAIR GATE THROUGH A YAML-SEQUENCE-READING CORPUS.  THE RECORDED FINDING
+
+S-475, measured 2026-09-29 against ~/source/pec-services (84 `.git` directories,
+83 manifest members; read-only against the estate SOURCE).
+
+  FALSIFIED ON THE DECISIVE READING.  11 AGAINST A FLOOR OF 12.
+
+The sequence reader did exactly what S-411's ceiling said it would: it gained the
+two gateway pairs, and only those. The gate still falls one short on the
+reading CR-153 section 3.2 B4 made decisive before the run, because the same
+change of population that removes the fork's duplicate pair also removes nothing
+else, and the one pair left that is not a production deployment is the
+test-harness consumer's.
+
+Floor and population declared 2026-09-29T09:17:07Z, at logos commit 5e3d0547,
+BEFORE the reader existed, in sequence_addressed_pairs_floor.txt beside this
+file. The floor (12) is CR-131 section 3.2 B1's, quoted verbatim and unrevised;
+the gate parses it and the 83 member names out of that file. S-411's floor
+file, finding file and pinned constants are byte-identical.
+
+
+  THE THREE READINGS
+
+    reading                                             pairs   floor   verdict
+    DIRECTORY  84 .git dirs (S-411's population)           13      12   holds
+    MANIFEST   83 members, e2e-tests counted               12      12   holds
+    STRICT     83 members, e2e-tests not counted           11      12   FALSIFIED  <- decisive
+    S-411 as recorded (84 dirs, shipped reader)             11      12   (baseline)
+
+  CR-153 B4, declared before the run: "HOLDS only on the directory population
+  or only by counting `e2e-tests`" is "recorded FALSIFIED on the decisive
+  reading". Both other readings reach the floor, and each does so ONLY through
+  the thing B4 names: DIRECTORY through the fork CR-153 excluded as a duplicate,
+  MANIFEST through `e2e-tests -> mailbox-api`, an end-to-end suite's
+  docker-compose under `final-tests/`.
+
+
+  GAINED OVER S-411 — the same two, on every reading
+
+    hermodr-gateway                   -> webmail
+        proxy.upstreams[0].host = pec-webmail.pec-services.svc.cluster.local
+        (port 8080 in the same item)
+        overlays deploy-coll · deploy-svil · deploy-config
+        hermodr-gateway/deploy-{coll,svil}/values.yaml,
+        hermodr-gateway/deploy-config/values_TEMPLATE.yaml
+    mailbox-aggregate-hermodr-gateway -> mailbox-api
+        proxy.upstreams[0].host = mailbox-api.pec-services.svc.cluster.local
+        (port 9000 in the same item)
+        overlays deploy-coll · deploy-svil · deploy-config
+        mailbox-aggregate-hermodr-gateway/deploy-{coll,svil}/values.yaml,
+        mailbox-aggregate-hermodr-gateway/deploy-config/values_TEMPLATE.yaml
+
+  Both are admitted by S-411's own rule for a bare host — a sibling `port` under
+  the same parent — and the parent is the ITEM: `proxy.upstreams[0].port`. The
+  ceiling S-411 recorded judged these lines without that rule; the reader
+  confirms it holds. CRA-01 of CR-153 is validated.
+
+  LOST RELATIVE TO S-411
+
+    archive-api-logiclens-fork -> mailserver-api   consumer is not a manifest
+                                                   member (MANIFEST, STRICT)
+    e2e-tests -> mailbox-api                       test-harness consumer (STRICT)
+
+  So CR-153 section 7's prediction of exactly 12 on the manifest population was
+  right to the pair, and the knife-edge it named fell on the test harness.
+
+
+  THE SENSITIVITY THE DECLARATION PRINTS AND NEVER COUNTS
+
+  With the fork gone from the population but still in the identity corpus —
+  "everything else unchanged: the S-384 identity classifier", as CR-153 B
+  requires — the label `archive-api` still collides at tier 1, so two consumers
+  that address it resolve to nothing:
+
+    funnel-aggregator-api  -> archive-api
+    mailbox-aggregator-api -> archive-api
+
+  An identity registry built from the manifest's members only, which is what
+  S-413 would build, would resolve both, and STRICT would read 13. That is NOT
+  this gate's figure, for two reasons written down before the run: it changes
+  the classifier, and neither pair has been through a path-only subtraction
+  taken without the fork. Both consumers are aggregators, and seven of S-411's
+  eight path-only pairs belong to exactly these two, so a subtraction taken
+  without the fork's duplicate routes could remove either or both. It is the
+  one question this run leaves genuinely open, and it is a stakeholder
+  population decision (CR-153 CRA-02), not a reader question.
+
+
+  THE READER'S OWN COVERAGE
+
+    deploy overlays                                  3087 files read
+      sequences with a parent key                    5649
+      items bound                                    9742   (5482 mapping · 4260 scalar)
+      items skipped by shape                         2339
+        no parent key                                 134   e.g. `- hosts:` after a template directive
+        flow sequence                                   8
+        nothing the shipped parser reads             1936   e.g. `- host: {{ .Values.route.host }}`
+        source refused (below)                        261
+      item-scoped keys bound                        29614
+      `-` lines nested inside bound items           24956   rule 3: unbound
+    application config                                171 YAML sources re-read
+      items bound                                       7   (7 scalar)
+    item-scoped target values: 63 deploy overlay · 0 application config
+
+    collapsed keys: 0.
+
+  The "nothing the shipped parser reads" bucket's recorded example is a Helm
+  template expression: a value starting `{{` opens what the shipped parser
+  treats as a flow collection, and it skips it, as it does at mapping level.
+  The bucket is not broken down further; none of its items can carry a target
+  the item-scoped reading would otherwise have bound, because the shipped
+  parser — whose scalar rules the reader borrows — reads nothing out of them.
+
+
+  THE FIRST RUN FAILED, AND WHY THAT WAS THE CHECK WORKING
+
+  The first estate run of this gate FAILED on 233 collapsed keys, all in Helm
+  `templates/deployment*.yaml`. There a column-0 directive (`{{- range … }}`,
+  `{{- end }}`) cuts a container item in two. The SHIPPED parser then hangs the
+  item's remaining lines under the enclosing key — `spec.template.spec.
+  containers.image` is a key it produces today, the `routes:` fabrication still
+  live on templates — while the rewrite hung them under the item. So the rewrite
+  changed shipped keys and nested one sentinel inside another.
+
+  The reader now REFUSES such a source whole: where the rewritten text, outside
+  every item, does not read key-for-key as the shipped parser reads the original,
+  the source adds nothing. That is the under-read direction the declaration
+  allows ("each chosen so the reading can only UNDER-read"), and what it costs is
+  measured rather than argued:
+
+    sources refused                                        32   all Helm templates/deployment*.yaml
+    item keys those sources would have added              242
+    target values they would have admitted                  0
+    addressed pairs they would have added                   0
+
+  and the three readings are identical before and after the change (13 / 12 / 11
+  on both runs). An index-free key on a source the reader does NOT refuse still
+  fails the run. The two checks do not separate reader defects from source
+  shapes: a leaked item line lands outside every item and refuses its source,
+  exactly like a template. What guards against a refusal hiding a defect is the
+  pinned refusal count, the forgone targets (0) and the items bound.
+
+  THIS REFUSAL WAS ADDED AFTER THE DECLARATION. The declaration committed at
+  2026-09-29T09:17:07Z defines a change to a shipped key as a collapsed key that
+  fails the run, and names no refusal. The first run failed on exactly that
+  (233 keys, all Helm templates); the whole-source refusal came after it. Its
+  measured cost is 0 target values and 0 pairs, and the readings did not move,
+  so the verdict does not depend on it — but whether to accept it as a reader
+  restriction or restore the declared semantics is a stakeholder decision,
+  recorded here and in ADR-65's appendix, not taken by this run.
+
+  FOR S-476: the shipped `parse_yaml` fabricates `spec.template.spec.containers.
+  image` (and siblings) on every Helm deployment template on this estate. S-411's
+  metric consumed those keys unchanged, and none of them is target-valued, so no
+  recorded figure moves; but a product flattener that reads items (S-476) would
+  inherit the same ambiguity and must decide it, not this gate.
+
+
+  RECONCILIATION AGAINST S-411'S 84 CEILING LINES
+
+    ceiling lines (S-411's walk / this walk)             84 / 84
+    matched by a host scalar the reader bound            20
+    not bound                                            64   every one a Helm template
+                                                              expression (`{{ .host | quote }}`,
+                                                              `{{ .Values.route.host }}`)
+    bound hosts no ceiling line accounts for              0
+
+  The 64 are values a deploy tool substitutes; neither the URL parser nor the
+  bare-host rule can read one as an identity, whatever reader sits in front of
+  them. So the ceiling's 84 lines contained exactly 20 readable hosts, and they
+  are all bound.
+
+
+  THE GATE'S OWN WALK DENOMINATOR
+
+    corpus walk  hidden(true)     18618 files
+    overlay walk hidden(false)    19881 files
+    deploy-shaped files read       3087   (509 inside a hidden directory)
+    skipped as documentation         92
+
+  S-411's `RECORDED_CORPUS_ENTRIES` (18615) is NOT asserted here; the estate now
+  walks 18618, the drift Sprint 80 review item D5 left to the stakeholder.
+
+
+  WHAT THIS FINDING DECIDES
+
+  Per CR-153 section 3.2 B4: FALSIFIED on the decisive reading, recorded with its
+  evidence and date as the SECOND falsification of the addressed half. Nothing
+  becomes plannable: S-412, S-413, S-414, S-415, S-418 and S-476 keep their
+  banners and gain none. ADR-65 gains a dated appendix; its supersession banner
+  stays. The blind-spot caveat in S-411's finding is ANSWERED by this file — the
+  blind spot was exactly the two pairs it said — and S-411's file is not revised.
+
+  What would change it is a decision, not a measurement: the stakeholder may
+  re-decide the population in a later CR (CR-153 B4), and the sensitivity above
+  states what the identity half of that decision is worth, with its caveat.
+
+  Re-run before re-deciding:
+
+      LOGOS_REF_WORKSPACE=~/source/pec-services \
+        cargo test -p logos-core --test operand_resolvability \
+        measure_sequence_addressed_pairs_over_the_reference_workspace -- --nocapture
+
+  Without the environment variable the gate prints VOID and asserts nothing.
