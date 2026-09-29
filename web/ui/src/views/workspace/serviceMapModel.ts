@@ -849,13 +849,14 @@ export function declaredLayer(
   }
   return {
     nodes,
-    edges: links
-      .filter((l) => l.to.kind === "member" || nodes[counterpartyNode(l.to)])
-      .map((l) => ({
-        source: serviceId(l.from),
-        target: counterpartyNode(l.to),
-        edge_type: DECLARED_EDGE_TYPE,
-      })),
+    // One edge per link, never filtered: every external a contract names is in
+    // the registry, so its node exists — and a filter here could only make the
+    // canvas and its accessible twin disagree.
+    edges: links.map((l) => ({
+      source: serviceId(l.from),
+      target: counterpartyNode(l.to),
+      edge_type: DECLARED_EDGE_TYPE,
+    })),
     links,
     externals,
   };
