@@ -8,6 +8,8 @@ import {
   capNotice,
   cloneLoaded,
   degreeMap,
+  EDGE_COLOR,
+  EDGE_FALLBACK,
   edgeColor,
   edgeStyle,
   elementPhrase,
@@ -151,6 +153,15 @@ describe("palettes & sizing", () => {
     const deg = degreeMap(set, new Set(["a", "b", "ext"]));
     expect(deg).toEqual({ a: 1, b: 1 });
     expect(edgeStyle(DECLARED_EDGE_TYPE)).toBe("dotted");
+  });
+
+  it("draws a declared contract in a hue no other edge type uses — a class of its own, never a fallback (S-461)", () => {
+    const hue = edgeColor(DECLARED_EDGE_TYPE);
+    expect(hue).not.toBe(EDGE_FALLBACK);
+    const others = Object.entries(EDGE_COLOR)
+      .filter(([type]) => type !== DECLARED_EDGE_TYPE)
+      .map(([, color]) => color.toLowerCase());
+    expect(others).not.toContain(hue.toLowerCase());
   });
 
   it("bumps the selected node to at least the focus size", () => {

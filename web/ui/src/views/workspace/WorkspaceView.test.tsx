@@ -16,6 +16,8 @@ import {
   EMPTY_COVERAGE,
   stubApi,
 } from "../../workspace/testFixtures.ts";
+import { EDGE_COLOR } from "../graph/graphModel.ts";
+import { DECLARED_EDGE_TYPE } from "./serviceMapModel.ts";
 import { WorkspaceView } from "./WorkspaceView.tsx";
 
 // The service map mounts the real ECharts canvas, which needs a layout engine jsdom
@@ -1666,7 +1668,12 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     stubApi({ providers: [BINDING], coverage: DECLARING });
     mount();
     const legend = (await screen.findByText("Declared contracts", { selector: "span" })).closest("details")!;
-    expect(within(legend).getByText("Declares a contract (a vendored spec)")).toBeInTheDocument();
+    // The swatch is the class's own — its hue and its dotted stroke, the same
+    // two channels the canvas draws the edge with — never another arm's.
+    const swatch = within(legend).getByText("Declares a contract (a vendored spec)").closest("li")!.querySelector("line")!;
+    expect(swatch.getAttribute("stroke")).toBe(EDGE_COLOR[DECLARED_EDGE_TYPE]);
+    expect(swatch.getAttribute("stroke")).not.toBe(EDGE_COLOR.build);
+    expect(swatch.getAttribute("stroke-dasharray")).toBe("2 3");
     expect(within(legend).getByText("Named external — not a member (topics share this hue)")).toBeInTheDocument();
     expect(within(legend).getByText(/never an observed call/)).toHaveTextContent(
       DECLARED_CONTRACTS.headline.summary,
