@@ -319,6 +319,14 @@ fn mapping_item_key(body: &str) -> Option<&str> {
     for quote in ['"', '\''] {
         if let Some(rest) = body.strip_prefix(quote) {
             let end = rest.find(quote)?;
+            // `"u\": http://x"` is ONE string whose first quote is escaped.
+            // Ending the key at that quote would read `{u\: http://x"}` — an
+            // invented key and an admitted URL. Left a scalar instead, the
+            // shipped parser's escape refusal declines it, as it declines an
+            // escaped value at mapping level.
+            if quote == '"' && rest[..end].contains('\\') {
+                return None;
+            }
             let after = rest[end + 1..].trim_start_matches([' ', '\t']);
             return after
                 .strip_prefix(':')
@@ -1711,6 +1719,16 @@ log:
         assert_eq!(r.coverage.scalar_items_bound, 3);
         // `- Error: x` IS a mapping in YAML.
         assert_eq!(keys(&read_items("e:\n- Error: x\n")), ["e[0].error"]);
+    }
+
+    #[test]
+    fn an_escaped_quote_never_ends_an_item_key() {
+        // One double-quoted string, not a mapping: its first `"` is escaped.
+        let r = read_items("l:\n- \"u\\\": http://mailbox-api/x\"\n");
+        assert!(r.values.is_empty(), "{:?}", r.values);
+        assert_eq!(skipped(&r, Shape::NothingRead), 1);
+        // The near miss: the same shape without the escape IS a mapping.
+        assert_eq!(keys(&read_items("l:\n- \"u\": http://mailbox-api/x\n")), ["l[0].u"]);
     }
 
     #[test]
