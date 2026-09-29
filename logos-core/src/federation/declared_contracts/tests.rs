@@ -215,6 +215,12 @@ fn copies_group_into_one_external_named_by_their_title() {
         "the join S-459 reads: each copy the member holds, with its own operations"
     );
     assert_eq!(r.contracts_of("web").next().unwrap().operations.len(), 10);
+    // The lookup finds each external by id — not merely the one sorting first.
+    assert_eq!(
+        r.externals_declared_by("notify").map(|(_, e)| (e.id.0.as_str(), e.name.as_str())).collect::<Vec<_>>(),
+        vec![("notify:n/gateway.yaml", "gateway")]
+    );
+    assert!(r.external(&ExternalId("nobody:none.yaml".into())).is_none());
 }
 
 /// springdoc's default title names nothing; a real title beats it; with none,
