@@ -10,11 +10,15 @@ import type {
   WorkspaceStatus,
   XserviceBuildDeps,
 } from "../../api/types.ts";
+import { BOUND_EXTERNAL, DECLARED_CONTRACTS } from "../../workspace/testFixtures.ts";
 import {
   BUILD_EDGE_TYPE,
   buildLayer,
   buildServiceMap,
   CONFIG_REFUSAL_LABEL,
+  DECLARED_EDGE_TYPE,
+  declaredLayer,
+  externalNodeId,
   edgeProvenanceKind,
   hasNonLiteralBinding,
   LINK_PROVENANCE_KINDS,
@@ -837,5 +841,110 @@ describe("buildLayer (S-464)", () => {
     );
     expect(layer.edges).toEqual([]);
     expect(layer.links).toEqual([]);
+  });
+});
+
+// ── The declared layer (S-461, FR-WS-31, BR-57) ─────────────────────────────
+
+describe("declaredLayer (S-461)", () => {
+  const roster = [member("api"), member("web")];
+
+  it("is null when the status carries neither relation — the map is then the pre-S-461 map", () => {
+    expect(declaredLayer(undefined, undefined, roster)).toBeNull();
+  });
+
+  it("keys an external node by IDENTITY and labels it by name, so two externals titled PSS are two nodes", () => {
+    const layer = declaredLayer(DECLARED_CONTRACTS, BOUND_EXTERNAL, roster)!;
+    expect(Object.values(layer.nodes).map((n) => [n.id, n.label, n.kind])).toEqual([
+      ["external:api:pss.yaml", "PSS", "external"],
+      ["external:web:legacy/pss.yaml", "PSS", "external"],
+    ]);
+    // Never in the service namespace: clicking one must select no member.
+    expect(memberOfServiceId(externalNodeId("api:pss.yaml"))).toBeNull();
+  });
+
+  it("draws one declares-contract edge per (holder, counterparty) — two PSS copies from one holder would be one", () => {
+    const layer = declaredLayer(DECLARED_CONTRACTS, BOUND_EXTERNAL, roster)!;
+    expect(layer.edges.map((e) => `${e.source}->${e.target}:${e.edge_type}`)).toEqual([
+      "service:api->external:api:pss.yaml:declares-contract",
+      "service:api->service:web:declares-contract",
+      "service:web->external:api:pss.yaml:declares-contract",
+      "service:web->external:web:legacy/pss.yaml:declares-contract",
+    ]);
+    expect(layer.edges.every((e) => e.edge_type === DECLARED_EDGE_TYPE && !e.admitted)).toBe(true);
+
+    const twice = {
+      ...DECLARED_CONTRACTS,
+      contracts: [
+        ...DECLARED_CONTRACTS.contracts,
+        { ...DECLARED_CONTRACTS.contracts[0], document: "second-pss.yaml" },
+      ],
+    };
+    const merged = declaredLayer(twice, undefined, roster)!;
+    expect(merged.edges).toHaveLength(4);
+    const apiPss = merged.links.find((l) => l.from === "api" && l.to.kind === "external" && l.to.external === "api:pss.yaml")!;
+    expect(apiPss.contracts.map((c) => c.document)).toEqual(["pss.yaml", "second-pss.yaml"]);
+  });
+
+  it("attaches each BOUND call to its member's link to that external, with the operation and base-path evidence; a refused row attaches nowhere", () => {
+    const layer = declaredLayer(DECLARED_CONTRACTS, BOUND_EXTERNAL, roster)!;
+    const withCalls = layer.links.filter((l) => l.bound.length > 0);
+    expect(withCalls.map((l) => [l.from, l.to])).toEqual([
+      ["api", { kind: "external", external: "api:pss.yaml", name: "PSS" }],
+      ["web", { kind: "external", external: "web:legacy/pss.yaml", name: "PSS" }],
+    ]);
+    // Each bound row lands on the link to ITS external, by identity: `web`'s
+    // call binds the second PSS, never the first one it also declares.
+    expect(withCalls[1].bound).toEqual([BOUND_EXTERNAL.rows[1]]);
+    // The server's bound row itself, carried whole.
+    expect(withCalls[0].bound).toEqual([BOUND_EXTERNAL.rows[0]]);
+    expect(withCalls[0].bound).toEqual([
+      {
+        from: { member: "api", symbol: "local fetch_mailbox" },
+        state: "bound-external",
+        external: "api:pss.yaml",
+        name: "PSS",
+        target: "GET ${pss.uri-get-mailbox}",
+        document: "pss.yaml",
+        operation: "GET /prov/domain/{}/user/{}",
+        base: {
+          path: "/prov",
+          origin: "deploy-overlay",
+          sources: [{ file: "deploy-coll/values.yaml", key: "envfrom.pssbaseurl" }],
+        },
+      },
+    ]);
+    // `web`'s refused call is judged and reported by the server, never drawn:
+    // `web` declares the same external and still carries no bound call.
+    const webPss = layer.links.find((l) => l.from === "web" && l.to.kind === "external" && l.to.external === "api:pss.yaml")!;
+    expect(webPss.bound).toEqual([]);
+  });
+
+  it("draws a node for an external only a mock stands in for — with no edge, since nothing declares it", () => {
+    const standInOnly = {
+      ...DECLARED_CONTRACTS,
+      contracts: [],
+      externals: [{ id: "pss-mock:source.yaml", name: "PSS", copies: [], declared_by: [], stand_ins: ["pss-mock"] }],
+    };
+    const layer = declaredLayer(standInOnly, undefined, roster)!;
+    expect(Object.keys(layer.nodes)).toEqual(["external:pss-mock:source.yaml"]);
+    // The HUE channel is the non-member one, never the service one.
+    expect(layer.nodes["external:pss-mock:source.yaml"].layer).toBe("artifact");
+    expect(layer.edges).toEqual([]);
+    expect(layer.links).toEqual([]);
+  });
+
+  it("drops a contract whose holder or member target is not a roster service, and a self-identity", () => {
+    const stray = {
+      ...DECLARED_CONTRACTS,
+      contracts: [
+        { ...DECLARED_CONTRACTS.contracts[1], holder: "ghost" },
+        { ...DECLARED_CONTRACTS.contracts[1], target: { ...DECLARED_CONTRACTS.contracts[1].target, member: "ghost" } },
+        { ...DECLARED_CONTRACTS.contracts[1], holder: "web" },
+      ],
+    } as typeof DECLARED_CONTRACTS;
+    const layer = declaredLayer(stray, undefined, roster)!;
+    expect(layer.links).toEqual([]);
+    expect(layer.edges).toEqual([]);
   });
 });

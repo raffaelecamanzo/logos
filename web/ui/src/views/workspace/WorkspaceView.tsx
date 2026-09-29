@@ -21,6 +21,16 @@
  * dependency is never a runtime coupling (BR-58), and a workspace with no build
  * manifest renders every panel exactly as before.
  *
+ * The declared layer (S-461, CR-147, FR-WS-31): when a member holds a vendored
+ * spec, the map draws each declared contract in its own `declares-contract` edge
+ * class — to the member whose own spec the document is, or to a named external
+ * drawn as its own node — with a legend section; the evidence names each
+ * document, its identity score or external, and every call bound to the
+ * external with its matched operation and base-path source. The coverage tab
+ * renders both server headlines in their own card. A declared contract is never
+ * an observed call (BR-57), and a workspace with no vendored spec renders every
+ * panel exactly as before.
+ *
  * Honesty (NFR-CC-04, NFR-RA-05): an unbound reference is never drawn as an edge
  * (its absence is *reported* as coverage, not hidden); a member with no index is a
  * muted node, not a service with "no couplings"; a workspace with no bindings gets
@@ -46,8 +56,10 @@ import {
   fetchWorkspaceStatus,
 } from "../../api/workspaceClient.ts";
 import type {
+  BoundExternal,
   BuildDependencyHeadline,
   CrossContextHint,
+  CrossServiceCoverage,
   CrossServiceImpact,
   ImpactEntry,
   ImpactResult,
@@ -79,6 +91,7 @@ import {
   ARM_LABEL,
   armLabel,
   buildCoverageDashboard,
+  type CoverageDashboard,
 } from "./coverageModel.ts";
 import { CoveragePanel } from "./CoverageBoards.tsx";
 import {
@@ -86,13 +99,18 @@ import {
   buildLayer,
   buildServiceMap,
   CONFIG_REFUSAL_LABEL,
+  DECLARED_EDGE_TYPE,
+  declaredLayer,
   hasNonLiteralBinding,
   LINK_PROVENANCE_KINDS,
   LINK_PROVENANCE_LABEL,
   linkEvidence,
   memberOfServiceId,
   serviceMembers,
+  type BoundCall,
   type BuildLink,
+  type DeclaredLayer,
+  type DeclaredLink,
   type EvidenceRow,
   type ServiceLink,
   type ServiceMember,
@@ -190,6 +208,7 @@ function WorkspaceContent({
                 services={services}
                 topics={status.topics ?? []}
                 build={status.build_dependency}
+                coverage={status.coverage}
               />
             ),
           },
@@ -199,6 +218,7 @@ function WorkspaceContent({
             panel: (
               <>
                 <CoveragePanel dashboard={coverage} degraded={status.degraded_rollup} />
+                <DeclaredRelationsCard dashboard={coverage} />
                 <BuildDependencyCard headline={status.build_dependency} />
               </>
             ),
@@ -216,6 +236,7 @@ function ServiceMapPanel({
   services,
   topics,
   build,
+  coverage,
 }: {
   services: ServiceMember[];
   topics: MemberTopics[];
@@ -223,6 +244,9 @@ function ServiceMapPanel({
    *  a build manifest. Absent, the build layer does not exist: no toggle, no
    *  fetch, and the map renders exactly as it did before it (S-464). */
   build?: BuildDependencyHeadline;
+  /** The status payload's coverage, the one source of the declared relations
+   *  (S-461) — read from what the view already fetched, never a second request. */
+  coverage: CrossServiceCoverage;
 }) {
   const bindings = useApiResource<XserviceRouteProviders>(() => fetchWorkspaceBindings(), []);
   // Read beside the bindings rather than on the toggle, so the cross-context hint
@@ -241,6 +265,7 @@ function ServiceMapPanel({
           providers={model}
           topics={topics}
           build={build}
+          coverage={coverage}
           deps={deps.data ?? null}
           depsError={deps.error ?? null}
         />
@@ -388,6 +413,254 @@ function BuildDependencyCard({ headline }: { headline?: BuildDependencyHeadline 
           ))}{" "}
           — their build dependencies are unknown, not absent.
         </p>
+      )}
+    </Card>
+  );
+}
+
+// ── The declared layer (S-461, FR-WS-31) ─────────────────────────────────────
+
+/** Where a bound call's base path was committed, in words. */
+const BASE_ORIGIN_LABEL: Record<string, string> = {
+  "deploy-overlay": "Deploy overlay",
+  "application-config": "Application configuration",
+};
+
+/** The other end of a declared link, as a cell: a member by name, or a named
+ *  external by name WITH its identity — two externals can share a name. */
+function counterparty(to: DeclaredLink["to"]) {
+  return to.kind === "member" ? (
+    <span className="mono">{to.member}</span>
+  ) : (
+    <>
+      {to.name} <span className="muted">(named external</span>{" "}
+      <span className="mono muted">{to.external}</span>
+      <span className="muted">)</span>
+    </>
+  );
+}
+
+function counterpartyText(to: DeclaredLink["to"]): string {
+  return to.kind === "member" ? to.member : `${to.name} (${to.external})`;
+}
+
+/** The declared layer's accessible twin: one row per drawn link. */
+const DECLARED_LINK_COLUMNS: Column<DeclaredLink>[] = [
+  { key: "from", header: "Member", mono: true, cell: (l) => l.from, sortValue: (l) => l.from },
+  {
+    key: "to",
+    header: "Declares a contract to",
+    cell: (l) => counterparty(l.to),
+    sortValue: (l) => counterpartyText(l.to),
+  },
+  {
+    key: "documents",
+    header: "Documents",
+    numeric: true,
+    cell: (l) => l.contracts.length,
+    sortValue: (l) => l.contracts.length,
+  },
+  {
+    key: "bound",
+    header: "Calls bound",
+    numeric: true,
+    // A member link has no join: it is not zero calls bound, it is no question
+    // asked (NFR-CC-04).
+    cell: (l) => (l.to.kind === "member" ? <span className="muted">—</span> : l.bound.length),
+    sortValue: (l) => l.bound.length,
+  },
+];
+
+/** One document behind a declared link: what it is, and why it names the
+ *  counterparty — the identity score, or the external it groups into. */
+const DECLARED_DOCUMENT_COLUMNS: Column<DeclaredLink["contracts"][number]>[] = [
+  { key: "document", header: "Document", mono: true, cell: (c) => c.document, sortValue: (c) => c.document },
+  {
+    key: "identity",
+    header: "Declares",
+    cell: (c) =>
+      c.target.kind === "member" ? (
+        <>
+          Document identity: {c.target.shared} of {c.target.total} operations match{" "}
+          <span className="mono">{c.target.member}</span>&apos;s own{" "}
+          <span className="mono">{c.target.document}</span>
+        </>
+      ) : (
+        <>
+          Named external {c.target.name} <span className="mono muted">{c.target.external}</span>
+        </>
+      ),
+    sortValue: (c) => c.target.kind,
+  },
+];
+
+/** One call bound to a link's external: the matched operation and the base
+ *  path's source — the evidence the join rests on. */
+const BOUND_CALL_COLUMNS: Column<BoundCall>[] = [
+  {
+    key: "call",
+    header: "Call",
+    mono: true,
+    cell: (b) => b.target,
+    sortValue: (b) => b.target,
+  },
+  {
+    key: "operation",
+    header: "Matched operation",
+    mono: true,
+    cell: (b) => b.operation,
+    sortValue: (b) => b.operation,
+  },
+  {
+    key: "base",
+    header: "Base path",
+    mono: true,
+    // An empty base path is a base URL with no path — say so rather than render
+    // an empty cell that reads as "not known".
+    cell: (b) => (b.base.path === "" ? <span className="muted">none (host only)</span> : b.base.path),
+    sortValue: (b) => b.base.path,
+  },
+  {
+    key: "source",
+    header: "Base-path source",
+    cell: (b) => (
+      <ul className={styles.reasons}>
+        {b.base.sources.map((src) => (
+          <li key={`${src.file}:${src.key}`}>
+            {BASE_ORIGIN_LABEL[b.base.origin] ?? b.base.origin} ·{" "}
+            <span className="mono">{src.file}</span> · <span className="mono">{src.key}</span>
+          </li>
+        ))}
+      </ul>
+    ),
+    sortValue: (b) => b.base.origin,
+  },
+];
+
+/** The named-external registry: name AND identity, since names repeat. */
+const EXTERNAL_COLUMNS: Column<DeclaredLayerExternal>[] = [
+  {
+    key: "name",
+    header: "Named external",
+    cell: (e) => (
+      <>
+        {e.name} <span className="mono muted">{e.id}</span>
+      </>
+    ),
+    sortValue: (e) => e.name,
+  },
+  {
+    key: "declared_by",
+    header: "Declared by",
+    mono: true,
+    cell: (e) => (e.declared_by.length > 0 ? e.declared_by.join(", ") : <span className="muted">—</span>),
+    sortValue: (e) => e.declared_by.length,
+  },
+  {
+    key: "stand_ins",
+    header: "Stood in for by",
+    mono: true,
+    cell: (e) => (e.stand_ins.length > 0 ? e.stand_ins.join(", ") : <span className="muted">—</span>),
+    sortValue: (e) => e.stand_ins.length,
+  },
+  {
+    key: "copies",
+    header: "Copies",
+    numeric: true,
+    cell: (e) => e.copies.length,
+    sortValue: (e) => e.copies.length,
+  },
+];
+
+type DeclaredLayerExternal = DeclaredLayer["externals"][number];
+
+/** The declared layer's twin and its evidence (S-461) — the edge detail: per
+ *  link, each document with its identity score or external, and each call
+ *  bound to the external with its matched operation and base-path source. */
+function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: BoundExternal }) {
+  return (
+    <Card title="Declared contracts">
+      <p className="muted">
+        What each member declares by a spec document it holds and does not implement: a contract
+        with the member whose own spec the document is, or with a named external. Declared, never
+        observed — none of these is a binding above.
+      </p>
+      {join && <p className="muted mono">{join.headline.summary}</p>}
+      {/* A relation can name externals and declare nothing: a declared `mock`
+          stands in for an external no member vendors. Then there is no link to
+          tabulate, and an empty twin table would read as a table that failed to
+          fill (NFR-CC-04) — so it says what is true instead. */}
+      {layer.links.length === 0 ? (
+        <p className="muted">
+          No member on this map declares a contract. The externals below are still named: each is
+          held by a declared <span className="mono">mock</span> member standing in for it.
+        </p>
+      ) : (
+        <DataTable
+          caption="Declared contracts (the accessible twin of the declared layer)"
+          columns={DECLARED_LINK_COLUMNS}
+          rows={layer.links}
+          rowKey={(l) => `${l.from}->${counterpartyText(l.to)}`}
+          pageSize={DEFAULT_TABLE_PAGE_SIZE}
+        />
+      )}
+      {layer.links.map((l) => (
+        <details key={`${l.from}->${counterpartyText(l.to)}`}>
+          <summary>
+            <span className="mono">{l.from}</span> → {counterparty(l.to)}
+          </summary>
+          <DataTable
+            caption={`Documents by which ${l.from} declares a contract with ${counterpartyText(l.to)}`}
+            columns={DECLARED_DOCUMENT_COLUMNS}
+            rows={l.contracts}
+            rowKey={(c) => c.document}
+            pageSize={DEFAULT_TABLE_PAGE_SIZE}
+          />
+          {l.bound.length > 0 && (
+            <DataTable
+              caption={`Calls from ${l.from} bound to ${counterpartyText(l.to)} — each still counted as no provider here`}
+              columns={BOUND_CALL_COLUMNS}
+              rows={l.bound}
+              rowKey={(b, i) => `${b.from.symbol}:${b.target}:${i}`}
+              pageSize={DEFAULT_TABLE_PAGE_SIZE}
+            />
+          )}
+        </details>
+      ))}
+      {layer.externals.length > 0 && (
+        <DataTable
+          caption="Named externals (APIs no member's own spec is)"
+          columns={EXTERNAL_COLUMNS}
+          rows={layer.externals}
+          rowKey={(e) => e.id}
+          pageSize={DEFAULT_TABLE_PAGE_SIZE}
+        />
+      )}
+    </Card>
+  );
+}
+
+/** The declared relations on the coverage tab (S-461, frontend-design §4.17) —
+ *  their own card after every runtime board, rendering the server's composed
+ *  lines (BR-51) and never a figure of its own. Absent both, no card. */
+function DeclaredRelationsCard({ dashboard }: { dashboard: CoverageDashboard }) {
+  const { declaredContracts, boundExternal } = dashboard;
+  if (!declaredContracts && !boundExternal) return null;
+  return (
+    <Card title="Declared contracts and named externals">
+      <p className="muted">
+        Declared by the spec documents members vendor, never observed calls: no figure above counts
+        them.
+      </p>
+      {declaredContracts && <p>{declaredContracts.summary}</p>}
+      {boundExternal && (
+        <>
+          <p>{boundExternal.summary}</p>
+          <p className="muted">
+            A bound call stays under <span className="mono">No provider here</span> above: the binding
+            is reported beside its row, not moved into <span className="mono">bound</span>.
+          </p>
+        </>
       )}
     </Card>
   );
@@ -558,6 +831,7 @@ function ServiceMap({
   providers,
   topics,
   build,
+  coverage,
   deps,
   depsError,
 }: {
@@ -565,6 +839,7 @@ function ServiceMap({
   providers: XserviceRouteProviders;
   topics: MemberTopics[];
   build?: BuildDependencyHeadline;
+  coverage: CrossServiceCoverage;
   deps: XserviceBuildDeps | null;
   depsError: Error | null;
 }) {
@@ -574,11 +849,17 @@ function ServiceMap({
   const [showBuild, setShowBuild] = useState(false);
   const map = buildServiceMap(services, providers.providers, topics);
   const layer = showBuild && deps ? buildLayer(deps, services) : null;
-  // With the toggle off the canvas gets the runtime set itself, not a copy — the
+  // Drawn whenever the status carries the relation (S-461); `null` otherwise.
+  const declared = declaredLayer(coverage.declared_contracts, coverage.bound_external, services);
+  // With neither layer the canvas gets the runtime set itself, not a copy — the
   // map is the pre-S-464 map, object for object.
-  const loaded = layer
-    ? { nodes: map.loaded.nodes, edges: [...map.loaded.edges, ...layer.edges] }
-    : map.loaded;
+  const loaded =
+    layer || declared
+      ? {
+          nodes: declared ? { ...map.loaded.nodes, ...declared.nodes } : map.loaded.nodes,
+          edges: [...map.loaded.edges, ...(declared?.edges ?? []), ...(layer?.edges ?? [])],
+        }
+      : map.loaded;
   /* The one gate on every rendering the provenance channel adds (S-419,
      CR-132 AC3/AC6). A workspace whose bindings were all observed at call sites
      has nothing to distinguish, so it renders exactly the DOM it rendered before
@@ -645,6 +926,32 @@ function ServiceMap({
                 The stroke says where a coupling came from; the hue still says which arm it
                 crosses. An admitted line was proved by a committed configuration value, not
                 observed at a call site — the table below states the split per coupling.
+              </p>
+            </>
+          )}
+          {/* The declared layer (S-461): its own edge class and node kind,
+              rendered only when the relation exists. */}
+          {declared && coverage.declared_contracts && (
+            <>
+              <span className={graphStyles.legendHeading}>Declared contracts</span>
+              <ul className={graphStyles.legendList}>
+                {/* The edge row only when an edge is drawn — a legend entry for
+                    a line the canvas never shows would describe nothing. */}
+                {declared.edges.length > 0 && (
+                  <EdgeRow type={DECLARED_EDGE_TYPE} label="Declares a contract (a vendored spec)" />
+                )}
+                <li className={graphStyles.legendRow}>
+                  <span
+                    className={`${graphStyles.legendDot} ${graphStyles.legendDotArtifact}`}
+                    aria-hidden="true"
+                  />
+                  <span>Named external — not a member (topics share this hue)</span>
+                </li>
+              </ul>
+              <p className={graphStyles.legendNote}>
+                Declared by a spec document a member holds and does not implement — never an
+                observed call, and counted apart from every binding above:{" "}
+                {coverage.declared_contracts.headline.summary}
               </p>
             </>
           )}
@@ -740,6 +1047,8 @@ function ServiceMap({
       )}
 
       <BindingEvidence links={map.links} />
+
+      {declared && <DeclaredContractsCard layer={declared} join={coverage.bound_external} />}
 
       {layer && layer.links.length > 0 && (
         <Card title="Build dependencies">

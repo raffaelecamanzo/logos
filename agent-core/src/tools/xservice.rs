@@ -894,6 +894,9 @@ mod tests {
         let answer = XserviceRouteProviders {
             scope: None,
             providers: vec![bound_edge()],
+            declared_contracts: None,
+            bound_external: None,
+            declared_scope_note: None,
         };
         let reading = read_route_providers(&answer);
         assert!(reading.contains("1 resolved cross-service binding(s)"), "{reading}");

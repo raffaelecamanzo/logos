@@ -1497,6 +1497,191 @@ export interface CrossServiceCoverage {
   /** Whether every roster member contributed. `false` means every figure above
    *  covers fewer than all members (FR-WS-16, NFR-CC-04). */
   covers_all_members: boolean;
+  /** The declared-contract relation (S-458, FR-WS-31) — DECLARED by vendored
+   *  specs, never an observed call (BR-57). Beside the headlines above, never
+   *  inside them: no figure above counts it. ABSENT when no member holds a
+   *  vendored or mock-held spec document. */
+  declared_contracts?: DeclaredContractRelation;
+  /** The external join (S-459, ADR-68 point 3) — each invocation
+   *  `no-provider-in-workspace` REST row judged against the externals its own
+   *  member declares. A bound row stays `no-provider-in-workspace` in every count
+   *  above. ABSENT when no member declares a named external. */
+  bound_external?: BoundExternal;
+}
+
+// ── Declared contracts and named externals (S-458/S-459/S-461, CR-147) ───────
+// DECLARED by vendored specs, never observed calls (BR-57): these are never a
+// BridgeEdge, a coverage count or a runtime headline.
+
+/** A named external's identity: the `member:path` of its group's first copy.
+ *  Unique where the display name is not — two externals can both be "PSS". */
+export type ExternalId = string;
+
+/** What a vendored document declares a contract to. */
+export type ContractTarget =
+  | {
+      kind: "member";
+      /** The member whose own spec the document is. */
+      member: string;
+      /** That member's matched own-spec document. */
+      document: string;
+      /** Operations of the held document found in the matched one … */
+      shared: number;
+      /** … of the held document's operations: the identity score. */
+      total: number;
+    }
+  | {
+      kind: "external";
+      external: ExternalId;
+      /** The display name — NOT unique; key by `external`. */
+      name: string;
+    };
+
+/** One `declares-contract(holder → target)` fact. */
+export interface DeclaredContract {
+  /** The member holding the document — the declaring consumer. */
+  holder: string;
+  /** The held document, member-relative. */
+  document: string;
+  /** Always `vendored-spec`. */
+  provenance: string;
+  target: ContractTarget;
+}
+
+/** One copy in a named external's group. */
+export interface ExternalCopy {
+  member: string;
+  document: string;
+  title?: string;
+}
+
+/** A named external: an API no member's own spec is identified as, grouped
+ *  across the copies members hold. Not a member — it has no engine. */
+export interface NamedExternal {
+  id: ExternalId;
+  name: string;
+  copies: ExternalCopy[];
+  /** Members declaring a contract to it, sorted. */
+  declared_by: string[];
+  /** Declared `mock` members standing in for it — providers, never consumers. */
+  stand_ins: string[];
+}
+
+/** A vendored document whose best identity score two members share — resolved
+ *  to neither. */
+export interface IdentityCollision {
+  holder: string;
+  document: string;
+  members: string[];
+  shared: number;
+  total: number;
+}
+
+/** A contract-surface tie resolved by document identity; the coverage row stays
+ *  ambiguous. */
+export interface ResolvedTie {
+  holder: string;
+  document: string;
+  operation: string;
+  provider: BridgeEndpoint;
+}
+
+/** Every spec document read, by bucket — the relation's denominator. */
+export interface DocumentAccounting {
+  documents: number;
+  own: number;
+  vendored: number;
+  partial: number;
+  unjudged: number;
+  mock: number;
+  documentation: number;
+}
+
+export interface DeclaredContractHeadline {
+  declared_contract_pairs: number;
+  to_member: number;
+  to_external: number;
+  documents: DocumentAccounting;
+  named_externals: number;
+  identity_collisions: number;
+  resolved_ties: number;
+  /** The headline beside its denominator as one server-composed line — render
+   *  it, never recompose it (BR-51). */
+  summary: string;
+}
+
+export interface DeclaredContractRelation {
+  headline: DeclaredContractHeadline;
+  contracts: DeclaredContract[];
+  externals: NamedExternal[];
+  collisions: IdentityCollision[];
+  resolved_ties: ResolvedTie[];
+}
+
+/** Where a base path was committed: the file and the key. */
+export interface BaseSource {
+  file: string;
+  key: string;
+}
+
+/** The base path a binding was made under, with its committed evidence. */
+export interface BasePathEvidence {
+  /** `""` for a base URL with no path. */
+  path: string;
+  origin: "deploy-overlay" | "application-config";
+  sources: BaseSource[];
+}
+
+/** One judged row, keyed by the coverage row's `from`; two calls in one method
+ *  share a `from`, and `target` tells them apart. */
+export type ExternalJoinRow = {
+  from: BridgeEndpoint;
+  /** The call's stored target, placeholders as written. */
+  target: string;
+} & (
+  | {
+      state: "bound-external";
+      external: ExternalId;
+      name: string;
+      /** The member's own copy of the external's spec. */
+      document: string;
+      /** The matched operation, `METHOD /positional/{}/template`. */
+      operation: string;
+      base: BasePathEvidence;
+    }
+  | {
+      state: "refused";
+      /** The refusal (kebab-case); its detail fields vary by reason. */
+      reason: string;
+      [detail: string]: unknown;
+    }
+);
+
+/** Every judged row by outcome; the buckets sum to `no_provider_rows`. */
+export interface JoinAccounting {
+  bound_external: number;
+  no_declared_external: number;
+  external_not_declared_by_member: number;
+  no_base_key: number;
+  base_path_uncommitted: number;
+  base_paths_disagree: number;
+  suffix_only: number;
+  no_match: number;
+  several_matches: number;
+}
+
+export interface BoundExternalHeadline {
+  bound_external: number;
+  /** The denominator: every invocation no-provider REST row. */
+  no_provider_rows: number;
+  accounting: JoinAccounting;
+  /** The figure beside its denominator as one server-composed line (BR-51). */
+  summary: string;
+}
+
+export interface BoundExternal {
+  headline: BoundExternalHeadline;
+  rows: ExternalJoinRow[];
 }
 
 /** `GET /api/v1/workspace/roster` — the manifest-only roster the shell probes on
@@ -1754,7 +1939,9 @@ export interface XserviceBuildDeps {
 }
 
 /** `GET /api/v1/workspace/route-providers` — the resolved cross-service bindings:
- *  the service map's edges. */
+ *  the service map's edges. The CLI and MCP twins also carry the declared
+ *  relations beside them; this route does not (S-461) — the map reads those from
+ *  {@link CrossServiceCoverage}, which the status payload already carries. */
 export interface XserviceRouteProviders {
   /** The applied `?repo=` scope, absent when unscoped. */
   scope?: string;

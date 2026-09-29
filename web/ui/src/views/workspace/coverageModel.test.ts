@@ -7,6 +7,7 @@ import type {
   ReferenceCoverage,
   UnboundReason,
 } from "../../api/types.ts";
+import { BOUND_EXTERNAL, DECLARED_CONTRACTS } from "../../workspace/testFixtures.ts";
 import {
   armLabel,
   buildCoverageDashboard,
@@ -650,5 +651,35 @@ describe("per-arm provenance breakdown (S-382, ADR-64)", () => {
       "Read from `orders.base`",
       "Read from `users.base`",
     ]);
+  });
+});
+
+// ── The declared relations beside the headlines (S-461, BR-57) ───────────────
+
+describe("buildCoverageDashboard — declared relations (S-461)", () => {
+  it("carries both server headlines verbatim, and moves no runtime count", () => {
+    const refs = unbound("route", "no-provider-in-workspace", 2, "invocation");
+    const summary = {
+      no_provider_in_workspace: 2,
+      by_intake: { contract_surface: counts(), invocation: counts({ no_provider_in_workspace: 2 }) },
+    };
+    const plain = buildCoverageDashboard(coverage(refs, summary));
+    const declared = buildCoverageDashboard(
+      coverage(refs, { ...summary, declared_contracts: DECLARED_CONTRACTS, bound_external: BOUND_EXTERNAL }),
+    );
+    // The same objects the server sent, not a re-derivation of them.
+    expect(declared.declaredContracts).toBe(DECLARED_CONTRACTS.headline);
+    expect(declared.boundExternal).toBe(BOUND_EXTERNAL.headline);
+    // The bound call stays a no-provider row: every runtime figure is unchanged.
+    const { declaredContracts: _d, boundExternal: _b, ...runtime } = declared;
+    const { declaredContracts: _pd, boundExternal: _pb, ...plainRuntime } = plain;
+    expect(runtime).toEqual(plainRuntime);
+    expect(declared.noProviderInWorkspace).toBe(2);
+  });
+
+  it("is null on both when the workspace declares nothing — never an empty headline", () => {
+    const model = buildCoverageDashboard(coverage([]));
+    expect(model.declaredContracts).toBeNull();
+    expect(model.boundExternal).toBeNull();
   });
 });

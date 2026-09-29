@@ -29,12 +29,18 @@
  */
 
 import type {
+  BoundExternal,
   BridgeEdge,
   BuildEdgeKind,
   BuildsAgainst,
   ConfigValueRefusal,
+  DeclaredContract,
+  DeclaredContractRelation,
+  ExternalId,
+  ExternalJoinRow,
   MemberTopics,
   MemberWarmStateLabel,
+  NamedExternal,
   ValueProvenance,
   WorkspaceStatus,
   XserviceBuildDeps,
@@ -695,5 +701,146 @@ export function buildLayer(deps: XserviceBuildDeps, members: readonly ServiceMem
     })),
     links,
     collapsed,
+  };
+}
+
+// ── The declared layer (S-461, CR-147, FR-WS-31, ADR-68) ─────────────────────
+// A vendored spec DECLARES a contract; it is never an observed call (BR-57). So,
+// like the build layer, it is a separate projection with its own edge class,
+// never folded into `buildServiceMap`'s links, and nothing here is counted as a
+// binding. Unlike the build layer it is drawn without a toggle: it is small (6
+// pairs on the reference estate against 56 build-connected members) and it is
+// the only place a call leaving the workspace gets a named other end.
+
+/** The canvas edge type every declared contract is drawn in — one class,
+ *  whether it names a member or an external. */
+export const DECLARED_EDGE_TYPE = "declares-contract";
+
+/** The canvas-id namespace for a named external — its own, so an external can
+ *  never decode as a member (clicking one selects nothing) or as a topic. */
+const EXTERNAL_ID_PREFIX = "external:";
+
+/** The canvas node id for a named external, keyed by its IDENTITY: two
+ *  externals may share a display name ("PSS" twice on the reference estate). */
+export function externalNodeId(id: ExternalId): string {
+  return `${EXTERNAL_ID_PREFIX}${id}`;
+}
+
+/** One bound call on a declared link: a `no-provider-in-workspace` call of the
+ *  holder, bound to the link's external under a committed base path — the
+ *  server's own bound join row, narrowed, never a hand-copied twin of it. The
+ *  coverage row it comes from is unchanged; this is reported beside it. */
+export type BoundCall = Extract<ExternalJoinRow, { state: "bound-external" }>;
+
+/** One declared link: every contract `from` declares to one counterparty,
+ *  collapsed to a single line. */
+export interface DeclaredLink {
+  /** The declaring member — the holder of the vendored documents. */
+  from: string;
+  /** The counterparty: a member by document identity, or a named external. */
+  to:
+    | { kind: "member"; member: string }
+    | { kind: "external"; external: ExternalId; name: string };
+  /** The holder's documents declaring it, in payload order — each names its
+   *  identity score or its external. */
+  contracts: DeclaredContract[];
+  /** The holder's calls bound to this external (empty on a member link). */
+  bound: BoundCall[];
+}
+
+/** The declared layer the service map draws. */
+export interface DeclaredLayer {
+  /** One node per named external, keyed by identity, labelled by name. */
+  nodes: LoadedSet["nodes"];
+  /** One `declares-contract` canvas edge per link. */
+  edges: CanvasEdge[];
+  /** The drawn links, sorted by (from, counterparty) — the accessible twin. */
+  links: DeclaredLink[];
+  /** The registry, as the server sent it (id order). */
+  externals: NamedExternal[];
+}
+
+/** The node id a link points at. */
+function counterpartyNode(to: DeclaredLink["to"]): string {
+  return to.kind === "member" ? serviceId(to.member) : externalNodeId(to.external);
+}
+
+/**
+ * Project the declared-contract relation and the external join onto the map.
+ *
+ * `null` when the workspace declares nothing — the status then carries neither
+ * key, and the map renders exactly as it did before them. Every figure is read
+ * from the payload; nothing is re-derived. A contract whose holder or member
+ * target is not a roster service is dropped for the reason an unknown binding
+ * is: inventing an endpoint would fabricate a service (NFR-RA-05). A bound call
+ * attaches to its member's link to that external — the join binds only an
+ * external the member itself declares, so the link exists.
+ */
+export function declaredLayer(
+  relation: DeclaredContractRelation | undefined,
+  join: BoundExternal | undefined,
+  members: readonly ServiceMember[],
+): DeclaredLayer | null {
+  if (!relation && !join) return null;
+  const roster = new Set(members.map((m) => m.name));
+  const externals = relation?.externals ?? [];
+
+  const byKey = new Map<string, DeclaredLink>();
+  const keyOf = (from: string, node: string) => `${from}\u0000${node}`;
+  for (const c of relation?.contracts ?? []) {
+    if (!roster.has(c.holder)) continue;
+    const to: DeclaredLink["to"] =
+      c.target.kind === "member"
+        ? { kind: "member", member: c.target.member }
+        : { kind: "external", external: c.target.external, name: c.target.name };
+    if (to.kind === "member" && (!roster.has(to.member) || to.member === c.holder)) continue;
+    const key = keyOf(c.holder, counterpartyNode(to));
+    let link = byKey.get(key);
+    if (!link) {
+      link = { from: c.holder, to, contracts: [], bound: [] };
+      byKey.set(key, link);
+    }
+    link.contracts.push(c);
+  }
+  for (const row of join?.rows ?? []) {
+    if (row.state !== "bound-external") continue;
+    const link = byKey.get(keyOf(row.from.member, externalNodeId(row.external)));
+    if (!link) continue;
+    link.bound.push(row);
+  }
+
+  const links = [...byKey.values()].sort(
+    (a, b) => a.from.localeCompare(b.from) || counterpartyNode(a.to).localeCompare(counterpartyNode(b.to)),
+  );
+  // A node for every external a drawn link reaches — and for every other one in
+  // the registry too (a mock's stand-in-only group has no declarer, and is still
+  // an API the workspace names).
+  const nodes: LoadedSet["nodes"] = {};
+  for (const e of externals) {
+    nodes[externalNodeId(e.id)] = {
+      id: externalNodeId(e.id),
+      label: e.name,
+      // The tooltip's kind: an external is not a member and has no engine.
+      kind: "external",
+      // The HUE channel: the non-member hue a topic also takes, never the
+      // service one — an external must not read as a service with no index
+      // either. Shared with topics deliberately (a new layer would widen the
+      // wire `GraphLayer`); the legend says so, and the node kind and the
+      // dotted declared edges tell the two apart.
+      layer: "artifact",
+    };
+  }
+  return {
+    nodes,
+    // One edge per link, never filtered: every external a contract names is in
+    // the registry, so its node exists — and a filter here could only make the
+    // canvas and its accessible twin disagree.
+    edges: links.map((l) => ({
+      source: serviceId(l.from),
+      target: counterpartyNode(l.to),
+      edge_type: DECLARED_EDGE_TYPE,
+    })),
+    links,
+    externals,
   };
 }

@@ -902,6 +902,22 @@ pub(crate) async fn workspace_roster(
 ///
 /// [FR-WS-32]: ../../docs/specs/requirements/FR-WS-32.md
 ///
+/// # Declared contracts and bound externals ride beside the headlines ([BR-57])
+/// When a member holds a vendored spec, `coverage.declared_contracts` carries the
+/// declared-contract relation ([FR-WS-31]) — `declared_contract_pairs` beside the
+/// spec documents read, each contract's document and target, the named-external
+/// registry — and `coverage.bound_external` the external join, `bound_external`
+/// beside the `no-provider-in-workspace` REST rows it judged, each bound row
+/// naming the matched operation and the committed base path with its sources.
+/// Both are **declared, never observed**: no figure above counts either, and a
+/// bound row stays `no-provider-in-workspace`. This payload is where the service
+/// map reads both from — the map already fetches it — so neither the SPA nor
+/// `workspace/route-providers` pays the coverage walk a second time. Both keys are
+/// absent over a workspace with no vendored spec.
+///
+/// [BR-57]: ../../docs/specs/software-spec.md#327-workspace-federation
+/// [FR-WS-31]: ../../docs/specs/requirements/FR-WS-31.md
+///
 /// [FR-WS-15]: ../../docs/specs/requirements/FR-WS-15.md
 /// [FR-WS-16]: ../../docs/specs/requirements/FR-WS-16.md
 /// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
@@ -918,6 +934,15 @@ pub(crate) async fn workspace_status(
 /// `GET /api/v1/workspace/route-providers[?repo=<member>]` — the resolved
 /// cross-service route bindings (the service map), optionally scoped to routes a
 /// member provides ([`xservice_route_providers`](fed_query::xservice_route_providers)).
+///
+/// # The bindings only, by design (S-461)
+/// The CLI and MCP twins add the declared relations beside the bindings
+/// ([`with_declared`](fed_query::XserviceRouteProviders::with_declared)); this
+/// route does not. Its one consumer, the service map, reads them from
+/// `workspace/status`, which it fetches anyway and which already walked the
+/// coverage tier they come from. Adding them here would pay that walk twice per
+/// map load, and it is not cached, while the bindings are. The keys are therefore
+/// absent here, so this answer is what it was before S-461.
 pub(crate) async fn workspace_route_providers(
     State(backing): State<Arc<Backing<Engine>>>,
     State(bridge): State<Arc<ContractBridge>>,

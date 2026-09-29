@@ -43,6 +43,8 @@ use crate::graph_store::BuildManifestRow;
 
 use super::build_deps::{self, BuildDependencyHeadline, MemberBuildFacts};
 use super::coverage::{cross_service_coverage, CrossServiceCoverage};
+use super::declared_contracts::DeclaredContractRelation;
+use super::external_join::BoundExternal;
 use super::manifest::MemberKind;
 use super::open_state::{self, DegradedRollup, MemberOpenState};
 use super::registry::{AnswerScope, EngineRegistry, MemberScoped};
@@ -419,6 +421,18 @@ pub fn xservice_impact(
 
 /// The resolved cross-service route bindings ([FR-WS-05]): the [bridge](super::bridge)
 /// edges, optionally scoped to routes a single member *provides*.
+///
+/// # Declared relations ride beside, never inside ([BR-57], S-461)
+/// [`with_declared`](Self::with_declared) adds the coverage tier's
+/// `declared_contracts` ([FR-WS-31]) and `bound_external` ([ADR-68] point 3)
+/// verbatim, each with its own headline and denominator. Neither is a binding:
+/// no declared contract or bound external ever enters `providers`, and both
+/// keys are absent when the workspace has nothing to declare, so such a
+/// workspace's answer is byte-for-byte what it was before them.
+///
+/// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
+/// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
 #[derive(Debug, Serialize)]
 pub struct XserviceRouteProviders {
     /// The `--repo` scope, if one was applied (routes provided by that member).
@@ -427,6 +441,45 @@ pub struct XserviceRouteProviders {
     /// Each resolved cross-service binding: `from` (the consumer endpoint) →
     /// `to` (the provider endpoint), both repo-qualified `(member, symbol)`.
     pub providers: Vec<BridgeEdge>,
+    /// The declared-contract relation, workspace-wide — declared by vendored
+    /// specs, never observed calls. Absent when no member holds a vendored or
+    /// `mock`-held spec document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_contracts: Option<DeclaredContractRelation>,
+    /// The external join, workspace-wide — each `no-provider-in-workspace` REST
+    /// row judged against the externals its own member declares. Absent when
+    /// no member declares one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_external: Option<BoundExternal>,
+    /// Present only under a `repo` scope with a declared relation beside it:
+    /// says the scope narrowed `providers` and not the two relations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_scope_note: Option<String>,
+}
+
+impl XserviceRouteProviders {
+    /// Carry `coverage`'s declared relations beside the bindings, verbatim.
+    ///
+    /// They are **not** scoped by `repo`: a declared contract is not a route a
+    /// member provides, and narrowing the relation would leave its headline
+    /// stated over a denominator its rows no longer match ([BR-51]). Under a
+    /// scope the answer says so in `declared_scope_note`, so an unscoped
+    /// relation is never read as the scoped member's.
+    ///
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    pub fn with_declared(mut self, coverage: CrossServiceCoverage) -> Self {
+        self.declared_contracts = coverage.declared_contracts;
+        self.bound_external = coverage.bound_external;
+        let declared = self.declared_contracts.is_some() || self.bound_external.is_some();
+        self.declared_scope_note = self.scope.as_deref().filter(|_| declared).map(|member| {
+            format!(
+                "`--repo {member}` scopes `providers` to routes {member} provides; \
+                 `declared_contracts` and `bound_external` are workspace-wide — a \
+                 declared contract is not a provided route"
+            )
+        });
+        self
+    }
 }
 
 /// The cross-service route bindings, scoped to a provider member when `repo` is
@@ -442,6 +495,9 @@ pub fn xservice_route_providers(
             .filter(|edge| repo.is_none_or(|member| edge.to.member == member))
             .cloned()
             .collect(),
+        declared_contracts: None,
+        bound_external: None,
+        declared_scope_note: None,
     }
 }
 
@@ -1227,6 +1283,159 @@ mod tests {
 
         // A member that provides nothing (only consumes) scopes to empty.
         assert!(xservice_route_providers(&edges, Some("api")).providers.is_empty());
+    }
+
+    // ── declared relations beside the bindings (S-461) ──────────────────
+
+    /// A coverage answer carrying the given declared relations and nothing else
+    /// worth reading — `with_declared` takes only those two fields from it.
+    fn coverage_declaring(
+        declared: Option<super::super::DeclaredContractRelation>,
+        bound: Option<super::super::BoundExternal>,
+    ) -> CrossServiceCoverage {
+        use super::super::{ClassificationCounts, IntakeSplit};
+        CrossServiceCoverage {
+            references: Vec::new(),
+            bound: 0,
+            ambiguous: 0,
+            unbound: 0,
+            no_provider_in_workspace: 1,
+            by_intake: IntakeSplit {
+                contract_surface: ClassificationCounts::default(),
+                invocation: ClassificationCounts { no_provider_in_workspace: 1, ..Default::default() },
+            },
+            resolved_cross_service_edges: 0,
+            egress_resolution: None,
+            egress_resolution_measured: 0,
+            resolved_edges_summary: String::new(),
+            spec_conformance_ratio: None,
+            spec_conformance_measured: 0,
+            spec_conformance_summary: String::new(),
+            members_read: 2,
+            members_total: 2,
+            covers_all_members: true,
+            declared_apart: None,
+            declared_contracts: declared,
+            bound_external: bound,
+        }
+    }
+
+    /// `webmail` vendors a PSS copy; `facade`'s one call binds it under `/prov`.
+    fn pss_relations() -> (super::super::DeclaredContractRelation, super::super::BoundExternal) {
+        use super::super::declared_contracts::{
+            ContractTarget, DeclaredContract, DeclaredContractHeadline, DeclaredContractRelation,
+            DocumentAccounting, ExternalId, NamedExternal,
+        };
+        use super::super::external_join::{
+            BaseOrigin, BasePathEvidence, BaseSource, BoundExternal, BoundExternalHeadline,
+            ExternalBinding, ExternalJoinRow, JoinAccounting, JoinOutcome,
+        };
+        let pss = ExternalId("facade:pss.yaml".to_string());
+        let relation = DeclaredContractRelation {
+            headline: DeclaredContractHeadline {
+                declared_contract_pairs: 1,
+                to_member: 0,
+                to_external: 1,
+                documents: DocumentAccounting { documents: 1, vendored: 1, ..Default::default() },
+                named_externals: 1,
+                identity_collisions: 0,
+                resolved_ties: 0,
+                summary: "1 declared contract pair; declared by vendored specs, never observed calls".into(),
+            },
+            contracts: vec![DeclaredContract {
+                holder: "facade".into(),
+                document: "pss.yaml".into(),
+                provenance: "vendored-spec",
+                target: ContractTarget::External { external: pss.clone(), name: "PSS".into() },
+                operations: Default::default(),
+            }],
+            externals: vec![NamedExternal {
+                id: pss.clone(),
+                name: "PSS".into(),
+                copies: Vec::new(),
+                declared_by: vec!["facade".into()],
+                stand_ins: Vec::new(),
+            }],
+            collisions: Vec::new(),
+            resolved_ties: Vec::new(),
+        };
+        let join = BoundExternal {
+            headline: BoundExternalHeadline {
+                bound_external: 1,
+                no_provider_rows: 1,
+                accounting: JoinAccounting { bound_external: 1, ..Default::default() },
+                summary: "1 of 1 bound; never a cross-service edge".into(),
+            },
+            rows: vec![ExternalJoinRow {
+                from: endpoint("facade", "f"),
+                target: "GET ${pss.url}/user".into(),
+                outcome: JoinOutcome::BoundExternal(ExternalBinding {
+                    external: pss,
+                    name: "PSS".into(),
+                    document: "pss.yaml".into(),
+                    operation: "GET /prov/user".into(),
+                    base: BasePathEvidence {
+                        path: "/prov".into(),
+                        origin: BaseOrigin::DeployOverlay,
+                        sources: vec![BaseSource { file: "deploy/values.yaml".into(), key: "pss.url".into() }],
+                    },
+                }),
+            }],
+        };
+        (relation, join)
+    }
+
+    /// S-461 ([BR-57]): both relations ride beside `providers` verbatim —
+    /// the same bytes the coverage answer carries — and add no binding.
+    ///
+    /// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn route_providers_carry_both_declared_relations_verbatim_and_beside() {
+        let edges = [edge("api", "op1", "web", "r1")];
+        let (relation, join) = pss_relations();
+        let coverage = coverage_declaring(Some(relation), Some(join));
+        let expected = serde_json::to_value(&coverage).unwrap();
+
+        let out = xservice_route_providers(&edges, None).with_declared(coverage);
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json["declared_contracts"], expected["declared_contracts"]);
+        assert_eq!(json["bound_external"], expected["bound_external"]);
+        assert_eq!(json["providers"].as_array().unwrap().len(), 1, "no declared row became a binding");
+        assert!(json.get("declared_scope_note").is_none(), "unscoped, nothing to note: {json}");
+    }
+
+    /// A workspace with nothing declared prints `route-providers` byte for
+    /// byte as before S-461 — no key, not a `null` one.
+    #[test]
+    fn route_providers_without_declared_relations_serialize_unchanged() {
+        let edges = [edge("api", "op1", "web", "r1")];
+        let before = serde_json::to_string(&xservice_route_providers(&edges, Some("web"))).unwrap();
+        let after = serde_json::to_string(
+            &xservice_route_providers(&edges, Some("web")).with_declared(coverage_declaring(None, None)),
+        )
+        .unwrap();
+        assert_eq!(after, before);
+        assert!(!after.contains("declared"), "{after}");
+    }
+
+    /// Under `--repo` the relations stay workspace-wide, and the answer says so
+    /// rather than letting them read as the scoped member's ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_repo_scope_narrows_providers_and_states_the_relations_are_workspace_wide() {
+        let edges = [edge("api", "op1", "web", "r1")];
+        let (relation, join) = pss_relations();
+        let out = xservice_route_providers(&edges, Some("api"))
+            .with_declared(coverage_declaring(Some(relation), Some(join)));
+        assert!(out.providers.is_empty(), "api provides nothing");
+        assert_eq!(out.bound_external.as_ref().map(|b| b.rows.len()), Some(1), "not narrowed");
+        let note = out.declared_scope_note.expect("a scoped answer with a relation states its reach");
+        assert!(note.contains("`--repo api`") && note.contains("workspace-wide"), "{note}");
+
+        let bound_only = xservice_route_providers(&edges, Some("api"))
+            .with_declared(coverage_declaring(None, Some(pss_relations().1)));
+        assert!(bound_only.declared_scope_note.is_some(), "the join alone is also workspace-wide");
     }
 
     /// [`MemberResult`] serialises the ok and error channels **mutually

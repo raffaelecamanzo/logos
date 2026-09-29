@@ -10,7 +10,14 @@ import type {
 } from "../../api/types.ts";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { scopedMember, setScopedMember } from "../../workspace/scope.ts";
-import { stubApi } from "../../workspace/testFixtures.ts";
+import {
+  BOUND_EXTERNAL,
+  DECLARED_CONTRACTS,
+  EMPTY_COVERAGE,
+  stubApi,
+} from "../../workspace/testFixtures.ts";
+import { EDGE_COLOR } from "../graph/graphModel.ts";
+import { DECLARED_EDGE_TYPE } from "./serviceMapModel.ts";
 import { WorkspaceView } from "./WorkspaceView.tsx";
 
 // The service map mounts the real ECharts canvas, which needs a layout engine jsdom
@@ -22,7 +29,7 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
     onNodeClick,
   }: {
     loaded: {
-      nodes: Record<string, { id: string; label: string }>;
+      nodes: Record<string, { id: string; label: string; kind?: string | null }>;
       edges: { source: string; target: string; edge_type: string | null; admitted?: boolean }[];
     };
     onNodeClick: (id: string) => void;
@@ -85,6 +92,27 @@ vi.mock("../graph/GraphCanvas.tsx", () => ({
         .map((e) => (
           <span key={`build:${e.source}->${e.target}`} data-testid="canvas-build-edge">
             {`${e.source}->${e.target}:${e.edge_type}`}
+          </span>
+        ))}
+      {/* The DECLARED layer (S-461): its edges and its external nodes, surfaced
+          as DOM for the reason the build edges are, and FILTERED to the
+          `declares-contract` class and the `external` node kind, so a workspace
+          that declares nothing — every snapshot recorded before this story —
+          renders exactly the DOM it did. An external is printed with its id, so
+          "keyed by identity, labelled by name" is asserted on what the canvas
+          was handed. */}
+      {loaded.edges
+        .filter((e) => e.edge_type === "declares-contract")
+        .map((e) => (
+          <span key={`declared:${e.source}->${e.target}`} data-testid="canvas-declared-edge">
+            {`${e.source}->${e.target}:${e.edge_type}`}
+          </span>
+        ))}
+      {Object.values(loaded.nodes)
+        .filter((n) => n.kind === "external")
+        .map((n) => (
+          <span key={`external:${n.id}`} data-testid="canvas-external-node">
+            {`${n.id}=${n.label}`}
           </span>
         ))}
       {Object.values(loaded.nodes).map((n) => (
@@ -1582,5 +1610,223 @@ describe("WorkspaceView — the build layer (S-464, FR-UI-29, FR-WS-33)", () => 
     await expect(panel.innerHTML).toMatchFileSnapshot(
       "./__snapshots__/coverage.no-build-manifests.html",
     );
+  });
+});
+
+// ── S-461 / CR-147 / FR-WS-31: declared contracts and named externals ─────────
+// A declared contract is never an observed call (BR-57): its own edge class, a
+// legend entry, externals as named nodes keyed by identity, and edge detail
+// naming the document, the identity score or matched operation, and the
+// base-path source. Every assertion reads what the user is shown (or what the
+// canvas was handed), never `declaredLayer`'s return value.
+
+/** The coverage payload over a workspace that declares — the runtime figures
+ *  are the empty workspace's, so every declared figure below is the relation's. */
+const DECLARING: CrossServiceCoverage = {
+  ...EMPTY_COVERAGE,
+  declared_contracts: DECLARED_CONTRACTS,
+  bound_external: BOUND_EXTERNAL,
+};
+
+function declaredEdges(): string[] {
+  return screen.queryAllByTestId("canvas-declared-edge").map((e) => e.textContent ?? "");
+}
+
+function externalNodes(): string[] {
+  return screen.queryAllByTestId("canvas-external-node").map((e) => e.textContent ?? "");
+}
+
+describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI-29, FR-WS-31)", () => {
+  it("draws declared contracts in their own class, and externals as nodes keyed by identity and labelled by name", async () => {
+    stubApi({ providers: [BINDING], coverage: DECLARING });
+    mount();
+    await waitFor(() => expect(declaredEdges()).toHaveLength(4));
+    expect(declaredEdges()).toEqual([
+      "service:api->external:api:pss.yaml:declares-contract",
+      "service:api->service:web:declares-contract",
+      "service:web->external:api:pss.yaml:declares-contract",
+      "service:web->external:web:legacy/pss.yaml:declares-contract",
+    ]);
+    // Two externals titled PSS are two nodes, not one merged by name.
+    expect(externalNodes()).toEqual(["external:api:pss.yaml=PSS", "external:web:legacy/pss.yaml=PSS"]);
+    expect(within(screen.getByTestId("canvas")).getAllByRole("button", { name: "PSS" })).toHaveLength(2);
+    // The runtime binding is untouched beside them: one route line plus four declared.
+    expect(screen.getByTestId("canvas-edges")).toHaveTextContent("5");
+    expect(screen.queryAllByTestId("canvas-admitted-edge")).toEqual([]);
+  });
+
+  it("clicking an external selects no member — it is not a service", async () => {
+    stubApi({ providers: [BINDING], coverage: DECLARING });
+    setScopedMember("web");
+    mount();
+    const [pss] = await within(await screen.findByTestId("canvas")).findAllByRole("button", { name: "PSS" });
+    await userEvent.click(pss);
+    expect(scopedMember()).toBe("web");
+  });
+
+  it("gives the declared class and the external node a legend entry, with the server's summary beside them", async () => {
+    stubApi({ providers: [BINDING], coverage: DECLARING });
+    mount();
+    const legend = (await screen.findByText("Declared contracts", { selector: "span" })).closest("details")!;
+    // The swatch is the class's own — its hue and its dotted stroke, the same
+    // two channels the canvas draws the edge with — never another arm's.
+    const swatch = within(legend).getByText("Declares a contract (a vendored spec)").closest("li")!.querySelector("line")!;
+    expect(swatch.getAttribute("stroke")).toBe(EDGE_COLOR[DECLARED_EDGE_TYPE]);
+    expect(swatch.getAttribute("stroke")).not.toBe(EDGE_COLOR.build);
+    expect(swatch.getAttribute("stroke-dasharray")).toBe("2 3");
+    expect(within(legend).getByText("Named external — not a member (topics share this hue)")).toBeInTheDocument();
+    expect(within(legend).getByText(/never an observed call/)).toHaveTextContent(
+      DECLARED_CONTRACTS.headline.summary,
+    );
+  });
+
+  it("the edge detail names each document with its identity score or external, and each bound call's operation and base-path source", async () => {
+    stubApi({ providers: [BINDING], coverage: DECLARING });
+    mount();
+    const card = (await screen.findByRole("heading", { name: "Declared contracts" })).closest("section")!;
+
+    // The accessible twin: one row per drawn link.
+    const twin = within(card).getByRole("table", { name: /accessible twin of the declared layer/i });
+    const rows = within(twin)
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+    expect(rows).toEqual([
+      ["api", "PSS (named external api:pss.yaml)", "1", "1"],
+      ["api", "web", "1", "—"],
+      ["web", "PSS (named external api:pss.yaml)", "1", "0"],
+      ["web", "PSS (named external web:legacy/pss.yaml)", "1", "1"],
+    ]);
+
+    // Identity: the document, the score, and the member's own document it matched.
+    const identity = within(card).getByRole("table", {
+      name: "Documents by which api declares a contract with web",
+      hidden: true,
+    });
+    // The whole row: the vendored DOCUMENT, then what it declares — a missing
+    // or empty document cell must fail here, not pass a `toContain`.
+    expect(within(identity).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
+      "specs/web.yaml",
+      "Document identity: 3 of 3 operations match web's own api/openapi.yaml",
+    ]);
+    // An external target: the document, and the external named WITH its
+    // identity — two externals here are both titled PSS.
+    const external = within(card).getByRole("table", {
+      name: "Documents by which web declares a contract with PSS (web:legacy/pss.yaml)",
+      hidden: true,
+    });
+    expect(within(external).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
+      "legacy/pss.yaml",
+      "Named external PSS web:legacy/pss.yaml",
+    ]);
+
+    // The bound call: target, matched operation, base path and its source.
+    const calls = within(card).getByRole("table", {
+      name: /Calls from api bound to PSS \(api:pss\.yaml\)/,
+      hidden: true,
+    });
+    expect(within(calls).getAllByRole("cell", { hidden: true }).map((c) => c.textContent)).toEqual([
+      "GET ${pss.uri-get-mailbox}",
+      "GET /prov/domain/{}/user/{}",
+      "/prov",
+      "Deploy overlay · deploy-coll/values.yaml · envfrom.pssbaseurl",
+    ]);
+    // The other base-path shape: a host-only base URL committed by application
+    // configuration in two files — the path stated as none, the origin named,
+    // and EVERY source listed, not the first.
+    const hostOnly = within(card).getByRole("table", {
+      name: /Calls from web bound to PSS \(web:legacy\/pss\.yaml\)/,
+      hidden: true,
+    });
+    const hostOnlyCells = within(hostOnly).getAllByRole("cell", { hidden: true });
+    expect(hostOnlyCells.slice(0, 3).map((c) => c.textContent)).toEqual([
+      "POST ${legacy.uri-send}",
+      "POST /v1/send",
+      "none (host only)",
+    ]);
+    expect(within(hostOnlyCells[3]).getAllByRole("listitem", { hidden: true }).map((li) => li.textContent)).toEqual([
+      "Application configuration · src/main/resources/application.yml · legacy.base-url",
+      "Application configuration · src/test/resources/application-it.yml · legacy.base-url",
+    ]);
+    // The refused `web` call is never shown as a binding.
+    expect(within(card).queryByText("GET /folder")).toBeNull();
+
+    // The registry: both PSS groups, each with its identity, declarers and stand-ins.
+    const registry = within(card).getByRole("table", { name: /Named externals/ });
+    const registryRows = within(registry)
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => within(r).getAllByRole("cell").map((c) => c.textContent));
+    expect(registryRows).toEqual([
+      ["PSS api:pss.yaml", "api, web", "pss-mock", "3"],
+      ["PSS web:legacy/pss.yaml", "web", "—", "1"],
+    ]);
+    expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
+  });
+
+  it("the coverage tab states both server headlines in their own card, the bound call still under no provider", async () => {
+    stubApi({ providers: [BINDING], coverage: DECLARING });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: "Cross-service coverage" }));
+    const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
+    expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
+    expect(within(card).getByText(BOUND_EXTERNAL.headline.summary)).toBeInTheDocument();
+    expect(card).toHaveTextContent("A bound call stays under No provider here above");
+  });
+
+  it("the coverage tab states the declared headline alone when no member declares a named external", async () => {
+    // Identity-only declarations: the server then sends no join at all.
+    stubApi({ providers: [BINDING], coverage: { ...EMPTY_COVERAGE, declared_contracts: DECLARED_CONTRACTS } });
+    mount();
+    await userEvent.click(await screen.findByRole("tab", { name: "Cross-service coverage" }));
+    const card = screen.getByRole("heading", { name: "Declared contracts and named externals" }).closest("section")!;
+    expect(within(card).getByText(DECLARED_CONTRACTS.headline.summary)).toBeInTheDocument();
+    expect(card).not.toHaveTextContent("A bound call stays under");
+    expect(within(card).queryByText(BOUND_EXTERNAL.headline.summary)).toBeNull();
+  });
+
+  it("over a relation a mock only stands in for, draws the external with no edge, no edge legend row and no empty twin table", async () => {
+    stubApi({
+      providers: [BINDING],
+      coverage: {
+        ...EMPTY_COVERAGE,
+        declared_contracts: {
+          ...DECLARED_CONTRACTS,
+          contracts: [],
+          externals: [
+            { id: "pss-mock:source.yaml", name: "PSS", copies: [], declared_by: [], stand_ins: ["pss-mock"] },
+          ],
+        },
+      },
+    });
+    mount();
+    await waitFor(() => expect(externalNodes()).toEqual(["external:pss-mock:source.yaml=PSS"]));
+    expect(declaredEdges()).toEqual([]);
+    const legend = screen.getByText("Declared contracts", { selector: "span" }).closest("details")!;
+    expect(within(legend).queryByText("Declares a contract (a vendored spec)")).toBeNull();
+    expect(within(legend).getByText("Named external — not a member (topics share this hue)")).toBeInTheDocument();
+
+    const card = screen.getByRole("heading", { name: "Declared contracts" }).closest("section")!;
+    expect(within(card).queryByRole("table", { name: /accessible twin of the declared layer/i })).toBeNull();
+    expect(card).toHaveTextContent("No member on this map declares a contract.");
+    const registry = within(card).getByRole("table", { name: /Named externals/ });
+    expect(within(registry).getAllByRole("cell").map((c) => c.textContent)).toEqual([
+      "PSS pss-mock:source.yaml",
+      "—",
+      "pss-mock",
+      "0",
+    ]);
+  });
+
+  it("renders no declared class, legend section, node or card over a workspace that declares nothing", async () => {
+    stubApi({ providers: [BINDING] });
+    mount();
+    await waitFor(() => expect(screen.getByTestId("canvas-edges")).toHaveTextContent("1"));
+    expect(declaredEdges()).toEqual([]);
+    expect(externalNodes()).toEqual([]);
+    expect(screen.queryByText("Declared contracts", { selector: "span" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Declared contracts" })).toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: "Cross-service coverage" }));
+    expect(screen.queryByRole("heading", { name: "Declared contracts and named externals" })).toBeNull();
   });
 });

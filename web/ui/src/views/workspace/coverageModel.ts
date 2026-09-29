@@ -33,8 +33,10 @@
  */
 
 import type {
+  BoundExternalHeadline,
   ClassificationCounts,
   CrossServiceCoverage,
+  DeclaredContractHeadline,
   IntakeSplit,
   ReferenceCoverage,
   UnboundReason,
@@ -259,6 +261,16 @@ export interface CoverageDashboard {
   /** Members that contributed, out of the roster — the shortfall, stated. */
   membersRead: number;
   membersTotal: number;
+  /** The declared-contract relation's headline (S-461, FR-WS-31), verbatim —
+   *  `null` when the server sent no relation. DECLARED by vendored specs, never
+   *  an observed call (BR-57): no count above includes it, so it is rendered
+   *  beside them from its own composed line, never folded into one. */
+  declaredContracts: DeclaredContractHeadline | null;
+  /** The external join's headline (S-459), verbatim — `null` when absent. Its
+   *  bound rows are a subset of `noProviderInWorkspace`'s invocation rows and
+   *  STAY there: the binding is reported beside the row, never moved into
+   *  `bound` (ADR-68 point 3). */
+  boundExternal: BoundExternalHeadline | null;
 }
 
 /** Every reference in one intake population — the denominator that tells an
@@ -386,5 +398,9 @@ export function buildCoverageDashboard(coverage: CrossServiceCoverage): Coverage
     coversAllMembers: coverage.covers_all_members,
     membersRead: coverage.members_read,
     membersTotal: coverage.members_total,
+    // Optional on the wire, so `?? null` is real here: absent means the workspace
+    // declares nothing, which the view renders as no card at all.
+    declaredContracts: coverage.declared_contracts?.headline ?? null,
+    boundExternal: coverage.bound_external?.headline ?? null,
   };
 }
