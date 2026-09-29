@@ -916,6 +916,20 @@ describe("declaredLayer (S-461)", () => {
     expect(webPss.bound).toEqual([]);
   });
 
+  it("draws a node for an external only a mock stands in for — with no edge, since nothing declares it", () => {
+    const standInOnly = {
+      ...DECLARED_CONTRACTS,
+      contracts: [],
+      externals: [{ id: "pss-mock:source.yaml", name: "PSS", copies: [], declared_by: [], stand_ins: ["pss-mock"] }],
+    };
+    const layer = declaredLayer(standInOnly, undefined, roster)!;
+    expect(Object.keys(layer.nodes)).toEqual(["external:pss-mock:source.yaml"]);
+    // The HUE channel is the non-member one, never the service one.
+    expect(layer.nodes["external:pss-mock:source.yaml"].layer).toBe("artifact");
+    expect(layer.edges).toEqual([]);
+    expect(layer.links).toEqual([]);
+  });
+
   it("drops a contract whose holder or member target is not a roster service, and a self-identity", () => {
     const stray = {
       ...DECLARED_CONTRACTS,

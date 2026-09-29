@@ -586,13 +586,24 @@ function DeclaredContractsCard({ layer, join }: { layer: DeclaredLayer; join?: B
         observed — none of these is a binding above.
       </p>
       {join && <p className="muted mono">{join.headline.summary}</p>}
-      <DataTable
-        caption="Declared contracts (the accessible twin of the declared layer)"
-        columns={DECLARED_LINK_COLUMNS}
-        rows={layer.links}
-        rowKey={(l) => `${l.from}->${counterpartyText(l.to)}`}
-        pageSize={DEFAULT_TABLE_PAGE_SIZE}
-      />
+      {/* A relation can name externals and declare nothing: a declared `mock`
+          stands in for an external no member vendors. Then there is no link to
+          tabulate, and an empty twin table would read as a table that failed to
+          fill (NFR-CC-04) — so it says what is true instead. */}
+      {layer.links.length === 0 ? (
+        <p className="muted">
+          No member on this map declares a contract. The externals below are still named: each is
+          held by a declared <span className="mono">mock</span> member standing in for it.
+        </p>
+      ) : (
+        <DataTable
+          caption="Declared contracts (the accessible twin of the declared layer)"
+          columns={DECLARED_LINK_COLUMNS}
+          rows={layer.links}
+          rowKey={(l) => `${l.from}->${counterpartyText(l.to)}`}
+          pageSize={DEFAULT_TABLE_PAGE_SIZE}
+        />
+      )}
       {layer.links.map((l) => (
         <details key={`${l.from}->${counterpartyText(l.to)}`}>
           <summary>
@@ -924,7 +935,11 @@ function ServiceMap({
             <>
               <span className={graphStyles.legendHeading}>Declared contracts</span>
               <ul className={graphStyles.legendList}>
-                <EdgeRow type={DECLARED_EDGE_TYPE} label="Declares a contract (a vendored spec)" />
+                {/* The edge row only when an edge is drawn — a legend entry for
+                    a line the canvas never shows would describe nothing. */}
+                {declared.edges.length > 0 && (
+                  <EdgeRow type={DECLARED_EDGE_TYPE} label="Declares a contract (a vendored spec)" />
+                )}
                 <li className={graphStyles.legendRow}>
                   <span
                     className={`${graphStyles.legendDot} ${graphStyles.legendDotArtifact}`}

@@ -1737,6 +1737,39 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
     expect(card).toHaveTextContent("A bound call stays under No provider here above");
   });
 
+  it("over a relation a mock only stands in for, draws the external with no edge, no edge legend row and no empty twin table", async () => {
+    stubApi({
+      providers: [BINDING],
+      coverage: {
+        ...EMPTY_COVERAGE,
+        declared_contracts: {
+          ...DECLARED_CONTRACTS,
+          contracts: [],
+          externals: [
+            { id: "pss-mock:source.yaml", name: "PSS", copies: [], declared_by: [], stand_ins: ["pss-mock"] },
+          ],
+        },
+      },
+    });
+    mount();
+    await waitFor(() => expect(externalNodes()).toEqual(["external:pss-mock:source.yaml=PSS"]));
+    expect(declaredEdges()).toEqual([]);
+    const legend = screen.getByText("Declared contracts", { selector: "span" }).closest("details")!;
+    expect(within(legend).queryByText("Declares a contract (a vendored spec)")).toBeNull();
+    expect(within(legend).getByText("Named external — not a member (topics share this hue)")).toBeInTheDocument();
+
+    const card = screen.getByRole("heading", { name: "Declared contracts" }).closest("section")!;
+    expect(within(card).queryByRole("table", { name: /accessible twin of the declared layer/i })).toBeNull();
+    expect(card).toHaveTextContent("No member on this map declares a contract.");
+    const registry = within(card).getByRole("table", { name: /Named externals/ });
+    expect(within(registry).getAllByRole("cell").map((c) => c.textContent)).toEqual([
+      "PSS pss-mock:source.yaml",
+      "—",
+      "pss-mock",
+      "0",
+    ]);
+  });
+
   it("renders no declared class, legend section, node or card over a workspace that declares nothing", async () => {
     stubApi({ providers: [BINDING] });
     mount();
