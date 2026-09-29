@@ -1423,6 +1423,12 @@ pub const RECORDED_RECONCILIATION: (usize, usize, usize) = (20, 64, 64);
 /// quietly stopped engaging is a failure.
 pub const RECORDED_ITEMS_BOUND: (usize, usize) = (9742, 7);
 
+/// `(parented sequences, items skipped, item-scoped keys, nested lines)` over
+/// the deploy overlays — the rest of the coverage the finding quotes. Pinned
+/// because a figure printed at the headline and asserted nowhere is free to be
+/// wrong under a green run.
+pub const RECORDED_DEPLOY_COVERAGE: (usize, usize, usize, usize) = (5649, 2339, 29614, 24956);
+
 const _: () = {
     assert!(
         RECORDED_STRICT_PAIRS < ADDRESSED_PAIR_FLOOR,
@@ -1490,6 +1496,12 @@ fn assert_the_recorded_verdict(r: &Remeasure) {
         ),
         RECORDED_ITEMS_BOUND,
         "the reader's own coverage moved",
+    );
+    let c = &r.deploy_coverage;
+    assert_eq!(
+        (c.sequences, c.items_skipped(), c.keys_bound, c.nested_lines_in_items),
+        RECORDED_DEPLOY_COVERAGE,
+        "the deploy coverage the finding quotes moved",
     );
 }
 
