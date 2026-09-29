@@ -59,11 +59,14 @@
 //! The identity score, the implementation bands, the copy graph and the naming
 //! rule are those of S-456's gate harness
 //! (`logos-core/tests/operand_resolvability/vendored_spec_contracts.rs`), which
-//! measured this relation before it was built. Two differences are deliberate:
-//! a provider verdict here is read from the untruncated candidate list (the
-//! harness read a row's list, truncated at eight, and called a truncated one
-//! undecidable), and a `documentation` holder's copies do not join the copy
-//! graph (the harness pooled them).
+//! measured this relation before it was built. Three differences are
+//! deliberate: a provider verdict here is read from the untruncated candidate
+//! list (the harness read a row's list, truncated at eight, and called a
+//! truncated one undecidable); a `documentation` holder's copies do not join
+//! the copy graph (the harness pooled them); and [`spec_title`] reads the
+//! `title` key under `info` through a parser, where the harness took the first
+//! `title` substring after `info` — which a Swagger 2 `description` placed
+//! first defeats.
 //!
 //! [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
 //! [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
@@ -595,25 +598,25 @@ pub fn external_name(copies: &[(&str, Option<&str>)]) -> String {
     file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string()
 }
 
-/// The `info.title` of a YAML or JSON spec, read textually: the first `title`
-/// key after the first `info` key. A label, never an identity.
+/// The `info.title` of a JSON or YAML spec, or `None` when there is none. A
+/// label, never an identity.
+///
+/// Read through parsers this crate already ships, never a substring scan: a
+/// JSON document through `serde_json`, anything else through the configuration
+/// corpus's YAML scalar subset ([`parse_yaml`]), so `title` is only ever the
+/// `title` key directly under `info` — never a word inside a description that
+/// happens to precede it (Swagger 2's key order puts `description` first).
+/// Forms that subset deliberately does not bind — a flow mapping
+/// (`info: {title: …}`) or a block scalar (`title: >-`) — yield `None`, and the
+/// external falls back to its file stem rather than to a partial value.
+///
+/// [`parse_yaml`]: crate::extract::config::corpus::parse_yaml
 pub fn spec_title(text: &str) -> Option<String> {
-    let after_info = text
-        .find("\ninfo:")
-        .map(|i| i + 6)
-        .or_else(|| text.starts_with("info:").then_some(5))
-        .or_else(|| text.find("\"info\"").map(|i| i + 6))?;
-    let rest = &text[after_info..];
-    let at = rest.find("title")?;
-    let tail = &rest[at + "title".len()..];
-    let tail = tail.trim_start_matches('"').trim_start();
-    let value = tail.strip_prefix(':')?.trim_start();
-    let title = match value.chars().next() {
-        Some(q @ ('"' | '\'')) => {
-            let inner = &value[1..];
-            &inner[..inner.find(q)?]
-        }
-        _ => value.lines().next().unwrap_or("").trim(),
+    let title = if text.trim_start().starts_with('{') {
+        let json: serde_json::Value = serde_json::from_str(text).ok()?;
+        json.get("info")?.get("title")?.as_str()?.to_string()
+    } else {
+        crate::extract::config::corpus::parse_yaml(text).remove("info.title")?.pop_first()?
     };
     let title = title.trim();
     (!title.is_empty()).then(|| title.to_string())

@@ -238,6 +238,21 @@ fn a_spec_title_is_read_from_the_members_own_file_only() {
     assert_eq!(spec_title("info:\n  title: \"Notification Gateway\"\n").as_deref(), Some("Notification Gateway"));
     assert_eq!(spec_title(r#"{"info": {"title": "Poste", "version": "1"}}"#).as_deref(), Some("Poste"));
     assert_eq!(spec_title("paths: {}\n"), None);
+    assert_eq!(spec_title("info:\n  title: 'PSS'\n").as_deref(), Some("PSS"), "single-quoted");
+    // `title` is the key under `info`, never a word before it (review: Swagger
+    // 2 puts `description` first) — in YAML and in JSON.
+    assert_eq!(
+        spec_title("swagger: \"2.0\"\ninfo:\n  description: \"Every mailbox entitled to a quota\"\n  version: \"1.0.0\"\n  title: \"Mail API\"\n").as_deref(),
+        Some("Mail API")
+    );
+    assert_eq!(
+        spec_title(r#"{"swagger":"2.0","info":{"description":"Subtitles service","version":"1","title":"Subs API"}}"#).as_deref(),
+        Some("Subs API")
+    );
+    assert_eq!(spec_title("info:\n  contact:\n    title: Nested\n"), None, "a nested `title` is not info's");
+    // Forms the YAML subset does not bind name nothing, never a partial value.
+    assert_eq!(spec_title("openapi: 3.0.0\ninfo: {title: PSS, version: '1'}\npaths: {}\n"), None);
+    assert_eq!(spec_title("openapi: 3.0.0\ninfo:\n  title: >-\n    Notification Gateway\n  version: '1'\n"), None);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let member = tmp.path().join("m");
