@@ -13,8 +13,37 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **A plugin can declare a package-shaped module path.** A `[package_modules]` table in
+  `plugin.toml` lists `source_roots` (for example `src/main/java`). A file under one is keyed by
+  the path after the root, so `src/main/java/com/x/Svc.java` is `com.x.Svc`, the name its
+  imports spell. The table is off by default; Java opts in, and every other language keeps its
+  module keys.
+- **Java type relations are edges.** A class's superclass and an interface's super-interfaces
+  bind as `Extends`, a class's interfaces as `Implements`, `new T(…)` as `Instantiates`, and a
+  declared field, parameter, local or return type (type arguments included) as `TypeUses`. Each
+  binds only to the one in-repository type of the right kind; JDK, library, generated and
+  ambiguous types stay in `unresolved_refs`. The four kinds are kept in the full symbol graph
+  and fenced out of the dependency views the metrics run on, so they do not change the signal
+  by themselves.
+
 ### Changed
 
+- **Java imports bind to the type they name.** A single-type import binds to the class and a
+  static import to the member; a wildcard import brings its package's (or type's) members into
+  scope; and a reference to a type in the file's own package binds without an import. A type declared under one name in both `src/main` and
+  `src/test` stays unbound. On the reference estate Java imports went from 18 to 4,628 bound
+  of 25,132; the rest are external, generated or in another member.
+- **Spring routes built from string constants are promoted, or counted.** A mapping path
+  written as `"/users/{" + USER_ID + "}"`, with `USER_ID` a `static final String` of the same
+  type, of an interface, or of a type in the same member reached through `import static` or
+  `Type.NAME`, folds to one path and becomes a `route` node like a written one. A path that
+  cannot be folded (a method call, a non-final field, a wildcard static import, a constant in
+  another member or a library) promotes no route and is counted in `routes_not_composed`
+  instead of being dropped silently. Kotlin non-literal paths are not counted yet. On the
+  reference estate all 16 concatenated sites are promoted, and `resolved_cross_service_edges`
+  rose from 65 to 70.
 - **A typed Java call binds through its receiver's class and that class's superclasses.**
   `service.send()` on a receiver the file declares binds to that class's `send()`. If the
   class does not declare it, the call binds to the one `send()` of its nearest superclass in
