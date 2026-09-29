@@ -126,15 +126,17 @@ export const DECLARED_CONTRACTS: DeclaredContractRelation = {
   resolved_ties: [],
 };
 
-/** The external join over {@link DECLARED_CONTRACTS} (S-459): `api`'s one
- *  configuration-composed call binds the first PSS under `/prov`, and a `web`
- *  call is refused — judged, never drawn. */
+/** The external join over {@link DECLARED_CONTRACTS} (S-459), in the estate's
+ *  two base-path shapes: `api`'s call binds the first PSS under `/prov` from one
+ *  deploy overlay (`pecserver-facade`), `web`'s binds the second PSS under the
+ *  host-only base URL its application configuration commits in two profiles
+ *  (`notification-adapter`); a third call is refused — judged, never drawn. */
 export const BOUND_EXTERNAL: BoundExternal = {
   headline: {
-    bound_external: 1,
-    no_provider_rows: 2,
+    bound_external: 2,
+    no_provider_rows: 3,
     accounting: {
-      bound_external: 1,
+      bound_external: 2,
       no_declared_external: 0,
       external_not_declared_by_member: 0,
       no_base_key: 0,
@@ -145,7 +147,7 @@ export const BOUND_EXTERNAL: BoundExternal = {
       several_matches: 0,
     },
     summary:
-      "1 of 2 invocation no-provider-in-workspace REST rows bound to a named external their own member declares (refused: 1 no match); declared by vendored specs, never a cross-service edge, and outside egress_resolution",
+      "2 of 3 invocation no-provider-in-workspace REST rows bound to a named external their own member declares (refused: 1 no match); declared by vendored specs, never a cross-service edge, and outside egress_resolution",
   },
   rows: [
     {
@@ -160,6 +162,23 @@ export const BOUND_EXTERNAL: BoundExternal = {
         path: "/prov",
         origin: "deploy-overlay",
         sources: [{ file: "deploy-coll/values.yaml", key: "envfrom.pssbaseurl" }],
+      },
+    },
+    {
+      from: { member: "web", symbol: "local send_legacy" },
+      target: "POST ${legacy.uri-send}",
+      state: "bound-external",
+      external: "web:legacy/pss.yaml",
+      name: "PSS",
+      document: "legacy/pss.yaml",
+      operation: "POST /v1/send",
+      base: {
+        path: "",
+        origin: "application-config",
+        sources: [
+          { file: "src/main/resources/application.yml", key: "legacy.base-url" },
+          { file: "src/test/resources/application-it.yml", key: "legacy.base-url" },
+        ],
       },
     },
     {

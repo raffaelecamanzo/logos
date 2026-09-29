@@ -1688,7 +1688,7 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
       ["api", "PSS (named external api:pss.yaml)", "1", "1"],
       ["api", "web", "1", "—"],
       ["web", "PSS (named external api:pss.yaml)", "1", "0"],
-      ["web", "PSS (named external web:legacy/pss.yaml)", "1", "0"],
+      ["web", "PSS (named external web:legacy/pss.yaml)", "1", "1"],
     ]);
 
     // Identity: the document, the score, and the member's own document it matched.
@@ -1723,6 +1723,23 @@ describe("WorkspaceView — declared contracts and named externals (S-461, FR-UI
       "GET /prov/domain/{}/user/{}",
       "/prov",
       "Deploy overlay · deploy-coll/values.yaml · envfrom.pssbaseurl",
+    ]);
+    // The other base-path shape: a host-only base URL committed by application
+    // configuration in two files — the path stated as none, the origin named,
+    // and EVERY source listed, not the first.
+    const hostOnly = within(card).getByRole("table", {
+      name: /Calls from web bound to PSS \(web:legacy\/pss\.yaml\)/,
+      hidden: true,
+    });
+    const hostOnlyCells = within(hostOnly).getAllByRole("cell", { hidden: true });
+    expect(hostOnlyCells.slice(0, 3).map((c) => c.textContent)).toEqual([
+      "POST ${legacy.uri-send}",
+      "POST /v1/send",
+      "none (host only)",
+    ]);
+    expect(within(hostOnlyCells[3]).getAllByRole("listitem", { hidden: true }).map((li) => li.textContent)).toEqual([
+      "Application configuration · src/main/resources/application.yml · legacy.base-url",
+      "Application configuration · src/test/resources/application-it.yml · legacy.base-url",
     ]);
     // The refused `web` call is never shown as a binding.
     expect(within(card).queryByText("GET /folder")).toBeNull();

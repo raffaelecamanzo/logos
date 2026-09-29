@@ -891,7 +891,11 @@ describe("declaredLayer (S-461)", () => {
     const withCalls = layer.links.filter((l) => l.bound.length > 0);
     expect(withCalls.map((l) => [l.from, l.to])).toEqual([
       ["api", { kind: "external", external: "api:pss.yaml", name: "PSS" }],
+      ["web", { kind: "external", external: "web:legacy/pss.yaml", name: "PSS" }],
     ]);
+    // Each bound row lands on the link to ITS external, by identity: `web`'s
+    // call binds the second PSS, never the first one it also declares.
+    expect(withCalls[1].bound).toEqual([BOUND_EXTERNAL.rows[1]]);
     // The server's bound row itself, carried whole.
     expect(withCalls[0].bound).toEqual([BOUND_EXTERNAL.rows[0]]);
     expect(withCalls[0].bound).toEqual([
