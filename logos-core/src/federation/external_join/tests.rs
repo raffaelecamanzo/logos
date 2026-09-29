@@ -581,6 +581,25 @@ fn the_base_url_key_is_another_key_of_the_calls_namespace() {
     assert_eq!(base_reading(&keys(&["shop.uri-orders"]), &facade_facts()), Err(JoinRefusal::NoBaseKey));
 }
 
+/// Only a sibling committing a URL (or an indirection) is a base-url key: an
+/// overlay overriding `pec-server.allow-self-signed-certificates` overrides a
+/// flag, not the base, and the call still reads its application URL.
+#[test]
+fn an_overlay_overriding_a_non_url_sibling_does_not_override_the_base() {
+    let facts = BaseFacts {
+        application: facade_app(),
+        overlays: vec![value("envFrom.PECSERVER_ALLOWSELFSIGNEDCERTIFICATES", "true", "deploy-coll/values.yaml")],
+    };
+    assert_eq!(
+        base_reading(&keys(&["pec-server.uri-get-mailbox-path"]), &facts),
+        Ok(BasePathEvidence {
+            path: String::new(),
+            origin: BaseOrigin::ApplicationConfig,
+            sources: vec![BaseSource { file: APP.into(), key: "pecserver.baseurl".into() }],
+        })
+    );
+}
+
 /// Application profiles that commit different base paths disagree, too.
 #[test]
 fn application_profiles_committing_different_base_paths_disagree() {
