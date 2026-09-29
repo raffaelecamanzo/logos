@@ -487,11 +487,11 @@ fn the_base_url_key_is_another_key_of_the_calls_namespace() {
         application: vec![value("pec-server.uri-full", "http://h/prov/x", APP)],
         overlays: Vec::new(),
     };
-    assert_eq!(base_reading(&keys(&["pec-server.uri-full"]), &facts), BaseReading::NoKey);
-    assert_eq!(base_reading(&keys(&["toplevel"]), &facade_facts()), BaseReading::NoKey);
-    assert_eq!(base_reading(&BTreeSet::new(), &facade_facts()), BaseReading::NoKey);
+    assert_eq!(base_reading(&keys(&["pec-server.uri-full"]), &facts), Err(JoinRefusal::NoBaseKey));
+    assert_eq!(base_reading(&keys(&["toplevel"]), &facade_facts()), Err(JoinRefusal::NoBaseKey));
+    assert_eq!(base_reading(&BTreeSet::new(), &facade_facts()), Err(JoinRefusal::NoBaseKey));
     // Another namespace's URL is not this call's base.
-    assert_eq!(base_reading(&keys(&["shop.uri-orders"]), &facade_facts()), BaseReading::NoKey);
+    assert_eq!(base_reading(&keys(&["shop.uri-orders"]), &facade_facts()), Err(JoinRefusal::NoBaseKey));
 }
 
 /// Application profiles that commit different base paths disagree, too.
@@ -502,7 +502,7 @@ fn application_profiles_committing_different_base_paths_disagree() {
     let facts = BaseFacts { application, overlays: Vec::new() };
     assert!(matches!(
         base_reading(&keys(&["pec-server.uri-get-mailbox-path"]), &facts),
-        BaseReading::Disagree(paths) if paths.len() == 2
+        Err(JoinRefusal::BasePathsDisagree { paths }) if paths.len() == 2
     ));
 }
 
@@ -566,6 +566,6 @@ fn the_overlay_read_opens_only_walk_admitted_files_and_adds_no_corpus_key() {
     assert!(!before.contains("envfrom.pecserverbaseurl"));
     assert!(matches!(
         base_reading(&keys(&["pec-server.uri-get"]), &facts),
-        BaseReading::One { ref path, origin: BaseOrigin::DeployOverlay, .. } if path == "/prov"
+        Ok(BasePathEvidence { ref path, origin: BaseOrigin::DeployOverlay, .. }) if path == "/prov"
     ));
 }

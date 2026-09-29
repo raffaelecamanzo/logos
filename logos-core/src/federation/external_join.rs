@@ -203,6 +203,13 @@ pub struct CommittedValue {
     pub file: String,
 }
 
+impl CommittedValue {
+    /// Where this value is committed: its file and key.
+    fn source(&self) -> BaseSource {
+        BaseSource { file: self.file.clone(), key: self.key.clone() }
+    }
+}
+
 /// Everything one member's base path is read from: its application
 /// configuration and its admitted deploy overlays.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -283,34 +290,16 @@ pub enum BaseOrigin {
     DeployOverlay,
 }
 
-/// A call's committed base path, read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BaseReading {
-    /// No key in the call's namespace commits a base URL.
-    NoKey,
-    /// The base-url key is committed only as an indirection — a `${…}` value, or
-    /// an overriding overlay committing no URL path: the path is environment
-    /// state, not committed evidence.
-    Uncommitted(Vec<BaseSource>),
-    /// Exactly one path, with every source committing it.
-    One {
-        /// The path.
-        path: String,
-        /// Which source set proved it.
-        origin: BaseOrigin,
-        /// Every file and key committing it.
-        sources: Vec<BaseSource>,
-    },
-    /// Two or more distinct paths, each with its file and key.
-    Disagree(Vec<BasePath>),
-}
-
 /// Whether a committed value is an indirection — a `${…}` placeholder.
 fn is_indirection(value: &str) -> bool {
     value.contains("${")
 }
 
-/// Read a call's committed base path from its member's `facts`.
+/// Read a call's committed base path from its member's `facts`: the path and
+/// its evidence, or the refusal naming why none is proven
+/// ([`NoBaseKey`](JoinRefusal::NoBaseKey),
+/// [`BasePathUncommitted`](JoinRefusal::BasePathUncommitted),
+/// [`BasePathsDisagree`](JoinRefusal::BasePathsDisagree)).
 ///
 /// `call_keys` are the canonical keys the call's target named. The base-url
 /// keys are the other keys of their namespaces whose application value is a URL
@@ -319,7 +308,7 @@ fn is_indirection(value: &str) -> bool {
 /// **key**, so an overriding overlay committing no URL path proves nothing and
 /// does not let the application value back in; beside overlays that do commit a
 /// path, it adds nothing.
-pub fn base_reading(call_keys: &BTreeSet<String>, facts: &BaseFacts) -> BaseReading {
+pub fn base_reading(call_keys: &BTreeSet<String>, facts: &BaseFacts) -> Result<BasePathEvidence, JoinRefusal> {
     let parents: BTreeSet<&str> = call_keys.iter().map(|k| parent(k)).filter(|p| !p.is_empty()).collect();
     let base_values: Vec<&CommittedValue> = facts
         .application
@@ -329,7 +318,7 @@ pub fn base_reading(call_keys: &BTreeSet<String>, facts: &BaseFacts) -> BaseRead
         .collect();
     let base_keys: BTreeSet<&str> = base_values.iter().map(|v| v.key.as_str()).collect();
     if base_keys.is_empty() {
-        return BaseReading::NoKey;
+        return Err(JoinRefusal::NoBaseKey);
     }
     let overriding: Vec<&CommittedValue> = facts
         .overlays
@@ -344,30 +333,25 @@ pub fn base_reading(call_keys: &BTreeSet<String>, facts: &BaseFacts) -> BaseRead
     let mut by_path: BTreeMap<String, BTreeSet<BaseSource>> = BTreeMap::new();
     for v in &chosen {
         if let Some(path) = url_path(&v.value) {
-            by_path.entry(path).or_default().insert(BaseSource { file: v.file.clone(), key: v.key.clone() });
+            by_path.entry(path).or_default().insert(v.source());
         }
     }
     match by_path.len() {
-        0 => BaseReading::Uncommitted(
-            chosen
-                .iter()
-                .map(|v| BaseSource { file: v.file.clone(), key: v.key.clone() })
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        ),
+        0 => Err(JoinRefusal::BasePathUncommitted {
+            sources: chosen.iter().map(|v| v.source()).collect::<BTreeSet<_>>().into_iter().collect(),
+        }),
         1 => {
             let (path, sources) = by_path.into_iter().next().expect("one path");
-            BaseReading::One { path, origin, sources: sources.into_iter().collect() }
+            Ok(BasePathEvidence { path, origin, sources: sources.into_iter().collect() })
         }
-        _ => BaseReading::Disagree(
-            by_path
+        _ => Err(JoinRefusal::BasePathsDisagree {
+            paths: by_path
                 .into_iter()
                 .flat_map(|(path, sources)| {
                     sources.into_iter().map(move |s| BasePath { path: path.clone(), file: s.file, key: s.key })
                 })
                 .collect(),
-        ),
+        }),
     }
 }
 
@@ -687,14 +671,11 @@ fn judge(
     }
 
     let keys: BTreeSet<String> = call.keys.iter().cloned().collect();
-    let (base, origin, sources) = match base_reading(&keys, facts.of(member)) {
-        BaseReading::NoKey => return JoinOutcome::Refused(JoinRefusal::NoBaseKey),
-        BaseReading::Uncommitted(sources) => {
-            return JoinOutcome::Refused(JoinRefusal::BasePathUncommitted { sources })
-        }
-        BaseReading::Disagree(paths) => return JoinOutcome::Refused(JoinRefusal::BasePathsDisagree { paths }),
-        BaseReading::One { path, origin, sources } => (path, origin, sources),
+    let evidence = match base_reading(&keys, facts.of(member)) {
+        Ok(evidence) => evidence,
+        Err(refusal) => return JoinOutcome::Refused(refusal),
     };
+    let base = evidence.path.clone();
 
     // Keyed by external AND operation: two externals carrying one operation are
     // two matches, never a first-wins binding.
@@ -733,7 +714,7 @@ fn judge(
                 name: copy.external.name.clone(),
                 document: copy.contract.document.clone(),
                 operation,
-                base: BasePathEvidence { path: base, origin, sources },
+                base: evidence,
             });
         }
         0 => match (not_declared, suffix) {
