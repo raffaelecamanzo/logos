@@ -49,12 +49,14 @@ use serde::{Deserialize, Serialize};
 use crate::model::{BridgeNamespace, BridgeRole, MatchDiscipline, NodeKind};
 use crate::resolve::binding::{Provenance, ValueRefusal};
 use crate::resolve::http_client_call::ClientCallRefusal;
+use crate::resolve::route_template::route_key;
 
 use super::bridge::{
     bucket_candidates, classify, consumer_portable_key, index_provider,
     member_corpora, read_members, sort_buckets, BridgeEndpoint, BridgeIntake, MemberContracts,
     MemberCorpus, PortableKey, ProviderIndex, Role,
 };
+use super::declared_contracts::{self, DeclaredContractRelation, OperationProviders, SpecOperation};
 use super::manifest::MemberKind;
 use super::registry::{AnswerScope, MemberEngine};
 
@@ -1315,6 +1317,30 @@ pub struct CrossServiceCoverage {
     /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared_apart: Option<DeclaredApart>,
+    /// The **declared-contract relation** and its named-external registry —
+    /// `declares-contract(A → C)` from the spec documents members hold but do
+    /// not implement, with its own headline
+    /// ([`declared_contract_pairs`](super::declared_contracts::DeclaredContractHeadline::declared_contract_pairs))
+    /// beside its denominator, every spec document read ([FR-WS-31],
+    /// [ADR-68] points 1–2, [BR-51]).
+    ///
+    /// **Beside, never inside.** It is derived from the contract-surface walk
+    /// above and moves none of its figures: no row, bucket or count above —
+    /// `resolved_cross_service_edges` and `egress_resolution` included — reads
+    /// it, and the bridge never sees it ([BR-57], [ADR-26]). A tie it resolves
+    /// by document identity is reported in the relation; the row stays
+    /// ambiguous.
+    ///
+    /// **Absent** when no member holds a vendored or mock-held spec document,
+    /// so such a workspace serializes byte-for-byte as it did before.
+    ///
+    /// [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
+    /// [ADR-26]: ../../../docs/specs/architecture/decisions/ADR-26.md
+    /// [ADR-68]: ../../../docs/specs/architecture/decisions/ADR-68.md
+    /// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_contracts: Option<DeclaredContractRelation>,
 }
 
 /// The contract-surface rows of members **declared** `documentation` or
@@ -1470,6 +1496,15 @@ pub struct SpecConformanceReading {
 /// and reported in [`declared_apart`](CrossServiceCoverage::declared_apart)
 /// rather than the headline ([FR-WS-32]).
 ///
+/// The same walk feeds the **declared-contract relation**
+/// ([`declared_contracts`](CrossServiceCoverage::declared_contracts),
+/// [FR-WS-31]): each operation's provider verdict is handed to
+/// [`declared_contracts::derive`] after the tally is sealed, so the relation is
+/// built from facts already read — plus the `info.title` of each copy the
+/// external grouping names, read from the member's own file — and can move no
+/// figure above it.
+///
+/// [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
 /// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
 ///
 /// A member that fails to start or whose surface read fails is skipped
@@ -1529,6 +1564,11 @@ where
     sort_buckets(&mut providers);
 
     let mut tally = Tally::setting_apart(&answer.registry().federation().member_kinds);
+    // Every operation with the tier's own provider verdict — what the
+    // declared-contract relation reads a document's implementation off ([FR-WS-31]).
+    //
+    // [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
+    let mut spec_operations: Vec<SpecOperation> = Vec::new();
 
     for (member, name, symbol) in consumer_refs {
         let from = BridgeEndpoint {
@@ -1537,6 +1577,12 @@ where
         };
 
         let Some((key, _role)) = classify(NodeKind::ApiOperation, &name) else {
+            spec_operations.push(SpecOperation {
+                member: member.clone(),
+                symbol: from.symbol.clone(),
+                key: None,
+                providers: OperationProviders::Elsewhere,
+            });
             tally.record(
                 "route".to_string(),
                 from,
@@ -1556,7 +1602,15 @@ where
         };
         let relation = key.relation().to_string();
 
-        if let Some((state, evidence)) = tier(&key, &member, &providers) {
+        let verdict = tier(&key, &member, &providers);
+        spec_operations.push(SpecOperation {
+            member: member.clone(),
+            symbol: from.symbol.clone(),
+            // The same shared `route_key` `classify` just keyed this node on.
+            key: route_key(&name),
+            providers: operation_providers(verdict.as_ref()),
+        });
+        if let Some((state, evidence)) = verdict {
             // A contract-surface consumer *declares* an endpoint rather than
             // calling one — the same intake the bridge stamps on its edge
             // ([CR-083]), read here from the loop the consumer arrived in.
@@ -1702,7 +1756,30 @@ where
         );
     }
 
-    tally.finish(members_read, answer.registry().members().len())
+    let mut coverage = tally.finish(members_read, answer.registry().members().len());
+    // Beside the sealed figures, never inside them ([BR-57], [ADR-68] point 2).
+    let federation = answer.registry().federation();
+    let roots: BTreeMap<&str, &std::path::Path> =
+        federation.members.iter().map(|m| (m.name.as_str(), m.root.as_path())).collect();
+    let declared = declared_contracts::derive(&spec_operations, &federation.member_kinds, |member, document| {
+        roots.get(member).and_then(|root| declared_contracts::read_title(root, document))
+    });
+    coverage.declared_contracts = (!declared.is_empty()).then_some(declared);
+    coverage
+}
+
+/// The provider verdict the declared-contract relation reads off one
+/// contract-surface operation's [`tier`] answer: `None` is a sole same-member
+/// provider (the holder), a tie lists every candidate, anything else is
+/// elsewhere.
+fn operation_providers(verdict: Option<&(CoverageState, ProviderEvidence)>) -> OperationProviders {
+    match verdict {
+        None => OperationProviders::Holder,
+        Some((_, ProviderEvidence::Several(ProviderDisposition::TiedBetween, _, candidates))) => {
+            OperationProviders::Tied(candidates.clone())
+        }
+        Some(_) => OperationProviders::Elsewhere,
+    }
 }
 
 /// Classify one **configuration-bound HTTP** invocation reference (S-382,
@@ -2687,6 +2764,9 @@ impl Tally {
             members_total: members_total as u64,
             covers_all_members: members_read == members_total,
             declared_apart,
+            // Derived from the walk by `cross_service_coverage`, after the tally
+            // is sealed — so nothing above can read it.
+            declared_contracts: None,
         }
     }
 }
@@ -4360,6 +4440,23 @@ mod tests {
         );
     }
 
+    /// Rewind [S-458]'s `declared_contracts` relation on a serialized copy —
+    /// the same discipline as every rewind below: a baseline that claims to
+    /// predate a change must not carry any of it.
+    ///
+    /// The relation's own size is **not** measured on this shape, and cannot
+    /// be honestly: each operation here sits in its own `.java` file, so every
+    /// one of the 648 orphans would be its own vendored document and its own
+    /// external. No extractor emits that — an `ApiOperation` comes from an
+    /// OpenAPI document holding many (the reference estate: 41 documents
+    /// under its 868 contract-surface rows) — so the rider is measured on a
+    /// private estate copy instead and recorded in the S-458 notes.
+    ///
+    /// [S-458]: ../../../docs/planning/journal.md#s-458-a-vendored-spec-is-a-declared-contract-to-a-member-or-a-named-external
+    fn rewind_s458(value: &mut serde_json::Value) {
+        value.as_object_mut().unwrap().remove("declared_contracts");
+    }
+
     /// **Payload growth, measured against the reference workspace's shape**
     /// ([CR-118] §7, [NFR-CC-04]).
     ///
@@ -4492,7 +4589,9 @@ mod tests {
              81-row `bound` count hid"
         );
 
-        let after = serde_json::to_string(&cov).unwrap().len();
+        let mut after_value = serde_json::to_value(&cov).unwrap();
+        rewind_s458(&mut after_value);
+        let after = serde_json::to_string(&after_value).unwrap().len();
 
         /// Rewind [S-376]'s summary keys on a serialized copy: drop the four the
         /// story adds and restore the three it renamed to their retired
@@ -4564,6 +4663,7 @@ mod tests {
         // those 185 bytes. Stripped, `before` reproduces S-372's recorded 195 044
         // to the byte, which is what makes the two riders separable at all.
         let mut value = serde_json::to_value(&cov).unwrap();
+        rewind_s458(&mut value);
         rewind_s376(&mut value);
         rewind_s382(&mut value);
         value.as_object_mut().unwrap().remove("by_intake");
@@ -4583,6 +4683,7 @@ mod tests {
         // published figures. A story may add its own rider; it may not move
         // anybody else's number.
         let mut pre_s382_value = serde_json::to_value(&cov).unwrap();
+        rewind_s458(&mut pre_s382_value);
         rewind_s382(&mut pre_s382_value);
         let pre_s382 = serde_json::to_string(&pre_s382_value).unwrap().len();
         // The pre-CR-118 baseline, checked against the figure [S-372] recorded for
@@ -4600,7 +4701,7 @@ mod tests {
         // THIS figure and its line count, not about a layout. Measured rather than
         // asserted: the bound that keeps it readable is `CANDIDATE_LIMIT`, and a
         // reviewer is entitled to the number it produces.
-        let pretty = serde_json::to_string_pretty(&cov).unwrap();
+        let pretty = serde_json::to_string_pretty(&after_value).unwrap();
         let pretty_lines = pretty.lines().count();
         println!(
             "CR-118 payload growth at the reference workspace's shape \
@@ -4647,6 +4748,7 @@ mod tests {
         // reconstructed exactly: `intake` on the bound rows only (where CR-118 put
         // it), and no `by_intake` block on the summary.
         let mut prior = serde_json::to_value(&cov).unwrap();
+        rewind_s458(&mut prior);
         rewind_s376(&mut prior);
         rewind_s382(&mut prior);
         prior.as_object_mut().unwrap().remove("by_intake");
@@ -4693,6 +4795,7 @@ mod tests {
         // headline that cost a per-row key would be a different design decision,
         // and this is where it would show up.
         let mut pre_s376_value = serde_json::to_value(&cov).unwrap();
+        rewind_s458(&mut pre_s376_value);
         rewind_s376(&mut pre_s376_value);
         rewind_s382(&mut pre_s376_value);
         let pre_s376 = serde_json::to_string(&pre_s376_value).unwrap().len();
@@ -9198,4 +9301,208 @@ mod tests {
     /// that tree, so the assertion above compares against a vintage it cannot
     /// have produced itself.
     const PRE_S457_COVERAGE_JSON: &str = r#"{"references":[{"relation":"route","from":{"member":"api","symbol":"local api_delete"},"bucket":"unbound","state":"unbound","reason":"no-provider-in-workspace","intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"api","symbol":"local api_get"},"bucket":"bound","state":"bound","to":{"member":"web","symbol":"local web_users"},"intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"docs","symbol":"local docs_get"},"bucket":"bound","state":"bound","to":{"member":"web","symbol":"local web_users"},"intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"docs","symbol":"local docs_orders"},"bucket":"ambiguous","state":"unbound","reason":"ambiguous","intake":"contract-surface","candidates":{"disposition":"tied-between","providers":[{"member":"shop","symbol":"local shop_orders"},{"member":"web","symbol":"local web_orders"}],"total":2,"omitted":0,"summary":"2 tied providers, all listed; none bound"},"provenance":"literal"},{"relation":"route","from":{"member":"shop","symbol":"local shop_calls_users"},"bucket":"bound","state":"bound","to":{"member":"web","symbol":"local web_users"},"intake":"invocation","provenance":"literal"}],"bound":3,"ambiguous":1,"unbound":0,"no_provider_in_workspace":1,"by_intake":{"contract_surface":{"bound":2,"ambiguous":1,"unbound":0,"no_provider_in_workspace":1},"invocation":{"bound":1,"ambiguous":0,"unbound":0,"no_provider_in_workspace":0}},"resolved_cross_service_edges":1,"egress_resolution":1.0,"egress_resolution_measured":1,"resolved_edges_summary":"1 resolved cross-service edge; egress resolution 1.000 (1 of 1 egress site resolved)","spec_conformance_ratio":0.75,"spec_conformance_measured":4,"spec_conformance_summary":"0.750 (3 of 4 measured; 1 excluded as no-provider-in-workspace)","members_read":4,"members_total":4,"covers_all_members":true}"#;
+
+    // ── S-458 / FR-WS-31: a vendored spec is a declared contract, beside the
+    //    figures and never inside them ─────────────────────────────────────
+
+    /// An `ApiOperation` of `member` declared in the spec file `path` — a
+    /// file-descriptor symbol, the shape a spec extractor emits, so the
+    /// document it belongs to is readable off it.
+    fn spec_op(path: &str, n: usize, name: &str) -> ContractNode {
+        let (dir, file) = path.rsplit_once('/').expect("fixture path has a directory");
+        op(name, &format!("logos . . . {dir}/`{file}`/op{n}#"))
+    }
+
+    const AGG_SPEC: &str = "src/main/resources/openapi/v1.yaml";
+    const VENDORED_WORKSPACE: [&str; 5] = ["agg", "core", "facade", "pss-mock", "web"];
+
+    /// The estate's two shapes in miniature. `agg` serves and specifies four
+    /// operations, two of which `core` also serves; `web` holds a copy of
+    /// `agg`'s spec and serves none of it (`webmail → mailbox-aggregator-api`);
+    /// `facade` holds a copy of an API nobody serves (PSS) and calls it;
+    /// `pss-mock` holds another PSS copy. One `facade` call binds and one `web`
+    /// call ties, so every runtime figure is non-trivial.
+    fn vendored_workspace() {
+        reset();
+        let agg_ops = ["GET /mail/{id}", "GET /mail", "POST /mail", "GET /folders"];
+        let mut agg: Vec<ContractNode> =
+            agg_ops.iter().enumerate().map(|(n, o)| spec_op(AGG_SPEC, n, o)).collect();
+        agg.extend([
+            route("GET /mail/{id}", "local agg_mail_id"),
+            route("GET /mail", "local agg_mail"),
+            route("POST /mail", "local agg_post"),
+            route("GET /folders", "local agg_folders"),
+        ]);
+        set_member("agg", agg);
+        set_member(
+            "core",
+            vec![route("GET /mail/{id}", "local core_mail_id"), route("GET /mail", "local core_mail")],
+        );
+        set_member(
+            "web",
+            agg_ops.iter().enumerate().map(|(n, o)| spec_op("spec/agg.yaml", n, o)).collect(),
+        );
+        set_consumers("web", vec![http_call("GET /mail/{id}", "local web_calls_mail")]);
+        let pss = ["GET /prov/domain/{d}", "POST /prov/session/authenticate"];
+        set_member(
+            "facade",
+            pss.iter().enumerate().map(|(n, o)| spec_op("api/pss.yaml", n, o)).collect(),
+        );
+        set_consumers(
+            "facade",
+            vec![
+                http_call("GET /folders", "local facade_calls_folders"),
+                http_call("GET /domain/{d}/user", "local facade_calls_pss"),
+            ],
+        );
+        set_member(
+            "pss-mock",
+            pss.iter().enumerate().map(|(n, o)| spec_op("mock/pss.yaml", n, o)).collect(),
+        );
+    }
+
+    /// The coverage payload and the bridge edge set over [`vendored_workspace`].
+    fn vendored_payloads(kinds: &[(&str, MemberKind)]) -> (serde_json::Value, String) {
+        vendored_workspace();
+        let reg = registry_declaring(&VENDORED_WORKSPACE, kinds);
+        let cov = serde_json::to_value(cross_service_coverage(&reg.answer())).unwrap();
+        let edges = serde_json::to_string(&*super::super::bridge::ContractBridge::new().edges(&reg)).unwrap();
+        (cov, edges)
+    }
+
+    /// **Beside, never inside — byte-identical to the pre-S-458 vintage**
+    /// ([ADR-26], [BR-57]). With declared contracts present (a document-identity
+    /// pair resolving two ties, an external declared and stood in for), every
+    /// coverage figure but the new relation — `resolved_cross_service_edges`,
+    /// `egress_resolution`, every row and bucket — and the bridge edge set
+    /// serialize exactly as the code at `5e3d0547` emitted them for this same
+    /// fixture.
+    ///
+    /// [ADR-26]: ../../../docs/specs/architecture/decisions/ADR-26.md
+    /// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn declared_contracts_leave_every_runtime_figure_and_the_bridge_edge_set_byte_identical() {
+        let (mut cov, edges) = vendored_payloads(&[("pss-mock", MemberKind::Mock)]);
+        let relation = cov
+            .as_object_mut()
+            .unwrap()
+            .remove("declared_contracts")
+            .expect("the fixture declares contracts, so the comparison is not vacuous");
+        assert_eq!(relation["headline"]["declared_contract_pairs"], 2);
+        assert_eq!(relation["headline"]["resolved_ties"], 2);
+
+        let vintage: serde_json::Value = serde_json::from_str(PRE_S458_COVERAGE_JSON).unwrap();
+        for figure in ["resolved_cross_service_edges", "egress_resolution", "egress_resolution_measured"] {
+            assert_eq!(cov[figure], vintage[figure], "{figure} moved");
+        }
+        assert_eq!(cov["resolved_cross_service_edges"], 1, "the fixture binds an edge");
+        assert_eq!(serde_json::to_string(&cov).unwrap(), PRE_S458_COVERAGE_JSON, "the payload moved");
+        assert_eq!(edges, PRE_S458_BRIDGE_EDGES_JSON, "the bridge edge set moved");
+    }
+
+    /// **`webmail → mailbox-aggregator-api`, in miniature**: `web`'s copy of
+    /// `agg`'s spec is a declared contract to `agg` by document identity, score
+    /// and matched document named, and its two tied operations resolve to `agg`
+    /// in the relation — while their coverage rows stay ambiguous, both
+    /// candidates listed, because a declared contract is never a binding
+    /// candidate. `agg`'s own copy of the same ties is not resolved: the
+    /// resolution is for the holder's document only.
+    #[test]
+    fn a_vendored_copy_of_a_members_spec_declares_a_contract_and_resolves_its_ties_only() {
+        vendored_workspace();
+        let cov = cross_service_coverage(&registry(&VENDORED_WORKSPACE).answer());
+        let relation = cov.declared_contracts.as_ref().expect("contracts are declared");
+
+        let web = relation.contracts_of("web").next().expect("web declares a contract");
+        assert_eq!(web.document, "spec/agg.yaml");
+        assert_eq!(web.provenance, super::super::declared_contracts::VENDORED_SPEC);
+        assert_eq!(
+            web.target,
+            super::super::declared_contracts::ContractTarget::Member {
+                member: "agg".into(),
+                document: AGG_SPEC.into(),
+                shared: 4,
+                total: 4,
+            }
+        );
+        let resolved: Vec<(&str, &str, &str)> = relation
+            .resolved_ties
+            .iter()
+            .map(|t| (t.holder.as_str(), t.operation.as_str(), t.provider.symbol.as_str()))
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![
+                ("web", "logos . . . spec/`agg.yaml`/op0#", "local agg_mail_id"),
+                ("web", "logos . . . spec/`agg.yaml`/op1#", "local agg_mail"),
+            ]
+        );
+        for tie in &relation.resolved_ties {
+            let row = cov.references.iter().find(|r| r.from.symbol == tie.operation).unwrap();
+            assert_eq!(row.bucket, "ambiguous", "the row is unchanged: {row:?}");
+            assert_eq!(row.candidates.as_ref().unwrap().providers.len(), 2);
+        }
+        assert!(relation.resolved_ties.iter().all(|t| t.holder == "web"), "agg's own ties are its own");
+
+        // Undeclared, the mock is an ordinary holder: its copy and facade's
+        // group into one external both declare.
+        let externals: Vec<(&str, &[String])> =
+            relation.externals.iter().map(|e| (e.name.as_str(), e.declared_by.as_slice())).collect();
+        assert_eq!(externals, vec![("pss", &["facade".to_string(), "pss-mock".to_string()][..])]);
+        assert_eq!(relation.headline.declared_contract_pairs, 3);
+    }
+
+    /// A declared `mock` stands in for the external its copy names and declares
+    /// nothing; S-459's join reads the external `facade` itself declares.
+    #[test]
+    fn a_declared_mock_stands_in_for_the_external_and_is_never_a_consumer() {
+        vendored_workspace();
+        let cov = cross_service_coverage(
+            &registry_declaring(&VENDORED_WORKSPACE, &[("pss-mock", MemberKind::Mock)]).answer(),
+        );
+        let relation = cov.declared_contracts.as_ref().expect("contracts are declared");
+        assert!(relation.contracts_of("pss-mock").next().is_none(), "a mock declares nothing");
+        let [pss] = relation.externals.as_slice() else {
+            panic!("one external: {:?}", relation.externals);
+        };
+        assert_eq!(pss.stand_ins, vec!["pss-mock".to_string()]);
+        assert_eq!(pss.declared_by, vec!["facade".to_string()]);
+        let joined: Vec<&str> = relation.externals_declared_by("facade").map(|(_, e)| e.id.0.as_str()).collect();
+        assert_eq!(joined, vec!["facade:api/pss.yaml"]);
+        assert_eq!(relation.headline.declared_contract_pairs, 2);
+        assert_eq!(relation.headline.documents.mock, 1);
+    }
+
+    /// The external's name is the title its copies commit, read from the
+    /// member's own file — and a workspace holding only own specs carries no
+    /// relation at all, so its payload is unchanged.
+    #[test]
+    fn an_external_is_named_by_the_title_committed_in_the_members_copy() {
+        let tmp = tempfile::TempDir::new().expect("temp root");
+        std::fs::create_dir_all(tmp.path().join("facade/api")).unwrap();
+        std::fs::write(tmp.path().join("facade/api/pss.yaml"), "openapi: 3.0.1\ninfo:\n  title: PSS\n").unwrap();
+        let mut federation = fed(&VENDORED_WORKSPACE);
+        for m in &mut federation.members {
+            m.root = tmp.path().join(&m.name);
+        }
+        federation.root = tmp.path().to_path_buf();
+        vendored_workspace();
+        let cov = cross_service_coverage(&EngineRegistry::<FakeEngine>::new(federation, RegistryMode::Lazy).answer());
+        let pss = &cov.declared_contracts.as_ref().unwrap().externals[0];
+        assert_eq!(pss.name, "PSS", "the committed title, not the stem");
+
+        reset();
+        set_member("agg", vec![spec_op(AGG_SPEC, 0, "GET /folders"), route("GET /folders", "local agg_folders")]);
+        let own_only = cross_service_coverage(&registry(&["agg"]).answer());
+        assert!(own_only.declared_contracts.is_none());
+        assert!(!serde_json::to_string(&own_only).unwrap().contains("declared_contracts"));
+    }
+
+    /// The coverage payload [`vendored_payloads`] serialized to under the code
+    /// at `5e3d0547`, before S-458 — generated by running this same fixture
+    /// against that tree.
+    const PRE_S458_COVERAGE_JSON: &str = r#"{"references":[{"relation":"route","from":{"member":"agg","symbol":"logos . . . src/main/resources/openapi/`v1.yaml`/op0#"},"bucket":"ambiguous","state":"unbound","reason":"ambiguous","intake":"contract-surface","candidates":{"disposition":"tied-between","providers":[{"member":"agg","symbol":"local agg_mail_id"},{"member":"core","symbol":"local core_mail_id"}],"total":2,"omitted":0,"summary":"2 tied providers, all listed; none bound"},"provenance":"literal"},{"relation":"route","from":{"member":"agg","symbol":"logos . . . src/main/resources/openapi/`v1.yaml`/op1#"},"bucket":"ambiguous","state":"unbound","reason":"ambiguous","intake":"contract-surface","candidates":{"disposition":"tied-between","providers":[{"member":"agg","symbol":"local agg_mail"},{"member":"core","symbol":"local core_mail"}],"total":2,"omitted":0,"summary":"2 tied providers, all listed; none bound"},"provenance":"literal"},{"relation":"route","from":{"member":"facade","symbol":"local facade_calls_folders"},"bucket":"bound","state":"bound","to":{"member":"agg","symbol":"local agg_folders"},"intake":"invocation","provenance":"literal"},{"relation":"route","from":{"member":"facade","symbol":"local facade_calls_pss"},"bucket":"unbound","state":"unbound","reason":"no-provider-in-workspace","intake":"invocation","provenance":"literal"},{"relation":"route","from":{"member":"facade","symbol":"logos . . . api/`pss.yaml`/op0#"},"bucket":"unbound","state":"unbound","reason":"no-provider-in-workspace","intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"facade","symbol":"logos . . . api/`pss.yaml`/op1#"},"bucket":"unbound","state":"unbound","reason":"no-provider-in-workspace","intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"web","symbol":"local web_calls_mail"},"bucket":"ambiguous","state":"unbound","reason":"ambiguous","intake":"invocation","candidates":{"disposition":"tied-between","providers":[{"member":"agg","symbol":"local agg_mail_id"},{"member":"core","symbol":"local core_mail_id"}],"total":2,"omitted":0,"summary":"2 tied providers, all listed; none bound"},"provenance":"literal"},{"relation":"route","from":{"member":"web","symbol":"logos . . . spec/`agg.yaml`/op0#"},"bucket":"ambiguous","state":"unbound","reason":"ambiguous","intake":"contract-surface","candidates":{"disposition":"tied-between","providers":[{"member":"agg","symbol":"local agg_mail_id"},{"member":"core","symbol":"local core_mail_id"}],"total":2,"omitted":0,"summary":"2 tied providers, all listed; none bound"},"provenance":"literal"},{"relation":"route","from":{"member":"web","symbol":"logos . . . spec/`agg.yaml`/op1#"},"bucket":"ambiguous","state":"unbound","reason":"ambiguous","intake":"contract-surface","candidates":{"disposition":"tied-between","providers":[{"member":"agg","symbol":"local agg_mail"},{"member":"core","symbol":"local core_mail"}],"total":2,"omitted":0,"summary":"2 tied providers, all listed; none bound"},"provenance":"literal"},{"relation":"route","from":{"member":"web","symbol":"logos . . . spec/`agg.yaml`/op2#"},"bucket":"bound","state":"bound","to":{"member":"agg","symbol":"local agg_post"},"intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"web","symbol":"logos . . . spec/`agg.yaml`/op3#"},"bucket":"bound","state":"bound","to":{"member":"agg","symbol":"local agg_folders"},"intake":"contract-surface","provenance":"literal"}],"bound":3,"ambiguous":5,"unbound":0,"no_provider_in_workspace":3,"by_intake":{"contract_surface":{"bound":2,"ambiguous":4,"unbound":0,"no_provider_in_workspace":2},"invocation":{"bound":1,"ambiguous":1,"unbound":0,"no_provider_in_workspace":1}},"resolved_cross_service_edges":1,"egress_resolution":0.5,"egress_resolution_measured":2,"resolved_edges_summary":"1 resolved cross-service edge; egress resolution 0.500 (1 of 2 egress sites resolved)","spec_conformance_ratio":0.375,"spec_conformance_measured":8,"spec_conformance_summary":"0.375 (3 of 8 measured; 3 excluded as no-provider-in-workspace); 2 of 10 contract-surface rows reported apart by declared member kind","members_read":5,"members_total":5,"covers_all_members":true,"declared_apart":{"members":[{"member":"pss-mock","kind":"mock","rows":2}],"rows":2,"contract_surface_rows":10,"counts":{"bound":0,"ambiguous":0,"unbound":0,"no_provider_in_workspace":2},"summary":"2 of 10 contract-surface rows reported apart from 1 declared member (mock: 1); the headline and spec_conformance_ratio exclude them","references":[{"relation":"route","from":{"member":"pss-mock","symbol":"logos . . . mock/`pss.yaml`/op0#"},"bucket":"unbound","state":"unbound","reason":"no-provider-in-workspace","intake":"contract-surface","provenance":"literal"},{"relation":"route","from":{"member":"pss-mock","symbol":"logos . . . mock/`pss.yaml`/op1#"},"bucket":"unbound","state":"unbound","reason":"no-provider-in-workspace","intake":"contract-surface","provenance":"literal"}]}}"#;
+
+    /// The bridge edge set over the same fixture, same vintage.
+    const PRE_S458_BRIDGE_EDGES_JSON: &str = r#"[{"relation":"route","from":{"member":"facade","symbol":"local facade_calls_folders"},"to":{"member":"agg","symbol":"local agg_folders"},"intake":"invocation","from_value":{"provenance":"literal"},"to_value":{"provenance":"literal"}},{"relation":"route","from":{"member":"web","symbol":"logos . . . spec/`agg.yaml`/op2#"},"to":{"member":"agg","symbol":"local agg_post"},"intake":"contract-surface","from_value":{"provenance":"literal"},"to_value":{"provenance":"literal"}},{"relation":"route","from":{"member":"web","symbol":"logos . . . spec/`agg.yaml`/op3#"},"to":{"member":"agg","symbol":"local agg_folders"},"intake":"contract-surface","from_value":{"provenance":"literal"},"to_value":{"provenance":"literal"}}]"#;
 }

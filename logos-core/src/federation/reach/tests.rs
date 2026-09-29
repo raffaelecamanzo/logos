@@ -882,6 +882,7 @@ fn the_rider_carries_every_coverage_figure_verbatim_at_non_zero_values() {
         members_total: 5,
         covers_all_members: false,
         declared_apart: None,
+        declared_contracts: None,
     };
 
     // Two invocation edges and one contract-surface edge: the seeded-edge figure
