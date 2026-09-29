@@ -135,8 +135,10 @@ file, finding file and pinned constants are byte-identical.
 
   and the three readings are identical before and after the change (13 / 12 / 11
   on both runs). An index-free key on a source the reader does NOT refuse still
-  fails the run; the two checks are separate so that a reader defect cannot be
-  refused away.
+  fails the run. The two checks do not separate reader defects from source
+  shapes: a leaked item line lands outside every item and refuses its source,
+  exactly like a template. What guards against a refusal hiding a defect is the
+  pinned refusal count, the forgone targets (0) and the items bound.
 
   FOR S-476: the shipped `parse_yaml` fabricates `spec.template.spec.containers.
   image` (and siblings) on every Helm deployment template on this estate. S-411's

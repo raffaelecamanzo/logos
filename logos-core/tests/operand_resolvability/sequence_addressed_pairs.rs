@@ -56,10 +56,17 @@
 //! `spec.template.spec.containers.image` is the `routes:` fabrication, still
 //! live on templates), and the rewrite hangs them under the item instead. What
 //! the refusal forgoes is measured and printed, never assumed. Second
-//! ([`collapsed_keys`]): every key a faithful source adds must carry an index.
-//! Any one that does not **fails the run** — the `routes:` incident is exactly
-//! an index-free key read out of a list, and refusing it would hide a defect of
-//! the reader rather than decline a source.
+//! ([`collapsed_keys`]): every key a faithful source adds must carry an index,
+//! and any one that does not **fails the run**.
+//!
+//! The two checks do NOT partition "source" from "reader" defects, and this
+//! module must not be read as if they did. An item line leaking under its
+//! enclosing mapping — the `routes:` incident's shape — lands outside every
+//! item, so it is a divergence and REFUSES the source; `collapsed_keys` guards
+//! only the renaming of a sentinel to its index. What stops a refusal from
+//! hiding a reader defect on the estate is the pinned figures: the refused
+//! sources and the target values they forgo ([`RECORDED_REFUSALS`]), and the
+//! items the reader binds ([`RECORDED_ITEMS_BOUND`]).
 //!
 //! # Three readings, one decisive
 //!
@@ -664,8 +671,9 @@ pub fn divergent_keys(
 
 /// **The collapsed-key check** — every item key a faithful source adds must be
 /// item-scoped: `…[N]` on a named key, no sentinel left, no index-free form.
-/// Any one that is not FAILS THE RUN; it is never a reason to refuse a source,
-/// because it is a defect of the reader, not a property of the source.
+/// Any one that is not FAILS THE RUN. It guards the renaming of a sentinel to
+/// its index; a key leaking OUTSIDE every item is [`divergent_keys`]'s case and
+/// refuses the source instead.
 ///
 /// A pure function, so the check itself is pinned by fixtures that feed it each
 /// violation independently of the reader it guards.
