@@ -234,6 +234,9 @@ fn an_external_is_named_by_its_title_unless_it_is_the_springdoc_default() {
     );
     assert_eq!(external_name(&[("b/x.yaml", None), ("a/y.json", Some(""))]), "y");
     assert_eq!(external_name(&[("b/x.yaml", None), ("a/y.json", None)]), "y");
+    // Equally common titles tie to the smallest; a stem keeps its inner dots.
+    assert_eq!(external_name(&[("a/x.yaml", Some("B")), ("b/y.yaml", Some("A"))]), "A");
+    assert_eq!(external_name(&[("PSS_v1.0.3.yaml", None)]), "PSS_v1.0.3");
 }
 
 /// The title is read textually from YAML and JSON, and a path that would leave
