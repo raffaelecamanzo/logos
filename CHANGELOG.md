@@ -15,6 +15,45 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [1.7.0] — 2026-09-30
 
+### Added
+
+- **A vendored spec is a declared contract.** An OpenAPI document a member holds but does not
+  implement declares `declares-contract(A → C)`: to the member whose own spec holds ≥ 90 % of its
+  operations (document identity, score and matched document named), or else to a **named
+  external** grouped across copies. Names are not unique, so an external is identified by the
+  `member:path` of its first copy. A `kind = "mock"` member is a stand-in provider; a
+  `documentation` member's copies stay out. Built in memory on the first cross-service query; no
+  migration. Published as `coverage.declared_contracts`, headline `declared_contract_pairs` over
+  every spec document read. On the reference estate: 6 pairs (1 by identity, 5 to named
+  externals) from 7 vendored of 41 spec documents.
+- **A no-provider call binds to the external its member vendors.** A `no-provider-in-workspace`
+  REST call whose path, under a base path its member's committed sources prove (application
+  configuration, or agreeing committed deploy overlays), equals exactly one operation of an
+  external that member declares is reported in `coverage.bound_external`, with the file, key and
+  matched operation. Every other case is refused with its reason. On the reference estate: 21 of
+  32 rows bound.
+- **Declared contracts and named externals on every surface.** `workspace status`,
+  `xservice route-providers` (CLI `--json` and MCP; `--repo` adds `declared_scope_note`) and the
+  web service map — a dotted declared-contract edge class with its legend section, named-external
+  nodes, and a declared-relations card on the Coverage tab. A workspace with no vendored spec and
+  no `kind` renders every surface unchanged.
+
+### Changed
+
+- **Modularity drops out of a graph too small to have community structure.** Below 5
+  module-rollup edges Modularity is *not applicable*: its computed pair is kept, it leaves both
+  the geometric mean and the zero short-circuit, and `quality-report --json`, `scan --json` and
+  the dashboard say why (`n of 5`). Metric semantics 5 → 6, so every project re-baselines once
+  (`baseline reset: metric semantics changed`). Graphs with 5 or more edges score exactly as
+  before; on the reference estate 7 small members rise (e.g. `notification-kafka-models`
+  0 → 9725) and all 63 others are byte-identical.
+- **Forward-only store migration 23** (`metric_snapshots.modularity_applicable`). Once 1.7.0 opens
+  a store, 1.6.x can no longer open it.
+- **Declared figures stand beside the runtime ones, never inside.** `resolved_cross_service_edges`,
+  `egress_resolution`, `no_provider_in_workspace` and the bridge edge set are unchanged by either
+  new relation. `workspace status --json` grows about 3 % on the reference estate and
+  `route-providers --json` about 29 %.
+
 ## [1.6.0] — 2026-09-29
 
 ### Added
