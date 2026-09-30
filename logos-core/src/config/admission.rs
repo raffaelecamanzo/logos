@@ -506,6 +506,32 @@ mod tests {
     }
 
     #[test]
+    fn the_default_config_rejects_minified_js_at_any_depth_in_step_with_the_walk() {
+        // S-478 / CR-154: the sync/watch authority and the discovery walk agree on
+        // the built-in `**/*.min.js` default, so an incremental sync can never
+        // re-admit what a full index kept out.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let minified = [root.join("app.min.js"), root.join("static/js/lib.min.js")];
+        let kept = root.join("static/js/app.js");
+        for p in minified.iter().chain([&kept]) {
+            write(p, "var a = 1;\n");
+        }
+
+        // `Config::default()`, not `test_config()`: the shipped exclude set.
+        let config = Config::default();
+        let authority = AdmissionAuthority::from_config(&root, &config).unwrap();
+
+        for p in &minified {
+            assert!(!authority.admits_path(p), "{p:?} is minified — rejected by default");
+        }
+        assert!(authority.admits_path(&kept), "the non-minified sibling is admitted");
+        for p in minified.iter().chain([&kept]) {
+            assert_eq!(authority.admits_path(p), walk_admits(&root, &config, p), "parity for {p:?}");
+        }
+    }
+
+    #[test]
     fn rejects_an_oversize_file() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
