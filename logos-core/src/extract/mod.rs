@@ -2842,8 +2842,11 @@ fn kind_for_capture(capture_name: &str) -> Option<NodeKind> {
 /// binder looks a field up among the class's members ([FR-EX-08]), and the
 /// class-cohesion metric counts the class's fields ([FR-QM-11]). The test is
 /// structural (the field's node sits inside the method's `parameters` field), not a
-/// `constructor` name match, so a local `val` in a method body — which is not in its
-/// parameter list — keeps its method as parent (S-477, CR-154).
+/// `constructor` name match, so a field a plugin captures elsewhere in a method keeps
+/// the method as its parent. No shipped plugin captures one today (the TypeScript
+/// patterns reach only a class body's fields and constructor parameters), so that
+/// guard is a constraint on future plugins, not behaviour a fixture can show
+/// (S-477, CR-154).
 ///
 /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
 /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
@@ -2879,8 +2882,8 @@ fn assign_parents(decls: &mut [Decl<'_>]) {
                 return None;
             }
             let params = method.node.child_by_field_name("parameters")?;
-            let inside =
-                params.start_byte() <= d.start_byte && d.node.end_byte() <= params.end_byte();
+            let (start, end) = (d.node.start_byte(), d.node.end_byte());
+            let inside = params.start_byte() <= start && end <= params.end_byte();
             inside.then_some((i, method.parent?))
         })
         .collect();

@@ -16,6 +16,13 @@
 ; by an accessibility / `override` / `readonly` modifier — a bare parameter is not
 ; a field). They are what the `this.x` capture in references.scm binds to. A
 ; field initialised with an arrow function is a field, not a function.
+;
+; Both patterns are anchored to the body of a `class_declaration`, the only class
+; form the symbols above capture as `@symbol.class`. A field of an abstract class or
+; a class expression would otherwise be a file-scope `Field` — no class to own it,
+; so nothing could bind it, yet it would join every bare-name candidate set — and a
+; modifier-bearing parameter of an interface method, a function type or a function
+; (none of them a constructor) would become a bogus field.
 
 (function_declaration
   name: (identifier) @symbol.function)
@@ -43,16 +50,18 @@
   name: (identifier) @symbol.function
   value: (function_expression))
 
-(public_field_definition
-  name: (property_identifier) @symbol.field)
+(class_declaration
+  body: (class_body
+    (public_field_definition
+      name: [(property_identifier) (private_property_identifier)] @symbol.field)))
 
-(public_field_definition
-  name: (private_property_identifier) @symbol.field)
-
-(required_parameter
-  [(accessibility_modifier) (override_modifier) "readonly"]
-  pattern: (identifier) @symbol.field)
-
-(optional_parameter
-  [(accessibility_modifier) (override_modifier) "readonly"]
-  pattern: (identifier) @symbol.field)
+(class_declaration
+  body: (class_body
+    (method_definition
+      parameters: (formal_parameters
+        [(required_parameter
+           [(accessibility_modifier) (override_modifier) "readonly"]
+           pattern: (identifier) @symbol.field)
+         (optional_parameter
+           [(accessibility_modifier) (override_modifier) "readonly"]
+           pattern: (identifier) @symbol.field)]))))

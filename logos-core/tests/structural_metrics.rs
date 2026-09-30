@@ -687,6 +687,63 @@ class Repo {
 }
 ";
 
+    /// Every other parameter-property spelling: `readonly` alone (no accessibility
+    /// modifier), `override`, an optional one, a decorated one, and a decorated
+    /// declared field — each read through `this` by one method.
+    const FORMS: &str = "\
+class Forms {
+    @Dec() deco = 1;
+
+    constructor(
+        readonly ro: Client,
+        override ov: Client,
+        @Inject(TOKEN) private injected: Client,
+        private opt?: Client,
+    ) {}
+
+    all() {
+        return [this.deco, this.ro, this.ov, this.injected, this.opt];
+    }
+}
+";
+
+    /// Class-like and function-like forms the plugin does not capture as a class, each
+    /// carrying a field or a modifier-bearing parameter, plus one valid class as the
+    /// control. Only the control's `z` may become a `Field`. The `interface`, `type`
+    /// and `function` lines are not valid TypeScript (a parameter property belongs to
+    /// a constructor), which is the point: the grammar parses them, and a bare
+    /// `required_parameter` pattern would have made each a field.
+    const UNOWNED: &str = "\
+abstract class Abs {
+    y = 2;
+    constructor(private readonly a: Client) {}
+    run() {
+        return this.y;
+    }
+}
+
+const K = class {
+    kx = 1;
+    constructor(public kp: number) {}
+};
+
+export default class {
+    q = 1;
+}
+
+interface I {
+    m(private b: string): void;
+}
+
+type F = new (private e: string) => Real;
+
+function free(private h: string) {}
+
+class Ok {
+    z = 1;
+}
+";
+
     fn node_id(rt: &Runtime, name: &str, kind: NodeKind) -> NodeId {
         let wanted = name.to_string();
         // `all_nodes`, not `search`: the FTS query parser rejects the `#` of a
@@ -770,6 +827,81 @@ class Repo {
     #[test]
     fn tsx_fields_bind_and_the_getter_and_unmatched_stay_unresolved() {
         check("Repo.tsx");
+    }
+
+    /// Run `src` as `file` and hand the indexed runtime to `check`.
+    fn indexed(file: &str, src: &str, check: impl FnOnce(&Runtime)) {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(file), src).unwrap();
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let rt = engine.runtime().unwrap();
+        engine.index();
+        check(rt);
+    }
+
+    fn field_names(rt: &Runtime) -> Vec<String> {
+        let mut names: Vec<String> = rt
+            .submit_read(|store| {
+                Ok(store
+                    .all_nodes()?
+                    .into_iter()
+                    .filter(|n| n.kind == NodeKind::Field)
+                    .map(|n| n.name)
+                    .collect())
+            })
+            .expect("read runs");
+        names.sort();
+        names
+    }
+
+    fn every_parameter_property_form_and_a_decorated_field_bind(file: &str) {
+        indexed(file, FORMS, |rt| {
+            let all = node_id(rt, "all", NodeKind::Method);
+            let mut want: Vec<_> = ["deco", "ro", "ov", "injected", "opt"]
+                .iter()
+                .map(|f| (all, node_id(rt, f, NodeKind::Field)))
+                .collect();
+            let mut edges = accesses_edges(rt);
+            edges.sort();
+            want.sort();
+            assert_eq!(
+                edges, want,
+                "{file}: readonly-only, override, optional and decorated parameter properties \
+                 and a decorated field are each a Field the class owns (FR-EX-08)"
+            );
+        });
+    }
+
+    #[test]
+    fn typescript_every_parameter_property_form_and_a_decorated_field_bind() {
+        every_parameter_property_form_and_a_decorated_field_bind("Forms.ts");
+    }
+
+    #[test]
+    fn tsx_every_parameter_property_form_and_a_decorated_field_bind() {
+        every_parameter_property_form_and_a_decorated_field_bind("Forms.tsx");
+    }
+
+    fn only_a_class_declarations_own_members_are_fields(file: &str) {
+        indexed(file, UNOWNED, |rt| {
+            assert_eq!(
+                field_names(rt),
+                ["z"],
+                "{file}: a field of an abstract class or class expression, or a modifier on a \
+                 non-constructor parameter, is not a Field — nothing owns it, so it would only \
+                 join the file-scope candidates of unrelated references (NFR-RA-05)"
+            );
+        });
+    }
+
+    #[test]
+    fn typescript_only_a_class_declarations_own_members_are_fields() {
+        only_a_class_declarations_own_members_are_fields("Unowned.ts");
+    }
+
+    #[test]
+    fn tsx_only_a_class_declarations_own_members_are_fields() {
+        only_a_class_declarations_own_members_are_fields("Unowned.tsx");
     }
 
     /// LCOM4 reads the fields the binder now finds ([FR-QM-11]). `Shared`'s
