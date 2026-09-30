@@ -448,14 +448,17 @@ pub struct DiscoveryReport {
     ///
     /// [CR-098]: ../../../../docs/requests/CR-098-nested-git-prune-diagnostic.md
     pub pruned_nested_git: Vec<PathBuf>,
-    /// Files the `exclude` set kept out that match [`MINIFIED_JS_GLOB`]
-    /// (`**/*.min.js`), counted by the main pass ([FR-CF-05], [CR-154]).
+    /// Files kept out **solely** by [`MINIFIED_JS_GLOB`] (`**/*.min.js`),
+    /// counted by the main pass ([FR-CF-05], [CR-154]): the `exclude` set rejects
+    /// the file, the `include` set admits it, and no *other* `exclude` glob would
+    /// have rejected it (`notes/old.min.js` is `notes/**`'s, not the glob's).
     ///
     /// Only a file the walk actually reached is counted: one under an
     /// `ignored_dirs` name, a nested-git boundary or a gitignored path is never
     /// seen. Zero when the user's `exclude` does not name the glob — the count is
-    /// what the glob kept out, so an override that re-admits minified files
-    /// reports none. Thread-count-independent like every field here.
+    /// what the glob kept out, so an override that re-admits minified files, or
+    /// one whose own globs cover them, reports none. Thread-count-independent
+    /// like every field here.
     ///
     /// [FR-CF-05]: ../../../../docs/specs/requirements/FR-CF-05.md
     /// [CR-154]: ../../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
@@ -577,6 +580,16 @@ pub(crate) fn discover_with_threads(
     let include = globs::compile(&config.include)?;
     let exclude = globs::compile(&config.exclude)?;
     let minified_js = globs::compile(&[MINIFIED_JS_GLOB.to_string()])?;
+    // The `exclude` set without the minified glob: a file this still rejects is
+    // not attributable to the glob, so it is never counted as minified-excluded.
+    let exclude_without_minified_js = globs::compile(
+        &config
+            .exclude
+            .iter()
+            .filter(|g| g.as_str() != MINIFIED_JS_GLOB)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
     let ignored_dirs: HashSet<String> = config.semantics.ignored_dirs.iter().cloned().collect();
     let max_file_size = config.max_file_size;
 
@@ -615,6 +628,7 @@ pub(crate) fn discover_with_threads(
     let include_ref = &include;
     let exclude_ref = &exclude;
     let minified_js_ref = &minified_js;
+    let exclude_without_minified_js_ref = &exclude_without_minified_js;
     let sanctioned_ref = sanctioned_root.as_deref();
     walker.run(|| {
         let tx = tx.clone();
@@ -669,9 +683,13 @@ pub(crate) fn discover_with_threads(
             };
 
             if exclude_ref.is_match(rel) {
-                // Tally what the minified-JS glob kept out so the index can state
-                // the count; the glob is only ever consulted for an excluded file.
-                if include_ref.is_match(rel) && minified_js_ref.is_match(rel) {
+                // Tally what the minified-JS glob alone kept out so the index can
+                // state the count; the extra sets are only consulted for an
+                // excluded file.
+                if include_ref.is_match(rel)
+                    && minified_js_ref.is_match(rel)
+                    && !exclude_without_minified_js_ref.is_match(rel)
+                {
                     let _ = tx.send(Found::ExcludedMinifiedJs);
                 }
                 return WalkState::Continue;
@@ -1546,6 +1564,36 @@ mod tests {
             report.excluded_minified_js, 0,
             "nothing excluded by the glob"
         );
+    }
+
+    #[test]
+    fn excluded_minified_js_counts_only_what_the_glob_alone_kept_out() {
+        // The count is attributed to `**/*.min.js`: a minified file another
+        // exclude glob covers, one the include set rejects, or any file under a
+        // user `exclude` that omits the glob is not the glob's to report.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root.join("app.min.js"), "var a=1;\n");
+        write(&root.join("static/z.min.js"), "var z=1;\n");
+        write(&root.join("notes/old.min.js"), "var o=1;\n");
+        let counted = |exclude: &[&str], include: &[&str]| {
+            let config = Config {
+                include: include.iter().map(|g| (*g).to_string()).collect(),
+                exclude: exclude.iter().map(|g| (*g).to_string()).collect(),
+                ..test_config(1 << 20)
+            };
+            discover_with_threads(&root, &config, 0).unwrap().excluded_minified_js
+        };
+
+        // `notes/old.min.js` is `notes/**`'s: only the other two are the glob's.
+        assert_eq!(counted(&["notes/**", MINIFIED_JS_GLOB], &["**"]), 2);
+        // The user's own `static/**` kept `static/z.min.js` out, not the glob —
+        // the glob is absent, so nothing is reported.
+        assert_eq!(counted(&["static/**"], &["**"]), 0);
+        // Restating the glob next to a covering glob: the covered file is not its.
+        assert_eq!(counted(&["static/**", MINIFIED_JS_GLOB], &["**"]), 2);
+        // A file the include set rejects was never a candidate to report.
+        assert_eq!(counted(&[MINIFIED_JS_GLOB], &["static/**"]), 1);
     }
 
     #[test]
