@@ -350,6 +350,44 @@ mod tests {
         assert!(!cfg.admits("dist/app.min.json"));
     }
 
+    // ── Default code `exclude`: minified JavaScript (S-478, CR-154, FR-CF-05) ──
+
+    #[test]
+    fn default_code_exclude_prunes_minified_js_at_any_depth() {
+        // The shipped default code `exclude`, compiled exactly as discovery
+        // compiles it (non-anchored): `**/*.min.js` matches at the root and at
+        // every nested depth, and leaves the non-minified sibling alone.
+        let exclude = compile(&crate::config::Config::default().exclude).unwrap();
+        assert!(exclude.is_match("app.min.js"), "root minified excluded");
+        assert!(
+            exclude.is_match("static/js/app.min.js"),
+            "nested minified excluded"
+        );
+        assert!(
+            exclude.is_match("a/b/c/jquery-3.6.0.min.js"),
+            "deeply nested, dotted stem"
+        );
+        assert!(!exclude.is_match("app.js"), "non-minified sibling admitted");
+        assert!(
+            !exclude.is_match("static/js/app.js"),
+            "nested non-minified admitted"
+        );
+        // Near misses, one character from matching: none of these is `*.min.js`.
+        for near_miss in [
+            "min.js",         // no `.min` suffix on a stem — the file is called `min`
+            "admin.js",       // `min.js` only as the tail of a word
+            "app.min.json",   // the config-layer glob's territory, not code's
+            "app.min.js.map", // a sourcemap, not the script
+            "app.min.jsx",    // a different extension
+            "app.minjs",      // missing the dot
+        ] {
+            assert!(
+                !exclude.is_match(near_miss),
+                "{near_miss} must not match `**/*.min.js`"
+            );
+        }
+    }
+
     #[test]
     fn config_globs_override_can_re_admit_a_lock_file() {
         // Overriding the exclude set (e.g. dropping the package-lock exclude)

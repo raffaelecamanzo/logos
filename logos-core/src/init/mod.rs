@@ -104,10 +104,13 @@ const CONFIG_TEMPLATE: &str = r#"# Logos project configuration (.logos/config.to
 # languages = ["rust", "python"]
 
 # Include/exclude globs, matched against root-relative paths. The default
-# `exclude` prunes the planning/security/notes prose paths (CR-029/FR-CF-05);
-# set `exclude = []` to re-admit them, or list your own globs to replace it.
+# `exclude` prunes the planning/security/notes prose paths (CR-029/FR-CF-05)
+# and minified JavaScript, `**/*.min.js` at any depth (CR-154); set
+# `exclude = []` to re-admit them, or list your own globs to replace it (a list
+# that omits `**/*.min.js` re-admits minified files). Add a directory of
+# non-minified vendored scripts here to prune it too.
 # include = ["**"]
-# exclude = ["docs/planning/**", "docs/security/**", "notes/**"]
+# exclude = ["docs/planning/**", "docs/security/**", "notes/**", "**/*.min.js"]
 
 # Files larger than this many bytes are skipped with a notice.
 # max_file_size = 2097152

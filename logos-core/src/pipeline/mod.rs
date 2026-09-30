@@ -1474,6 +1474,16 @@ fn discover_candidates(
     for notice in report.notices() {
         warnings.push(notice);
     }
+    // State what the minified-JavaScript default kept out ([FR-CF-05], [CR-154]):
+    // a `*.min.js` is never navigable, but the exclusion must not be silent.
+    if report.excluded_minified_js > 0 {
+        warnings.push(format!(
+            "{} minified JavaScript file(s) excluded from indexing by the `{}` exclude glob \
+             (set your own `exclude` in .logos/config.toml to re-admit them)",
+            report.excluded_minified_js,
+            config::MINIFIED_JS_GLOB,
+        ));
+    }
     // Surface any documentation directory-symlink that exists under the doc-
     // include set but ended up unindexed ([FR-IX-11]) — a git-ignored symlink with
     // no sanctioned bypass, or one whose target escapes containment — so the

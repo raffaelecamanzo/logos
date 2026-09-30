@@ -388,9 +388,11 @@ languages = ["rust", "python", "typescript", "go", "java", "c", "cpp", "c-sharp"
 
 # Discovery: a file is indexed only if it matches an include glob (default:
 # everything) and no exclude glob. Excludes are unioned with .gitignore.
-# Default exclude (CR-029/FR-CF-05): ["docs/planning/**", "docs/security/**",
-# "notes/**"] — planning/security/notes prose is pruned from code AND docs out
-# of the box. Set `exclude = []` (or your own globs) to replace it wholesale.
+# Default exclude (CR-029/FR-CF-05, CR-154): ["docs/planning/**",
+# "docs/security/**", "notes/**", "**/*.min.js"] — planning/security/notes prose
+# is pruned from code AND docs, and minified JavaScript at any depth is kept out
+# of code admission, out of the box. Set `exclude = []` (or your own globs) to
+# replace it wholesale — see "Minified JavaScript and vendored copies" below.
 include = ["**"]
 exclude = ["generated/**", "**/*.pb.go"]
 
@@ -473,6 +475,29 @@ format = "auto"
 # refresh` errors loudly rather than guessing a command.
 refresh_cmd = "cargo llvm-cov --lcov --output-path target/coverage/lcov.info"
 ```
+
+### Minified JavaScript and vendored copies
+
+`**/*.min.js` is in the default code `exclude`, at the root and at every nested
+depth: a minified file is never meaningfully navigable, and on a workspace with
+vendored front-end libraries it alone can carry most of the TypeScript-language
+access and method-call rows the resolver then cannot bind. `logos index` says how
+many it kept out — `N minified JavaScript file(s) excluded from indexing by the
+`**/*.min.js` exclude glob` — so the exclusion is never silent.
+
+- **`exclude` replaces the default, it does not add to it.** A `config.toml`
+  that sets its own `exclude` (say `exclude = ["generated/**"]`) **re-admits
+  `*.min.js`**. To keep them out while adding your own globs, restate the glob:
+  `exclude = ["generated/**", "**/*.min.js"]`. The report states a count only
+  while the glob is in effect.
+- **Non-minified vendored copies are not detected.** Only the `*.min.js`
+  filename is excluded — no heuristic guesses that `tinymce.js` or `bootstrap.js`
+  is third-party. Prune those yourself with `exclude`, naming the directory that
+  holds them (`exclude = ["docs/planning/**", "docs/security/**", "notes/**",
+  "**/*.min.js", "styleguide/ui-kit/**"]`, restating whichever defaults you still
+  want).
+- **Upgrading narrows admission**, so the next `index`/`reconcile` purges the
+  minified files' nodes from an existing graph (see the next section).
 
 ### Narrowing admission self-corrects the graph
 

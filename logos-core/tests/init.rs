@@ -92,6 +92,33 @@ fn plain_init_creates_policy_files_gitignore_and_store() {
     assert_eq!(rules, Rules::default(), "template == built-in defaults");
 }
 
+/// The template's commented `exclude` line documents the built-in default: with
+/// that one line uncommented the file still deserializes to `Config::default()`
+/// (S-478 — the line names `**/*.min.js`, so it cannot silently go stale).
+#[test]
+fn the_template_exclude_line_documents_the_built_in_default_when_uncommented() {
+    let tmp = TempDir::new().unwrap();
+    Engine::init(tmp.path()).unwrap();
+    let template = read(tmp.path(), ".logos/config.toml");
+    let line = template
+        .lines()
+        .find_map(|l| l.strip_prefix("# exclude = [\"docs/planning/**\""))
+        .map(|rest| format!("exclude = [\"docs/planning/**\"{rest}"))
+        .expect("the template documents the code `exclude` default");
+    assert!(
+        line.contains("**/*.min.js"),
+        "the template names the minified-JS glob: {line}"
+    );
+    fs::write(tmp.path().join(".logos/config.toml"), format!("{line}\n")).unwrap();
+    let config = logos_core::config::load_config(&tmp.path().join(".logos/config.toml"))
+        .expect("the uncommented line parses");
+    assert_eq!(
+        config,
+        Config::default(),
+        "the documented value IS the default"
+    );
+}
+
 #[test]
 fn re_init_never_clobbers_edited_policy_files() {
     let tmp = TempDir::new().unwrap();

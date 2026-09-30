@@ -116,12 +116,26 @@ fn default_ignored_dirs() -> Vec<String> {
     .collect()
 }
 
+/// The minified-JavaScript exclude glob ([FR-CF-05], [CR-154]): non-anchored, so
+/// it matches `app.min.js` at the root and at any nested depth. Shared by
+/// [`default_exclude`] and discovery, which tallies the files this glob kept out
+/// so the index can state the count.
+///
+/// [CR-154]: ../../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
+pub const MINIFIED_JS_GLOB: &str = "**/*.min.js";
+
 /// Default code `exclude` globs ([FR-CF-05]): the planning/security/notes prose
 /// paths that are noise in the code/doc graph by default. These are
 /// **root-anchored** path globs (not [`default_ignored_dirs`] names) so they
 /// prune exactly `docs/planning/`, `docs/security/`, and a root `notes/` — both
 /// the code *and* the documentation under them — without touching a same-named
 /// directory nested elsewhere in real source.
+///
+/// Minified JavaScript ([`MINIFIED_JS_GLOB`], [CR-154]) is the one **non-anchored**
+/// entry: a `*.min.js` is never meaningfully navigable, wherever it sits. Only
+/// that filename pattern is excluded — a non-minified vendored copy
+/// (`tinymce.js`) is not heuristically detected; a project prunes those by
+/// listing their directory in its own `exclude`.
 ///
 /// Unioned with gitignore and `ignored_dirs` during discovery ([FR-CF-02]);
 /// fully user-overridable — a `config.toml` `exclude` replaces this set
@@ -130,11 +144,17 @@ fn default_ignored_dirs() -> Vec<String> {
 /// [FR-CF-05]: ../../../../docs/specs/requirements/FR-CF-05.md
 /// [FR-CF-02]: ../../../../docs/specs/requirements/FR-CF-02.md
 /// [CR-029]: ../../../../docs/requests/CR-029-graph-layer-visibility-and-canvas-fixes.md
+/// [CR-154]: ../../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
 fn default_exclude() -> Vec<String> {
-    ["docs/planning/**", "docs/security/**", "notes/**"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
+    [
+        "docs/planning/**",
+        "docs/security/**",
+        "notes/**",
+        MINIFIED_JS_GLOB,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 /// Default dead-code entry points ([FR-AN-01]): `main` — the conventional
@@ -1058,8 +1078,9 @@ mod tests {
                 "docs/planning/**".to_string(),
                 "docs/security/**".to_string(),
                 "notes/**".to_string(),
+                "**/*.min.js".to_string(),
             ],
-            "default exclude prunes the planning/security/notes paths"
+            "default exclude prunes the planning/security/notes paths and minified JavaScript"
         );
         for path_name in ["planning", "security", "notes"] {
             assert!(
