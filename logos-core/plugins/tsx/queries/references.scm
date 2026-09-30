@@ -49,7 +49,8 @@
   (#match? @ref.call "^[A-Z]"))
 
 ;   @ref.access — an own-field access (`this.x`): identical to the typescript
-;                 plugin's capture (CR-005, FR-EX-08), against the TSX grammar.
+;                 plugin's capture (CR-005, FR-EX-08), against the TSX grammar —
+;                 including `this.#x`, a `private_property_identifier` (S-477).
 (member_expression
   object: (this)
-  property: (property_identifier) @ref.access)
+  property: [(property_identifier) (private_property_identifier)] @ref.access)

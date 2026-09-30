@@ -13,6 +13,18 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **TypeScript and TSX class fields are `Field` nodes, so `this.x` binds.** A declared field, a
+  `#private` field and a constructor parameter property (`private readonly http`) are now captured
+  as `Field`, and a `this.#x` read is an own-field access like `this.x`. The exactly-one `Accesses`
+  binding finds them, so LCOM4 sees the fields methods share. A parameter property is owned by the
+  class, not by its constructor. A getter, a method, an inherited member and an absent name still
+  stay unresolved. On the reference estate's TypeScript, first-party own-field accesses bound
+  0 → 334 of ~507; vendored JavaScript stays 0 of 6,805 (no class fields there). A field named
+  like another symbol joins its candidate set: two documentation references to a bare `path` that
+  had bound to a Rust test helper by name now stay unresolved, as they are ambiguous.
+
 ## [1.7.0] — 2026-09-30
 
 ### Added
