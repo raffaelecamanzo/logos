@@ -480,16 +480,20 @@ refresh_cmd = "cargo llvm-cov --lcov --output-path target/coverage/lcov.info"
 
 `**/*.min.js` is in the default code `exclude`, at the root and at every nested
 depth: a minified file is never meaningfully navigable, and on a workspace with
-vendored front-end libraries it alone can carry most of the TypeScript-language
-access and method-call rows the resolver then cannot bind. `logos index` says how
-many it kept out — `N minified JavaScript file(s) excluded from indexing by the
-`**/*.min.js` exclude glob` — so the exclusion is never silent.
+vendored front-end libraries it can carry a large share of the TypeScript-language
+access and method-call rows the resolver then cannot bind. `logos index` says
+how many files the glob kept out, so the exclusion is never silent:
+
+```text
+73 minified JavaScript file(s) excluded from indexing by the `**/*.min.js` exclude glob (set your own `exclude` in .logos/config.toml to re-admit them)
+```
 
 - **`exclude` replaces the default, it does not add to it.** A `config.toml`
   that sets its own `exclude` (say `exclude = ["generated/**"]`) **re-admits
   `*.min.js`**. To keep them out while adding your own globs, restate the glob:
-  `exclude = ["generated/**", "**/*.min.js"]`. The report states a count only
-  while the glob is in effect.
+  `exclude = ["generated/**", "**/*.min.js"]`. The count covers only files the
+  glob alone kept out, so it is absent while the glob is not in your `exclude`
+  and never includes a minified file another of your globs already excludes.
 - **Non-minified vendored copies are not detected.** Only the `*.min.js`
   filename is excluded — no heuristic guesses that `tinymce.js` or `bootstrap.js`
   is third-party. Prune those yourself with `exclude`, naming the directory that
