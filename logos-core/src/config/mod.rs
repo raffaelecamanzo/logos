@@ -96,7 +96,7 @@ pub use secrets::{load_secrets_from_root, ChatSecrets, MaskedSecret, Secrets};
 pub(crate) use secrets::SECRETS_RELPATH;
 pub use settings::{
     BindingPolicy, Config, ConfigArtifacts, CoverageIngest, Documentation, EffectiveCoverageIngest,
-    Resolution, Semantics, TypedEnrichment, Watcher, DEFAULT_MAX_FILE_SIZE, MINIFIED_JS_GLOB,
+    Resolution, Semantics, TypedEnrichment, Watcher, DEFAULT_MAX_FILE_SIZE,
 };
 pub use wiki::{EffectiveWikiModel, WikiConfig};
 pub use workspace_tier::{

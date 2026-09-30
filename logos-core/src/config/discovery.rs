@@ -466,12 +466,26 @@ pub struct DiscoveryReport {
 }
 
 impl DiscoveryReport {
-    /// The human-readable oversize notices, one per skipped file ([FR-CF-04]).
+    /// The human-readable notices: one oversize notice per skipped file
+    /// ([FR-CF-04]), then — when [`MINIFIED_JS_GLOB`] kept any file out — one line
+    /// stating the count ([FR-CF-05], [CR-154]).
     ///
     /// The surface logs these to stderr; keeping the text here (not at the
     /// emission site) lets the core own and test the notice contract.
+    ///
+    /// [CR-154]: ../../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
     pub fn notices(&self) -> impl Iterator<Item = String> + '_ {
-        self.skipped_oversize.iter().map(ToString::to_string)
+        let minified_js = (self.excluded_minified_js > 0).then(|| {
+            format!(
+                "{} minified JavaScript file(s) excluded from indexing by the `{MINIFIED_JS_GLOB}` \
+                 exclude glob (set your own `exclude` in .logos/config.toml to re-admit them)",
+                self.excluded_minified_js
+            )
+        });
+        self.skipped_oversize
+            .iter()
+            .map(ToString::to_string)
+            .chain(minified_js)
     }
 }
 
@@ -1563,6 +1577,30 @@ mod tests {
         assert_eq!(
             report.excluded_minified_js, 0,
             "nothing excluded by the glob"
+        );
+    }
+
+    #[test]
+    fn the_minified_js_notice_states_the_count_the_glob_and_the_remedy_after_oversize() {
+        // The core owns the notice text: silent at zero, one line after the
+        // oversize notices otherwise, naming the count, the glob and the way out.
+        assert_eq!(DiscoveryReport::default().notices().count(), 0, "silent at zero");
+        let report = DiscoveryReport {
+            excluded_minified_js: 1,
+            skipped_oversize: vec![OversizeSkip {
+                path: PathBuf::from("big.bin"),
+                size: 9,
+                max: 4,
+            }],
+            ..DiscoveryReport::default()
+        };
+        let notices: Vec<String> = report.notices().collect();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0].contains("big.bin"), "oversize first: {notices:?}");
+        assert_eq!(
+            notices[1],
+            "1 minified JavaScript file(s) excluded from indexing by the `**/*.min.js` \
+             exclude glob (set your own `exclude` in .logos/config.toml to re-admit them)"
         );
     }
 

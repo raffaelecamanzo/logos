@@ -122,7 +122,7 @@ fn default_ignored_dirs() -> Vec<String> {
 /// so the index can state the count.
 ///
 /// [CR-154]: ../../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
-pub const MINIFIED_JS_GLOB: &str = "**/*.min.js";
+pub(super) const MINIFIED_JS_GLOB: &str = "**/*.min.js";
 
 /// Default code `exclude` globs ([FR-CF-05]): the planning/security/notes prose
 /// paths that are noise in the code/doc graph by default. These are
