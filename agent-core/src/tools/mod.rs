@@ -112,11 +112,10 @@ where
 
 /// Attribute everything `call` emits to [`Surface::Chat`] ([FR-OB-10]).
 ///
-/// This function — together with its twin in [`run_engine_result`], the
-/// federated `run_federated` in `xservice`, and the addressed tools' member
-/// resolution in `addressed` (which starts the addressed member's engine) — is
-/// the **entire** chat-surface seam: the four places every agent tool reaches an
-/// engine through.
+/// This function — together with its twin in [`run_engine_result`] and the
+/// federated `run_federated` in `xservice` (which the addressed tools' member
+/// resolution also goes through) — is the **entire** chat-surface seam: the
+/// three places every agent tool reaches an engine through.
 /// Resolution therefore happens once per tool call at this adapter boundary,
 /// never inside a chokepoint, so the engine stays unaware the agent exists
 /// ([ADR-01]) and the hot path is unchanged ([NFR-OO-02]).

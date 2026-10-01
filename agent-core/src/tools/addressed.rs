@@ -44,6 +44,7 @@ use rig_core::tool::{ToolDyn, ToolError, ToolSet, ToolSetError};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde_json::{json, Map, Value};
 
+use super::xservice::run_federated;
 use super::{
     governance_toolset, graph_toolset, source_toolset, Sandbox, ToolCallError, ToolDomain,
     XserviceBacking,
@@ -74,15 +75,16 @@ impl AddressedTool {
     /// tool on the arguments that remain.
     async fn dispatch(&self, args: String) -> Result<String, ToolError> {
         let (repo, member_args) = split_repo(&args, self.xs.registry())?;
-        let (domain, xs) = (self.domain, self.xs.clone());
+        let domain = self.domain;
         // Starting an engine opens and migrates a store, and a sandbox reads a
-        // config file: both on the blocking pool under the chat surface, like
-        // every other engine call this layer makes ([ADR-03], [FR-OB-10]).
-        let member_tools = tokio::task::spawn_blocking(move || {
-            super::in_chat_surface(|| member_toolset(domain, &xs, &repo))
+        // config file: both through the federated bridge — the blocking pool,
+        // under the chat surface — like every registry call this layer makes
+        // ([ADR-03], [FR-OB-10]).
+        let member_tools = run_federated(self.xs.clone(), move |registry, _bridge| {
+            member_toolset(domain, registry, &repo)
         })
         .await
-        .map_err(|err| tool_error(ToolCallError::Runtime(err.to_string())))??;
+        .map_err(tool_error)??;
         match member_tools.call(&self.definition.name, member_args).await {
             Ok(output) => Ok(output),
             // The member tool's own error, unwrapped from the set's envelope so
@@ -212,10 +214,9 @@ fn split_repo(
 /// the member's own sandbox.
 fn member_toolset(
     domain: ToolDomain,
-    xs: &XserviceBacking,
+    registry: &EngineRegistry<Engine>,
     repo: &str,
 ) -> Result<ToolSet, ToolError> {
-    let registry = xs.registry();
     match domain {
         ToolDomain::Graph => Ok(graph_toolset(member_engine(registry, repo)?)),
         ToolDomain::Governance => Ok(governance_toolset(member_engine(registry, repo)?)),
