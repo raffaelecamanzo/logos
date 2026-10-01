@@ -297,6 +297,64 @@ async fn each_addressed_definition_is_its_member_definition_plus_a_required_repo
     assert_eq!(total, 19);
 }
 
+/// What the model is offered: each workspace tool's schema names exactly the
+/// arguments its call reads, and the source domain's `repo` says what its paths
+/// are relative to — the calls above pass arguments directly, so nothing else
+/// would notice a schema that stopped offering one.
+#[tokio::test]
+async fn the_schemas_offer_the_arguments_the_calls_read() {
+    let ws = Workspace::new();
+    let xs = ws.backing(false);
+    let properties = |definition: &ToolDefinition| -> Vec<String> {
+        definition.parameters["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let offered: Vec<(String, Vec<String>)> = definitions(&workspace_toolset(xs.clone()))
+        .await
+        .iter()
+        .map(|definition| (definition.name.clone(), properties(definition)))
+        .collect();
+    let expected: Vec<(String, Vec<String>)> = [
+        ("workspace_status", &[][..]),
+        ("workspace_reachability", &["repo", "all"][..]),
+        ("workspace_check", &[][..]),
+        ("xservice_build_deps", &["repo"][..]),
+        ("workspace_roster", &[][..]),
+    ]
+    .iter()
+    .map(|(name, keys)| {
+        (
+            name.to_string(),
+            keys.iter().map(|k| k.to_string()).collect(),
+        )
+    })
+    .collect();
+    assert_eq!(offered, expected);
+
+    for domain in ToolDomain::ALL {
+        for definition in definitions(&addressed_toolset(domain, xs.clone())).await {
+            let repo = definition.parameters["properties"]["repo"]["description"]
+                .as_str()
+                .expect("a described repo")
+                .to_string();
+            assert!(repo.starts_with("REQUIRED. The workspace member"), "{repo}");
+            let paths = repo.contains(
+                "Paths are relative to that member's root; nothing outside it is readable",
+            );
+            assert_eq!(
+                paths,
+                domain == ToolDomain::Source,
+                "{}: only a source tool's repo speaks of paths: {repo}",
+                definition.name
+            );
+        }
+    }
+}
+
 // ── 2. Laziness and resolution ──────────────────────────────────────────────
 
 #[tokio::test]
