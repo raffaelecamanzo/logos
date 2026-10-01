@@ -450,6 +450,13 @@ mod tests {
         );
         let first_planner_prompt = one.user_prompts().first().cloned().flatten().unwrap_or_default();
         assert!(!first_planner_prompt.contains("ANSWER-ONE"), "turn 1 has no window");
+        // The Synthesizer is grounded on this turn's scratchpad: the analyst's
+        // observation reaches it only through the grounding the launch path wires.
+        let first_synthesizer_prompt = one.user_prompts().last().cloned().flatten().unwrap_or_default();
+        assert!(
+            first_synthesizer_prompt.contains("two members: svc and web."),
+            "the Synthesizer reads the analyst's observation: {first_synthesizer_prompt}"
+        );
 
         let two = scripted("ANSWER-TWO");
         let (same, _) = turn(&e.ws, &xs, two.clone(), Some(thread), "and web alone?").await;
