@@ -49,7 +49,8 @@
 //! A type is owned by the member declaring it in a **main** source tree or in
 //! an Avro schema. A test-tree declaration is never an owner: a test class is
 //! not on another member's classpath, and a type declared in both trees of one
-//! member is that member's main type. A refused fact names no type.
+//! member is that member's main type. Nor is a default-package declaration (a
+//! dotless name): no named package can import it. A refused fact names no type.
 //!
 //! # Unread is never "declares nothing" ([NFR-CC-04])
 //! A member is **read** only when its store marks its declared types extracted
@@ -350,6 +351,10 @@ pub struct TypeMembersRead {
     pub owned_declarations: u64,
     /// Test-tree source declarations, never owners.
     pub test_tree_declarations: u64,
+    /// Declarations in the default package (a source file with no `package`,
+    /// an Avro type with no namespace): a dotless name no named package can
+    /// import, so never an owner.
+    pub default_package_declarations: u64,
     /// Refused facts (a `package` disagreeing with its directory, a malformed
     /// schema): they name no type.
     pub refused_declarations: u64,
@@ -616,6 +621,13 @@ fn member_owners(member: &str, declared: &[DeclaredTypeRow], read: &mut TypeMemb
         }
         if origin == TypeOrigin::Source && fact.tree.as_deref() != Some("main") {
             read.test_tree_declarations += 1;
+            continue;
+        }
+        // A dotless name is never a cross-member key: a type in the default
+        // package cannot be imported from a named one, and a bare type-use
+        // target of the same spelling would otherwise bind to it.
+        if !fqn.contains('.') {
+            read.default_package_declarations += 1;
             continue;
         }
         read.owned_declarations += 1;

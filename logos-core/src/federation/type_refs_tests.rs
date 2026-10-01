@@ -404,6 +404,39 @@ fn a_test_tree_type_owns_nothing_and_a_refused_fact_names_nothing() {
     assert_eq!(members.owned_declarations, 6, "Dto, Evt, Own, Only, and Thing in each fork");
 }
 
+/// **A default-package type owns nothing** (review finding A3-F2): `lib`'s
+/// `src/main/java/Helper.java` has no `package`, so its fact is the dotless
+/// `Helper`. `app`'s bare type use of a third-party `Helper` must not bind to
+/// it — no named package can import a default-package type.
+#[test]
+fn a_default_package_type_is_never_an_owner() {
+    let federation = fed(&["lib", "app"], &[]);
+    let build = join(
+        &federation.members,
+        &federation.member_kinds,
+        &[("lib".to_string(), pom(Some("lib"), &[])), ("app".to_string(), pom(Some("app"), &["lib"]))],
+        &[],
+    );
+    let facts = vec![
+        (
+            "lib".to_string(),
+            MemberTypeFacts { declared: vec![source("Helper", "src/main/java/Helper.java")], ..MemberTypeFacts::default() },
+        ),
+        (
+            "app".to_string(),
+            MemberTypeFacts {
+                rows: vec![import("org::thirdparty::Helper", APP, 3), type_use("Helper", APP, 9)],
+                ..MemberTypeFacts::default()
+            },
+        ),
+    ];
+    let index = build_index(&federation.members, &facts, &[], &build);
+    assert!(index.references.is_empty(), "a dotless name bound: {:?}", keys(&index.references));
+    assert!(index.owners("Helper").is_empty());
+    assert_eq!(index.headline.members.default_package_declarations, 1);
+    assert_eq!(index.headline.members.owned_declarations, 0);
+}
+
 // ── the pair restriction ──────────────────────────────────────────────────
 
 /// **A build-unrelated pair is type-only, listed, never bound**: `stray`
