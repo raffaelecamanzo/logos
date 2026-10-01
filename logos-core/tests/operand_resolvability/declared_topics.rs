@@ -1801,6 +1801,24 @@ mod fixtures {
     }
 
     #[test]
+    fn a_member_the_read_model_answered_with_no_topic_has_none() {
+        // `read_product` inserts an entry for EVERY member the read-model
+        // answers, an empty set included: "has an entry" is not "has a topic",
+        // and the difference is config-only against site-uncaptured.
+        let mut o = Observed::default();
+        o.by_member.insert("m".to_string(), BTreeSet::new());
+        o.by_member.insert("p".to_string(), set(&["orders"]));
+        assert!(!o.has_topics("m"));
+        assert!(!o.has_topics("absent"));
+        assert!(o.has_topics("p"));
+        assert_eq!(site_state(0, o.has_topics("m"), &[]), SiteState::ConfigOnly);
+        assert_eq!(
+            site_state(0, o.has_topics("p"), &[]),
+            SiteState::SiteUncaptured
+        );
+    }
+
+    #[test]
     fn only_a_refusal_is_a_refusal_and_no_provider_is_not_one() {
         let lit = ValueProvenance::Literal;
         let unbound = |reason| CoverageState::Unbound { reason };
