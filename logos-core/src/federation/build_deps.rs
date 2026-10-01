@@ -448,16 +448,16 @@ pub const UNREAD_NOT_EXTRACTED: &str = "build facts not yet extracted";
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 pub const UNREAD_FAILED: &str = "build facts could not be read";
 
-/// Sort one member's facts read into [`join`]'s two inputs: its rows onto
+/// Sort one member's facts read into a join's two inputs: its facts onto
 /// `facts` when its store marks them extracted, its name onto `not_extracted`
-/// when it does not (the `None` of
-/// [`MemberContracts::build_manifests`]). Shared by both read paths — the lazy
-/// relation and `workspace status`'s freshness walk — so they cannot disagree
-/// about which member is read.
-pub(super) fn sort_read(
+/// when it does not (the `None` of [`MemberContracts::build_manifests`] and
+/// of `MemberContracts::type_facts`). Shared by every read path — the lazy
+/// build relation and type-reference index, and `workspace status`'s
+/// freshness walk — so they cannot disagree about which member is read.
+pub(super) fn sort_read<T>(
     member: String,
-    read: Option<Vec<BuildManifestRow>>,
-    facts: &mut Vec<MemberBuildFacts>,
+    read: Option<T>,
+    facts: &mut Vec<(String, T)>,
     not_extracted: &mut Vec<String>,
 ) {
     match read {

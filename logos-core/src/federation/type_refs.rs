@@ -89,7 +89,7 @@ use crate::graph_store::{AvroSchemaRow, DeclaredTypeRow, TypeRefRow};
 use crate::model::EdgeKind;
 
 use super::bridge::{current_stamps, read_members, MemberContracts, StampCache};
-use super::build_deps::{BuildDependencies, BuildDependencyRelation};
+use super::build_deps::{sort_read, BuildDependencies, BuildDependencyRelation};
 use super::registry::{EngineRegistry, MemberEngine};
 use super::Member;
 
@@ -131,23 +131,6 @@ pub const UNREAD_FAILED: &str = "declared types could not be read";
 
 /// The reason an [`AmbiguousReference`] stays unbound.
 pub const AMBIGUOUS_OWNER: &str = "ambiguous-owner";
-
-/// Sort one member's read into [`build_index`]'s two inputs: its facts onto
-/// `facts` when its store marks them extracted, its name onto `not_extracted`
-/// when it does not. Shared by both read paths — the lazy index and `workspace
-/// status`'s freshness walk — so they cannot disagree about which member is
-/// read.
-pub(super) fn sort_read(
-    member: String,
-    read: Option<MemberTypeFacts>,
-    facts: &mut Vec<MemberTypeFactsRead>,
-    not_extracted: &mut Vec<String>,
-) {
-    match read {
-        Some(read) => facts.push((member, read)),
-        None => not_extracted.push(member),
-    }
-}
 
 /// Where an owning type is declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]

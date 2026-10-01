@@ -199,7 +199,7 @@ fn split_status_and_facts(
     let member = scoped.member;
     let value = scoped.value.map(|(status, facts, types)| {
         match types {
-            Ok(read) => type_refs::sort_read(
+            Ok(read) => build_deps::sort_read(
                 member.clone(),
                 read,
                 &mut walked.types,
