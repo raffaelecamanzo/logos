@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::plugin::LanguageRegistry;
+use crate::plugin::{LanguagePlugin, LanguageRegistry};
 
 /// A module identity: `(crate name, module path segments)` — the binder's
 /// `ModKey`.
@@ -63,6 +63,24 @@ impl PackageLayout {
     /// The layout the loaded plugins declare.
     pub fn from_registry(registry: &LanguageRegistry) -> Self {
         Self::new(registry.package_source_roots())
+    }
+
+    /// The layout one plugin declares — [`from_registry`](Self::from_registry)
+    /// narrowed to a single language, for the single-file
+    /// [`extract`](crate::extract::extract) entry point, which is handed a
+    /// plugin and no registry. For every extension of that plugin it is the
+    /// registry's layout exactly.
+    pub fn from_plugin(plugin: &dyn LanguagePlugin) -> Self {
+        let Some(pm) = plugin.semantics().package_modules.as_ref() else {
+            return Self::default();
+        };
+        Self::new(
+            plugin
+                .extensions()
+                .iter()
+                .map(|ext| (ext.trim_start_matches('.').to_string(), pm.source_roots.clone()))
+                .collect(),
+        )
     }
 
     /// `true` when `path`'s language declares a package-shaped module path.
@@ -112,6 +130,16 @@ impl PackageLayout {
         Some(fqn)
     }
 
+    /// The source root the file at `path` sits under — the root whose match
+    /// keyed it ([`module_key`](Self::module_key)), as its path segments — or
+    /// `None` when its language is not package-shaped or no root precedes it.
+    /// `svc/src/test/java/com/x/SvcTest.java` → `[src, test, java]`.
+    pub fn source_root(&self, path: &str) -> Option<&[String]> {
+        let roots = self.roots_of(path)?;
+        let (_, _, idx) = matched_root(path, roots)?;
+        Some(&roots[idx])
+    }
+
     fn roots_of(&self, path: &str) -> Option<&[Vec<String>]> {
         let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
         self.roots_by_ext.get(&ext).map(Vec::as_slice)
@@ -123,15 +151,7 @@ impl PackageLayout {
 fn rooted(path: &str, roots: &[Vec<String>]) -> Option<(String, Vec<String>, Option<String>)> {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let (file, dirs) = segs.split_last()?;
-    let (start, len) = roots
-        .iter()
-        .filter(|r| !r.is_empty() && r.len() <= dirs.len())
-        .flat_map(|r| {
-            (0..=dirs.len() - r.len())
-                .filter(move |&i| dirs[i..i + r.len()].iter().zip(r).all(|(d, s)| *d == s))
-                .map(move |i| (i, r.len()))
-        })
-        .max()?;
+    let (start, len, _) = matched_root(path, roots)?;
     let crate_name = match start {
         0 => "crate".to_string(),
         i => normalize_crate(dirs[i - 1]),
@@ -141,6 +161,26 @@ fn rooted(path: &str, roots: &[Vec<String>]) -> Option<(String, Vec<String>, Opt
         .map(|s| (*s).to_string())
         .collect();
     Some((crate_name, package, Some(file_stem(file))))
+}
+
+/// `(start, length, root index)` of the rightmost match of any of `roots`
+/// among `path`'s directories — the one match both [`rooted`] and
+/// [`PackageLayout::source_root`] read, so the root that keys a file and the
+/// root reported for it can never differ. Of two roots matching at one start,
+/// the longer wins, then the later-declared.
+fn matched_root(path: &str, roots: &[Vec<String>]) -> Option<(usize, usize, usize)> {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let (_, dirs) = segs.split_last()?;
+    roots
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !r.is_empty() && r.len() <= dirs.len())
+        .flat_map(|(idx, r)| {
+            (0..=dirs.len() - r.len())
+                .filter(move |&i| dirs[i..i + r.len()].iter().zip(r).all(|(d, s)| *d == s))
+                .map(move |i| (i, r.len(), idx))
+        })
+        .max()
 }
 
 /// Derive a file's module identity from its project-relative path, by the
@@ -289,7 +329,7 @@ mod tests {
             "src/main.rs",
             "src/lib.rs",
             "a/src/main/java/b.rs",
-            "src/main/java/x.kt",
+            "src/main/java/x.py",
         ] {
             assert_eq!(l.module_key(path), module_key_for_file(path), "{path}");
             assert_eq!(l.package_of(path), None, "{path}");

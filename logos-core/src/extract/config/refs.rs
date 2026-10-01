@@ -1434,6 +1434,7 @@ mod tests {
             warnings: Vec::new(),
             config_source: None,
             forwarding: Vec::new(),
+            declared_types: Vec::new(),
         }
     }
 
@@ -1867,6 +1868,7 @@ mod infra_tests {
             warnings: Vec::new(),
             config_source: None,
             forwarding: Vec::new(),
+            declared_types: Vec::new(),
         }
     }
 

@@ -56,6 +56,13 @@ pub mod config;
 // node — so the pipeline drives it beside extraction rather than through it.
 // PUBLIC so the reference-workspace census reads the product's own reader.
 pub mod build_manifest;
+// Declared types → member-local facts (S-472, CR-152, ADR-70 point 1): each
+// top-level Java/Kotlin type under its package-aware name, and each `.avsc`
+// record/enum under its namespace. The source half rides extraction (it needs
+// the file's nodes and its `package` statement); the schema half, like a build
+// manifest, yields no node and is driven by the pipeline beside extraction.
+// PUBLIC so the reference-workspace report reads the product's own reader.
+pub mod declared_types;
 // `pub(crate)`: the framework pass (resolve::framework, S-015) canonicalises
 // captured handler paths and unquotes captured route-path literals with the
 // same helpers extraction uses, so the two passes can never disagree on what
@@ -109,6 +116,7 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, RefForm};
 use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, Semantics};
 use crate::resolve::http_client_call::ClientCallRefusal;
+use crate::resolve::package_key::PackageLayout;
 
 use config::accessor::{BindingView, DeclaredTypes};
 use config::binding::{PropertiesIndex, MEMBER_SCOPE};
@@ -312,6 +320,16 @@ pub struct Facts {
     ///
     /// [FR-WS-26]: ../../../docs/specs/requirements/FR-WS-26.md
     pub forwarding: Vec<broker::ForwardingCandidate>,
+    /// The top-level types this file declares under their package-aware
+    /// fully-qualified names, or refused (S-472, [CR-152] §3.2 B).
+    ///
+    /// Empty for every file whose language is not package-shaped — which is
+    /// every file of a member with no Java/Kotlin source, so such a member
+    /// writes no declared-type row and is byte-for-byte unaffected. Produced by
+    /// [`declared_types::source_types`] on the code-extraction path only.
+    ///
+    /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+    pub declared_types: Vec<declared_types::SourceType>,
 }
 
 /// One captured declaration, retained with its tree-sitter node for the metrics
@@ -347,7 +365,14 @@ pub fn extract(input: &FileInput, plugin: &dyn LanguagePlugin, ctx: &SymbolConte
     // owning class is declared in another file by construction, so a per-file
     // caller never had the evidence. [`extract_files`] builds the real index
     // once, over the set the pass is about to read.
-    extract_one(&mut parser, input, plugin, ctx, &PropertiesIndex::default())
+    extract_one(
+        &mut parser,
+        input,
+        plugin,
+        ctx,
+        &PropertiesIndex::default(),
+        &PackageLayout::from_plugin(plugin),
+    )
 }
 
 /// Extract many files in parallel, one [`tree_sitter::Parser`] per rayon worker.
@@ -403,6 +428,9 @@ pub fn extract_files(
         registry,
         inputs.iter().map(|i| (i.path.as_str(), i.source.as_str())),
     );
+    // The one package-aware layout (S-465) the binder keys files by, so a
+    // declared type is named exactly as an import of it binds (S-472).
+    let layout = PackageLayout::from_registry(registry);
     let mut facts: Vec<Facts> = inputs
         .par_iter()
         // `map_init` runs the init closure once per rayon worker thread, so each
@@ -410,7 +438,7 @@ pub fn extract_files(
         // across the files that worker handles.
         .map_init(Parser::new, |parser, input| {
             let plugin = plugin_for(registry, &input.path)?;
-            Some(extract_one(parser, input, plugin, ctx, &properties))
+            Some(extract_one(parser, input, plugin, ctx, &properties, &layout))
         })
         // `rayon`'s `collect` preserves input order even through this
         // `Option`-flattening, so the result is deterministic (NFR-RA-06).
@@ -445,6 +473,7 @@ fn extract_one(
     plugin: &dyn LanguagePlugin,
     ctx: &SymbolContext,
     properties: &PropertiesIndex,
+    layout: &PackageLayout,
 ) -> Facts {
     // A documentation grammar (S-033, CR-003) is extracted structurally into a
     // DocFile + nested DocSection tree, not via the code `symbols` query. This
@@ -474,6 +503,7 @@ fn extract_one(
         warnings: Vec::new(),
         config_source: None,
         forwarding: Vec::new(),
+        declared_types: Vec::new(),
     };
 
     // A grammar that fails to bind (ABI skew) is skipped-and-warned, never fatal.
@@ -517,10 +547,19 @@ fn extract_one(
     // one pattern per node kind so this never fires today, but it keeps the
     // ID-stability invariant (ADR-07) robust against future query authors.
     let mut seen_decls: HashSet<usize> = HashSet::new();
+    // The file's `package` statement, when its grammar's query names one
+    // (S-472): the first one only — a second is a syntax error.
+    let mut package: Option<String> = None;
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     while let Some(m) = matches.next() {
         for cap in m.captures {
+            if capture_names[cap.index as usize] == declared_types::PACKAGE_CAPTURE {
+                if package.is_none() {
+                    package = declared_types::package_name(cap.node, source);
+                }
+                continue;
+            }
             let Some(kind) = kind_for_capture(capture_names[cap.index as usize]) else {
                 continue; // a capture we do not map to a NodeKind
             };
@@ -721,6 +760,16 @@ fn extract_one(
             });
         }
     }
+
+    // The file's top-level types under their package-aware names (S-472), read
+    // off the nodes and Contains edges just emitted.
+    facts.declared_types = declared_types::source_types(
+        &input.path,
+        package.as_deref(),
+        &facts.nodes,
+        &facts.edges,
+        layout,
+    );
 
     // 7) Collect outgoing references (S-011) — calls, method calls, imports.
     // A grammar without the `references` capability simply produces none.

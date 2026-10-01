@@ -684,11 +684,12 @@ mod tests {
         }
     }
 
-    /// Only Java declares a package-shaped module path (CR-149), under its two
-    /// Maven roots; every other grammar — Rust above all, and Kotlin, which is
+    /// Only Java (CR-149) and Kotlin (S-472, CR-152 — the "data change later"
+    /// CR-149 named) declare a package-shaped module path, each under its two
+    /// source roots; every other grammar — Rust above all, and Scala, which is
     /// package-shaped too but not opted in — keeps the default module model.
     #[test]
-    fn package_source_roots_collects_only_the_opted_in_java_grammar() {
+    fn package_source_roots_collects_only_the_opted_in_jvm_grammars() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
         let roots = reg.package_source_roots();
@@ -697,7 +698,15 @@ mod tests {
             roots.get("java").map(Vec::as_slice),
             Some(["src/main/java".to_string(), "src/test/java".to_string()].as_slice())
         );
-        for ext in ["rs", "py", "ts", "go", "kt", "cs", "php", "rb", "scala"] {
+        #[cfg(feature = "lang-kotlin")]
+        for ext in ["kt", "kts"] {
+            assert_eq!(
+                roots.get(ext).map(Vec::as_slice),
+                Some(["src/main/kotlin".to_string(), "src/test/kotlin".to_string()].as_slice()),
+                "`{ext}` is keyed by its package"
+            );
+        }
+        for ext in ["rs", "py", "ts", "go", "cs", "php", "rb", "scala"] {
             assert!(!roots.contains_key(ext), "`{ext}` keeps the default module model");
         }
     }

@@ -17,7 +17,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use logos_core::graph_store::{BuildArtifactRow, BuildManifestRow, BUILD_FACTS_EXTRACTED_KEY};
+use logos_core::graph_store::{
+    BuildArtifactRow, BuildManifestRow, BUILD_FACTS_EXTRACTED_KEY, DECLARED_TYPES_EXTRACTED_KEY,
+};
 use logos_core::{Engine, Runtime};
 
 fn write(root: &Path, rel: &str, contents: &str) {
@@ -128,13 +130,18 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// Take a member store back to what the release before migration 22 left on
 /// disk: both build tables absent (their one index goes with them), migration
 /// 22 unrecorded, `user_version` 21 — and so no extraction marker. The exact
-/// inverse of migration 22, which is two `CREATE TABLE`s and one index, and of
-/// migration 23 (S-487), which only adds `metric_snapshots.modularity_applicable`;
-/// the next [`Engine::start`] re-applies both, as it does on a real upgrade.
+/// inverse of migration 22, which is two `CREATE TABLE`s and one index, of
+/// migration 23 (S-487), which only adds `metric_snapshots.modularity_applicable`,
+/// and of migration 24 (S-472), two declared-type tables with their indexes and
+/// marker; the next [`Engine::start`] re-applies all three, as it does on a real
+/// upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE metric_snapshots DROP COLUMN modularity_applicable; \
+        "DROP TABLE declared_types; DROP TABLE avro_schemas; \
+         DELETE FROM schema_versions WHERE version = 24; \
+         DELETE FROM project_metadata WHERE key = '{DECLARED_TYPES_EXTRACTED_KEY}'; \
+         ALTER TABLE metric_snapshots DROP COLUMN modularity_applicable; \
          DELETE FROM schema_versions WHERE version = 23; \
          DROP TABLE build_artifacts; DROP TABLE build_manifests; \
          DELETE FROM schema_versions WHERE version = 22; \

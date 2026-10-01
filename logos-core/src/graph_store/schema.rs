@@ -56,6 +56,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (21, MIGRATION_21),
     (22, MIGRATION_22),
     (23, MIGRATION_23),
+    (24, MIGRATION_24),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2199,6 +2200,87 @@ const MIGRATION_23: &str = "\
 -- raw/normalized pair is still stored), NULL = scored before this flag existed,
 -- when Modularity always applied.
 ALTER TABLE metric_snapshots ADD COLUMN modularity_applicable INTEGER CHECK (modularity_applicable IN (0,1));
+";
+
+/// Migration 24 — the member-local **declared-type facts** (S-472, [CR-152]
+/// §3.2 B, [ADR-70] decision point 1, the [ADR-69] point-1 precedent).
+///
+/// Two tables, the migration-22 shape. `avro_schemas` holds one row per `.avsc`
+/// schema the discovery walk found — **read or not**, because the census
+/// reports "files read, of files found" and a malformed schema must stay in the
+/// denominator. Like a build manifest it is keyed by **path**, not by
+/// `files.id`: a schema has no grammar and is never a `files` row, and its own
+/// `content_hash` is what an incremental sync compares.
+///
+/// `declared_types` holds one row per declared type, from exactly one of two
+/// provenances: a top-level Java/Kotlin type (`file_id`, with its node's
+/// `symbol` and its `tree`), or an Avro record/enum (`schema_id`). Each
+/// provenance's FK cascades, so re-extracting or removing a source file, or
+/// replacing or removing a schema, takes exactly that file's facts with it —
+/// the per-file resync the incremental path relies on.
+///
+/// The CHECKs pin the vocabulary and its pairings in the schema: exactly one
+/// provenance; a symbol and a tree exactly for a source fact; a resolved fact
+/// carries a name and no reason, a refused one a reason and no name — a caller
+/// cannot store a refusal without saying why, nor a guessed name beside one.
+///
+/// **Purely additive**: two `CREATE TABLE`s and two indexes. No table is
+/// dropped, rebuilt or copied, so `nodes`, `edges`, `shingles` and the
+/// external-content `nodes_fts` index are byte-for-byte unaffected and an
+/// existing store upgrades in place with no re-index ([FR-DB-04], [NFR-MA-06])
+/// — asserted on a populated store by
+/// `migration_24_adds_the_declared_type_tables_preserving_the_graph_byte_for_byte`
+/// in [`super::migrate`]. A member with no Java/Kotlin/Avro file keeps both
+/// tables empty for ever.
+///
+/// [ADR-69]: ../../../../docs/specs/architecture/decisions/ADR-69.md
+/// [ADR-70]: ../../../../docs/specs/architecture/decisions/ADR-70.md
+/// [CR-152]: ../../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_24: &str = "\
+-- avro_schemas: one row per .avsc schema the walk found, read or not (the
+-- census denominator is schemas FOUND). content_hash is NULL exactly for a
+-- schema that could not be read; detail says why a schema yielded no type and
+-- is NULL exactly when it was read.
+CREATE TABLE avro_schemas (
+    id           INTEGER PRIMARY KEY,
+    path         TEXT NOT NULL UNIQUE,
+    content_hash TEXT,
+    status       TEXT NOT NULL CHECK (status IN ('read','malformed','unreadable')),
+    detail       TEXT,
+    CHECK ((status = 'read') = (detail IS NULL)),
+    CHECK ((status = 'unreadable') = (content_hash IS NULL))
+) STRICT;
+
+-- declared_types: one fully-qualified type a member declares. A source fact
+-- names its file, its node's symbol and its tree; an Avro fact names its
+-- schema. fqn is the dotted name, NULL exactly when the fact is refused (a
+-- package statement that disagrees with the directory) -- never the path's
+-- guess. name is the type's own name as declared.
+CREATE TABLE declared_types (
+    id         INTEGER PRIMARY KEY,
+    file_id    INTEGER REFERENCES files(id) ON DELETE CASCADE,
+    schema_id  INTEGER REFERENCES avro_schemas(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    fqn        TEXT,
+    kind       TEXT NOT NULL CHECK (kind IN ('class','interface','enum','record')),
+    symbol     TEXT,
+    tree       TEXT CHECK (tree IN ('main','test')),
+    resolution TEXT NOT NULL CHECK (resolution IN ('resolved','refused')),
+    reason     TEXT,
+    CHECK ((file_id IS NULL) <> (schema_id IS NULL)),
+    CHECK ((file_id IS NULL) = (symbol IS NULL)),
+    CHECK ((file_id IS NULL) = (tree IS NULL)),
+    CHECK ((resolution = 'resolved') = (reason IS NULL)),
+    CHECK ((resolution = 'resolved') = (fqn IS NOT NULL))
+) STRICT;
+
+-- The cascades' lookups: re-extracting a file, or replacing a schema, deletes
+-- its facts through these. Names are NOT indexed: the workspace index reads
+-- every row of a member once, in memory (ADR-52).
+CREATE INDEX idx_declared_types_file   ON declared_types(file_id);
+CREATE INDEX idx_declared_types_schema ON declared_types(schema_id);
 ";
 
 #[cfg(test)]

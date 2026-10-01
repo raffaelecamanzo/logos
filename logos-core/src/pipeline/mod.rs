@@ -72,10 +72,12 @@ use rayon::prelude::*;
 
 use crate::config::{self, AdmissionAuthority, BindingPolicy, Config, ConfigGlobs, DocGlobs};
 use crate::extract::build_manifest::{self, ManifestFacts};
+use crate::extract::declared_types::{self, SchemaFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
-    BatchWriter, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewNode, NewUnresolvedRef,
-    StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY, LAST_FULL_INDEX_AT_KEY,
+    BatchWriter, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType,
+    NewNode, NewUnresolvedRef, StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY,
+    DECLARED_TYPES_EXTRACTED_KEY, LAST_FULL_INDEX_AT_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
@@ -84,6 +86,7 @@ use crate::models::pipeline::{
 };
 use crate::observability::Tool;
 use crate::plugin::LanguageRegistry;
+use crate::resolve::package_key::PackageLayout;
 use crate::runtime::Runtime;
 
 /// Debug-only structural-integrity assertion (CR-052, [NFR-RA-13], [FR-GV-18],
@@ -150,7 +153,7 @@ pub fn index(
     // (FR-OB-01, CR-057) so they join the per-phase index breakdown (FR-OB-06)
     // — the same measurement that reaches telemetry is handed back here, never
     // a parallel timing path (NFR-OO-01).
-    let (Discovery { candidates, build_manifests }, discover_ms) = {
+    let (Discovery { candidates, build_manifests, avro_schemas }, discover_ms) = {
         let (res, ms) = crate::observability::traced_timed(Tool::Discover, || {
             discover_candidates(root, config, registry, &mut warnings)
         });
@@ -219,6 +222,13 @@ pub fn index(
     // manifest and none recorded writes only that marker (see
     // `rebuild_build_manifests`).
     rebuild_build_manifests(runtime, &build_manifests)?;
+
+    // Member-local declared-type facts (S-472, CR-152, ADR-70 point 1): the
+    // source half was written file by file as Pass 1 persisted each file above;
+    // the Avro half is read here from every schema this walk found, and the
+    // whole is marked extracted. A member with no schema and none recorded
+    // writes only that marker (see `rebuild_avro_schemas`).
+    rebuild_avro_schemas(runtime, &avro_schemas)?;
 
     // Pass 2 binds the freshly persisted reference ledger (S-011); the
     // framework pass promotes route/component matches against the resolved
@@ -527,6 +537,16 @@ pub fn sync(
         .map(|r| (r.path, r.content_hash))
         .collect();
 
+    // Declared-type backfill (S-472): a full walk over a store whose
+    // declared-type facts were never extracted — one upgraded across migration
+    // 24, whose source files re-extract only when they change — re-extracts every
+    // package-shaped source file once, unchanged or not, so the facts become
+    // complete and are marked so (`sync_avro_schemas`). Once marked, never
+    // again; a partial sync never backfills, having seen a subset.
+    let backfill = scope == SyncScope::FullWalk
+        && !runtime.submit_read(|store| store.declared_types_extracted())?;
+    let layout = PackageLayout::from_registry(registry);
+
     let mut loaded: Vec<LoadedFile> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
     let mut removals: Vec<String> = Vec::new();
@@ -610,8 +630,11 @@ pub fn sync(
         let hash = hash_source(&source);
 
         match stored.get(&rel) {
-            // Unchanged: the stored hash matches — skip without re-extracting.
-            Some(Some(prev)) if *prev == hash => continue,
+            // Unchanged: the stored hash matches — skip without re-extracting,
+            // unless the declared-type backfill above needs its facts.
+            Some(Some(prev)) if *prev == hash && !(backfill && layout.is_package_shaped(&rel)) => {
+                continue
+            }
             // Present but changed (or never hashed): a modification.
             Some(_) => {}
             // Absent from the index: a new file.
@@ -737,6 +760,10 @@ pub fn sync(
     // Build-manifest facts (S-462): the manifests among every path this sync
     // named, reconciled apart from the graph gates above.
     let manifests_changed = sync_build_manifests(runtime, &canon_root, &authority, &seen, scope)?;
+    // Avro schemas (S-472): the schemas among every path this sync named, one
+    // schema at a time — and the declared-type marker, once a backfill is done.
+    let schemas_changed =
+        sync_avro_schemas(runtime, &canon_root, &authority, &seen, scope, backfill)?;
 
     // CR-015 incremental resolution change-set (part 2 of 2): union the names that
     // entered the changed files (this sync's freshly extracted facts) with those
@@ -809,7 +836,12 @@ pub fn sync(
     // A manifest change moves the build facts, which later readers cache on
     // this revision, so it advances it too (S-462) — as does the first full walk
     // marking them extracted, which turns an unread member into a read one.
-    if result.files_added + result.files_modified + result.files_removed > 0 || manifests_changed {
+    // An Avro schema's types, and the declared-type marker, are member facts
+    // read the same way (S-472).
+    if result.files_added + result.files_modified + result.files_removed > 0
+        || manifests_changed
+        || schemas_changed
+    {
         advance_graph_revision(runtime)?;
     }
 
@@ -870,6 +902,7 @@ pub fn reconcile(
     let Discovery {
         candidates,
         build_manifests,
+        avro_schemas,
     } = discover_candidates(root, config, registry, &mut warnings)?;
     let candidate_keys: HashSet<&str> = candidates.iter().map(|c| c.rel.as_str()).collect();
 
@@ -890,9 +923,12 @@ pub fn reconcile(
     // added, changed or removed, and otherwise leaves them untouched. A manifest
     // that is also admitted as source (`build.gradle.kts` is Kotlin) is named
     // twice here; `sync` de-duplicates a repeated path.
+    // The walk's Avro schemas ride it the same way (S-472), recognised by
+    // extension and reconciled one schema at a time.
     let paths: Vec<PathBuf> = candidates
         .iter()
         .chain(&build_manifests)
+        .chain(&avro_schemas)
         .map(|c| PathBuf::from(&c.rel))
         .collect();
     let purge = if pending_fingerprint.is_some() {
@@ -1456,6 +1492,9 @@ struct Discovery {
     /// it is also a graph candidate — read into member-local artifact facts,
     /// never into nodes.
     build_manifests: Vec<Candidate>,
+    /// Every `.avsc` schema the walk admitted (S-472) — read into member-local
+    /// declared-type facts, never into nodes.
+    avro_schemas: Vec<Candidate>,
 }
 
 /// Discover the supported source files under `root`, honouring config and
@@ -1503,6 +1542,7 @@ fn discover_candidates(
 
     let mut candidates = Vec::new();
     let mut build_manifests = Vec::new();
+    let mut avro_schemas = Vec::new();
     for abs in report.files {
         let Ok(rel_path) = abs.strip_prefix(&canon_root) else {
             continue; // defence in depth — discovery already contains the walk
@@ -1510,6 +1550,12 @@ fn discover_candidates(
         let rel = to_forward_slash(rel_path);
         if build_manifest::manifest_format(&rel).is_some() {
             build_manifests.push(Candidate {
+                abs: abs.clone(),
+                rel: rel.clone(),
+            });
+        }
+        if declared_types::is_avro_schema(&rel) {
+            avro_schemas.push(Candidate {
                 abs: abs.clone(),
                 rel: rel.clone(),
             });
@@ -1545,6 +1591,7 @@ fn discover_candidates(
     Ok(Discovery {
         candidates,
         build_manifests,
+        avro_schemas,
     })
 }
 
@@ -1841,6 +1888,7 @@ fn persist_file(
             let counts = insert_facts(w, facts, file_id)?;
             insert_refs(w, facts, file_id)?;
             persist_config_source(w, facts, file_id)?;
+            persist_declared_types(w, facts, file_id)?;
             for cap in &captured {
                 let kind = EdgeKind::try_from(cap.kind)
                     .with_context(|| format!("captured edge has an unknown kind {}", cap.kind))?;
@@ -1875,14 +1923,18 @@ fn persist_file(
     // like the reference ledger above. `None` writes nothing, so a member with
     // no configuration corpus is byte-for-byte unaffected.
     persist_config_source(w, facts, file_id)?;
+    // The file's declared types (S-472): replace-wholesale per file, so an
+    // empty set on a file that never declared one writes nothing.
+    persist_declared_types(w, facts, file_id)?;
     Ok(PersistCounts {
         nodes: counts.nodes,
         edges: counts.edges,
     })
 }
 
-/// One build manifest as read from disk: its text (or why it could not be
-/// read) and the blake3 hash an incremental sync compares.
+/// One build manifest — or Avro schema (S-472), which is read the same way — as
+/// read from disk: its text (or why it could not be read) and the blake3 hash
+/// an incremental sync compares.
 struct LoadedManifest {
     rel: String,
     text: Result<String, String>,
@@ -2086,6 +2138,157 @@ fn persist_build_manifests(
     })
 }
 
+/// A full index's Avro-schema pass (S-472, [CR-152] §3.2 B): read every schema
+/// the walk found, record each with its types, forget any recorded schema the
+/// walk no longer found, and record [`DECLARED_TYPES_EXTRACTED_KEY`] — the full
+/// index has by now persisted every source file's declared types too, so the
+/// member's facts, however few, are complete.
+///
+/// A member with no schema and none recorded reads nothing and writes only
+/// that marker — with no Java/Kotlin file either, the one row that separates it
+/// from a store upgraded across migration 24, whose tables are just as empty.
+///
+/// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+fn rebuild_avro_schemas(runtime: &Runtime, found: &[Candidate]) -> Result<()> {
+    let found_paths: HashSet<&str> = found.iter().map(|c| c.rel.as_str()).collect();
+    let gone: Vec<String> = runtime
+        .submit_read(|store| store.avro_schemas())?
+        .into_iter()
+        .map(|s| s.path)
+        .filter(|p| !found_paths.contains(p.as_str()))
+        .collect();
+    let loaded: Vec<LoadedManifest> = found
+        .iter()
+        .map(|c| LoadedManifest::read(&c.rel, &c.abs))
+        .collect();
+    persist_avro_schemas(runtime, loaded, gone, true)
+}
+
+/// Record that this member's declared-type facts are complete
+/// ([`DECLARED_TYPES_EXTRACTED_KEY`]).
+fn mark_declared_types_extracted(w: &BatchWriter<'_>) -> Result<()> {
+    w.set_project_metadata(DECLARED_TYPES_EXTRACTED_KEY, "1")
+}
+
+/// An incremental sync's Avro-schema pass (S-472): `named` is every
+/// project-relative path this sync was handed, and the schemas among them are
+/// selected here — like a build manifest, ahead of and independent of the
+/// graph admission gate, since a schema is never a `files` row. Returns
+/// whether what a reader of the member's declared types sees changed.
+///
+/// Per schema, not wholesale: a schema's types depend on its own text alone,
+/// so only a requested schema that was added or changed (its blake3 hash moved)
+/// is re-read and re-recorded, and only one that is gone is forgotten — on a
+/// [`SyncScope::FullWalk`], also any recorded schema the walk no longer found.
+/// A [`SyncScope::Partial`] sync that names no schema does nothing here, not
+/// even a read.
+///
+/// `mark` — a full walk over a store without [`DECLARED_TYPES_EXTRACTED_KEY`],
+/// whose package-shaped source this sync has just re-extracted (see [`sync`]) —
+/// records the marker in the same batch as the schema facts, or alone, and
+/// counts as a change. A schema the walk-level [`AdmissionAuthority`] rejects
+/// is treated as absent, exactly as the discovery walk would treat it.
+fn sync_avro_schemas(
+    runtime: &Runtime,
+    canon_root: &Path,
+    authority: &AdmissionAuthority,
+    named: &HashSet<String>,
+    scope: SyncScope,
+    mark: bool,
+) -> Result<bool> {
+    let requested: Vec<&String> = named
+        .iter()
+        .filter(|rel| declared_types::is_avro_schema(rel))
+        .collect();
+    if requested.is_empty() && scope == SyncScope::Partial {
+        return Ok(false);
+    }
+    let stored: HashMap<String, Option<String>> = runtime
+        .submit_read(|store| store.avro_schemas())?
+        .into_iter()
+        .map(|s| (s.path, s.content_hash))
+        .collect();
+    let mut changed: Vec<LoadedManifest> = Vec::new();
+    let mut gone: Vec<String> = Vec::new();
+    for &rel in &requested {
+        let abs = canon_root.join(rel);
+        if abs.is_file() && authority.admits_path(&abs) {
+            let schema = LoadedManifest::read(rel, &abs);
+            if stored.get(rel) != Some(&schema.hash) {
+                changed.push(schema);
+            }
+        } else if stored.contains_key(rel) {
+            gone.push(rel.clone());
+        }
+    }
+    if scope == SyncScope::FullWalk {
+        let requested: HashSet<&str> = requested.iter().map(|r| r.as_str()).collect();
+        gone.extend(stored.into_keys().filter(|p| !requested.contains(p.as_str())));
+    }
+    if changed.is_empty() && gone.is_empty() {
+        if mark {
+            runtime.submit_write(mark_declared_types_extracted)?;
+        }
+        return Ok(mark);
+    }
+    changed.sort_by(|a, b| a.rel.cmp(&b.rel));
+    gone.sort();
+    persist_avro_schemas(runtime, changed, gone, mark)?;
+    Ok(true)
+}
+
+/// Read each loaded schema's types and record it, forget every schema in
+/// `gone`, and — when `mark_extracted` — record
+/// [`DECLARED_TYPES_EXTRACTED_KEY`], all in one batch, adapting
+/// [`SchemaFacts`] to the store's row shape here as
+/// [`persist_build_manifests`] does for a manifest.
+fn persist_avro_schemas(
+    runtime: &Runtime,
+    loaded: Vec<LoadedManifest>,
+    gone: Vec<String>,
+    mark_extracted: bool,
+) -> Result<()> {
+    let facts: Vec<(SchemaFacts, Option<String>)> = loaded
+        .into_iter()
+        .map(|m| {
+            let facts = match &m.text {
+                Ok(text) => declared_types::schema_facts(&m.rel, text),
+                Err(detail) => SchemaFacts::unreadable(&m.rel, detail.clone()),
+            };
+            (facts, m.hash)
+        })
+        .collect();
+    runtime.submit_write(move |w| {
+        for path in &gone {
+            w.delete_avro_schema(path)?;
+        }
+        for (schema, hash) in &facts {
+            w.replace_avro_schema(&NewAvroSchema {
+                path: &schema.path,
+                content_hash: hash.as_deref(),
+                status: schema.status.as_str(),
+                detail: schema.detail.as_deref(),
+                types: schema
+                    .types
+                    .iter()
+                    .map(|t| NewDeclaredType {
+                        name: &t.name,
+                        fqn: Some(&t.fqn),
+                        kind: t.kind.as_str(),
+                        symbol: None,
+                        tree: None,
+                        reason: None,
+                    })
+                    .collect(),
+            })?;
+        }
+        if mark_extracted {
+            mark_declared_types_extracted(w)?;
+        }
+        Ok(())
+    })
+}
+
 /// Adapt a file's extracted configuration facts to the store's row shape and
 /// write them (S-380, [FR-WS-19]).
 ///
@@ -2116,6 +2319,29 @@ fn persist_config_source(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Re
 
 /// Persist a file's extracted references into the `unresolved_refs` ledger
 /// (S-011). Insertion is idempotent over the ledger's uniqueness rule.
+/// Adapt a file's extracted declared types to the store's row shape and write
+/// them (S-472, [CR-152] §3.2 B) — the extraction → store adaptation, beside
+/// [`persist_config_source`] for the reason given there. An empty set still
+/// calls through: the write is replace-wholesale per file, so a file that
+/// stops declaring a type has its old rows cleared.
+///
+/// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+fn persist_declared_types(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
+    let rows: Vec<NewDeclaredType<'_>> = facts
+        .declared_types
+        .iter()
+        .map(|t| NewDeclaredType {
+            name: &t.name,
+            fqn: t.fqn.as_deref().ok(),
+            kind: t.kind.as_str(),
+            symbol: Some(t.symbol.as_str()),
+            tree: Some(t.tree.as_str()),
+            reason: t.fqn.as_ref().err().map(String::as_str),
+        })
+        .collect();
+    w.replace_file_declared_types(file_id, &rows)
+}
+
 fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
     for r in &facts.refs {
         w.insert_unresolved_ref(&NewUnresolvedRef {

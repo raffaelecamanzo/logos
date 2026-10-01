@@ -2587,6 +2587,202 @@ mod tests {
         );
     }
 
+    /// Migration 24 ([CR-152], S-472) is purely additive: every table a v23
+    /// member store carries — the graph, the reference ledger, the configuration
+    /// corpus, the check-run marker and the build-manifest facts — crosses the
+    /// boundary byte-for-byte, so an upgraded store needs no re-index; the two
+    /// new tables arrive **empty**. Then the additions are exercised, because
+    /// "additive" also means they work: the pairing CHECKs refuse a fact with
+    /// two provenances or none, a source fact without its symbol, a refusal
+    /// without a reason and a refusal that still names a type; a schema path is
+    /// unique; and deleting a file or a schema cascades exactly its facts away.
+    ///
+    /// [CR-152]: ../../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+    #[test]
+    fn migration_24_adds_the_declared_type_tables_preserving_the_graph_byte_for_byte() {
+        let mut conn = contract_conn();
+
+        // Stop at v23 — the pre-migration fixture — and populate every table a
+        // member's store already carries at that version.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..23]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path) VALUES (1, 'src/main/java/com/x/Svc.java'), (2, 'application.yml');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, is_test, body) VALUES
+                 (10, 1, 7,  'caller',   1, 1, 3,    0, NULL),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, 0, 'the body prose');
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'helper', 'h', 1, 2, 42, 1, NULL);
+             INSERT INTO config_sources (id, file_id, profile) VALUES (1, 2, NULL);
+             INSERT INTO config_values (source_id, key, value) VALUES (1, 'server.port', '8080');
+             INSERT INTO check_run (id, ran_at, commit_sha, violation_count, checked_rules, rules_present, operation)
+                 VALUES (1, 1700000000, 'abc1234', 0, 9, 1, 'check');
+             INSERT INTO build_manifests (id, path, format, content_hash, status, detail)
+                 VALUES (1, 'pom.xml', 'maven', 'h1', 'read', NULL);
+             INSERT INTO build_artifacts (manifest_id, role, kind, group_id, artifact_id, version, resolution)
+                 VALUES (1, 'produced', NULL, 'g', 'a', '1', 'resolved');",
+        )
+        .unwrap();
+
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+        let others = [
+            ("config_sources", "id"),
+            ("config_values", "id"),
+            ("check_run", "id"),
+            ("build_manifests", "id"),
+            ("build_artifacts", "id"),
+            ("project_metadata", "key"),
+        ];
+        let others_before: Vec<_> = others.iter().map(|(t, o)| read_table(&conn, t, o)).collect();
+
+        for table in ["declared_types", "avro_schemas"] {
+            assert!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
+                    .is_err(),
+                "{table} does not exist at v23"
+            );
+        }
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..24]).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            24,
+            "PRAGMA user_version advances by exactly one (23 → 24)"
+        );
+        // Forward-only: re-running the full ledger on a v24 store applies nothing.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 24", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 24 is recorded once and never re-applied");
+
+        assert_eq!(
+            read_graph(&conn),
+            graph_before,
+            "nodes, edges and shingles are byte-for-byte unchanged across migration 24"
+        );
+        assert_eq!(
+            read_ledger(&conn),
+            ledger_before,
+            "the reference ledger is byte-for-byte unchanged across migration 24"
+        );
+        let others_after: Vec<_> = others.iter().map(|(t, o)| read_table(&conn, t, o)).collect();
+        assert_eq!(
+            others_after, others_before,
+            "the corpus, the check-run marker, the build facts and the metadata are \
+             byte-for-byte unchanged across migration 24"
+        );
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (nodes never touched by migration 24, NFR-RA-09)");
+
+        // The upgrade itself reads no type.
+        let (types, schemas): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM declared_types), (SELECT count(*) FROM avro_schemas)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((types, schemas), (0, 0), "the upgrade itself ingests nothing");
+
+        // The additions work: every shape the pipeline writes is admitted.
+        conn.execute_batch(
+            "INSERT INTO avro_schemas (id, path, content_hash, status, detail) VALUES
+                 (1, 'src/main/avro/a.avsc', 'h1', 'read', NULL),
+                 (2, 'src/main/avro/bad.avsc', 'h2', 'malformed', 'not valid JSON'),
+                 (3, 'src/main/avro/gone.avsc', NULL, 'unreadable', 'not UTF-8');
+             INSERT INTO declared_types (file_id, schema_id, name, fqn, kind, symbol, tree, resolution, reason) VALUES
+                 (1, NULL, 'Svc',   'com.x.Svc', 'class',  'local a', 'main', 'resolved', NULL),
+                 (1, NULL, 'Other', NULL,        'interface', 'local b', 'test', 'refused', 'package-mismatch'),
+                 (NULL, 1, 'Ev',    'com.x.Ev',  'record', NULL, NULL, 'resolved', NULL),
+                 (NULL, 1, 'Kind',  'com.x.Kind', 'enum',  NULL, NULL, 'resolved', NULL);",
+        )
+        .expect("every shape the pipeline writes is admitted");
+
+        for (label, sql) in [
+            (
+                "a fact with no provenance",
+                "INSERT INTO declared_types (name, fqn, kind, resolution) VALUES ('X', 'a.X', 'class', 'resolved')",
+            ),
+            (
+                "a fact with two provenances",
+                "INSERT INTO declared_types (file_id, schema_id, name, fqn, kind, symbol, tree, resolution) \
+                 VALUES (1, 1, 'X', 'a.X', 'class', 's', 'main', 'resolved')",
+            ),
+            (
+                "a source fact without its symbol",
+                "INSERT INTO declared_types (file_id, name, fqn, kind, tree, resolution) \
+                 VALUES (1, 'X', 'a.X', 'class', 'main', 'resolved')",
+            ),
+            (
+                "a source fact without its tree",
+                "INSERT INTO declared_types (file_id, name, fqn, kind, symbol, resolution) \
+                 VALUES (1, 'X', 'a.X', 'class', 's', 'resolved')",
+            ),
+            (
+                "an Avro fact with a symbol",
+                "INSERT INTO declared_types (schema_id, name, fqn, kind, symbol, resolution) \
+                 VALUES (1, 'X', 'a.X', 'record', 's', 'resolved')",
+            ),
+            (
+                "a refusal without a reason",
+                "INSERT INTO declared_types (file_id, name, fqn, kind, symbol, tree, resolution) \
+                 VALUES (1, 'X', NULL, 'class', 's', 'main', 'refused')",
+            ),
+            (
+                "a refusal that still names a type",
+                "INSERT INTO declared_types (file_id, name, fqn, kind, symbol, tree, resolution, reason) \
+                 VALUES (1, 'X', 'a.X', 'class', 's', 'main', 'refused', 'why')",
+            ),
+            (
+                "a resolved fact without a name",
+                "INSERT INTO declared_types (file_id, name, fqn, kind, symbol, tree, resolution) \
+                 VALUES (1, 'X', NULL, 'class', 's', 'main', 'resolved')",
+            ),
+            (
+                "an unknown kind",
+                "INSERT INTO declared_types (schema_id, name, fqn, kind, resolution) \
+                 VALUES (1, 'X', 'a.X', 'fixed', 'resolved')",
+            ),
+            (
+                "an unknown tree",
+                "INSERT INTO declared_types (file_id, name, fqn, kind, symbol, tree, resolution) \
+                 VALUES (1, 'X', 'a.X', 'class', 's', 'it', 'resolved')",
+            ),
+            (
+                "a read schema with a detail",
+                "INSERT INTO avro_schemas (path, content_hash, status, detail) VALUES ('x.avsc', 'h', 'read', 'why')",
+            ),
+            (
+                "an unreadable schema with a hash",
+                "INSERT INTO avro_schemas (path, content_hash, status, detail) \
+                 VALUES ('y.avsc', 'h', 'unreadable', 'why')",
+            ),
+            (
+                "a duplicate schema path",
+                "INSERT INTO avro_schemas (path, content_hash, status) VALUES ('src/main/avro/a.avsc', 'h', 'read')",
+            ),
+        ] {
+            assert!(conn.execute(sql, []).is_err(), "migration 24 must refuse {label}");
+        }
+
+        // Deleting a file cascades its facts away, and a schema's — no orphan,
+        // and nothing of the other provenance moves.
+        let count = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT count(*) FROM declared_types", [], |r| r.get(0))
+                .unwrap()
+        };
+        conn.execute("DELETE FROM files WHERE id = 1", []).unwrap();
+        assert_eq!(count(&conn), 2, "deleting a file cascades exactly its two facts");
+        conn.execute("DELETE FROM avro_schemas WHERE id = 1", []).unwrap();
+        assert_eq!(count(&conn), 0, "deleting a schema cascades exactly its two facts");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 24");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///
