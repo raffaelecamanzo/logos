@@ -421,7 +421,15 @@ impl FileFacts {
         let mut f = FileFacts::default();
         each_node(tree.root_node(), |n| match n.kind() {
             "import_statement" => {
-                let Some(source) = n.child_by_field_name("source") else { return };
+                // `import u = require('./u')` carries its specifier on the clause,
+                // not on the statement.
+                let mut c0 = n.walk();
+                let source = n.child_by_field_name("source").or_else(|| {
+                    n.named_children(&mut c0)
+                        .find(|ch| ch.kind() == "import_require_clause")
+                        .and_then(|ch| ch.child_by_field_name("source"))
+                });
+                let Some(source) = source else { return };
                 let relative = is_relative(unquote(text(source, src)));
                 let mut names = Vec::new();
                 let mut c = n.walk();
@@ -1558,6 +1566,13 @@ export class Wizard {
             shape_of(SERVICE, "help"),
             (Shape::Imported, Sub::RelativeImport, Some("helpers".into()))
         );
+    }
+
+    #[test]
+    fn an_import_require_clause_binds_its_name_like_any_import() {
+        let s = "import u = require('./u');\nimport v = require('lib');\nu.run();\nv.go();\n";
+        assert_eq!(shape_of(s, "run"), (Shape::Imported, Sub::RelativeImport, Some("u".into())));
+        assert_eq!(shape_of(s, "go"), (Shape::LibraryGlobal, Sub::PackageImport, Some("v".into())));
     }
 
     #[test]
