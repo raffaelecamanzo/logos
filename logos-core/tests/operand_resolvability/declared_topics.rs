@@ -1846,6 +1846,91 @@ mod fixtures {
         }
     }
 
+    /// One judged S-411 topic, as its `judge_topics` would record it.
+    fn judged_topic(
+        identity: Option<&str>,
+        outcome: TopicOutcome,
+        evidence: &[(&str, &str, &str)],
+    ) -> crate::config_declared_coupling::JudgedTopic {
+        crate::config_declared_coupling::JudgedTopic {
+            topic: crate::config_declared_coupling::CapturedTopic {
+                as_written: identity.unwrap_or("${unresolved}").to_string(),
+                resolved: identity.map(str::to_string),
+                publishes: 0,
+                subscribes: 1,
+            },
+            identity: identity.map(str::to_string),
+            outcome,
+            declarers: evidence.iter().map(|e| e.0.to_string()).collect(),
+            evidence: evidence
+                .iter()
+                .map(|(m, k, f)| (m.to_string(), k.to_string(), f.to_string()))
+                .collect(),
+            by_source: Vec::new(),
+        }
+    }
+
+    /// A [`Judgement`] carrying only topics, after S-411's own `probe_judgement`.
+    fn judgement_of(
+        resolved: Vec<crate::config_declared_coupling::JudgedTopic>,
+        as_written: Vec<crate::config_declared_coupling::JudgedTopic>,
+    ) -> Judgement {
+        Judgement {
+            members: BTreeSet::new(),
+            runnable: BTreeSet::new(),
+            targets: Vec::new(),
+            topics_resolved: resolved,
+            topics_as_written: as_written,
+            cost: crate::config_declared_coupling::WalkCost::default(),
+            sequence_host_ceiling: Vec::new(),
+            path_only: BTreeSet::new(),
+            application_scalars: 0,
+            deploy_scalars: 0,
+            deploy_member_labels: BTreeSet::new(),
+            deploy_external_labels: BTreeSet::new(),
+            port_owners: BTreeMap::new(),
+            claimants: BTreeMap::new(),
+            blind_spot: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn the_s411_side_is_its_both_sides_declarations_under_the_resolved_reading() {
+        let f = "x/src/main/resources/application.yml";
+        let k = "spring.kafka.topics.orders";
+        let j = judgement_of(
+            vec![
+                judged_topic(
+                    Some("orders"),
+                    TopicOutcome::BothSidesDeclared,
+                    &[("b", k, f), ("a", k, f)],
+                ),
+                judged_topic(Some("solo"), TopicOutcome::OneSideOnly, &[("c", k, f)]),
+                judged_topic(None, TopicOutcome::DanglingUnresolved, &[]),
+            ],
+            // The AS-WRITTEN reading is never the S-411 side.
+            vec![judged_topic(
+                Some("${spring.kafka.topics.orders}"),
+                TopicOutcome::BothSidesDeclared,
+                &[("z", k, f)],
+            )],
+        );
+        assert_eq!(
+            s411_declarations(&j),
+            vec![theirs("a", "orders", k, f), theirs("b", "orders", k, f)],
+            "only both-sides-declared identities, one row per declarer, sorted"
+        );
+        let topics = s411_topics(&j);
+        assert_eq!(
+            topics.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("orders".to_string(), TopicOutcome::BothSidesDeclared),
+                ("solo".to_string(), TopicOutcome::OneSideOnly),
+            ],
+            "resolved identities only; an unresolved one has no identity to key"
+        );
+    }
+
     #[test]
     fn every_reconciliation_mechanism_is_reachable_and_the_rest_is_unexplained() {
         let manifest = set(&["m"]);
