@@ -405,6 +405,31 @@ mod tests {
         for tool in tools {
             assert!(preamble.contains(tool), "{tool}: {preamble}");
         }
+        // …and each role's line names exactly its own role's tools, so a planner is
+        // never told one role holds another's.
+        let join = |names: &[&str]| names.join(", ");
+        for line in [
+            format!(
+                "- workspace_analyst: reads the workspace as a whole ({}) and across services \
+                 ({})",
+                join(WORKSPACE_TOOL_NAMES),
+                join(XSERVICE_TOOL_NAMES)
+            ),
+            format!(
+                "- graph_navigator: navigates ONE member's code graph ({}).\n",
+                join(ToolDomain::Graph.tool_names())
+            ),
+            format!(
+                "- governance_analyst: runs ONE member's governance/quality read-models ({}).\n",
+                join(ToolDomain::Governance.tool_names())
+            ),
+            format!(
+                "- source_reader: reads source files within ONE member ({}).\n",
+                join(ToolDomain::Source.tool_names())
+            ),
+        ] {
+            assert!(preamble.contains(&line), "{line}\n---\n{preamble}");
+        }
         for absent in ["workspace_analyst", "xservice", "workspace_"] {
             assert!(!DEFAULT_PLANNER_PREAMBLE.contains(absent), "{absent}");
         }
