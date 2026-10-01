@@ -362,6 +362,37 @@ fn changing_one_source_file_and_one_schema_resyncs_only_their_facts_and_sync_equ
     assert_eq!(schemas(rt), schemas(fresh_engine.runtime().unwrap()), "and over the schemas");
 }
 
+/// A file whose new content declares no type at all loses every fact it had —
+/// the per-file replace runs on an empty set too — so no stale, resolved name
+/// outlives the type it named.
+#[test]
+fn a_file_that_stops_declaring_any_type_loses_its_facts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    member(root);
+    let engine = Engine::start(root).expect("engine starts");
+    engine.index();
+    let rt = engine.runtime().unwrap();
+
+    let kotlin = "svc/src/main/kotlin/com/x/mail/Channels.kt";
+    let java = "svc/src/main/java/com/x/mail/MailPort.java";
+    write(root, kotlin, "package com.x.mail\n\nfun helper() {}\n");
+    write(root, java, "package com.x.mail;\n\n// nothing declared here any more\n");
+    engine.sync(&[PathBuf::from(kotlin), PathBuf::from(java)]);
+
+    let rows = types(rt);
+    assert!(
+        !rows.iter().any(|t| t.path == kotlin || t.path == java),
+        "no fact outlives the types its file stopped declaring: {:?}",
+        summary(&rows)
+    );
+    let fresh = tempfile::tempdir().unwrap();
+    copy_tree(root, fresh.path());
+    let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
+    fresh_engine.index();
+    assert_eq!(rows, types(fresh_engine.runtime().unwrap()), "sync ≡ reindex");
+}
+
 /// Copy the member's source tree — everything but its `.logos/` store.
 fn copy_tree(from: &Path, to: &Path) {
     for entry in fs::read_dir(from).unwrap() {
