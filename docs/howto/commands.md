@@ -1101,8 +1101,13 @@ nor counted yet.
   neither. Name the type by its node (``…/`Dto.java`/Dto#``) or by its dotted
   name (`com.acme.lib.Dto`); an Avro-declared type has no node, so its dotted
   name is the only way to reach it. The match is on the symbol alone, like the
-  bridge tier, whatever `--repo` says. A symbol no type reference names
-  answers exactly the bytes it did before. The reach is **file grain**: a
+  bridge tier, whatever `--repo` says. A member whose declared types could
+  not be read (not yet extracted after an upgrade, or a store that will not
+  open) holds references nobody can reach, so both answers then carry
+  `type_reference_unread`, naming each such member with its reason — an absent
+  `via_type_reference` beside it is not "nothing imports this". A symbol no
+  type reference names, in a workspace whose members were all read, answers
+  exactly the bytes it did before. The reach is **file grain**: a
   Java/Kotlin import is held by the importing file, so every importer of the
   type is reached, whichever of its methods the importer calls.
 - **`build-deps`** (since S-464) — what each member **builds against** and what

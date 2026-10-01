@@ -376,7 +376,13 @@ fn xservice_type_refs_says_it_is_advisory_and_not_a_coupling() {
 
     for name in ["xservice_callers", "xservice_impact"] {
         let text = description(name);
-        for clause in ["`via_type_reference`", "APART FROM `cross_service`", "via type reference", "NOT a coupling"] {
+        for clause in [
+            "`via_type_reference`",
+            "APART FROM `cross_service`",
+            "via type reference",
+            "NOT a coupling",
+            "`type_reference_unread`",
+        ] {
             assert!(text.contains(clause), "{name} names its type-reference section with {clause:?}: {text}");
         }
     }

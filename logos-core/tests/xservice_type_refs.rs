@@ -389,6 +389,7 @@ fn a_symbol_no_type_reference_names_returns_byte_identical_output() {
             // Before this story the key did not exist, so "byte-identical to
             // before" is its absence, not an empty list both sides agree on.
             assert!(after.get("via_type_reference").is_none(), "{symbol}: {after:#}");
+            assert!(after.get("type_reference_unread").is_none(), "every member was read: {after:#}");
             assert_eq!(
                 serde_json::to_string(&after).unwrap(),
                 serde_json::to_string(&before).unwrap(),
@@ -437,4 +438,37 @@ fn an_importer_whose_engine_fails_is_a_per_member_error_inside_the_answer() {
         answer["scope_note"],
         "`app` is not a member the type-reference overlay was built over (declared types could not be read)"
     );
+}
+
+/// **An importer the overlay could not read is named, never silently dropped**
+/// ([NFR-CC-04]). On one registry — the CLI's path — a member whose declared
+/// types are not yet extracted, or whose store will not open, is unread in the
+/// overlay, so no reference from it can be reached: `callers` and `impact`
+/// say so in `type_reference_unread`, with the overlay's reason, rather than
+/// answering as though nothing imported the type.
+///
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn an_importer_the_overlay_could_not_read_is_named_beside_the_section() {
+    let tmp = tempfile::tempdir().unwrap();
+    workspace(tmp.path());
+    let dto = dto_symbol(&index(&registry(tmp.path())));
+
+    let conn = rusqlite::Connection::open(tmp.path().join("app/.logos/logos.db")).unwrap();
+    conn.execute(&format!("DELETE FROM project_metadata WHERE key = '{DECLARED_TYPES_EXTRACTED_KEY}'"), [])
+        .unwrap();
+    drop(conn);
+    let upgraded = registry(tmp.path());
+    for (_, after) in reachability(&upgraded, &index(&upgraded), &dto) {
+        assert!(after.get("via_type_reference").is_none(), "app's reference is not reachable: {after:#}");
+        assert_eq!(after["type_reference_unread"], json!({"app": "declared types not yet extracted"}), "{after:#}");
+    }
+
+    let db = tmp.path().join("app/.logos/logos.db");
+    fs::remove_file(&db).expect("clear the store file");
+    fs::create_dir_all(&db).expect("a directory where the store must be");
+    let broken = registry(tmp.path());
+    for (_, after) in reachability(&broken, &index(&broken), &dto) {
+        assert_eq!(after["type_reference_unread"], json!({"app": "declared types could not be read"}), "{after:#}");
+    }
 }

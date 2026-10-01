@@ -46,7 +46,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   from the bridge-reached results and never merged with them: each entry is tagged
   `via type reference` with the reference it was reached through, and for `impact` carries the
   files depending on the importing file in its member, or that member's error when it will not
-  open. A symbol no type reference names answers exactly as before. Advisory, never a
+  open. A member whose declared types could not be read is named, with its reason, in
+  `type_reference_unread`. A symbol no type reference names answers exactly as before. Advisory, never a
   coupling. As with every `xservice_*` tool, `logos serve --mcp` does not yet route the twin:
   it serves the single-root engine even inside a workspace.
 

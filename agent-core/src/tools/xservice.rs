@@ -859,6 +859,7 @@ mod tests {
             members: Vec::new(),
             cross_service: vec![bound_edge()],
             via_type_reference: Vec::new(),
+            type_reference_unread: Default::default(),
             unresolved_egress: Some(residue(2, summary)),
         };
         let reading = read_callers(&callers);
@@ -879,6 +880,7 @@ mod tests {
                 impact: logos_core::models::ImpactResult::default(),
             }],
             via_type_reference: Vec::new(),
+            type_reference_unread: Default::default(),
             unresolved_egress: None,
         };
         let reading = read_impact(&impact);

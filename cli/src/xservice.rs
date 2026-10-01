@@ -71,7 +71,9 @@ pub(crate) enum XserviceCommands {
     /// importers an advisory type reference reaches ([FR-WS-35], [BR-60]) — for
     /// a type's node or its dotted name — each tagged `via type reference` with
     /// the reference, whose importer (member, file, line) is the class-grain
-    /// caller; absent when none.
+    /// caller; absent when none. `type_reference_unread` names the members
+    /// whose declared types could not be read, so that absence is never
+    /// "nothing imports it".
     ///
     /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
     /// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation
@@ -92,7 +94,8 @@ pub(crate) enum XserviceCommands {
     /// each importing file reached through an advisory type reference
     /// ([FR-WS-35], [BR-60]) — for a type's node or its dotted name — tagged
     /// `via type reference` with the reference, and the files depending on it
-    /// in its member; absent when none.
+    /// in its member; absent when none. `type_reference_unread` names the
+    /// members whose declared types could not be read.
     ///
     /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
     /// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation

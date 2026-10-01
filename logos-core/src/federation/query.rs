@@ -305,6 +305,16 @@ pub struct XserviceCallers {
     /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub via_type_reference: Vec<TypeReferenceCaller>,
+    /// The members whose declared types the type-reference overlay could not
+    /// read, each with its reason ([NFR-CC-04]): an importer there cannot be
+    /// reached, so [`via_type_reference`](Self::via_type_reference) is stated
+    /// over the members read and its absence is not "no importer". Filled by
+    /// [`with_type_references`](Self::with_type_references); absent when every
+    /// member was read.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub type_reference_unread: BTreeMap<String, &'static str>,
     /// What this answer **could not reach**: the unresolved egress residue of the
     /// members in scope ([FR-WS-05], [BR-53], [CR-125]).
     ///
@@ -365,6 +375,7 @@ pub fn xservice_callers(
         ),
         cross_service,
         via_type_reference: Vec::new(),
+        type_reference_unread: BTreeMap::new(),
     }
 }
 
@@ -375,7 +386,8 @@ impl XserviceCallers {
     /// At class grain the importer **is** the caller — a reference binds the
     /// import of a type, not a call of one of its methods — as the bridge
     /// tier's consumer endpoint is, so no engine is opened. See
-    /// [`references_reaching`] for what the query matches. Nothing else in the
+    /// [`references_reaching`] for what the query matches. A member the overlay
+    /// could not read is named in `type_reference_unread`. Nothing else in the
     /// answer moves: `cross_service` and the residue's resolved count are the
     /// bridge's alone.
     ///
@@ -389,6 +401,7 @@ impl XserviceCallers {
                 via: reference.clone(),
             })
             .collect();
+        self.type_reference_unread = index.headline.members.unread_reasons.clone();
         self
     }
 }
@@ -428,6 +441,16 @@ pub struct XserviceImpact {
     /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub via_type_reference: Vec<TypeReferenceImpact>,
+    /// The members whose declared types the type-reference overlay could not
+    /// read, each with its reason ([NFR-CC-04]): an importer there cannot be
+    /// reached, so [`via_type_reference`](Self::via_type_reference) is stated
+    /// over the members read and its absence is not "no importer". Filled by
+    /// [`with_type_references`](Self::with_type_references); absent when every
+    /// member was read.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub type_reference_unread: BTreeMap<String, &'static str>,
     /// What this answer **could not reach**: the unresolved egress residue of the
     /// members in scope ([FR-WS-05], [BR-53], [CR-125]).
     ///
@@ -490,6 +513,7 @@ pub fn xservice_impact(
         ),
         cross_service,
         via_type_reference: Vec::new(),
+        type_reference_unread: BTreeMap::new(),
     }
 }
 
@@ -506,9 +530,10 @@ impl XserviceImpact {
     /// calls, imports and references from it. A reference binds the import of a
     /// type, not a call of one of its methods, so every importer of the type is
     /// reached ([CR-152] CRA-04). See [`references_reaching`] for what the
-    /// query matches. An importing member whose engine will not start yields
-    /// an entry carrying its error, never an abort ([ADR-53]). Nothing else in
-    /// the answer moves.
+    /// query matches. A member the overlay could not read is named in
+    /// `type_reference_unread`; an importing member read when the overlay was
+    /// built whose engine will not start now yields an entry carrying its
+    /// error, never an abort ([ADR-53]). Nothing else in the answer moves.
     ///
     /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
     /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
@@ -531,6 +556,7 @@ impl XserviceImpact {
                 }
             })
             .collect();
+        self.type_reference_unread = index.headline.members.unread_reasons.clone();
         self
     }
 }
