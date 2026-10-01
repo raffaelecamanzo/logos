@@ -142,7 +142,23 @@ fn read_status(status: &WorkspaceStatus) -> String {
     )
 }
 
-fn read_reachability(view: &BoundedReachability) -> String {
+/// `members` is the workspace's member names: a `repo` scope naming none of
+/// them reads nothing, and its empty view must not read as an empty answer for
+/// that member ([NFR-CC-04]) — the read-model carries no note of its own, so
+/// the reading supplies the verdict.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn read_reachability(view: &BoundedReachability, members: &[&str]) -> String {
+    if let Some(repo) = view.scope.repo.as_deref() {
+        if !members.contains(&repo) {
+            return format!(
+                "workspace_reachability for {repo} — NOT A MEMBER: {repo:?} is not a workspace \
+                 member, so nothing was read for it and the empty view is not an absence; the \
+                 members are: {}",
+                bounded_list(members.iter().map(|m| m.to_string()).collect())
+            );
+        }
+    }
     let scope = view
         .scope
         .repo
@@ -362,8 +378,9 @@ impl Tool for WorkspaceReachabilityTool {
             let answer =
                 federation::app_wide_reachability(registry, &query::edges(bridge, registry))
                     .bound(scope);
+            let members: Vec<&str> = registry.members().iter().map(|m| m.name.as_str()).collect();
             XserviceAnswer {
-                reading: read_reachability(&answer),
+                reading: read_reachability(&answer, &members),
                 answer,
             }
         })

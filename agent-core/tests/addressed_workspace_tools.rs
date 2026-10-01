@@ -621,6 +621,24 @@ async fn each_workspace_tool_answers_its_twins_payload() {
         "{reading}"
     );
 
+    // A scope naming no member: the twin's payload, and a reading that says so
+    // rather than reading the empty view as an empty answer for it.
+    let ghost = json!({ "repo": "ghost", "all": true });
+    let (reading, ours) = workspace_call(&set, "workspace_reachability", ghost).await;
+    let theirs = federated::call(
+        &client,
+        "workspace_reachability",
+        params(&[("repo", json!("ghost")), ("all", json!(true))]),
+    )
+    .await;
+    assert_same_payload(&ours, &theirs, "workspace_reachability for a non-member");
+    assert_eq!(
+        reading,
+        "workspace_reachability for ghost — NOT A MEMBER: \"ghost\" is not a workspace member, \
+         so nothing was read for it and the empty view is not an absence; the members are: \
+         api; web"
+    );
+
     // workspace_check — the boundary rule is broken by web → api
     let (reading, ours) = workspace_call(&set, "workspace_check", json!({})).await;
     let theirs = federated::call(&client, "workspace_check", Map::new()).await;
