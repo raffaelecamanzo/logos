@@ -1,0 +1,332 @@
+S-488 T1 — THE NET-NEW CONFIG-DECLARED TOPIC FLOOR, DECLARED BEFORE THE RUN
+===========================================================================
+
+Declared (UTC):  2026-10-01T16:08:09Z
+Declared by:     Dev Session 1.3 (sprint-84, branch sprint-84-I1-S3)
+Declared at:     logos commit 13498362 (release 1.8.1) — the parent of the commit
+                 that adds this file. No measurement code for this gate exists at
+                 that commit; `declared_topics.rs` is added only by LATER commits
+                 on this branch, so the ordering is auditable in `git log`, not
+                 asserted here.
+Story:           S-488 — Measure the net-new config-declared topic memberships
+                 beyond the observed broker edges
+Gate decides:    CR-157 section 3.2 B4. Whether the declared-topic intake S-489,
+                 and S-490 and S-491 behind it, become plannable.
+
+Estate under measurement: a PRIVATE COPY of ~/source/pec-services at
+~/source/.estate-copies/pec-services-S-488, every one of its 84 member stores
+re-indexed (`logos index --project <member>`, 84 of 84, 0 failures) with the
+merged-main binary, `logos 1.8.1` = logos commit 13498362, before this file was
+written. The live estate is never opened by this gate: nothing under
+~/source/pec-services is read by an engine or written.
+
+This file is TRACKED, beside S-411's `config_declared_coupling_floor.txt`, and it
+does NOT replace or amend that file. S-411's floor file, its finding file and its
+pinned constants stay byte-identical: this is a NEW metric over S-411's topic
+half, filed by CR-157, not an edit of S-411's record.
+
+
+CR-157 SECTION 3.2 A — QUOTED VERBATIM
+--------------------------------------
+
+The whole of part A, character for character, each line indented four spaces:
+
+    **A — Definitions, fixed before the gate runs.**
+
+    - **A1, declaration.** A member **M declares topic T** when a committed value in M's **`src/main` application configuration** equals T, under a **topic-named key**: `spring.kafka.topics.*`, or any key whose last segment is or ends in `topic` / `topics` (`filteraggregate.topic`, `spring.kafka.template.default-topic`). Values are resolved as [S-410](../planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe) resolves them: one placeholder hop to a committed value, profile-tagged per overlay ([FR-WS-19](../specs/requirements/FR-WS-19.md) AC2). An uncommitted or placeholder-valued result refuses with the existing reasons ([BR-52](../specs/software-spec.md#327-workspace-federation)).
+    - **A2, topic identity.** T must be a topic identity the product **captures somewhere in the workspace**, meaning at least one member's broker site resolves to T. A configured value that no broker site names is reported apart as `declared-only`, never as a topic.
+    - **A3, net-new pair.** A declaration (M, T) is **net-new** when M has **no observed `Producer` or `Consumer` on T** in the current product. "Current" means the merged-main binary at the run, cluster A included, on a private estate copy.
+    - **A4, grain.** `declares-topic(M → T)` is **directionless**. Configuration does not say whether M produces or consumes. It carries `config-declared` provenance: key, defining file, profile set.
+
+
+CR-157 SECTION 3.2 B1 — QUOTED VERBATIM
+---------------------------------------
+
+The whole B1 bullet, character for character, indented four spaces:
+
+    - **B1 — Metric and floor.** *Net-new member–topic pairs (A3) over the decisive population.* **Floor: ≥ 3**, stated by the stakeholder on 2026-10-01. It is committed in a tracked declaration file **before** any measurement code exists, quotes this section verbatim, and is parsed by the gate.
+
+And, because the gate also parses the population and reads its verdict off the
+outcome rules, B2 and B4, verbatim on the same terms:
+
+    - **B2 — Population.** The **83 members of `~/source/pec-services/logos.workspace.toml`** at a named commit, `src/main` configuration only. Deploy overlays are excluded ([S-412](../planning/journal.md#s-412-the-configuration-corpus-admits-committed-deploy-overlays) is closed). Two further readings are printed beside it and are never decisive:
+      - the 84-directory population;
+      - a reading that includes the test tree.
+
+    - **B4 — Outcome rules, declared now.**
+      - **HOLDS (≥ 3).** The three delivery stories become plannable by an appended banner. [ADR-72](#52-new-adr) stays Proposed until the intake story delivers.
+      - **FALSIFIED (< 3).** Recorded with evidence and date. [ADR-72](#52-new-adr) is superseded in place, the delivery stories stay unplanned, and [FR-WS-36](#51-new-requirements) is never written.
+
+
+THE FLOOR
+---------
+
+    >= 3 NET-NEW MEMBER-TOPIC PAIRS on the decisive reading defined below.
+
+It is the stakeholder's figure, stated 2026-10-01 and carried by CR-157 B1. This
+file does not derive it, lower it or tune it to an expected yield.
+
+
+HOW EACH TERM OF PART A IS MEASURED — FIXED BEFORE THE RUN
+-----------------------------------------------------------
+
+Every instrument below is SHIPPED or S-411 CODE, CALLED. A second copy of any
+of them would be a second metric wearing the first one's name.
+
+  1. THE CONFIGURATION READER (A1, "committed value"). S-411's application
+     reader, unchanged: the shipped `ConfigCorpus::discover` over the estate
+     root, each source folded through S-411's `collect_values` under S-411's
+     `Provenance` for the application source set, tagged with
+     `identity::application_overlay(profile)`. Keys are therefore in the
+     relaxed-binding CANONICAL form the corpus stores (`canonical_key`:
+     lower-case, `-` and `_` dropped per segment), and every rule below is
+     applied to that form.
+
+  2. "`src/main` APPLICATION CONFIGURATION". A source counts in the decisive
+     reading exactly when its corpus-relative path contains the segment pair
+     `/src/main/`. The TEST-TREE reading also admits `/src/test/`. An
+     application source on neither path is listed with its declarations and is
+     counted in NO reading. Deploy overlays are not read at all (B2).
+
+  3. "TOPIC-NAMED KEY". The canonical key starts with `spring.kafka.topics.`, OR
+     its last `.`-segment equals `topic` or `topics`, OR its last `.`-segment
+     ends in `topic` or `topics`. The KEY-SHAPE SPLIT printed at the headline is
+     exactly those three shapes, taken in that order (a key is counted under
+     the first shape it matches). A value under any other key is not a
+     declaration, however topic-like it is (CR-157 section 3.3, "Any-key value
+     equality").
+
+  4. "RESOLVED AS S-410 RESOLVES THEM". The declared value is passed to the
+     shipped `resolve::broker_identity::topic_identity` — S-410's function,
+     called — over a lookup that sees the DECLARING SOURCE'S OWN MODULE within
+     the reading's own sources (the harness's `CorpusLookup` scoping, ADR-64's
+     within-reach rule). Its three answers:
+       - `Literal`   — no `${...}`: the value is the candidate T;
+       - `Committed` — one placeholder hop proved a committed value: each of its
+                       topics is a candidate T, carrying the profiles its
+                       `ConfigBound` names;
+       - `Unresolved`— REFUSED, with the shipped `ValueRefusal` reason
+                       (`Uncommitted`, `PlaceholderValue`, `MissingKey`). A
+                       refused declaration is never a pair; it is counted apart
+                       with its reason.
+
+  5. "A TOPIC IDENTITY THE PRODUCT CAPTURES" (A2). A topic the shipped
+     `federation::topics::workspace_topics` read-model lists, over member
+     engines opened on the private copy, with at least one producer or one
+     consumer, its `#`-guard (a message-schema FQN) stripped. Under the decisive
+     reading the workspace is the 83 manifest members. A candidate T no member
+     lists is `declared-only` and is never a pair.
+
+  6. "NO OBSERVED PRODUCER OR CONSUMER ON T" (A3). M's own entry in that same
+     read-model does not list T with producers + consumers >= 1. Where it does,
+     the declaration is ALREADY OBSERVED: counted and listed at the headline,
+     never a pair.
+
+  7. THE GRAIN (A4). The distinct (M, T) pair. Several keys, files or profiles
+     proving one pair are ONE pair, listed as its evidence (key, file, profile).
+     Direction is never read: no key, `default-topic` included, makes M a
+     producer or a consumer.
+
+  8. THE B3 SPLIT, per net-new pair, from the shipped
+     `federation::coverage::cross_service_coverage` broker rows whose consumer
+     endpoint is M, together with M's promoted topics:
+       - CONFIG-ONLY    M has no broker row and no promoted topic at all;
+       - SITE-REFUSED   M has at least one broker row the product refused
+                        (unbound for a reason other than no-provider), printed
+                        with its reason and its declaration;
+       - SITE-UNCAPTURED otherwise — M has broker sites, none refused, none on T.
+     The product's ledger stores no operand for a refused site, so a refusal
+     can be tied to M but not provably to T: the split is at MEMBER grain and
+     says so beside it. The split never changes the headline count.
+
+  9. THE RECONCILIATION (B3). S-411's own `judgement`, run over the same copy,
+     supplies its 13 shared topics and their (member, topic) declarations, which
+     S-411 recorded as 36. They are set-compared with this run's declarations,
+     and every difference is attributed to a NAMED MECHANISM: the `src/main`
+     restriction, the manifest population, the topic-named key rule, member-local
+     versus workspace-wide value resolution, the product's captured identities
+     versus the harness's, or the declarer threshold (S-411 counted a topic only
+     where >= 2 members declare it; A3 counts each pair). A difference no named
+     mechanism explains is printed as UNEXPLAINED and FAILS the run.
+
+ 10. `filters-ingestion-cdk/cdk.json` is a KNOWN BLIND SPOT (CR-157 section 3.3):
+     it is not a configuration source, is never read as one, and is NEVER
+     counted. The run names it and states whether it exists on the copy.
+
+
+THE MEMBER POPULATION, FIXED BEFORE THE RUN
+-------------------------------------------
+
+The estate root is NOT a git repository, so the manifest has no commit of its
+own. It is fixed instead by its content and by the logos commit this
+declaration is made at — the same manifest S-475 declared, byte for byte:
+
+    manifest:       ~/source/pec-services/logos.workspace.toml
+    SHA-256:        9e1873392a2e366d59db7b375b9c55c5f984648cc4718f2a02dab93db7444f49
+    last modified:  2026-09-28 09:43 local
+    declared at:    logos commit 13498362
+
+and by its 83 members, listed verbatim between the two markers below. The test
+PARSES this list, and on an estate run asserts that the measured workspace's
+manifest member set is EXACTLY this set: a manifest edited after this
+declaration changes the population, and the run then fails rather than silently
+measuring a different one. The 84th directory, `archive-api-logiclens-fork`, is
+absent from the list by the stakeholder's recorded 2026-09-27 decision.
+
+MANIFEST MEMBERS — BEGIN (83)
+    agid-volume-counters-batch
+    archive-api
+    archive-feeder
+    archive-kafka-models
+    archive-listener-adapter
+    archive-manager
+    archive-notification-adapter
+    archive-reporting-adapter
+    batch-kafka-models
+    batch-test
+    deprecated-mailbox-core
+    e2e-tests
+    filters-api
+    filters-domain
+    filters-ingestion-cdk
+    filters-kafka-models
+    filters-processor
+    funnel-aggregator-api
+    gen2gen3_devops_utils
+    hermodr-gateway
+    hermodr-mirror
+    legacy-official-log-tools
+    mailbox-aggregate-hermodr-gateway
+    mailbox-aggregator-api
+    mailbox-api
+    mailbox-domain
+    mailbox-kafka-models
+    mailbox-manager
+    mailbox-notification-adapter
+    mailbox-reporting-adapter
+    mailbox-unread-mail-batch
+    mailserver-api
+    mailserver-common
+    mock-legal-storage
+    notification-adapter
+    notification-api
+    notification-domain
+    notification-gateway-mock
+    notification-kafka-models
+    official-log-batch-lib
+    official-log-daily-activities-fetcher-batch
+    official-log-export-api
+    official-log-export-domain
+    official-log-export-job-manager
+    official-log-export-job-worker
+    official-log-export-notification-adapter
+    official-log-export-reporting-adapter
+    official-log-ingestion-batch
+    official-log-ingestion-domain
+    official-log-ingestion-status-batch
+    official-log-journal-api
+    official-log-kafka-models
+    official-log-legal-storage-batch
+    official-log-metrics-adapter
+    pec-agid-statistics-informer
+    pec-services-tools
+    pecserver-facade
+    pecserver-mock
+    pecserver-reporting-adapter
+    poste-pec-common
+    poste-pec-documentation
+    poste-pec-starter
+    postel-cpx-creation-lib
+    ptpec-assistance-tool
+    ptpec-precommit-hooks
+    punctuators-poc
+    reporting-api
+    reporting-archive-data-downsampler
+    reporting-archive-data-projector
+    reporting-data-export-batch
+    reporting-domain
+    reporting-kafka-models
+    reporting-mailbox-data-projector
+    reporting-volume-counters-batch
+    retail-migration-pre-population-script
+    software-architecture-documents
+    spring-cloud-data-flow-helm
+    spring-cloud-data-flow-pecserver-task
+    sprint-review-tools
+    styleguide
+    timestamp-service-client
+    virus-ingestion-batch
+    webmail
+MANIFEST MEMBERS — END
+
+
+THE THREE READINGS, AND WHICH ONE DECIDES
+------------------------------------------
+
+  MANIFEST·MAIN  the 83 members above, `src/main` sources only. DECISIVE.
+  DIRECTORY      the 84 `.git` directories under the estate root, `src/main`
+                 sources only, captured identities over all 84. NEVER decisive.
+  TEST-TREE      the 83 members, `src/main` and `src/test` sources. NEVER
+                 decisive.
+
+  HOLDS      MANIFEST·MAIN >= 3.
+  FALSIFIED  MANIFEST·MAIN < 3, whatever DIRECTORY or TEST-TREE read — and when
+             either of them reaches the floor, the record says which, beside the
+             verdict, so the stakeholder can re-decide in a later CR and not in
+             this run.
+
+
+WHAT IS PRINTED BESIDE THE VERDICT — REPORTS, NEVER FLOORS
+-----------------------------------------------------------
+
+  - every net-new pair by name, with key, file and profile;
+  - the CONFIG-ONLY / SITE-REFUSED (with reason) / SITE-UNCAPTURED split;
+  - every declaration already explained by an observed Producer/Consumer,
+    counted;
+  - the `declared-only` values, by member and key;
+  - the refused declarations, by reason;
+  - the key-shape split;
+  - the DIRECTORY and TEST-TREE readings;
+  - the reconciliation against S-411's 13 topics / 36 declarations, by
+    mechanism;
+  - `filters-ingestion-cdk/cdk.json`, named as the blind spot.
+
+None of these can clear or fail the gate. There is exactly one decisive number.
+
+
+WHAT THE CR EXPECTS, AND WHY IT IS NOT A FLOOR
+-----------------------------------------------
+
+CR-157 names two config-only publishers by hand (CRA-01, not validated):
+`funnel-aggregator-api` on archive-message-queue through `filteraggregate.topic`
+and `mailbox-unread-mail-batch` on unread-mails-requests through
+`spring.kafka.template.default-topic`. Recorded here so the run can be read
+against them. They are a hypothesis about the estate, not an acceptance figure,
+and the floor of 3 asks deliberately whether there is anything beyond them.
+
+
+A RUN THAT SEES NO ESTATE REPORTS *VOID*, NEVER ZERO
+-----------------------------------------------------
+
+Per NFR-CC-04: where `LOGOS_REF_WORKSPACE` is unset the measurement has not been
+performed. The estate arm prints VOID and asserts nothing about the gate. The
+classifier deciding declared / observed / net-new carries ALWAYS-RUN fixtures,
+independent of the estate: a declaration with an observed Producer on the same
+topic is observed; a declaration with no site on T is net-new; a value no broker
+site names is declared-only; a placeholder or uncommitted value is refused; an
+estate-blind run is VOID.
+
+
+COMMITMENT
+----------
+
+The floor is not revised after the run. The constant in the measurement code is
+PARSED from this file, and the decisive population is PARSED from the member
+list above, so neither can be edited to clear a run without this declaration
+being edited too — in the file whose purpose is to say it must not be.
+
+On HOLDS, S-489, S-490 and S-491 gain an appended "plannable" banner and ADR-72
+stays Proposed. On FALSIFIED, ADR-72 is superseded in place with the figure and
+the date, nothing is planned, and FR-WS-36 is never written. If a later run
+disagrees with what is recorded, the procedure is to re-decide CR-157 and
+ADR-72, not to relax an assertion.
