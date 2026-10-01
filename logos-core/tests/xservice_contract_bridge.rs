@@ -21,6 +21,9 @@ use logos_core::federation::{
 };
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 /// An OpenAPI spec whose `/users/{user_id}` path drifts in parameter name from
 /// the axum route's `/users/{id}` — the {id}-vs-{user_id} drift `route_key`
 /// erases. Its `get` operation matches; its `delete` has no provider anywhere.
@@ -144,6 +147,8 @@ fn an_openapi_operation_binds_a_route_in_another_member() {
     // Nothing was written to any member DB by the bridge computation ([ADR-52]).
     assert_eq!(db_bytes(&api), api_before, "member `api` DB unchanged by the bridge");
     assert_eq!(db_bytes(&web), web_before, "member `web` DB unchanged by the bridge");
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// FR-WS-04 acceptance: two members providing the same `route_key` make the
@@ -182,4 +187,6 @@ fn two_members_providing_the_same_route_are_ambiguous() {
         edges.is_empty(),
         "two providers of one key are ambiguous — no edge fabricated: {edges:?}"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }

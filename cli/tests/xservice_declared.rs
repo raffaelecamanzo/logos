@@ -322,18 +322,23 @@ fn workspace_status_states_both_relations_beside_the_headlines_with_their_denomi
 
 /// AC4: a workspace with no vendored spec and no `kind` declaration prints both
 /// commands with exactly the keys they had before the relations existed — no
-/// relation key, not a `null` one, in either rendering.
+/// relation key, not a `null` one, in either rendering. `route-providers` has
+/// since gained one key of its own, last: S-484's `member_reads`.
 #[test]
 fn a_workspace_without_vendored_specs_prints_both_commands_unchanged() {
     let tmp = undeclaring_workspace();
 
     let providers = logos_json(tmp.path(), &["xservice", "route-providers"]);
     let keys: Vec<&String> = providers.as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["providers"], "{providers}");
+    assert_eq!(keys, ["providers", "member_reads"], "{providers}");
     assert_eq!(providers["providers"].as_array().map(Vec::len), Some(1), "not vacuous: web binds mbx");
     let scoped = logos_json(tmp.path(), &["xservice", "route-providers", "--repo", "mbx"]);
     let keys: Vec<&String> = scoped.as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["scope", "providers"], "no scope note without a relation, keys in their old order: {scoped}");
+    assert_eq!(
+        keys,
+        ["scope", "providers", "member_reads"],
+        "no scope note without a relation, keys in their old order: {scoped}"
+    );
 
     let status = logos_json(tmp.path(), &["workspace", "status"]);
     let mut keys: Vec<&str> = status["coverage"].as_object().unwrap().keys().map(String::as_str).collect();

@@ -257,18 +257,18 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
     let bridge = ContractBridge::new();
     match command {
         XserviceCommands::RouteProviders { repo } => {
-            let edges = query::edges(&bridge, &registry);
+            let read = query::bridge_read(&bridge, &registry);
             let coverage = cross_service_coverage(&registry.answer());
-            out.print(&query::xservice_route_providers(&edges, repo.as_deref()).with_declared(coverage))?;
+            out.print(&query::xservice_route_providers(&read, repo.as_deref()).with_declared(coverage))?;
         }
         XserviceCommands::Callers {
             symbol,
             limit,
             repo,
         } => {
-            let (edges, residue) = query::reachability_inputs(&bridge, &registry);
+            let inputs = query::reachability_inputs(&bridge, &registry);
             out.print(
-                &query::xservice_callers(&registry, &edges, &residue, &symbol, limit, repo.as_deref())
+                &query::xservice_callers(&registry, &inputs, &symbol, limit, repo.as_deref())
                     .with_type_references(&registry, &type_references(&registry)),
             )?;
         }
@@ -277,9 +277,9 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
             depth,
             repo,
         } => {
-            let (edges, residue) = query::reachability_inputs(&bridge, &registry);
+            let inputs = query::reachability_inputs(&bridge, &registry);
             out.print(
-                &query::xservice_impact(&registry, &edges, &residue, &symbol, depth, repo.as_deref())
+                &query::xservice_impact(&registry, &inputs, &symbol, depth, repo.as_deref())
                     .with_type_references(&registry, &type_references(&registry), depth),
             )?;
         }

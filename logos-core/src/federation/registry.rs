@@ -94,12 +94,13 @@
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 //! [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 use super::budget::WorkspaceBudget;
 use super::open_state::{MemberOpen, MemberOpenState, StoreFile};
@@ -201,6 +202,47 @@ pub struct MemberScoped<T> {
     pub member: String,
     /// The per-member value.
     pub value: T,
+}
+
+/// The members one answer **read**, and the ones it needed and could not read,
+/// each with its reason ([NFR-CC-04], [NFR-PE-10]).
+///
+/// A member is *read* when the answer opened it or found it resident and read
+/// something off it — a sync-stamp, a contract surface, a per-member query. A
+/// member is *unread* when the answer needed it and its engine would not start
+/// or its read failed; it is named with the reason, never left out. Unread is
+/// sticky: a member whose stamp was read and whose surface read then failed is
+/// unread, because the answer lacks what that read would have contributed.
+///
+/// A member in neither set was not needed by this answer: a warm cross-service
+/// bridge whose stamp check proved nothing changed reads no member the check
+/// did not have to ([`ContractBridge::edges`](super::ContractBridge::edges)).
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MemberReads {
+    /// The members read, sorted by name.
+    pub read: BTreeSet<String>,
+    /// The members needed and not read, sorted by name, each with why. Absent
+    /// when none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub unread: BTreeMap<String, String>,
+}
+
+impl MemberReads {
+    /// Record `member` read — unless it is already unread, which wins.
+    pub fn note_read(&mut self, member: &str) {
+        if !self.unread.contains_key(member) {
+            self.read.insert(member.to_string());
+        }
+    }
+
+    /// Record `member` unread with `reason`; the first reason recorded stands.
+    pub fn note_unread(&mut self, member: &str, reason: impl Into<String>) {
+        self.read.remove(member);
+        self.unread.entry(member.to_string()).or_insert_with(|| reason.into());
+    }
 }
 
 /// One resident member engine and (under serve) its watcher, with the logical
@@ -697,6 +739,32 @@ impl<E: MemberEngine> EngineRegistry<E> {
         Ok(engine)
     }
 
+    /// An already-resident member's engine, **without** opening one and without
+    /// marking it touched — `None` when the member is not resident.
+    ///
+    /// For a read that must not change what is resident: the cross-service
+    /// bridge's stamp check reads a resident member's sync-stamp through this,
+    /// so checking that nothing changed neither starts an engine nor reorders
+    /// the eviction queue toward members no answer used ([NFR-PE-10]).
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    pub(super) fn peek_resident(&self, member: &str) -> Option<Arc<E>> {
+        self.read_resident().get(member).map(|entry| Arc::clone(&entry.engine))
+    }
+
+    /// The members whose **last** open attempt succeeded — the open-state
+    /// ledger's `opened`, which an eviction since then leaves standing. One
+    /// snapshot under one lock, so a walk asking it of every member does not
+    /// queue behind an in-flight admission once per member.
+    pub(super) fn last_opened(&self) -> HashSet<String> {
+        self.lock_admission()
+            .opens
+            .iter()
+            .filter(|(_, failure)| failure.is_none())
+            .map(|(member, _)| member.clone())
+            .collect()
+    }
+
     /// Clone out an already-resident member's engine, marking it most-recently
     /// touched — the hit path, under a **read** lock only.
     fn touch_resident(&self, member: &str) -> Option<Arc<E>> {
@@ -1020,6 +1088,10 @@ struct ScopeState {
     /// Members whose open failure has already been announced on the human
     /// diagnostic channel during this answer.
     announced: HashSet<String>,
+    /// What this answer has read so far, and what it could not ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    reads: MemberReads,
 }
 
 /// One answer's worth of member walks over an [`EngineRegistry`] ([FR-WS-16]
@@ -1132,7 +1204,21 @@ impl<'r, E: MemberEngine> AnswerScope<'r, E> {
     /// [`EngineRegistry::engine_for`] for an all-member **walk**: a member whose
     /// open already failed in this answer is not attempted again, its recorded
     /// diagnostic being replayed instead ([FR-WS-16], [NFR-PE-10]).
-    fn open_for_walk(&self, member: &str) -> Result<Arc<E>> {
+    ///
+    /// Every outcome is recorded in this answer's [`reads`](Self::reads): an
+    /// engine handed back is a member read, a failed or replayed open a member
+    /// unread with its diagnostic.
+    pub(super) fn open_for_walk(&self, member: &str) -> Result<Arc<E>> {
+        let opened = self.open_unrecorded(member);
+        match &opened {
+            Ok(_) => self.note_read(member),
+            Err(err) => self.note_unread(member, format!("{err:#}")),
+        }
+        opened
+    }
+
+    /// [`open_for_walk`](Self::open_for_walk) without the read record.
+    fn open_unrecorded(&self, member: &str) -> Result<Arc<E>> {
         // Two statements deliberately: the scope guard is a temporary in this
         // `let`, so it drops at the `;` — before the `engine_for` below runs.
         // Folding this into `match self.lock_state()…` would hold the guard
@@ -1189,6 +1275,25 @@ impl<'r, E: MemberEngine> AnswerScope<'r, E> {
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub(super) fn announce_open_failure(&self, member: &str) -> bool {
         self.lock_state().announced.insert(member.to_string())
+    }
+
+    /// Record `member` read by this answer ([`MemberReads::note_read`]).
+    pub(super) fn note_read(&self, member: &str) {
+        self.lock_state().reads.note_read(member);
+    }
+
+    /// Record `member` needed and not read by this answer, with `reason`
+    /// ([`MemberReads::note_unread`]).
+    pub(super) fn note_unread(&self, member: &str, reason: impl Into<String>) {
+        self.lock_state().reads.note_unread(member, reason);
+    }
+
+    /// The members this answer has read so far, and the ones it needed and
+    /// could not read ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn reads(&self) -> MemberReads {
+        self.lock_state().reads.clone()
     }
 
     /// Lock this answer's walk state, **recovering** a poisoned lock rather than

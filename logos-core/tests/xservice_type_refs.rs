@@ -37,6 +37,9 @@ use logos_core::graph_store::DECLARED_TYPES_EXTRACTED_KEY;
 use logos_core::Engine;
 use serde_json::{json, Value};
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 const OPENAPI_YAML: &str = "\
 openapi: 3.0.3
 info:
@@ -199,9 +202,9 @@ fn dto_symbol(index: &TypeReferenceIndex) -> String {
 /// `callers` and `impact` on `symbol` as the CLI arms assemble them, before and
 /// after the type-reference stitch, serialized.
 fn reachability(registry: &EngineRegistry<Engine>, index: &TypeReferenceIndex, symbol: &str) -> [(Value, Value); 2] {
-    let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), registry);
-    let callers = || query::xservice_callers(registry, &edges, &residue, symbol, None, None);
-    let impact = || query::xservice_impact(registry, &edges, &residue, symbol, None, None);
+    let inputs = query::reachability_inputs(&ContractBridge::new(), registry);
+    let callers = || query::xservice_callers(registry, &inputs, symbol, None, None);
+    let impact = || query::xservice_impact(registry, &inputs, symbol, None, None);
     fn json(v: &impl serde::Serialize) -> Value {
         serde_json::to_value(v).expect("the read-model serializes")
     }
@@ -258,6 +261,8 @@ fn type_refs_lists_each_provider_with_its_imported_types_and_their_importers() {
     assert_eq!((&evt["fqn"], &evt["owner"]["origin"]), (&json!("com.acme.events.Evt"), &json!("avro")));
     assert!(evt["owner"].get("symbol").is_none(), "an Avro type has no node: {evt:#}");
     assert_eq!(evt["importers"][0]["line"], 4);
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// **`--repo`** scopes the listing to one provider member and keeps the
@@ -306,6 +311,8 @@ fn a_repo_scope_lists_one_provider_and_a_non_member_returns_a_scope_note() {
         "`lib` is not a member the type-reference overlay was built over (declared types not yet extracted)",
         "{unread:#}"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// **Stitching** ([FR-WS-05], [BR-60]): `callers` and `impact` on `Dto`'s
@@ -375,11 +382,13 @@ fn callers_and_impact_on_a_provider_type_stitch_each_importer_apart_from_the_bri
     );
 
     // `depth` bounds this tier as it bounds the seed and the bridge tier.
-    let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), &registry);
-    let shallow = query::xservice_impact(&registry, &edges, &residue, &dto, Some(1), None)
+    let inputs = query::reachability_inputs(&ContractBridge::new(), &registry);
+    let shallow = query::xservice_impact(&registry, &inputs, &dto, Some(1), None)
         .with_type_references(&registry, &index, Some(1));
     let shallow = serde_json::to_value(shallow).unwrap();
     assert_eq!(files(&app_java(&shallow)), ["src/main/java/com/acme/app/Main.java"], "{shallow:#}");
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// **An Avro-declared type has no node**, so it is reached by its dotted name
@@ -406,6 +415,8 @@ fn a_type_named_by_its_dotted_name_is_stitched_and_an_avro_type_is_reached_that_
     for ((_, node), (_, name)) in by_node.iter().zip(&by_name) {
         assert_eq!(node["via_type_reference"], name["via_type_reference"], "one reference, two spellings");
     }
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// **A symbol with no type references is byte-identical** with the stitch on
@@ -436,6 +447,8 @@ fn a_symbol_no_type_reference_names_returns_byte_identical_output() {
     }
     let [(callers, _), _] = reachability(&registry, &index, &handler);
     assert_eq!(callers["cross_service"].as_array().map(Vec::len), Some(1), "the bridge tier is non-empty");
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// **A member whose engine fails is a per-member error inside the answer,
@@ -473,15 +486,15 @@ fn an_importer_whose_engine_fails_is_a_per_member_error_inside_the_answer() {
     // One open attempt per answer, not one per reference: the seed fan-out's
     // and the stitch's — so the stitch tried `app` once, whatever the count.
     let one_more = {
-        let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), &broken);
-        let _ = query::xservice_impact(&broken, &edges, &residue, &dto, None, None)
+        let inputs = query::reachability_inputs(&ContractBridge::new(), &broken);
+        let _ = query::xservice_impact(&broken, &inputs, &dto, None, None)
             .with_type_references(&broken, &index, None);
         broken.start_failures() - failures
     };
     let seed_only = {
         let before = broken.start_failures();
-        let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), &broken);
-        let _ = query::xservice_impact(&broken, &edges, &residue, &dto, None, None);
+        let inputs = query::reachability_inputs(&ContractBridge::new(), &broken);
+        let _ = query::xservice_impact(&broken, &inputs, &dto, None, None);
         broken.start_failures() - before
     };
     assert_eq!(one_more, seed_only + 1, "the stitch attempts a broken importer once per answer");
@@ -495,6 +508,8 @@ fn an_importer_whose_engine_fails_is_a_per_member_error_inside_the_answer() {
         answer["scope_note"],
         "`app` is not a member the type-reference overlay was built over (declared types could not be read)"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&broken);
 }
 
 /// **An importer the overlay could not read is named, never silently dropped**

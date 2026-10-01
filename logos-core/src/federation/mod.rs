@@ -202,7 +202,7 @@ pub use build_deps::{
 pub use budget::WorkspaceBudget;
 pub use open_state::{DegradedCause, DegradedRollup, MemberOpen, MemberOpenState, StoreFile};
 pub use registry::{
-    AnswerScope, Backing, EngineRegistry, MemberEngine, MemberScoped, RegistryMode,
+    AnswerScope, Backing, EngineRegistry, MemberEngine, MemberReads, MemberScoped, RegistryMode,
 };
 // The surfaces serialize `EgressResidue`/`ResidueReason` and pass
 // `WorkspaceEgressResidue` through; `AnswerReach` and `egress_residue` are the

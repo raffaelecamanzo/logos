@@ -71,9 +71,9 @@ async fn the_mcp_twin_carries_the_declared_relations_the_cli_prints() {
     // The CLI arm's body, verbatim minus the print (cli/src/xservice.rs).
     let cli = |repo: Option<&str>| {
         let reg = registry("pec", root, members.clone());
-        let edges = query::edges(&ContractBridge::new(), &reg);
+        let read = query::bridge_read(&ContractBridge::new(), &reg);
         let coverage = cross_service_coverage(&reg.answer());
-        serde_json::to_value(query::xservice_route_providers(&edges, repo).with_declared(coverage))
+        serde_json::to_value(query::xservice_route_providers(&read, repo).with_declared(coverage))
             .expect("the read-model serializes")
     };
 
@@ -94,6 +94,11 @@ async fn the_mcp_twin_carries_the_declared_relations_the_cli_prints() {
     assert_eq!(unscoped["bound_external"]["rows"][0]["base"]["path"], "/prov");
     assert_eq!(scoped["scope"], "mbx");
     assert!(scoped["declared_scope_note"].as_str().is_some_and(|n| n.contains("workspace-wide")));
+    // The members the bridge read ride the MCP payload (S-484).
+    assert!(
+        unscoped["member_reads"]["read"].as_array().is_some_and(|read| read.len() == members.len()),
+        "a cold first answer reads every member: {unscoped}"
+    );
 
     assert_eq!(cli(None), unscoped, "CLI and MCP print one read-model");
     assert_eq!(cli(Some("mbx")), scoped, "both surfaces scope it identically");

@@ -38,6 +38,9 @@ use logos_core::federation::{
 use logos_core::model::NodeKind;
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 /// The `api` member: an exported producer that publishes to `orders`. `pub`, so it
 /// is a per-repo live root — its own deadness is irrelevant here; it exists only
 /// to emit the cross-service publish that roots `web`'s subscriber.
@@ -332,4 +335,6 @@ fn a_cross_member_publish_promotes_an_otherwise_dead_subscribe_handler_to_live()
     // ── The view is a pure read: no member DB was written ([ADR-52]) ──────────
     assert_eq!(db_bytes(&api), api_before, "member `api` DB unchanged");
     assert_eq!(db_bytes(&web), web_before, "member `web` DB unchanged");
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }

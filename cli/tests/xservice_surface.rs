@@ -1155,6 +1155,9 @@ fn route_providers_are_repo_qualified_and_repo_scopes() {
         edge["intake"], "contract-surface",
         "an OpenAPI operation → route surfaces as a contract-surface edge"
     );
+    // S-484: `--json` names the members the bridge read — a one-shot's bridge
+    // is cold, so both.
+    assert_eq!(all["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{all}");
 
     // `--repo web`: routes provided BY web → the one edge.
     let scoped_web = logos_json(tmp.path(), &["xservice", "route-providers", "--repo", "web"]);
@@ -1229,6 +1232,7 @@ fn callers_lists_cross_service_consumers_and_repo_scopes() {
         "the cross-service caller is the consumer endpoint in api"
     );
     assert_eq!(cross[0]["to"]["member"], "web", "reaching the provider in web");
+    assert_eq!(callers["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{callers}");
 
     // `--repo web` scopes the intra-repo fan-out to one member.
     let scoped = logos_json(
@@ -1291,6 +1295,7 @@ fn impact_stitches_across_bridge_edges() {
     );
     assert_eq!(cross[0]["via"]["to"]["member"], "web");
     assert_eq!(cross[0]["via"]["from"]["member"], "api");
+    assert_eq!(impact["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{impact}");
 }
 
 /// S-257 acceptance through the real binary: `workspace reachability --all` emits
@@ -1920,9 +1925,10 @@ fn a_zero_residue_leaves_the_reachability_answer_exactly_as_it_was() {
     );
     let mut keys: Vec<&str> = callers.as_object().expect("object").keys().map(String::as_str).collect();
     keys.sort_unstable();
+    // S-484 adds `member_reads` to every bridge-backed answer; still no residue.
     assert_eq!(
         keys,
-        ["cross_service", "members", "query"],
+        ["cross_service", "member_reads", "members", "query"],
         "no residue block over a zero residue: {callers}"
     );
 
@@ -1931,7 +1937,7 @@ fn a_zero_residue_leaves_the_reachability_answer_exactly_as_it_was() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["cross_service", "query", "seed"],
+        ["cross_service", "member_reads", "query", "seed"],
         "no residue block over a zero residue: {impact}"
     );
 }

@@ -83,14 +83,14 @@ async fn the_mcp_twins_answer_the_cli_read_models_with_the_type_reference_tier()
     let cli = |tool: &str, repo: Option<&str>| {
         let reg = registry("acme", root, members.clone());
         let index = TypeReferences::new().index(&reg, &BuildDependencies::new());
-        let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), &reg);
+        let inputs = query::reachability_inputs(&ContractBridge::new(), &reg);
         match tool {
             "xservice_type_refs" => serde_json::to_value(query::xservice_type_refs(&index, repo)),
             "xservice_callers" => serde_json::to_value(
-                query::xservice_callers(&reg, &edges, &residue, DTO_NODE, None, None).with_type_references(&reg, &index),
+                query::xservice_callers(&reg, &inputs, DTO_NODE, None, None).with_type_references(&reg, &index),
             ),
             _ => serde_json::to_value(
-                query::xservice_impact(&reg, &edges, &residue, DTO_NODE, None, None)
+                query::xservice_impact(&reg, &inputs, DTO_NODE, None, None)
                     .with_type_references(&reg, &index, None),
             ),
         }

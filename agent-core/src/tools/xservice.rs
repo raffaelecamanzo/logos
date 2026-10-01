@@ -15,10 +15,14 @@
 //! Constructing the tools touches no engine. A member is started only when a
 //! dispatched call reaches it, and the resident-engine ceiling stays the
 //! registry's own budget. A `repo`-scoped `xservice_search` starts that one
-//! member. The other three read the contract bridge, whose sync-stamp walk
-//! reads **every** member whatever `repo` says (`ContractBridge::edges` /
-//! `reachability_inputs`), exactly as `logos xservice …` and the MCP tools do —
-//! so their `repo` narrows the answer, never what is opened.
+//! member. The other three read the contract bridge, exactly as
+//! `logos xservice …` and the MCP tools do: its **first** answer reads every
+//! member (an edge binds the *sole* provider of a key, which only every
+//! member's surface can establish); after that a read checks the sync-stamps of
+//! the members that can have changed — the resident ones — and starts no other
+//! (S-484, `ContractBridge::edges_read`). Each answer names the members it read
+//! in `member_reads`, beside the read-model; the `reading` line is unchanged by
+//! it.
 //!
 //! # The residue rides the answer ([BR-53], [NFR-CC-04])
 //! Each output is an [`XserviceAnswer`]: the read-model verbatim, plus one
@@ -480,16 +484,18 @@ pub struct XserviceSearchArgs {
 }
 
 /// The `repo` property every `xservice_*` schema carries. `opens_one` is true
-/// only for `xservice_search`: the bridge-backed tools read every member's
-/// sync-stamp regardless, so scoping them saves nothing ([NFR-PE-10]).
+/// only for `xservice_search`: what a bridge-backed tool opens is the bridge's
+/// to decide — every member on its first answer, the members that can have
+/// changed after that — and `repo` does not change it ([NFR-PE-10]).
 ///
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 fn repo_property(scoped: &str, opens_one: bool) -> serde_json::Value {
     let cost = if opens_one {
         "which starts only that member's engine"
     } else {
-        "which narrows the answer but not what is opened: the cross-service bridge reads \
-         every member either way"
+        "which narrows the answer but not what is read: the cross-service bridge reads \
+         every member on its first answer and only the members it needs after that, and \
+         `member_reads` names them"
     };
     json!({
         "type": "string",
@@ -552,7 +558,7 @@ impl Tool for XserviceRouteProvidersTool {
     async fn call(&self, args: RouteProvidersArgs) -> Result<Self::Output, ToolCallError> {
         run_federated(self.xs.clone(), move |registry, bridge| {
             let answer =
-                query::xservice_route_providers(&query::edges(bridge, registry), args.repo.as_deref());
+                query::xservice_route_providers(&query::bridge_read(bridge, registry), args.repo.as_deref());
             XserviceAnswer {
                 reading: read_route_providers(&answer),
                 answer,
@@ -605,12 +611,10 @@ impl Tool for XserviceCallersTool {
 
     async fn call(&self, args: XserviceCallersArgs) -> Result<Self::Output, ToolCallError> {
         run_federated(self.xs.clone(), move |registry, bridge| {
-            let (edges, residue) = query::reachability_inputs(bridge, registry);
+            let inputs = query::reachability_inputs(bridge, registry);
             let answer = query::xservice_callers(
                 registry,
-                &edges,
-                &residue,
-                &args.symbol,
+                &inputs, &args.symbol,
                 args.limit,
                 args.repo.as_deref(),
             );
@@ -666,12 +670,10 @@ impl Tool for XserviceImpactTool {
 
     async fn call(&self, args: XserviceImpactArgs) -> Result<Self::Output, ToolCallError> {
         run_federated(self.xs.clone(), move |registry, bridge| {
-            let (edges, residue) = query::reachability_inputs(bridge, registry);
+            let inputs = query::reachability_inputs(bridge, registry);
             let answer = query::xservice_impact(
                 registry,
-                &edges,
-                &residue,
-                &args.symbol,
+                &inputs, &args.symbol,
                 args.depth,
                 args.repo.as_deref(),
             );
@@ -886,6 +888,7 @@ mod tests {
             via_type_reference: Vec::new(),
             type_reference_unread: Default::default(),
             unresolved_egress: Some(residue(2, summary)),
+            member_reads: Default::default(),
         };
         let reading = read_callers(&callers);
         assert!(
@@ -907,6 +910,7 @@ mod tests {
             via_type_reference: Vec::new(),
             type_reference_unread: Default::default(),
             unresolved_egress: None,
+            member_reads: Default::default(),
         };
         let reading = read_impact(&impact);
         assert!(
@@ -926,6 +930,7 @@ mod tests {
             declared_contracts: None,
             bound_external: None,
             declared_scope_note: None,
+            member_reads: Default::default(),
         };
         let reading = read_route_providers(&answer);
         assert!(reading.contains("1 resolved cross-service binding(s)"), "{reading}");

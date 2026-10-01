@@ -34,6 +34,9 @@ use logos_core::federation::{
 use logos_core::resolve::binding::Provenance;
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 /// A client module making a static outbound call `GET /users/{id}` — captured as
 /// an `HttpClientCall` reference `"GET /users/{id}"` sourced from `fetch_user`.
 /// The `use reqwest` import makes the file a client-call candidate (the
@@ -195,6 +198,8 @@ fn a_static_client_call_binds_a_route_in_another_member() {
     // The bridge computation wrote to no member DB ([ADR-52]).
     assert_eq!(db_bytes(&web), web_before, "member `web` DB unchanged by the bridge");
     assert_eq!(db_bytes(&api), api_before, "member `api` DB unchanged by the bridge");
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// Acceptance (1): two members providing the same route make the client call
@@ -233,6 +238,8 @@ fn two_matching_routes_make_the_client_call_ambiguous() {
     let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.ambiguous, 1, "the ambiguous call is bucketed as such");
     assert_eq!(coverage.bound, 0);
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// Acceptance (2/3): a runtime-composed (bare-variable) client-call path binds
@@ -336,6 +343,8 @@ fn a_runtime_composed_client_call_records_a_keyless_refusal_and_never_binds() {
         reasons.iter().any(|r| r.contains("base-url-runtime")),
         "and it carries the arm's own reason, not `path-not-composed`: {reasons:?}"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// One member's `http-client-call` ledger rows, its promoted nodes, and its
@@ -494,6 +503,8 @@ fn a_config_bound_client_call_binds_its_committed_target_in_another_member() {
         "and nothing is promoted, because nothing behind this edge was dead: {:?}",
         view.live_via_cross_service
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// [CR-133] AC2 on the real pipeline: the same call with `orders.base` committed
@@ -534,4 +545,6 @@ fn a_config_bound_client_call_with_an_undefined_key_binds_nothing() {
         reasons.iter().any(|r| r.contains("config-key-missing")),
         "the row keeps its own reason: {reasons:?}"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }

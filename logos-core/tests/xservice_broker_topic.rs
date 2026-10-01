@@ -41,6 +41,9 @@ use logos_core::federation::{
 use logos_core::model::{EdgeKind, NodeKind};
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 /// The `api` member: publishes to `orders`.
 const PUBLISHER: &str = r#"
 package com.acme;
@@ -232,6 +235,8 @@ fn a_publish_in_one_member_binds_a_subscribe_on_the_same_topic_in_another() {
         billing_before,
         "the bridge wrote to the billing member's store"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// A topic published in one member with **no subscriber anywhere in the workspace** is
@@ -283,4 +288,6 @@ fn a_per_repo_topic_is_visible_across_the_workspace_with_no_cross_repo_match() {
         .find(|m| m.member == "billing")
         .expect("a healthy member with no topics is still reported");
     assert!(billing_topics.topics.is_empty());
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }

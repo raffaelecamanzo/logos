@@ -1201,6 +1201,29 @@ nor counted yet.
 builds all N, [NFR-PE-10](../specs/requirements/NFR-PE-10.md)). All `--json`
 output is a single machine-clean line.
 
+**Each bridge answer names the members it read.** `route-providers`, `callers`
+and `impact` — on the CLI, the `xservice_*` MCP tools, the chat's tools and
+`/api/v1/workspace/*` alike — carry `member_reads`: `read`, the members this
+answer read, and `unread`, every member it needed and could not read, each with
+its reason (absent when none). A member is never left out silently.
+
+```json
+"member_reads": { "read": ["api", "web"], "unread": { "audit": "starting the engine for workspace member \"audit\": …" } }
+```
+
+What gets read depends on whether the bridge has already answered once. Its
+**first** answer reads every member — an edge binds the *sole* provider of a
+key, and only every member's surface can say a provider is the sole one — so a
+CLI one-shot, whose bridge starts empty, always lists every member. A
+long-running surface (`serve`, the MCP server, the chat) keeps the bridge's
+answer, and each later answer only re-checks the members whose index can have
+changed since — those with a live engine — and retries any it could not open
+before. It starts no other member. `callers`
+also reads the members of its per-member fan-out, and `impact` the far member
+of each edge it crosses. The type-reference section and the declared relations
+of `route-providers` state their own coverage (`type_reference_unread`, the
+headlines' denominators) and are not counted in `member_reads`.
+
 **A reachability answer carries its unresolved residue** ([CR-125], [BR-53]).
 `callers` and `impact` answer "what reaches this / what does this reach" across a
 boundary, and an **empty** answer there is read as safety. So both — on the CLI,

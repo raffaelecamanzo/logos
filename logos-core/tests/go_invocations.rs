@@ -51,6 +51,9 @@ use logos_core::model::ArtifactRelation;
 use logos_core::plugin::LanguageRegistry;
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 // ── Capture-level harness ────────────────────────────────────────────────────
 
 /// Extract one in-memory Go source through the embedded Go plugin.
@@ -817,6 +820,8 @@ fn go_client_calls_bind_go_routes_in_another_member() {
         coverage.no_provider_in_workspace, 0,
         "both routes exist in member `api`"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 // ── Stated ceiling: the named-constant verb ([ADR-54]) ──────────────────────

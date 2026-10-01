@@ -950,8 +950,7 @@ pub(crate) async fn workspace_route_providers(
 ) -> Response {
     let repo = opt_param(&q, "repo");
     workspace_fan(backing, bridge, "api_v1_workspace_route_providers", Surface::Web, move |registry, bridge| {
-        let edges = fed_query::edges(bridge, registry);
-        fed_query::xservice_route_providers(&edges, repo.as_deref())
+        fed_query::xservice_route_providers(&fed_query::bridge_read(bridge, registry), repo.as_deref())
     })
     .await
 }
@@ -1025,8 +1024,8 @@ pub(crate) async fn workspace_callers(
     let limit = opt_param(&q, "limit").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
     workspace_fan(backing, bridge, "api_v1_workspace_callers", Surface::Web, move |registry, bridge| {
-        let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
-        fed_query::xservice_callers(registry, &edges, &residue, &symbol, limit, repo.as_deref())
+        let inputs = fed_query::reachability_inputs(bridge, registry);
+        fed_query::xservice_callers(registry, &inputs, &symbol, limit, repo.as_deref())
     })
     .await
 }
@@ -1047,8 +1046,8 @@ pub(crate) async fn workspace_impact(
     let depth = opt_param(&q, "depth").and_then(|n| n.parse::<usize>().ok());
     let repo = opt_param(&q, "repo");
     workspace_fan(backing, bridge, "api_v1_workspace_impact", Surface::Web, move |registry, bridge| {
-        let (edges, residue) = fed_query::reachability_inputs(bridge, registry);
-        fed_query::xservice_impact(registry, &edges, &residue, &symbol, depth, repo.as_deref())
+        let inputs = fed_query::reachability_inputs(bridge, registry);
+        fed_query::xservice_impact(registry, &inputs, &symbol, depth, repo.as_deref())
     })
     .await
 }

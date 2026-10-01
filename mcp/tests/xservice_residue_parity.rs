@@ -110,13 +110,13 @@ async fn both_surfaces(
     let cli = {
         let reg = registry("shop", root, members.clone());
         let bridge = ContractBridge::new();
-        let (edges, residue) = query::reachability_inputs(&bridge, &reg);
+        let inputs = query::reachability_inputs(&bridge, &reg);
         match verb {
             "xservice_callers" => serde_json::to_value(query::xservice_callers(
-                &reg, &edges, &residue, ROUTE_SYMBOL, None, repo,
+                &reg, &inputs, ROUTE_SYMBOL, None, repo,
             )),
             _ => serde_json::to_value(query::xservice_impact(
-                &reg, &edges, &residue, ROUTE_SYMBOL, None, repo,
+                &reg, &inputs, ROUTE_SYMBOL, None, repo,
             )),
         }
         .expect("the read-model serializes")
@@ -156,6 +156,13 @@ async fn cli_and_mcp_report_the_same_residue_for_the_same_query() {
         assert_eq!(
             mcp["unresolved_egress"]["unresolved_sites"], 1,
             "{verb} must leave one outbound site unresolved: {mcp}"
+        );
+        // The members the answer read ride the MCP payload (S-484): a first,
+        // cold answer reads both.
+        assert_eq!(
+            mcp["member_reads"],
+            serde_json::json!({ "read": ["api", "web"] }),
+            "{verb} names the members it read: {mcp}"
         );
 
         assert_eq!(

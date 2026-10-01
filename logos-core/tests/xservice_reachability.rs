@@ -31,6 +31,9 @@ use logos_core::federation::{
 use logos_core::model::NodeKind;
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 /// The `api` member's OpenAPI spec: its `get` operation is the cross-service
 /// consumer that binds `web`'s route; its `delete` binds nothing.
 const OPENAPI_YAML: &str = "\
@@ -272,6 +275,8 @@ fn the_union_view_is_advisory_riderd_and_never_exceeds_the_per_repo_dead_set() {
     // The view is a pure read: no member DB was written (ADR-52).
     assert_eq!(db_bytes(&api), api_before, "member `api` DB unchanged");
     assert_eq!(db_bytes(&web), web_before, "member `web` DB unchanged");
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// ADR-56 acceptance: computing the union view leaves the **per-repo gated
@@ -338,6 +343,8 @@ fn computing_the_view_leaves_the_per_repo_dead_code_signal_unchanged() {
         view.dead.iter().all(|c| c.kind == NodeKind::Function),
         "the per-repo dead verdict is only ever written for callables"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// Read one member's per-repo dead-code verdicts directly from its store — the
