@@ -39,7 +39,9 @@
 ;                 its own class (CR-005, FR-EX-08). The `this` receiver anchors
 ;                 the capture to an own-member access. Resolution binds it to an
 ;                 `Accesses` edge only on an exactly-one Field candidate, else it
-;                 stays unresolved (NFR-RA-05).
+;                 stays unresolved (NFR-RA-05). A `#private` field is read as
+;                 `this.#x`, whose property is a `private_property_identifier`
+;                 (S-477), so both spellings are captured.
 (member_expression
   object: (this)
-  property: (property_identifier) @ref.access)
+  property: [(property_identifier) (private_property_identifier)] @ref.access)

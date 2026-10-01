@@ -2873,6 +2873,22 @@ fn kind_for_capture(capture_name: &str) -> Option<NodeKind> {
 /// Resolve each declaration's nearest enclosing captured declaration by walking
 /// the tree-sitter ancestry. A declaration with no captured ancestor is at file
 /// scope (`parent = None`).
+///
+/// One exception: a [`NodeKind::Field`] declared **in a method's parameter list**
+/// — a TypeScript parameter property, `constructor(private readonly http: Client)`
+/// — is owned by the class the method belongs to, not by the method. Lexically it
+/// nests in the constructor, but it is a member of the class: the own-field access
+/// binder looks a field up among the class's members ([FR-EX-08]), and the
+/// class-cohesion metric counts the class's fields ([FR-QM-11]). The test is
+/// structural (the field's node sits inside the method's `parameters` field), not a
+/// `constructor` name match, so a field a plugin captures elsewhere in a method keeps
+/// the method as its parent. No shipped plugin captures one today (the TypeScript
+/// patterns reach only a class body's fields and constructor parameters), so that
+/// guard is a constraint on future plugins, not behaviour a fixture can show
+/// (S-477, CR-154).
+///
+/// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
 fn assign_parents(decls: &mut [Decl<'_>]) {
     let id_to_idx: HashMap<usize, usize> = decls
         .iter()
@@ -2890,6 +2906,28 @@ fn assign_parents(decls: &mut [Decl<'_>]) {
             }
             ancestor = node.parent();
         }
+    }
+
+    // Lift a parameter-list field to the method's own parent (see above). Done in
+    // a second pass so every method's parent is already resolved; the lift reads
+    // the *original* parents and writes only `Field` decls, so it is order-free.
+    let lifted: Vec<(usize, usize)> = decls
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.kind == NodeKind::Field)
+        .filter_map(|(i, d)| {
+            let method = &decls[d.parent?];
+            if method.kind != NodeKind::Method {
+                return None;
+            }
+            let params = method.node.child_by_field_name("parameters")?;
+            let (start, end) = (d.node.start_byte(), d.node.end_byte());
+            let inside = params.start_byte() <= start && end <= params.end_byte();
+            inside.then_some((i, method.parent?))
+        })
+        .collect();
+    for (i, class) in lifted {
+        decls[i].parent = Some(class);
     }
 }
 

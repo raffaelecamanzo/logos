@@ -628,6 +628,344 @@ public class Repo {
     }
 }
 
+// ── FR-EX-08 / NFR-RA-05: TypeScript / TSX own-field access (S-477, CR-154) ──
+
+/// TypeScript and TSX fields used to go unextracted, so every `this.x` access
+/// row stayed unresolved for want of a `Field` candidate. The grammar spells a
+/// field three ways — a declared `public_field_definition`, a `#private` one
+/// (its name and its `this.#x` access are `private_property_identifier`, not
+/// `property_identifier`), and a constructor parameter property
+/// (`private readonly http`). One class fixture carries all three, plus a
+/// getter and an absent name, and the same source runs under both grammars: the
+/// `Accesses` edges are the three fields' and no others, and the getter, a bare
+/// parameter and the unmatched access stay `resolved = 0` ([FR-EX-08], [NFR-RA-05]).
+#[cfg(feature = "lang-typescript")]
+mod typescript_accesses {
+    use logos_core::model::{EdgeKind, NodeId, NodeKind};
+    use logos_core::{metrics, Engine, Granularity, Runtime};
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// A declared field, a `#private` field, a parameter property, a getter and
+    /// an unmatched name — each read through `this` — plus a bare constructor
+    /// parameter (`plain`, no modifier): the near miss of a parameter property,
+    /// which is not a field.
+    const CLASS: &str = "\
+class Repo {
+    count = 0;
+    #secret = 1;
+
+    constructor(private readonly http: Client, plain: Client) {}
+
+    get total(): number {
+        return 1;
+    }
+
+    readCount() {
+        return this.count;
+    }
+
+    readSecret() {
+        return this.#secret;
+    }
+
+    fetch() {
+        return this.http;
+    }
+
+    readTotal() {
+        return this.total;
+    }
+
+    readPlain() {
+        return this.plain;
+    }
+
+    bad() {
+        return this.missing;
+    }
+}
+";
+
+    /// Every other parameter-property spelling: `readonly` alone (no accessibility
+    /// modifier), `override`, an optional one, a decorated one, and a decorated
+    /// declared field — each read through `this` by one method.
+    const FORMS: &str = "\
+class Forms {
+    @Dec() deco = 1;
+
+    constructor(
+        readonly ro: Client,
+        override ov: Client,
+        @Inject(TOKEN) private injected: Client,
+        private opt?: Client,
+    ) {}
+
+    all() {
+        return [this.deco, this.ro, this.ov, this.injected, this.opt];
+    }
+}
+";
+
+    /// Class-like and function-like forms the plugin does not capture as a class, each
+    /// carrying a field or a modifier-bearing parameter, plus one valid class as the
+    /// control. Only the control's `z` may become a `Field`. The `interface`, `type`
+    /// and `function` lines are not valid TypeScript (a parameter property belongs to
+    /// a constructor), which is the point: the grammar parses them, and a bare
+    /// `required_parameter` pattern would have made each a field.
+    const UNOWNED: &str = "\
+abstract class Abs {
+    y = 2;
+    constructor(private readonly a: Client) {}
+    run() {
+        return this.y;
+    }
+}
+
+const K = class {
+    kx = 1;
+    constructor(public kp: number) {}
+};
+
+export default class {
+    q = 1;
+}
+
+interface I {
+    m(private b: string): void;
+}
+
+type F = new (private e: string) => Real;
+
+function free(private h: string) {}
+
+class Ok {
+    z = 1;
+}
+";
+
+    fn node_id(rt: &Runtime, name: &str, kind: NodeKind) -> NodeId {
+        let wanted = name.to_string();
+        // `all_nodes`, not `search`: the FTS query parser rejects the `#` of a
+        // `#private` field's name.
+        rt.submit_read(move |store| {
+            Ok(store
+                .all_nodes()?
+                .into_iter()
+                .find(|n| n.name == wanted && n.kind == kind)
+                .map(|n| n.id))
+        })
+        .expect("read runs")
+        .unwrap_or_else(|| panic!("no {kind:?} node named {name}"))
+    }
+
+    fn accesses_edges(rt: &Runtime) -> Vec<(NodeId, NodeId)> {
+        rt.submit_read(|store| {
+            Ok(store
+                .all_edges()?
+                .into_iter()
+                .filter(|e| e.kind == EdgeKind::Accesses)
+                .map(|e| (e.source, e.target))
+                .collect())
+        })
+        .expect("read runs")
+    }
+
+    fn check(file: &str) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(file);
+        fs::write(&path, CLASS).unwrap();
+
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let rt = engine.runtime().unwrap();
+        engine.index();
+
+        let mut edges = accesses_edges(rt);
+        let mut want = vec![
+            (
+                node_id(rt, "readCount", NodeKind::Method),
+                node_id(rt, "count", NodeKind::Field),
+            ),
+            (
+                node_id(rt, "readSecret", NodeKind::Method),
+                node_id(rt, "#secret", NodeKind::Field),
+            ),
+            (
+                node_id(rt, "fetch", NodeKind::Method),
+                node_id(rt, "http", NodeKind::Field),
+            ),
+        ];
+        edges.sort();
+        want.sort();
+        assert_eq!(
+            edges, want,
+            "{file}: a declared field, a #private field and a parameter property each \
+             bind their own-class access — and nothing else does (FR-EX-08)"
+        );
+
+        let refs = rt
+            .submit_read(|store| store.unresolved_refs())
+            .expect("read runs");
+        for name in ["total", "plain", "missing"] {
+            let rows: Vec<_> = refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Accesses && r.target == name)
+                .collect();
+            assert_eq!(rows.len(), 1, "{file}: `this.{name}` is recorded once");
+            assert!(
+                !rows[0].resolved,
+                "{file}: `this.{name}` names no Field, so it stays resolved = 0 (NFR-RA-05)"
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_fields_bind_and_the_getter_and_unmatched_stay_unresolved() {
+        check("Repo.ts");
+    }
+
+    #[test]
+    fn tsx_fields_bind_and_the_getter_and_unmatched_stay_unresolved() {
+        check("Repo.tsx");
+    }
+
+    /// Run `src` as `file` and hand the indexed runtime to `check`.
+    fn indexed(file: &str, src: &str, check: impl FnOnce(&Runtime)) {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(file), src).unwrap();
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let rt = engine.runtime().unwrap();
+        engine.index();
+        check(rt);
+    }
+
+    fn field_names(rt: &Runtime) -> Vec<String> {
+        let mut names: Vec<String> = rt
+            .submit_read(|store| {
+                Ok(store
+                    .all_nodes()?
+                    .into_iter()
+                    .filter(|n| n.kind == NodeKind::Field)
+                    .map(|n| n.name)
+                    .collect())
+            })
+            .expect("read runs");
+        names.sort();
+        names
+    }
+
+    fn every_parameter_property_form_and_a_decorated_field_bind(file: &str) {
+        indexed(file, FORMS, |rt| {
+            let all = node_id(rt, "all", NodeKind::Method);
+            let mut want: Vec<_> = ["deco", "ro", "ov", "injected", "opt"]
+                .iter()
+                .map(|f| (all, node_id(rt, f, NodeKind::Field)))
+                .collect();
+            let mut edges = accesses_edges(rt);
+            edges.sort();
+            want.sort();
+            assert_eq!(
+                edges, want,
+                "{file}: readonly-only, override, optional and decorated parameter properties \
+                 and a decorated field are each a Field the class owns (FR-EX-08)"
+            );
+        });
+    }
+
+    #[test]
+    fn typescript_every_parameter_property_form_and_a_decorated_field_bind() {
+        every_parameter_property_form_and_a_decorated_field_bind("Forms.ts");
+    }
+
+    #[test]
+    fn tsx_every_parameter_property_form_and_a_decorated_field_bind() {
+        every_parameter_property_form_and_a_decorated_field_bind("Forms.tsx");
+    }
+
+    fn only_a_class_declarations_own_members_are_fields(file: &str) {
+        indexed(file, UNOWNED, |rt| {
+            assert_eq!(
+                field_names(rt),
+                ["z"],
+                "{file}: a field of an abstract class or class expression, or a modifier on a \
+                 non-constructor parameter, is not a Field — nothing owns it, so it would only \
+                 join the file-scope candidates of unrelated references (NFR-RA-05)"
+            );
+        });
+    }
+
+    #[test]
+    fn typescript_only_a_class_declarations_own_members_are_fields() {
+        only_a_class_declarations_own_members_are_fields("Unowned.ts");
+    }
+
+    #[test]
+    fn tsx_only_a_class_declarations_own_members_are_fields() {
+        only_a_class_declarations_own_members_are_fields("Unowned.tsx");
+    }
+
+    /// LCOM4 reads the fields the binder now finds ([FR-QM-11]). `Shared`'s
+    /// methods reach one another only through the declared field and the
+    /// parameter property, so they are one component (cohesion 1); `Split`'s two
+    /// getters read disjoint fields, so they are two (cohesion 1/2). Mean 0.75.
+    /// With no `Field` nodes every `Shared` method would be its own component
+    /// (1/3), so this mean cannot be reached without the fields.
+    #[test]
+    fn lcom4_reflects_the_shared_typescript_fields() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("Shared.ts"),
+            "\
+class Shared {
+    count = 0;
+
+    constructor(private readonly http: Client) {
+        this.count = 1;
+    }
+
+    a() {
+        return this.count + this.http;
+    }
+
+    b() {
+        return this.http;
+    }
+}
+
+class Split {
+    x = 0;
+    y = 0;
+
+    getX() {
+        return this.x;
+    }
+
+    getY() {
+        return this.y;
+    }
+}
+",
+        )
+        .unwrap();
+
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        engine.index();
+        let view = engine
+            .hydrate(Granularity::ExcludeContains)
+            .expect("dependency view hydrates");
+        let rt = engine.runtime().unwrap();
+        let (_, model) = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+            .expect("snapshot runs");
+
+        let cohesion = model.cohesion.expect("two classes with methods → Cohesion applies");
+        assert!(
+            (cohesion.raw - 0.75).abs() < 1e-12,
+            "mean of Shared 1/1 and Split 1/2 = 0.75, got {}",
+            cohesion.raw
+        );
+    }
+}
+
 // ── FR-EX-08 / NFR-RA-05: PHP own-property access + never-fabricate (S-060) ──
 
 /// PHP properties extract as `Field` nodes and methods nest in the class, so a
