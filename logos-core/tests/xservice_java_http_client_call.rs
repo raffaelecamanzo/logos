@@ -33,6 +33,9 @@ use logos_core::federation::{
 };
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 /// The consumer: a Spring `RestClient` fluent chain making a static
 /// `GET /users/{id}`. The `org.springframework.web.client` import is what makes
 /// the file a client-call candidate under the arm's ledger gate.
@@ -160,6 +163,8 @@ fn a_static_java_client_call_binds_a_spring_route_in_another_member() {
     let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.bound, 1, "the Java client call is bound");
     assert_eq!(coverage.ambiguous, 0);
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// A runtime-composed Java client call never binds, even against a provider that
@@ -214,6 +219,8 @@ fn a_runtime_composed_java_client_call_records_a_keyless_refusal_and_never_binds
         reasons.iter().any(|r| r.contains("base-url-runtime")),
         "and it carries the arm's own reason, not `path-not-composed`: {reasons:?}"
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }
 
 /// [FR-WS-08]: *"Two matching routes across the workspace ⇒ ambiguous, no
@@ -261,4 +268,6 @@ fn two_matching_spring_routes_make_the_java_client_call_ambiguous() {
     let coverage = cross_service_coverage(&registry.answer());
     assert_eq!(coverage.ambiguous, 1, "the ambiguous call is bucketed as such");
     assert_eq!(coverage.bound, 0);
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 }

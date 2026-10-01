@@ -24,6 +24,9 @@ use logos_core::federation::{
 use logos_core::graph_store::{BUILD_FACTS_EXTRACTED_KEY, DECLARED_TYPES_EXTRACTED_KEY};
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 const OPENAPI_YAML: &str = "\
 openapi: 3.0.3
 info:
@@ -228,6 +231,9 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
     let (edges_with, edges_without) = (edges(with.path()), edges(without.path()));
     assert!(edges_with.contains("GET /users/{id}"), "the bridge binds the route: {edges_with}");
     assert_eq!(edges_with, edges_without);
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry_over(with.path(), MANIFEST));
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry_over(without.path(), MANIFEST));
 }
 
 /// Take a member store back to what the release before migration 22 left on

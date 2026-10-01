@@ -24,10 +24,13 @@
 use std::path::{Path, PathBuf};
 
 use logos_core::federation::{
-    query, ContractBridge, EngineRegistry, Federation, Member, RegistryMode,
+    ContractBridge, EngineRegistry, Federation, Member, RegistryMode,
 };
 use logos_core::Engine;
 use tempfile::TempDir;
+
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
 
 /// The `api` member's client: one runtime-composed call the HTTP client-call arm
 /// captures and refuses (S-374) — a guaranteed non-zero residue.
@@ -118,7 +121,7 @@ fn assembling_the_residue_moves_no_gate_verdict_and_writes_no_member_store() {
     };
     let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
     let bridge = ContractBridge::new();
-    let (_edges, residue) = query::reachability_inputs(&bridge, &registry);
+    let (_edges, residue, _) = bridge.reachability_read(&registry);
 
     // Guard the guard: a residue of zero would make every assertion below pass
     // over a read that did nothing.
@@ -128,6 +131,8 @@ fn assembling_the_residue_moves_no_gate_verdict_and_writes_no_member_store() {
         "the fixture must carry a real residue: {:?}",
         residue.members
     );
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry);
 
     // Drop the registry so every member engine is closed before re-opening.
     drop(residue);

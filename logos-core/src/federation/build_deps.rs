@@ -762,7 +762,7 @@ impl BuildDependencies {
     /// [`relation`](Self::relation) inside a caller's [`AnswerScope`], keyed on
     /// the stamps it already read — so a read-model built beside the relation
     /// (the type-reference overlay) shares one open attempt per member and one
-    /// stamp snapshot with it, as `ContractBridge::reachability_inputs` does
+    /// stamp snapshot with it, as `ContractBridge::reachability_read` does
     /// for its two caches ([FR-WS-16], [CR-125]).
     ///
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
@@ -1852,7 +1852,7 @@ mod tests {
             RegistryMode::Lazy,
         );
         let coverage = cross_service_coverage(&registry.answer());
-        let (edges, residue) = ContractBridge::new().reachability_inputs(&registry);
+        let (edges, residue, _) = ContractBridge::new().reachability_read(&registry);
         [
             serde_json::to_string(&coverage).unwrap(),
             serde_json::to_string(&*edges).unwrap(),

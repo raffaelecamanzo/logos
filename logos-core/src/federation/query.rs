@@ -47,7 +47,7 @@ use super::declared_contracts::DeclaredContractRelation;
 use super::external_join::BoundExternal;
 use super::manifest::MemberKind;
 use super::open_state::{self, DegradedRollup, MemberOpenState};
-use super::registry::{AnswerScope, EngineRegistry, MemberScoped};
+use super::registry::{AnswerScope, EngineRegistry, MemberReads, MemberScoped};
 use super::residue::{AnswerReach, EgressResidue, WorkspaceEgressResidue};
 use super::topics::{workspace_topics, MemberTopics};
 use super::type_refs::{
@@ -78,6 +78,17 @@ pub struct MemberResult<T> {
 }
 
 impl<T> MemberResult<T> {
+    /// Record this row in `reads`: its member read when it carries a result,
+    /// unread with its error when it does not ([NFR-CC-04]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    fn note_in(&self, reads: &mut MemberReads) {
+        match &self.error {
+            Some(error) => reads.note_unread(&self.member, error.clone()),
+            None => reads.note_read(&self.member),
+        }
+    }
+
     /// Project a fan-out [`MemberScoped<Result<T>>`] onto the wire shape,
     /// flattening the start-failure `Err` into the `error` channel.
     fn from_scoped(scoped: MemberScoped<anyhow::Result<T>>) -> Self {
@@ -330,22 +341,34 @@ pub struct XserviceCallers {
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unresolved_egress: Option<EgressResidue>,
+    /// The members this answer read, and every member it needed and could not
+    /// read, with the reason ([NFR-CC-04], [NFR-PE-10]): the bridge's stamp
+    /// check — every member's contract surface too, when its cache missed —
+    /// and the intra-repo fan-out.
+    ///
+    /// A tier stitched on beside them states its own coverage and is not
+    /// counted here: the type-reference overlay in
+    /// [`type_reference_unread`](Self::type_reference_unread), as the declared
+    /// relations of `route-providers` do in their headlines' denominators.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    pub member_reads: MemberReads,
 }
 
 /// Callers of `symbol` across the workspace, with what the answer could not
 /// reach ([FR-WS-05], [BR-53]).
 ///
-/// `residue` is the workspace's unresolved egress, assembled once by
+/// `inputs.residue` is the workspace's unresolved egress, assembled once by
 /// [`residue`](self::residue) and merely **scoped** here — the surfaces hand it
-/// in exactly as they hand in `edges`, so none of them composes a figure of its
-/// own and the MCP, CLI and web renderings cannot disagree ([CR-125] §4.4).
+/// in exactly as they hand in the edges, so none of them composes a figure of
+/// its own and the MCP, CLI and web renderings cannot disagree ([CR-125] §4.4).
 ///
 /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 pub fn xservice_callers(
     registry: &EngineRegistry<Engine>,
-    edges: &[BridgeEdge],
-    residue: &WorkspaceEgressResidue,
+    inputs: &ReachabilityInputs,
     symbol: &str,
     limit: Option<usize>,
     repo: Option<&str>,
@@ -354,19 +377,25 @@ pub fn xservice_callers(
     // (not member+symbol): a `LogosSymbol` is a database-portable identity
     // and bridge edges are already exactly-one resolved cross-member, so a
     // provider symbol identifies its consumers unambiguously.
-    let cross_service: Vec<BridgeEdge> = edges
+    let cross_service: Vec<BridgeEdge> = inputs
+        .edges
         .iter()
         .filter(|edge| edge.to.symbol.as_str() == symbol)
         .cloned()
         .collect();
+    let members = fan(registry, repo, |engine| engine.callers(symbol, limit));
+    let mut member_reads = inputs.reads.clone();
+    for member in &members {
+        member.note_in(&mut member_reads);
+    }
     XserviceCallers {
         query: symbol.to_string(),
         scope: repo.map(str::to_string),
-        members: fan(registry, repo, |engine| engine.callers(symbol, limit)),
+        members,
         // Read off the answer that was just built, never recounted from the
         // inputs: the residue's "no resolved cross-service callers" and the
         // `cross_service` list are then two renderings of one fact.
-        unresolved_egress: residue.beside(
+        unresolved_egress: inputs.residue.beside(
             repo,
             AnswerReach {
                 resolved: cross_service.len(),
@@ -376,6 +405,7 @@ pub fn xservice_callers(
         cross_service,
         via_type_reference: Vec::new(),
         type_reference_unread: BTreeMap::new(),
+        member_reads,
     }
 }
 
@@ -465,6 +495,12 @@ pub struct XserviceImpact {
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unresolved_egress: Option<EgressResidue>,
+    /// The members this answer read — the bridge's, the seed fan-out's and
+    /// each far member's — and every member it needed and could not read, with
+    /// the reason; see [`XserviceCallers::member_reads`]. A far member that
+    /// will not start is skipped in [`cross_service`](Self::cross_service), as
+    /// it always was, and named here.
+    pub member_reads: MemberReads,
 }
 
 /// Transitive impact of `symbol`, stitched across bridge edges ([FR-WS-05]).
@@ -473,16 +509,20 @@ pub struct XserviceImpact {
 /// follows every [`BridgeEdge`] the symbol is an endpoint of to the opposite
 /// endpoint's member and computes *its* impact — literally fanning per-member
 /// impact across the bridge. A far member whose engine fails to start is
-/// skipped (degraded, not fatal, [ADR-53]).
+/// skipped (degraded, not fatal, [ADR-53]) and named unread in
+/// [`member_reads`](XserviceImpact::member_reads) ([NFR-CC-04]).
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub fn xservice_impact(
     registry: &EngineRegistry<Engine>,
-    edges: &[BridgeEdge],
-    residue: &WorkspaceEgressResidue,
+    inputs: &ReachabilityInputs,
     symbol: &str,
     depth: Option<usize>,
     repo: Option<&str>,
 ) -> XserviceImpact {
-    let cross_service: Vec<CrossServiceImpact> = edges
+    let mut member_reads = inputs.reads.clone();
+    let cross_service: Vec<CrossServiceImpact> = inputs
+        .edges
         .iter()
         .filter_map(|edge| {
             let far = if edge.from.symbol.as_str() == symbol {
@@ -493,7 +533,14 @@ pub fn xservice_impact(
                 return None;
             };
             // A far member that fails to start is skipped, not fatal ([ADR-53]).
-            let engine = registry.engine_for(&far.member).ok()?;
+            let engine = match registry.engine_for(&far.member) {
+                Ok(engine) => engine,
+                Err(err) => {
+                    member_reads.note_unread(&far.member, format!("{err:#}"));
+                    return None;
+                }
+            };
+            member_reads.note_read(&far.member);
             Some(CrossServiceImpact {
                 via: edge.clone(),
                 member: far.member.clone(),
@@ -501,12 +548,16 @@ pub fn xservice_impact(
             })
         })
         .collect();
+    let seed = fan(registry, repo, |engine| engine.impact(symbol, depth));
+    for member in &seed {
+        member.note_in(&mut member_reads);
+    }
 
     XserviceImpact {
         query: symbol.to_string(),
         scope: repo.map(str::to_string),
-        seed: fan(registry, repo, |engine| engine.impact(symbol, depth)),
-        unresolved_egress: residue.beside(
+        seed,
+        unresolved_egress: inputs.residue.beside(
             repo,
             AnswerReach {
                 resolved: cross_service.len(),
@@ -516,6 +567,7 @@ pub fn xservice_impact(
         cross_service,
         via_type_reference: Vec::new(),
         type_reference_unread: BTreeMap::new(),
+        member_reads,
     }
 }
 
@@ -814,6 +866,11 @@ pub struct XserviceRouteProviders {
     /// says the scope narrowed `providers` and not the two relations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared_scope_note: Option<String>,
+    /// The members the bridge read for these bindings, and every member it
+    /// needed and could not read, with the reason; see
+    /// [`XserviceCallers::member_reads`]. The declared relations beside them
+    /// are workspace-wide and state their own denominators.
+    pub member_reads: MemberReads,
 }
 
 impl XserviceRouteProviders {
@@ -843,13 +900,11 @@ impl XserviceRouteProviders {
 
 /// The cross-service route bindings, scoped to a provider member when `repo` is
 /// given ([FR-WS-05]).
-pub fn xservice_route_providers(
-    edges: &[BridgeEdge],
-    repo: Option<&str>,
-) -> XserviceRouteProviders {
+pub fn xservice_route_providers(read: &BridgeRead, repo: Option<&str>) -> XserviceRouteProviders {
     XserviceRouteProviders {
         scope: repo.map(str::to_string),
-        providers: edges
+        providers: read
+            .edges
             .iter()
             .filter(|edge| repo.is_none_or(|member| edge.to.member == member))
             .cloned()
@@ -857,6 +912,7 @@ pub fn xservice_route_providers(
         declared_contracts: None,
         bound_external: None,
         declared_scope_note: None,
+        member_reads: read.reads.clone(),
     }
 }
 
@@ -1399,7 +1455,10 @@ fn build_dependency_section(relation: build_deps::BuildDependencyRelation) -> Op
 /// so a CLI one-shot and the serve loop share the same entry point ([FR-WS-04]).
 ///
 /// A thin re-export of [`ContractBridge::edges`](super::bridge::ContractBridge::edges)
-/// kept here so callers reach the whole query surface through this module.
+/// kept here so callers reach the whole query surface through this module. A
+/// read-model that names the members it read takes [`bridge_read`] instead.
+///
+/// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
 pub fn edges(
     bridge: &super::bridge::ContractBridge,
     registry: &EngineRegistry<Engine>,
@@ -1407,28 +1466,69 @@ pub fn edges(
     bridge.edges(registry)
 }
 
-/// The inputs one **cross-service reachability** answer is built from — the edge
-/// set and the unresolved egress residue — resolved together ([CR-125],
-/// [FR-WS-05]).
+/// One read of the bridge edge set, with the members read for it
+/// ([`bridge_read`]).
+#[derive(Debug, Clone, Default)]
+pub struct BridgeRead {
+    /// The resolved cross-service bindings.
+    pub edges: Arc<Vec<BridgeEdge>>,
+    /// The members the read touched, and the ones it could not read.
+    pub reads: MemberReads,
+}
+
+/// The bridge edge set and the members read for it — what
+/// [`xservice_route_providers`] is built from ([FR-WS-05], [NFR-PE-10]).
 ///
-/// The reachability twin of [`edges`], and the entry point `callers`/`impact`
-/// use instead of it. Both values come from **one** walk at **one** member
-/// sync-stamp snapshot, so the answer and the residue printed beside it can
-/// never describe two different generations of the workspace
-/// ([`ContractBridge::reachability_inputs`] carries the full reasoning).
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+pub fn bridge_read(bridge: &super::bridge::ContractBridge, registry: &EngineRegistry<Engine>) -> BridgeRead {
+    let (edges, reads) = bridge.edges_read(registry);
+    BridgeRead { edges, reads }
+}
+
+/// The inputs one **cross-service reachability** answer is built from — the edge
+/// set, the unresolved egress residue and the members read for them — resolved
+/// together ([`reachability_inputs`]).
+#[derive(Debug, Clone)]
+pub struct ReachabilityInputs {
+    /// The resolved cross-service bindings.
+    pub edges: Arc<Vec<BridgeEdge>>,
+    /// The workspace's unresolved egress, at the same generation as `edges`.
+    pub residue: Arc<WorkspaceEgressResidue>,
+    /// The members the read touched, and the ones it could not read.
+    pub reads: MemberReads,
+}
+
+/// The inputs one **cross-service reachability** answer is built from — the edge
+/// set and the unresolved egress residue — resolved together, with the members
+/// read for them ([CR-125], [FR-WS-05], [NFR-PE-10]).
+///
+/// The reachability twin of [`bridge_read`], and the entry point
+/// `callers`/`impact` use instead of it. Both values come from **one** walk at
+/// **one** member sync-stamp snapshot, so the answer and the residue printed
+/// beside it can never describe two different generations of the workspace
+/// ([`ContractBridge::reachability_read`](super::bridge::ContractBridge::reachability_read)
+/// carries the full reasoning).
 ///
 /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 pub fn reachability_inputs(
     bridge: &super::bridge::ContractBridge,
     registry: &EngineRegistry<Engine>,
-) -> (Arc<Vec<BridgeEdge>>, Arc<WorkspaceEgressResidue>) {
-    bridge.reachability_inputs(registry)
+) -> ReachabilityInputs {
+    let (edges, residue, reads) = bridge.reachability_read(registry);
+    ReachabilityInputs { edges, residue, reads }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bridge read of `edges` that names no member.
+    fn read<const N: usize>(edges: [BridgeEdge; N]) -> BridgeRead {
+        BridgeRead { edges: Arc::new(edges.to_vec()), reads: MemberReads::default() }
+    }
 
     // ── the build-dependency headline on the status payload (S-463) ─────
 
@@ -1681,7 +1781,7 @@ mod tests {
     /// Unscoped, `route-providers` returns every resolved binding verbatim.
     #[test]
     fn route_providers_unscoped_returns_every_edge() {
-        let edges = [edge("api", "op1", "web", "r1"), edge("api", "op2", "svc", "r2")];
+        let edges = read([edge("api", "op1", "web", "r1"), edge("api", "op2", "svc", "r2")]);
         let out = xservice_route_providers(&edges, None);
         assert_eq!(out.providers.len(), 2);
         assert!(out.scope.is_none(), "no scope when repo is None");
@@ -1691,7 +1791,7 @@ mod tests {
     /// that member exposes to the rest of the workspace ([FR-WS-05]).
     #[test]
     fn route_providers_repo_scopes_to_the_provider_member() {
-        let edges = [edge("api", "op1", "web", "r1"), edge("api", "op2", "svc", "r2")];
+        let edges = read([edge("api", "op1", "web", "r1"), edge("api", "op2", "svc", "r2")]);
         let out = xservice_route_providers(&edges, Some("web"));
         assert_eq!(out.providers.len(), 1, "only web-provided routes survive");
         assert_eq!(out.providers[0].to.member, "web");
@@ -1807,7 +1907,7 @@ mod tests {
     /// [BR-57]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[test]
     fn route_providers_carry_both_declared_relations_verbatim_and_beside() {
-        let edges = [edge("api", "op1", "web", "r1")];
+        let edges = read([edge("api", "op1", "web", "r1")]);
         let (relation, join) = pss_relations();
         let coverage = coverage_declaring(Some(relation), Some(join));
         let expected = serde_json::to_value(&coverage).unwrap();
@@ -1824,7 +1924,7 @@ mod tests {
     /// byte as before S-461 — no key, not a `null` one.
     #[test]
     fn route_providers_without_declared_relations_serialize_unchanged() {
-        let edges = [edge("api", "op1", "web", "r1")];
+        let edges = read([edge("api", "op1", "web", "r1")]);
         let before = serde_json::to_string(&xservice_route_providers(&edges, Some("web"))).unwrap();
         let after = serde_json::to_string(
             &xservice_route_providers(&edges, Some("web")).with_declared(coverage_declaring(None, None)),
@@ -1840,7 +1940,7 @@ mod tests {
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     #[test]
     fn a_repo_scope_narrows_providers_and_states_the_relations_are_workspace_wide() {
-        let edges = [edge("api", "op1", "web", "r1")];
+        let edges = read([edge("api", "op1", "web", "r1")]);
         let (relation, join) = pss_relations();
         let out = xservice_route_providers(&edges, Some("api"))
             .with_declared(coverage_declaring(Some(relation), Some(join)));

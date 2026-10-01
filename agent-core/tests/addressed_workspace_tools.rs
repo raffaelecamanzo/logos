@@ -29,8 +29,8 @@ use agent_core::rig::completion::ToolDefinition;
 use agent_core::rig::tool::ToolSet;
 use agent_core::{
     addressed_toolset, governance_toolset, graph_toolset, source_toolset, workspace_reading,
-    workspace_toolset, BoundedDispatcher, DispatchError, Sandbox, ToolBudget, ToolDomain,
-    XserviceBacking, WORKSPACE_TOOL_NAMES,
+    workspace_toolset, xservice_toolset, BoundedDispatcher, DispatchError, Sandbox, ToolBudget,
+    ToolDomain, XserviceBacking, WORKSPACE_TOOL_NAMES,
 };
 use logos_core::federation::{
     query, Backing, ContractBridge, EngineRegistry, Federation, Governance, Member, RegistryMode,
@@ -699,6 +699,33 @@ fn params(pairs: &[(&str, Value)]) -> Map<String, Value> {
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect()
+}
+
+/// **S-484: each bridge-backed `xservice_*` tool names the members it read, as
+/// its MCP twin does** — `member_reads` rides the tool's payload beside the
+/// read-model, and the `reading` line the roster lifts is untouched by it.
+#[tokio::test]
+async fn each_bridge_backed_xservice_tool_names_the_members_it_read_as_its_twin_does() {
+    let ws = Workspace::new();
+    let set = xservice_toolset(ws.backing(false));
+    let (client, server) = federated::boot(ws.registry(false)).await;
+
+    for (tool, call) in [
+        ("xservice_route_providers", json!({})),
+        ("xservice_callers", json!({ "symbol": "shared" })),
+        ("xservice_impact", json!({ "symbol": "shared", "repo": "api" })),
+    ] {
+        let out = set.call(tool, args(call.clone())).await.unwrap_or_else(|e| panic!("{tool}: {e}"));
+        let ours: Value = serde_json::from_str(&out).expect("json");
+        let theirs = federated::call(&client, tool, call.as_object().cloned().unwrap_or_default()).await;
+        assert_eq!(ours["member_reads"], json!({ "read": ["api", "web"] }), "{tool}: {ours}");
+        assert_eq!(ours["member_reads"], theirs["member_reads"], "{tool}: the twin names the same members");
+        let reading = agent_core::xservice_reading(tool, &out).expect("a reading");
+        assert!(!reading.contains("member_reads") && !reading.contains("read:"), "{tool}: {reading}");
+    }
+
+    client.cancel().await.ok();
+    server.abort();
 }
 
 #[tokio::test]

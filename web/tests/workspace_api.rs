@@ -638,12 +638,23 @@ async fn workspace_status_carries_the_degraded_shape_for_an_unopenable_member() 
 async fn workspace_impact_exposes_seed_and_cross_service_tiers() {
     let tmp = workspace();
     let router = ws_router(&tmp);
-    let resp = router.oneshot(get("/api/v1/workspace/impact?symbol=get_user")).await.unwrap();
+    let resp = router.clone().oneshot(get("/api/v1/workspace/impact?symbol=get_user")).await.unwrap();
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(v["seed"].is_array(), "impact carries the per-member seed tier: {body}");
     assert!(v["cross_service"].is_array(), "impact carries the cross-service tier: {body}");
+    // S-484: the members the answer read ride the HTTP payload — the unscoped
+    // seed reads both.
+    assert_eq!(v["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{body}");
+
+    let resp = router.oneshot(get("/api/v1/workspace/callers?symbol=get_user&repo=web")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // The scoped fan-out reads web alone; api is named because the bridge's
+    // stamp check read it (resident since the impact answer above).
+    assert_eq!(v["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{body}");
 }
 
 /// Each parametrised workspace handler rejects a missing/empty required query
@@ -741,6 +752,7 @@ async fn workspace_route_providers_report_the_resolved_binding() {
     assert_eq!(providers.len(), 1, "one resolved cross-service route binding: {body}");
     assert_eq!(providers[0]["from"]["member"], "api", "consumer endpoint repo-qualified");
     assert_eq!(providers[0]["to"]["member"], "web", "provider endpoint repo-qualified");
+    assert_eq!(v["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "S-484: {body}");
 
     // `?repo=web` scopes to routes web provides → the one edge; `?repo=api` → none.
     let scoped = router.clone().oneshot(get("/api/v1/workspace/route-providers?repo=web")).await.unwrap();

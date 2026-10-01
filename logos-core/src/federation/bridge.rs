@@ -37,6 +37,14 @@
 //! ([`SyncStamp`](crate::hydrate::SyncStamp)); when any member re-syncs and its
 //! stamp advances, the next [`ContractBridge::edges`] recomputes.
 //!
+//! Checking the stamps reads only the members whose stamp is not already known
+//! (S-484, [`current_stamps`]): a resident member's live stamp is read; a member
+//! opened before and since evicted would restart at a constant, so its stamp is
+//! stated rather than started; a member never opened, or whose last open
+//! failed, is opened as before. A computation still reads every member, since a
+//! sole provider is a fact about all of them. Every read names the members it
+//! read ([`MemberReads`]).
+//!
 //! [`sync_stamp`]: crate::Engine::sync_stamp
 //! [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
 //! [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
@@ -46,6 +54,7 @@
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -80,7 +89,7 @@ use crate::resolve::route_template::route_key;
 /// Re-exported so [`super::coverage`] classifies with one role vocabulary.
 pub(super) use crate::model::BridgeRole as Role;
 
-use super::registry::{AnswerScope, EngineRegistry, MemberEngine};
+use super::registry::{AnswerScope, EngineRegistry, MemberEngine, MemberReads};
 use super::residue::{egress_residue, WorkspaceEgressResidue};
 
 /// One cross-service endpoint: the portable `(member, symbol)` identity of a
@@ -294,6 +303,25 @@ pub trait MemberContracts {
     /// bridge caches against; it advances when the member re-syncs.
     fn contract_stamp(&self) -> u64;
 
+    /// The sync-stamp a fresh start of the member engine rooted at `root`
+    /// would report, when that is known **without** starting it — `None` when
+    /// only a start can tell ([NFR-PE-10]).
+    ///
+    /// The stamp lives in the engine, not the store, so a member that was
+    /// opened and then evicted has no stamp until it is started again — and a
+    /// restarted [`Engine`](crate::Engine) begins at
+    /// [`SyncStamp::INITIAL`](crate::hydrate::SyncStamp::INITIAL). A stamp
+    /// check can therefore state such a member's stamp without starting it
+    /// ([`current_stamps`]). The default, `None`, keeps the start.
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    fn restart_stamp(_root: &Path) -> Option<u64>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Read this member's arm-tagged cross-service **invocation references** — the
     /// captured call sites (HTTP client calls, gRPC stub calls, broker publishes
     /// *and subscribes*) in its `unresolved_refs` ledger, on **either** side of
@@ -485,6 +513,16 @@ impl MemberContracts for crate::Engine {
         // The inherent `Engine::sync_stamp` returns a `SyncStamp(u64)`; the
         // bridge caches on the bare monotonic value.
         self.sync_stamp().0
+    }
+
+    fn restart_stamp(root: &Path) -> Option<u64> {
+        // Every constructor seeds `sync_stamp` at `INITIAL`, and a start over a
+        // store that is there advances nothing. Only a store at the store path
+        // makes that claim: with none, a start creates one or seeds a worktree
+        // (the seed's diff-reconcile advances the stamp), and with something
+        // else there it fails — so either way it must really be attempted.
+        matches!(super::registry::store_file(root), super::open_state::StoreFile::Present)
+            .then_some(crate::hydrate::SyncStamp::INITIAL.0)
     }
 
     fn invocation_refs(&self) -> Result<Vec<InvocationRef>> {
@@ -1401,7 +1439,7 @@ where
 /// The two caches are **separate slots**, so an `xservice search` or
 /// `route-providers` call pays only for the edges and never for a residue it
 /// will not render ([NFR-PE-01]). They are nonetheless filled through **one**
-/// entry point on the reachability path ([`reachability_inputs`](Self::reachability_inputs)),
+/// entry point on the reachability path ([`reachability_read`](Self::reachability_read)),
 /// keyed on one stamp snapshot, because two independent snapshots can straddle a
 /// member re-sync and make the answer contradict its own residue.
 ///
@@ -1419,8 +1457,23 @@ where
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 #[derive(Debug, Default)]
 pub struct ContractBridge {
-    edge_cache: StampCache<Vec<BridgeEdge>>,
+    edge_cache: StampCache<EdgeSnapshot>,
     residue_cache: StampCache<WorkspaceEgressResidue>,
+}
+
+/// The cached edge set, with the members it was computed **without**.
+///
+/// A member whose engine would not start or whose surface read failed when the
+/// set was computed contributes no edge to it, and an answer served from the
+/// cache still lacks those edges — so every answer read off this snapshot names
+/// those members unread, with their reasons, whether or not it recomputed
+/// ([NFR-CC-04]).
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug)]
+struct EdgeSnapshot {
+    edges: Arc<Vec<BridgeEdge>>,
+    unread: BTreeMap<String, String>,
 }
 
 /// The bridge cache key: each member's sync-stamp at compute time, sorted by
@@ -1505,30 +1558,52 @@ impl ContractBridge {
     /// The cross-service edge set over `registry`'s members, recomputing only
     /// when a member's sync-stamp has advanced since the last call ([FR-WS-04]).
     ///
-    /// The member sync-stamps are read **first** (cheap); on a cache hit the
-    /// per-member `all_nodes` reads are skipped entirely. On a miss the full
+    /// [`edges_read`](Self::edges_read) without the member reads, for a caller
+    /// that renders none.
+    ///
+    /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+    pub fn edges<E>(&self, registry: &EngineRegistry<E>) -> Arc<Vec<BridgeEdge>>
+    where
+        E: MemberEngine + MemberContracts,
+    {
+        self.edges_read(registry).0
+    }
+
+    /// The cross-service edge set over `registry`'s members, and the members
+    /// read to answer it ([FR-WS-04], [NFR-PE-10], [NFR-CC-04]).
+    ///
+    /// The member sync-stamps are checked **first** ([`current_stamps`]): on a
+    /// cache hit the per-member surface reads are skipped entirely, and the
+    /// check itself starts no engine it does not have to. On a miss the full
     /// contract surface is read through each member's read pool via the
-    /// registry fan-out and the edge set is recomputed and re-cached.
+    /// registry fan-out and the edge set is recomputed and re-cached — every
+    /// member, because an edge binds the **sole** provider of a key, and only
+    /// every member's surface can say a provider is the sole one.
     ///
     /// This is a top-level read-model entry point, so it mints the
-    /// [`AnswerScope`] its own walks share — the stamp read and, on a miss, the
+    /// [`AnswerScope`] its own walks share — the stamp check and, on a miss, the
     /// two surface reads are **one** answer, and a member that will not open is
-    /// attempted and announced once across them ([FR-WS-16]).
+    /// attempted and announced once across them ([FR-WS-16]). The
+    /// [`MemberReads`] are that answer's, plus the members the cached set was
+    /// computed without ([`EdgeSnapshot`]).
     ///
     /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
-    pub fn edges<E>(&self, registry: &EngineRegistry<E>) -> Arc<Vec<BridgeEdge>>
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn edges_read<E>(&self, registry: &EngineRegistry<E>) -> (Arc<Vec<BridgeEdge>>, MemberReads)
     where
         E: MemberEngine + MemberContracts,
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
-        self.edge_cache
-            .get_or_compute(stamps, || compute_edges(&answer))
+        let snapshot = self.edge_snapshot(&answer, stamps);
+        (Arc::clone(&snapshot.edges), reads_over(&answer, &snapshot))
     }
 
     /// **The derived read-models one cross-service reachability answer needs**,
-    /// resolved against a **single** stamp snapshot ([CR-125], [FR-WS-05]).
+    /// resolved against a **single** stamp snapshot, and the members read to
+    /// answer it ([CR-125], [FR-WS-05], [NFR-CC-04]).
     ///
     /// Returns the edge set the answer is built from and the unresolved egress
     /// residue reported beside it. Both are projections of the members this call
@@ -1536,12 +1611,12 @@ impl ContractBridge {
     ///
     /// # Why one entry point and not two calls ([FR-WS-16] AC5, [NFR-CC-04])
     /// Calling [`edges`](Self::edges) and a separate residue accessor in sequence
-    /// mints **two** [`AnswerScope`]s and reads the member sync-stamps **twice**.
-    /// Both are defects, and the second is the serious one:
+    /// mints **two** [`AnswerScope`]s and checks the member sync-stamps
+    /// **twice**. Both are defects, and the second is the serious one:
     ///
     /// - a member that will not open is attempted and diagnosed once per scope,
     ///   and [FR-WS-16] AC5 says *once per command*; and
-    /// - between the two stamp reads a member can re-sync under `logos serve`'s
+    /// - between the two stamp checks a member can re-sync under `logos serve`'s
     ///   watcher, so the edge set comes from one generation and the residue from
     ///   the next. A call site resolved in the first then reads as *unresolved*
     ///   in the second — the answer contradicting its own residue, which is
@@ -1558,38 +1633,109 @@ impl ContractBridge {
     /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
     /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    pub fn reachability_inputs<E>(
+    pub fn reachability_read<E>(
         &self,
         registry: &EngineRegistry<E>,
-    ) -> (Arc<Vec<BridgeEdge>>, Arc<WorkspaceEgressResidue>)
+    ) -> (Arc<Vec<BridgeEdge>>, Arc<WorkspaceEgressResidue>, MemberReads)
     where
         E: MemberEngine + MemberContracts,
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
-        let edges = self
-            .edge_cache
-            .get_or_compute(stamps.clone(), || compute_edges(&answer));
+        let snapshot = self.edge_snapshot(&answer, stamps.clone());
         let residue = self
             .residue_cache
             .get_or_compute(stamps, || egress_residue(&answer));
-        (edges, residue)
+        (Arc::clone(&snapshot.edges), residue, reads_over(&answer, &snapshot))
+    }
+
+    /// The edge slot at `stamps`, computing it over `answer` on a miss.
+    fn edge_snapshot<E>(&self, answer: &AnswerScope<'_, E>, stamps: Stamps) -> Arc<EdgeSnapshot>
+    where
+        E: MemberEngine + MemberContracts,
+    {
+        self.edge_cache.get_or_compute(stamps, || {
+            let edges = Arc::new(compute_edges(answer));
+            EdgeSnapshot {
+                edges,
+                unread: answer.reads().unread,
+            }
+        })
     }
 }
 
+/// What one bridge answer read: its own walks, and the members the edge set it
+/// was served was computed without ([`EdgeSnapshot`]).
+fn reads_over<E: MemberEngine>(answer: &AnswerScope<'_, E>, snapshot: &EdgeSnapshot) -> MemberReads {
+    let mut reads = answer.reads();
+    for (member, reason) in &snapshot.unread {
+        reads.note_unread(member, reason.clone());
+    }
+    reads
+}
+
 /// Snapshot each member's current sync-stamp, sorted by member — the bridge
-/// cache key. A member whose engine fails to start contributes no stamp (it is
-/// skipped), so if it later starts the stamp vector changes and the cache
-/// invalidates.
+/// cache key — reading **only** the members whose stamp is not already known
+/// ([NFR-PE-10]). A member whose engine fails to start contributes no stamp (it
+/// is skipped, and named unread in the answer), so if it later starts the stamp
+/// vector changes and the cache invalidates.
+///
+/// # Which members are read, and why that is every member it must read
+/// The vector is exactly the one opening every member would read, built
+/// without opening the ones whose stamp is already known:
+///
+/// - a **resident** member's stamp is read off its live engine — a stamp lives
+///   in the engine and only a resident engine can advance one, so these are
+///   the members whose stamp can have moved. No engine is started, and the
+///   eviction queue is not touched ([`EngineRegistry::peek_resident`]);
+/// - a member **opened before and since evicted** has no live stamp: starting
+///   it again would read [`restart_stamp`](MemberContracts::restart_stamp), so
+///   that is its entry, and it is neither started nor counted read. Opening it
+///   to read a constant was the whole cost of the old check — every member, on
+///   every cross-service query, whatever `repo` said. An `Engine` states it only
+///   while the member's store file is there: a store deleted or obstructed since
+///   is opened, as below, so a member that will not start any more drops out of
+///   the vector and is named unread, as it was;
+/// - a member **never attempted, or whose last open failed**, is opened, as
+///   before: whether it starts is not yet known, and a member that now starts
+///   adds an entry and invalidates the cache. Likewise every member whose
+///   restart stamp cannot be stated (`restart_stamp` is `None`).
+///
+/// # Where it differs from opening every member
+/// A store that is **there but no longer opens** — corrupt contents, a schema
+/// newer than this binary, an `open(2)` refused — is not detected until a tier
+/// of the answer opens the member: the bridge serves the edges it last read
+/// from it, and the member is named unread only by a tier that opens it (the
+/// per-member fan-out, `impact`'s far side). The old check opened it and would
+/// have dropped it. A member's store **changed** by another process while it was
+/// not resident is as invisible here as it was to the old check, which reopened
+/// it at the same constant.
 pub(super) fn current_stamps<E>(answer: &AnswerScope<'_, E>) -> Stamps
 where
     E: MemberEngine + MemberContracts,
 {
-    let mut stamps: Vec<(String, u64)> = answer
-        .fan_out(|_, engine| engine.contract_stamp())
-        .into_iter()
-        .filter_map(|scoped| scoped.value.ok().map(|stamp| (scoped.member, stamp)))
-        .collect();
+    let registry = answer.registry();
+    let opened = registry.last_opened();
+    let mut stamps: Stamps = Vec::new();
+    for member in registry.members() {
+        let name = member.name.as_str();
+        let restart = || E::restart_stamp(&member.root);
+        let engine = match (registry.peek_resident(name), opened.contains(name).then(restart).flatten()) {
+            (Some(engine), _) => {
+                answer.note_read(name);
+                engine
+            }
+            (None, Some(stamp)) => {
+                stamps.push((name.to_string(), stamp));
+                continue;
+            }
+            (None, _) => match answer.open_for_walk(name) {
+                Ok(engine) => engine,
+                Err(_) => continue,
+            },
+        };
+        stamps.push((name.to_string(), engine.contract_stamp()));
+    }
     stamps.sort();
     stamps
 }
@@ -1643,10 +1789,13 @@ where
         let member = scoped.member;
         match scoped.value {
             Ok(Ok(value)) => out.push((member, value)),
-            Ok(Err(err)) => tracing::warn!(
-                member = %member,
-                "reading a workspace member's {subject} failed; degraded without it: {err:#}"
-            ),
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    member = %member,
+                    "reading a workspace member's {subject} failed; degraded without it: {err:#}"
+                );
+                answer.note_unread(&member, format!("reading its {subject} failed: {err:#}"));
+            }
             Err(err) => {
                 if answer.announce_open_failure(&member) {
                     tracing::warn!(
@@ -2105,7 +2254,8 @@ mod tests {
     use crate::graph_store::ConfigDefinition;
 
     use std::cell::{Cell, RefCell};
-    use std::path::{Path, PathBuf};
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     use super::super::{Federation, Member};
     use super::super::registry::RegistryMode;
@@ -2121,6 +2271,19 @@ mod tests {
         /// How many times each member's committed configuration was read — the
         /// corpus-open budget [NFR-PE-10] bounds (S-420).
         static CONFIG_READS: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+        /// How many times each member's sync-stamp was read — the instrument
+        /// S-484's "reads only the members it needs" is asserted on.
+        static STAMP_READS: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+        /// What `FakeEngine::restart_stamp` reports: `None` (the default, every
+        /// pre-S-484 test) keeps the stamp check opening every member; `Some`
+        /// makes the fake behave like `Engine`, whose fresh stamp is a constant.
+        static RESTART_STAMP: Cell<Option<u64>> = const { Cell::new(None) };
+        /// Members whose engine fails to start until removed from the set — a
+        /// store that recovers, unlike the always-failing `"broken"`.
+        static FAILS_TO_START: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+        /// Members whose store file is gone or obstructed — what `Engine`'s
+        /// `restart_stamp` reads off the store path.
+        static STORE_GONE: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     }
 
     #[derive(Clone, Default)]
@@ -2137,6 +2300,10 @@ mod tests {
         SURFACE_READS.with(|c| c.set(0));
         RESYNC_ON_FIRST_READ.with(|c| c.set(false));
         CONFIG_READS.with(|c| c.borrow_mut().clear());
+        STAMP_READS.with(|c| c.borrow_mut().clear());
+        RESTART_STAMP.with(|c| c.set(None));
+        FAILS_TO_START.with(|c| c.borrow_mut().clear());
+        STORE_GONE.with(|c| c.borrow_mut().clear());
     }
 
     /// Commit `key` in `member`'s own configuration, once per `(file, profile,
@@ -2242,7 +2409,7 @@ mod tests {
     /// what `logos serve`'s watcher does while a request is in flight: the
     /// fixture bumps `web`'s stamp on the first contract-surface read. Two
     /// independent snapshots would then straddle that bump and key the two slots
-    /// differently; [`ContractBridge::reachability_inputs`] takes the snapshot
+    /// differently; [`ContractBridge::reachability_read`] takes the snapshot
     /// **before** either slot is filled, so both are keyed on one vector and the
     /// window does not exist.
     ///
@@ -2258,7 +2425,7 @@ mod tests {
 
         // `web` re-indexes the instant this answer starts reading surfaces.
         RESYNC_ON_FIRST_READ.with(|c| c.set(true));
-        let (edges, residue) = bridge.reachability_inputs(&reg);
+        let (edges, residue, _) = bridge.reachability_read(&reg);
 
         assert_eq!(
             bridge.edge_cache.cached_stamps(),
@@ -2297,7 +2464,7 @@ mod tests {
     ///
     /// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
     #[test]
-    fn reachability_inputs_hits_both_caches_without_re_reading_any_member_surface() {
+    fn reachability_read_hits_both_caches_without_re_reading_any_member_surface() {
         reset();
         set_member("api", 3, vec![op("GET /users/{id}", "local op_get")]);
         set_member("web", 7, vec![route("GET /users/{id}", "local route_get")]);
@@ -2305,7 +2472,7 @@ mod tests {
         let reg = registry(&["api", "web"]);
         let bridge = ContractBridge::new();
 
-        let (edges_a, residue_a) = bridge.reachability_inputs(&reg);
+        let (edges_a, residue_a, _) = bridge.reachability_read(&reg);
         let reads = surface_reads();
         assert!(reads >= 2, "the first call reads each member");
         assert_eq!(
@@ -2314,7 +2481,7 @@ mod tests {
             "guard the guard: a residue that is empty proves nothing about caching"
         );
 
-        let (edges_b, residue_b) = bridge.reachability_inputs(&reg);
+        let (edges_b, residue_b, _) = bridge.reachability_read(&reg);
         assert_eq!(
             surface_reads(),
             reads,
@@ -2329,7 +2496,7 @@ mod tests {
 
         // A stamp advance invalidates BOTH, together.
         bump_stamp("web");
-        let (edges_c, residue_c) = bridge.reachability_inputs(&reg);
+        let (edges_c, residue_c, _) = bridge.reachability_read(&reg);
         assert!(surface_reads() > reads, "the advance forces a recompute");
         assert!(!Arc::ptr_eq(&edges_a, &edges_c));
         assert!(!Arc::ptr_eq(&residue_a, &residue_c));
@@ -2356,7 +2523,7 @@ mod tests {
         let reg = registry(&["api", "unreadable"]);
         let bridge = ContractBridge::new();
 
-        let (_edges, residue) = bridge.reachability_inputs(&reg);
+        let (_edges, residue, _) = bridge.reachability_read(&reg);
         assert!(
             !residue.covers_all_members,
             "one member's surface could not be read: {residue:?}"
@@ -2378,8 +2545,287 @@ mod tests {
         set_consumers("api", vec![http_call("", "local api_call")]);
         set_member("web", 1, Vec::new());
         let reg = registry(&["api", "web"]);
-        let (_edges, residue) = ContractBridge::new().reachability_inputs(&reg);
+        let (_edges, residue, _) = ContractBridge::new().reachability_read(&reg);
         assert!(residue.covers_all_members, "both members read: {residue:?}");
+    }
+
+    // ── the stamp check reads only the members it needs (S-484) ─────────
+
+    /// **Unread wins** ([NFR-CC-04]): once a member is named unread in an
+    /// answer, a later read of something else off it does not re-list it as
+    /// read — the answer still lacks what the failed read would have
+    /// contributed, as the per-member fan-out reading a member whose contract
+    /// surface failed would otherwise claim. The first reason stands.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_member_named_unread_stays_unread_whatever_is_read_off_it_later() {
+        let mut reads = MemberReads::default();
+        reads.note_read("api");
+        reads.note_unread("api", "reading its contract surface failed: store read failed");
+        reads.note_unread("api", "a later reason");
+        reads.note_read("api");
+        assert!(reads.read.is_empty(), "a read after the failure does not re-list it: {reads:?}");
+        assert_eq!(
+            reads.unread.get("api").map(String::as_str),
+            Some("reading its contract surface failed: store read failed"),
+            "the first reason stands"
+        );
+    }
+
+    /// How many times each member's sync-stamp was read since the last reset.
+    fn stamp_reads() -> BTreeMap<String, usize> {
+        STAMP_READS.with(|c| c.borrow().iter().map(|(m, n)| (m.clone(), *n)).collect())
+    }
+
+    fn clear_stamp_reads() {
+        STAMP_READS.with(|c| c.borrow_mut().clear());
+    }
+
+    /// The five-member workspace S-484's criterion is stated over: `web`
+    /// calls a route `api` provides — the one edge, so the answer involves two
+    /// members — and three members the answer has nothing to do with. Every
+    /// fake starts at the restart stamp, as a real `Engine` does. Two members
+    /// may be resident at once.
+    fn five_member_workspace() -> EngineRegistry<FakeEngine> {
+        RESTART_STAMP.with(|c| c.set(Some(0)));
+        set_member("api", 0, vec![route("GET /users/{id}", "local api_route")]);
+        set_member("web", 0, Vec::new());
+        set_consumers("web", vec![http_call("GET /users/{id}", "local web_call")]);
+        for unrelated in ["billing", "search", "audit"] {
+            set_member(unrelated, 0, Vec::new());
+        }
+        let federation = fed(&["api", "web", "billing", "search", "audit"]);
+        let tight = super::super::budget::WorkspaceBudget::from_limits(64, 1);
+        assert_eq!(tight.max_resident_members(), 2, "the fixture's residency ceiling");
+        EngineRegistry::with_budget(federation, RegistryMode::Lazy, tight)
+    }
+
+    fn names(members: &[&str]) -> BTreeSet<String> {
+        members.iter().map(|m| (*m).to_string()).collect()
+    }
+
+    /// **S-484: a warm bridge reads the stamps of only the members it needs**
+    /// ([NFR-PE-10]). On five members where the answer involves two, the stamp
+    /// check reads exactly those two — counted at the engine, not inferred —
+    /// and the answer names them. The old check read all five, opening the
+    /// three evicted ones to read a stamp starting them would have reset.
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    #[test]
+    fn a_warm_bridge_reads_the_stamps_of_only_the_members_it_needs() {
+        reset();
+        let reg = five_member_workspace();
+        let bridge = ContractBridge::new();
+        let (cold, cold_reads) = bridge.edges_read(&reg);
+        assert_eq!(cold.len(), 1, "guard the guard: the one edge the answer involves: {cold:?}");
+        assert_eq!(
+            cold_reads.read,
+            names(&["api", "audit", "billing", "search", "web"]),
+            "cold, every member's surface is read — an edge binds the SOLE provider"
+        );
+
+        // The answer's two members are the working set (a chat that asked
+        // about them through the member-addressed tools leaves them resident).
+        reg.engine_for("api").unwrap();
+        reg.engine_for("web").unwrap();
+        assert_eq!(reg.resident_members(), ["api", "web"]);
+        clear_stamp_reads();
+        let starts = reg.engine_starts();
+
+        let (warm, warm_reads) = bridge.edges_read(&reg);
+        assert!(Arc::ptr_eq(&cold, &warm), "the cached edge set is served");
+        assert_eq!(
+            stamp_reads(),
+            BTreeMap::from([("api".to_string(), 1), ("web".to_string(), 1)]),
+            "exactly the two members the answer involves had their stamp read"
+        );
+        assert_eq!(reg.engine_starts(), starts, "and no engine was started to read one");
+        assert_eq!(warm_reads.read, names(&["api", "web"]), "the answer names them");
+        assert!(warm_reads.unread.is_empty(), "{warm_reads:?}");
+    }
+
+    /// **Checking the stamps does not reorder the eviction queue**
+    /// ([NFR-PE-10]): a resident member's stamp is read without marking it
+    /// touched, so the members the answers actually used stay the hot ones.
+    /// `api` is touched after `web`; a stamp check that touched them in roster
+    /// order would leave `web` the most recent, and admitting `billing` would
+    /// then evict `api` instead of `web`.
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    #[test]
+    fn a_stamp_check_leaves_the_eviction_order_as_the_answers_left_it() {
+        reset();
+        let reg = five_member_workspace();
+        let bridge = ContractBridge::new();
+        let _ = bridge.edges(&reg);
+        reg.evict_to_capacity(0);
+        reg.engine_for("web").unwrap();
+        reg.engine_for("api").unwrap();
+        let (_, reads) = bridge.edges_read(&reg);
+        assert_eq!(reads.read, names(&["api", "web"]), "guard the guard: both resident stamps were read");
+
+        reg.engine_for("billing").unwrap();
+        assert_eq!(reg.resident_members(), ["api", "billing"], "web, the least recently used, was evicted");
+    }
+
+    /// The other half of the rule, and why it is sound: a **resident** member
+    /// is read whether or not the answer involves it, because a stamp lives in
+    /// the engine and only a resident engine can advance one — and its advance
+    /// still invalidates the cache, as it did when every member was read.
+    #[test]
+    fn a_resident_member_is_read_because_only_it_can_have_moved() {
+        reset();
+        let reg = five_member_workspace();
+        let bridge = ContractBridge::new();
+        let cold = bridge.edges(&reg);
+        reg.evict_to_capacity(0);
+        reg.engine_for("billing").unwrap();
+        clear_stamp_reads();
+
+        let (warm, reads) = bridge.edges_read(&reg);
+        assert!(Arc::ptr_eq(&cold, &warm));
+        assert_eq!(stamp_reads(), BTreeMap::from([("billing".to_string(), 1)]));
+        assert_eq!(reads.read, names(&["billing"]));
+
+        // `billing` re-syncs while resident: the next read recomputes.
+        bump_stamp("billing");
+        let surfaces = surface_reads();
+        let after = bridge.edges(&reg);
+        assert!(surface_reads() > surfaces, "the resident member's advance forces a recompute");
+        assert!(!Arc::ptr_eq(&cold, &after));
+    }
+
+    /// A member that advanced its stamp and was then evicted is a **miss** —
+    /// its restart stamp differs from the one cached — exactly as when the old
+    /// check reopened it and read the reset stamp. The narrowing never turns
+    /// that miss into a hit.
+    #[test]
+    fn an_evicted_member_whose_stamp_moved_still_invalidates() {
+        reset();
+        let reg = five_member_workspace();
+        let bridge = ContractBridge::new();
+        let _ = bridge.edges(&reg);
+        reg.evict_to_capacity(0);
+        reg.engine_for("search").unwrap();
+        bump_stamp("search"); // resident, re-synced
+        let advanced = bridge.edges(&reg);
+        assert!(
+            bridge.edge_cache.cached_stamps().is_some_and(|s| s.contains(&("search".to_string(), 1))),
+            "guard the guard: the advance was read and cached: {:?}",
+            bridge.edge_cache.cached_stamps()
+        );
+        reg.evict_to_capacity(0); // `search` would restart at 0
+
+        let surfaces = surface_reads();
+        let after = bridge.edges(&reg);
+        assert!(surface_reads() > surfaces, "the restart stamp differs from the cached one");
+        assert!(!Arc::ptr_eq(&advanced, &after));
+    }
+
+    /// A member whose last open **failed** is opened again by every check —
+    /// whether it starts now is not known — and one that recovers adds its
+    /// stamp and invalidates the cache, as it did when every member was opened.
+    /// It stays failed across warm hits first, so a check that stopped retrying
+    /// it after one hit would serve the stale set on recovery.
+    #[test]
+    fn a_member_whose_last_open_failed_is_retried_and_its_recovery_invalidates() {
+        reset();
+        RESTART_STAMP.with(|c| c.set(Some(0)));
+        set_member("api", 0, vec![route("GET /users/{id}", "local api_route")]);
+        set_member("flaky", 0, Vec::new());
+        set_consumers("flaky", vec![http_call("GET /users/{id}", "local flaky_call")]);
+        FAILS_TO_START.with(|c| c.borrow_mut().insert("flaky".to_string()));
+        let reg = registry(&["api", "flaky"]);
+        let bridge = ContractBridge::new();
+        let (cold, reads) = bridge.edges_read(&reg);
+        assert!(cold.is_empty() && reads.unread.contains_key("flaky"), "{reads:?}");
+        for _ in 0..2 {
+            let (warm, reads) = bridge.edges_read(&reg);
+            assert!(warm.is_empty() && reads.unread.contains_key("flaky"), "still failing: {reads:?}");
+        }
+
+        FAILS_TO_START.with(|c| c.borrow_mut().clear());
+        let (recovered, reads) = bridge.edges_read(&reg);
+        assert_eq!(recovered.len(), 1, "the recovered member's call binds: {recovered:?}");
+        assert!(reads.read.contains("flaky") && reads.unread.is_empty(), "{reads:?}");
+    }
+
+    /// **A member opened before whose store has since gone is opened, not
+    /// stated** (review finding A). Its restart cannot be stated without the
+    /// store, so the check attempts it; it fails to start, drops out of the
+    /// vector, the cache misses, and the answer no longer serves its edges and
+    /// names it unread — what opening every member did.
+    #[test]
+    fn an_evicted_member_whose_store_is_gone_is_opened_and_named_not_served() {
+        reset();
+        RESTART_STAMP.with(|c| c.set(Some(0)));
+        set_member("api", 0, vec![route("GET /users/{id}", "local api_route")]);
+        set_member("flaky", 0, Vec::new());
+        set_consumers("flaky", vec![http_call("GET /users/{id}", "local flaky_call")]);
+        let reg = registry(&["api", "flaky"]);
+        let bridge = ContractBridge::new();
+        let (cold, _) = bridge.edges_read(&reg);
+        assert_eq!(cold.len(), 1, "guard the guard: flaky's call binds api's route");
+
+        reg.evict_to_capacity(0);
+        STORE_GONE.with(|c| c.borrow_mut().insert("flaky".to_string()));
+        FAILS_TO_START.with(|c| c.borrow_mut().insert("flaky".to_string()));
+        let (warm, reads) = bridge.edges_read(&reg);
+        assert!(warm.is_empty(), "the gone member's edge is no longer served: {warm:?}");
+        assert!(
+            reads.unread.get("flaky").is_some_and(|r| r.contains("store is corrupt")),
+            "and the member is named with its reason: {reads:?}"
+        );
+    }
+
+    /// Without a constant restart stamp the check opens every non-resident
+    /// member, as before S-484: the narrowing is earned by the engine type, and
+    /// one that cannot state its fresh stamp keeps the old read.
+    #[test]
+    fn an_engine_without_a_restart_stamp_keeps_the_all_member_read() {
+        reset();
+        let reg = five_member_workspace();
+        RESTART_STAMP.with(|c| c.set(None));
+        let bridge = ContractBridge::new();
+        let _ = bridge.edges(&reg);
+        reg.evict_to_capacity(0);
+        clear_stamp_reads();
+        let (_, reads) = bridge.edges_read(&reg);
+        assert_eq!(stamp_reads().len(), 5, "every member opened for its stamp: {:?}", stamp_reads());
+        assert_eq!(reads.read.len(), 5);
+    }
+
+    /// **A member that could not be read is named with its reason, never
+    /// omitted** ([NFR-CC-04]) — on the read that computed the edge set and on
+    /// every warm read served from it, since the cached set still lacks what
+    /// that member would have contributed. One whose engine will not start is
+    /// re-attempted by each check (whether it starts now is not known).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn a_member_that_could_not_be_read_is_named_with_its_reason() {
+        reset();
+        RESTART_STAMP.with(|c| c.set(Some(0)));
+        set_member("api", 0, vec![route("GET /users/{id}", "local api_route")]);
+        set_member("web", 0, Vec::new());
+        set_member("unreadable", 0, Vec::new());
+        let reg = registry(&["api", "web", "unreadable", "broken"]);
+        let bridge = ContractBridge::new();
+
+        for (pass, read) in [("cold", bridge.edges_read(&reg).1), ("warm", bridge.edges_read(&reg).1)] {
+            assert!(
+                read.unread.get("broken").is_some_and(|r| r.contains("store is corrupt")),
+                "{pass}: the start failure is named with its diagnostic: {read:?}"
+            );
+            assert!(
+                read.unread.get("unreadable").is_some_and(|r| {
+                    r.starts_with("reading its contract surface failed") && r.contains("store read failed")
+                }),
+                "{pass}: the read failure is named with what failed: {read:?}"
+            );
+            assert!(!read.read.contains("broken") && !read.read.contains("unreadable"), "{pass}: {read:?}");
+        }
     }
 
     fn surface_reads() -> usize {
@@ -2408,8 +2854,13 @@ mod tests {
             _worker_pool: crate::SharedWorkerPool,
         ) -> Result<Arc<Self>> {
             let member = member_of(root);
-            if member == "broken" {
+            if member == "broken" || FAILS_TO_START.with(|c| c.borrow().contains(&member)) {
                 anyhow::bail!("store is corrupt");
+            }
+            // With a restart stamp the fake keeps its stamp in the engine, as
+            // `Engine` does: a start resets it.
+            if let Some(stamp) = RESTART_STAMP.with(Cell::get) {
+                FIXTURES.with(|f| f.borrow_mut().entry(member.clone()).or_default().stamp = stamp);
             }
             Ok(Arc::new(FakeEngine { member }))
         }
@@ -2438,7 +2889,13 @@ mod tests {
             }))
         }
         fn contract_stamp(&self) -> u64 {
+            STAMP_READS.with(|c| *c.borrow_mut().entry(self.member.clone()).or_default() += 1);
             FIXTURES.with(|f| f.borrow().get(&self.member).map(|m| m.stamp).unwrap_or(0))
+        }
+        fn restart_stamp(root: &Path) -> Option<u64> {
+            // A member whose store is gone cannot have its restart stated.
+            let gone = STORE_GONE.with(|c| c.borrow().contains(&member_of(root)));
+            RESTART_STAMP.with(Cell::get).filter(|_| !gone)
         }
         // The single ledger seam — the bridge and the coverage tier both read it and
         // apply the role themselves, so a fixture's provider-role rows (a broker
