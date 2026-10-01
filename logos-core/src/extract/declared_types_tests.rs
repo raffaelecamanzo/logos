@@ -216,6 +216,14 @@ fn a_java_file_outside_every_source_root_is_named_by_the_default_key_and_refused
 }
 
 #[test]
+fn a_test_shaped_file_outside_every_source_root_is_tagged_test() {
+    let types = declared("com/x/SvcTest.java", "package com.x;\nclass SvcTest {}\n");
+    assert_eq!(summary(&types), vec![(Ok("com.x.SvcTest"), "class", "test")]);
+    let types = declared("com/x/Svc.java", "package com.x;\nclass Svc {}\n");
+    assert_eq!(summary(&types), vec![(Ok("com.x.Svc"), "class", "main")]);
+}
+
+#[test]
 fn a_file_of_a_language_that_is_not_package_shaped_declares_nothing() {
     assert!(declared("src/lib.rs", "pub struct S;\npub enum E { A }\npub trait T {}\n").is_empty());
     assert!(declared("src/main/java/app.py", "class Svc:\n    pass\n").is_empty());
