@@ -861,9 +861,11 @@ async fn the_workspace_roster_opens_no_member_and_only_a_scoped_search_opens_jus
     // The bridge-backed tools are NOT lazy per `repo` on a COLD bridge: this is
     // the turn's first bridge-backed call, and building the edge set reads every
     // member's surface whatever the scope, as the MCP twin does — an edge binds
-    // the sole provider, which only the whole workspace can name. (A WARM bridge
-    // re-reads only the stamps of the members it needs since S-484 —
-    // `logos-core`'s `a_warm_bridge_reads_the_stamps_of_only_the_members_it_needs`.)
+    // the sole provider, which only the whole workspace can name. (Since S-484 a
+    // WARM bridge reads only the resident members' stamps — the ones that can have
+    // moved — states an evicted member's restart stamp without starting it, and
+    // opens only a member it has not opened yet, failed to open, or whose store
+    // has gone — `logos-core`'s `current_stamps`.)
     // Pinned so the tool text cannot drift back to promising otherwise — and the
     // residency still stays inside the registry's budget.
     let (observation, _) = run_turn(
