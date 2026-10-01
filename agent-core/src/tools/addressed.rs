@@ -22,8 +22,11 @@
 //!
 //! # The addressed member's sandbox ([NFR-SE-04])
 //! A source call's sandbox is the addressed member's root, with that member's
-//! own `ignored_dirs` and `[chat] read_roots` (its `.logos/config.toml`, read
-//! roots resolved against its root). Paths are member-relative, so a sibling
+//! own `ignored_dirs` and the **effective** `[chat] read_roots` its own chat
+//! reads through — its own table's, resolved against its root, or the
+//! workspace table's, resolved against the workspace root, when it declares no
+//! `[chat] model` and so inherits that table whole (S-482). Paths are
+//! member-relative, so a sibling
 //! member or a file of the workspace root itself is reachable only through `..`,
 //! an absolute path or an escaping symlink — each a containment refusal, carried
 //! to the dispatch seam as the typed [`SandboxError`](super::SandboxError) the
@@ -230,9 +233,15 @@ fn member_engine(registry: &EngineRegistry<Engine>, repo: &str) -> Result<Arc<En
         .map_err(|err| tool_error(ToolCallError::Engine(err)))
 }
 
-/// The member's sandbox: its root, its `ignored_dirs`, and its `[chat]
-/// read_roots` resolved against that root — what [`Sandbox::from_root`] builds,
-/// plus the read roots, from one read of the member's config.
+/// The member's sandbox: the one its own chat reads through ([NFR-SE-04]) —
+/// its root, its `ignored_dirs`, and its **effective** `[chat] read_roots`,
+/// resolved through the chat seam against the workspace root exactly as the
+/// member chat resolves them ([`Sandbox::with_chat_read_roots`]). A member that
+/// inherits the workspace's `[chat]` table therefore reads through the
+/// workspace's read roots, never its own, so an addressed `read` admits no path
+/// that member's chat refuses.
+///
+/// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
 fn member_sandbox(registry: &EngineRegistry<Engine>, repo: &str) -> Result<Sandbox, ToolError> {
     let root = registry
         .members()
@@ -240,10 +249,13 @@ fn member_sandbox(registry: &EngineRegistry<Engine>, repo: &str) -> Result<Sandb
         .find(|member| member.name == repo)
         .map(|member| member.root.as_path())
         .ok_or_else(|| invalid(format!("no workspace member is named {repo:?}")))?;
-    let config = logos_core::config::load_config_from_root(root)
-        .map_err(|err| tool_error(ToolCallError::Engine(err.into())))?;
+    let workspace_root = registry.federation().root.as_path();
+    let config_fault = |err: logos_core::config::ConfigError| tool_error(ToolCallError::Engine(err.into()));
+    let config = logos_core::config::load_config_from_root(root).map_err(config_fault)?;
+    let resolution =
+        logos_core::config::resolve_chat(root, Some(workspace_root)).map_err(config_fault)?;
     Sandbox::new(root, config.semantics.ignored_dirs)
-        .and_then(|sandbox| sandbox.with_read_roots(root, &config.chat.read_roots))
+        .and_then(|sandbox| sandbox.with_chat_read_roots(root, Some(workspace_root), &resolution))
         .map_err(tool_error)
 }
 

@@ -42,6 +42,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use globset::GlobBuilder;
+use logos_core::config::{ChatOrigin, ChatResolution};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
@@ -263,6 +264,37 @@ impl Sandbox {
         }
         self.read_roots = Arc::new(roots);
         Ok(self)
+    }
+
+    /// Declare the read roots of the chat that reads `member_root` — the
+    /// effective `[chat] read_roots` of `resolution` ([`resolve_chat`] over
+    /// `member_root` and `workspace_root`), resolved against the root that
+    /// declared that table: the workspace root for an inherited policy, else the
+    /// member (sprint-79 HF-1, [ADR-67]).
+    ///
+    /// The one spelling of that rule, shared by the member chat's turn setup and
+    /// the workspace chat's repo-addressed source tools, so an addressed `read`
+    /// never admits a path the member's own chat refuses ([NFR-SE-04]). A member
+    /// that declares `read_roots` but no `model` inherits the workspace table
+    /// whole, and its own `read_roots` go with the rest of its table.
+    ///
+    /// # Errors
+    /// [`SandboxError::BadReadRoot`] as [`with_read_roots`](Self::with_read_roots).
+    ///
+    /// [`resolve_chat`]: logos_core::config::resolve_chat
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    /// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
+    pub fn with_chat_read_roots(
+        self,
+        member_root: &Path,
+        workspace_root: Option<&Path>,
+        resolution: &ChatResolution,
+    ) -> Result<Self, SandboxError> {
+        let declaring_root = match (resolution.policy_origin, workspace_root) {
+            (ChatOrigin::Workspace, Some(workspace_root)) => workspace_root,
+            _ => member_root,
+        };
+        self.with_read_roots(declaring_root, &resolution.policy.read_roots)
     }
 
     /// The canonical project root.

@@ -5,9 +5,10 @@
 //! background index warm are CLI-surface concerns (terminal I/O / process
 //! spawning) that live in the `cli` crate, not here.
 //!
-//! Enablement also maintains the **workspace-root ignore entry** for the
-//! [FR-WS-17] warm-outcome sidecar, but only where the root is a git working
-//! tree ([`maintain_root_ignore`], [CR-104]) — through [`crate::init`]'s
+//! Enablement also maintains the **workspace-root ignore entries** for the
+//! [FR-WS-17] warm-outcome sidecar, the workspace chat credential and the
+//! workspace chat's conversation store, but only where the root is a git
+//! working tree ([`maintain_root_ignore`], [CR-104]) — through [`crate::init`]'s
 //! existing managed-block writer rather than a second copy of it.
 //!
 //! The report also states the **working-tree footprint** enablement leaves
@@ -507,9 +508,23 @@ pub fn candidates_for_approval(
         .collect())
 }
 
+/// The workspace chat's conversation store at the workspace root and its WAL
+/// sidecars ([FR-WS-34], S-482): `chat-agent`'s `db_path` of the workspace root
+/// is `.logos/chat.db`, and SQLite's WAL mode writes `-wal`/`-shm` beside it.
+/// The same `chat.db*` shape a member's `.logos/.gitignore` carries
+/// ([FR-IN-04]), spelled from the root because this entry lives in the root's
+/// `.gitignore`. `logos-core` cannot name `chat-agent`'s path (the dependency
+/// runs the other way), so the drift guard is behavioural: the web suite runs a
+/// real workspace turn through the real store and asserts the root stays clean.
+///
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+/// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
+const WORKSPACE_CHAT_STORE_PATTERN: &str = ".logos/chat.db*";
+
 /// Maintain the workspace-root ignore entries for the [FR-WS-17] warm-outcome
-/// sidecar and the workspace chat credential — **only where they mean
-/// something** ([FR-WS-02], [FR-WS-30], [CR-104]).
+/// sidecar, the workspace chat credential and the workspace chat's
+/// conversation store — **only where they mean something** ([FR-WS-02],
+/// [FR-WS-30], [FR-WS-34], [CR-104]).
 ///
 /// The sidecar is host-local machine state written beside `logos.workspace.toml`,
 /// which is checked-in configuration; a workspace root can therefore legitimately
@@ -523,6 +538,8 @@ pub fn candidates_for_approval(
 /// The same holds for the second entry, the workspace chat credential
 /// ([FR-WS-30]): the root is an ordinary config root, so its `secrets.toml` sits
 /// at the credential store's own relative path, and that path is what is passed.
+/// The third, the workspace chat's store ([`WORKSPACE_CHAT_STORE_PATTERN`]), is
+/// a glob because the store is three files.
 ///
 /// # The gate is tri-state, deliberately
 /// [`git_root_known`] rather than [`is_git_root`](crate::workspace::is_git_root):
@@ -539,6 +556,7 @@ pub fn candidates_for_approval(
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
 /// [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 /// [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
 /// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
@@ -547,14 +565,19 @@ fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
     if git_root_known(root) == Some(true) {
         return init::workspace_root_gitignore(
             root,
-            &[warm_state::OUTCOME_FILENAME, crate::config::SECRETS_RELPATH],
+            &[
+                warm_state::OUTCOME_FILENAME,
+                crate::config::SECRETS_RELPATH,
+                WORKSPACE_CHAT_STORE_PATTERN,
+            ],
         );
     }
     Ok(InitStep {
         target: ".gitignore".to_string(),
         action: InitAction::Skipped,
         detail: "workspace root is not the top level of a git repository — no root .gitignore \
-                 written (the workspace credential is kept out by its own .logos/.gitignore)"
+                 written (the workspace credential and chat store are kept out by the root's own \
+                 .logos/.gitignore, written by the first workspace config save)"
             .to_string(),
     })
 }
@@ -1094,6 +1117,47 @@ mod tests {
             !ignores("member/.logos/secrets.toml"),
             "anchored to the workspace root, not matched at every depth"
         );
+    }
+
+    /// The same managed entry keeps the **workspace chat's conversation store**
+    /// out of version control ([FR-WS-34], S-482): the workspace chat persists
+    /// its turns to `<workspace root>/.logos/chat.db`, which SQLite's WAL mode
+    /// shadows with `-wal`/`-shm` sidecars, so all three must leave a tracked
+    /// root clean. Root-anchored for the reason the credential entry is: a
+    /// DB-only member's own `.logos/chat.db` is its own managed ignore's
+    /// business, not this one's. (The end-to-end twin — a real workspace turn
+    /// through the real store — is `web/tests/workspace_chat.rs`.)
+    ///
+    /// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+    #[test]
+    fn a_tracked_workspace_root_ignores_the_workspace_chat_store() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+
+        enable(root, "shop", &[]).expect("enables");
+        sh_git(root, &["add", "-A"]);
+        sh_git(root, &["commit", "-q", "-m", "enable"]);
+
+        fs::create_dir_all(root.join(".logos")).unwrap();
+        for store in ["chat.db", "chat.db-wal", "chat.db-shm"] {
+            fs::write(root.join(".logos").join(store), "").unwrap();
+        }
+        assert_eq!(porcelain(root), "", "the workspace chat store leaves the root clean");
+
+        let ignores = |rel: &str| {
+            git_cmd(root)
+                .args(["check-ignore", "-q", "--no-index", rel])
+                .status()
+                .expect("git is on PATH")
+                .success()
+        };
+        assert!(
+            !ignores("member/.logos/chat.db"),
+            "anchored to the workspace root, not matched at every depth"
+        );
+        assert!(!ignores(".logos/chat"), "a near miss beside the store is not swept up");
+        assert!(!ignores(".logos/config.toml"), "the workspace chat policy still travels");
     }
 
     /// A tracked root **with members**: the two named ACs that no other test

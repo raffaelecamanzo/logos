@@ -344,6 +344,30 @@ pub const CHAT_POST_ROUTE: &str = "/chat";
 /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
 pub const CHAT_THREADS_ROUTE: &str = "/api/v1/chat/threads";
 
+/// The workspace chat's turn `POST` route ([S-482], [FR-WS-34], [ADR-71]): the
+/// workspace roster's turn, served by its own service rather than a member's.
+/// It carries [`CHAT_POST_ROUTE`]'s contract unchanged — admitted by
+/// [`method_guard`], gated by [`intent_guard`], streaming SSE or rendering the
+/// buffered answer per `Accept` — but answers for the **workspace**: it reads no
+/// `?repo=`, takes its `[chat]` from the workspace tier alone, and persists to
+/// `<workspace root>/.logos/chat.db`. Mounted only under `agents`; under a
+/// single-root serve it answers `404` (not a workspace, [ADR-52]).
+///
+/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+/// [ADR-71]: ../../../docs/specs/architecture/decisions/ADR-71.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub const WORKSPACE_CHAT_POST_ROUTE: &str = "/workspace/chat";
+
+/// The workspace chat's conversation-history routes ([S-482], [FR-UI-26]): the
+/// [`CHAT_THREADS_ROUTE`] list / messages / per-thread delete, over
+/// `<workspace root>/.logos/chat.db` instead of a member's. `?repo=` is not
+/// read; a single-root serve answers `404`.
+///
+/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+/// [FR-UI-26]: ../../../docs/specs/requirements/FR-UI-26.md
+pub const WORKSPACE_CHAT_THREADS_ROUTE: &str = "/api/v1/workspace/chat/threads";
+
 /// The enumerated wiki-generation trigger `POST` route (S-178, [FR-WK-18],
 /// [FR-UI-19], [NFR-SE-06]): the Wiki tab posts here on open to launch a
 /// background, single-run [`wiki-agent`] generation pass and stream its per-page
@@ -465,6 +489,13 @@ pub(crate) struct WebState {
     /// dashboard carries no chat surface (CR-078, ADR-60).
     #[cfg(feature = "agents")]
     chat: Arc<dyn chat::ChatService>,
+    /// The workspace chat seam ([S-482]): the workspace roster's service over
+    /// this surface's registry, bridge and build-dependency cache — `None` under
+    /// [`Backing::Single`], where its routes answer `404`. `agents`-only.
+    ///
+    /// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+    #[cfg(feature = "agents")]
+    workspace_chat: Option<Arc<dyn chat::ChatService>>,
     /// The wiki-generation seam (S-178): production resolves the configured wiki
     /// model and drives [`run_configured`](wiki_agent::run_configured); the
     /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
@@ -516,6 +547,30 @@ impl FromRef<WebState> for IntentToken {
 impl FromRef<WebState> for Arc<dyn chat::ChatService> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.chat)
+    }
+}
+
+/// The workspace chat service, extracted for its turn route ([S-482]) — or, when
+/// this serve has none (a single root), the workspace family's `404`, answered
+/// from the request head before the body is read. The [`WorkspaceRoot`]
+/// extractor's rule for the workspace config routes: the state holds the
+/// `Option`, the extractor yields the service, and the 404 is decided once.
+///
+/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+/// [`WorkspaceRoot`]: crate::member::WorkspaceRoot
+#[cfg(feature = "agents")]
+pub(crate) struct WorkspaceChat(Arc<dyn chat::ChatService>);
+
+#[cfg(feature = "agents")]
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<WebState> for WorkspaceChat {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        _parts: &mut axum::http::request::Parts,
+        state: &WebState,
+    ) -> Result<Self, Self::Rejection> {
+        state.workspace_chat.clone().map(Self).ok_or_else(api_v1::not_a_workspace)
     }
 }
 
@@ -582,6 +637,28 @@ pub fn workspace_router_with_intent(
     Ok(build_router(make_state(engine, backing, intent)))
 }
 
+/// Build a workspace router over an explicit [`IntentToken`] **and** workspace chat
+/// service — the seam the S-482 route tests drive to inject a mock-provider
+/// [`ChatService`](chat::ChatService) on `POST /workspace/chat`, proving its guards
+/// and SSE/buffered contract end-to-end without a live provider, as
+/// [`router_with_chat`] does for `/chat`. Everything else is the production
+/// workspace state.
+///
+/// # Errors
+/// The workspace's default member cannot start (see [`router_for_backing`]).
+#[cfg(feature = "agents")]
+pub fn workspace_router_with_chat(
+    registry: EngineRegistry<Engine>,
+    intent: IntentToken,
+    workspace_chat: Arc<dyn chat::ChatService>,
+) -> Result<Router> {
+    let backing = Arc::new(Backing::Federated(Box::new(registry)));
+    let engine = backing.default_engine()?;
+    let mut state = make_state(engine, backing, intent);
+    state.workspace_chat = Some(workspace_chat);
+    Ok(build_router(state))
+}
+
 /// The chat service for this request's member scope (S-250, [FR-UI-29]).
 ///
 /// The injected [`ChatService`](chat::ChatService) is bound to the **default** engine at
@@ -639,6 +716,7 @@ fn wiki_for(
 /// constructed, shared by every router entry point.
 fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: IntentToken) -> WebState {
     let bridge = Arc::new(ContractBridge::new());
+    let build_deps = Arc::new(BuildDependencies::new());
     #[cfg(feature = "agents")]
     {
         let workspace_root = workspace_root_of(&backing);
@@ -649,13 +727,25 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
         let wiki: Arc<dyn wikigen::WikiRunService> = Arc::new(
             wikigen::ConfiguredWikiRunService::new(Arc::clone(&engine), workspace_root),
         );
+        // The workspace chat stitches over the same bridge and build-dependency
+        // cache the `/api/v1/workspace/*` routes read (S-482); a single root
+        // mints no query backing, so it has no workspace chat.
+        let workspace_chat =
+            agent_core::XserviceBacking::federated(Arc::clone(&backing), Arc::clone(&bridge)).map(
+                |xservice| {
+                    Arc::new(chat::WorkspaceChatService::new(
+                        xservice.with_build_deps(Arc::clone(&build_deps)),
+                    )) as Arc<dyn chat::ChatService>
+                },
+            );
         WebState {
             engine,
             backing,
             bridge,
-            build_deps: Arc::new(BuildDependencies::new()),
+            build_deps,
             intent,
             chat,
+            workspace_chat,
             wiki,
             wiki_state: wikigen::WikiRunState::new(),
         }
@@ -666,7 +756,7 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
             engine,
             backing,
             bridge,
-            build_deps: Arc::new(BuildDependencies::new()),
+            build_deps,
             intent,
         }
     }
@@ -721,6 +811,7 @@ pub fn router_with_chat(
         build_deps: Arc::new(BuildDependencies::new()),
         intent,
         chat,
+        workspace_chat: None,
         wiki,
         wiki_state: wikigen::WikiRunState::new(),
     })
@@ -752,6 +843,7 @@ pub fn router_with_wiki(
         build_deps: Arc::new(BuildDependencies::new()),
         intent,
         chat,
+        workspace_chat: None,
         wiki,
         wiki_state: wikigen::WikiRunState::new(),
     })
@@ -911,6 +1003,16 @@ fn build_router(state: WebState) -> Router {
         .route(CHAT_THREADS_ROUTE, get(chat_threads))
         .route("/api/v1/chat/threads/:id", get(chat_thread_messages))
         .route("/api/v1/chat/threads/:id/delete", post(chat_thread_delete))
+        // ── The workspace chat (S-482, FR-WS-34, ADR-71): the workspace roster on
+        // its own route and store — the `/chat` turn and threads contract
+        // unchanged, answering for the workspace (no `?repo=`), configured from
+        // the workspace tier alone, persisted to `<workspace root>/.logos/chat.db`.
+        // A single-root serve answers all four `404`. The POSTs are kept in
+        // lock-step with `post_route_admitted` below.
+        .route(WORKSPACE_CHAT_POST_ROUTE, post(workspace_chat_turn))
+        .route(WORKSPACE_CHAT_THREADS_ROUTE, get(workspace_chat_threads))
+        .route("/api/v1/workspace/chat/threads/:id", get(workspace_chat_thread_messages))
+        .route("/api/v1/workspace/chat/threads/:id/delete", post(workspace_chat_thread_delete))
         // ── The wiki-generation trigger (S-178, FR-WK-18, FR-UI-19, ADR-42): the
         // Wiki tab POSTs here on open. Under the single-run lock it launches a
         // background wiki-agent pass and, with `Accept: text/event-stream`, streams
@@ -986,6 +1088,38 @@ async fn chat_turn(
     // Answer from the member the user is actually reading (S-250), resolving its
     // chat halves against the workspace root it may inherit them from ([ADR-67]).
     let chat = chat_for(&chat, &default, engine, &backing);
+    serve_turn(chat, &headers, &form).await
+}
+
+/// The workspace chat turn handler ([S-482], [FR-WS-34]): [`chat_turn`]'s contract
+/// over the workspace chat service — the same form, the same SSE / buffered
+/// answer per `Accept` ([`serve_turn`]), the same guards — but no member is
+/// resolved, so `?repo=` is not read. A single-root serve never reaches here:
+/// the [`WorkspaceChat`] extractor answers `404` first.
+///
+/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+#[cfg(feature = "agents")]
+async fn workspace_chat_turn(
+    WorkspaceChat(chat): WorkspaceChat,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    serve_turn(chat, &headers, &form).await
+}
+
+/// Run one chat turn on `chat` from the turn form and answer per `Accept` — the
+/// body [`chat_turn`] and [`workspace_chat_turn`] share, so the two routes cannot
+/// drift on the form fields, the empty-question refusal or the SSE / buffered
+/// split ([FR-UI-19]).
+///
+/// [FR-UI-19]: ../../../docs/specs/requirements/FR-UI-19.md
+#[cfg(feature = "agents")]
+async fn serve_turn(
+    chat: Arc<dyn chat::ChatService>,
+    headers: &HeaderMap,
+    form: &HashMap<String, String>,
+) -> Response {
     let question = form
         .get("q")
         .or_else(|| form.get("message"))
@@ -1004,7 +1138,7 @@ async fn chat_turn(
 
     let stream = chat.start_turn(question, thread_id);
 
-    if wants_event_stream(&headers) {
+    if wants_event_stream(headers) {
         // Stream the turn. KeepAlive comments keep intermediaries from idling the
         // connection between sparse orchestrator events.
         Sse::new(chat::sse_body(stream))
@@ -1147,15 +1281,17 @@ async fn host_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Method guard (FR-UI-03 as revised, ADR-31, S-170/S-209/S-206): the surface is
-/// GET-only **except** a `POST` to one of the enumerated [`CONFIG_POST_ROUTES`],
-/// the [`CHAT_POST_ROUTE`] (a turn), a per-thread delete under
-/// [`CHAT_THREADS_ROUTE`] (`…/{id}/delete`, S-209), the [`WIKI_GENERATE_ROUTE`]
-/// (the Wiki-tab generation trigger), or the [`VERIFY_POST_ROUTE`] (the deep
-/// graph-consistency check). Every other method — and a `POST` to any other
-/// path — is answered `405` before any handler runs, so relaxing the read-only
-/// posture stays bounded to exactly the config-write/apply seam, the two chat
-/// routes, the wiki-generation trigger, and the verify route (NFR-SE-06).
+/// Method guard (FR-UI-03 as revised, ADR-31, S-170/S-209/S-206/S-482): the
+/// surface is GET-only **except** a `POST` to one of the enumerated
+/// [`CONFIG_POST_ROUTES`], the [`CHAT_POST_ROUTE`] or [`WORKSPACE_CHAT_POST_ROUTE`]
+/// (a turn), a per-thread delete under [`CHAT_THREADS_ROUTE`] or
+/// [`WORKSPACE_CHAT_THREADS_ROUTE`] (`…/{id}/delete`, S-209), the
+/// [`WIKI_GENERATE_ROUTE`] (the Wiki-tab generation trigger), or the
+/// [`VERIFY_POST_ROUTE`] (the deep graph-consistency check). Every other method —
+/// and a `POST` to any other path — is answered `405` before any handler runs, so
+/// relaxing the read-only posture stays bounded to exactly the config-write/apply
+/// seam, the four chat routes, the wiki-generation trigger, and the verify route
+/// (NFR-SE-06).
 /// The admitted `POST`s are gated again by [`intent_guard`] for same-origin +
 /// intent-token defense.
 async fn method_guard(req: Request, next: Next) -> Response {
@@ -1183,23 +1319,29 @@ fn post_route_admitted(path: &str) -> bool {
         return true;
     }
     #[cfg(feature = "agents")]
-    if path == CHAT_POST_ROUTE || is_chat_thread_delete_route(path) || path == WIKI_GENERATE_ROUTE {
+    if path == CHAT_POST_ROUTE
+        || path == WORKSPACE_CHAT_POST_ROUTE
+        || is_thread_delete_route(CHAT_THREADS_ROUTE, path)
+        || is_thread_delete_route(WORKSPACE_CHAT_THREADS_ROUTE, path)
+        || path == WIKI_GENERATE_ROUTE
+    {
         return true;
     }
     false
 }
 
-/// Does `path` name the per-thread delete route (`/api/v1/chat/threads/{id}/delete`
+/// Does `path` name the per-thread delete route under `threads` (`{threads}/{id}/delete`
 /// with an integer `{id}`)? This is the one mutating verb under
 /// [`CHAT_THREADS_ROUTE`] (S-209, [ADR-47]) — it replaced the global `/chat/clear`
-/// in the [`post_route_admitted`] allow-list. The `{id}` segment must parse as the
+/// in the [`post_route_admitted`] allow-list — and under its workspace twin
+/// [`WORKSPACE_CHAT_THREADS_ROUTE`] (S-482). The `{id}` segment must parse as the
 /// `i64` rowid the handler extracts, so a malformed or extra-segment path is not
 /// admitted here (it stays `405`), never silently reaching the handler.
 ///
 /// [ADR-47]: ../../../docs/specs/architecture/decisions/ADR-47.md
 #[cfg(feature = "agents")]
-fn is_chat_thread_delete_route(path: &str) -> bool {
-    path.strip_prefix(CHAT_THREADS_ROUTE)
+fn is_thread_delete_route(threads: &str, path: &str) -> bool {
+    path.strip_prefix(threads)
         .and_then(|rest| rest.strip_prefix('/'))
         .and_then(|rest| rest.strip_suffix("/delete"))
         .is_some_and(|id| id.parse::<i64>().is_ok())
@@ -1561,11 +1703,20 @@ struct ThreadSummary {
 /// (S-250): the list is that member's `.logos/chat.db`.
 #[cfg(feature = "agents")]
 async fn chat_threads(MemberEngine(engine): MemberEngine) -> Response {
-    let result = bridge(engine, "chat_threads", Surface::Web, move |e| {
-        let store = chat_agent::ChatStore::open(e.root())?;
-        store.list_threads()
-    })
-    .await;
+    threads_response(bridge(engine, "chat_threads", Surface::Web, move |e| list_threads_at(e.root())).await)
+}
+
+/// The thread list of the conversation store under `root` — the read the member
+/// and workspace thread lists share.
+#[cfg(feature = "agents")]
+fn list_threads_at(root: &std::path::Path) -> Result<Vec<chat_agent::ChatThread>> {
+    chat_agent::ChatStore::open(root)?.list_threads()
+}
+
+/// Render a thread-list read as the [`ThreadSummary`] rows the rail reads, or an
+/// honest `500` ([NFR-CC-04]).
+#[cfg(feature = "agents")]
+fn threads_response(result: Result<Vec<chat_agent::ChatThread>>) -> Response {
     match result {
         Ok(threads) => {
             let summaries: Vec<ThreadSummary> = threads
@@ -1594,16 +1745,34 @@ async fn chat_thread_messages(
     MemberEngine(engine): MemberEngine,
     axum::extract::Path(thread_id): axum::extract::Path<i64>,
 ) -> Response {
-    let result = bridge(engine, "chat_thread_messages", Surface::Web, move |e| {
-        let store = chat_agent::ChatStore::open(e.root())?;
-        // Distinguish "no such thread" (→ 404) from "a real thread with no
-        // messages" (→ an honest empty list) — `messages` alone cannot.
-        match store.thread(thread_id)? {
-            Some(_) => store.messages(thread_id).map(Some),
-            None => Ok(None),
-        }
-    })
-    .await;
+    messages_response(
+        bridge(engine, "chat_thread_messages", Surface::Web, move |e| {
+            thread_messages_at(e.root(), thread_id)
+        })
+        .await,
+    )
+}
+
+/// One thread's ordered messages in the store under `root`, or `None` when no
+/// thread has that id.
+#[cfg(feature = "agents")]
+fn thread_messages_at(
+    root: &std::path::Path,
+    thread_id: i64,
+) -> Result<Option<Vec<chat_agent::ChatMessage>>> {
+    let store = chat_agent::ChatStore::open(root)?;
+    // Distinguish "no such thread" (→ 404) from "a real thread with no
+    // messages" (→ an honest empty list) — `messages` alone cannot.
+    match store.thread(thread_id)? {
+        Some(_) => store.messages(thread_id).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Render a messages read: the transcript, an honest `404` for an unknown
+/// thread, or a `500` ([NFR-CC-04]).
+#[cfg(feature = "agents")]
+fn messages_response(result: Result<Option<Vec<chat_agent::ChatMessage>>>) -> Response {
     match result {
         Ok(Some(messages)) => Json(messages).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
@@ -1628,16 +1797,99 @@ async fn chat_thread_delete(
     MemberEngine(engine): MemberEngine,
     axum::extract::Path(thread_id): axum::extract::Path<i64>,
 ) -> Response {
-    let result = bridge(engine, "chat_thread_delete", Surface::Web, move |e| {
-        let mut store = chat_agent::ChatStore::open(e.root())?;
-        store.delete_thread(thread_id)
-    })
-    .await;
+    delete_response(
+        bridge(engine, "chat_thread_delete", Surface::Web, move |e| {
+            delete_thread_at(e.root(), thread_id)
+        })
+        .await,
+    )
+}
+
+/// Delete one thread (and, by the store's cascade, its memory) from the store
+/// under `root`; `false` when no thread had that id.
+#[cfg(feature = "agents")]
+fn delete_thread_at(root: &std::path::Path, thread_id: i64) -> Result<bool> {
+    chat_agent::ChatStore::open(root)?.delete_thread(thread_id)
+}
+
+/// Render a delete: `204` on a hit, an idempotent `404` on a miss, a `500` on a
+/// store fault ([NFR-CC-04]).
+#[cfg(feature = "agents")]
+fn delete_response(result: Result<bool>) -> Response {
     match result {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "no chat thread with that id").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
     }
+}
+
+/// `GET /api/v1/workspace/chat/threads` → the workspace chat's conversation list
+/// ([S-482]): [`chat_threads`] over `<workspace root>/.logos/chat.db`. The root
+/// holds no graph, so the read crosses on [`run_blocking`] with no engine, as the
+/// workspace config routes do; a single-root serve answers `404`.
+///
+/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+#[cfg(feature = "agents")]
+async fn workspace_chat_threads(crate::member::WorkspaceRoot(root): crate::member::WorkspaceRoot) -> Response {
+    threads_response(
+        run_blocking("workspace_chat_threads", Surface::Web, move || {
+            if workspace_store_exists(&root) {
+                list_threads_at(&root)
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .await,
+    )
+}
+
+/// Whether the workspace chat's store exists yet. The workspace threads routes
+/// read through this rather than letting [`ChatStore::open`](chat_agent::ChatStore::open)
+/// create one: the workspace root holds no graph, and a read — or a delete of a
+/// conversation that cannot exist — must not leave a `chat.db` behind at a root
+/// nobody has chatted at (no conversations is the answer, not a fresh store).
+#[cfg(feature = "agents")]
+fn workspace_store_exists(root: &std::path::Path) -> bool {
+    chat_agent::db_path(root).exists()
+}
+
+/// `GET /api/v1/workspace/chat/threads/{id}` → one workspace conversation's
+/// transcript ([S-482]), as [`chat_thread_messages`].
+///
+/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+#[cfg(feature = "agents")]
+async fn workspace_chat_thread_messages(
+    crate::member::WorkspaceRoot(root): crate::member::WorkspaceRoot,
+    axum::extract::Path(thread_id): axum::extract::Path<i64>,
+) -> Response {
+    messages_response(
+        run_blocking("workspace_chat_thread_messages", Surface::Web, move || {
+            if workspace_store_exists(&root) {
+                thread_messages_at(&root, thread_id)
+            } else {
+                Ok(None)
+            }
+        })
+        .await,
+    )
+}
+
+/// `POST /api/v1/workspace/chat/threads/{id}/delete` → delete one workspace
+/// conversation ([S-482]), as [`chat_thread_delete`] — intent-guarded like every
+/// mutating `POST`.
+///
+/// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+#[cfg(feature = "agents")]
+async fn workspace_chat_thread_delete(
+    crate::member::WorkspaceRoot(root): crate::member::WorkspaceRoot,
+    axum::extract::Path(thread_id): axum::extract::Path<i64>,
+) -> Response {
+    delete_response(
+        run_blocking("workspace_chat_thread_delete", Surface::Web, move || {
+            Ok(workspace_store_exists(&root) && delete_thread_at(&root, thread_id)?)
+        })
+        .await,
+    )
 }
 
 /// The ADR-03 submit-and-await bridge: run one blocking `Engine` call on the
@@ -1782,8 +2034,10 @@ mod tests {
     /// handed any cross-service reach: `ConfiguredChatService` no longer takes a query
     /// backing, so there is none to hand. Re-targeted from S-431's
     /// `the_chat_service_gets_cross_service_reach_exactly_under_a_federated_backing`;
-    /// the reach itself moved to the workspace roster (`chat-agent`'s `WorkspaceRoster`).
+    /// the reach itself moved to the workspace roster (`chat-agent`'s `WorkspaceRoster`),
+    /// which the workspace chat serves on its own route ([S-482]).
     ///
+    /// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
     /// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
     #[cfg(feature = "agents")]
     #[test]
@@ -1820,7 +2074,21 @@ mod tests {
             &chat_for(&state.chat, &default, Arc::clone(&default), &federated),
             &state.chat
         ));
-        assert!(!Arc::ptr_eq(&chat_for(&state.chat, &default, other, &federated), &state.chat));
+        let scoped = chat_for(&state.chat, &default, other, &federated);
+        assert!(!Arc::ptr_eq(&scoped, &state.chat));
+
+        // [S-482]: the federated reach is the workspace chat's alone — minted once,
+        // beside the member chat, and never what `chat_for` hands a member turn.
+        let workspace = state.workspace_chat.clone().expect("a federated serve has a workspace chat");
+        for member in [&state.chat, &scoped] {
+            assert!(!Arc::ptr_eq(member, &workspace), "a member turn never gets the workspace chat");
+        }
+        let single = make_state(
+            Arc::clone(&default),
+            Arc::new(Backing::Single(Arc::clone(&default))),
+            IntentToken::generate(),
+        );
+        assert!(single.workspace_chat.is_none(), "a single root has no workspace chat");
     }
 
     /// The [`bridge`] installs the boundary scope its caller names, and
@@ -2490,7 +2758,13 @@ mod tests {
         // Under a listen-only build the agent routes are compiled out of the
         // router AND out of the guard, so they are the one legitimate exception.
         #[cfg(not(feature = "agents"))]
-        let agents_only = [CHAT_POST_ROUTE, "/api/v1/chat/threads/1/delete", WIKI_GENERATE_ROUTE];
+        let agents_only = [
+            CHAT_POST_ROUTE,
+            "/api/v1/chat/threads/1/delete",
+            WORKSPACE_CHAT_POST_ROUTE,
+            "/api/v1/workspace/chat/threads/1/delete",
+            WIKI_GENERATE_ROUTE,
+        ];
         #[cfg(feature = "agents")]
         let agents_only: [&str; 0] = [];
         let refused: Vec<&str> = posts

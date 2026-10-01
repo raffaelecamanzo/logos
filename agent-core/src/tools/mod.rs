@@ -11,19 +11,17 @@
 //! - **source** — net-new, path-sandboxed `read` / `grep` / `glob` confined to
 //!   the project root and honoring `ignored_dirs` ([NFR-SE-04]).
 //!
-//! Under a **federated** backing only, the Graph-Navigator's graph set is joined
-//! by the four read-only `xservice` tools (S-431, [FR-WS-29]) over the
-//! workspace member registry — an addition to the graph domain, not a fourth
-//! domain: no subagent owns them alone, and a single-root roster never sees them
-//! ([ADR-52]).
-//!
-//! The **workspace chat** (S-480, [FR-WS-34]) reaches the same three domains
-//! through [`addressed_toolset`]: each member tool with a required `repo`,
-//! resolved per call to that member's engine or sandbox through the registry,
-//! leaving the member toolsets above untouched. Beside them sit the workspace
-//! read-model tools of [`workspace_toolset`] — `workspace_status`,
-//! `workspace_reachability`, `workspace_check`, `xservice_build_deps` and
-//! `workspace_roster`.
+//! The **workspace chat** (S-480, S-481, [FR-WS-34]) reaches the same three
+//! domains through [`addressed_toolset`]: each member tool with a required
+//! `repo`, resolved per call to that member's engine or sandbox through the
+//! registry, leaving the member toolsets above untouched. Its Workspace-Analyst
+//! holds the workspace read-model tools of [`workspace_toolset`] —
+//! `workspace_status`, `workspace_reachability`, `workspace_check`,
+//! `xservice_build_deps` and `workspace_roster` — followed by the four
+//! read-only `xservice_*` tools of [`xservice_toolset`] ([FR-WS-29]) over the
+//! workspace member registry. Both families exist only over a federated
+//! backing ([`XserviceBacking`]); the member chat's roster never sees either,
+//! under any backing ([ADR-52]).
 //!
 //! Every Engine-backed tool is a thin adapter ([ADR-01]): it deserializes its
 //! arguments, runs **one** existing read-model on the blocking pool
@@ -170,11 +168,10 @@ where
 }
 
 /// The three least-privilege tool domains the subagent roster partitions over
-/// (S-174). Each subagent is built from exactly one domain's [`ToolSet`] — with
-/// one extension: under a federated backing the Graph-Navigator's set is
-/// [`ToolDomain::Graph`] followed by [`XSERVICE_TOOL_NAMES`]
-/// ([`xservice_toolset`], S-431). No other role gains a tool, and a single-root
-/// roster is exactly its one domain.
+/// (S-174). Each member-roster subagent is built from exactly one domain's
+/// [`ToolSet`], under any backing. The workspace roster's repo-addressed roles
+/// are the same domains through [`addressed_toolset`]; its Workspace-Analyst
+/// holds no domain — the workspace tools and [`XSERVICE_TOOL_NAMES`] (S-481).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolDomain {
     /// Code-graph navigation tools (Graph-Navigator subagent).
@@ -197,8 +194,7 @@ impl ToolDomain {
     ///
     /// These are the `Tool::NAME` constants of the domain's tools; the partition
     /// suite asserts each built [`ToolSet`] contains exactly this subset. The
-    /// federated Graph-Navigator's additions are [`XSERVICE_TOOL_NAMES`], not a
-    /// fourth domain.
+    /// Workspace-Analyst's [`XSERVICE_TOOL_NAMES`] are not a fourth domain.
     pub const fn tool_names(self) -> &'static [&'static str] {
         match self {
             ToolDomain::Graph => &[
@@ -299,9 +295,10 @@ pub fn governance_toolset(engine: Arc<Engine>) -> ToolSet {
 }
 
 /// Build the four read-only `xservice_*` tools over a federated backing
-/// (S-431, [FR-WS-29]) — composed onto [`graph_toolset`] for the Graph-Navigator,
-/// in [`XSERVICE_TOOL_NAMES`] order, and only when an [`XserviceBacking`] exists,
-/// which it never does under a single root ([ADR-52]).
+/// (S-431, [FR-WS-29]) — composed after [`workspace_toolset`] for the workspace
+/// roster's Workspace-Analyst (S-481), in [`XSERVICE_TOOL_NAMES`] order, and only
+/// when an [`XserviceBacking`] exists, which it never does under a single root
+/// ([ADR-52]).
 ///
 /// [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md

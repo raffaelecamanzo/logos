@@ -210,6 +210,21 @@ const WORKSPACE_WRITE_ENDPOINTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The workspace chat's conversation routes ([S-482]) — mounted only under
+/// `agents`, and two of them carry a `:id` segment, so none can join the `GET`
+/// loops over [`WORKSPACE_ENDPOINTS`]. They are walked where their contract
+/// lives instead: `chat_threads_api.rs` runs every threads case on both the
+/// member and the workspace tree, and `workspace_chat.rs` walks all of them for
+/// the single-root `404` and the non-creating read. Listed here so the
+/// route-table guard below still sees every `/api/v1/workspace/*` route named.
+///
+/// [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+const WORKSPACE_CHAT_ROUTES: &[&str] = &[
+    "/api/v1/workspace/chat/threads",
+    "/api/v1/workspace/chat/threads/:id",
+    "/api/v1/workspace/chat/threads/:id/delete",
+];
+
 fn ws_router(tmp: &TempDir) -> axum::Router {
     let federation = discover(tmp.path()).expect("discovery succeeds").expect("a workspace");
     let registry = EngineRegistry::<Engine>::new_serve_default(federation);
@@ -1970,10 +1985,11 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// and the write-free loop all walk, so a route missing from it is unguarded on all
 /// three — and silently, which is the failure mode an enumerated list has instead of
 /// a wildcard. The `POST` routes live in [`WORKSPACE_WRITE_ENDPOINTS`] instead
-/// (those loops issue `GET`s), and are walked by the S-450 tests. This asserts the
-/// union of the two lists and the router's own route table name exactly the same
-/// set, read out of `src/lib.rs` at compile time. Set equality in both
-/// directions, so it needs no count to keep up to date.
+/// (those loops issue `GET`s), and are walked by the S-450 tests; the workspace
+/// chat's routes live in [`WORKSPACE_CHAT_ROUTES`], walked by the chat suites.
+/// This asserts the union of the three lists and the router's own route table
+/// name exactly the same set, read out of `src/lib.rs` at compile time. Set
+/// equality in both directions, so it needs no count to keep up to date.
 ///
 /// # Two blind spots a line-based scan had, both closed
 /// The first version split each *line* on `.route("`, which two real patterns in
@@ -1984,23 +2000,75 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// `/api/v1/workspace/*` GET written that way would also slip through.
 ///
 /// So the scan runs over the whole source as one string (formatting-independent),
-/// and a second assertion requires that no `/api/v1/workspace/` path is declared as
-/// a `const`. The `!declared.is_empty()` check remains, but note what it is and is
-/// not: it catches a *total* parse failure, not a partial one — the second
-/// assertion is what covers the const form.
+/// and a path given by **constant** is resolved from its `const` declaration in
+/// the same file (S-482's `WORKSPACE_CHAT_THREADS_ROUTE` is one), as `lib.rs`'s own
+/// `every_post_mounted_route_is_admitted_by_the_method_guard` resolves them —
+/// whatever the `&str` annotation, and wherever rustfmt breaks the declaration. A
+/// `.route(` argument that is code but not a resolvable constant (a call, a
+/// qualified path) fails the scan rather than being skipped, and a second
+/// assertion requires every `/api/v1/workspace/` path declared as a `const` to be
+/// one the scan saw mounted. The `!declared.is_empty()` check remains, but note
+/// what it is and is not: it catches a *total* parse failure, not a partial one.
 #[test]
 fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
     const ROUTER_SOURCE: &str = include_str!("../src/lib.rs");
 
-    // Whole-source scan: `.route(` followed by a string literal, wherever the line
-    // breaks fall.
+    // Every `const NAME: <type> = "<value>"` in the router source, as
+    // `(NAME, value)` — over the whole source, so a declaration rustfmt wraps
+    // after the `=` (any past 100 columns) and a `&'static str` annotation are
+    // read like the one-line `&str` form.
+    let consts: Vec<(&str, &str)> = ROUTER_SOURCE
+        .match_indices("const ")
+        .filter_map(|(at, marker)| {
+            let rest = &ROUTER_SOURCE[at + marker.len()..];
+            let name_len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+            let (name, rest) = rest.split_at(name_len);
+            let rest = rest.strip_prefix(':')?;
+            let value = rest[rest.find('=')?..].strip_prefix('=')?.trim_start();
+            let value = value.strip_prefix('"')?;
+            Some((name, value.split('"').next()?))
+        })
+        .collect();
+    let resolve = |name: &str| consts.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
+
+    // Whole-source scan: `.route(` followed by a string literal or a constant,
+    // wherever the line breaks fall. Code the scan cannot resolve to a declared
+    // constant (a call, a qualified path) is collected and fails below, never
+    // skipped; text that opens with no identifier is prose quoting `.route(` (a
+    // doc comment), not a call.
+    let mut unreadable: Vec<&str> = Vec::new();
     let mut declared: Vec<&str> = ROUTER_SOURCE
         .split(".route(")
         .skip(1)
-        .filter_map(|rest| rest.trim_start().strip_prefix('"'))
-        .filter_map(|rest| rest.split('"').next())
+        .filter_map(|rest| {
+            let rest = rest.trim_start();
+            let path = match rest.strip_prefix('"') {
+                Some(literal) => literal.split('"').next(),
+                None => {
+                    let argument = rest.split(',').next()?.trim();
+                    // An argument that is code (it opens with an identifier —
+                    // a constant, a call, a path) must be a constant the scan
+                    // resolves, exactly.
+                    if !argument.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                        return None;
+                    }
+                    let path = resolve(argument);
+                    if path.is_none() {
+                        unreadable.push(argument);
+                    }
+                    path
+                }
+            };
+            path
+        })
         .filter(|path| path.starts_with("/api/v1/workspace/"))
         .collect();
+    assert!(
+        unreadable.is_empty(),
+        "these `.route(` paths are neither a literal nor a constant declared in \
+         src/lib.rs, so the scan cannot tell whether they are workspace routes — \
+         teach it the form: {unreadable:?}"
+    );
     declared.sort_unstable();
     declared.dedup();
 
@@ -2008,6 +2076,7 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
         .iter()
         .map(|e| e.split('?').next().expect("a path before any query string"))
         .chain(WORKSPACE_WRITE_ENDPOINTS.iter().map(|(path, _)| *path))
+        .chain(WORKSPACE_CHAT_ROUTES.iter().copied())
         .collect();
     enumerated.sort_unstable();
     enumerated.dedup();
@@ -2023,21 +2092,26 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
          the lists is unguarded by every loop that walks them"
     );
 
-    // The const form the inline scan cannot see. `VERIFY_POST_ROUTE` is the live
-    // precedent for it in this very file, so this is a pattern already in use.
-    let const_declared: Vec<&str> = ROUTER_SOURCE
-        .lines()
-        .filter(|l| l.contains("const ") && l.contains(": &str"))
-        .filter_map(|l| l.split('"').nth(1))
+    // The const form: every `/api/v1/workspace/*` path declared as a constant is
+    // one the scan resolved at a `.route(` call — so a constant the resolver
+    // cannot follow (mounted through an alias, say) fails here rather than
+    // leaving the route enumerable only by hand.
+    let const_declared: Vec<&str> = consts
+        .iter()
+        .map(|(_, value)| *value)
         .filter(|path| path.starts_with("/api/v1/workspace/"))
         .collect();
     assert!(
-        const_declared.is_empty(),
-        "a /api/v1/workspace/* path is declared as a const ({const_declared:?}), which \
-         the route-table scan above cannot see. Either inline the literal at its \
-         `.route(` call or teach this guard to resolve the constant — do not leave \
-         the route enumerable only by hand."
+        !const_declared.is_empty(),
+        "guard the guard: WORKSPACE_CHAT_THREADS_ROUTE is a const-declared workspace route"
     );
+    for path in &const_declared {
+        assert!(
+            declared.contains(path),
+            "{path} is declared as a const but the route-table scan never saw it mounted — \
+             teach the scan the form it is mounted in"
+        );
+    }
 }
 
 // ── S-450 / FR-WS-30: the workspace root is a config root ─────────────────────

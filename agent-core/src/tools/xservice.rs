@@ -91,7 +91,8 @@ pub struct XserviceBacking {
     pub(super) bridge: Arc<ContractBridge>,
     /// The build-dependency relation `xservice_build_deps` reads, joined on its
     /// first query and cached on member sync-stamps ([FR-WS-33]) — this
-    /// backing's own cache, as the MCP server holds its own.
+    /// backing's own cache unless [`with_build_deps`](Self::with_build_deps)
+    /// shares a surface's, as the MCP server holds its own.
     ///
     /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
     pub(super) build_deps: Arc<BuildDependencies>,
@@ -112,6 +113,18 @@ impl XserviceBacking {
             bridge,
             build_deps: Arc::new(BuildDependencies::new()),
         })
+    }
+
+    /// Read the build-dependency relation through `build_deps` rather than a
+    /// cache of this backing's own — the surface's shared cache, so the
+    /// workspace chat's `xservice_build_deps` and the `/api/v1/workspace/build-deps`
+    /// route join the relation once between them ([FR-WS-33]).
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    #[must_use]
+    pub fn with_build_deps(mut self, build_deps: Arc<BuildDependencies>) -> Self {
+        self.build_deps = build_deps;
+        self
     }
 
     /// The member registry, for assertions on what a turn constructed
@@ -802,6 +815,36 @@ mod tests {
             file: Some("src/lib.rs".to_string()),
             line: Some(1),
         }
+    }
+
+    /// [`XserviceBacking::with_build_deps`] replaces the backing's own cache with
+    /// the one it is handed — the web surface's, so the workspace chat and the
+    /// `/api/v1/workspace/build-deps` route share one join ([FR-WS-33]).
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    #[test]
+    fn a_shared_build_dependency_cache_replaces_the_backings_own() {
+        use logos_core::federation::{EngineRegistry, Federation, RegistryMode};
+        let federation = Federation {
+            name: "shop".to_string(),
+            root: std::path::PathBuf::from("/ws"),
+            members: Vec::new(),
+            default: None,
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+            member_kinds: Default::default(),
+        };
+        let backing = Arc::new(Backing::Federated(Box::new(EngineRegistry::<Engine>::new(
+            federation,
+            RegistryMode::Lazy,
+        ))));
+        let shared = Arc::new(BuildDependencies::new());
+        let own = XserviceBacking::federated(Arc::clone(&backing), Arc::new(ContractBridge::new()))
+            .expect("federated");
+        assert!(!Arc::ptr_eq(&own.build_deps, &shared), "a fresh backing holds its own cache");
+        let xs = own.with_build_deps(Arc::clone(&shared));
+        assert!(Arc::ptr_eq(&xs.build_deps, &shared), "the shared cache is the one read");
     }
 
     #[test]

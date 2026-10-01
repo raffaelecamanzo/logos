@@ -45,6 +45,7 @@
 //! [`chat-agent`]: ../../../docs/specs/architecture/components/chat-agent.md
 //! [`agent-core`]: ../../../docs/specs/architecture/components/agent-core.md
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -57,7 +58,7 @@ use chat_agent::{
     thread_window, BudgetTree, ChatRole, ChatStore, ConversationWindow, MemoryGrounding,
     MemoryStore, Orchestrator, Planner, SubagentRoster, SynthesizerGrounding,
 };
-use logos_core::config::{resolve_chat, ChatOrigin, ChatProvider};
+use logos_core::config::{resolve_chat, ChatConfig, ChatProvider};
 use logos_core::Engine;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -87,26 +88,82 @@ impl ConfiguredChatService {
     }
 }
 
-/// The blocking-acquired pieces of a turn's setup — produced on the blocking pool
-/// ([ADR-03]) and consumed by the async orchestrator run.
-struct ChatSetup {
-    memory: Arc<MemoryStore>,
-    sandbox: Arc<Sandbox>,
-    thread_id: i64,
-    turn: i64,
-    provider: ChatProvider,
-    model_id: String,
-    api_key: String,
-    base_url: String,
-    budget: BudgetTree,
-    temperature: Option<f64>,
-    max_tokens: Option<u64>,
-    retry: RetryPolicy,
+/// The blocking-acquired pieces of a turn's setup that both chats share — the
+/// member chat here and the workspace chat ([`super::workspace`], S-482):
+/// produced on the blocking pool ([ADR-03]) and consumed by the async
+/// orchestrator run. One shape and one constructor ([`prepare_turn`]), so the two
+/// chats cannot drift on how a conversation is opened, recorded and bounded.
+pub(super) struct TurnSetup {
+    /// The root whose `.logos/chat.db` holds the conversation — where the
+    /// question was recorded, and so where the scratchpad and the durable answer
+    /// go ([`into_run`](Self::into_run)): one value, so the two cannot diverge.
+    pub(super) store_root: PathBuf,
+    pub(super) memory: Arc<MemoryStore>,
+    pub(super) thread_id: i64,
+    pub(super) turn: i64,
+    pub(super) provider: ChatProvider,
+    pub(super) model_id: String,
+    pub(super) api_key: String,
+    pub(super) base_url: String,
+    pub(super) budget: BudgetTree,
+    pub(super) temperature: Option<f64>,
+    pub(super) max_tokens: Option<u64>,
+    pub(super) retry: RetryPolicy,
     /// The thread's bounded prior turns, read before this turn's question was
     /// appended ([S-483]); empty on a thread's first turn.
     ///
     /// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
-    history: ConversationWindow,
+    pub(super) history: ConversationWindow,
+}
+
+impl TurnSetup {
+    /// Split the setup into what the roster runs on and what dials the provider,
+    /// grounding the Synthesizer on the turn's memory and aiming the scratchpad
+    /// and durable answer at the store the setup recorded the question in
+    /// ([FR-UI-26] AC-2).
+    ///
+    /// [FR-UI-26]: ../../../docs/specs/requirements/FR-UI-26.md
+    pub(super) fn into_run(self, question: String) -> (TurnRun, Dial) {
+        let TurnSetup {
+            store_root,
+            memory,
+            thread_id,
+            turn,
+            provider,
+            model_id,
+            api_key,
+            base_url,
+            budget,
+            temperature,
+            max_tokens,
+            retry,
+            history,
+        } = self;
+        let grounding: Arc<dyn SynthesizerGrounding> =
+            Arc::new(MemoryGrounding::new(Arc::clone(&memory), thread_id, turn));
+        let target = TurnTarget::new(store_root, thread_id, turn);
+        (
+            TurnRun { grounding, budget, temperature, max_tokens, question, history, memory, target },
+            Dial { provider, model_id, api_key, base_url, retry },
+        )
+    }
+}
+
+/// What a configured turn dials: the provider family, its model and key, the
+/// endpoint, and the bounded retry policy.
+pub(super) struct Dial {
+    provider: ChatProvider,
+    model_id: String,
+    api_key: String,
+    base_url: String,
+    retry: RetryPolicy,
+}
+
+/// The member chat's setup: the shared [`TurnSetup`] plus the member's source
+/// sandbox.
+struct ChatSetup {
+    sandbox: Arc<Sandbox>,
+    turn: TurnSetup,
 }
 
 /// Resolve the policy + credential through the seam, open the source sandbox,
@@ -127,28 +184,44 @@ fn build_setup(
         resolve_chat(root, workspace_root).map_err(|e| resolution_fault("chat", &e))?;
     // Configure-first ([FR-UI-18]): an unset half is not an error, and the verdict
     // is the seam's origins — the same facts the tab reads ([ADR-67] §6).
-    let TurnProvider { model_id, api_key } = turn_provider(root, workspace_root, &resolution)?;
-    let chat = resolution.policy;
+    let provider = turn_provider(root, workspace_root, &resolution)?;
 
     // `[chat] read_roots` travel with the policy table, so they resolve against
     // the root that declared that table: the workspace root for an inherited
-    // policy, else this member (sprint-79 HF-1). A missing entry fails the turn
+    // policy, else this member (sprint-79 HF-1) — the rule the workspace chat's
+    // addressed source tools read through too. A missing entry fails the turn
     // by name — reported, never dropped — and, like the configure-first
     // verdict, before any store is touched, so it records no orphan thread.
-    let declaring_root = match (resolution.policy_origin, workspace_root) {
-        (ChatOrigin::Workspace, Some(workspace_root)) => workspace_root,
-        _ => root,
-    };
     let sandbox = Arc::new(
         Sandbox::from_root(root)
-            .and_then(|sandbox| Ok(sandbox.with_read_roots(declaring_root, &chat.read_roots)?))
+            .and_then(|sandbox| {
+                Ok(sandbox.with_chat_read_roots(root, workspace_root, &resolution)?)
+            })
             .map_err(|e| format!("could not open the source sandbox: {e}"))?,
     );
 
+    let turn = prepare_turn(root, provider, resolution.policy, thread_id, question)?;
+    Ok(ChatSetup { sandbox, turn })
+}
+
+/// Open the conversation a turn appends to under `store_root`'s
+/// `.logos/chat.db` — the thread (a new one when `thread_id` is `None`), its
+/// bounded prior-turn window, the durable user message and the turn's memory —
+/// and carry `chat`'s budget, sampling and retry keys beside the provider. The
+/// part of a turn's setup both chats share; the caller has already passed the
+/// configure-first verdict, so this is where the first store is touched.
+pub(super) fn prepare_turn(
+    store_root: &Path,
+    provider: TurnProvider,
+    chat: ChatConfig,
+    thread_id: Option<i64>,
+    question: &str,
+) -> Result<TurnSetup, String> {
+    let TurnProvider { model_id, api_key } = provider;
     // The thread the turn appends to (a new one when the caller gave none); the
     // scratchpad's foreign key requires the thread to exist first.
     let mut store =
-        ChatStore::open(root).map_err(|e| format!("could not open the chat store: {e}"))?;
+        ChatStore::open(store_root).map_err(|e| format!("could not open the chat store: {e}"))?;
     // The prior turns come from the thread store, read BEFORE this turn's question
     // is appended so the window never contains the question it is answering
     // ([S-483]). A new thread has none; a deleted one has no messages either.
@@ -179,8 +252,9 @@ fn build_setup(
         .map_err(|e| format!("could not record the user message: {e}"))?;
     drop(store);
 
-    let memory =
-        Arc::new(MemoryStore::open(root).map_err(|e| format!("could not open chat memory: {e}"))?);
+    let memory = Arc::new(
+        MemoryStore::open(store_root).map_err(|e| format!("could not open chat memory: {e}"))?,
+    );
     let turn = memory
         .next_turn(thread_id)
         .map_err(|e| format!("could not compute the turn ordinal: {e}"))?;
@@ -195,9 +269,9 @@ fn build_setup(
         u64::from(chat.provider_retry_base_ms),
     );
 
-    Ok(ChatSetup {
+    Ok(TurnSetup {
+        store_root: store_root.to_path_buf(),
         memory,
-        sandbox,
         thread_id,
         turn,
         provider: chat.provider,
@@ -214,111 +288,169 @@ fn build_setup(
 
 impl ChatService for ConfiguredChatService {
     fn start_turn(&self, question: String, thread_id: Option<i64>) -> ChatStream {
-        let (tx, rx) = unbounded_chat_channel();
         let engine = Arc::clone(&self.engine);
-        let root = engine.root().to_path_buf();
+        let setup_root = engine.root().to_path_buf();
         let workspace_root = self.workspace_root.clone();
         let setup_question = question.clone();
-
-        let turn_root = root.clone();
-
-        let handle = tokio::spawn(async move {
-            // Blocking config/store/sandbox setup off the async executor thread
-            // ([ADR-03]); a configure-first or setup fault is an honest single
-            // `error` frame, never a crash ([NFR-CC-04]).
-            let setup = match tokio::task::spawn_blocking(move || {
-                build_setup(&root, workspace_root.as_deref(), thread_id, &setup_question)
-            })
-            .await
-            {
-                Ok(Ok(setup)) => setup,
-                Ok(Err(message)) => {
-                    let _ = tx.send(ChatFrame::Error(message));
-                    return;
-                }
-                Err(_join) => {
-                    let _ = tx.send(ChatFrame::Error(
-                        "the chat setup task failed unexpectedly".to_string(),
-                    ));
-                    return;
-                }
-            };
-
-            let ChatSetup {
-                memory,
-                sandbox,
+        spawn_configured_turn(question, move || {
+            let ChatSetup { sandbox, turn } = build_setup(
+                &setup_root,
+                workspace_root.as_deref(),
                 thread_id,
-                turn,
-                provider,
-                model_id,
-                api_key,
-                base_url,
-                budget,
-                temperature,
-                max_tokens,
-                retry,
-                history,
-            } = setup;
-            let grounding: Arc<dyn SynthesizerGrounding> =
-                Arc::new(MemoryGrounding::new(Arc::clone(&memory), thread_id, turn));
-            // Where this turn's scratchpad AND its durable answer are written
-            // ([FR-UI-26] AC-2) — the same `.logos/chat.db` the setup recorded the
-            // user's question in.
-            let target = TurnTarget::new(turn_root, thread_id, turn);
+                &setup_question,
+            )?;
+            Ok((turn, MemberRoster { engine, sandbox }))
+        })
+    }
+}
 
-            // Resolve the provider config, then run the deterministic pre-send
-            // preflight ([S-199], [FR-UI-24]): a model is set, the key is present,
-            // and the `base_url` is well-formed and does not already carry rig's
-            // appended `/chat/completions` path. A misconfiguration is an honest
-            // single frame naming the specific problem — never a crash, a
-            // fabricated answer ([NFR-CC-04]), or an echoed key ([NFR-SE-07]).
-            // (An unreachable-but-well-formed endpoint is not probed here; it
-            // surfaces honestly as a transport error naming the endpoint when the
-            // turn's first call fails — the story's "surface, don't guarantee
-            // reachability" scope.)
-            let cfg = match provider {
-                ChatProvider::Anthropic => ProviderConfig::anthropic(model_id, api_key),
-                ChatProvider::OpenAi => {
-                    ProviderConfig::openai_compatible(model_id, api_key).with_base_url(base_url)
-                }
-            };
-            if let Err(e) = cfg.preflight() {
-                let _ = tx.send(ChatFrame::Error(e.to_string()));
+/// What a configured turn hands its roster once the provider model is built —
+/// everything [`launch`] needs beside the model and the roster's own backing.
+pub(super) struct TurnRun {
+    pub(super) grounding: Arc<dyn SynthesizerGrounding>,
+    pub(super) budget: BudgetTree,
+    pub(super) temperature: Option<f64>,
+    pub(super) max_tokens: Option<u64>,
+    pub(super) question: String,
+    pub(super) history: ConversationWindow,
+    pub(super) memory: Arc<MemoryStore>,
+    pub(super) target: TurnTarget,
+}
+
+/// A roster a configured turn can launch over whichever provider model the
+/// `[chat]` policy names — the member roster ([`MemberRoster`]) or the
+/// workspace roster (S-482). Generic over the model because the two provider
+/// families are distinct concrete types, so each arm of
+/// [`spawn_configured_turn`]'s provider match monomorphizes the launch.
+pub(super) trait RosterLaunch: Send + 'static {
+    /// Build the roster and orchestrator over `model` and run the streamed turn.
+    fn launch<M>(
+        self,
+        model: M,
+        run: TurnRun,
+        tx: UnboundedSender<ChatFrame>,
+    ) -> impl Future<Output = ()> + Send
+    where
+        M: CompletionModel + Clone + Send + Sync + 'static;
+}
+
+/// The member chat's roster backing: the member's engine and source sandbox.
+struct MemberRoster {
+    engine: Arc<Engine>,
+    sandbox: Arc<Sandbox>,
+}
+
+impl RosterLaunch for MemberRoster {
+    fn launch<M>(
+        self,
+        model: M,
+        run: TurnRun,
+        tx: UnboundedSender<ChatFrame>,
+    ) -> impl Future<Output = ()> + Send
+    where
+        M: CompletionModel + Clone + Send + Sync + 'static,
+    {
+        let TurnRun { grounding, budget, temperature, max_tokens, question, history, memory, target } =
+            run;
+        launch(
+            self.engine,
+            self.sandbox,
+            model,
+            grounding,
+            budget,
+            temperature,
+            max_tokens,
+            question,
+            history,
+            memory,
+            target,
+            tx,
+        )
+    }
+}
+
+/// Spawn a configured turn: run `setup` (config resolution, sandbox, stores) on
+/// the blocking pool ([ADR-03]), then build the provider the resolved policy
+/// names, preflight it, and launch the roster `setup` returned — the shared
+/// production turn body of both chats. The turn's scratchpad and durable answer
+/// are written to the store `setup` recorded the question in
+/// ([`TurnSetup::store_root`]): the member root, or the workspace root for the
+/// workspace chat. A configure-first or setup fault is an honest single `error`
+/// frame, never a crash ([NFR-CC-04]).
+pub(super) fn spawn_configured_turn<L, F>(question: String, setup: F) -> ChatStream
+where
+    L: RosterLaunch,
+    F: FnOnce() -> Result<(TurnSetup, L), String> + Send + 'static,
+{
+    let (tx, rx) = unbounded_chat_channel();
+    let handle = tokio::spawn(async move {
+        // Blocking config/store/sandbox setup off the async executor thread
+        // ([ADR-03]); a configure-first or setup fault is an honest single
+        // `error` frame, never a crash ([NFR-CC-04]).
+        let (setup, roster) = match tokio::task::spawn_blocking(setup).await {
+            Ok(Ok(setup)) => setup,
+            Ok(Err(message)) => {
+                let _ = tx.send(ChatFrame::Error(message));
                 return;
             }
-
-            // Provider client construction + orchestrator wiring are non-blocking;
-            // the first egress is the consent-gated turn ([NFR-SE-07]). The two
-            // providers are distinct concrete model types, so each arm
-            // monomorphizes `launch`; both run the same orchestrated turn.
-            match provider {
-                ChatProvider::Anthropic => match anthropic_completion_model(&cfg, retry) {
-                    Ok(model) => {
-                        launch(engine, sandbox, model, grounding, budget, temperature,
-                            max_tokens, question, history, memory, target, tx).await
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ChatFrame::Error(format!(
-                            "could not build the Anthropic provider: {e}"
-                        )));
-                    }
-                },
-                ChatProvider::OpenAi => match openai_compatible_completion_model(&cfg, retry) {
-                    Ok(model) => {
-                        launch(engine, sandbox, model, grounding, budget, temperature,
-                            max_tokens, question, history, memory, target, tx).await
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ChatFrame::Error(format!(
-                            "could not build the OpenAI-compatible provider: {e}"
-                        )));
-                    }
-                },
+            Err(_join) => {
+                let _ = tx.send(ChatFrame::Error(
+                    "the chat setup task failed unexpectedly".to_string(),
+                ));
+                return;
             }
-        });
+        };
 
-        ChatStream::from_spawn(rx, handle)
-    }
+        // The scratchpad AND the durable answer go to the same `.logos/chat.db`
+        // the setup recorded the user's question in ([FR-UI-26] AC-2).
+        let (run, Dial { provider, model_id, api_key, base_url, retry }) = setup.into_run(question);
+
+        // Resolve the provider config, then run the deterministic pre-send
+        // preflight ([S-199], [FR-UI-24]): a model is set, the key is present,
+        // and the `base_url` is well-formed and does not already carry rig's
+        // appended `/chat/completions` path. A misconfiguration is an honest
+        // single frame naming the specific problem — never a crash, a
+        // fabricated answer ([NFR-CC-04]), or an echoed key ([NFR-SE-07]).
+        // (An unreachable-but-well-formed endpoint is not probed here; it
+        // surfaces honestly as a transport error naming the endpoint when the
+        // turn's first call fails — the story's "surface, don't guarantee
+        // reachability" scope.)
+        let cfg = match provider {
+            ChatProvider::Anthropic => ProviderConfig::anthropic(model_id, api_key),
+            ChatProvider::OpenAi => {
+                ProviderConfig::openai_compatible(model_id, api_key).with_base_url(base_url)
+            }
+        };
+        if let Err(e) = cfg.preflight() {
+            let _ = tx.send(ChatFrame::Error(e.to_string()));
+            return;
+        }
+
+        // Provider client construction + orchestrator wiring are non-blocking;
+        // the first egress is the consent-gated turn ([NFR-SE-07]). The two
+        // providers are distinct concrete model types, so each arm
+        // monomorphizes the roster's launch; both run the same orchestrated turn.
+        match provider {
+            ChatProvider::Anthropic => match anthropic_completion_model(&cfg, retry) {
+                Ok(model) => roster.launch(model, run, tx).await,
+                Err(e) => {
+                    let _ = tx.send(ChatFrame::Error(format!(
+                        "could not build the Anthropic provider: {e}"
+                    )));
+                }
+            },
+            ChatProvider::OpenAi => match openai_compatible_completion_model(&cfg, retry) {
+                Ok(model) => roster.launch(model, run, tx).await,
+                Err(e) => {
+                    let _ = tx.send(ChatFrame::Error(format!(
+                        "could not build the OpenAI-compatible provider: {e}"
+                    )));
+                }
+            },
+        }
+    });
+
+    ChatStream::from_spawn(rx, handle)
 }
 
 /// Build the roster (grounded on the turn's memory) and orchestrator over `model`,
@@ -457,9 +589,9 @@ mod tests {
     fn turn_verdict(member: &Path, ws: Option<&Path>) -> bool {
         match build_setup(member, ws, None, "what is here?") {
             Ok(setup) => {
-                if setup.model_id == WS_MODEL {
+                if setup.turn.model_id == WS_MODEL {
                     assert_eq!(
-                        setup.api_key, WS_KEY,
+                        setup.turn.api_key, WS_KEY,
                         "a member key reached the workspace endpoint"
                     );
                 }
@@ -482,8 +614,8 @@ mod tests {
         let e = estate(Half::Absent, Half::Absent, Half::Declared, Half::Declared);
         let setup = build_setup(&e.member, Some(&e.ws), None, "what is here?")
             .expect("an inheriting member produces a turn");
-        assert_eq!(setup.model_id, WS_MODEL);
-        assert_eq!(setup.api_key, WS_KEY);
+        assert_eq!(setup.turn.model_id, WS_MODEL);
+        assert_eq!(setup.turn.api_key, WS_KEY);
     }
 
     /// Per-half inheritance reaches the turn in the one allowed direction: a
@@ -493,7 +625,7 @@ mod tests {
         let e = estate(Half::Declared, Half::Absent, Half::Declared, Half::Declared);
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
         assert_eq!(
-            (setup.model_id.as_str(), setup.api_key.as_str()),
+            (setup.turn.model_id.as_str(), setup.turn.api_key.as_str()),
             (MEMBER_MODEL, WS_KEY)
         );
     }
@@ -506,7 +638,7 @@ mod tests {
         let e = estate(Half::Absent, Half::Declared, Half::Declared, Half::Declared);
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
         assert_eq!(
-            (setup.model_id.as_str(), setup.api_key.as_str()),
+            (setup.turn.model_id.as_str(), setup.turn.api_key.as_str()),
             (WS_MODEL, WS_KEY)
         );
     }
@@ -547,7 +679,7 @@ mod tests {
         write(&e.member, "config.toml", &format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\n"));
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
         assert_eq!(
-            (setup.model_id.as_str(), setup.api_key.as_str()),
+            (setup.turn.model_id.as_str(), setup.turn.api_key.as_str()),
             (MEMBER_MODEL, MEMBER_KEY)
         );
     }
@@ -584,21 +716,21 @@ mod tests {
         );
 
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
-        assert_eq!(setup.model_id, WS_MODEL);
-        assert_eq!(setup.api_key, WS_KEY);
-        assert_eq!(setup.provider, ChatProvider::Anthropic);
-        assert_eq!(setup.base_url, "https://workspace.example/v1");
-        assert_eq!(setup.temperature, Some(0.3));
-        assert_eq!(setup.max_tokens, Some(777));
+        assert_eq!(setup.turn.model_id, WS_MODEL);
+        assert_eq!(setup.turn.api_key, WS_KEY);
+        assert_eq!(setup.turn.provider, ChatProvider::Anthropic);
+        assert_eq!(setup.turn.base_url, "https://workspace.example/v1");
+        assert_eq!(setup.turn.temperature, Some(0.3));
+        assert_eq!(setup.turn.max_tokens, Some(777));
         assert_eq!(
             (
-                setup.budget.global_limit(),
-                setup.budget.max_subagent_tool_calls(),
-                setup.budget.max_replans()
+                setup.turn.budget.global_limit(),
+                setup.turn.budget.max_subagent_tool_calls(),
+                setup.turn.budget.max_replans()
             ),
             (11, 5, 2)
         );
-        assert_eq!(setup.retry, RetryPolicy::new(4, 321));
+        assert_eq!(setup.turn.retry, RetryPolicy::new(4, 321));
     }
 
     /// [S-483]: a follow-up turn on an existing thread is set up with the thread's
@@ -619,8 +751,8 @@ mod tests {
         );
 
         let first = build_setup(&e.member, None, None, "first question").expect("a turn");
-        assert!(first.history.is_empty(), "a thread's first turn has no window");
-        let thread = first.thread_id;
+        assert!(first.turn.history.is_empty(), "a thread's first turn has no window");
+        let thread = first.turn.thread_id;
         let mut store = ChatStore::open(&e.member).unwrap();
         store.append_message(thread, ChatRole::Assistant, "first answer", &[]).unwrap();
         for (q, a) in [("second question", "second answer"), ("third question", "third answer")] {
@@ -631,8 +763,8 @@ mod tests {
 
         let followup =
             build_setup(&e.member, None, Some(thread), "fourth question").expect("a follow-up");
-        let text = followup.history.render();
-        assert_eq!(followup.history.omitted(), 1, "history_max_turns = 2 keeps two of three: {text}");
+        let text = followup.turn.history.render();
+        assert_eq!(followup.turn.history.omitted(), 1, "history_max_turns = 2 keeps two of three: {text}");
         assert!(text.contains("second question") && text.contains("third answer"), "{text}");
         assert!(!text.contains("first question"), "the oldest turn went first: {text}");
         assert!(!text.contains("fourth question"), "the window never holds the live question: {text}");
@@ -647,8 +779,8 @@ mod tests {
         );
         let capped =
             build_setup(&e.member, None, Some(thread), "fifth question").expect("a follow-up");
-        let text = capped.history.render();
-        assert_eq!(capped.history.omitted(), 3, "history_max_chars = 30 keeps one of four: {text}");
+        let text = capped.turn.history.render();
+        assert_eq!(capped.turn.history.omitted(), 3, "history_max_chars = 30 keeps one of four: {text}");
         assert!(text.contains("fourth question") && !text.contains("third question"), "{text}");
     }
 
@@ -676,12 +808,45 @@ mod tests {
 
         write(&e.member, "config.toml", "[chat]\n");
         let inherited = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
-        assert_eq!(inherited.model_id, WS_MODEL);
+        assert_eq!(inherited.turn.model_id, WS_MODEL);
         assert_eq!(
             inherited.sandbox.read_roots(),
             [e.ws.join("member-docs").canonicalize().unwrap()],
             "an inherited table resolves against the workspace root that declared it"
         );
+    }
+
+    /// The member chat's half of the review's fixture (sprint-impl-84 Decision 2,
+    /// [NFR-SE-04]): a member declaring `read_roots = ["../shared-docs"]` but no
+    /// `model`, under a workspace declaring `model`, inherits the workspace table
+    /// **whole** — its own `read_roots` go with the rest of it — so its chat
+    /// refuses `docs/guide.md` as a containment. Once the member owns its policy
+    /// the same path is readable. The workspace chat's addressed `read` is pinned
+    /// to the same verdict by `agent-core/tests/addressed_workspace_tools.rs`'s
+    /// `the_addressed_read_roots_are_the_members_effective_ones_as_its_chat_resolves_them`.
+    ///
+    /// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
+    #[cfg(unix)]
+    #[test]
+    fn an_inherited_policy_drops_the_members_own_read_roots_from_the_member_chat() {
+        let e = estate(Half::Absent, Half::Absent, Half::Declared, Half::Declared);
+        fs::create_dir_all(e.ws.join("shared-docs")).unwrap();
+        fs::write(e.ws.join("shared-docs/guide.md"), "a guide\n").unwrap();
+        std::os::unix::fs::symlink("../shared-docs", e.member.join("docs")).unwrap();
+        write(&e.member, "config.toml", "[chat]\nread_roots = [\"../shared-docs\"]\n");
+
+        let inherited = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
+        assert_eq!(inherited.turn.model_id, WS_MODEL);
+        let refused = inherited.sandbox.resolve("docs/guide.md").expect_err("refused");
+        assert!(refused.is_containment_refusal(), "{refused}");
+
+        write(
+            &e.member,
+            "config.toml",
+            &format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\nread_roots = [\"../shared-docs\"]\n"),
+        );
+        let owned = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
+        owned.sandbox.resolve("docs/guide.md").expect("an owned table's read root is readable");
     }
 
     /// Sprint-79 HF-1: a declared read root that does not exist fails the turn
@@ -768,7 +933,7 @@ mod tests {
         let e = estate(Half::Blank, Half::Declared, Half::Declared, Half::Declared);
         let setup = build_setup(&e.member, Some(&e.ws), None, "q").expect("a turn");
         assert_eq!(
-            (setup.model_id.as_str(), setup.api_key.as_str()),
+            (setup.turn.model_id.as_str(), setup.turn.api_key.as_str()),
             (WS_MODEL, WS_KEY),
             "a blank member model does not shadow the workspace's"
         );

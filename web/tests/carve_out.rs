@@ -513,9 +513,12 @@ async fn chat_and_wiki_generation_posts_are_405_without_agents() {
     // The per-thread delete (`…/threads/{id}/delete`, S-209) replaced the global
     // `/chat/clear` in the mutating allow-list; under no-`agents` it is neither
     // mounted nor admitted, so a well-formed POST to it is still `405`.
+    // The workspace chat's turn and delete (S-482) are agents-only the same way.
     for path in [
         web::CHAT_POST_ROUTE,
         "/api/v1/chat/threads/1/delete",
+        web::WORKSPACE_CHAT_POST_ROUTE,
+        "/api/v1/workspace/chat/threads/1/delete",
         web::WIKI_GENERATE_ROUTE,
     ] {
         let (_dir, router, intent) = mutating_router();

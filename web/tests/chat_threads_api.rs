@@ -22,6 +22,13 @@
 //! - the retired global `POST /chat/clear` route is **gone** (`405`);
 //! - the surface stays **loopback-only** (a non-loopback `Host` is `403`).
 //!
+//! Every case but the retired-route one runs **twice** ([S-482]): over the member
+//! chat's `/api/v1/chat/threads` and over the workspace chat's
+//! `/api/v1/workspace/chat/threads`, whose store is `<workspace root>/.logos/chat.db`
+//! ([`over_both_trees!`] names them `<case>::member` and `<case>::workspace`).
+//!
+//! [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+//!
 //! [FR-UI-26]: ../../docs/specs/requirements/FR-UI-26.md
 //! [ADR-47]: ../../docs/specs/architecture/decisions/ADR-47.md
 //! [ADR-28]: ../../docs/specs/architecture/decisions/ADR-28.md
@@ -29,6 +36,7 @@
 //! [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
 //! [NFR-SE-07]: ../../docs/specs/requirements/NFR-SE-07.md
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -38,21 +46,97 @@ use http_body_util::BodyExt;
 use logos_core::Engine;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use web::{router_with_intent, IntentToken, CHAT_THREADS_ROUTE, INTENT_HEADER};
+use web::{
+    router_with_intent, IntentToken, CHAT_THREADS_ROUTE, INTENT_HEADER,
+    WORKSPACE_CHAT_THREADS_ROUTE,
+};
+
+#[path = "support/workspace_chat.rs"]
+mod workspace_chat;
 
 const ORIGIN: &str = "http://127.0.0.1:4983";
 const HOST: &str = "127.0.0.1:4983";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-/// A throwaway engine over a temp root, plus a fresh per-session intent token —
-/// enough to build the real router and reach the store-backed chat routes.
-fn fixture() -> (TempDir, Arc<Engine>, IntentToken) {
-    let dir = TempDir::new().expect("temp dir");
-    std::fs::create_dir_all(dir.path().join(".logos")).expect("pre-create .logos");
-    let engine = Arc::new(Engine::open(dir.path()));
-    (dir, engine, IntentToken::generate())
+/// The two thread trees every case runs over ([S-482]).
+///
+/// [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+#[derive(Clone, Copy)]
+enum Tree {
+    /// `/api/v1/chat/threads` over a single root's `.logos/chat.db`.
+    Member,
+    /// `/api/v1/workspace/chat/threads` over `<workspace root>/.logos/chat.db`.
+    Workspace,
 }
+
+/// One case's world: the root whose store the tree reads, the real router, the
+/// session's intent token and the tree's base route.
+struct Fixture {
+    _keep: TempDir,
+    root: PathBuf,
+    router: axum::Router,
+    intent: IntentToken,
+    base: &'static str,
+}
+
+/// The real router over a throwaway root, plus a fresh per-session intent token
+/// — enough to reach the store-backed chat routes of `tree`.
+fn fixture(tree: Tree) -> Fixture {
+    let intent = IntentToken::generate();
+    match tree {
+        Tree::Member => {
+            let dir = TempDir::new().expect("temp dir");
+            std::fs::create_dir_all(dir.path().join(".logos")).expect("pre-create .logos");
+            let engine = Arc::new(Engine::open(dir.path()));
+            Fixture {
+                root: dir.path().to_path_buf(),
+                router: router_with_intent(engine, intent.clone()),
+                _keep: dir,
+                intent,
+                base: CHAT_THREADS_ROUTE,
+            }
+        }
+        Tree::Workspace => {
+            let dir = workspace_chat::workspace();
+            Fixture {
+                root: dir.path().to_path_buf(),
+                router: workspace_chat::router(dir.path(), &intent),
+                _keep: dir,
+                intent,
+                base: WORKSPACE_CHAT_THREADS_ROUTE,
+            }
+        }
+    }
+}
+
+/// Run the case `$case(Fixture)` once per tree, as `$case::member` and
+/// `$case::workspace`.
+macro_rules! over_both_trees {
+    ($($case:ident),+ $(,)?) => {$(
+        mod $case {
+            #[tokio::test]
+            async fn member() {
+                super::$case(super::fixture(super::Tree::Member)).await;
+            }
+            #[tokio::test]
+            async fn workspace() {
+                super::$case(super::fixture(super::Tree::Workspace)).await;
+            }
+        }
+    )+};
+}
+
+over_both_trees!(
+    list_returns_threads_most_recent_first,
+    reads_are_get_only_and_carry_no_secret,
+    messages_returns_ordered_transcript,
+    messages_for_empty_thread_is_empty_ok,
+    messages_for_unknown_thread_is_404,
+    delete_requires_a_valid_intent_token,
+    delete_unknown_thread_is_404,
+    non_loopback_host_is_rejected,
+);
 
 /// Seed `n` conversations, each with one user message, returning their ids in
 /// creation order. Because `append_message` bumps `updated_at` and `list_threads`
@@ -109,12 +193,11 @@ async fn body_json(resp: Response<Body>) -> serde_json::Value {
 
 /// `GET /api/v1/chat/threads` returns every conversation most-recent-first, as
 /// the exact `{id,title,updated_at}` contract the rail reads — nothing more.
-#[tokio::test]
-async fn list_returns_threads_most_recent_first() {
-    let (dir, engine, intent) = fixture();
-    let ids = seed_threads(dir.path(), &["first", "second", "third"]);
+async fn list_returns_threads_most_recent_first(f: Fixture) {
+    let Fixture { root, router, base, .. } = f;
+    let ids = seed_threads(&root, &["first", "second", "third"]);
     // The store's own order is the contract the endpoint must faithfully surface.
-    let expected: Vec<i64> = ChatStore::open(dir.path())
+    let expected: Vec<i64> = ChatStore::open(&root)
         .unwrap()
         .list_threads()
         .unwrap()
@@ -122,8 +205,8 @@ async fn list_returns_threads_most_recent_first() {
         .map(|t| t.id)
         .collect();
 
-    let router = router_with_intent(engine, intent);
-    let resp = router.oneshot(get(CHAT_THREADS_ROUTE)).await.unwrap();
+    let router = router.clone();
+    let resp = router.oneshot(get(base)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let rows = json.as_array().expect("the list is a JSON array");
@@ -142,26 +225,25 @@ async fn list_returns_threads_most_recent_first() {
 
 /// The list payload carries no secret: it is a GET (a POST is `405`), and its
 /// serialized body names no key/secret field ([NFR-SE-07], [ADR-28]).
-#[tokio::test]
-async fn reads_are_get_only_and_carry_no_secret() {
-    let (dir, engine, intent) = fixture();
-    let ids = seed_threads(dir.path(), &["alpha", "beta"]);
-    let router = router_with_intent(engine, intent.clone());
+async fn reads_are_get_only_and_carry_no_secret(f: Fixture) {
+    let Fixture { root, router, intent, base, .. } = f;
+    let ids = seed_threads(&root, &["alpha", "beta"]);
+    let router = router.clone();
 
     // GET-only: a POST to the list route is not an admitted mutating route → 405.
     let posted = router
         .clone()
-        .oneshot(post(CHAT_THREADS_ROUTE, Some(intent.as_str()), Some(ORIGIN)))
+        .oneshot(post(base, Some(intent.as_str()), Some(ORIGIN)))
         .await
         .unwrap();
     assert_eq!(posted.status(), StatusCode::METHOD_NOT_ALLOWED, "the list route is GET-only");
 
     // The `{id}` messages route (no `/delete` suffix) is a read too: a well-formed
-    // POST to it is not admitted by `is_chat_thread_delete_route` → 405.
+    // POST to it is not admitted by `is_thread_delete_route` → 405.
     let posted_msg = router
         .clone()
         .oneshot(post(
-            &format!("{CHAT_THREADS_ROUTE}/{}", ids[0]),
+            &format!("{base}/{}", ids[0]),
             Some(intent.as_str()),
             Some(ORIGIN),
         ))
@@ -174,7 +256,7 @@ async fn reads_are_get_only_and_carry_no_secret() {
     );
 
     // No secret rides the read payload.
-    let text = body_text(router.oneshot(get(CHAT_THREADS_ROUTE)).await.unwrap()).await;
+    let text = body_text(router.oneshot(get(base)).await.unwrap()).await;
     for marker in ["secret", "api_key", "apikey", "last4", "sk-"] {
         assert!(
             !text.to_ascii_lowercase().contains(marker),
@@ -188,9 +270,8 @@ async fn reads_are_get_only_and_carry_no_secret() {
 /// `GET /api/v1/chat/threads/{id}` returns the thread's messages in stored order,
 /// as the exact producer-contract shape (incl. `tool_traces`), and carries no
 /// secret on the richer transcript payload either.
-#[tokio::test]
-async fn messages_returns_ordered_transcript() {
-    let (dir, engine, intent) = fixture();
+async fn messages_returns_ordered_transcript(f: Fixture) {
+    let Fixture { root, router, base, .. } = f;
     let trace = ToolTrace {
         tool_name: "graph_search".to_string(),
         arguments: "{\"q\":\"binder\"}".to_string(),
@@ -198,7 +279,7 @@ async fn messages_returns_ordered_transcript() {
         is_error: false,
     };
     let thread = {
-        let mut store = ChatStore::open(dir.path()).unwrap();
+        let mut store = ChatStore::open(&root).unwrap();
         let thread = store.create_thread("ordered").unwrap();
         store.append_message(thread, ChatRole::User, "first question", &[]).unwrap();
         store
@@ -208,8 +289,8 @@ async fn messages_returns_ordered_transcript() {
         thread
     };
 
-    let router = router_with_intent(engine, intent);
-    let resp = router.oneshot(get(&format!("{CHAT_THREADS_ROUTE}/{thread}"))).await.unwrap();
+    let router = router.clone();
+    let resp = router.oneshot(get(&format!("{base}/{thread}"))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let text = body_text(resp).await;
     // The transcript is the richer payload (content + tool traces) — the more
@@ -253,13 +334,12 @@ async fn messages_returns_ordered_transcript() {
 
 /// A real thread with no appended messages returns an honest empty `200` array —
 /// the branch the `thread()` existence check exists to distinguish from a `404`.
-#[tokio::test]
-async fn messages_for_empty_thread_is_empty_ok() {
-    let (dir, engine, intent) = fixture();
-    let thread = ChatStore::open(dir.path()).unwrap().create_thread("empty").unwrap();
+async fn messages_for_empty_thread_is_empty_ok(f: Fixture) {
+    let Fixture { root, router, base, .. } = f;
+    let thread = ChatStore::open(&root).unwrap().create_thread("empty").unwrap();
 
-    let router = router_with_intent(engine, intent);
-    let resp = router.oneshot(get(&format!("{CHAT_THREADS_ROUTE}/{thread}"))).await.unwrap();
+    let router = router.clone();
+    let resp = router.oneshot(get(&format!("{base}/{thread}"))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "a real-but-empty thread is 200, not 404");
     let json = body_json(resp).await;
     assert_eq!(json.as_array().map(|a| a.len()), Some(0), "the transcript is an empty array");
@@ -267,11 +347,10 @@ async fn messages_for_empty_thread_is_empty_ok() {
 
 /// A request for a thread that does not exist is an honest `404`, never a
 /// misleading empty `200`.
-#[tokio::test]
-async fn messages_for_unknown_thread_is_404() {
-    let (_dir, engine, intent) = fixture();
-    let router = router_with_intent(engine, intent);
-    let resp = router.oneshot(get(&format!("{CHAT_THREADS_ROUTE}/99999"))).await.unwrap();
+async fn messages_for_unknown_thread_is_404(f: Fixture) {
+    let Fixture { router, base, .. } = f;
+    let router = router.clone();
+    let resp = router.oneshot(get(&format!("{base}/99999"))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND, "an unknown thread is 404");
 }
 
@@ -280,13 +359,12 @@ async fn messages_for_unknown_thread_is_404() {
 /// A forged (cross-origin) or intent-less delete is rejected `403` and mutates
 /// nothing; a valid same-origin + intent-token delete is `204` and removes
 /// exactly that thread ([ADR-31], [NFR-SE-06]).
-#[tokio::test]
-async fn delete_requires_a_valid_intent_token() {
-    let (dir, engine, intent) = fixture();
-    let ids = seed_threads(dir.path(), &["keep", "victim"]);
+async fn delete_requires_a_valid_intent_token(f: Fixture) {
+    let Fixture { root, router, intent, base, .. } = f;
+    let ids = seed_threads(&root, &["keep", "victim"]);
     let victim = ids[1];
-    let router = router_with_intent(engine, intent.clone());
-    let route = format!("{CHAT_THREADS_ROUTE}/{victim}/delete");
+    let router = router.clone();
+    let route = format!("{base}/{victim}/delete");
 
     // Cross-origin (forged) — the browser-set Origin is the attacker's → 403.
     let forged = router
@@ -302,7 +380,7 @@ async fn delete_requires_a_valid_intent_token() {
 
     // Neither rejection touched the store.
     assert_eq!(
-        ChatStore::open(dir.path()).unwrap().list_threads().unwrap().len(),
+        ChatStore::open(&root).unwrap().list_threads().unwrap().len(),
         2,
         "a rejected delete mutates nothing",
     );
@@ -310,7 +388,7 @@ async fn delete_requires_a_valid_intent_token() {
     // The valid delete removes exactly the victim, leaving the other thread.
     let ok = router.oneshot(post(&route, Some(intent.as_str()), Some(ORIGIN))).await.unwrap();
     assert_eq!(ok.status(), StatusCode::NO_CONTENT, "a valid delete succeeds");
-    let remaining: Vec<i64> = ChatStore::open(dir.path())
+    let remaining: Vec<i64> = ChatStore::open(&root)
         .unwrap()
         .list_threads()
         .unwrap()
@@ -322,13 +400,12 @@ async fn delete_requires_a_valid_intent_token() {
 
 /// Deleting a thread that does not exist is an idempotent `404`, never a silent
 /// success (`delete_thread` returned `false`).
-#[tokio::test]
-async fn delete_unknown_thread_is_404() {
-    let (_dir, engine, intent) = fixture();
-    let router = router_with_intent(engine, intent.clone());
+async fn delete_unknown_thread_is_404(f: Fixture) {
+    let Fixture { router, intent, base, .. } = f;
+    let router = router.clone();
     let resp = router
         .oneshot(post(
-            &format!("{CHAT_THREADS_ROUTE}/4242/delete"),
+            &format!("{base}/4242/delete"),
             Some(intent.as_str()),
             Some(ORIGIN),
         ))
@@ -342,9 +419,8 @@ async fn delete_unknown_thread_is_404() {
 /// ([ADR-47]).
 #[tokio::test]
 async fn global_chat_clear_route_is_gone() {
-    let (dir, engine, intent) = fixture();
-    seed_threads(dir.path(), &["survives"]);
-    let router = router_with_intent(engine, intent.clone());
+    let Fixture { root, router, intent, .. } = fixture(Tree::Member);
+    seed_threads(&root, &["survives"]);
     let resp = router
         .oneshot(post("/chat/clear", Some(intent.as_str()), Some(ORIGIN)))
         .await
@@ -355,7 +431,7 @@ async fn global_chat_clear_route_is_gone() {
         "the global /chat/clear route no longer exists",
     );
     assert_eq!(
-        ChatStore::open(dir.path()).unwrap().list_threads().unwrap().len(),
+        ChatStore::open(&root).unwrap().list_threads().unwrap().len(),
         1,
         "nothing was wiped",
     );
@@ -365,15 +441,14 @@ async fn global_chat_clear_route_is_gone() {
 
 /// The new endpoints stay loopback-only: a non-loopback `Host` is `403` before
 /// any handler runs ([FR-UI-01]), on both a read and the delete.
-#[tokio::test]
-async fn non_loopback_host_is_rejected() {
-    let (dir, engine, intent) = fixture();
-    let ids = seed_threads(dir.path(), &["local"]);
-    let router = router_with_intent(engine, intent.clone());
+async fn non_loopback_host_is_rejected(f: Fixture) {
+    let Fixture { root, router, intent, base, .. } = f;
+    let ids = seed_threads(&root, &["local"]);
+    let router = router.clone();
 
     let read = Request::builder()
         .method(Method::GET)
-        .uri(CHAT_THREADS_ROUTE)
+        .uri(base)
         .header(header::HOST, "evil.example.com")
         .body(Body::empty())
         .unwrap();
@@ -382,7 +457,7 @@ async fn non_loopback_host_is_rejected() {
 
     let del = Request::builder()
         .method(Method::POST)
-        .uri(format!("{CHAT_THREADS_ROUTE}/{}/delete", ids[0]))
+        .uri(format!("{base}/{}/delete", ids[0]))
         .header(header::HOST, "evil.example.com")
         .header(header::ORIGIN, "http://evil.example.com")
         .header(INTENT_HEADER, intent.as_str())

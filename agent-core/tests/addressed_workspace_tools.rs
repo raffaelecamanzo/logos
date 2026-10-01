@@ -11,8 +11,9 @@
 //!    starts only the member it names, and an unknown `repo` is an error listing
 //!    the members that starts nothing;
 //! 3. a source call is confined to the addressed member's own sandbox — its root,
-//!    its `ignored_dirs`, its `[chat] read_roots` — so a sibling member or a file
-//!    of the workspace root is a containment refusal;
+//!    its `ignored_dirs`, its **effective** `[chat] read_roots` (the ones its own
+//!    chat reads through, S-482) — so a sibling member or a file of the
+//!    workspace root is a containment refusal;
 //! 4. each workspace read-model tool answers its twin's payload, compared whole
 //!    against the MCP tool called over the real protocol (and, for the roster,
 //!    which has no MCP tool, against the read-model its HTTP route serves).
@@ -622,6 +623,43 @@ async fn the_sandbox_carries_the_addressed_members_own_ignored_dirs_and_read_roo
         .await,
         "api declares no read root",
     );
+}
+
+/// The addressed sandbox's read roots are the member's **effective** ones — the
+/// ones its own chat reads through ([NFR-SE-04], [ADR-67]). `web` declares
+/// `read_roots` but no `model`, so once the workspace root declares a `model`,
+/// `web` inherits the workspace's `[chat]` table **whole** and its own
+/// `read_roots` stop applying: the addressed `read` refuses `docs/guide.md` as
+/// a containment, exactly as `web`'s member chat does (its twin is
+/// `web/src/chat/configured.rs`'s
+/// `an_inherited_policy_drops_the_members_own_read_roots_from_the_member_chat`).
+/// The other direction holds too: read roots the workspace table declares
+/// resolve against the workspace root and reach every member inheriting it.
+///
+/// [NFR-SE-04]: ../../docs/specs/requirements/NFR-SE-04.md
+/// [ADR-67]: ../../docs/specs/architecture/decisions/ADR-67.md
+#[cfg(unix)]
+#[tokio::test]
+async fn the_addressed_read_roots_are_the_members_effective_ones_as_its_chat_resolves_them() {
+    let ws = Workspace::new();
+    let xs = ws.backing(false);
+    write(ws.root(), ".logos/config.toml", "[chat]\nmodel = \"workspace/model\"\n");
+    assert_contained(
+        source_call(&xs, "read", json!({ "repo": "web", "path": "docs/guide.md" })).await,
+        "web inherits the workspace table, which declares no read root",
+    );
+
+    write(
+        ws.root(),
+        ".logos/config.toml",
+        "[chat]\nmodel = \"workspace/model\"\nread_roots = [\"shared-docs\"]\n",
+    );
+    for repo in ["web", "api"] {
+        let guide = source_call(&xs, "read", json!({ "repo": repo, "path": "docs/guide.md" }))
+            .await
+            .unwrap_or_else(|err| panic!("{repo} reads the workspace's read root: {err:?}"));
+        assert!(guide.contains("a guide both members link to"), "{repo}: {guide}");
+    }
 }
 
 /// A member whose `config.toml` will not load is an error naming it — never a
