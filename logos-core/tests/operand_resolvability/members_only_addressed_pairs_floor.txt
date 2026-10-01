@@ -1,0 +1,298 @@
+S-492 T1 — THE ADDRESSED-PAIR FLOOR, RE-DECLARED UNREVISED BEFORE A MEMBERS-ONLY RE-RUN
+=====================================================================================
+
+Declared (UTC):  2026-10-01T17:31:56Z
+Declared by:     Dev Session 2.3 (sprint-84, branch sprint-84-I2-S3)
+Declared at:     logos commit 55058123 — the parent of the commit that adds this
+                 file. The members-only identity registry does not exist in the
+                 harness at that commit and is added only by LATER commits on this
+                 branch, so the ordering is auditable in `git log`, not asserted
+                 here.
+Story:           S-492 — Re-measure the addressed-pair gate through a members-only
+                 identity registry
+Gate decides:    CR-158 section 3.2 B3. Whether a fresh delivery CR for the member
+                 map may be filed, or the addressed line closes on this estate.
+
+Estate under measurement: ~/source/pec-services (LOGOS_REF_WORKSPACE), read-only
+against the estate SOURCE. Nothing under that path is written.
+
+This file is TRACKED, beside S-411's `config_declared_coupling_floor.txt` and
+S-475's `sequence_addressed_pairs_floor.txt`, and it does NOT replace or amend
+either. Their floor files, finding files and pinned constants stay byte-identical:
+this run is a FOURTH experiment against the same contract, not an edit of the
+earlier records.
+
+
+THE ONE CHANGE, QUOTED VERBATIM FROM CR-158 SECTION 3.2 A
+----------------------------------------------------------
+
+Character for character, from the "A —" paragraph through the end of the
+"Everything else is unchanged" list:
+
+    **A — The one change: a members-only identity registry.** Tier 1–3 identity labels ([FR-WS-20](../specs/requirements/FR-WS-20.md): chart name, directory name, and the tiers the [S-384](../planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus) classifier already reads) are collected **only from the members of `~/source/pec-services/logos.workspace.toml`** at a named commit.
+    - A label that only a non-member directory carries is not an identity: a value naming it falls into the existing "labels resolving to no member" bucket.
+    - A collision is counted only between members.
+    - Tiers 4–5 stay recorded and never decisive, as today.
+
+    **Everything else is unchanged**, exactly as [S-475](../planning/journal.md#s-475-re-measure-the-addressed-pair-gate-through-a-yaml-sequence-reading-corpus) ran it:
+    - the metric ([CR-131](CR-131-cross-service-coupling-from-committed-configuration.md) §3.2 B1, quoted verbatim);
+    - the item-scoped sequence reader;
+    - the deploy-overlay walk;
+    - the runnable rule;
+    - the self-tie and collision subtractions;
+    - the path-only subtraction, taken over the same population the pairs are counted over, so the fork's duplicate routes take no part;
+    - the six-way split.
+
+
+THE METRIC AND THE FLOOR, QUOTED VERBATIM FROM CR-131 SECTION 3.2 B1
+---------------------------------------------------------------------
+
+The whole B1 bullet, character for character:
+
+    - **B1 (gate).** One read-only measurement over the reference estate, in the `operand_resolvability` harness, reusing the [S-384](../planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus) identity classifier and the shipped corpus code: count ordered member pairs A→B (A ≠ B, B a runnable member, target from a URL- or host-valued committed value in application config *or* a deploy overlay), and topics declared by two or more members through a committed value equal to a topic identity. **Floors, declared here and parsed by the test from a tracked file: 12 addressed pairs and 10 shared topics.** Self-ties, same-tier collisions, out-of-namespace externals and pairs path-matching already binds are each reported apart. Below either floor the corresponding half is recorded falsified and its delivery stories stay unplanned.
+
+Only the ADDRESSED-PAIR half is re-measured. The topic half is CR-157's (CR-158
+section 3.3) and its floor is not restated here.
+
+
+THE FLOOR
+---------
+
+FLOOR: 12
+
+    >= 12 ADDRESSED MEMBER PAIRS on the decisive reading defined below.
+
+Unrevised. It is CR-131's figure, carried by CR-153 and by CR-158 ("Floor (12),
+metric, corpus and decisive reading are unchanged"). Neither CR-158 nor this file
+derives it, lowers it or tunes it to an expected yield.
+
+
+THE DECISIVE READING
+--------------------
+
+DECISIVE: STRICT
+
+  STRICT      the 83 manifest members listed below, with the TEST-HARNESS
+              CONSUMER `e2e-tests` NOT counted: no pair whose A is `e2e-tests`.
+              THE GATE.
+  MANIFEST    the same 83 members, `e2e-tests` counted. Printed, never decisive.
+  DIRECTORY   the 84 `.git` directories, the fork included as a CONSUMER.
+              Printed for comparability, never decisive.
+
+The three readings are S-475's `Reading` — the same three population filters
+over ONE judged target set — called, not restated. CR-158 section 3.2 B3, fixed
+before the run:
+
+  HOLDS      STRICT >= 12. Authorises filing a fresh delivery CR for the member
+             map, designed afresh; no closed story is re-opened.
+  FALSIFIED  STRICT < 12, whatever MANIFEST or DIRECTORY read. A HOLDS only on
+             MANIFEST or on DIRECTORY is FALSIFIED on the decisive reading (the
+             CR-153 precedent). A FALSIFIED closes the addressed line on this
+             estate: no further re-measurement CR without a new CLASS of address
+             evidence (CR-158 section 2.3).
+
+
+WHAT "MEMBERS-ONLY" MEANS IN THE HARNESS, EXACTLY
+--------------------------------------------------
+
+The identity registry is S-384's `identity::Corpus`, judged through S-384's
+`Corpus::member_for` (FR-WS-20 AC2 as written) by S-411's `label_state` and
+`classify_pair`, all CALLED. The one change is to the CLAIMS that corpus holds:
+
+  1. A claim at tier 1 (deploy), tier 2 (container) or tier 3 (directory) is
+     kept only when its member is one of the 83 listed below. A label that only
+     a non-member claims at those tiers is therefore no identity, and a value
+     naming it falls in the existing "label resolves to no member" bucket; a
+     collision at those tiers is counted only between members.
+  2. Claims at tier 4 (`spring.application.name`) and tier 5 (artifact id) are
+     kept EXACTLY as S-384 records them, from every directory. CR-158 says
+     "Tiers 4–5 stay recorded and never decisive, as today"; in the S-384
+     classifier as it runs today tier 5 is never decisive but TIER 4 IS
+     (`Tier::is_decisive` excludes only `Artifact`). This declaration resolves
+     that against the CR's own scope sentence — "Tier 1–3 identity labels ...
+     are collected only from the members" — and leaves tier 4 as today. The run
+     PRINTS how many judged targets and STRICT pairs would move if tier 4 were
+     scoped too: a report, never counted.
+  3. Nothing else in the corpus changes: the target references, the walk, the
+     Spring key census.
+
+THE PATH-ONLY SUBTRACTION, TAKEN WITHOUT THE FORK. CR-158 section 3.2 A requires
+"the path-only subtraction, taken over the same population the pairs are counted
+over, so the fork's duplicate routes take no part". In the harness that means,
+exactly: the path-only set is S-384's own consumer-site judgement (its `judge`,
+FR-WS-20 AC2 literal resolution, CALLED, never copied), run
+
+  - with the members-only registry above, so a site addressing `archive-api`
+    now names a provider; and
+  - against S-384's provider index restricted to the 83 members, so a route the
+    fork alone duplicates no longer makes the template ambiguous;
+
+and its "already bound by path alone" (consumer, provider) pairs are the
+subtracted set. It is the decisive population's subtraction and it is applied
+to all three readings, exactly as S-475 applied S-411's one path-only set to
+all three. The runnable rule is S-411's runnable set, unchanged.
+
+FOR EACH OF THE TWO AGGREGATOR PAIRS the run prints whether this fork-free
+subtraction KEPT or REMOVED it and, when removed, the path-only binding — the
+consumer site, its normalized template, the via-key and the overlay — that
+caused it:
+
+    funnel-aggregator-api  -> archive-api
+    mailbox-aggregator-api -> archive-api
+
+The outcome is NOT predetermined (CR-158 section 2.1): with both pairs the
+STRICT reading would be 13, with one 12, with neither 11. That arithmetic is the
+CR's expectation, recorded so the run can be read against it, and it is NOT an
+acceptance figure.
+
+
+THE MEMBER POPULATION, FIXED BEFORE THE RUN
+--------------------------------------------
+
+The estate root is NOT a git repository, so the manifest has no commit id of its
+own. It is fixed instead by its content and by the logos commit this declaration
+is made at:
+
+    manifest:       ~/source/pec-services/logos.workspace.toml
+    SHA-256:        9e1873392a2e366d59db7b375b9c55c5f984648cc4718f2a02dab93db7444f49
+    declared at:    logos commit 55058123
+
+The SHA-256 is the one S-475's declaration recorded on 2026-09-29: the manifest
+has not changed since. Its 83 members are listed verbatim between the two
+markers below. The test PARSES this list, and on an estate run asserts that the
+live manifest's member set is EXACTLY this set — a manifest edited after this
+declaration changes the population, and the run then fails rather than silently
+measuring a different one. The 84th directory, `archive-api-logiclens-fork`, is
+absent by the stakeholder's recorded 2026-09-27 decision.
+
+POPULATION: 83
+
+MANIFEST MEMBERS — BEGIN (83)
+    agid-volume-counters-batch
+    archive-api
+    archive-feeder
+    archive-kafka-models
+    archive-listener-adapter
+    archive-manager
+    archive-notification-adapter
+    archive-reporting-adapter
+    batch-kafka-models
+    batch-test
+    deprecated-mailbox-core
+    e2e-tests
+    filters-api
+    filters-domain
+    filters-ingestion-cdk
+    filters-kafka-models
+    filters-processor
+    funnel-aggregator-api
+    gen2gen3_devops_utils
+    hermodr-gateway
+    hermodr-mirror
+    legacy-official-log-tools
+    mailbox-aggregate-hermodr-gateway
+    mailbox-aggregator-api
+    mailbox-api
+    mailbox-domain
+    mailbox-kafka-models
+    mailbox-manager
+    mailbox-notification-adapter
+    mailbox-reporting-adapter
+    mailbox-unread-mail-batch
+    mailserver-api
+    mailserver-common
+    mock-legal-storage
+    notification-adapter
+    notification-api
+    notification-domain
+    notification-gateway-mock
+    notification-kafka-models
+    official-log-batch-lib
+    official-log-daily-activities-fetcher-batch
+    official-log-export-api
+    official-log-export-domain
+    official-log-export-job-manager
+    official-log-export-job-worker
+    official-log-export-notification-adapter
+    official-log-export-reporting-adapter
+    official-log-ingestion-batch
+    official-log-ingestion-domain
+    official-log-ingestion-status-batch
+    official-log-journal-api
+    official-log-kafka-models
+    official-log-legal-storage-batch
+    official-log-metrics-adapter
+    pec-agid-statistics-informer
+    pec-services-tools
+    pecserver-facade
+    pecserver-mock
+    pecserver-reporting-adapter
+    poste-pec-common
+    poste-pec-documentation
+    poste-pec-starter
+    postel-cpx-creation-lib
+    ptpec-assistance-tool
+    ptpec-precommit-hooks
+    punctuators-poc
+    reporting-api
+    reporting-archive-data-downsampler
+    reporting-archive-data-projector
+    reporting-data-export-batch
+    reporting-domain
+    reporting-kafka-models
+    reporting-mailbox-data-projector
+    reporting-volume-counters-batch
+    retail-migration-pre-population-script
+    software-architecture-documents
+    spring-cloud-data-flow-helm
+    spring-cloud-data-flow-pecserver-task
+    sprint-review-tools
+    styleguide
+    timestamp-service-client
+    virus-ingestion-batch
+    webmail
+MANIFEST MEMBERS — END
+
+
+WHAT IS PRINTED BESIDE THE VERDICT — REPORTS, NEVER FLOORS (CR-158 B2)
+-----------------------------------------------------------------------
+
+  - the STRICT, MANIFEST and DIRECTORY readings, each against the floor;
+  - every pair GAINED or LOST versus S-475's STRICT (S-475's own object, not a
+    reconstruction), by name, with the key, file and overlays that prove it, or
+    the bucket it fell in;
+  - for each of the two aggregator pairs, KEPT or REMOVED by the fork-free
+    path-only subtraction, and the binding that caused it;
+  - the collisions the members-only registry REMOVED and those it KEPT, by
+    label, with their claimants;
+  - the "label resolves to no member" bucket BEFORE (S-475) and AFTER;
+  - the tier-4 sensitivity named above.
+
+None of these can clear or fail the gate. There is exactly one decisive number.
+
+
+A RUN THAT SEES NO ESTATE REPORTS *VOID*, NEVER ZERO
+-----------------------------------------------------
+
+Per NFR-CC-04: where `LOGOS_REF_WORKSPACE` is unset the measurement has not been
+performed. The estate arm prints VOID and asserts nothing about the gate. The
+members-only rule carries ALWAYS-RUN fixtures, independent of the estate — a
+non-member owns a label (no collision); two members own one label (collision
+kept); a label only a non-member owns (no member) — and S-475's own fixtures run
+unchanged beside them.
+
+
+COMMITMENT
+----------
+
+The floor is not revised after the run. The floor, the population and the
+decisive reading are PARSED from this file (the `FLOOR:`, `POPULATION:` and
+`DECISIVE:` lines and the member list), so none can be edited to clear a run
+without this declaration being edited too — in the file whose purpose is to say
+it must not be.
+
+Whatever the verdict, ADR-65 gains a dated appendix recording it; its
+supersession banner stays and its original text is byte-identical. No journal
+story's status or banner changes (CR-158 section 6). If a later run disagrees
+with what is recorded, the procedure is to re-decide CR-158 and ADR-65, not to
+relax an assertion.

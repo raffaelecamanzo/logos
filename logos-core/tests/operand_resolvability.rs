@@ -377,6 +377,19 @@ mod ts_method_residue;
 #[path = "operand_resolvability/declared_topics.rs"]
 mod declared_topics;
 
+/// S-492's members-only addressed-pair gate — its own module, so CR-158's
+/// re-run does not co-edit the file S-475's floor, finding and pins live in.
+/// Re-judges S-475's own target population through S-411's classifier with
+/// one change, a members-only identity registry, and takes the path-only
+/// subtraction through S-384's site judgement without the fork; adds no walk
+/// of the estate.
+///
+/// `#[path]`-attached for the same reason every sibling above is: a plain
+/// `tests/members_only_addressed_pairs.rs` would become a second cargo test
+/// target.
+#[path = "operand_resolvability/members_only_addressed_pairs.rs"]
+mod members_only_addressed_pairs;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
