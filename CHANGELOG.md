@@ -31,8 +31,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   declares `[package_modules]` under `src/main/kotlin` and `src/test/kotlin`, so a Kotlin
   file there is `com.x.Svc` rather than `main::kotlin::com::x::Svc`: Kotlin imports of
   in-repository types can bind, and a type declared under one name in both trees stays
-  unbound. Kotlin projects will see more resolved imports and type relations after re-index,
-  and `status` reports the Kotlin row's `call_residue` as it does Java's.
+  unbound. Kotlin projects will see more resolved imports after their first full reconcile or
+  re-index, and `status` reports the Kotlin row's `call_residue` as it does Java's. Kotlin type
+  relations (`Extends`/`Implements`/`TypeUses`) are still not captured.
 
 ## [1.7.0] — 2026-09-30
 
