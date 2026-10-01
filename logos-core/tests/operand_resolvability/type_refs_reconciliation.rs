@@ -301,13 +301,14 @@ fn reconcile_the_type_reference_overlay_with_the_s471_gate_over_the_reference_wo
     println!("\nPRODUCT HEADLINE\n  {}", index.headline.summary);
     println!("  rows: {:?}", index.headline.rows);
     println!(
-        "  members: {} of {} read; {} Java/Kotlin/Avro; owned declarations {}, test-tree {}, refused {}; \
-         schemas {} read of {}",
+        "  members: {} of {} read; {} Java/Kotlin/Avro; owned declarations {}, test-tree {}, \
+         default-package {}, refused {}; schemas {} read of {}",
         index.headline.members.read,
         index.headline.members.members,
         index.headline.members.java_kotlin_avro,
         index.headline.members.owned_declarations,
         index.headline.members.test_tree_declarations,
+        index.headline.members.default_package_declarations,
         index.headline.members.refused_declarations,
         index.headline.members.schemas_read,
         index.headline.members.schemas,

@@ -1,15 +1,22 @@
 S-473 T1 — RECORDED RUN: THE TYPE-REFERENCE OVERLAY RECONCILED WITH THE S-471 GATE
 ================================================================================
 
-Measured (UTC):  2026-10-01T01:18:53Z (reconciliation), 01:19:22Z–01:24:43Z (on/off)
+Measured (UTC):  2026-10-01T02:08:35Z (reconciliation), 02:03:12Z–02:07:16Z (on/off),
+                 re-run after the task review's fixes (review-fix commits through ab51d63f);
+                 the first run (01:18:53Z, 01:19:22Z–01:24:43Z, at aa738a93) gave the same
+                 bound figures, its single no-owner bucket (39,292) since split into
+                 unqualified (21,406) and no owner (17,886)
 Measured by:     Dev Session 2.1 (sprint-83, branch sprint-83-I2-S1), logos-core 1.7.0
                  + this branch (no schema migration of its own; S-472's migration 24)
 Estate:          a private copy (`cp -Rp`, 2026-10-01T01:13:45Z) of ~/source/pec-services
                  at ~/source/.estate-copies/pec-services-S-473. 84 clones, 83 manifest
                  members, every store at v23; each member re-indexed by this branch's
-                 release binary (`logos index --project <member>`, 01:17:16Z–01:18:27Z,
-                 83 of 83 exit 0, all now v24, 67.5 s total). The live estate was never
-                 opened by a branch binary.
+                 release binary (`logos index --project <member>`; first 01:17:16Z–
+                 01:18:27Z, 83 of 83 exit 0, all now v24, 67.5 s total; again before each
+                 later run, since the "off" step deletes the facts — 83 of 83 exit 0 each
+                 time; the review changed no indexing code, so aa738a93's binary and the
+                 post-review one index identically).
+                 The live estate was never opened by a branch binary.
 Command:         LOGOS_REF_WORKSPACE=~/source/.estate-copies/pec-services-S-473 \
                    cargo test -p logos-core --test operand_resolvability \
                    reconcile_the_type_reference_overlay_with_the_s471_gate -- --nocapture
@@ -17,6 +24,12 @@ Command:         LOGOS_REF_WORKSPACE=~/source/.estate-copies/pec-services-S-473 
                  CI, so this file is the run's only record.
 
 VERDICT — RECONCILED. One triple apart from the gate, attributed; none unattributed.
+
+  Product headline: 80 pairs (77 build · 3 collision-backed) bind 2,356 of 41,788 rows
+  (20,179 imports · 21,609 type uses). The rest: 3 type-only, 0 pair-unread,
+  131 ambiguous-owner, 6 self-owned, 21,406 unqualified (bare type-use names, never
+  looked up) and 17,886 no owner in the workspace. 83 of 83 members read; no
+  default-package declaration.
 
   Reach (main-tree triples): recorded 434 · gate rule re-run on these stores 434 ·
   product 433. The one: official-log-export-job-worker → poste-pec-common
@@ -36,7 +49,7 @@ VERDICT — RECONCILED. One triple apart from the gate, attributed; none unattri
 
 BYTE-IDENTITY, OVERLAY ON AND OFF (estate copy)
 
-  "Off" = every member's declared_types, avro_schemas and declared_types_extracted
+  Run with the post-review release binary. "Off" = every member's declared_types, avro_schemas and declared_types_extracted
   marker deleted (`sqlite3 <copy store> DELETE …`), so the overlay reads every member
   unread and binds nothing. Then `logos --project <copy> workspace status --json` and
   `xservice route-providers --json` were run, and in each member
@@ -57,9 +70,9 @@ S-473 RECONCILIATION — THE OVERLAY AGAINST THE S-471 GATE, BY NAME
 root: /Users/raffaelecamanzo/source/.estate-copies/pec-services-S-473
 
 PRODUCT HEADLINE
-  80 member pairs (77 build · 3 collision-backed) bind 2356 of 41788 unresolved Java/Kotlin import and type-use rows to a type another member declares (3 type-only, 0 pair unread, 131 ambiguous-owner, 6 self-owned, 39292 no owner in the workspace), over 83 of 83 members read; an advisory type reference, never a coupling
-  rows: TypeRowAccounting { considered: 41788, imports: 20179, type_uses: 21609, bound: 2356, type_only: 3, pair_unread: 0, ambiguous_owner: 131, self_owned: 6, no_owner: 39292 }
-  members: 83 of 83 read; 59 Java/Kotlin/Avro; owned declarations 1951, test-tree 510, refused 0; schemas 70 read of 70
+  80 member pairs (77 build · 3 collision-backed) bind 2356 of 41788 unresolved Java/Kotlin import and type-use rows to a type another member declares (3 type-only, 0 pair unread, 131 ambiguous-owner, 6 self-owned, 21406 unqualified, 17886 no owner in the workspace), over 83 of 83 members read; an advisory type reference, never a coupling
+  rows: TypeRowAccounting { considered: 41788, imports: 20179, type_uses: 21609, bound: 2356, type_only: 3, pair_unread: 0, ambiguous_owner: 131, self_owned: 6, unqualified: 21406, no_owner: 17886 }
+  members: 83 of 83 read; 59 Java/Kotlin/Avro; owned declarations 1951, test-tree 510, default-package 0, refused 0; schemas 70 read of 70
   collision-backed: [CollisionBackedPair { from: "mailbox-api", to: "mailbox-domain", artifacts: ["com.sourcesense.poste.pec.mailbox.core:common-domain"], references: 53 }, CollisionBackedPair { from: "mailbox-manager", to: "mailbox-domain", artifacts: ["com.sourcesense.poste.pec.mailbox.core:common-domain"], references: 155 }, CollisionBackedPair { from: "mailbox-unread-mail-batch", to: "mailbox-domain", artifacts: ["com.sourcesense.poste.pec.mailbox.core:common-domain"], references: 12 }]
   type-only: [TypeOnlyPair { from: "official-log-legal-storage-batch", to: "postel-cpx-creation-lib", types: ["com.sourcesense.postel.legalstorage.cpxlib.exception.CpxCreationException", "com.sourcesense.postel.legalstorage.cpxlib.model.builder.CpxIndexBuilder", "com.sourcesense.postel.legalstorage.cpxlib.model.builder.PdvArchiveDirector"], references: 3 }]
   ambiguous-owner: [AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.configuration.AbstractMongoConfiguration", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 1 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.configuration.MongoMailboxConfiguration", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 2 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.exception.ExistingResourceException", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 11 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.exception.ResourceNotFoundException", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 55 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.model.dto.configuration.MultipleMongoProperties", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 3 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.repository.mailbox.MailboxRepository", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 59 }]
