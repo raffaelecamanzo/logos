@@ -311,3 +311,32 @@ fn an_evicted_member_whose_store_is_gone_is_not_served_from_the_cache() {
     let reason = warm.member_reads.unread.get("web").expect("web is named");
     assert!(reason.contains("starting the engine for workspace member \"web\""), "{reason}");
 }
+
+/// **A per-member row that carries an error is unread, never read** — the
+/// intra-repo fan-out of `callers` and the seed of `impact` record their own
+/// rows. A `repo` naming no member is the error row every surface can reach:
+/// the answer names it with the registry's reason.
+#[test]
+fn a_per_member_row_that_failed_is_named_unread_not_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = five_members(tmp.path());
+    let bridge = ContractBridge::new();
+    let inputs = query::reachability_inputs(&bridge, &registry);
+    let route = inputs.edges[0].to.symbol.as_str().to_string();
+
+    for (read_model, rows, reads) in [
+        {
+            let answer = query::xservice_callers(&registry, &inputs, &route, None, Some("ghost"));
+            ("callers", answer.members.len(), answer.member_reads)
+        },
+        {
+            let answer = query::xservice_impact(&registry, &inputs, &route, None, Some("ghost"));
+            ("impact", answer.seed.len(), answer.member_reads)
+        },
+    ] {
+        assert_eq!(rows, 1, "{read_model}: guard the guard — the one error row");
+        let reason = reads.unread.get("ghost").unwrap_or_else(|| panic!("{read_model}: ghost is named: {reads:?}"));
+        assert!(reason.contains("no such workspace member"), "{read_model}: {reason}");
+        assert!(!reads.read.contains("ghost"), "{read_model}: an error row is never read: {reads:?}");
+    }
+}
