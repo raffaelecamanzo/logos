@@ -1071,16 +1071,20 @@ decomposes the question, dispatches
 specialized read-only **subagents** over the existing Logos tools, and streams
 back a synthesized answer:
 
-- **Graph-Navigator** — structural navigation (callers, callees, impact, search). In a
-  workspace it also carries the four cross-service tools — `xservice_route_providers`,
-  `xservice_callers`, `xservice_impact` and `xservice_search` — so a question such as
-  "which services call this endpoint?" is answered across members, with every result
-  qualified by the member it belongs to. An empty cross-service answer over a non-zero
-  **unresolved** residue is reported as unresolved, with the count and its reasons,
-  never as "none". In a plain single repo the tool list is exactly what it was.
+- **Graph-Navigator** — structural navigation (callers, callees, impact, search).
 - **Governance-Analyst** — the quality/governance read-models (gate, gaps, hotspots).
 - **Source-Reader** — sandboxed read/grep/glob over the project source.
 - **Synthesizer** — a tool-less subagent that writes the final answer from what the others found.
+
+This Chat answers for **one codebase** — the repository, or the one workspace member, it
+is opened on — and carries the same tools whether `serve` runs over a single repo or a
+workspace. It has no cross-service tool. The cross-service tools (`xservice_route_providers`,
+`xservice_callers`, `xservice_impact`, `xservice_search`) and the workspace read-models
+belong to a separate **workspace chat** roster, whose Workspace-Analyst answers "which
+services call this endpoint?" across members, every cross-service result qualified by
+the member it belongs to, and an empty cross-service answer over a non-zero
+**unresolved** residue reported as unresolved, never as "none". That workspace chat is
+not served yet; until it is, a workspace serve has no cross-service chat.
 
 A working Chat exists **only** in an `--features agents` build. The default
 `logos` binary ships the dashboard and no networking client — there is no

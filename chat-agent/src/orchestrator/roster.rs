@@ -1,22 +1,38 @@
-//! The fixed roster of specialized subagents ([S-174], [ADR-41], [chat-agent]).
+//! The fixed rosters of specialized subagents ([S-174], [ADR-41], [ADR-71],
+//! [chat-agent]).
 //!
 //! S-173 built the plan→act→observe→replan loop and routed each [`PlanStep`] to a
-//! [`StepExecutor`] behind a trait. This module is the real executor: a
-//! **fixed**, four-role roster, each role a `rig`-`Agent`-shaped unit — a
-//! [`CompletionModel`] + a system preamble + **exactly one** of agent-core's
-//! least-privilege tool domains (S-167):
+//! [`StepExecutor`] behind a trait. This module holds the real executors — two
+//! fixed rosters, each role a `rig`-`Agent`-shaped unit: a [`CompletionModel`] + a
+//! system preamble + **one fixed** least-privilege tool subset from agent-core
+//! (S-167) — a single domain for every role but the Workspace-Analyst, whose
+//! subset is agent-core's workspace and `xservice_*` sets together ([ADR-71] §5).
+//!
+//! The **member roster** ([`SubagentRoster`]) answers for one codebase, under any
+//! backing:
 //!
 //! - **Graph-Navigator** — the 8 graph tools (`search`/`context`/`node`/
-//!   `callers`/`callees`/`impact`/`explore`/`affected`), plus — under a
-//!   **federated** backing only — the 4 read-only `xservice_*` tools
-//!   (`xservice_route_providers`/`xservice_callers`/`xservice_impact`/
-//!   `xservice_search`, [S-431], [FR-WS-29]);
+//!   `callers`/`callees`/`impact`/`explore`/`affected`);
 //! - **Governance-Analyst** — the 8 governance tools (`scan`/`check_rules`/
 //!   `hotspots`/`dsm`/`gate`/`evolution`/`doc_gaps`/`health`);
 //! - **Source-Reader** — the 3 sandboxed source tools (`read`/`grep`/`glob`),
 //!   project-root-confined ([NFR-SE-04]);
 //! - **Synthesizer** — **tool-less**; composes the final grounded answer from the
 //!   turn's observations and makes **zero** tool calls.
+//!
+//! The **workspace roster** ([`WorkspaceRoster`], [S-481]) answers for a
+//! workspace, narrowing to one member when a question names one:
+//!
+//! - **Workspace-Analyst** — the 5 workspace read-model tools
+//!   (`workspace_status`/`workspace_reachability`/`workspace_check`/
+//!   `xservice_build_deps`/`workspace_roster`) followed by the 4 read-only
+//!   `xservice_*` tools (`xservice_route_providers`/`xservice_callers`/
+//!   `xservice_impact`/`xservice_search`, [FR-WS-29]), under its own
+//!   per-subagent cap: a step of its own draws its own [`ToolBudget`];
+//! - **Graph-Navigator**, **Governance-Analyst** and **Source-Reader** — the
+//!   same tools **repo-addressed** ([S-480]): each takes a required `repo` and
+//!   resolves that member's engine, or sandbox, per call through the registry;
+//! - **Synthesizer** — tool-less, as above.
 //!
 //! # Least privilege + the budget tree
 //!
@@ -34,22 +50,25 @@
 //! built-in multi-turn tool loop precisely so every tool call passes through the
 //! budget tree; `rig`'s own loop would dispatch tools internally and bypass it.
 //!
-//! # Cross-service reach, only in a workspace ([S-431], [ADR-52])
+//! # Cross-service reach is the workspace roster's ([S-481], [ADR-71])
 //!
-//! [`SubagentRoster::with_xservice`] hands in the federated query backing. Under a
-//! single backing none is supplied, so the Graph-Navigator's registered tool list,
-//! its preamble and every observation it produces are byte-for-byte what they were
-//! before S-431. Under a federated one, every `xservice_*` result's deterministic
-//! `reading` line — repo-qualified, and carrying the unresolved residue as
-//! `UNRESOLVED` when a cross-service answer is empty over a non-zero residue
-//! ([BR-53]) — is appended **verbatim** to the step's observation
-//! (`with_xservice_readings`), so the planner and the Synthesizer read the
-//! qualification whether or not the model's own summary repeats it.
+//! The member roster has no federated branch: it takes no query backing, so its
+//! registered tools, its preambles and every observation it produces are
+//! byte-for-byte what a single root's were before [S-431] — whichever backing the
+//! engine it is handed came from. Cross-service reach lives on the workspace
+//! roster alone. There, every `xservice_*` and workspace read-model result's
+//! deterministic `reading` line — repo-qualified, and carrying the unresolved
+//! residue as `UNRESOLVED` when a cross-service answer is empty over a non-zero
+//! residue ([BR-53]) — is appended **verbatim** to the step's observation
+//! (`with_readings`), so the planner and the Synthesizer read the qualification
+//! whether or not the model's own summary repeats it.
 //!
+//! [S-480]: ../../../docs/planning/journal.md#s-480-agent-tools-address-a-named-member-and-the-workspace-read-models-become-tools
+//! [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+//! [ADR-71]: ../../../docs/specs/architecture/decisions/ADR-71.md
 //! [S-174]: ../../../docs/planning/journal.md#s-174-specialized-subagent-roster-on-rig
 //! [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
 //! [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
-//! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 //! [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-41]: ../../../docs/specs/architecture/decisions/ADR-41.md
 //! [chat-agent]: ../../../docs/specs/architecture/components/chat-agent.md
@@ -61,12 +80,15 @@ use std::sync::Arc;
 use agent_core::rig::completion::{AssistantContent, CompletionModel};
 use agent_core::rig::message::{Message, ToolCall};
 use agent_core::{
-    governance_toolset, graph_toolset, source_toolset, xservice_reading, xservice_toolset,
-    BoundedDispatcher, DispatchError, Sandbox, ToolBudget, XserviceBacking,
+    addressed_toolset, governance_toolset, graph_toolset, source_toolset, workspace_reading,
+    workspace_toolset, xservice_reading, xservice_toolset, BoundedDispatcher, DispatchError,
+    Sandbox, ToolBudget, ToolDomain, XserviceBacking,
 };
+use logos_core::federation::Federation;
 use logos_core::Engine;
 
 use super::plan::{PlanStep, StepRole};
+use super::planner::member_roster;
 use super::step::{StepContext, StepError, StepExecutor, StepObservation};
 
 /// How many **consecutive** tool errors (a tool that ran and failed, or an
@@ -109,26 +131,6 @@ multiple symbols, or asks for a neighborhood/overview rather than one known \
 symbol — prefer a single `context` call (one ranked multi-symbol bundle) over \
 several separate `search`/`node` calls; reach for `search`/`node` once you already \
 know the specific symbol you need.";
-
-/// What the Graph-Navigator's preamble gains under a **federated** backing
-/// ([S-431], [FR-WS-29]) — appended to [`GRAPH_NAVIGATOR_PREAMBLE`], never
-/// substituted for it, and never under a single backing.
-///
-/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
-/// [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
-pub const GRAPH_NAVIGATOR_XSERVICE_ADDENDUM: &str = "This codebase is one member of a multi-repository WORKSPACE. Your graph tools above \
-answer from this member only. For a question that crosses repositories — which \
-services call an endpoint, what another service breaks, where a symbol lives across \
-the workspace — use the cross-service tools: xservice_search, xservice_callers, \
-xservice_impact, xservice_route_providers. Pass `repo` to xservice_search when you \
-already know the member, so only that member is opened; the other three read every \
-member's contracts whatever `repo` says. Do not scope xservice_callers or \
-xservice_impact to the provider's own member: their residue would then cover only \
-that member's outbound calls, not the consumers that might reach it. Pass a hit's \
-canonical `symbol` to them, never a bare name. Cross-service results are repo-qualified: \
-name the member with every result, and never merge the same symbol from two members \
-into one. An xservice reading that says UNRESOLVED is not an absence — report it as \
-unresolved, with its count, never as \"none\".";
 
 /// System preamble for the **Governance-Analyst** subagent.
 ///
@@ -176,20 +178,135 @@ they are insufficient, say so honestly rather than inventing facts. In a Mermaid
 sequence diagram, never put a bare ';' in message or note text — use '#59;' or \
 rephrase, and use '<br/>' for line breaks.";
 
-/// What the Synthesizer's preamble gains under a **federated** backing ([S-431],
-/// [BR-53]): it writes the user-facing answer, so it is the role that must turn
-/// an `UNRESOLVED`/`NOT CHECKED` reading into an unresolved answer — even when a
-/// subagent's own prose summary beside that reading says "none".
+/// System preamble for the workspace roster's **Workspace-Analyst** ([S-481],
+/// [FR-WS-34]): the workspace read-models, then the cross-service tools, whose
+/// usage guidance it carries from the member Graph-Navigator's retired
+/// cross-service addendum ([S-431]).
 ///
+/// It names no member: the roster tool reads them, and the planner names the one
+/// a step is about. The running per-step budget status is appended dynamically by
+/// [`budget_aware_preamble`] before every model round.
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
 /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+pub const WORKSPACE_ANALYST_PREAMBLE: &str = "\
+You are the Workspace-Analyst subagent of Logos, a structural code-intelligence tool. \
+You answer one step of a larger plan about a multi-repository WORKSPACE as a whole, \
+with read-only tools: workspace_status, workspace_reachability, workspace_check, \
+xservice_build_deps and workspace_roster read the workspace's own read-models; \
+xservice_route_providers, xservice_callers, xservice_impact and xservice_search answer \
+across services. workspace_roster reads the manifest alone and starts no member, so \
+it is the first move for a question about which members exist. Pass `repo` to \
+xservice_search when you already know the member, so only that member is opened. Do \
+not scope xservice_callers or xservice_impact to the provider's own member: their \
+residue would then cover only that member's outbound calls, not the consumers that \
+might reach it. Pass a hit's canonical `symbol` to them, never a bare name. \
+Cross-service results are repo-qualified: name the member with every one, and never \
+merge the same symbol from two members into one. A reading that says UNRESOLVED or NOT CHECKED is \
+not an absence — report it as it says, with its count, never as \"none\". Never \
+compute a mean, sum or score across members' signals; report each member's own. Call \
+the tools you need, then reply with a concise plain-text summary grounded in the tool \
+results.";
+
+/// System preamble for the workspace roster's repo-addressed **Graph-Navigator**
+/// ([S-481], [S-480]) — [`GRAPH_NAVIGATOR_PREAMBLE`]'s tools and `context`
+/// steering, over the one member the step's `repo` names.
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [S-480]: ../../../docs/planning/journal.md#s-480-agent-tools-address-a-named-member-and-the-workspace-read-models-become-tools
+pub const WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE: &str = "\
+You are the Graph-Navigator subagent of Logos, a structural code-intelligence tool, \
+in a multi-repository WORKSPACE. You answer one step of a larger plan by navigating \
+ONE member's code graph with your tools: search, context, node, callers, callees, \
+impact, explore, affected. Every tool takes a required `repo`: the member the step \
+names, exactly as named. Only that member is opened. An unknown `repo` is an error \
+listing the members — choose from it, never guess. Call the tools you need to gather \
+grounded facts, then reply with a concise plain-text summary of what you found that \
+names the member. Ground every claim in a tool result — never invent a symbol, edge, \
+or count. When a step is broad — it spans multiple symbols, or asks for a \
+neighborhood/overview rather than one known symbol — prefer a single `context` call \
+(one ranked multi-symbol bundle) over several separate `search`/`node` calls; reach \
+for `search`/`node` once you already know the specific symbol you need.";
+
+/// System preamble for the workspace roster's repo-addressed
+/// **Governance-Analyst** ([S-481], [S-480]).
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [S-480]: ../../../docs/planning/journal.md#s-480-agent-tools-address-a-named-member-and-the-workspace-read-models-become-tools
+pub const WORKSPACE_GOVERNANCE_ANALYST_PREAMBLE: &str = "\
+You are the Governance-Analyst subagent of Logos, a structural code-intelligence \
+tool, in a multi-repository WORKSPACE. You answer one step of a larger plan by \
+running ONE member's governance/quality read-models with your tools: scan, \
+check_rules, hotspots, dsm, gate, evolution, doc_gaps, health. Every tool takes a \
+required `repo`: the member the step names, exactly as named. An unknown `repo` is an \
+error listing the members — choose from it, never guess. Each member's signal is \
+measured against that member's own baseline: report it as that member's, and never \
+combine two members' signals into one figure. Call the tools you need, then reply \
+with a concise plain-text summary of the grounded signal that names the member. Never \
+fabricate a metric or a verdict.";
+
+/// System preamble for the workspace roster's repo-addressed **Source-Reader**
+/// ([S-481], [S-480], [NFR-SE-04]).
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [S-480]: ../../../docs/planning/journal.md#s-480-agent-tools-address-a-named-member-and-the-workspace-read-models-become-tools
+/// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
+pub const WORKSPACE_SOURCE_READER_PREAMBLE: &str = "\
+You are the Source-Reader subagent of Logos, a structural code-intelligence tool, in \
+a multi-repository WORKSPACE. You answer one step of a larger plan by reading source \
+files WITHIN one member with your sandboxed tools: read, grep, glob. Every tool takes \
+a required `repo`: the member the step names, exactly as named. Paths are relative to \
+that member's root, and the tools are confined to it. An unknown `repo` is an error \
+listing the members — choose from it, never guess. Call the tools you need, then reply \
+with a concise plain-text summary grounded in the file contents you read that names \
+the member. Never invent file contents.";
+
+/// The [BR-59] clause of the workspace Synthesizer's preamble: a cross-member
+/// answer ranks the members by their own signals and never composes one.
+///
+/// [BR-59]: ../../../docs/specs/software-spec.md#327-workspace-federation
+pub const WORKSPACE_RANKING_CLAUSE: &str = "\
+When you compare members, rank them by their own named signals or findings, citing \
+each with the member it belongs to and its baseline. Never state a mean, sum, \
+weighted figure or workspace score of per-member signals: each is measured against \
+its own member's baseline, so a figure composed from several has no referent. A \
+workspace-level figure enters the answer only when a workspace tool computed it from \
+workspace-level evidence.";
+
+/// The workspace roster's **Synthesizer** preamble for `federation` ([S-481],
+/// [FR-WS-34]): told it answers for the workspace, given every member with its
+/// declared kind ([`member_roster`]), told that a reading beats a subagent's prose
+/// ([BR-53], carried from the retired cross-service addendum), and bound by the
+/// [BR-59] ranking clause ([`WORKSPACE_RANKING_CLAUSE`]). It keeps
+/// [`SYNTHESIZER_PREAMBLE`]'s grounding discipline and its Mermaid rule (HF-2).
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
 /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
-pub const SYNTHESIZER_XSERVICE_ADDENDUM: &str = "\
-This codebase is one member of a multi-repository workspace. Observations may end with \
-\"Cross-service readings\" — verbatim tool results. Where a reading and a subagent's \
-prose disagree, the reading wins. A reading marked UNRESOLVED or NOT CHECKED means the \
-cross-service answer is incomplete: say so, with its count and reasons, and never \
-answer \"none\" or \"no other service\" from it. Name the member with every \
-cross-service result, and never merge the same symbol from two members into one.";
+/// [BR-59]: ../../../docs/specs/software-spec.md#327-workspace-federation
+pub fn workspace_synthesizer_preamble(federation: &Federation) -> String {
+    format!(
+        "\
+You are the Synthesizer subagent of Logos, a structural code-intelligence tool, \
+answering for the multi-repository WORKSPACE \"{name}\". You have NO tools. Using only \
+the observations the other subagents have already gathered (provided in your \
+instruction), compose the final, grounded answer to the user's question in clear \
+prose. Ground every claim in those observations; if they are insufficient, say so \
+honestly rather than inventing facts.\n\n\
+{roster}\n\n\
+Name the member with every result, and never merge the same symbol from two members \
+into one. Observations may end with \"{READINGS_HEADING}\" — verbatim tool results. \
+Where a reading and a subagent's prose disagree, the reading wins. A reading marked \
+UNRESOLVED or NOT CHECKED means the cross-service answer is incomplete: say so, with \
+its count and reasons, and never answer \"none\" or \"no other service\" from it.\n\n\
+{WORKSPACE_RANKING_CLAUSE}\n\n\
+In a Mermaid sequence diagram, never put a bare ';' in message or note text — use \
+'#59;' or rephrase, and use '<br/>' for line breaks.",
+        name = federation.name,
+        roster = member_roster(federation),
+    )
+}
 
 /// Supplies the grounding context the tool-less **Synthesizer** composes its
 /// final answer from — the seam that wires S-175's persisted scratchpad into the
@@ -227,13 +344,16 @@ fn compose_synthesis_prompt(grounding: &str, instruction: &str) -> String {
     )
 }
 
-/// The system preamble for a subagent [`StepRole`].
-fn preamble_for(role: StepRole) -> &'static str {
+/// The member roster's system preamble for a subagent [`StepRole`]; `None` for
+/// the [`WorkspaceAnalyst`](StepRole::WorkspaceAnalyst), a role only the
+/// workspace roster carries.
+fn preamble_for(role: StepRole) -> Option<&'static str> {
     match role {
-        StepRole::GraphNavigator => GRAPH_NAVIGATOR_PREAMBLE,
-        StepRole::GovernanceAnalyst => GOVERNANCE_ANALYST_PREAMBLE,
-        StepRole::SourceReader => SOURCE_READER_PREAMBLE,
-        StepRole::Synthesizer => SYNTHESIZER_PREAMBLE,
+        StepRole::GraphNavigator => Some(GRAPH_NAVIGATOR_PREAMBLE),
+        StepRole::GovernanceAnalyst => Some(GOVERNANCE_ANALYST_PREAMBLE),
+        StepRole::SourceReader => Some(SOURCE_READER_PREAMBLE),
+        StepRole::Synthesizer => Some(SYNTHESIZER_PREAMBLE),
+        StepRole::WorkspaceAnalyst => None,
     }
 }
 
@@ -263,7 +383,9 @@ fn budget_aware_preamble(base: &str, budget: &ToolBudget) -> String {
 /// One model per role so the `[chat.models]` per-role overrides ([FR-CF-06],
 /// [`StepRole::as_chat_role`]) can resolve a distinct model per subagent; build
 /// with [`RoleModels::uniform`] to share one model across the roster (the common
-/// case — and how the offline mock backs all four roles in tests).
+/// case — and how the offline mock backs all four roles in tests). The workspace
+/// roster takes its Workspace-Analyst's model beside these
+/// ([`WorkspaceRoster::with_models`]).
 #[derive(Debug, Clone)]
 pub struct RoleModels<M> {
     /// Model for the Graph-Navigator.
@@ -287,35 +409,25 @@ impl<M: Clone> RoleModels<M> {
         }
     }
 
-    /// The model for `role`.
-    fn for_role(&self, role: StepRole) -> &M {
+    /// The model for `role`; `None` for the Workspace-Analyst, whose model the
+    /// workspace roster holds beside these.
+    fn for_role(&self, role: StepRole) -> Option<&M> {
         match role {
-            StepRole::GraphNavigator => &self.graph_navigator,
-            StepRole::GovernanceAnalyst => &self.governance_analyst,
-            StepRole::SourceReader => &self.source_reader,
-            StepRole::Synthesizer => &self.synthesizer,
+            StepRole::GraphNavigator => Some(&self.graph_navigator),
+            StepRole::GovernanceAnalyst => Some(&self.governance_analyst),
+            StepRole::SourceReader => Some(&self.source_reader),
+            StepRole::Synthesizer => Some(&self.synthesizer),
+            StepRole::WorkspaceAnalyst => None,
         }
     }
 }
 
-/// The fixed roster of specialized subagents — the real [`StepExecutor`] the
-/// orchestrator dispatches plan steps to ([S-174], [ADR-41]).
-///
-/// Holds the shared [`Engine`] (behind the graph + governance tools), the
-/// [`Sandbox`] (behind the source tools), the optional federated backing (behind
-/// the `xservice_*` tools), the per-role [`RoleModels`], and the optional
-/// `[chat]` sampling params applied to every subagent request.
-pub struct SubagentRoster<M> {
-    engine: Arc<Engine>,
-    sandbox: Arc<Sandbox>,
-    /// The federated query backing ([S-431]); `None` (the default, and always
-    /// under a single root) leaves the Graph-Navigator's roster exactly the eight
-    /// graph tools ([ADR-52]).
-    ///
-    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
-    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-    xservice: Option<XserviceBacking>,
-    models: RoleModels<M>,
+/// What both rosters run a step with beyond the role's model, preamble and tools:
+/// the optional `[chat]` sampling params and the Synthesizer's grounding — and the
+/// one step runner both rosters share, so the two can never drift apart in how a
+/// step is executed.
+#[derive(Default)]
+struct StepRunner {
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     /// The per-turn scratchpad grounding injected into the Synthesizer's prompt
@@ -328,152 +440,28 @@ pub struct SubagentRoster<M> {
     synthesizer_grounding: Option<Arc<dyn SynthesizerGrounding>>,
 }
 
-impl<M> SubagentRoster<M>
-where
-    M: CompletionModel + Clone + Send + Sync + 'static,
-{
-    /// Build a roster that backs every role with a single shared `model`.
-    pub fn new(engine: Arc<Engine>, sandbox: Arc<Sandbox>, model: M) -> Self {
-        Self::with_models(engine, sandbox, RoleModels::uniform(model))
-    }
-
-    /// Build a roster with a distinct model per role (the `[chat.models]`
-    /// per-role overrides, [FR-CF-06]).
-    pub fn with_models(engine: Arc<Engine>, sandbox: Arc<Sandbox>, models: RoleModels<M>) -> Self {
-        Self {
-            engine,
-            sandbox,
-            xservice: None,
-            models,
-            temperature: None,
-            max_tokens: None,
-            synthesizer_grounding: None,
-        }
-    }
-
-    /// Ground the tool-less Synthesizer's final answer on `grounding` — the
-    /// per-turn scratchpad the SSE seam (S-170) wires from the persisted
-    /// [`MemoryStore`](crate::memory::MemoryStore), enforcing [S-175] AC1 in
-    /// production. Built per turn because the grounding is turn-scoped.
-    ///
-    /// [S-175]: ../../../docs/planning/journal.md#s-175-multi-step-agent-memory-store-scratchpad-and-working-memory
-    pub fn with_synthesizer_grounding(mut self, grounding: Arc<dyn SynthesizerGrounding>) -> Self {
-        self.synthesizer_grounding = Some(grounding);
-        self
-    }
-
-    /// Compose the `xservice_*` tools onto the Graph-Navigator over `xservice` —
-    /// the federated backing, which exists only in a workspace ([S-431],
-    /// [ADR-52]). `None` is a no-op, so a caller can hand in whatever
-    /// [`XserviceBacking::federated`] returned.
-    ///
-    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
-    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-    pub fn with_xservice(mut self, xservice: Option<XserviceBacking>) -> Self {
-        self.xservice = xservice;
-        self
-    }
-
-    /// `role`'s registered tool definitions (name, description, schema), in
-    /// registration order — exactly what its model is offered. Introspection for
-    /// the [ADR-52] byte-identity assertion, which is made on what is registered
-    /// rather than on a behaviour; the tool-less Synthesizer has none.
-    ///
-    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-    pub async fn registered_tools(
+impl StepRunner {
+    /// Run `step` as `role` over `model`, `preamble` and `toolset` — a
+    /// tool-bearing subagent's bounded loop when there is a toolset, the
+    /// tool-less Synthesizer's single streamed completion when there is none.
+    async fn run<M>(
         &self,
-        role: StepRole,
-    ) -> Vec<agent_core::rig::completion::ToolDefinition> {
-        match self.toolset_for(role) {
-            Some(toolset) => toolset.get_tool_definitions().await.unwrap_or_default(),
-            None => Vec::new(),
-        }
-    }
-
-    /// The system preamble `role` runs under: [`preamble_for`], plus — under a
-    /// federated backing only — the cross-service addendum of the two roles that
-    /// read the `xservice_*` results: the Graph-Navigator, which calls them, and
-    /// the Synthesizer, which writes the answer from their readings.
-    pub fn preamble(&self, role: StepRole) -> String {
-        match (role, &self.xservice) {
-            (StepRole::GraphNavigator, Some(_)) => {
-                format!("{GRAPH_NAVIGATOR_PREAMBLE}\n\n{GRAPH_NAVIGATOR_XSERVICE_ADDENDUM}")
-            }
-            (StepRole::Synthesizer, Some(_)) => {
-                format!("{SYNTHESIZER_PREAMBLE}\n\n{SYNTHESIZER_XSERVICE_ADDENDUM}")
-            }
-            _ => preamble_for(role).to_string(),
-        }
-    }
-
-    /// The planner preamble that matches this roster: the workspace one — which
-    /// routes a cross-repository question to the Graph-Navigator's `xservice_*`
-    /// tools — exactly when those tools are registered, the default otherwise
-    /// ([S-431]). Owned here so the planner can never be told about a tool the
-    /// roster does not carry, or left ignorant of one it does.
-    ///
-    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
-    pub fn planner_preamble(&self) -> String {
-        match self.xservice {
-            Some(_) => super::planner::workspace_planner_preamble(),
-            None => super::planner::DEFAULT_PLANNER_PREAMBLE.to_string(),
-        }
-    }
-
-    /// Set the sampling temperature applied to every subagent request
-    /// (`[chat].temperature`, [FR-CF-06]).
-    pub fn with_temperature(mut self, temperature: Option<f64>) -> Self {
-        self.temperature = temperature;
-        self
-    }
-
-    /// Set the max-tokens applied to every subagent request
-    /// (`[chat].max_tokens`, [FR-CF-06]).
-    pub fn with_max_tokens(mut self, max_tokens: Option<u64>) -> Self {
-        self.max_tokens = max_tokens;
-        self
-    }
-
-    /// Build the `rig` `ToolSet` for a tool-bearing role; the Synthesizer is
-    /// tool-less ([`None`]). The Graph-Navigator's set gains the `xservice_*`
-    /// tools, after the eight graph tools, only when a federated backing was
-    /// supplied — building them touches no member engine ([NFR-PE-10]).
-    ///
-    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
-    fn toolset_for(&self, role: StepRole) -> Option<agent_core::rig::tool::ToolSet> {
-        match role {
-            StepRole::GraphNavigator => {
-                let mut toolset = graph_toolset(self.engine.clone());
-                if let Some(xservice) = &self.xservice {
-                    toolset.add_tools(xservice_toolset(xservice.clone()));
-                }
-                Some(toolset)
-            }
-            StepRole::GovernanceAnalyst => Some(governance_toolset(self.engine.clone())),
-            StepRole::SourceReader => Some(source_toolset(self.sandbox.clone())),
-            StepRole::Synthesizer => None,
-        }
-    }
-}
-
-impl<M> StepExecutor for SubagentRoster<M>
-where
-    M: CompletionModel + Clone + Send + Sync + 'static,
-{
-    async fn execute(
-        &self,
+        model: &M,
+        preamble: &str,
+        toolset: Option<agent_core::rig::tool::ToolSet>,
         step: &PlanStep,
         ctx: &StepContext<'_>,
-    ) -> Result<StepObservation, StepError> {
-        let model = self.models.for_role(step.role);
-        let preamble = self.preamble(step.role);
-        match self.toolset_for(step.role) {
+    ) -> Result<StepObservation, StepError>
+    where
+        M: CompletionModel + Clone + Send + Sync + 'static,
+    {
+        match toolset {
             // Tool-bearing subagent: run its bounded tool loop.
             Some(toolset) => {
                 run_tool_subagent(
                     model,
                     step.role,
-                    &preamble,
+                    preamble,
                     toolset,
                     &step.instruction,
                     ctx,
@@ -496,7 +484,7 @@ where
                 };
                 run_synthesizer(
                     model,
-                    &preamble,
+                    preamble,
                     &instruction,
                     self.temperature,
                     self.max_tokens,
@@ -505,6 +493,303 @@ where
                 .await
             }
         }
+    }
+}
+
+/// The **member** roster of specialized subagents — the real [`StepExecutor`]
+/// the orchestrator dispatches a member chat's plan steps to ([S-174],
+/// [ADR-41]).
+///
+/// Holds the shared [`Engine`] (behind the graph + governance tools), the
+/// [`Sandbox`] (behind the source tools), the per-role [`RoleModels`], and the
+/// optional `[chat]` sampling params applied to every subagent request.
+///
+/// It is single-backing only ([S-481], [ADR-71]): it takes no query backing, so
+/// whichever backing its engine came from — a single root, or one member of a
+/// workspace — it registers exactly the single-backing tools under the
+/// single-backing preambles. Cross-service reach is the [`WorkspaceRoster`]'s.
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [ADR-71]: ../../../docs/specs/architecture/decisions/ADR-71.md
+pub struct SubagentRoster<M> {
+    engine: Arc<Engine>,
+    sandbox: Arc<Sandbox>,
+    models: RoleModels<M>,
+    runner: StepRunner,
+}
+
+impl<M> SubagentRoster<M>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
+    /// Build a roster that backs every role with a single shared `model`.
+    pub fn new(engine: Arc<Engine>, sandbox: Arc<Sandbox>, model: M) -> Self {
+        Self::with_models(engine, sandbox, RoleModels::uniform(model))
+    }
+
+    /// Build a roster with a distinct model per role (the `[chat.models]`
+    /// per-role overrides, [FR-CF-06]).
+    pub fn with_models(engine: Arc<Engine>, sandbox: Arc<Sandbox>, models: RoleModels<M>) -> Self {
+        Self {
+            engine,
+            sandbox,
+            models,
+            runner: StepRunner::default(),
+        }
+    }
+
+    /// Ground the tool-less Synthesizer's final answer on `grounding` — the
+    /// per-turn scratchpad the SSE seam (S-170) wires from the persisted
+    /// [`MemoryStore`](crate::memory::MemoryStore), enforcing [S-175] AC1 in
+    /// production. Built per turn because the grounding is turn-scoped.
+    ///
+    /// [S-175]: ../../../docs/planning/journal.md#s-175-multi-step-agent-memory-store-scratchpad-and-working-memory
+    pub fn with_synthesizer_grounding(mut self, grounding: Arc<dyn SynthesizerGrounding>) -> Self {
+        self.runner.synthesizer_grounding = Some(grounding);
+        self
+    }
+
+    /// `role`'s registered tool definitions (name, description, schema), in
+    /// registration order — exactly what its model is offered. Introspection for
+    /// the [ADR-52] byte-identity assertion, which is made on what is registered
+    /// rather than on a behaviour; the tool-less Synthesizer has none, and neither
+    /// has the Workspace-Analyst, which this roster does not carry.
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    pub async fn registered_tools(
+        &self,
+        role: StepRole,
+    ) -> Vec<agent_core::rig::completion::ToolDefinition> {
+        definitions(self.toolset_for(role)).await
+    }
+
+    /// The system preamble `role` runs under — empty for the Workspace-Analyst,
+    /// which this roster does not carry.
+    pub fn preamble(&self, role: StepRole) -> String {
+        preamble_for(role).unwrap_or_default().to_string()
+    }
+
+    /// The planner preamble that matches this roster: the default one, which
+    /// names exactly the four roles it carries. Owned here, as the workspace
+    /// roster owns its own ([`WorkspaceRoster::planner_preamble`]), so a planner
+    /// is never told about a role or tool its roster does not carry.
+    pub fn planner_preamble(&self) -> String {
+        super::planner::DEFAULT_PLANNER_PREAMBLE.to_string()
+    }
+
+    /// Set the sampling temperature applied to every subagent request
+    /// (`[chat].temperature`, [FR-CF-06]).
+    pub fn with_temperature(mut self, temperature: Option<f64>) -> Self {
+        self.runner.temperature = temperature;
+        self
+    }
+
+    /// Set the max-tokens applied to every subagent request
+    /// (`[chat].max_tokens`, [FR-CF-06]).
+    pub fn with_max_tokens(mut self, max_tokens: Option<u64>) -> Self {
+        self.runner.max_tokens = max_tokens;
+        self
+    }
+
+    /// Build the `rig` `ToolSet` for a tool-bearing role; the Synthesizer is
+    /// tool-less ([`None`]), and the Workspace-Analyst is not on this roster.
+    fn toolset_for(&self, role: StepRole) -> Option<agent_core::rig::tool::ToolSet> {
+        match role {
+            StepRole::GraphNavigator => Some(graph_toolset(self.engine.clone())),
+            StepRole::GovernanceAnalyst => Some(governance_toolset(self.engine.clone())),
+            StepRole::SourceReader => Some(source_toolset(self.sandbox.clone())),
+            StepRole::Synthesizer | StepRole::WorkspaceAnalyst => None,
+        }
+    }
+}
+
+impl<M> StepExecutor for SubagentRoster<M>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
+    async fn execute(
+        &self,
+        step: &PlanStep,
+        ctx: &StepContext<'_>,
+    ) -> Result<StepObservation, StepError> {
+        // A step routed to a role this roster does not carry is a misroute, not a
+        // turn failure: it degrades to an `[unavailable — …]` observation naming
+        // the roles there are, so the planner can reroute ([CR-060] Layer 3). It is
+        // reached only when a planner names `workspace_analyst` unprompted — the
+        // member planner preamble never does.
+        //
+        // [CR-060]: ../../../docs/requests/CR-060-chat-resilience-recoverable-faults.md
+        let Some(model) = self.models.for_role(step.role) else {
+            return Err(StepError::Unavailable(format!(
+                "this chat answers for one codebase and has no {:?} subagent; route the step to \
+                 graph_navigator, governance_analyst or source_reader",
+                step.role
+            )));
+        };
+        let preamble = self.preamble(step.role);
+        self.runner
+            .run(model, &preamble, self.toolset_for(step.role), step, ctx)
+            .await
+    }
+}
+
+/// The **workspace** roster of specialized subagents ([S-481], [FR-WS-34],
+/// [ADR-71]) — the [`StepExecutor`] a workspace chat dispatches its plan steps
+/// to, centred on the workspace and narrowing to a named member.
+///
+/// Built over one [`XserviceBacking`] — which exists only over a federated
+/// backing — that serves every role: the Workspace-Analyst's workspace and
+/// `xservice_*` tools, and the repo-addressed Graph-Navigator, Governance-Analyst
+/// and Source-Reader ([S-480]). Building it, listing its tools or rendering its
+/// preambles starts no member engine ([NFR-PE-10]): a repo-addressed call opens
+/// its member when it runs.
+///
+/// The Workspace-Analyst runs under its own per-subagent cap: it is a role of its
+/// own, so each of its steps draws its own [`ToolBudget`] from the turn's budget
+/// tree rather than sharing a Graph-Navigator step's.
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [S-480]: ../../../docs/planning/journal.md#s-480-agent-tools-address-a-named-member-and-the-workspace-read-models-become-tools
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+/// [ADR-71]: ../../../docs/specs/architecture/decisions/ADR-71.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+pub struct WorkspaceRoster<M> {
+    xservice: XserviceBacking,
+    models: RoleModels<M>,
+    workspace_analyst: M,
+    runner: StepRunner,
+}
+
+impl<M> WorkspaceRoster<M>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
+    /// Build a workspace roster over `xservice` that backs every role with a
+    /// single shared `model`.
+    pub fn new(xservice: XserviceBacking, model: M) -> Self {
+        Self::with_models(xservice, RoleModels::uniform(model.clone()), model)
+    }
+
+    /// Build a workspace roster over `xservice` with a distinct model per role:
+    /// `models` for the four roles both rosters carry, `workspace_analyst` for
+    /// the Workspace-Analyst.
+    pub fn with_models(xservice: XserviceBacking, models: RoleModels<M>, workspace_analyst: M) -> Self {
+        Self {
+            xservice,
+            models,
+            workspace_analyst,
+            runner: StepRunner::default(),
+        }
+    }
+
+    /// Ground the tool-less Synthesizer's final answer on `grounding`, as
+    /// [`SubagentRoster::with_synthesizer_grounding`] does.
+    pub fn with_synthesizer_grounding(mut self, grounding: Arc<dyn SynthesizerGrounding>) -> Self {
+        self.runner.synthesizer_grounding = Some(grounding);
+        self
+    }
+
+    /// Set the sampling temperature applied to every subagent request
+    /// (`[chat].temperature`, [FR-CF-06]).
+    pub fn with_temperature(mut self, temperature: Option<f64>) -> Self {
+        self.runner.temperature = temperature;
+        self
+    }
+
+    /// Set the max-tokens applied to every subagent request
+    /// (`[chat].max_tokens`, [FR-CF-06]).
+    pub fn with_max_tokens(mut self, max_tokens: Option<u64>) -> Self {
+        self.runner.max_tokens = max_tokens;
+        self
+    }
+
+    /// `role`'s registered tool definitions (name, description, schema), in
+    /// registration order — exactly what its model is offered. The tool-less
+    /// Synthesizer has none.
+    pub async fn registered_tools(
+        &self,
+        role: StepRole,
+    ) -> Vec<agent_core::rig::completion::ToolDefinition> {
+        definitions(self.toolset_for(role)).await
+    }
+
+    /// The system preamble `role` runs under. The Synthesizer's names every
+    /// member with its declared kind and carries the [BR-59] ranking clause
+    /// ([`workspace_synthesizer_preamble`]).
+    ///
+    /// [BR-59]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    pub fn preamble(&self, role: StepRole) -> String {
+        match role {
+            StepRole::WorkspaceAnalyst => WORKSPACE_ANALYST_PREAMBLE.to_string(),
+            StepRole::GraphNavigator => WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE.to_string(),
+            StepRole::GovernanceAnalyst => WORKSPACE_GOVERNANCE_ANALYST_PREAMBLE.to_string(),
+            StepRole::SourceReader => WORKSPACE_SOURCE_READER_PREAMBLE.to_string(),
+            StepRole::Synthesizer => workspace_synthesizer_preamble(self.federation()),
+        }
+    }
+
+    /// The planner preamble that matches this roster: the workspace one, naming
+    /// every member with its declared kind and each role's registered tools
+    /// ([`workspace_planner_preamble`](super::planner::workspace_planner_preamble)).
+    pub fn planner_preamble(&self) -> String {
+        super::planner::workspace_planner_preamble(self.federation())
+    }
+
+    /// The resolved workspace — the manifest's member set and kinds, held by the
+    /// registry; reading it starts no engine.
+    fn federation(&self) -> &Federation {
+        self.xservice.registry().federation()
+    }
+
+    /// Build the `rig` `ToolSet` for a tool-bearing role; the Synthesizer is
+    /// tool-less ([`None`]). The Workspace-Analyst's set is the workspace tools
+    /// followed by the `xservice_*` tools; every other role's is repo-addressed.
+    /// Building any of them touches no member engine ([NFR-PE-10]).
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    fn toolset_for(&self, role: StepRole) -> Option<agent_core::rig::tool::ToolSet> {
+        let xs = self.xservice.clone();
+        match role {
+            StepRole::WorkspaceAnalyst => {
+                let mut toolset = workspace_toolset(xs.clone());
+                toolset.add_tools(xservice_toolset(xs));
+                Some(toolset)
+            }
+            StepRole::GraphNavigator => Some(addressed_toolset(ToolDomain::Graph, xs)),
+            StepRole::GovernanceAnalyst => Some(addressed_toolset(ToolDomain::Governance, xs)),
+            StepRole::SourceReader => Some(addressed_toolset(ToolDomain::Source, xs)),
+            StepRole::Synthesizer => None,
+        }
+    }
+}
+
+impl<M> StepExecutor for WorkspaceRoster<M>
+where
+    M: CompletionModel + Clone + Send + Sync + 'static,
+{
+    async fn execute(
+        &self,
+        step: &PlanStep,
+        ctx: &StepContext<'_>,
+    ) -> Result<StepObservation, StepError> {
+        let model = self
+            .models
+            .for_role(step.role)
+            .unwrap_or(&self.workspace_analyst);
+        let preamble = self.preamble(step.role);
+        self.runner
+            .run(model, &preamble, self.toolset_for(step.role), step, ctx)
+            .await
+    }
+}
+
+/// A toolset's definitions in registration order; none for a tool-less role.
+async fn definitions(
+    toolset: Option<agent_core::rig::tool::ToolSet>,
+) -> Vec<agent_core::rig::completion::ToolDefinition> {
+    match toolset {
+        Some(toolset) => toolset.get_tool_definitions().await.unwrap_or_default(),
+        None => Vec::new(),
     }
 }
 
@@ -592,10 +877,10 @@ where
     // on any `Ok` dispatch; when it reaches the cap the step soft-closes.
     let mut tool_error_streak: usize = 0;
 
-    // The `reading` line of every `xservice_*` result this step dispatched, in
-    // dispatch order — appended verbatim to whatever observation the step ends
-    // with ([`with_xservice_readings`]). Always empty under a single backing,
-    // where no `xservice_*` tool is registered.
+    // The `reading` line of every `xservice_*` and workspace read-model result
+    // this step dispatched, in dispatch order — appended verbatim to whatever
+    // observation the step ends with ([`with_readings`]). Always empty on the
+    // member roster, which registers neither family.
     let mut readings: Vec<String> = Vec::new();
 
     loop {
@@ -657,7 +942,7 @@ where
                     "the {role:?} subagent returned neither a tool call nor an answer"
                 )));
             }
-            return Ok(StepObservation::new(with_xservice_readings(text, &readings)));
+            return Ok(StepObservation::new(with_readings(text, &readings)));
         }
 
         // Record the assistant's tool-call turn, then run each call (charged).
@@ -706,7 +991,9 @@ where
                     // The dispatcher charged this step's per-subagent budget; now
                     // charge the shared global ceiling for the call that ran.
                     ctx.budget_tree().charge_global()?;
-                    if let Some(reading) = xservice_reading(name, &output) {
+                    if let Some(reading) = xservice_reading(name, &output)
+                        .or_else(|| workspace_reading(name, &output))
+                    {
                         readings.push(reading);
                     }
                     conversation.push(Message::tool_result(tool_call.id.clone(), output));
@@ -1022,30 +1309,36 @@ where
     } else {
         format!("[bounded — {reason}; this summary may be partial]\n{text}")
     };
-    Ok(StepObservation::new(with_xservice_readings(summary, readings)))
+    Ok(StepObservation::new(with_readings(summary, readings)))
 }
 
-/// Append the step's `xservice_*` readings, verbatim, to its observation text
-/// ([S-431], [BR-53], [NFR-CC-04]).
+/// The heading the readings ride under in an observation ([`with_readings`]) —
+/// named here once, because the workspace Synthesizer's preamble tells the model
+/// to look for it ([`workspace_synthesizer_preamble`]).
+const READINGS_HEADING: &str = "Workspace readings";
+
+/// Append the step's `xservice_*` and workspace read-model readings, verbatim, to
+/// its observation text ([S-431], [S-481], [BR-53], [NFR-CC-04]).
 ///
 /// The readings are the tools' own deterministic lines — repo-qualified, and
 /// `UNRESOLVED` where an empty cross-service answer sits over a non-zero residue
 /// — so the planner and the Synthesizer read that qualification even when the
-/// model's summary drops it. No readings (every single-backing step) leaves the
+/// model's summary drops it. No readings (every member-roster step) leaves the
 /// text untouched, byte for byte ([ADR-52]).
 ///
 /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
 /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-fn with_xservice_readings(text: String, readings: &[String]) -> String {
+fn with_readings(text: String, readings: &[String]) -> String {
     if readings.is_empty() {
         return text;
     }
     let mut out = text;
     // Deliberately neutral: the verdict word lives in each reading, so a
     // zero-residue answer carries no qualification it did not earn ([BR-53]).
-    out.push_str("\n\nCross-service readings (verbatim tool results, repo-qualified):");
+    out.push_str(&format!("\n\n{READINGS_HEADING} (verbatim tool results):"));
     for reading in readings {
         out.push_str("\n- ");
         out.push_str(reading);
@@ -1279,5 +1572,57 @@ result — never invent a symbol, edge, or count.";
             !SYNTHESIZER_PREAMBLE.to_lowercase().contains("remaining"),
             "the Synthesizer has no tool budget to report: {SYNTHESIZER_PREAMBLE}"
         );
+    }
+}
+
+#[cfg(test)]
+mod workspace_preamble_tests {
+    //! [S-481]: the workspace preambles are rewrites of the member ones, and the
+    //! rules both chats must share are re-typed in them. These guards derive each
+    //! shared sentence from the member preamble itself, so amending it there and
+    //! not here fails a test instead of silently diverging the workspace chat.
+    //!
+    //! [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+
+    use super::*;
+    use logos_core::federation::Member;
+
+    fn federation() -> Federation {
+        Federation {
+            name: "shop".to_string(),
+            root: std::path::PathBuf::from("/ws"),
+            members: vec![Member { name: "api".to_string(), root: "/ws/api".into() }],
+            default: None,
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+            member_kinds: Default::default(),
+        }
+    }
+
+    /// `text` from the first occurrence of `from` to its end.
+    fn tail_from<'a>(text: &'a str, from: &str) -> &'a str {
+        &text[text.find(from).unwrap_or_else(|| panic!("{from:?} in {text}"))..]
+    }
+
+    #[test]
+    fn the_workspace_synthesizer_keeps_the_member_grounding_and_mermaid_rules() {
+        let workspace = workspace_synthesizer_preamble(&federation());
+        // HF-2: both chats render through one Mermaid renderer, so the rule is the
+        // member preamble's, verbatim, and it closes the workspace preamble too.
+        let mermaid = tail_from(SYNTHESIZER_PREAMBLE, "In a Mermaid sequence diagram");
+        assert!(workspace.ends_with(mermaid), "{workspace}");
+        let grounding = tail_from(SYNTHESIZER_PREAMBLE, "Using only the observations");
+        let grounding = &grounding[..grounding.find(" In a Mermaid").expect("rule follows")];
+        assert!(workspace.contains(grounding), "{grounding}\n---\n{workspace}");
+    }
+
+    #[test]
+    fn the_workspace_graph_navigator_keeps_the_member_context_steering() {
+        let steering = tail_from(GRAPH_NAVIGATOR_PREAMBLE, "When a step is broad");
+        assert!(WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE.ends_with(steering));
+        let grounding = "Ground every claim in a tool result — never invent a symbol, edge, or count.";
+        assert!(GRAPH_NAVIGATOR_PREAMBLE.contains(grounding));
+        assert!(WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE.contains(grounding));
     }
 }

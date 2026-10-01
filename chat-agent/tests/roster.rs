@@ -566,3 +566,60 @@ async fn a_subagent_reaching_its_cap_soft_closes_without_overcharging_global() {
         "the soft cap does not halt the turn: {events:?}"
     );
 }
+
+/// [S-481]: the member roster carries no Workspace-Analyst. A planner that names
+/// `workspace_analyst` anyway gets a misroute it can recover from — the step
+/// degrades to an `[unavailable — …]` observation naming the roles there are,
+/// charging nothing — never a fabricated result and never a turn-fatal error.
+///
+/// [S-481]: ../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+#[tokio::test]
+async fn a_workspace_analyst_step_on_the_member_roster_degrades_to_unavailable() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (engine, sandbox) = fixture(dir.path());
+    let roster = SubagentRoster::with_models(
+        engine,
+        sandbox,
+        RoleModels {
+            graph_navigator: MockCompletionModel::new([]),
+            governance_analyst: MockCompletionModel::new([]),
+            source_reader: MockCompletionModel::new([]),
+            synthesizer: MockCompletionModel::new([MockTurn::text("nothing was gathered.")]),
+        },
+    );
+    assert!(roster.registered_tools(StepRole::WorkspaceAnalyst).await.is_empty());
+    assert_eq!(roster.preamble(StepRole::WorkspaceAnalyst), "");
+
+    let orchestrator = Orchestrator::new(
+        MockCompletionModel::new([
+            MockTurn::text(plan_json("workspace_analyst", "list the members")),
+            MockTurn::text(final_json(true)),
+        ]),
+        roster,
+        BudgetTree::new(24, 8, 3),
+    );
+    let sink = CapturingSink::new();
+    let outcome = orchestrator.run("which members are there?", &sink).await.expect("the turn runs");
+    assert!(matches!(outcome, TurnOutcome::Answered(_)), "{outcome:?}");
+
+    let observed: Vec<String> = sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            OrchestratorEvent::StepObserved { role: StepRole::WorkspaceAnalyst, summary, .. } => {
+                Some(summary)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        vec![
+            "[unavailable — the WorkspaceAnalyst step could not complete: this chat answers for \
+             one codebase and has no WorkspaceAnalyst subagent; route the step to graph_navigator, \
+             governance_analyst or source_reader]"
+                .to_string()
+        ]
+    );
+    assert_eq!(orchestrator.budget().global_used(), 0, "the misroute charged nothing");
+}

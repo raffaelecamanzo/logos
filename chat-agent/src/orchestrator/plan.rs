@@ -13,13 +13,19 @@
 use logos_core::config::ChatRole;
 use serde::{Deserialize, Serialize};
 
-/// The role a plan step is routed to — one of the four fixed specialized
-/// subagents of the [ADR-41] roster (the planner itself is not a step target).
+/// The role a plan step is routed to — one of the fixed specialized subagents of
+/// the [ADR-41] rosters (the planner itself is not a step target).
 ///
-/// The wire names match the `[chat.models]` per-role override keys ([FR-CF-06])
-/// so a step's role maps directly to its configured model via
+/// The member roster carries the four original roles; the workspace roster
+/// ([S-481], [ADR-71]) carries those four repo-addressed plus the
+/// [`WorkspaceAnalyst`](StepRole::WorkspaceAnalyst). The four original wire names
+/// match the `[chat.models]` per-role override keys ([FR-CF-06]) so a step's role
+/// maps directly to its configured model via
 /// [`as_chat_role`](StepRole::as_chat_role) (S-174 resolves the subagent model
 /// that way).
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [ADR-71]: ../../../docs/specs/architecture/decisions/ADR-71.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepRole {
@@ -31,16 +37,29 @@ pub enum StepRole {
     SourceReader,
     /// Tool-less final-answer synthesis from the turn's scratchpad.
     Synthesizer,
+    /// The workspace read-models and the cross-service `xservice_*` tools — the
+    /// workspace roster's own role ([S-481], [FR-WS-34]); the member roster has
+    /// none.
+    ///
+    /// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+    /// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+    WorkspaceAnalyst,
 }
 
 impl StepRole {
     /// The matching [`ChatRole`] for per-role model resolution
     /// ([`ChatConfig::model_for_role`](logos_core::config::ChatConfig::model_for_role),
-    /// [FR-CF-06]). The planner role has no step form, so this maps only the four
+    /// [FR-CF-06]). The planner role has no step form, so this maps only the
     /// subagent roles.
+    ///
+    /// `[chat.models]` has no Workspace-Analyst key, so that role resolves through
+    /// the Graph-Navigator's: it holds the `xservice_*` tools the Graph-Navigator
+    /// held before [S-481]. A key of its own is a config change, not this one.
+    ///
+    /// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
     pub fn as_chat_role(self) -> ChatRole {
         match self {
-            StepRole::GraphNavigator => ChatRole::GraphNavigator,
+            StepRole::GraphNavigator | StepRole::WorkspaceAnalyst => ChatRole::GraphNavigator,
             StepRole::GovernanceAnalyst => ChatRole::GovernanceAnalyst,
             StepRole::SourceReader => ChatRole::SourceReader,
             StepRole::Synthesizer => ChatRole::Synthesizer,
@@ -115,6 +134,7 @@ mod tests {
             (StepRole::GovernanceAnalyst, "\"governance_analyst\""),
             (StepRole::SourceReader, "\"source_reader\""),
             (StepRole::Synthesizer, "\"synthesizer\""),
+            (StepRole::WorkspaceAnalyst, "\"workspace_analyst\""),
         ] {
             assert_eq!(serde_json::to_string(&role).unwrap(), wire);
             assert_eq!(serde_json::from_str::<StepRole>(wire).unwrap(), role);

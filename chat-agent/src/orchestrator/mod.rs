@@ -41,13 +41,13 @@ pub use budget::{BudgetBound, BudgetTree};
 pub use event::{CapturingSink, EventSink, FanOut, OrchestratorEvent};
 pub use history::{ConversationWindow, PriorTurn};
 pub use plan::{PlanStep, PlannerDecision, StepRole};
-pub use planner::{
-    workspace_planner_preamble, Planner, DEFAULT_PLANNER_PREAMBLE, WORKSPACE_PLANNER_ADDENDUM,
-};
+pub use planner::{member_roster, workspace_planner_preamble, Planner, DEFAULT_PLANNER_PREAMBLE};
 pub use roster::{
-    RoleModels, SubagentRoster, SynthesizerGrounding, GOVERNANCE_ANALYST_PREAMBLE,
-    GRAPH_NAVIGATOR_PREAMBLE, GRAPH_NAVIGATOR_XSERVICE_ADDENDUM, SOURCE_READER_PREAMBLE,
-    SYNTHESIZER_PREAMBLE, SYNTHESIZER_XSERVICE_ADDENDUM,
+    workspace_synthesizer_preamble, RoleModels, SubagentRoster, SynthesizerGrounding,
+    WorkspaceRoster, GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE,
+    SOURCE_READER_PREAMBLE, SYNTHESIZER_PREAMBLE, WORKSPACE_ANALYST_PREAMBLE,
+    WORKSPACE_GOVERNANCE_ANALYST_PREAMBLE, WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE,
+    WORKSPACE_RANKING_CLAUSE, WORKSPACE_SOURCE_READER_PREAMBLE,
 };
 pub use step::{AnswerSink, StepContext, StepError, StepExecutor, StepObservation};
 
