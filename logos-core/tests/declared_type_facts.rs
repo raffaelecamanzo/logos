@@ -254,6 +254,35 @@ fn a_refused_package_and_a_malformed_schema_stay_in_the_denominator_with_their_r
     assert!(schemas[1].detail.as_deref().unwrap().contains("no `name`"));
 }
 
+/// A schema that cannot be read as UTF-8 stays in the denominator —
+/// `unreadable`, with no hash and its reason — and once fixed, a sync that names
+/// it reads its types (the no-hash → hash transition).
+#[test]
+fn an_unreadable_schema_is_recorded_and_a_fixed_one_is_read_by_the_next_sync() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(root, "src/lib.rs", "pub fn hello() {}\n");
+    let bin = "src/main/avro/bin.avsc";
+    fs::create_dir_all(root.join("src/main/avro")).unwrap();
+    fs::write(root.join(bin), [0xff, 0xfe, 0x00]).unwrap();
+    let engine = Engine::start(root).expect("engine starts");
+    engine.index();
+    let rt = engine.runtime().unwrap();
+
+    let rows = schemas(rt);
+    assert_eq!(rows.len(), 1, "an unreadable schema is still found: {rows:?}");
+    assert_eq!((rows[0].path.as_str(), rows[0].status.as_str()), (bin, "unreadable"));
+    assert_eq!(rows[0].content_hash, None);
+    assert!(rows[0].detail.as_deref().unwrap().contains("non-UTF-8"), "{:?}", rows[0].detail);
+    assert!(types(rt).is_empty());
+
+    write(root, bin, AUDIT);
+    engine.sync(&[PathBuf::from(bin)]);
+    let rows = schemas(rt);
+    assert_eq!((rows[0].status.as_str(), rows[0].content_hash.is_some()), ("read", true));
+    assert_eq!(summary(&types(rt))[0].1, "com.x.audit.AuditKind");
+}
+
 // ── a member with no Java/Kotlin/Avro file is unaffected ─────────────────────
 
 #[test]
