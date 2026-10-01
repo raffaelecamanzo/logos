@@ -413,6 +413,29 @@ async fn an_unknown_or_missing_repo_is_an_error_listing_the_members_and_warms_no
             .expect_err("a missing repo is refused");
         assert!(missing.contains("`repo` is required"), "{missing}");
         assert!(missing.contains("api, web"), "{missing}");
+
+        // `null` — what a model sends for an all-optional schema — is a missing
+        // `repo`, with the same guidance, not a malformed-arguments error.
+        let null = set
+            .call(tool, "null".to_string())
+            .await
+            .map(|_| ())
+            .map_err(failure)
+            .expect_err("null arguments are refused");
+        assert!(null.contains("`repo` is required"), "{null}");
+        assert!(null.contains("api, web"), "{null}");
+
+        let not_a_name = set
+            .call(tool, args(json!({ "repo": 1, "query": "x", "path": "x" })))
+            .await
+            .map(|_| ())
+            .map_err(failure)
+            .expect_err("a non-string repo is refused");
+        assert!(
+            not_a_name.contains("`repo` must be a string"),
+            "{not_a_name}"
+        );
+        assert!(not_a_name.contains("api, web"), "{not_a_name}");
     }
     assert_eq!(xs.registry().resident_count(), 0);
     assert_eq!(xs.registry().engine_starts(), 0);
