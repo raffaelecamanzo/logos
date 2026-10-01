@@ -90,7 +90,8 @@ async fn the_mcp_twins_answer_the_cli_read_models_with_the_type_reference_tier()
                 query::xservice_callers(&reg, &edges, &residue, DTO_NODE, None, None).with_type_references(&reg, &index),
             ),
             _ => serde_json::to_value(
-                query::xservice_impact(&reg, &edges, &residue, DTO_NODE, None, None).with_type_references(&reg, &index),
+                query::xservice_impact(&reg, &edges, &residue, DTO_NODE, None, None)
+                    .with_type_references(&reg, &index, None),
             ),
         }
         .expect("the read-model serializes")

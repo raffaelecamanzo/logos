@@ -280,7 +280,7 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
             let (edges, residue) = query::reachability_inputs(&bridge, &registry);
             out.print(
                 &query::xservice_impact(&registry, &edges, &residue, &symbol, depth, repo.as_deref())
-                    .with_type_references(&registry, &type_references(&registry)),
+                    .with_type_references(&registry, &type_references(&registry), depth),
             )?;
         }
         XserviceCommands::Search {

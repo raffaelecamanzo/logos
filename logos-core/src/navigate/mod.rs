@@ -76,7 +76,7 @@ const DEFAULT_MAX_NODES: usize = 25;
 /// Default `explore` file-group cap ([FR-NV-03]).
 const DEFAULT_MAX_FILES: usize = 10;
 /// Default `impact` traversal depth ([FR-NV-06]).
-const DEFAULT_IMPACT_DEPTH: usize = 3;
+pub(crate) const DEFAULT_IMPACT_DEPTH: usize = 3;
 /// Default visible-element cap for `graph_elements` ([FR-UI-08], [ADR-29]): the
 /// level-of-detail bound the whole-graph canvas opens within. Elements beyond it
 /// are reported as elided, never silently dropped ([NFR-CC-04]).

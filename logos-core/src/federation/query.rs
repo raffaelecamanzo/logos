@@ -521,7 +521,9 @@ impl XserviceImpact {
     /// Stitch the type-reference tier on ([FR-WS-35], [BR-60]): every bound
     /// [`TypeReference`] reaching the queried type, with the importing file's
     /// reach in its member — the files depending on it, directly or
-    /// transitively ([`Engine::affected`]).
+    /// transitively ([`Engine::affected`]), within `depth` hops (the surfaces
+    /// pass the `depth` they passed [`xservice_impact`]; its default when
+    /// `None`), so the bound reads the same in every tier of the answer.
     ///
     /// The reach is **file-grain**, not the importing declaration's
     /// [`Engine::impact`]: a Java/Kotlin import row is held by the importing
@@ -540,7 +542,17 @@ impl XserviceImpact {
     /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
     /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
     #[must_use]
-    pub fn with_type_references(mut self, registry: &EngineRegistry<Engine>, index: &TypeReferenceIndex) -> Self {
+    pub fn with_type_references(
+        mut self,
+        registry: &EngineRegistry<Engine>,
+        index: &TypeReferenceIndex,
+        depth: Option<usize>,
+    ) -> Self {
+        let hops = depth.unwrap_or(crate::navigate::DEFAULT_IMPACT_DEPTH);
+        let within = |mut affected: AffectedResult| {
+            affected.affected.retain(|file| usize::try_from(file.distance).is_ok_and(|d| d <= hops));
+            affected
+        };
         self.via_type_reference = references_reaching(registry, index, &self.query)
             .map(|reference| {
                 let importer = &reference.importer;
@@ -551,7 +563,7 @@ impl XserviceImpact {
                         member: importer.member.clone(),
                         value: registry
                             .engine_for(&importer.member)
-                            .map(|engine| engine.affected(std::slice::from_ref(&importer.file), false)),
+                            .map(|engine| within(engine.affected(std::slice::from_ref(&importer.file), false))),
                     }),
                 }
             })

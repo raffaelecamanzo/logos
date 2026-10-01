@@ -87,6 +87,17 @@ public class Main {
 }
 ";
 
+/// In `app`, depending on `Main` — two hops from the importing file.
+const TOP_JAVA: &str = "\
+package com.acme.app;
+
+import com.acme.app.Main;
+
+public class Top {
+    public static void start() { Main.main(null); }
+}
+";
+
 const STRAY_JAVA: &str = "package com.acme.stray;\n\nimport com.acme.lib.Dto;\n\npublic class Stray {}\n";
 
 fn pom(artifact: &str, dependencies: &[&str]) -> String {
@@ -141,6 +152,7 @@ fn workspace(root: &Path) {
             "app" => {
                 write(&dir, "src/main/java/com/acme/app/App.java", APP_JAVA);
                 write(&dir, "src/main/java/com/acme/app/Main.java", MAIN_JAVA);
+                write(&dir, "src/main/java/com/acme/app/Top.java", TOP_JAVA);
                 write(&dir, "pom.xml", &pom("app", &["lib", "models"]));
             }
             "stray" => {
@@ -186,7 +198,7 @@ fn reachability(registry: &EngineRegistry<Engine>, index: &TypeReferenceIndex, s
     let json = |v: &dyn erased::Ser| v.to_value();
     [
         (json(&callers()), json(&callers().with_type_references(registry, index))),
-        (json(&impact()), json(&impact().with_type_references(registry, index))),
+        (json(&impact()), json(&impact().with_type_references(registry, index, None))),
     ]
 }
 
@@ -340,9 +352,21 @@ fn callers_and_impact_on_a_provider_type_stitch_each_importer_apart_from_the_bri
     assert_eq!(entry["member"], "app", "{entry:#}");
     assert!(entry.get("error").is_none(), "{entry:#}");
     assert_eq!(entry["result"]["changed"], json!(["src/main/java/com/acme/app/App.java"]), "{entry:#}");
-    let affected: Vec<&str> =
-        entry["result"]["affected"].as_array().unwrap().iter().map(|a| a["file"].as_str().unwrap()).collect();
-    assert_eq!(affected, ["src/main/java/com/acme/app/Main.java"], "the importing file's own dependents: {entry:#}");
+    let files = |entry: &Value| -> Vec<String> {
+        entry["result"]["affected"].as_array().unwrap().iter().map(|a| a["file"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(
+        files(entry),
+        ["src/main/java/com/acme/app/Main.java", "src/main/java/com/acme/app/Top.java"],
+        "the importing file's own dependents, to the default depth: {entry:#}"
+    );
+
+    // `depth` bounds this tier as it bounds the seed and the bridge tier.
+    let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), &registry);
+    let shallow = query::xservice_impact(&registry, &edges, &residue, &dto, Some(1), None)
+        .with_type_references(&registry, &index, Some(1));
+    let shallow = serde_json::to_value(shallow).unwrap();
+    assert_eq!(files(&shallow["via_type_reference"][0]), ["src/main/java/com/acme/app/Main.java"], "{shallow:#}");
 }
 
 /// **An Avro-declared type has no node**, so it is reached by its dotted name

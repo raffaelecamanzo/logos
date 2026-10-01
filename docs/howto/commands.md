@@ -1093,7 +1093,8 @@ nor counted yet.
   with the bridge edge it was reached through. For a type another member
   imports, a `via_type_reference` section carries, per importer, the importing
   member's [`affected`](#affected) closure of the importing file — `changed` is
-  that file, `affected` every file depending on it there — or that member's
+  that file, `affected` every file depending on it there, within `--depth`
+  hops like the rest of the answer — or that member's
   `error` when its store will not open.
 
   Both sections sit **apart from** `cross_service` and are never merged with
