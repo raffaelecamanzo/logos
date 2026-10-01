@@ -741,10 +741,12 @@ pub fn xservice_type_refs(index: &TypeReferenceIndex, repo: Option<&str>) -> Xse
             types: imported_types(member.imported_by),
         })
         .collect();
-    let scope_note = repo.filter(|_| providers.is_empty()).map(|member| {
-        let why = index.headline.members.unread_reasons.get(member).copied().unwrap_or("not in the workspace");
-        format!("`{member}` is not a member the type-reference overlay was built over ({why})")
-    });
+    let scope_note = build_deps::scope_note(
+        repo,
+        !providers.is_empty(),
+        &index.headline.members.unread_reasons,
+        "type-reference overlay was built over",
+    );
     XserviceTypeRefs {
         scope: repo.map(str::to_string),
         scope_note,

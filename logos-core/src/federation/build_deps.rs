@@ -923,6 +923,26 @@ pub struct XserviceBuildDeps {
     pub cross_context: Vec<CrossContextHint>,
 }
 
+/// The `scope_note` of an `xservice` listing scoped to `repo` that lists
+/// nothing (`listed` false): the member is not one the read-model was built
+/// `over`, for its `unread` reason, or because it is not in the workspace — so
+/// an empty listing is never read as "nothing here" ([NFR-CC-04]). `None`
+/// unscoped, or when something is listed. Shared by `build-deps` and
+/// `type-refs`, so the two can never state the rule differently.
+///
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+pub(super) fn scope_note(
+    repo: Option<&str>,
+    listed: bool,
+    unread: &BTreeMap<String, &'static str>,
+    over: &str,
+) -> Option<String> {
+    repo.filter(|_| !listed).map(|member| {
+        let why = unread.get(member).copied().unwrap_or("not in the workspace");
+        format!("`{member}` is not a member the {over} ({why})")
+    })
+}
+
 /// The `xservice build-deps` answer over `relation`, scoped to one member when
 /// `repo` is given.
 pub fn xservice_build_deps(relation: &BuildDependencyRelation, repo: Option<&str>) -> XserviceBuildDeps {
@@ -930,16 +950,12 @@ pub fn xservice_build_deps(relation: &BuildDependencyRelation, repo: Option<&str
         Some(member) => relation.member(member).into_iter().collect(),
         None => relation.per_member(),
     };
-    let scope_note = repo.filter(|_| members.is_empty()).map(|member| {
-        let why = relation
-            .headline
-            .members
-            .unread_reasons
-            .get(member)
-            .copied()
-            .unwrap_or("not in the workspace");
-        format!("`{member}` is not a member the build relation was read over ({why})")
-    });
+    let scope_note = scope_note(
+        repo,
+        !members.is_empty(),
+        &relation.headline.members.unread_reasons,
+        "build relation was read over",
+    );
     XserviceBuildDeps {
         scope: repo.map(str::to_string),
         scope_note,
