@@ -966,6 +966,73 @@ class Split {
     }
 }
 
+/// The parameter-list lift (S-477) moves only a `Field` declared **in** its
+/// method's parameter list. Java's field query is not anchored to a class body
+/// and an anonymous class is not a captured class, so a field of
+/// `new Runnable() { int n; … }` written in a method body is a `Field` whose
+/// nearest captured declaration is that method — a shipped input that reaches
+/// the lift's containment guard. It must keep the method as its parent: lifting
+/// it would hand the enclosing class a field it does not declare and change
+/// every such Java graph (S-477's byte-identity AC, [FR-QM-11]).
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_java_anonymous_class_field_in_a_method_body_keeps_the_method_as_its_parent() {
+    use logos_core::model::{EdgeKind, NodeKind};
+
+    let reg = registry();
+    let facts = facts_for(
+        &reg,
+        "Outer.java",
+        "\
+class Outer {
+    int own;
+
+    void m(int arg) {
+        Runnable r = new Runnable() {
+            int n;
+            public void run() {}
+        };
+    }
+}
+",
+    );
+    let symbol_of = |name: &str, kind: NodeKind| {
+        facts
+            .nodes
+            .iter()
+            .find(|n| n.name == name && n.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind:?} node named {name}"))
+            .symbol
+            .clone()
+    };
+    let container_of = |name: &str| {
+        let field = symbol_of(name, NodeKind::Field);
+        let parents: Vec<_> = facts
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Contains && e.target == field)
+            .map(|e| e.source.clone())
+            .collect();
+        assert_eq!(
+            parents.len(),
+            1,
+            "{name}: exactly one container, got {parents:?}"
+        );
+        parents[0].clone()
+    };
+
+    assert_eq!(
+        container_of("own"),
+        symbol_of("Outer", NodeKind::Class),
+        "the control: a class-body field"
+    );
+    assert_eq!(
+        container_of("n"),
+        symbol_of("m", NodeKind::Method),
+        "a field in a method BODY is not in its parameter list: the lift leaves it with the method"
+    );
+}
+
 // ── FR-EX-08 / NFR-RA-05: PHP own-property access + never-fabricate (S-060) ──
 
 /// PHP properties extract as `Field` nodes and methods nest in the class, so a

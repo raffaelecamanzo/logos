@@ -29,7 +29,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`stats`](#stats) | ✅ | Usage/performance statistics |
 | [`languages`](#languages) | ✅ | Registered language grammars |
 | [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`, requires a `--features ui` build) |
-| [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` / `build-deps` (`--repo` to scope) |
+| [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` / `build-deps` / `type-refs` (`--repo` to scope) |
 | [`workspace status`](#workspace-status) | ✅ | Per-member freshness, warm state and open state + the 3-state cross-service coverage summary — exits 1 if a member could not be opened |
 | [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
 | [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |

@@ -2882,9 +2882,11 @@ fn kind_for_capture(capture_name: &str) -> Option<NodeKind> {
 /// class-cohesion metric counts the class's fields ([FR-QM-11]). The test is
 /// structural (the field's node sits inside the method's `parameters` field), not a
 /// `constructor` name match, so a field a plugin captures elsewhere in a method keeps
-/// the method as its parent. No shipped plugin captures one today (the TypeScript
-/// patterns reach only a class body's fields and constructor parameters), so that
-/// guard is a constraint on future plugins, not behaviour a fixture can show
+/// the method as its parent. Java reaches that guard today: its field query is not
+/// anchored to a class body and an anonymous class is not a captured class, so a
+/// field of `new Runnable() { int n; }` in a method body is a `Field` under the
+/// method, and stays there — pinned by `structural_metrics.rs`
+/// `a_java_anonymous_class_field_in_a_method_body_keeps_the_method_as_its_parent`
 /// (S-477, CR-154).
 ///
 /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
