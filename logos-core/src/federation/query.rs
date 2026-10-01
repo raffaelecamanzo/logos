@@ -2292,4 +2292,30 @@ mod tests {
         );
         assert_eq!(types[1].owner.declared_in, "com.acme.lib.Dto.java", "the type's one owner, once");
     }
+
+    /// **Each importer row says how it bound**: `naming`, `form` and
+    /// `evidence` are the reference's own, copied through — an enclosing
+    /// type-use row admitted through a collision is listed as exactly that,
+    /// never as the exact build-admitted import the fixtures mostly hold.
+    #[test]
+    fn imported_types_carries_each_references_naming_form_and_evidence() {
+        let mut reference = type_reference("com.acme.lib.Dto", "user", "User.java");
+        reference.naming = TypeNaming::Enclosing;
+        reference.form = TypeRefForm::TypeUse;
+        reference.evidence = PairEvidence::Collision {
+            artifacts: vec!["com.acme:dup".to_string()],
+        };
+        let types = imported_types(vec![reference]);
+        let row = serde_json::to_value(&types[0].importers[0]).unwrap();
+        assert_eq!(
+            (&row["naming"], &row["form"], &row["evidence"]),
+            (
+                &serde_json::json!("enclosing"),
+                &serde_json::json!("type-use"),
+                &serde_json::json!({"via": "collision", "artifacts": ["com.acme:dup"]})
+            ),
+            "{row:#}"
+        );
+        assert_eq!(row["file"], "User.java", "the importer is flattened beside them: {row:#}");
+    }
 }
