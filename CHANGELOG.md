@@ -28,7 +28,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   workspace, a still-unresolved Java/Kotlin import naming a type exactly one other member
   declares (main-tree source or an Avro schema) is matched to it, with the importing file and
   line and the declaring file or schema. It is admitted only where the build relation relates
-  the two members, or a build collision names the owner as a producer (the artifact named);
+  the two members, or the importer references a colliding artifact the owner produces (the
+  artifact named);
   every other match is listed `type-only`, and a type several members declare stays unbound
   as `ambiguous-owner`, owners named. `workspace status` gains a `type_reference` section:
   `type_reference_pairs` beside every row considered, by bucket, and the members read. It is
