@@ -703,14 +703,6 @@ where
         self
     }
 
-    /// The federated backing every role reads through — for assertions on what a
-    /// turn constructed ([`XserviceBacking::registry`], [NFR-PE-10]).
-    ///
-    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
-    pub fn xservice(&self) -> &XserviceBacking {
-        &self.xservice
-    }
-
     /// `role`'s registered tool definitions (name, description, schema), in
     /// registration order — exactly what its model is offered. The tool-less
     /// Synthesizer has none.
