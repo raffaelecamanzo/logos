@@ -1894,6 +1894,45 @@ export class Wizard {
     }
 
     #[test]
+    fn an_untyped_field_carries_its_initialiser_for_the_inference_extension() {
+        let s = "class K {\n  a = inject(Svc);\n  b = new Repo();\n  c = signal(0);\n  d;\n  t: Typed = inject(Other);\n  m() { this.a.x(); this.b.y(); this.c.set(1); this.d.z(); this.t.w(); }\n}";
+        let init = |m: &str| site(s, m).init.map(|i| (i.label, i.ty));
+        assert_eq!(init("x"), Some(("inject(T)".into(), Some("Svc".into()))));
+        assert_eq!(init("y"), Some(("new T()".into(), Some("Repo".into()))));
+        assert_eq!(init("set"), Some(("signal()".into(), None)));
+        assert_eq!(init("z"), Some(("no initialiser".into(), None)));
+        assert_eq!(init("w"), None, "a typed field takes the declared-type rule, never the extension");
+    }
+
+    #[test]
+    fn the_inference_line_counts_every_binding_outcome_and_stays_apart_from_the_bound() {
+        let mut e = Estate::default();
+        e.totals.insert(Population::FirstPartyTs, (6, 0));
+        let untyped = |inferred| Classified {
+            inferred,
+            ..classified(Population::FirstPartyTs, Sub::ThisFieldUntyped, Outcome::NoEvidence)
+        };
+        e.classified = vec![
+            untyped(Some(Outcome::CrossClass)),
+            untyped(Some(Outcome::SelfTie)),
+            untyped(Some(Outcome::Inherited)),
+            untyped(Some(Outcome::OverloadAmbiguous)),
+            untyped(Some(Outcome::ExternalType)),
+            untyped(None),
+        ];
+        let t = Tally::of(&e, Population::FirstPartyTs);
+        assert_eq!(t.would_bind(), 0, "the extension never adds to the declared-type bound");
+        let [_, _, u, i] = t.verdict_lines(Population::FirstPartyTs);
+        assert!(u.contains("would bind 0 of 6"), "{u}");
+        assert_eq!(
+            i,
+            "INFERENCE EXTENSION first-party .ts/.tsx (not the declared-type rule): of 6 untyped \
+             this.f rows, 5 have an inject(T)/new T() initialiser; would bind 3 more (self-tie 1 · \
+             cross-class 1 · via supertype 1) · ambiguous 1"
+        );
+    }
+
+    #[test]
     fn an_estate_blind_run_is_void_never_zero() {
         let blind = Estate::default();
         assert!(void_reason(&blind).is_some_and(|r| r.contains("no first-party")));
