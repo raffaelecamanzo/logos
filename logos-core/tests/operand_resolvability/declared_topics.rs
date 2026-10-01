@@ -70,7 +70,7 @@ use logos_core::federation::{
 };
 use logos_core::graph_store::ConfigDefinition;
 use logos_core::model::BridgeNamespace;
-use logos_core::resolve::binding::{Provenance as ValueProvenance, ValueRefusal};
+use logos_core::resolve::binding::{Provenance as ValueProvenance, Resolver, ValueRefusal};
 use logos_core::resolve::broker_identity::{topic_identity, TopicIdentity};
 use logos_core::Engine;
 
@@ -249,38 +249,94 @@ pub enum Resolved {
 }
 
 /// Resolve one declared value as [S-410] resolves a topic operand —
-/// [`topic_identity`], called. `overlay` is the declaring source's tag; a hop
-/// adds the profiles its `ConfigBound` proves.
+/// [`topic_identity`], called, decides literal / committed / refused.
 ///
+/// A committed hop is then read **as the declaring file's profile reads it**
+/// (CR-157 A1, "profile-tagged per overlay"). Spring under profile `p` reads
+/// `application.yml` and `application-p.yml`, never another profile's file, so
+/// a declaration in a `p`-profiled file admits the compositions `p` itself
+/// proves, else those the unprofiled base proves, else nothing — refused
+/// [`ValueRefusal::MissingKey`], the word the shipped resolver uses when no
+/// committed composition exists ([NFR-RA-05]). An unprofiled declaration is read
+/// under every profile, so every composition is admitted. Each admitted topic
+/// is tagged with the profiles of **its own** composition, never the union.
+///
+/// The per-composition profiles come from the same shipped
+/// [`Resolver::resolve_template`] that `topic_identity` wraps; `topic_identity`
+/// keeps them out of its answer.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 /// [S-410]: ../../../docs/planning/journal.md#s-410-topic-identity-is-the-committed-configured-value-so-a-streams-publish-meets-a-subscribe
-pub fn resolve(value: &str, lookup: &ModuleScoped<'_>, overlay: &str) -> Resolved {
-    match topic_identity(value, lookup) {
+pub fn resolve(
+    value: &str,
+    lookup: &ModuleScoped<'_>,
+    declaring: Option<&str>,
+    overlay: &str,
+) -> Resolved {
+    let (topics, bound) = match topic_identity(value, lookup) {
         TopicIdentity::Literal => {
-            Resolved::Topics(vec![(value.trim().to_string(), overlay.to_string())])
+            return Resolved::Topics(vec![(value.trim().to_string(), overlay.to_string())])
         }
-        TopicIdentity::Committed { topics, bound } => {
-            let mut profiles: BTreeSet<String> = BTreeSet::new();
-            for b in &bound {
-                for v in &b.values {
-                    profiles.extend(v.profiles.iter().cloned());
-                    if v.unprofiled {
-                        profiles.insert("<none>".to_string());
-                    }
-                }
-            }
-            let hop = format!(
-                "{overlay} via ${{{}}} [{}]",
-                bound
-                    .iter()
-                    .map(|b| b.key.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                profiles.into_iter().collect::<Vec<_>>().join(",")
-            );
-            Resolved::Topics(topics.into_iter().map(|t| (t, hop.clone())).collect())
-        }
-        TopicIdentity::Unresolved { refusal, .. } => Resolved::Refused(refusal),
+        TopicIdentity::Unresolved { refusal, .. } => return Resolved::Refused(refusal),
+        TopicIdentity::Committed { topics, bound } => (topics, bound),
+    };
+    let candidates = Resolver {
+        corpus: lookup,
+        module: "",
     }
+    .resolve_template(value)
+    .and_then(Result::ok)
+    .map(|r| r.candidates)
+    .unwrap_or_default();
+    // (topic, the profiles proving it, whether the unprofiled base does).
+    let proven: Vec<(String, BTreeSet<String>, bool)> = topics
+        .into_iter()
+        .map(|topic| {
+            let mut profiles = BTreeSet::new();
+            let mut unprofiled = false;
+            for c in candidates.iter().filter(|c| c.template.trim() == topic) {
+                profiles.extend(c.profiles.iter().cloned());
+                unprofiled |= c.unprofiled;
+            }
+            (topic, profiles, unprofiled)
+        })
+        .collect();
+    let admitted: Vec<_> = match declaring {
+        None => proven,
+        Some(profile) => {
+            let own: Vec<_> = proven
+                .iter()
+                .filter(|(_, p, _)| p.contains(profile))
+                .cloned()
+                .collect();
+            if own.is_empty() {
+                proven.into_iter().filter(|(_, _, base)| *base).collect()
+            } else {
+                own
+            }
+        }
+    };
+    if admitted.is_empty() {
+        return Resolved::Refused(ValueRefusal::MissingKey);
+    }
+    let keys = bound
+        .iter()
+        .map(|b| b.key.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    Resolved::Topics(
+        admitted
+            .into_iter()
+            .map(|(topic, profiles, base)| {
+                let mut tags: Vec<String> = profiles.into_iter().collect();
+                if base {
+                    tags.push("<none>".to_string());
+                }
+                let tag = format!("{overlay} via ${{{keys}}} [{}]", tags.join(","));
+                (topic, tag)
+            })
+            .collect(),
+    )
 }
 
 // ── The classifier (A2, A3) ─────────────────────────────────────────────────
@@ -517,7 +573,7 @@ pub fn measure_reading(
             corpus: &scoped,
             module: &source.module,
         };
-        match resolve(&s.value, &lookup, &overlay) {
+        match resolve(&s.value, &lookup, source.profile.as_deref(), &overlay) {
             Resolved::Refused(reason) => out.refused.push(RefusedDeclaration {
                 member: s.member.clone(),
                 key: s.key.clone(),
@@ -1576,7 +1632,7 @@ mod fixtures {
             module: "m",
         };
         assert_eq!(
-            resolve(" orders ", &lookup, "application:prod"),
+            resolve(" orders ", &lookup, Some("prod"), "application:prod"),
             Resolved::Topics(vec![("orders".to_string(), "application:prod".to_string())])
         );
     }
@@ -1604,21 +1660,22 @@ mod fixtures {
         let Resolved::Topics(t) = resolve(
             "${spring.kafka.topics.orders}",
             &lookup,
+            None,
             "application:<none>",
         ) else {
             panic!("the hop resolves");
         };
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].0, "orders");
-        assert!(
-            t[0].1.contains("via ${spring.kafka.topics.orders}"),
-            "{}",
-            t[0].1
+        // The whole A4 provenance: the declaring overlay, the hop, the profile set.
+        assert_eq!(
+            t[0].1,
+            "application:<none> via ${spring.kafka.topics.orders} [<none>]"
         );
         // The near miss: the same shape, but the key is defined only in ANOTHER
         // module — out of reach, so refused rather than borrowed.
         assert_eq!(
-            resolve("${spring.kafka.topics.payments}", &lookup, "x"),
+            resolve("${spring.kafka.topics.payments}", &lookup, None, "x"),
             Resolved::Refused(ValueRefusal::MissingKey)
         );
     }
@@ -1636,8 +1693,132 @@ mod fixtures {
             module: "m",
         };
         assert_eq!(
-            resolve("${spring.kafka.topics.orders}", &lookup, "x"),
+            resolve("${spring.kafka.topics.orders}", &lookup, None, "x"),
             Resolved::Refused(ValueRefusal::PlaceholderValue)
+        );
+    }
+
+    /// The three sources a profiled hop is judged against: a `prod`
+    /// declaration, a value committed only under `dev`, and optionally the
+    /// unprofiled base and `prod`'s own value.
+    fn profiled(base: Option<&str>, prod: Option<&str>) -> ConfigCorpus {
+        let mut sources = vec![
+            source(
+                "m/src/main/resources/application-prod.yml",
+                "m",
+                Some("prod"),
+                &[("app.out.topic", "${names.orders}")],
+            ),
+            source(
+                "m/src/main/resources/application-dev.yml",
+                "m",
+                Some("dev"),
+                &[("names.orders", "orders-dev")],
+            ),
+        ];
+        if let Some(v) = base {
+            sources.push(source(
+                "m/src/main/resources/application.yml",
+                "m",
+                None,
+                &[("names.orders", v)],
+            ));
+        }
+        if let Some(v) = prod {
+            sources[0]
+                .values
+                .entry("names.orders".to_string())
+                .or_default()
+                .insert(v.to_string());
+        }
+        corpus(sources)
+    }
+
+    #[test]
+    fn a_hop_in_a_profiled_file_reads_only_its_own_profile_or_the_base() {
+        // Spring under `prod` reads application.yml and application-prod.yml,
+        // never application-dev.yml: a value only `dev` commits is not one a
+        // `prod` declaration can resolve to (NFR-RA-05).
+        let only_dev = profiled(None, None);
+        let lookup = ModuleScoped {
+            corpus: &only_dev,
+            module: "m",
+        };
+        assert_eq!(
+            resolve("${names.orders}", &lookup, Some("prod"), "application:prod"),
+            Resolved::Refused(ValueRefusal::MissingKey)
+        );
+        // Through the measurement: refused, not a net-new pair.
+        let members = set(&["m", "p"]);
+        let scalars = application_scalars(&only_dev, &members);
+        let o = observed(&[("p", "orders-dev")]);
+        let r = measure_reading(Reading::Decisive, &only_dev, &scalars, &members, &o);
+        assert_eq!((r.net_new(), r.refused.len()), (0, 1));
+
+        // With the base committing a value, `prod` falls back to it.
+        let with_base = profiled(Some("orders-base"), None);
+        let lookup = ModuleScoped {
+            corpus: &with_base,
+            module: "m",
+        };
+        let Resolved::Topics(t) = resolve("${names.orders}", &lookup, Some("prod"), "p") else {
+            panic!("the base proves a value");
+        };
+        assert_eq!(
+            t.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(),
+            vec!["orders-base"]
+        );
+
+        // With `prod` committing its own value, that value overrides the base.
+        let with_own = profiled(Some("orders-base"), Some("orders-prod"));
+        let lookup = ModuleScoped {
+            corpus: &with_own,
+            module: "m",
+        };
+        let Resolved::Topics(t) = resolve("${names.orders}", &lookup, Some("prod"), "p") else {
+            panic!("prod proves a value");
+        };
+        assert_eq!(
+            t.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(),
+            vec!["orders-prod"]
+        );
+    }
+
+    #[test]
+    fn a_divergent_hop_tags_each_topic_with_the_profiles_that_prove_it() {
+        // An unprofiled declaration resolves under every profile, so both
+        // compositions are admitted — each carrying ITS profiles, never the
+        // union (CR-157 A4: profile set as provenance).
+        let c = corpus(vec![
+            source(
+                "m/src/main/resources/application-dev.yml",
+                "m",
+                Some("dev"),
+                &[("base.topic", "orders-dev")],
+            ),
+            source(
+                "m/src/main/resources/application-prod.yml",
+                "m",
+                Some("prod"),
+                &[("base.topic", "orders-prod")],
+            ),
+        ]);
+        let lookup = ModuleScoped {
+            corpus: &c,
+            module: "m",
+        };
+        assert_eq!(
+            resolve("${base.topic}", &lookup, None, "application:<none>"),
+            Resolved::Topics(vec![
+                (
+                    "orders-dev".to_string(),
+                    "application:<none> via ${base.topic} [dev]".to_string()
+                ),
+                (
+                    "orders-prod".to_string(),
+                    "application:<none> via ${base.topic} [prod]".to_string()
+                ),
+            ])
         );
     }
 
