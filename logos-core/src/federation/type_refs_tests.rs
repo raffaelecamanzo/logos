@@ -638,6 +638,59 @@ fn an_unread_member_owns_nothing_and_is_named_with_its_reason() {
     assert!(index.headline.summary.contains("over 6 of 8 members read"));
 }
 
+// ── the headline past cardinality one (review findings A4-F3..F6) ─────────
+
+/// The base fixture with every aggregate the headline folds holding two:
+/// `lib` declares a second type `app` imports (two triples on one pair);
+/// `stray` imports `Dto` twice and `Thing` once; `user` imports `Only` twice;
+/// `fork-a` and `fork-b` also both produce `com.acme:dup2`, which `user`
+/// references too (a collision pair backed by two artifacts); `models` holds a
+/// second, malformed schema, and `Evt`'s generated class is committed beside its
+/// schema.
+fn rich_index() -> TypeReferenceIndex {
+    let federation = fed(&MEMBERS, &[]);
+    let mut build = build_facts();
+    for (member, rows) in build.iter_mut() {
+        match member.as_str() {
+            "fork-a" | "fork-b" => rows.extend(pom(Some("dup2"), &[])),
+            "user" => *rows = pom(Some("user"), &["dup", "dup2"]),
+            _ => {}
+        }
+    }
+    let build = join(&federation.members, &federation.member_kinds, &build, &[]);
+    let mut facts = type_facts();
+    for (member, f) in facts.iter_mut() {
+        match member.as_str() {
+            "lib" => f.declared.push(source("com.acme.lib.Other", "src/main/java/com/acme/lib/Other.java")),
+            "app" => f.rows.push(import("com::acme::lib::Other", APP, 20)),
+            "stray" => f.rows.extend([
+                import("com::acme::lib::Dto", "src/main/java/S2.java", 1),
+                import("com::acme::dup::Thing", "src/main/java/S2.java", 2),
+            ]),
+            "user" => f.rows.push(import("com::acme::dup::Only", "src/main/kotlin/V.kt", 1)),
+            "models" => {
+                f.declared.push(source("com.acme.events.Evt", "src/main/java/com/acme/events/Evt.java"));
+                f.schemas.push(AvroSchemaRow {
+                    status: "malformed".to_string(),
+                    detail: Some("invalid JSON".to_string()),
+                    ..schema("src/main/avro/broken.avsc")
+                });
+            }
+            _ => {}
+        }
+    }
+    build_index(&federation.members, &facts, &[], &build)
+}
+
+/// `triples` counts distinct `(importer, owner, type)`: two types on one pair
+/// are two triples, one pair.
+#[test]
+fn triples_count_each_type_a_pair_carries() {
+    let headline = rich_index().headline;
+    assert_eq!(headline.type_reference_pairs, 3, "app→lib, app→models, user→fork-a");
+    assert_eq!(headline.triples, 4, "app→lib carries Dto and Other");
+}
+
 // ── the API S-474 reads ───────────────────────────────────────────────────
 
 /// The index, the per-type importers, the per-symbol references and the
