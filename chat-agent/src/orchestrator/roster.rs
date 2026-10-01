@@ -1581,3 +1581,55 @@ result — never invent a symbol, edge, or count.";
         );
     }
 }
+
+#[cfg(test)]
+mod workspace_preamble_tests {
+    //! [S-481]: the workspace preambles are rewrites of the member ones, and the
+    //! rules both chats must share are re-typed in them. These guards derive each
+    //! shared sentence from the member preamble itself, so amending it there and
+    //! not here fails a test instead of silently diverging the workspace chat.
+    //!
+    //! [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+
+    use super::*;
+    use logos_core::federation::Member;
+
+    fn federation() -> Federation {
+        Federation {
+            name: "shop".to_string(),
+            root: std::path::PathBuf::from("/ws"),
+            members: vec![Member { name: "api".to_string(), root: "/ws/api".into() }],
+            default: None,
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+            member_kinds: Default::default(),
+        }
+    }
+
+    /// `text` from the first occurrence of `from` to its end.
+    fn tail_from<'a>(text: &'a str, from: &str) -> &'a str {
+        &text[text.find(from).unwrap_or_else(|| panic!("{from:?} in {text}"))..]
+    }
+
+    #[test]
+    fn the_workspace_synthesizer_keeps_the_member_grounding_and_mermaid_rules() {
+        let workspace = workspace_synthesizer_preamble(&federation());
+        // HF-2: both chats render through one Mermaid renderer, so the rule is the
+        // member preamble's, verbatim, and it closes the workspace preamble too.
+        let mermaid = tail_from(SYNTHESIZER_PREAMBLE, "In a Mermaid sequence diagram");
+        assert!(workspace.ends_with(mermaid), "{workspace}");
+        let grounding = tail_from(SYNTHESIZER_PREAMBLE, "Using only the observations");
+        let grounding = &grounding[..grounding.find(" In a Mermaid").expect("rule follows")];
+        assert!(workspace.contains(grounding), "{grounding}\n---\n{workspace}");
+    }
+
+    #[test]
+    fn the_workspace_graph_navigator_keeps_the_member_context_steering() {
+        let steering = tail_from(GRAPH_NAVIGATOR_PREAMBLE, "When a step is broad");
+        assert!(WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE.ends_with(steering));
+        let grounding = "Ground every claim in a tool result — never invent a symbol, edge, or count.";
+        assert!(GRAPH_NAVIGATOR_PREAMBLE.contains(grounding));
+        assert!(WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE.contains(grounding));
+    }
+}
