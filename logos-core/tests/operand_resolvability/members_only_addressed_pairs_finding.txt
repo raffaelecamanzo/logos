@@ -111,10 +111,12 @@ pinned constants are byte-identical.
     - S-475's own run reads 11 / 12 / 13 today: the estate has not drifted
       since 2026-09-29 (CR-158 CRA-02), and its manifest's SHA-256 is the one
       both declarations record.
-    - identity::judge_pairs over S-384's UNSCOPED corpus and provider index
-      re-derives S-411's path-only set exactly (8 / 8 pairs): the subtraction
-      was called, not rebuilt. The fork-free set is those 8 plus the two
-      aggregator pairs (10).
+    - S-384's own site judgement over its UNSCOPED corpus and provider index
+      (`identity::judge`, the function `judge_pairs` calls), read through this
+      module's `path_only_of`, re-derives S-411's path-only set exactly (8 / 8
+      pairs): the subtraction was called, not rebuilt. The fork-free set —
+      the same `judge` over the members-only registry and the fork-free index —
+      is those 8 plus the two aggregator pairs (10).
     - under S-411's path-only set, the members-only registry adds exactly the
       pairs S-475's sensitivity printed.
     - S-475's reader collapsed no key.

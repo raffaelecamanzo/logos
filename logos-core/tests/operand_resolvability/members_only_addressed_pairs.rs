@@ -33,8 +33,9 @@
 //! - **the path-only subtraction** — [S-384]'s consumer-site judgement, called
 //!   through [`identity::judge_pairs`] with the members-only registry and a
 //!   provider index without the fork ([`members_only_providers`]). [S-411]
-//!   derives its own `path_only` from the same function; the estate run
-//!   asserts that calling it with [S-384]'s unscoped inputs reproduces
+//!   derives its own `path_only` from the same function's output over
+//!   [S-384]'s unscoped inputs (`identity::findings`' own `pairs`); the
+//!   estate run asserts that [`path_only_of`] over those pairs reproduces
 //!   [S-411]'s set exactly, so the subtraction cannot have drifted in the
 //!   reuse.
 //!
@@ -306,8 +307,8 @@ pub struct MembersOnly {
     /// path-only subtraction is made of.
     pub site_pairs: Vec<Pair>,
     pub path_only: BTreeSet<(String, String)>,
-    /// [S-411]'s path-only set re-derived through the same call over [S-384]'s
-    /// unscoped inputs — must equal [S-411]'s own.
+    /// [S-411]'s path-only set re-derived by [`path_only_of`] from [S-384]'s
+    /// own judged pairs (its unscoped inputs) — must equal [S-411]'s own.
     ///
     /// [S-384]: ../../../docs/planning/journal.md#s-384-measure-service-identity-resolvability-across-the-deploy-corpus
     /// [S-411]: ../../../docs/planning/journal.md#s-411-measure-config-declared-coupling-over-the-reference-estate
@@ -410,12 +411,9 @@ pub fn measure(root: &Path) -> MembersOnly {
     let providers = members_only_providers(&s384.providers, members);
     let site_pairs = identity::judge_pairs(root, &registry, &providers, Resolution::Literal);
     let path_only = path_only_of(&site_pairs);
-    let reproduced_s411_path_only = path_only_of(&identity::judge_pairs(
-        root,
-        &s384.corpus,
-        &s384.providers,
-        Resolution::Literal,
-    ));
+    // `identity::findings` already holds `judge` over the unscoped corpus and
+    // provider index; re-running it would only re-walk the same sites.
+    let reproduced_s411_path_only = path_only_of(&s384.pairs);
     let targets = judge_all(s475.targets(), &registry, runnable, &path_only);
 
     let strict_of = |judged: &[JudgedTarget]| -> BTreeSet<(String, String)> {
@@ -620,7 +618,7 @@ fn report_cross_checks(m: &MembersOnly) {
         m.s475.sensitivity.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect();
     println!("\n  CROSS-CHECKS ON THE REUSE");
     println!(
-        "    S-411's path-only re-derived through identity::judge_pairs   {} / {} pairs, equal: {}",
+        "    S-411's path-only re-derived by path_only_of from S-384's pairs   {} / {} pairs, equal: {}",
         m.reproduced_s411_path_only.len(),
         m.s475.s411.path_only.len(),
         m.reproduced_s411_path_only == m.s475.s411.path_only
@@ -718,8 +716,8 @@ fn assert_the_reuse_is_faithful(m: &MembersOnly) {
     );
     assert_eq!(
         m.reproduced_s411_path_only, m.s475.s411.path_only,
-        "identity::judge_pairs over S-384's unscoped inputs no longer reproduces S-411's \
-         path-only set — the subtraction drifted in the reuse",
+        "path_only_of over S-384's own judged pairs no longer reproduces S-411's path-only \
+         set — the subtraction drifted in the reuse",
     );
     let added: BTreeSet<(String, String)> = m
         .registry_only_strict
