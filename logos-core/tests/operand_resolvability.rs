@@ -192,6 +192,14 @@
 //! gate refuses to treat as a name, the second a directory convention the
 //! metric names in terms.
 //!
+//! Sprint 84 added one, in `declared_topics` (S-488): `key_shape`, whose
+//! `spring.kafka.topics.` prefix is Spring Kafka's topic-property convention.
+//! It is not a judgement made in the harness: it is CR-157 §3.2 A1's
+//! topic-named-key rule, quoted verbatim in `declared_topics_floor.txt` before
+//! the module existed. `CDK_BLIND_SPOT` in the same module is NOT of this kind
+//! and is named only so the reader does not have to decide that: it is a file
+//! the CR names as never read.
+//!
 //! This list is **open, not closed**: anything of that kind added to this
 //! harness or its submodules is covered by the same carve-out and the same
 //! prohibition. The fitness function cannot enforce it — it scans
@@ -357,6 +365,17 @@ mod sequence_addressed_pairs;
 /// `tests/ts_method_residue.rs` would become a second cargo test target.
 #[path = "operand_resolvability/ts_method_residue.rs"]
 mod ts_method_residue;
+
+/// S-488's net-new config-declared topic gate — its own module, so CR-157's
+/// measurement does not co-edit the file S-411's floor, finding and pins live
+/// in. Reads S-411's application reader and its judgement, the shipped
+/// `topic_identity`, and the shipped topic and coverage read-models through
+/// member engines over a private copy; adds no walk of the estate.
+///
+/// `#[path]`-attached for the same reason every sibling above is: a plain
+/// `tests/declared_topics.rs` would become a second cargo test target.
+#[path = "operand_resolvability/declared_topics.rs"]
+mod declared_topics;
 
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and

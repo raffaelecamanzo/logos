@@ -1,0 +1,174 @@
+S-488 T1 — RECORDED FINDING: NET-NEW CONFIG-DECLARED TOPIC PAIRS (CR-157 GATE B)
+================================================================================
+
+VERDICT: net-new member-topic pairs on the decisive MANIFEST·MAIN reading 8 against a floor of 3 declared before the run  =>  HOLDS
+
+  Measured:   2026-10-01, Dev Session 1.3 (sprint-84, branch sprint-84-I1-S3)
+  Floor:      >= 3, declared in `declared_topics_floor.txt`, committed at 570fd465
+              BEFORE this module existed (parent 13498362, release 1.8.1)
+  Estate:     PRIVATE COPY ~/source/.estate-copies/pec-services-S-488 of
+              ~/source/pec-services, every one of its 84 member stores re-indexed
+              with `logos 1.8.1` (= logos 13498362, merged main) — 84 of 84, 0
+              failures, 85 s. The live estate was never opened by an engine.
+  Command:    LOGOS_REF_WORKSPACE=~/source/.estate-copies/pec-services-S-488 \
+                cargo test -p logos-core --test operand_resolvability \
+                declared_topics::measure_net_new -- --nocapture --test-threads=1
+  Runtime:    147 s and 183 s on the two recorded runs (S-411's judgement, the
+              measurement walk, 84 member engines)
+
+  This harness is INVISIBLE TO `gate.sh` AND TO CI. Both run without
+  `LOGOS_REF_WORKSPACE`, so there the estate arm prints VOID and only the
+  always-run fixtures execute. This figure exists only because of the run above.
+
+
+DENOMINATORS
+------------
+
+  manifest members (decisive population)                83   = the declared list
+  directories with .git (DIRECTORY reading)             84
+  member stores the topic read-model answered for       84 of 84
+  src/main application sources read (decisive)          83
+  captured topic identities (decisive population)       19   (product, promoted)
+  members with at least one promoted topic              22
+  declarations resolved (decisive)                      56   rows, 55 (M, T) pairs
+  declarations refused                                   0
+
+
+THE HEADLINE — 8 NET-NEW (M, T) PAIRS, BY NAME
+-----------------------------------------------
+
+  Every one: profile `application:<none>`, file `src/main/resources/application.yml`
+  of the member (deprecated-mailbox-core: its `manager/` module).
+
+  CONFIG-ONLY (3) — M has no broker row and no promoted topic at all
+    funnel-aggregator-api      -> archive-message-queue   filteraggregate.topic
+    mailbox-aggregator-api     -> archive-message-queue   filteraggregate.topic
+    mailbox-unread-mail-batch  -> unread-mails-requests   spring.kafka.template.defaulttopic
+
+  SITE-REFUSED (5) — M has broker sites the product refused `topic-not-literal`
+    archive-manager            -> delayed-input-messages  spring.kafka.topics.delayedinputmessages
+        refused: KafkaProducer#sendMessage() (src/main)
+    deprecated-mailbox-core    -> delayed-input-messages  spring.kafka.topics.delayedinputmessages
+    deprecated-mailbox-core    -> mailbox-events          spring.kafka.topics.mailboxevents
+    deprecated-mailbox-core    -> pec-server-commands     spring.kafka.topics.pecservercommands
+        refused: api/ and manager/ KafkaProducer#sendMessage() (src/main) and 7
+        integration tests (src/test) — 9 keyless publish rows
+    pecserver-facade           -> pec-server-outcomes     spring.kafka.topics.pecserveroutcomes
+        refused: KafkaProducer#sendMessage() (src/main) and one integration test
+
+  SITE-UNCAPTURED (0)
+
+  The split is at MEMBER grain and says so: a refused row stores no operand, so
+  it is tied to M, never provably to T. In all five the refused src/main site is
+  a generic `KafkaProducer#sendMessage(topic, …)` wrapper whose topic is a
+  parameter, recorded `topic-not-literal`. It never moves the count.
+
+  Ground-truthed outside the read-model: each net-new member's raw store
+  (`nodes` kind 35, `unresolved_refs` broker rows) was queried directly on the
+  copy — the three config-only members hold no Topic node and no broker row;
+  the five site-refused members hold Topic nodes, none named T, and keyless
+  `broker-publish` rows.
+
+
+BESIDE THE HEADLINE — REPORTS, NEVER FLOORS
+-------------------------------------------
+
+  ALREADY OBSERVED: 46 (M, T) pairs (47 declarations) — explained by a promoted
+  Producer/Consumer of M on T. 46 of the 55 declared pairs, i.e. cluster A
+  already shows most of what configuration declares, exactly as CR-157 2.2
+  predicted. The net-new 8 are what it still does not.
+
+  DECLARED-ONLY: 1 — `pec-services-tools` commits `clickstream` under
+  `kafka.topics`; no broker site anywhere resolves to it. Never a topic.
+
+  REFUSED declarations: 0. No topic-named value on src/main is uncommitted or a
+  placeholder that fails its one hop.
+
+  KEY-SHAPE SPLIT (56 resolved declarations):
+    spring.kafka.topics.*                      52
+    last segment is topic/topics                3   (filteraggregate.topic x2,
+                                                     kafka.topics)
+    last segment ends in topic/topics           1   (spring.kafka.template.defaulttopic)
+
+  THE OTHER TWO READINGS — never decisive:
+    DIRECTORY (84 dirs, src/main)    net-new 8  observed 47  declared-only 1   HOLDS
+    TEST-TREE (src/main + src/test)  net-new 8  observed 46  declared-only 1   HOLDS
+  Neither adds a net-new pair. DIRECTORY's extra observed pair is the fork's own
+  archive-commands. The verdict rests on no reading but the decisive one.
+
+  APPLICATION SOURCES OUTSIDE src/main AND src/test (manifest members): 0.
+
+  BLIND SPOT: `filters-ingestion-cdk/cdk.json` — present on the copy, not a
+  configuration source, never read, NEVER counted (CR-157 section 3.3).
+
+
+RECONCILIATION AGAINST S-411 (13 TOPICS / 36 DECLARATIONS)
+-----------------------------------------------------------
+
+  S-411's own `judgement`, re-run over the SAME copy, reproduces its recorded
+  topic half exactly: 13 both-sides-declared identities, 36 (member, topic)
+  declarations. Against this run's 54 decisive captured pairs (55 declared
+  less the 1 declared-only; 46 observed + 8 net-new), at (M, T) grain:
+
+    matched (M, T) on both sides                                       35
+    in S-411, not here — MANIFEST POPULATION                             1
+        archive-api-logiclens-fork -> archive-commands
+        (the fork is a directory, not a manifest member)
+    here, not in S-411 — CAPTURED BY THE PRODUCT NOW, NOT BY S-411's
+                         HARNESS                                        19
+        archive-events (5 members), mailbox-events (5), delayed-input-
+        messages (4), official-log-events (2), archive-reporting (2),
+        email-event-queue (1). S-411's captured population was 16
+        `@KafkaListener` subscribes and zero publishes; cluster A (S-408 Streams,
+        S-409 accessor hop, S-410 committed identity, S-417 two-frame hop) is
+        what now captures these six topics in the product.
+
+    35 + 1 = 36.  35 + 19 = 54.  No difference is UNEXPLAINED (the run fails on
+    one), and three named mechanisms — src/main restriction, topic-named key
+    rule, placeholder hop — account for none: every S-411 declaration is a
+    literal value under a topic-named key in a src/main source.
+
+  ONE CORRECTION TO S-411's PROSE, recorded here and NOT in S-411's files
+  (which stay byte-identical): its finding says "TWO OF THE 36 DECLARATIONS DO
+  NOT COME THROUGH `spring.kafka.topics`". There are THREE. `mailbox-aggregator-api`
+  commits `filter-aggregate.topic: archive-message-queue` exactly as
+  `funnel-aggregator-api` does, and its pair is among the 36 S-411 counted and
+  among the 35 matched here — the count was right, the prose named two of three.
+
+  S-411's re-read also lists 3 identities its record did not have, all
+  `dangling: no member commits the value` (outside its 13; they move neither
+  figure): `direct:liveness`, `direct:readiness` and a
+  `mongodb:dbConnection?database=…&operation=save` endpoint. They are Camel
+  endpoint URIs the broker arm's capture has reached since S-411 ran, not Kafka
+  topics; no committed value equals them, so they join nothing in either run.
+
+
+CR-157 CRA-01 — VALIDATED
+-------------------------
+
+  "The two config-only publishers still have no observed `Producer` on their
+  topic after cluster A": TRUE. `funnel-aggregator-api` and
+  `mailbox-unread-mail-batch` are both net-new and config-only. The gate holds
+  on more than them: 8 = 2 hand-named + 1 config-only the prose missed + 5
+  members whose publish site the product refuses.
+
+
+WHAT THIS DOES NOT SAY
+----------------------
+
+  It does not say the 8 are producers. Configuration does not prove direction
+  (A4), and none is read as one. It does not say a refused site publishes to T:
+  the site-refused split is member grain. It says that 8 member-topic
+  memberships committed in src/main application configuration are invisible to
+  the product's broker graph today.
+
+
+CONSEQUENCE — CR-157 SECTION 3.2 B4, HOLDS
+-------------------------------------------
+
+  S-489, S-490 and S-491 gain an appended "plannable" banner (staged for the
+  coordinator in `.pending/S-488-docs-staged.md`). ADR-72 stays Proposed until
+  S-489 delivers. FR-WS-36 is written by S-489, not here.
+
+  If a later run disagrees with what is recorded here, re-decide CR-157 and
+  ADR-72; do not relax a pin.
