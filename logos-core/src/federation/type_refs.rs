@@ -540,9 +540,9 @@ impl TypeReferenceIndex {
     }
 }
 
-/// A row's class before the pair restriction.
+/// A row's class before the pair restriction, over the non-empty owner list
+/// [`lookup`] found (a name with no owner never reaches it).
 enum Match<'a> {
-    NoOwner,
     SelfOwned,
     One(&'a TypeOwner),
     Many(&'a [TypeOwner]),
@@ -565,7 +565,6 @@ fn lookup<'a>(
 
 fn classify<'a>(importer: &str, owners: &'a [TypeOwner]) -> Match<'a> {
     match owners {
-        [] => Match::NoOwner,
         _ if owners.iter().any(|o| o.member == importer) => Match::SelfOwned,
         [one] => Match::One(one),
         many => Match::Many(many),
@@ -739,7 +738,6 @@ pub fn build_index(
                 symbol: row.source_symbol.clone(),
             };
             match classify(name, found) {
-                Match::NoOwner => rows.no_owner += 1,
                 Match::SelfOwned => rows.self_owned += 1,
                 Match::Many(many) => {
                     rows.ambiguous_owner += 1;
