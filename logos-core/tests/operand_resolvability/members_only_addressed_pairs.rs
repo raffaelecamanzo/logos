@@ -366,13 +366,7 @@ impl MembersOnly {
             .collect();
         let outcomes: BTreeSet<PairOutcome> =
             self.evidence(a, b).iter().map(|t| t.outcome).collect();
-        let fate = if self.pairs(Reading::Strict).contains(&(a, b)) {
-            Fate::Kept
-        } else if outcomes.contains(&PairOutcome::PathOnlyMatched) {
-            Fate::Removed
-        } else {
-            Fate::NotReached(outcomes)
-        };
+        let fate = fate_of(self.pairs(Reading::Strict).contains(&(a, b)), outcomes);
         (fate, bindings)
     }
 }
@@ -380,13 +374,28 @@ impl MembersOnly {
 /// What the fork-free path-only subtraction did to one pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fate {
-    /// Addressed on STRICT: no path-only binding subtracts it.
+    /// Counted on STRICT: no path-only binding subtracts it.
     Kept,
     /// Every target resolving to it is already bound by path alone.
     Removed,
-    /// The registry never resolves it to an addressed or path-only target;
-    /// the buckets it did fall in.
+    /// Neither: not counted on STRICT and not wholly path-only — the buckets
+    /// its targets fell in (none when no target resolves to it; `Addressed`
+    /// when it is addressed but outside the STRICT population).
     NotReached(BTreeSet<PairOutcome>),
+}
+
+/// The fate of one pair from whether STRICT counts it and the buckets of the
+/// targets resolving to it. A free function so the rule is pinned by
+/// fixtures without an estate.
+pub fn fate_of(counted_on_strict: bool, outcomes: BTreeSet<PairOutcome>) -> Fate {
+    if counted_on_strict {
+        Fate::Kept
+    } else if !outcomes.is_empty() && outcomes.iter().all(|o| *o == PairOutcome::PathOnlyMatched)
+    {
+        Fate::Removed
+    } else {
+        Fate::NotReached(outcomes)
+    }
 }
 
 /// Run the re-measurement.
@@ -1009,6 +1018,23 @@ mod fixtures {
             pair("agg", "c", PairClass::TargetServesNothing),
         ];
         assert_eq!(path_only_of(&pairs), [("agg".into(), "a".into())].into_iter().collect());
+    }
+
+    #[test]
+    fn a_pair_is_removed_only_when_every_target_is_bound_by_path_alone() {
+        let of = |outcomes: &[PairOutcome]| outcomes.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(fate_of(true, of(&[PairOutcome::Addressed])), Fate::Kept);
+        assert_eq!(fate_of(false, of(&[PairOutcome::PathOnlyMatched])), Fate::Removed);
+        // The near misses: one target bound by path and one not is not a
+        // removal, an addressed pair outside STRICT is not kept, and a pair no
+        // target resolves to was never reached.
+        let mixed = of(&[PairOutcome::PathOnlyMatched, PairOutcome::Addressed]);
+        assert_eq!(fate_of(false, mixed.clone()), Fate::NotReached(mixed));
+        let outside = of(&[PairOutcome::Addressed]);
+        assert_eq!(fate_of(false, outside.clone()), Fate::NotReached(outside));
+        let other = of(&[PairOutcome::TargetNotRunnable]);
+        assert_eq!(fate_of(false, other.clone()), Fate::NotReached(other));
+        assert_eq!(fate_of(false, BTreeSet::new()), Fate::NotReached(BTreeSet::new()));
     }
 
     #[test]
