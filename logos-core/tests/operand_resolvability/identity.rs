@@ -1338,6 +1338,25 @@ fn judge(root: &Path, corpus: &Corpus, providers: &Providers, mode: Resolution) 
     }
 }
 
+/// [`judge`]'s judged pairs over a caller-supplied identity corpus and provider
+/// index — the one entry point a sibling gate re-runs the consumer-site
+/// judgement through.
+///
+/// `pub(crate)` for S-492's members-only gate, which takes the path-only
+/// subtraction with a members-only registry and a provider index without the
+/// fork. It calls [`judge`] rather than mirroring it, so the subtraction stays
+/// the one [S-411] derives its `path_only` from.
+///
+/// [S-411]: ../../../docs/planning/journal.md#s-411-measure-config-declared-coupling-over-the-reference-estate
+pub(crate) fn judge_pairs(
+    root: &Path,
+    corpus: &Corpus,
+    providers: &Providers,
+    mode: Resolution,
+) -> Vec<Pair> {
+    judge(root, corpus, providers, mode).pairs
+}
+
 /// The measurement, computed once per test binary.
 ///
 /// `pub(crate)` so the `port_identity` sibling gate reads the same deploy corpus

@@ -1,0 +1,155 @@
+S-492 — THE ADDRESSED-PAIR GATE THROUGH A MEMBERS-ONLY IDENTITY REGISTRY.  THE RECORDED FINDING
+
+S-492, measured 2026-10-01 against ~/source/pec-services (84 `.git` directories,
+83 manifest members; read-only against the estate SOURCE).
+
+  FALSIFIED ON THE DECISIVE READING.  11 AGAINST A FLOOR OF 12.
+
+The members-only registry did exactly what S-475's sensitivity said it would to
+the CLASSIFIER: `archive-api` stops colliding with the fork, and the two
+aggregator consumers that address it now resolve to it. It did nothing to the
+VERDICT, because the same population change removes the fork's duplicate
+routes from the path-only subtraction, and once they are gone the one template
+both aggregators call is served by `archive-api` alone. Path-only matching
+already binds both pairs, so both are subtracted. The reading is 11, as it was.
+
+Floor, population and decisive reading declared 2026-10-01T17:31:56Z, at logos
+commit 55058123, BEFORE the members-only registry existed in the harness, in
+members_only_addressed_pairs_floor.txt beside this file (committed alone, in
+the commit that precedes the module). The floor (12) is CR-131 section 3.2 B1's,
+quoted verbatim and unrevised; the gate parses it, the 83 member names and
+STRICT out of that file. S-411's and S-475's floor files, finding files and
+pinned constants are byte-identical.
+
+
+  THE THREE READINGS
+
+    reading                                             pairs   S-475   floor   verdict
+    DIRECTORY  84 .git dirs                                13      13      12   holds
+    MANIFEST   83 members, e2e-tests counted               12      12      12   holds
+    STRICT     83 members, e2e-tests not counted           11      11      12   FALSIFIED  <- decisive
+
+  Every reading is pair-for-pair S-475's: on all three, nothing is gained and
+  nothing is lost. MANIFEST holds only by counting `e2e-tests -> mailbox-api`
+  and DIRECTORY only through the fork as a consumer, exactly as on S-475;
+  CR-158 section 3.2 B3 records a HOLDS only there as FALSIFIED on the decisive
+  reading.
+
+
+  THE TWO AGGREGATOR PAIRS — BOTH REMOVED BY THE FORK-FREE PATH-ONLY SUBTRACTION
+
+    funnel-aggregator-api  -> archive-api    REMOVED
+        target  envfrom.archiveaggregateapibaseurl =
+                http://archive-api.pec-services.svc.cluster.local:9009
+                funnel-aggregator-api/.helm/values.yaml   overlay .helm
+        binding ArchiveApiRestClient.java:57, :87, :118, :152
+                template /v1/users/{}/archives/{}, served by 1 member
+                => already bound by path alone
+
+    mailbox-aggregator-api -> archive-api    REMOVED
+        target  envfrom.archiveaggregateapibaseurl =
+                http://archive-api.pec-services.svc.cluster.local:9009
+                mailbox-aggregator-api/.helm/values.yaml  overlay .helm
+        binding ArchiveApiRestClient.java:51, :73, :83
+                template /v1/users/{}/archives/{}, served by 1 member
+                => already bound by path alone
+
+  (Both client files live under each consumer's
+  src/main/java/com/sourcesense/poste/pec/<funnel|mailbox>/aggregator/api/client/.)
+
+  With the fork in the provider index the same template is served by TWO
+  directories — `archive-api` and `archive-api-logiclens-fork`, the duplicate —
+  so path-only matching refuses it as ambiguous and S-411's path-only set never
+  held these pairs. Take the fork out of the identity registry and out of the
+  provider index together, as CR-158 section 3.2 A requires, and the exactly-one
+  rule reaches `archive-api` on path alone: the coupling is one the invocation
+  intake already reports. The fork was the only reason these two pairs ever
+  looked addressed-but-unresolved.
+
+  So S-475's sensitivity ("STRICT would read 13") was the registry change WITHOUT
+  the fork-free subtraction, and its caveat was the decisive one. The run
+  reproduces that sensitivity exactly — under S-411's path-only set the
+  members-only registry adds precisely these two pairs, asserted — and then the
+  fork-free subtraction takes both back.
+
+
+  COLLISIONS — 22 BEFORE, 21 AFTER
+
+    removed   archive-api   tier 1 deploy   {archive-api, archive-api-logiclens-fork}
+              -> resolves to archive-api.  The only one. CRA-01 of CR-158 is
+              validated: the registry removes this collision and no other.
+    kept      21, every one at tier 2 (Compose service keys) and every one
+              between members: adminer, akhq, batch-metadata-postgres,
+              dataflow-server, jaeger, kafka, kafka-broker, legal-storage-mock,
+              minio, minio-bucket-initializer,
+              minio-mailbox-export-bucket-initializer, mongodb,
+              official-log-postgres, pecserver-mock, pg-admin, postgres,
+              reporting-postgres, schema-registry, skipper-server, swagger,
+              zookeeper. Four are target labels (minio, mongodb, pecserver-mock,
+              schema-registry); none of them is the fork's.
+    new       none.
+
+
+  THE SIX-WAY SPLIT, BY REFERENCE (S-475 -> members-only)
+
+    self-tie                                    5 ->   5
+    same-tier identity collision               75 ->  73
+    label resolves to no member (external)    393 -> 393
+    target member is not runnable               0 ->   0
+    already matched by path alone              12 ->  14
+    ADDRESSED PAIR                             21 ->  21
+
+  The two aggregator references move from the collision subtraction to the
+  path-only subtraction, and from nowhere else.
+
+  THE NO-MEMBER BUCKET: 393 references / 39 labels BEFORE and AFTER. No label
+  enters it: no target names a label only the fork claims.
+
+
+  WHAT WAS CHECKED ABOUT THE REUSE (all asserted, all hold)
+
+    - S-475's own run reads 11 / 12 / 13 today: the estate has not drifted
+      since 2026-09-29 (CR-158 CRA-02), and its manifest's SHA-256 is the one
+      both declarations record.
+    - identity::judge_pairs over S-384's UNSCOPED corpus and provider index
+      re-derives S-411's path-only set exactly (8 / 8 pairs): the subtraction
+      was called, not rebuilt. The fork-free set is those 8 plus the two
+      aggregator pairs (10).
+    - under S-411's path-only set, the members-only registry adds exactly the
+      pairs S-475's sensitivity printed.
+    - S-475's reader collapsed no key.
+
+
+  THE TIER-4 QUESTION THE DECLARATION RESOLVED BEFORE THE RUN
+
+  CR-158 calls tiers 4-5 "never decisive, as today"; in S-384's classifier tier 4
+  (`spring.application.name`) IS decisive. The declaration scoped tiers 1-3 only,
+  per the CR's own scope sentence, and promised to print what scoping tier 4 too
+  would move. It moves NOTHING: STRICT reads 11 either way, the same 11 pairs.
+  The verdict does not depend on that reading.
+
+
+  WHAT THIS FINDING DECIDES
+
+  Per CR-158 section 3.2 B3: FALSIFIED on the decisive reading, recorded with its
+  evidence and date as the FOURTH result of the addressed half (S-411 2026-09-15,
+  its re-run 2026-09-27, S-475 2026-09-29, this run). THE ADDRESSED LINE IS
+  CLOSED ON THIS ESTATE: no further re-measurement CR without a new CLASS of
+  address evidence (CR-158 section 2.3) — a new source of address facts, not
+  another reading or classifier adjustment of this corpus. No delivery CR is
+  authorised. No journal story's status or banner changes. ADR-65 gains a dated
+  appendix; its supersession banner stays.
+
+  What the run adds to the record beyond the verdict: the two aggregator pairs
+  that kept the question open are not net-new coupling. The product's
+  invocation intake already binds them on the path once the duplicate fork is
+  out of the workspace.
+
+  Re-run:
+
+      LOGOS_REF_WORKSPACE=~/source/pec-services \
+        cargo test -p logos-core --test operand_resolvability \
+        measure_members_only_addressed_pairs_over_the_reference_workspace -- --nocapture
+
+  Without the environment variable the gate prints VOID and asserts nothing.
+  The estate arm skips in `gate.sh` and in CI; only the fixtures run there.
