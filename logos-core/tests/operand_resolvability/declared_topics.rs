@@ -554,6 +554,9 @@ fn member_of(path: &str) -> &str {
 
 /// S-411's application reader, called: every application-config scalar of
 /// every member in `members`, as [`collect_values`] admits it.
+///
+/// The loop around the call mirrors S-411's private `judge`, which exposes only
+/// the count it produces; `run` asserts the two agree on the estate.
 pub fn application_scalars(config: &ConfigCorpus, members: &BTreeSet<String>) -> Vec<Scalar> {
     let mut scalars = Vec::new();
     let mut targets = Vec::new();
@@ -914,6 +917,14 @@ fn run(root: &Path) -> Run {
     let (manifest, product) = read_product(root, &directories);
     let config = &crate::measurement(root).config;
     let scalars = application_scalars(config, &directories);
+    // `application_scalars` restates the application loop inside S-411's
+    // private `judge`, which keeps only its count. Pinned to that count, so the
+    // reconciliation can never compare two different readers under one name.
+    assert_eq!(
+        scalars.len(),
+        j.application_scalars,
+        "this run's application scalars differ from S-411's over the same directories"
+    );
 
     let mut readings = BTreeMap::new();
     for reading in Reading::ALL {
