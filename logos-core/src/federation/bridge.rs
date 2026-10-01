@@ -2721,6 +2721,8 @@ mod tests {
     /// A member whose last open **failed** is opened again by every check —
     /// whether it starts now is not known — and one that recovers adds its
     /// stamp and invalidates the cache, as it did when every member was opened.
+    /// It stays failed across warm hits first, so a check that stopped retrying
+    /// it after one hit would serve the stale set on recovery.
     #[test]
     fn a_member_whose_last_open_failed_is_retried_and_its_recovery_invalidates() {
         reset();
@@ -2733,6 +2735,10 @@ mod tests {
         let bridge = ContractBridge::new();
         let (cold, reads) = bridge.edges_read(&reg);
         assert!(cold.is_empty() && reads.unread.contains_key("flaky"), "{reads:?}");
+        for _ in 0..2 {
+            let (warm, reads) = bridge.edges_read(&reg);
+            assert!(warm.is_empty() && reads.unread.contains_key("flaky"), "still failing: {reads:?}");
+        }
 
         FAILS_TO_START.with(|c| c.borrow_mut().clear());
         let (recovered, reads) = bridge.edges_read(&reg);
