@@ -150,6 +150,21 @@ mod tests {
         assert!(ConversationWindow::bounded(Vec::new(), 6, 16_000).is_empty());
     }
 
+    /// The header is the [NFR-CC-04] safeguard: earlier answers are context, never
+    /// grounding. A render that lost it would pass every ordering test.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[test]
+    fn the_render_states_the_window_is_context_and_not_grounding() {
+        let text = ConversationWindow::bounded(vec![turn(1)], 6, 16_000).render();
+        assert!(text.starts_with("Earlier in this conversation (oldest first)."), "{text}");
+        assert!(text.contains("context for the current question only"), "{text}");
+        assert!(
+            text.contains("ground every claim about the codebase in observations gathered this turn"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn turns_render_oldest_first_with_both_speakers() {
         let window = ConversationWindow::bounded(vec![turn(1), turn(2)], 6, 16_000);
