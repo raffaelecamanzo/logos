@@ -1647,6 +1647,24 @@ export class Wizard {
     }
 
     #[test]
+    fn every_binding_form_the_file_facts_read_is_classified() {
+        let s = "import { Real as Alias } from './real';\nconst { a, b: bb } = require('./dep');\nclass K {\n  constructor(private ro: Foo) {}\n  m(xs) {\n    Alias.f1();\n    a.f2();\n    bb.f3();\n    xs.map(v => v.f4());\n    try {} catch (err) { err.f5(); }\n    for (const it of xs) { it.f6(); }\n    (this.ro as Bar).f7();\n    (this.ro).f8();\n    Real.f9();\n  }\n}\n";
+        let sub = |m: &str| shape_of(s, m).1;
+        assert_eq!(shape_of(s, "f1"), (Shape::Imported, Sub::RelativeImport, Some("Alias".into())));
+        assert_eq!(sub("f2"), Sub::RelativeImport, "a shorthand destructured require");
+        assert_eq!(sub("f3"), Sub::RelativeImport, "a renamed destructured require");
+        assert_eq!(sub("f4"), Sub::LocalUntyped, "an arrow function's bare parameter");
+        assert_eq!(sub("f5"), Sub::LocalUntyped, "a catch parameter");
+        assert_eq!(sub("f6"), Sub::LocalUntyped, "a for-of binding");
+        assert_eq!(shape_of(s, "f7"), (Shape::ChainedUntyped, Sub::Other, Some("Bar".into())), "`as T`");
+        assert_eq!(shape_of(s, "f8"), (Shape::ThisField, Sub::ThisFieldTyped, Some("Foo".into())), "parens");
+        assert_eq!(sub("f9"), Sub::Global, "an aliased import binds only its alias");
+        assert_eq!(Population::of("m", "src/x.mts"), Population::FirstPartyTs);
+        assert_eq!(Population::of("m", "src/x.cts"), Population::FirstPartyTs);
+        assert_eq!(Population::of("m", "src/x.jsx"), Population::FirstPartyJs);
+    }
+
+    #[test]
     fn a_plain_constructor_parameter_is_not_a_field() {
         let s = "class K { constructor(plain: Other) { plain.x(); } m() { this.plain.y(); } }";
         assert_eq!(
