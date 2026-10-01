@@ -353,6 +353,20 @@ fn an_avro_union_file_and_a_namespace_on_a_non_named_type_are_read_by_the_avro_r
 }
 
 #[test]
+fn a_schema_wrapped_in_a_schema_declares_what_it_wraps() {
+    assert_eq!(
+        avro_names(r#"{"type": {"type": "record", "name": "W", "namespace": "n", "fields": []}}"#),
+        vec![("n.W".into(), "record")]
+    );
+    assert_eq!(
+        avro_names(r#"{"type": ["null", {"type": "enum", "name": "E", "namespace": "n", "symbols": ["A"]}]}"#),
+        vec![("n.E".into(), "enum")]
+    );
+    // A `type` that is neither a name nor a schema is malformed, not read.
+    assert!(malformed(r#"{"type": 7}"#).contains("not a type"));
+}
+
+#[test]
 fn a_field_is_never_read_as_a_named_type() {
     // A field named `Oops` whose type is a reference to a named type spelled
     // `record` is not a record named `Oops` — only a schema position declares.
