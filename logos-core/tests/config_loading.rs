@@ -1248,3 +1248,75 @@ fn forbidden_imports_escaping_glob_fails_exit_2() {
         "error names the escaping glob: {err}"
     );
 }
+
+// ── S-478 / CR-154 / FR-CF-05: minified JavaScript is excluded by default ─────
+
+/// The project-relative paths of every file the index admitted.
+fn indexed_paths(rt: &logos_core::Runtime) -> BTreeSet<String> {
+    rt.submit_read(|store| Ok(store.indexed_files()?.into_iter().map(|f| f.path).collect()))
+        .expect("read runs")
+}
+
+/// A fresh `init` then `index` on a tree holding `app.min.js` (root and nested)
+/// and `app.js` admits `app.js` only, and the index result states how many
+/// minified files the default `exclude` kept out. A `config.toml` that sets its
+/// own `exclude` replaces the default wholesale and re-admits `*.min.js`.
+#[test]
+fn fresh_init_then_index_excludes_minified_js_and_a_user_exclude_re_admits_it() {
+    use logos_core::Engine;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app.js", "function app() { return 1; }\n");
+    write(root, "app.min.js", "function a(){return 1}\n");
+    write(root, "static/js/lib.min.js", "function l(){return 2}\n");
+
+    Engine::init(root).expect("init runs");
+    let engine = Engine::start(root).expect("engine starts");
+    let result = engine.index();
+    let files = indexed_paths(engine.runtime().expect("runtime present"));
+    assert_eq!(
+        files,
+        BTreeSet::from(["app.js".to_string()]),
+        "only app.js is admitted by default"
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("2 minified JavaScript file(s)")),
+        "the excluded count is stated: {:?}",
+        result.warnings
+    );
+
+    // Override: the user's `exclude` replaces the default, so minified files are
+    // re-admitted and there is nothing for the default glob to report.
+    let dir2 = tempdir().unwrap();
+    let root2 = dir2.path();
+    write(
+        root2,
+        ".logos/config.toml",
+        "exclude = [\"generated/**\"]\n",
+    );
+    write(root2, "app.js", "function app() { return 1; }\n");
+    write(root2, "app.min.js", "function a(){return 1}\n");
+    write(root2, "static/js/lib.min.js", "function l(){return 2}\n");
+
+    let engine2 = Engine::start(root2).expect("engine starts");
+    let result2 = engine2.index();
+    let files2 = indexed_paths(engine2.runtime().expect("runtime present"));
+    assert_eq!(
+        files2,
+        BTreeSet::from([
+            "app.js".to_string(),
+            "app.min.js".to_string(),
+            "static/js/lib.min.js".to_string(),
+        ]),
+        "an overriding `exclude` re-admits *.min.js"
+    );
+    assert!(
+        !result2.warnings.iter().any(|w| w.contains("minified")),
+        "no minified exclusion to report: {:?}",
+        result2.warnings
+    );
+}
