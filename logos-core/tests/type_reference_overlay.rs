@@ -34,6 +34,9 @@ use logos_core::federation::{
 use logos_core::graph_store::DECLARED_TYPES_EXTRACTED_KEY;
 use logos_core::Engine;
 
+#[path = "support/bridge_reads.rs"]
+mod bridge_reads;
+
 const OPENAPI_YAML: &str = "\
 openapi: 3.0.3
 info:
@@ -313,6 +316,8 @@ fn runtime_build_and_member_figures_are_byte_identical_with_the_overlay_on_and_o
     assert!(edges_on.contains("GET /users/{id}"), "the bridge binds the route: {edges_on}");
     assert_eq!(edges_on, edges_off, "the bridge edge set moved with the overlay");
     assert_eq!(members_on, members_off, "a member's scan or gate moved with the overlay");
+
+    bridge_reads::assert_narrowed_read_changes_no_answer(&registry_over(root, &MEMBERS));
 }
 
 /// **A workspace with no Java/Kotlin/Avro member** prints `workspace status`
