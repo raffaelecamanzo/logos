@@ -1132,7 +1132,8 @@ mod tests {
     /// facts not yet extracted (named apart, never counted read), facts
     /// unreadable on a live engine (not pushed — the member reads unread — and
     /// its freshness row untouched), and an engine that never started (not
-    /// pushed, error row).
+    /// pushed, error row) — for the build facts and the declared-type facts
+    /// alike, each on its own channel (S-473).
     #[test]
     fn a_failed_build_facts_read_is_unread_and_leaves_the_freshness_row_alone() {
         let scoped = |value| MemberScoped { member: "api".to_string(), value };
@@ -1144,12 +1145,15 @@ mod tests {
         );
         assert!(row.result.is_some() && row.error.is_none());
         assert_eq!(walked.facts.len(), 1, "facts read are pushed, even when empty");
+        assert_eq!(walked.types.len(), 1, "declared types read are pushed, even when empty");
 
         let row =
             split_status_and_facts(scoped(Ok((Ok(StatusInfo::default()), Ok(None), Ok(None)))), &mut walked);
         assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
         assert_eq!(walked.facts.len(), 1, "a store with no extracted facts is never counted read");
         assert_eq!(walked.not_extracted, ["api"], "…it is named apart");
+        assert_eq!(walked.types.len(), 1, "no extracted declared types is never counted read");
+        assert_eq!(walked.types_not_extracted, ["api"], "…it is named apart too");
 
         let row = split_status_and_facts(
             scoped(Ok((
@@ -1161,10 +1165,24 @@ mod tests {
         );
         assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
         assert_eq!(walked.facts.len(), 1, "an unreadable member is never counted read");
+        assert_eq!(
+            (walked.types.len(), walked.types_not_extracted.len()),
+            (1, 1),
+            "a failed declared-type read pushes nothing: the member reads unread, failed"
+        );
+
+        // The two fact channels are independent: build facts read, type facts failed.
+        let row = split_status_and_facts(
+            scoped(Ok((Ok(StatusInfo::default()), Ok(Some(Vec::new())), Err(anyhow::anyhow!("read failed"))))),
+            &mut walked,
+        );
+        assert!(row.result.is_some() && row.error.is_none());
+        assert_eq!((walked.facts.len(), walked.types.len()), (2, 1));
 
         let row = split_status_and_facts(scoped(Err(anyhow::anyhow!("store is corrupt"))), &mut walked);
         assert!(row.error.is_some());
-        assert_eq!((walked.facts.len(), walked.not_extracted.len()), (1, 1));
+        assert_eq!((walked.facts.len(), walked.not_extracted.len()), (2, 1));
+        assert_eq!((walked.types.len(), walked.types_not_extracted.len()), (1, 1));
 
         let headline = build_dependency_headline(&two_member_federation(), &[], &[]).unwrap();
         assert_eq!(headline.members.unread, ["a", "b"], "no fact pushed ⇒ named unread");
