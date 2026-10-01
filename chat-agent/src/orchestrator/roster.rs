@@ -200,9 +200,9 @@ it is the first move for a question about which members exist. Pass `repo` to \
 xservice_search when you already know the member, so only that member is opened. Do \
 not scope xservice_callers or xservice_impact to the provider's own member: their \
 residue would then cover only that member's outbound calls, not the consumers that \
-might reach it. Pass a hit's canonical `symbol` to them, never a bare name. Results \
-are repo-qualified: name the member with every result, and never merge the same \
-symbol from two members into one. A reading that says UNRESOLVED or NOT CHECKED is \
+might reach it. Pass a hit's canonical `symbol` to them, never a bare name. \
+Cross-service results are repo-qualified: name the member with every one, and never \
+merge the same symbol from two members into one. A reading that says UNRESOLVED or NOT CHECKED is \
 not an absence — report it as it says, with its count, never as \"none\". Never \
 compute a mean, sum or score across members' signals; report each member's own. Call \
 the tools you need, then reply with a concise plain-text summary grounded in the tool \

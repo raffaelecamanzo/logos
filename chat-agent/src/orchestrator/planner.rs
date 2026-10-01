@@ -85,7 +85,7 @@ replanning from their observations until the turn can be finalized.\n\n\
 {roster}\n\n\
 The subagent roles are:\n\
 - workspace_analyst: reads the workspace as a whole ({workspace}) and across services \
-({xservice}), every result repo-qualified. Route here any question about which members \
+({xservice}), each cross-service result repo-qualified. Route here any question about which members \
 exist, how they connect, or what crosses repositories.\n\
 - graph_navigator: navigates ONE member's code graph ({graph}).\n\
 - governance_analyst: runs ONE member's governance/quality read-models ({governance}).\n\
