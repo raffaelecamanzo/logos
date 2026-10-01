@@ -691,6 +691,35 @@ fn triples_count_each_type_a_pair_carries() {
     assert_eq!(headline.triples, 4, "app→lib carries Dto and Other");
 }
 
+/// The headline lists count every row behind them — two per type-only pair,
+/// collision pair and ambiguous type here — and a collision pair names every
+/// artifact backing it.
+#[test]
+fn headline_lists_count_every_row_and_name_every_collision_artifact() {
+    let headline = rich_index().headline;
+    assert_eq!(
+        headline.collision_backed,
+        [CollisionBackedPair {
+            from: "user".to_string(),
+            to: "fork-a".to_string(),
+            artifacts: vec!["com.acme:dup".to_string(), "com.acme:dup2".to_string()],
+            references: 2,
+        }]
+    );
+    assert_eq!(
+        headline.type_only.iter().map(|p| (p.to.as_str(), p.references)).collect::<Vec<_>>(),
+        [("fork-a", 1), ("lib", 2)]
+    );
+    assert_eq!(
+        headline.ambiguous_owner,
+        [AmbiguousType {
+            fqn: "com.acme.dup.Thing".to_string(),
+            owners: vec!["fork-a".to_string(), "fork-b".to_string()],
+            references: 2,
+        }]
+    );
+}
+
 // ── the API S-474 reads ───────────────────────────────────────────────────
 
 /// The index, the per-type importers, the per-symbol references and the
