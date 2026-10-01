@@ -137,7 +137,9 @@ fn index_member(root: &Path) {
     let _ = engine.sync(&[] as &[PathBuf]);
 }
 
-const MEMBERS: [&str; 6] = ["lib", "models", "app", "stray", "api", "web"];
+/// `lib`, the one owner with a node, is deliberately **not** first: a node
+/// lookup must ask every roster member, not stop at the first.
+const MEMBERS: [&str; 6] = ["models", "lib", "app", "stray", "api", "web"];
 
 /// Write and index the workspace.
 fn workspace(root: &Path) {
@@ -230,9 +232,9 @@ fn type_refs_lists_each_provider_with_its_imported_types_and_their_importers() {
 
     let providers = answer["providers"].as_array().expect("a provider list");
     let names: Vec<&str> = providers.iter().map(|p| p["member"].as_str().unwrap()).collect();
-    assert_eq!(names, ["lib", "models"], "roster order, providers only: {answer:#}");
+    assert_eq!(names, ["models", "lib"], "roster order, providers only: {answer:#}");
 
-    let dto = &providers[0]["types"][0];
+    let dto = &providers[1]["types"][0];
     assert_eq!(dto["fqn"], "com.acme.lib.Dto");
     assert_eq!(dto["owner"]["declared_in"], "src/main/java/com/acme/lib/Dto.java");
     assert_eq!(dto["owner"]["origin"], "source");
@@ -252,7 +254,7 @@ fn type_refs_lists_each_provider_with_its_imported_types_and_their_importers() {
     assert_eq!((&app["naming"], &app["form"]), (&json!("exact"), &json!("import")));
     assert_eq!(app["evidence"], json!({"via": "build"}));
 
-    let evt = &providers[1]["types"][0];
+    let evt = &providers[0]["types"][0];
     assert_eq!((&evt["fqn"], &evt["owner"]["origin"]), (&json!("com.acme.events.Evt"), &json!("avro")));
     assert!(evt["owner"].get("symbol").is_none(), "an Avro type has no node: {evt:#}");
     assert_eq!(evt["importers"][0]["line"], 4);
@@ -278,7 +280,7 @@ fn a_repo_scope_lists_one_provider_and_a_non_member_returns_a_scope_note() {
     assert_eq!(lib["scope"], "lib");
     assert!(lib.get("scope_note").is_none(), "{lib:#}");
     assert_eq!(lib["headline"], unscoped["headline"], "the headline stays workspace-wide");
-    assert_eq!(lib["providers"], json!([unscoped["providers"][0]]), "{lib:#}");
+    assert_eq!(lib["providers"], json!([unscoped["providers"][1]]), "{lib:#}");
 
     let stray = scoped("stray");
     assert_eq!(stray["providers"], json!([{"member": "stray", "types": []}]), "{stray:#}");
