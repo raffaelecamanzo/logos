@@ -727,6 +727,24 @@ fn schemas_read_counts_only_the_schemas_that_parsed() {
     assert_eq!((members.schemas, members.schemas_read), (2, 1), "one of `models`' two schemas is malformed");
 }
 
+/// A member declaring one name twice — `Evt` in its schema and its committed
+/// generated class — is one owner: the first declaration in `(origin, path,
+/// symbol)` order, the source class with its node, so the reference keeps a
+/// symbol to stitch through. Both declarations are counted.
+#[test]
+fn a_name_declared_twice_in_one_member_keeps_its_source_declaration() {
+    let index = rich_index();
+    let owners = index.owners("com.acme.events.Evt");
+    assert_eq!(owners.len(), 1, "one owner per member: {owners:?}");
+    assert_eq!(
+        (owners[0].origin, owners[0].declared_in.as_str(), owners[0].symbol.as_deref()),
+        (TypeOrigin::Source, "src/main/java/com/acme/events/Evt.java", Some("sym:com.acme.events.Evt"))
+    );
+    let evt = index.importers("com.acme.events.Evt").next().expect("app's import binds");
+    assert_eq!(evt.owner, owners[0]);
+    assert_eq!(index.headline.members.owned_declarations, 8, "the base six, Other, and Evt's class");
+}
+
 // ── the API S-474 reads ───────────────────────────────────────────────────
 
 /// The index, the per-type importers, the per-symbol references and the
