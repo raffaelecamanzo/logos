@@ -1973,6 +1973,13 @@ export class Wizard {
     fn an_estate_blind_run_is_void_never_zero() {
         let blind = Estate::default();
         assert!(void_reason(&blind).is_some_and(|r| r.contains("no first-party")));
+        let mut js_only = Estate { pre_s477: vec![], ..Estate::default() };
+        js_only.totals.insert(Population::FirstPartyJs, (300, 42));
+        js_only.totals.insert(Population::Vendored, (16281, 850));
+        assert!(
+            void_reason(&js_only).is_some_and(|r| r.contains("no first-party")),
+            "rows only outside the stated denominator are VOID too"
+        );
         let mut stale = Estate::default();
         stale.totals.insert(Population::FirstPartyTs, (10, 1));
         assert_eq!(void_reason(&stale), None, "engaged, with no member flagged");
