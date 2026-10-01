@@ -8,8 +8,9 @@
 //! # Only under a federated backing ([ADR-52])
 //! Every tool holds an [`XserviceBacking`], which [`XserviceBacking::federated`]
 //! mints **only** over [`Backing::Federated`]: a single-root backing yields
-//! `None`, so there is nothing to build the toolset from and the Graph-Navigator's
-//! roster is exactly the eight graph tools it always was.
+//! `None`, so there is nothing to build the toolset from. Under any backing the
+//! tools belong to the workspace roster's Workspace-Analyst (S-481), never to a
+//! member roster.
 //!
 //! # Lazy, like the registry it wraps ([NFR-PE-10])
 //! Constructing the tools touches no engine. A member is started only when a
@@ -22,8 +23,9 @@
 //! **first** answer reads every member (an edge binds the *sole* provider of a
 //! key, which only every member's surface can establish); after that a read
 //! checks the sync-stamps of the members that can have changed — the resident
-//! ones — and starts no other for the check; when one of those stamps has
-//! moved, the read recomputes over every member (S-484,
+//! ones — opens any member not opened yet, or that failed to open, or whose
+//! store file has gone, and starts no other for the check; when one of those
+//! stamps has moved, the read recomputes over every member (S-484,
 //! `ContractBridge::edges_read`). Each answer names the members it read in
 //! `member_reads`, beside the read-model; the `reading` line is unchanged by it.
 //!
@@ -127,9 +129,9 @@ impl XserviceBacking {
         self
     }
 
-    /// The member registry, for assertions on what a turn constructed
-    /// ([NFR-PE-10]). Always present: [`federated`](Self::federated) refuses a
-    /// single-root backing.
+    /// The member registry every tool on this backing resolves members through
+    /// (and tests assert residency on, [NFR-PE-10]). Always present:
+    /// [`federated`](Self::federated) refuses a single-root backing.
     ///
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
     pub fn registry(&self) -> &EngineRegistry<Engine> {
@@ -160,9 +162,9 @@ pub struct XserviceAnswer<T> {
 /// The `reading` of an `xservice_*` tool's serialized output, or `None` when
 /// `tool` is not an `xservice_*` tool (or its output carries no reading).
 ///
-/// The roster calls this on every successful dispatch; under a single backing no
-/// `xservice_*` tool is registered, so it never returns `Some` and the
-/// observation is byte-for-byte what it was ([ADR-52]).
+/// The roster calls this on every successful dispatch; the member roster
+/// registers no `xservice_*` tool under any backing, so there it never returns
+/// `Some` and the observation is byte-for-byte what it was ([ADR-52]).
 ///
 /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 pub fn xservice_reading(tool: &str, output: &str) -> Option<String> {

@@ -1205,7 +1205,8 @@ output is a single machine-clean line.
 and `impact` — on the CLI, the `xservice_*` MCP tools, the chat's tools and
 `/api/v1/workspace/*` alike — carry `member_reads`: `read`, the members this
 answer read, and `unread`, every member it needed and could not read, each with
-its reason (absent when none). A member is never left out silently.
+its reason (absent when none). A member is never left out silently, with the one
+exception stated below.
 
 ```json
 "member_reads": { "read": ["api", "web"], "unread": { "audit": "starting the engine for workspace member \"audit\": …" } }
@@ -1225,6 +1226,14 @@ member again. `callers` also reads the members of its per-member fan-out and
 without it — and `impact` the far member of each edge it crosses. The type-reference section and the declared relations
 of `route-providers` state their own coverage (`type_reference_unread`, the
 headlines' denominators) and are not counted in `member_reads`.
+
+The exception: a member the bridge has opened before and that has since been
+evicted is not reopened by the check while its store file is still there. If
+that file no longer opens (corrupt contents, a schema newer than this binary, an
+`open` refused), the answer serves the edges last read from it and names it
+unread only through a tier that opens it — `callers`' fan-out, `impact`'s seed
+and far side. `route-providers` has no such tier, so there that member appears
+in neither `read` nor `unread` until the bridge recomputes.
 
 **A reachability answer carries its unresolved residue** ([CR-125], [BR-53]).
 `callers` and `impact` answer "what reaches this / what does this reach" across a
