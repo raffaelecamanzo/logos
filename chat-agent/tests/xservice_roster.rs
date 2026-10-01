@@ -56,7 +56,7 @@ use agent_core::{
 };
 use chat_agent::orchestrator::{
     BudgetTree, CapturingSink, Orchestrator, OrchestratorEvent, Planner, RoleModels, StepRole,
-    SubagentRoster, TurnOutcome, WorkspaceRoster, DEFAULT_PLANNER_PREAMBLE,
+    SubagentRoster, SynthesizerGrounding, TurnOutcome, WorkspaceRoster, DEFAULT_PLANNER_PREAMBLE,
     GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE, SOURCE_READER_PREAMBLE,
     SYNTHESIZER_PREAMBLE, WORKSPACE_ANALYST_PREAMBLE, WORKSPACE_GOVERNANCE_ANALYST_PREAMBLE,
     WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE, WORKSPACE_SOURCE_READER_PREAMBLE,
@@ -545,6 +545,55 @@ async fn a_workspace_turn_runs_the_planner_and_synthesizer_under_the_workspace_p
     );
     let observation = &analyst_observations(&sink)[0];
     assert!(observation.contains("xservice_search \"shared\" over 2 member(s)"), "{observation}");
+}
+
+/// A fixed grounding block — what the SSE seam's `MemoryGrounding` renders from
+/// the persisted scratchpad in production.
+struct Sentinel;
+
+impl SynthesizerGrounding for Sentinel {
+    fn grounding(&self) -> String {
+        "SENTINEL-SCRATCHPAD: api:shared has no resolved cross-service caller".to_string()
+    }
+}
+
+/// [S-482] grounds the workspace Synthesizer on the persisted scratchpad through
+/// `WorkspaceRoster::with_synthesizer_grounding`, as the member chat does: the
+/// grounding must reach the Synthesizer's prompt ahead of the instruction.
+///
+/// [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+#[tokio::test]
+async fn the_workspace_synthesizer_is_grounded_on_the_supplied_scratchpad() {
+    let ws = workspace(false);
+    let synthesizer = MockCompletionModel::new([MockTurn::text("answer")]);
+    let roster = WorkspaceRoster::with_models(
+        ws.xservice.clone(),
+        RoleModels {
+            graph_navigator: MockCompletionModel::new([]),
+            governance_analyst: MockCompletionModel::new([]),
+            source_reader: MockCompletionModel::new([]),
+            synthesizer: synthesizer.clone(),
+        },
+        MockCompletionModel::new([
+            MockTurn::tool_call("w1", "workspace_roster", serde_json::json!({})),
+            MockTurn::text("two members."),
+        ]),
+    )
+    .with_synthesizer_grounding(Arc::new(Sentinel));
+    let orchestrator = Orchestrator::new(
+        MockCompletionModel::new([plan("which members are there?"), finalize()]),
+        roster,
+        BudgetTree::from(&ChatConfig::default()),
+    );
+    let sink = CapturingSink::new();
+    orchestrator.run("which members are there?", &sink).await.expect("the turn runs");
+
+    let prompt = synthesizer.user_prompts().last().cloned().flatten().unwrap_or_default();
+    assert!(
+        prompt.starts_with("Scratchpad — the plan and every subagent observation gathered this turn:\n\
+                            SENTINEL-SCRATCHPAD: api:shared has no resolved cross-service caller"),
+        "{prompt}"
+    );
 }
 
 /// A repo-addressed role narrows to the member the step names: a Graph-Navigator
