@@ -340,3 +340,31 @@ fn a_per_member_row_that_failed_is_named_unread_not_read() {
         assert!(!reads.read.contains("ghost"), "{read_model}: an error row is never read: {reads:?}");
     }
 }
+
+/// **A resident member that re-syncs invalidates the warm bridge** — over real
+/// stores, which nothing else here exercises: the fixture helper compares
+/// answers over an unchanged workspace, so it cannot tell a working cache key
+/// from one that never misses. `api` is resident and re-indexes an edited
+/// file (its stamp advances, as `serve`'s watcher makes it); the next read is
+/// a miss, and a miss reads every member.
+#[test]
+fn a_resident_member_that_re_syncs_invalidates_the_warm_bridge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let registry = five_members(root);
+    let bridge = ContractBridge::new();
+    let _ = query::bridge_read(&bridge, &registry);
+    registry.evict_to_capacity(0);
+    let api = registry.engine_for("api").expect("api opens");
+    assert_eq!(query::bridge_read(&bridge, &registry).reads.read, names(&["api"]), "guard the guard: a warm hit");
+
+    write(&root.join("api"), "src/main.rs", &format!("{AXUM_MAIN}\npub fn added() {{}}\n"));
+    let _ = api.sync(&[root.join("api/src/main.rs")]);
+    let after = query::bridge_read(&bridge, &registry);
+    assert_eq!(
+        after.reads.read,
+        names(&["api", "audit", "billing", "search", "web"]),
+        "the advance is a miss, and the recompute reads every member"
+    );
+    assert_eq!(after.edges.len(), 1, "web's call still binds api's route");
+}

@@ -15,6 +15,13 @@
 //!   it. Each such answer is proved to have taken that path: the bridge read
 //!   it was built from read no member and started no engine.
 //!
+//! What this proves, and what it does not: a cached answer served through the
+//! narrowed check equals a recomputed one **over a workspace that does not
+//! change**. It cannot tell a working cache key from one that never misses —
+//! nothing here re-syncs a member — so invalidation is pinned elsewhere: the
+//! bridge's unit tests (stamp advances, evictions, recoveries) and
+//! `xservice_member_reads.rs` over real stores.
+//!
 //! The symbols asked about are every endpoint of the fixture's own edges plus
 //! one that matches nothing, each unscoped and scoped to every member, so the
 //! helper needs nothing from the fixture but its registry.
