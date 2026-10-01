@@ -332,7 +332,7 @@ fn an_avro_owner_names_its_schema_and_has_no_symbol() {
 }
 
 /// A static-member import binds its enclosing type; a qualified type use binds
-/// as a `type-use`; a bare type-use name has no owner.
+/// as a `type-use`; a bare type-use name is unqualified, never looked up.
 #[test]
 fn a_static_member_binds_through_its_enclosing_type_and_a_type_use_binds_too() {
     let index = index();
@@ -545,13 +545,20 @@ fn every_row_considered_is_filed_in_exactly_one_bucket_beside_the_headline() {
     assert_eq!(rows.considered, 13);
     assert_eq!((rows.imports, rows.type_uses), (11, 2));
     assert_eq!(
-        rows.bound + rows.type_only + rows.pair_unread + rows.ambiguous_owner + rows.self_owned + rows.no_owner,
+        rows.bound
+            + rows.type_only
+            + rows.pair_unread
+            + rows.ambiguous_owner
+            + rows.self_owned
+            + rows.unqualified
+            + rows.no_owner,
         rows.considered,
         "{rows:?}"
     );
     assert_eq!(
-        (rows.bound, rows.type_only, rows.ambiguous_owner, rows.self_owned, rows.no_owner),
-        (5, 2, 1, 2, 3)
+        (rows.bound, rows.type_only, rows.ambiguous_owner, rows.self_owned, rows.unqualified, rows.no_owner),
+        (5, 2, 1, 2, 1, 2),
+        "the bare `Dto` type use is unqualified, never \"no owner\""
     );
     assert_eq!(headline.type_reference_pairs, 3, "app→lib, app→models, user→fork-a");
     assert_eq!(headline.triples, 3);
@@ -562,8 +569,8 @@ fn every_row_considered_is_filed_in_exactly_one_bucket_beside_the_headline() {
         headline.summary,
         "3 member pairs (2 build · 1 collision-backed) bind 5 of 13 unresolved Java/Kotlin import \
          and type-use rows to a type another member declares (2 type-only, 0 pair unread, 1 \
-         ambiguous-owner, 2 self-owned, 3 no owner in the workspace), over 8 of 8 members read; an \
-         advisory type reference, never a coupling"
+         ambiguous-owner, 2 self-owned, 1 unqualified, 2 no owner in the workspace), over 8 of 8 \
+         members read; an advisory type reference, never a coupling"
     );
 }
 

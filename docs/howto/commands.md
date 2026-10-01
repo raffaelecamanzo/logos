@@ -1405,7 +1405,8 @@ declare stays unbound and is listed under `ambiguous_owner`, with the owners
 named. The headline `type_reference_pairs` (split `build_pairs` /
 `collision_backed_pairs`) sits beside `rows`, every row considered filed into
 exactly one of `bound`, `type_only`, `pair_unread`, `ambiguous_owner`,
-`self_owned` and `no_owner`, and the `members` read. Read `summary` for the
+`self_owned`, `unqualified` (a bare type use such as `Dto`, which names no
+package and so is never looked up) and `no_owner`, and the `members` read. Read `summary` for the
 one-line form. A type reference is advisory and never a coupling: it is not a
 bridge edge, and nothing in `coverage` or `build_dependency` moves with it.
 **After upgrading from 1.7.0**, a member's declared types exist only once it has

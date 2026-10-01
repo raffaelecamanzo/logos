@@ -27,6 +27,10 @@
 //! type — the rule the [S-471] gate measured. Every row considered is filed in
 //! exactly one bucket of [`TypeRowAccounting`]:
 //!
+//! - **unqualified** — the target names no package (a bare type use such as
+//!   `Dto`): never looked up, since no owned name is dotless, and never read
+//!   as "no member declares it" — the type may well be another member's, named
+//!   by the file's own import row;
 //! - **no owner** — no member declares the name (a JDK, Spring or third-party
 //!   type);
 //! - **self-owned** — the importing member is among the owners: intra-member,
@@ -323,6 +327,9 @@ pub struct TypeRowAccounting {
     pub ambiguous_owner: u64,
     /// The importing member is an owner: out of this tier.
     pub self_owned: u64,
+    /// The target names no package (a bare type use, `Dto`): never looked up,
+    /// so never claimed to have no owner.
+    pub unqualified: u64,
     /// No member declares the name.
     pub no_owner: u64,
 }
@@ -717,6 +724,10 @@ pub fn build_index(
                 TypeRefForm::TypeUse => rows.type_uses += 1,
             }
             let target = row.target.replace("::", ".");
+            if !target.contains('.') {
+                rows.unqualified += 1;
+                continue;
+            }
             let Some((fqn, naming, found)) = lookup(&target, &owners) else {
                 rows.no_owner += 1;
                 continue;
@@ -831,14 +842,15 @@ fn headline(
         "{type_reference_pairs} member pairs ({build_pairs} build · {collision_backed_pairs} \
          collision-backed) bind {} of {} unresolved Java/Kotlin import and type-use rows to a type \
          another member declares ({} type-only, {} pair unread, {} ambiguous-owner, {} self-owned, \
-         {} no owner in the workspace), over {} of {} members read; an advisory type reference, \
-         never a coupling",
+         {} unqualified, {} no owner in the workspace), over {} of {} members read; an advisory \
+         type reference, never a coupling",
         rows.bound,
         rows.considered,
         rows.type_only,
         rows.pair_unread,
         rows.ambiguous_owner,
         rows.self_owned,
+        rows.unqualified,
         rows.no_owner,
         members.read,
         members.members,
