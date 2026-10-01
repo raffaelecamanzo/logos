@@ -670,6 +670,20 @@ mod tests {
         assert!(text.contains("second question") && text.contains("third answer"), "{text}");
         assert!(!text.contains("first question"), "the oldest turn went first: {text}");
         assert!(!text.contains("fourth question"), "the window never holds the live question: {text}");
+
+        // `history_max_chars` bounds the window too (and the turn key, left at its
+        // default of 6 here, no longer binds): "fourth question" (15 characters, never
+        // answered) fits a 30-character ceiling, the 27-character third turn does not.
+        write(
+            &e.member,
+            "config.toml",
+            &format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\nhistory_max_chars = 30\n"),
+        );
+        let capped =
+            build_setup(&e.member, None, Some(thread), "fifth question").expect("a follow-up");
+        let text = capped.history.render();
+        assert_eq!(capped.history.omitted(), 3, "history_max_chars = 30 keeps one of four: {text}");
+        assert!(text.contains("fourth question") && !text.contains("third question"), "{text}");
     }
 
     /// Sprint-79 HF-1: `[chat] read_roots` resolve against the root that
