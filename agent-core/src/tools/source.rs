@@ -694,15 +694,11 @@ impl Read {
     pub fn new(sandbox: Arc<Sandbox>) -> Self {
         Self { sandbox }
     }
-}
 
-impl Tool for Read {
-    const NAME: &'static str = "read";
-    type Error = SandboxError;
-    type Args = ReadArgs;
-    type Output = ReadOutput;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Read a UTF-8 source file by its project-relative path. \
@@ -717,6 +713,17 @@ impl Tool for Read {
                 "required": ["path"]
             }),
         }
+    }
+}
+
+impl Tool for Read {
+    const NAME: &'static str = "read";
+    type Error = SandboxError;
+    type Args = ReadArgs;
+    type Output = ReadOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: ReadArgs) -> Result<ReadOutput, SandboxError> {
@@ -775,15 +782,11 @@ impl Grep {
     pub fn new(sandbox: Arc<Sandbox>) -> Self {
         Self { sandbox }
     }
-}
 
-impl Tool for Grep {
-    const NAME: &'static str = "grep";
-    type Error = SandboxError;
-    type Args = GrepArgs;
-    type Output = GrepOutput;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Regex search across project source files (gitignore- and \
@@ -801,6 +804,17 @@ impl Tool for Grep {
                 "required": ["pattern"]
             }),
         }
+    }
+}
+
+impl Tool for Grep {
+    const NAME: &'static str = "grep";
+    type Error = SandboxError;
+    type Args = GrepArgs;
+    type Output = GrepOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: GrepArgs) -> Result<GrepOutput, SandboxError> {
@@ -887,15 +901,11 @@ impl Glob {
     pub fn new(sandbox: Arc<Sandbox>) -> Self {
         Self { sandbox }
     }
-}
 
-impl Tool for Glob {
-    const NAME: &'static str = "glob";
-    type Error = SandboxError;
-    type Args = GlobArgs;
-    type Output = GlobOutput;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "List project files whose project-relative path matches a \
@@ -911,6 +921,17 @@ impl Tool for Glob {
                 "required": ["pattern"]
             }),
         }
+    }
+}
+
+impl Tool for Glob {
+    const NAME: &'static str = "glob";
+    type Error = SandboxError;
+    type Args = GlobArgs;
+    type Output = GlobOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: GlobArgs) -> Result<GlobOutput, SandboxError> {

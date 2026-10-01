@@ -17,6 +17,14 @@
 //! domain: no subagent owns them alone, and a single-root roster never sees them
 //! ([ADR-52]).
 //!
+//! The **workspace chat** (S-480, [FR-WS-34]) reaches the same three domains
+//! through [`addressed_toolset`]: each member tool with a required `repo`,
+//! resolved per call to that member's engine or sandbox through the registry,
+//! leaving the member toolsets above untouched. Beside them sit the workspace
+//! read-model tools of [`workspace_toolset`] — `workspace_status`,
+//! `workspace_reachability`, `workspace_check`, `xservice_build_deps` and
+//! `workspace_roster`.
+//!
 //! Every Engine-backed tool is a thin adapter ([ADR-01]): it deserializes its
 //! arguments, runs **one** existing read-model on the blocking pool
 //! ([`run_engine`] / [`run_engine_result`], the ADR-03 submit-and-await
@@ -35,20 +43,25 @@
 //! [ADR-41]: the `rig` decision + tool layer + budget primitives.
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 //! [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
+//! [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
 
 use std::sync::Arc;
 
 use logos_core::Engine;
+use rig_core::completion::ToolDefinition;
 use rig_core::tool::ToolSet;
 
+mod addressed;
 pub mod budget;
 mod governance;
 mod graph;
 mod source;
+mod workspace;
 mod xservice;
 
 pub use budget::{BoundedDispatcher, BudgetExhausted, DispatchError, ToolBudget};
 pub use source::{Sandbox, SandboxError, MAX_FOLLOWED_LINKS};
+pub use workspace::{workspace_reading, WORKSPACE_TOOL_NAMES};
 pub use xservice::{xservice_reading, XserviceAnswer, XserviceBacking, XSERVICE_TOOL_NAMES};
 
 /// The error every Engine-backed tool surfaces.
@@ -72,7 +85,9 @@ pub enum ToolCallError {
     Runtime(String),
 
     /// A structural failure inside a governance/quality read-model (store
-    /// fault, invalid `rules.toml`).
+    /// fault, invalid `rules.toml`) — or, for a repo-addressed tool, the
+    /// addressed member's engine failing to start or its `config.toml` failing
+    /// to load.
     #[error("{0:#}")]
     Engine(#[source] anyhow::Error),
 }
@@ -98,8 +113,9 @@ where
 /// Attribute everything `call` emits to [`Surface::Chat`] ([FR-OB-10]).
 ///
 /// This function — together with its twin in [`run_engine_result`] and the
-/// federated `run_federated` in `xservice` — is the **entire** chat-surface
-/// seam: the three places every agent tool reaches an engine through.
+/// federated `run_federated` in `xservice` (which the addressed tools' member
+/// resolution also goes through) — is the **entire** chat-surface seam: the
+/// three places every agent tool reaches an engine through.
 /// Resolution therefore happens once per tool call at this adapter boundary,
 /// never inside a chokepoint, so the engine stays unaware the agent exists
 /// ([ADR-01]) and the hot path is unchanged ([NFR-OO-02]).
@@ -214,6 +230,42 @@ impl ToolDomain {
     }
 }
 
+impl ToolDomain {
+    /// This domain's member-tool definitions, in [`tool_names`](Self::tool_names)
+    /// order — what the domain's toolset registers, read without the engine or
+    /// sandbox it wraps, so [`addressed_toolset`] can derive its definitions
+    /// before any member is resolved.
+    fn member_definitions(self) -> Vec<ToolDefinition> {
+        match self {
+            ToolDomain::Graph => vec![
+                graph::Search::tool_definition(),
+                graph::Context::tool_definition(),
+                graph::Node::tool_definition(),
+                graph::Callers::tool_definition(),
+                graph::Callees::tool_definition(),
+                graph::Impact::tool_definition(),
+                graph::Explore::tool_definition(),
+                graph::Affected::tool_definition(),
+            ],
+            ToolDomain::Governance => vec![
+                governance::Scan::tool_definition(),
+                governance::CheckRules::tool_definition(),
+                governance::Hotspots::tool_definition(),
+                governance::Dsm::tool_definition(),
+                governance::Gate::tool_definition(),
+                governance::Evolution::tool_definition(),
+                governance::DocGaps::tool_definition(),
+                governance::Health::tool_definition(),
+            ],
+            ToolDomain::Source => vec![
+                source::Read::tool_definition(),
+                source::Grep::tool_definition(),
+                source::Glob::tool_definition(),
+            ],
+        }
+    }
+}
+
 // `Tool::NAME` is a trait const; bring the trait into scope so the
 // `tool_names` table above can name the constants.
 use rig_core::tool::Tool;
@@ -268,6 +320,42 @@ pub fn source_toolset(sandbox: Arc<Sandbox>) -> ToolSet {
         .static_tool(source::Read::new(sandbox.clone()))
         .static_tool(source::Grep::new(sandbox.clone()))
         .static_tool(source::Glob::new(sandbox))
+        .build()
+}
+
+/// Build `domain`'s tools **repo-addressed** over a federated backing (S-480,
+/// [FR-WS-34]) — in [`ToolDomain::tool_names`] order, each the member tool's
+/// definition plus a required `repo`.
+///
+/// Constructs nothing: a call resolves the addressed member's engine (or, for
+/// [`ToolDomain::Source`], its sandbox) through the registry when it runs, so
+/// building this set leaves the registry's resident count where it was
+/// ([NFR-PE-10]).
+///
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+pub fn addressed_toolset(domain: ToolDomain, xs: XserviceBacking) -> ToolSet {
+    let tools = domain
+        .member_definitions()
+        .into_iter()
+        .map(|member| addressed::AddressedTool::new(domain, member, xs.clone()))
+        .collect();
+    ToolSet::from_tools(tools)
+}
+
+/// Build the five workspace read-model tools over a federated backing (S-480,
+/// [FR-WS-34]), in [`WORKSPACE_TOOL_NAMES`] order: each runs the read-model its
+/// MCP (or, for `workspace_roster`, HTTP) twin runs and returns it beside a
+/// deterministic `reading`.
+///
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+pub fn workspace_toolset(xs: XserviceBacking) -> ToolSet {
+    ToolSet::builder()
+        .static_tool(workspace::WorkspaceStatusTool::new(xs.clone()))
+        .static_tool(workspace::WorkspaceReachabilityTool::new(xs.clone()))
+        .static_tool(workspace::WorkspaceCheckTool::new(xs.clone()))
+        .static_tool(workspace::XserviceBuildDepsTool::new(xs.clone()))
+        .static_tool(workspace::WorkspaceRosterTool::new(xs))
         .build()
 }
 
