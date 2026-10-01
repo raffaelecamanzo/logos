@@ -48,8 +48,10 @@
 //! [`chat-agent`]: ../../../docs/specs/architecture/components/chat-agent.md
 
 mod configured;
+mod workspace;
 
 pub(crate) use configured::ConfiguredChatService;
+pub(crate) use workspace::WorkspaceChatService;
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -114,18 +116,23 @@ pub(crate) fn turn_provider(
     workspace_root: Option<&Path>,
     resolution: &ChatResolution,
 ) -> Result<TurnProvider, String> {
+    usable_provider(resolution)
+        .ok_or_else(|| configure_first_message(member_root, workspace_root, resolution))
+}
+
+/// The provider a resolution can dial, or `None` for the configure-first state —
+/// the verdict read off the two origins alone. Shared by the member chat's
+/// [`turn_provider`] and the workspace chat ([`workspace`]), which differ only in
+/// how they word a refusal.
+pub(crate) fn usable_provider(resolution: &ChatResolution) -> Option<TurnProvider> {
     let policy_set = resolution.policy_origin != ChatOrigin::Unset;
     let credential_set = resolution.credential_origin != ChatOrigin::Unset;
     match (resolution.policy.model.as_deref(), resolution.api_key()) {
-        (Some(model_id), Some(api_key)) if policy_set && credential_set => Ok(TurnProvider {
+        (Some(model_id), Some(api_key)) if policy_set && credential_set => Some(TurnProvider {
             model_id: model_id.to_string(),
             api_key: api_key.to_string(),
         }),
-        _ => Err(configure_first_message(
-            member_root,
-            workspace_root,
-            resolution,
-        )),
+        _ => None,
     }
 }
 

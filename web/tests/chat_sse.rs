@@ -20,6 +20,14 @@
 //! - zero real egress across a streamed turn, and the listener binds loopback
 //!   ([UAT-UI-07]).
 //!
+//! The guard, host, streaming, buffered and persistence cases run **twice**
+//! ([S-482]): on `POST /chat` and on the workspace chat's `POST /workspace/chat`,
+//! whose scripted service drives the real workspace roster and persists to the
+//! workspace root ([`over_both_routes!`] names them `<case>::member` and
+//! `<case>::workspace`).
+//!
+//! [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+//!
 //! [FR-UI-19]: ../../docs/specs/requirements/FR-UI-19.md
 //! [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
@@ -41,7 +49,12 @@ use logos_core::Engine;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use web::chat::{spawn_turn, ChatService, ChatStream, TurnTarget};
-use web::{router_with_chat, IntentToken, CHAT_POST_ROUTE, INTENT_HEADER};
+use web::{
+    router_with_chat, IntentToken, CHAT_POST_ROUTE, INTENT_HEADER, WORKSPACE_CHAT_POST_ROUTE,
+};
+
+#[path = "support/workspace_chat.rs"]
+mod workspace_chat;
 
 const ORIGIN: &str = "http://127.0.0.1:4983";
 const HOST: &str = "127.0.0.1:4983";
@@ -293,6 +306,70 @@ fn scripted_router() -> (TempDir, axum::Router, IntentToken) {
     (dir, router, intent)
 }
 
+/// The two chat turn routes a parameterised case runs on ([S-482]).
+///
+/// [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
+#[derive(Clone, Copy)]
+enum Route {
+    /// `POST /chat` over a single root, its seam the scripted member service.
+    Member,
+    /// `POST /workspace/chat` over a two-member workspace, its seam the scripted
+    /// workspace service.
+    Workspace,
+}
+
+/// A scripted router on one [`Route`]: the root whose store the turn writes, the
+/// router, the session's intent token and the route's path. Both scripts answer
+/// [`FINAL_SENTINEL`] after a grounding step observing "a grounded synthesis".
+struct Scripted {
+    dir: TempDir,
+    router: axum::Router,
+    intent: IntentToken,
+    uri: &'static str,
+}
+
+fn scripted(route: Route) -> Scripted {
+    match route {
+        Route::Member => {
+            let (dir, router, intent) = scripted_router();
+            Scripted { dir, router, intent, uri: CHAT_POST_ROUTE }
+        }
+        Route::Workspace => {
+            let (dir, router, intent) =
+                workspace_chat::scripted_router("a grounded synthesis", FINAL_SENTINEL);
+            Scripted { dir, router, intent, uri: WORKSPACE_CHAT_POST_ROUTE }
+        }
+    }
+}
+
+/// Run the case `$case(Scripted)` once per route, as `$case::member` and
+/// `$case::workspace`.
+macro_rules! over_both_routes {
+    ($($case:ident),+ $(,)?) => {$(
+        mod $case {
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn member() {
+                super::$case(super::scripted(super::Route::Member)).await;
+            }
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn workspace() {
+                super::$case(super::scripted(super::Route::Workspace)).await;
+            }
+        }
+    )+};
+}
+
+over_both_routes!(
+    cross_origin_chat_post_is_403,
+    intentless_chat_post_is_403,
+    non_loopback_host_chat_post_is_403,
+    chat_post_streams_sse_events_under_csp,
+    chat_post_buffered_fallback_renders_full_answer,
+    an_answered_turn_persists_its_answer_to_the_transcript,
+    empty_chat_message_is_400,
+    streamed_turn_records_zero_real_egress_and_binds_loopback,
+);
+
 /// A router whose chat seam is built by `make` over a fresh fixture (engine +
 /// sandbox + root).
 fn router_with_service<F>(make: F) -> (TempDir, axum::Router, IntentToken)
@@ -314,9 +391,20 @@ fn chat_post(
     accept_event_stream: bool,
     body: &'static str,
 ) -> Request<Body> {
+    post_to(CHAT_POST_ROUTE, intent, origin, accept_event_stream, body)
+}
+
+/// [`chat_post`] to an explicit turn route.
+fn post_to(
+    uri: &str,
+    intent: Option<&str>,
+    origin: Option<&str>,
+    accept_event_stream: bool,
+    body: &'static str,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method(Method::POST)
-        .uri(CHAT_POST_ROUTE)
+        .uri(uri)
         .header(header::HOST, HOST)
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
     if let Some(origin) = origin {
@@ -359,10 +447,10 @@ async fn non_chat_post_is_405() {
 
 /// A cross-origin `POST /chat` is rejected `403` before any turn starts — the chat
 /// route carries the same same-origin defense as the config writes ([NFR-SE-06]).
-#[tokio::test]
-async fn cross_origin_chat_post_is_403() {
-    let (_dir, router, intent) = scripted_router();
-    let req = chat_post(
+async fn cross_origin_chat_post_is_403(s: Scripted) {
+    let Scripted { router, intent, uri, .. } = s;
+    let req = post_to(
+        uri,
         Some(intent.as_str()),
         Some("http://evil.example.com"),
         true,
@@ -376,12 +464,32 @@ async fn cross_origin_chat_post_is_403() {
 /// per-session intent (CSRF) proof is required on the streaming route too, which
 /// is exactly why it rides the `POST` rather than a header-less `GET` `EventSource`
 /// ([NFR-SE-06]).
-#[tokio::test]
-async fn intentless_chat_post_is_403() {
-    let (_dir, router, _intent) = scripted_router();
-    let req = chat_post(None, Some(ORIGIN), true, "q=hello");
+async fn intentless_chat_post_is_403(s: Scripted) {
+    let Scripted { router, uri, .. } = s;
+    let req = post_to(uri, None, Some(ORIGIN), true, "q=hello");
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// A turn `POST` naming a non-loopback `Host` is rejected `403` before the intent
+/// guard or any handler runs — the DNS-rebinding defense ([FR-UI-01]) covers the
+/// turn routes, valid token and all.
+///
+/// [FR-UI-01]: ../../docs/specs/requirements/FR-UI-01.md
+async fn non_loopback_host_chat_post_is_403(s: Scripted) {
+    let Scripted { router, intent, uri, .. } = s;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::HOST, "evil.example.com")
+        .header(header::ORIGIN, "http://evil.example.com")
+        .header(INTENT_HEADER, intent.as_str())
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("q=hello"))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_string(resp).await, "loopback host only");
 }
 
 // ── Streaming + buffered (FR-UI-19) ────────────────────────────────────────────
@@ -390,10 +498,9 @@ async fn intentless_chat_post_is_403() {
 /// events incrementally as SSE under the unchanged self-only CSP: the plan,
 /// subagent activity, and the final answer all appear, in order, tagged with their
 /// event names ([FR-UI-19]).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_post_streams_sse_events_under_csp() {
-    let (_dir, router, intent) = scripted_router();
-    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=what+is+here");
+async fn chat_post_streams_sse_events_under_csp(s: Scripted) {
+    let Scripted { router, intent, uri, .. } = s;
+    let req = post_to(uri, Some(intent.as_str()), Some(ORIGIN), true, "q=what+is+here");
     let resp = router.oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
@@ -446,10 +553,9 @@ async fn chat_post_streams_sse_events_under_csp() {
 /// Without `Accept: text/event-stream`, the same guarded turn renders the complete
 /// buffered answer — the no-JS / no-stream progressive-enhancement fallback
 /// ([FR-UI-19]).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_post_buffered_fallback_renders_full_answer() {
-    let (_dir, router, intent) = scripted_router();
-    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), false, "q=what+is+here");
+async fn chat_post_buffered_fallback_renders_full_answer(s: Scripted) {
+    let Scripted { router, intent, uri, .. } = s;
+    let req = post_to(uri, Some(intent.as_str()), Some(ORIGIN), false, "q=what+is+here");
     let resp = router.oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
@@ -617,10 +723,9 @@ fn persisted_answers(root: &std::path::Path) -> Vec<String> {
 /// A turn that genuinely answers has its answer appended to the conversation's
 /// durable transcript, so a later restore replays it ([FR-UI-26] AC-2). The shared
 /// turn machinery owns this write, which is why the mock-provider path proves it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_answered_turn_persists_its_answer_to_the_transcript() {
-    let (dir, router, intent) = scripted_router();
-    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=what+is+risky");
+async fn an_answered_turn_persists_its_answer_to_the_transcript(s: Scripted) {
+    let Scripted { dir, router, intent, uri } = s;
+    let req = post_to(uri, Some(intent.as_str()), Some(ORIGIN), true, "q=what+is+risky");
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
@@ -720,10 +825,9 @@ async fn a_failed_answer_persist_streams_an_honest_error() {
 
 /// An empty message is a `400` — the turn never starts ([NFR-CC-04] honest input
 /// handling).
-#[tokio::test]
-async fn empty_chat_message_is_400() {
-    let (_dir, router, intent) = scripted_router();
-    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=");
+async fn empty_chat_message_is_400(s: Scripted) {
+    let Scripted { router, intent, uri, .. } = s;
+    let req = post_to(uri, Some(intent.as_str()), Some(ORIGIN), true, "q=");
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
@@ -777,8 +881,7 @@ async fn client_disconnect_cancels_the_in_flight_turn() {
 /// A full streamed turn through the route records **zero** real outbound
 /// connections — the mock provider served it, nothing reached the wire — and the
 /// listener binds only a loopback address ([UAT-UI-07], [NFR-SE-07], [NFR-SE-01]).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streamed_turn_records_zero_real_egress_and_binds_loopback() {
+async fn streamed_turn_records_zero_real_egress_and_binds_loopback(s: Scripted) {
     // A loopback tripwire counting any connection a real provider would have made.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -789,8 +892,8 @@ async fn streamed_turn_records_zero_real_egress_and_binds_loopback() {
         }
     });
 
-    let (_dir, router, intent) = scripted_router();
-    let req = chat_post(Some(intent.as_str()), Some(ORIGIN), true, "q=anything");
+    let Scripted { router, intent, uri, .. } = s;
+    let req = post_to(uri, Some(intent.as_str()), Some(ORIGIN), true, "q=anything");
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
