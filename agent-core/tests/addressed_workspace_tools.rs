@@ -372,6 +372,15 @@ async fn an_addressed_call_reads_the_member_it_names_not_the_default() {
         .await
         .expect("the addressed read runs");
     assert!(out.contains("render"), "web's own file: {out}");
+
+    // The governance arm resolves its own engine: on a fresh backing, a
+    // governance call addressed to `web` opens `web` and nothing else.
+    let xs = ws.backing(false);
+    addressed_toolset(ToolDomain::Governance, xs.clone())
+        .call("health", args(json!({ "repo": "web" })))
+        .await
+        .expect("the addressed health runs");
+    assert_eq!(xs.registry().resident_members(), ["web"]);
 }
 
 #[tokio::test]
