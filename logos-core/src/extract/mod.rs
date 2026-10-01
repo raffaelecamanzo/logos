@@ -547,20 +547,17 @@ fn extract_one(
     // one pattern per node kind so this never fires today, but it keeps the
     // ID-stability invariant (ADR-07) robust against future query authors.
     let mut seen_decls: HashSet<usize> = HashSet::new();
-    // The file's `package` statement, when its grammar's query names one
-    // (S-472): the first one only — a second is a syntax error.
+    // The file's `package` statement, when its grammar's query names one (S-472).
     let mut package: Option<String> = None;
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     while let Some(m) = matches.next() {
         for cap in m.captures {
-            if capture_names[cap.index as usize] == declared_types::PACKAGE_CAPTURE {
-                if package.is_none() {
-                    package = declared_types::package_name(cap.node, source);
-                }
+            let capture = capture_names[cap.index as usize];
+            if declared_types::note_package(&mut package, capture, cap.node, source) {
                 continue;
             }
-            let Some(kind) = kind_for_capture(capture_names[cap.index as usize]) else {
+            let Some(kind) = kind_for_capture(capture) else {
                 continue; // a capture we do not map to a NodeKind
             };
             // The query is expected to capture the *name* node; its parent is the
@@ -761,15 +758,8 @@ fn extract_one(
         }
     }
 
-    // The file's top-level types under their package-aware names (S-472), read
-    // off the nodes and Contains edges just emitted.
-    facts.declared_types = declared_types::source_types(
-        &input.path,
-        package.as_deref(),
-        &facts.nodes,
-        &facts.edges,
-        layout,
-    );
+    // The file's top-level types, read off the nodes and edges just emitted (S-472).
+    facts.declared_types = declared_types::source_types(&facts, package.as_deref(), layout);
 
     // 7) Collect outgoing references (S-011) — calls, method calls, imports.
     // A grammar without the `references` capability simply produces none.

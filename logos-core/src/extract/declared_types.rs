@@ -51,7 +51,7 @@ use std::collections::HashSet;
 use serde_json::{Map, Value};
 use tree_sitter::Node;
 
-use super::{EdgeFact, NodeFact};
+use super::Facts;
 use crate::model::{EdgeKind, LogosSymbol, NodeKind};
 use crate::resolve::package_key::PackageLayout;
 
@@ -140,19 +140,15 @@ pub struct SourceType {
     pub tree: SourceTree,
 }
 
-/// The top-level types the file at `path` declares, in node order.
+/// The top-level types a file declares, in node order, read off its extracted
+/// `facts` (its path, nodes and `Contains` edges).
 ///
 /// `package` is the file's `package` statement as its grammar captured it
-/// ([`package_name`]); `nodes`/`edges` are the file's extracted facts. Empty
-/// for a file whose language is not package-shaped under `layout`, and for one
-/// that declares no class, interface or enum at file scope.
-pub fn source_types(
-    path: &str,
-    package: Option<&str>,
-    nodes: &[NodeFact],
-    edges: &[EdgeFact],
-    layout: &PackageLayout,
-) -> Vec<SourceType> {
+/// ([`package_name`]). Empty for a file whose language is not package-shaped
+/// under `layout`, and for one that declares no class, interface or enum at
+/// file scope.
+pub fn source_types(facts: &Facts, package: Option<&str>, layout: &PackageLayout) -> Vec<SourceType> {
+    let (path, nodes, edges) = (facts.path.as_str(), &facts.nodes, &facts.edges);
     let Some(directory) = layout.package_of(path) else {
         return Vec::new();
     };
@@ -229,6 +225,25 @@ fn tree_of(path: &str, layout: &PackageLayout) -> SourceTree {
     } else {
         SourceTree::Main
     }
+}
+
+/// Record the file's package from a `symbols` capture: `true` when `capture` is
+/// the [`PACKAGE_CAPTURE`] (so the declaration walk skips it), and `package`
+/// takes its name if not already set — the first statement only, a second
+/// being a syntax error.
+pub(crate) fn note_package(
+    package: &mut Option<String>,
+    capture: &str,
+    node: Node<'_>,
+    source: &[u8],
+) -> bool {
+    if capture != PACKAGE_CAPTURE {
+        return false;
+    }
+    if package.is_none() {
+        *package = package_name(node, source);
+    }
+    true
 }
 
 /// The dotted name a captured `package` name node spells: its identifier

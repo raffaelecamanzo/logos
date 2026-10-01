@@ -536,16 +536,7 @@ pub fn sync(
         .into_iter()
         .map(|r| (r.path, r.content_hash))
         .collect();
-
-    // Declared-type backfill (S-472): a full walk over a store whose
-    // declared-type facts were never extracted — one upgraded across migration
-    // 24, whose source files re-extract only when they change — re-extracts every
-    // package-shaped source file once, unchanged or not, so the facts become
-    // complete and are marked so (`sync_avro_schemas`). Once marked, never
-    // again; a partial sync never backfills, having seen a subset.
-    let backfill = scope == SyncScope::FullWalk
-        && !runtime.submit_read(|store| store.declared_types_extracted())?;
-    let layout = PackageLayout::from_registry(registry);
+    let backfill = DeclaredTypesBackfill::for_sync(runtime, registry, scope)?;
 
     let mut loaded: Vec<LoadedFile> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
@@ -631,10 +622,8 @@ pub fn sync(
 
         match stored.get(&rel) {
             // Unchanged: the stored hash matches — skip without re-extracting,
-            // unless the declared-type backfill above needs its facts.
-            Some(Some(prev)) if *prev == hash && !(backfill && layout.is_package_shaped(&rel)) => {
-                continue
-            }
+            // unless the declared-type backfill needs its facts (S-472).
+            Some(Some(prev)) if *prev == hash && !backfill.wants(&rel) => continue,
             // Present but changed (or never hashed): a modification.
             Some(_) => {}
             // Absent from the index: a new file.
@@ -757,13 +746,10 @@ pub fn sync(
         result.files_removed += 1;
     }
 
-    // Build-manifest facts (S-462): the manifests among every path this sync
-    // named, reconciled apart from the graph gates above.
-    let manifests_changed = sync_build_manifests(runtime, &canon_root, &authority, &seen, scope)?;
-    // Avro schemas (S-472): the schemas among every path this sync named, one
-    // schema at a time — and the declared-type marker, once a backfill is done.
-    let schemas_changed =
-        sync_avro_schemas(runtime, &canon_root, &authority, &seen, scope, backfill)?;
+    // Member-local facts (S-462 manifests, S-472 Avro schemas) among every path
+    // this sync named, reconciled apart from the graph gates above.
+    let facts_changed =
+        sync_member_facts(runtime, &canon_root, &authority, &seen, scope, backfill.active)?;
 
     // CR-015 incremental resolution change-set (part 2 of 2): union the names that
     // entered the changed files (this sync's freshly extracted facts) with those
@@ -835,13 +821,9 @@ pub fn sync(
     // the revision, untouched. Done after every pass committed, mirroring index.
     // A manifest change moves the build facts, which later readers cache on
     // this revision, so it advances it too (S-462) — as does the first full walk
-    // marking them extracted, which turns an unread member into a read one.
-    // An Avro schema's types, and the declared-type marker, are member facts
-    // read the same way (S-472).
-    if result.files_added + result.files_modified + result.files_removed > 0
-        || manifests_changed
-        || schemas_changed
-    {
+    // marking them extracted, which turns an unread member into a read one — and
+    // so do an Avro schema's types and the declared-type marker (S-472).
+    if result.files_added + result.files_modified + result.files_removed > 0 || facts_changed {
         advance_graph_revision(runtime)?;
     }
 
@@ -2168,6 +2150,54 @@ fn rebuild_avro_schemas(runtime: &Runtime, found: &[Candidate]) -> Result<()> {
 /// ([`DECLARED_TYPES_EXTRACTED_KEY`]).
 fn mark_declared_types_extracted(w: &BatchWriter<'_>) -> Result<()> {
     w.set_project_metadata(DECLARED_TYPES_EXTRACTED_KEY, "1")
+}
+
+/// The declared-type backfill a [`sync`] runs (S-472): a full walk over a
+/// store whose declared-type facts were never extracted — one upgraded across
+/// migration 24, whose source files re-extract only when they change —
+/// re-extracts every package-shaped source file once, unchanged or not, so the
+/// facts become complete and are marked so ([`sync_avro_schemas`]). Once
+/// marked, never again; a partial sync never backfills, having seen a subset.
+struct DeclaredTypesBackfill {
+    /// Whether this sync backfills — and so marks the facts extracted.
+    active: bool,
+    layout: PackageLayout,
+}
+
+impl DeclaredTypesBackfill {
+    fn for_sync(runtime: &Runtime, registry: &LanguageRegistry, scope: SyncScope) -> Result<Self> {
+        let active = match scope {
+            SyncScope::FullWalk => !runtime.submit_read(|store| store.declared_types_extracted())?,
+            SyncScope::Partial => false,
+        };
+        Ok(Self {
+            active,
+            layout: PackageLayout::from_registry(registry),
+        })
+    }
+
+    /// Whether the unchanged file at `rel` must be re-extracted for its facts.
+    fn wants(&self, rel: &str) -> bool {
+        self.active && self.layout.is_package_shaped(rel)
+    }
+}
+
+/// An incremental sync's member-local fact passes — build manifests (S-462)
+/// and Avro schemas (S-472) — returning whether either moved what a reader of
+/// the member's facts sees. `mark_declared_types` is the backfill's
+/// [`DeclaredTypesBackfill::active`].
+fn sync_member_facts(
+    runtime: &Runtime,
+    canon_root: &Path,
+    authority: &AdmissionAuthority,
+    named: &HashSet<String>,
+    scope: SyncScope,
+    mark_declared_types: bool,
+) -> Result<bool> {
+    let manifests = sync_build_manifests(runtime, canon_root, authority, named, scope)?;
+    let schemas =
+        sync_avro_schemas(runtime, canon_root, authority, named, scope, mark_declared_types)?;
+    Ok(manifests || schemas)
 }
 
 /// An incremental sync's Avro-schema pass (S-472): `named` is every
