@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-01
+
 ### Added
 
 - **Members record the types they declare.** An index records every top-level Java/Kotlin
