@@ -4,8 +4,9 @@
 //! S-173 built the plan→act→observe→replan loop and routed each [`PlanStep`] to a
 //! [`StepExecutor`] behind a trait. This module holds the real executors — two
 //! fixed rosters, each role a `rig`-`Agent`-shaped unit: a [`CompletionModel`] + a
-//! system preamble + **exactly one** least-privilege tool set from agent-core
-//! (S-167).
+//! system preamble + **one fixed** least-privilege tool subset from agent-core
+//! (S-167) — a single domain for every role but the Workspace-Analyst, whose
+//! subset is agent-core's workspace and `xservice_*` sets together ([ADR-71] §5).
 //!
 //! The **member roster** ([`SubagentRoster`]) answers for one codebase, under any
 //! backing:
