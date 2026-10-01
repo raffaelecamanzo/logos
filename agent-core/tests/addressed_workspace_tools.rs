@@ -586,22 +586,28 @@ async fn each_workspace_tool_answers_its_twins_payload() {
     let theirs = federated::call(&client, "workspace_status", Map::new()).await;
     assert_eq!(ours["members"].as_array().map(Vec::len), Some(2), "{ours}");
     assert_same_payload(&ours, &theirs, "workspace_status");
-    assert!(
-        reading.starts_with("workspace_status \"shop\" — 2 member(s): "),
-        "{reading}"
-    );
-    assert!(
-        reading.contains(ours["coverage"]["resolved_edges_summary"].as_str().unwrap()),
-        "the reading quotes the core's own summary: {reading}"
+    // Every reading below is pinned whole: this layer's words literally, and the
+    // core's own composed summaries interpolated from the payload beside them.
+    let coverage = ours["coverage"]["resolved_edges_summary"].as_str().unwrap();
+    let build = ours["build_dependency"]["summary"].as_str().unwrap();
+    assert_eq!(
+        reading,
+        format!(
+            "workspace_status \"shop\" — 2 member(s): 2 warm, 0 deferred, 0 degraded | store \
+             open: 2 opened, 0 not attempted, 0 degraded | coverage: {coverage} | build \
+             dependency (not a runtime coupling): {build}"
+        )
     );
 
     // workspace_reachability, unscoped and scoped with the full dead set
     let (reading, ours) = workspace_call(&set, "workspace_reachability", json!({})).await;
     let theirs = federated::call(&client, "workspace_reachability", Map::new()).await;
     assert_same_payload(&ours, &theirs, "workspace_reachability");
-    assert!(
-        reading.starts_with("workspace_reachability — ADVISORY: "),
-        "{reading}"
+    assert_eq!(
+        reading,
+        "workspace_reachability — ADVISORY: no callable live via cross-service; dead set \
+         withheld (promotions only — pass all: true for it) | read 2 of 2 member(s) | seeded by \
+         1 bridge invocation edge(s) beside a headline of 1 resolved"
     );
     let scoped = json!({ "repo": "api", "all": true });
     let (reading, ours) = workspace_call(&set, "workspace_reachability", scoped.clone()).await;
@@ -616,9 +622,12 @@ async fn each_workspace_tool_answers_its_twins_payload() {
         "the full dead set is present: {ours}"
     );
     assert_same_payload(&ours, &theirs, "workspace_reachability scoped");
-    assert!(
-        reading.starts_with("workspace_reachability for api — ADVISORY: "),
-        "{reading}"
+    assert_eq!(ours["dead"].as_array().map(Vec::len), Some(1), "{ours}");
+    assert_eq!(
+        reading,
+        "workspace_reachability for api — ADVISORY: no callable live via cross-service; 1 dead \
+         app-wide | read 2 of 2 member(s) | seeded by 1 bridge invocation edge(s) beside a \
+         headline of 1 resolved"
     );
 
     // A scope naming no member: the twin's payload, and a reading that says so
@@ -648,7 +657,18 @@ async fn each_workspace_tool_answers_its_twins_payload() {
         "{ours}"
     );
     assert_same_payload(&ours, &theirs, "workspace_check");
-    assert!(reading.contains("1 violation(s): "), "{reading}");
+    // The direction is pinned: the consumer `web` → the provider `api`.
+    let violation = &ours["violations"][0];
+    assert_eq!(
+        reading,
+        format!(
+            "workspace_check \"shop\" — ADVISORY: 1 rule(s) over 1 cross-service binding(s), 1 \
+             violation(s): {}: web:{} → api:{} [route]",
+            violation["rule"].as_str().unwrap(),
+            violation["from"]["symbol"].as_str().unwrap(),
+            violation["to"]["symbol"].as_str().unwrap()
+        )
+    );
 
     // xservice_build_deps, unscoped and scoped
     let (reading, ours) = workspace_call(&set, "xservice_build_deps", json!({})).await;
@@ -658,11 +678,16 @@ async fn each_workspace_tool_answers_its_twins_payload() {
         "{ours}"
     );
     assert_same_payload(&ours, &theirs, "xservice_build_deps");
-    assert!(
-        reading.contains(ours["headline"]["summary"].as_str().unwrap()),
-        "{reading}"
+    let build = ours["headline"]["summary"].as_str().unwrap().to_string();
+    assert_eq!(
+        reading,
+        format!(
+            "xservice_build_deps — BUILD DEPENDENCY, NOT A RUNTIME COUPLING: {build} | 2 member \
+             row(s)"
+        )
     );
-    let (_, ours) = workspace_call(&set, "xservice_build_deps", json!({ "repo": "web" })).await;
+    let (reading, ours) =
+        workspace_call(&set, "xservice_build_deps", json!({ "repo": "web" })).await;
     let theirs = federated::call(
         &client,
         "xservice_build_deps",
@@ -671,6 +696,34 @@ async fn each_workspace_tool_answers_its_twins_payload() {
     .await;
     assert_eq!(ours["scope"], "web");
     assert_same_payload(&ours, &theirs, "xservice_build_deps scoped");
+    assert_eq!(
+        reading,
+        format!(
+            "xservice_build_deps for web — BUILD DEPENDENCY, NOT A RUNTIME COUPLING: {build} | 1 \
+             member row(s)"
+        )
+    );
+    // A scope naming no member reaches the core's `scope_note`, which the
+    // reading carries rather than reading the empty rows as an answer.
+    let (reading, ours) =
+        workspace_call(&set, "xservice_build_deps", json!({ "repo": "ghost" })).await;
+    let theirs = federated::call(
+        &client,
+        "xservice_build_deps",
+        params(&[("repo", json!("ghost"))]),
+    )
+    .await;
+    assert_same_payload(&ours, &theirs, "xservice_build_deps for a non-member");
+    let note = ours["scope_note"]
+        .as_str()
+        .expect("a scope note for a non-member");
+    assert_eq!(
+        reading,
+        format!(
+            "xservice_build_deps for ghost — BUILD DEPENDENCY, NOT A RUNTIME COUPLING: {build} | 0 \
+             member row(s) | {note}"
+        )
+    );
 
     // workspace_roster has no MCP tool: its twin is `GET /api/v1/workspace/roster`,
     // whose body is `query::workspace_roster` serialized.
