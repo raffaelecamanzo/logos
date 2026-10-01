@@ -2002,38 +2002,73 @@ async fn neither_route_widens_the_resident_engine_ceiling_beyond_the_existing_fa
 /// So the scan runs over the whole source as one string (formatting-independent),
 /// and a path given by **constant** is resolved from its `const` declaration in
 /// the same file (S-482's `WORKSPACE_CHAT_THREADS_ROUTE` is one), as `lib.rs`'s own
-/// `every_post_mounted_route_is_admitted_by_the_method_guard` resolves them. A
-/// second assertion requires every `/api/v1/workspace/` path declared as a `const`
-/// to be one the scan saw mounted. The `!declared.is_empty()` check remains, but
-/// note what it is and is not: it catches a *total* parse failure, not a partial
-/// one.
+/// `every_post_mounted_route_is_admitted_by_the_method_guard` resolves them —
+/// whatever the `&str` annotation, and wherever rustfmt breaks the declaration. A
+/// `.route(` argument that is code but not a resolvable constant (a call, a
+/// qualified path) fails the scan rather than being skipped, and a second
+/// assertion requires every `/api/v1/workspace/` path declared as a `const` to be
+/// one the scan saw mounted. The `!declared.is_empty()` check remains, but note
+/// what it is and is not: it catches a *total* parse failure, not a partial one.
 #[test]
 fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
     const ROUTER_SOURCE: &str = include_str!("../src/lib.rs");
 
-    // The value of `const NAME: &str = "…"` declared in the router source.
-    let resolve = |name: &str| -> Option<&str> {
-        let decl = format!("const {name}: &str = \"");
-        let at = ROUTER_SOURCE.find(&decl)? + decl.len();
-        ROUTER_SOURCE[at..].split('"').next()
-    };
+    // Every `const NAME: <type> = "<value>"` in the router source, as
+    // `(NAME, value)` — over the whole source, so a declaration rustfmt wraps
+    // after the `=` (any past 100 columns) and a `&'static str` annotation are
+    // read like the one-line `&str` form.
+    let consts: Vec<(&str, &str)> = ROUTER_SOURCE
+        .match_indices("const ")
+        .filter_map(|(at, marker)| {
+            let rest = &ROUTER_SOURCE[at + marker.len()..];
+            let name_len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+            let (name, rest) = rest.split_at(name_len);
+            let rest = rest.strip_prefix(':')?;
+            let value = rest[rest.find('=')?..].strip_prefix('=')?.trim_start();
+            let value = value.strip_prefix('"')?;
+            Some((name, value.split('"').next()?))
+        })
+        .collect();
+    let resolve = |name: &str| consts.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
+
     // Whole-source scan: `.route(` followed by a string literal or a constant,
-    // wherever the line breaks fall.
+    // wherever the line breaks fall. Code the scan cannot resolve to a declared
+    // constant (a call, a qualified path) is collected and fails below, never
+    // skipped; text that opens with no identifier is prose quoting `.route(` (a
+    // doc comment), not a call.
+    let mut unreadable: Vec<&str> = Vec::new();
     let mut declared: Vec<&str> = ROUTER_SOURCE
         .split(".route(")
         .skip(1)
         .filter_map(|rest| {
             let rest = rest.trim_start();
-            match rest.strip_prefix('"') {
+            let path = match rest.strip_prefix('"') {
                 Some(literal) => literal.split('"').next(),
                 None => {
-                    let name = rest.split(|c: char| c == ',' || c.is_whitespace()).next()?;
-                    resolve(name)
+                    let argument = rest.split(',').next()?.trim();
+                    // An argument that is code (it opens with an identifier —
+                    // a constant, a call, a path) must be a constant the scan
+                    // resolves, exactly.
+                    if !argument.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                        return None;
+                    }
+                    let path = resolve(argument);
+                    if path.is_none() {
+                        unreadable.push(argument);
+                    }
+                    path
                 }
-            }
+            };
+            path
         })
         .filter(|path| path.starts_with("/api/v1/workspace/"))
         .collect();
+    assert!(
+        unreadable.is_empty(),
+        "these `.route(` paths are neither a literal nor a constant declared in \
+         src/lib.rs, so the scan cannot tell whether they are workspace routes — \
+         teach it the form: {unreadable:?}"
+    );
     declared.sort_unstable();
     declared.dedup();
 
@@ -2061,10 +2096,9 @@ fn the_enumerated_endpoint_list_is_exactly_the_routers_workspace_route_table() {
     // one the scan resolved at a `.route(` call — so a constant the resolver
     // cannot follow (mounted through an alias, say) fails here rather than
     // leaving the route enumerable only by hand.
-    let const_declared: Vec<&str> = ROUTER_SOURCE
-        .lines()
-        .filter(|l| l.contains("const ") && l.contains(": &str"))
-        .filter_map(|l| l.split('"').nth(1))
+    let const_declared: Vec<&str> = consts
+        .iter()
+        .map(|(_, value)| *value)
         .filter(|path| path.starts_with("/api/v1/workspace/"))
         .collect();
     assert!(
