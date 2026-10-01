@@ -253,17 +253,6 @@ pub trait ChatService: Send + Sync + 'static {
     /// ([FR-UI-19] client-disconnect → in-flight cancel). A configure-first or
     /// setup fault yields a single honest [`ChatFrame::Error`] and no spawned turn.
     fn start_turn(&self, question: String, thread_id: Option<i64>) -> ChatStream;
-
-    /// Whether this service's turns carry the Graph-Navigator's `xservice_*`
-    /// tools — a test-only probe of the router's wiring ([S-431]), since the
-    /// service is held behind `dyn` and the backing it was handed is otherwise
-    /// unobservable without dialling a provider.
-    ///
-    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
-    #[cfg(test)]
-    fn cross_service_reach(&self) -> bool {
-        false
-    }
 }
 
 /// The live stream of a chat turn's [`ChatFrame`]s, backed by the spawned turn's

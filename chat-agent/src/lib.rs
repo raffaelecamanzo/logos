@@ -18,7 +18,10 @@
 //!   Governance-Analyst, Source-Reader, and the tool-less Synthesizer — the real
 //!   [`StepExecutor`](orchestrator::StepExecutor) the loop dispatches each plan
 //!   step to, each a `rig`-`Agent`-shaped unit least-privileged to one
-//!   [`agent-core`] tool domain (S-167).
+//!   [`agent-core`] tool domain (S-167). Since [S-481] that member roster is
+//!   single-backing only, and a workspace has its own
+//!   [workspace roster](orchestrator::WorkspaceRoster) — a Workspace-Analyst
+//!   plus the repo-addressed roles under workspace-centred preambles.
 //! - **[S-175]:** the [`memory`] store — the per-turn
 //!   [scratchpad](memory::MemoryStore) (plan + per-subagent observations +
 //!   findings) and per-thread working/conversation memory over the same
@@ -42,6 +45,7 @@
 //! [S-173]: ../../docs/planning/journal.md#s-173-planner-and-plan-act-observe-replan-orchestration-loop-with-budget-tree
 //! [S-174]: ../../docs/planning/journal.md#s-174-specialized-subagent-roster-on-rig
 //! [S-175]: ../../docs/planning/journal.md#s-175-multi-step-agent-memory-store-scratchpad-and-working-memory
+//! [S-481]: ../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
 
 #![forbid(unsafe_code)]
 
@@ -57,11 +61,13 @@ pub use memory::{
     prior_turns, thread_window, MemoryGrounding, MemoryStore, ScratchpadEntry, ScratchpadSink,
 };
 pub use orchestrator::{
-    workspace_planner_preamble, BudgetBound, BudgetTree, CapturingSink, ConversationWindow,
-    EventSink, FanOut, Orchestrator, OrchestratorError, OrchestratorEvent, PlanStep, Planner,
-    PlannerDecision, PriorTurn, RoleModels, StepContext, StepError, StepExecutor,
-    StepObservation, StepRole, SubagentRoster, SynthesizerGrounding, TurnOutcome,
-    GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE, GRAPH_NAVIGATOR_XSERVICE_ADDENDUM,
-    SOURCE_READER_PREAMBLE, SYNTHESIZER_PREAMBLE, SYNTHESIZER_XSERVICE_ADDENDUM,
-    WORKSPACE_PLANNER_ADDENDUM,
+    member_roster, workspace_planner_preamble, workspace_synthesizer_preamble, BudgetBound,
+    BudgetTree, CapturingSink, ConversationWindow, EventSink, FanOut, Orchestrator,
+    OrchestratorError, OrchestratorEvent, PlanStep, Planner, PlannerDecision, PriorTurn,
+    RoleModels, StepContext, StepError, StepExecutor, StepObservation, StepRole,
+    SubagentRoster, SynthesizerGrounding, TurnOutcome, WorkspaceRoster,
+    GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE, SOURCE_READER_PREAMBLE,
+    SYNTHESIZER_PREAMBLE, WORKSPACE_ANALYST_PREAMBLE, WORKSPACE_GOVERNANCE_ANALYST_PREAMBLE,
+    WORKSPACE_GRAPH_NAVIGATOR_PREAMBLE, WORKSPACE_RANKING_CLAUSE,
+    WORKSPACE_SOURCE_READER_PREAMBLE,
 };

@@ -18,6 +18,8 @@ use std::fmt::Write as _;
 
 use agent_core::rig::agent::AgentBuilder;
 use agent_core::rig::completion::{CompletionModel, Prompt};
+use agent_core::{ToolDomain, WORKSPACE_TOOL_NAMES, XSERVICE_TOOL_NAMES};
+use logos_core::federation::Federation;
 
 use super::history::ConversationWindow;
 use super::plan::{PlanStep, PlannerDecision};
@@ -52,28 +54,97 @@ turn that makes no codebase claim (a greeting, or a meta-question about this cha
 that answers directly with no tool steps. Ground every claim in the subagents' \
 observations. Never invent a tool result.";
 
-/// What the planner preamble gains under a **federated** backing ([S-431],
-/// [FR-WS-29]): the Graph-Navigator now also carries the cross-service tools, so a
-/// cross-repository question is routed to it rather than answered from one
-/// member. Appended to [`DEFAULT_PLANNER_PREAMBLE`] by
-/// [`workspace_planner_preamble`]; a single-root turn never sees it.
+/// The planner preamble of the **workspace** roster ([S-481], [FR-WS-34],
+/// [ADR-71]): told it answers for the workspace `federation` names — the workspace
+/// first, one member when the question names one — and given every member with
+/// its declared kind ([`member_roster`]).
 ///
-/// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
-/// [FR-WS-29]: ../../../docs/specs/requirements/FR-WS-29.md
-pub const WORKSPACE_PLANNER_ADDENDUM: &str = "\
-This codebase is one member of a multi-repository workspace. In this workspace the \
-graph_navigator ALSO has cross-service tools (xservice_search, xservice_callers, \
-xservice_impact, xservice_route_providers) that answer across every member, \
-repo-qualified. Route any question that crosses repositories — which services call \
-something, what another service would break, where a symbol lives across the \
-workspace — to graph_navigator and say in its instruction that the question is \
-cross-service. An observation line marked UNRESOLVED means the cross-service answer \
-is missing outbound calls: it must reach the answer as unresolved, never as \"none\".";
+/// The role lines name each role's tools from the same name lists the workspace
+/// roster registers them from ([`ToolDomain::tool_names`],
+/// [`WORKSPACE_TOOL_NAMES`], [`XSERVICE_TOOL_NAMES`]), so the planner is never told
+/// of a tool the roster does not carry. The JSON contract is
+/// [`DEFAULT_PLANNER_PREAMBLE`]'s, worded for a workspace; the member planner's
+/// preamble is untouched.
+///
+/// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+/// [ADR-71]: ../../../docs/specs/architecture/decisions/ADR-71.md
+pub fn workspace_planner_preamble(federation: &Federation) -> String {
+    let workspace = WORKSPACE_TOOL_NAMES.join(", ");
+    let xservice = XSERVICE_TOOL_NAMES.join(", ");
+    let graph = ToolDomain::Graph.tool_names().join(", ");
+    let governance = ToolDomain::Governance.tool_names().join(", ");
+    let source = ToolDomain::Source.tool_names().join(", ");
+    format!(
+        "\
+You are the planner for Logos, a structural code-intelligence tool. You answer a \
+user's question about the multi-repository WORKSPACE \"{name}\" — for the workspace as \
+a whole first, narrowing to one member when the question names one — by decomposing \
+it into a short plan of steps, each handled by one specialized subagent, then \
+replanning from their observations until the turn can be finalized.\n\n\
+{roster}\n\n\
+The subagent roles are:\n\
+- workspace_analyst: reads the workspace as a whole ({workspace}) and across services \
+({xservice}), every result repo-qualified. Route here any question about which members \
+exist, how they connect, or what crosses repositories.\n\
+- graph_navigator: navigates ONE member's code graph ({graph}).\n\
+- governance_analyst: runs ONE member's governance/quality read-models ({governance}).\n\
+- source_reader: reads source files within ONE member ({source}).\n\
+- synthesizer: composes the final grounded answer from the gathered observations \
+(no tools) — this is done for you when you finalize; you do NOT write the answer.\n\n\
+graph_navigator, governance_analyst and source_reader each address one member: name \
+that member in the step's instruction exactly as it is listed above. To look into \
+several members, give each its own step. When the prompt opens with earlier turns of \
+this conversation, read a follow-up against them: \"and for <member>?\" asks the earlier \
+question again, of that member. An observation line marked UNRESOLVED or NOT CHECKED \
+means a cross-service answer is incomplete: it must reach the answer as such, never as \
+\"none\".\n\n\
+Reply with EXACTLY ONE JSON object and nothing else. Either lay out the next steps:\n\
+{{\"action\":\"plan\",\"steps\":[{{\"role\":\"workspace_analyst\",\"instruction\":\"…\"}}]}}\n\
+or finalize the turn — the Synthesizer then composes the user-facing answer from \
+the observations, so your final decision carries NO answer text, only a `grounded` \
+marker:\n\
+{{\"action\":\"final\",\"grounded\":true}}\n\n\
+Set \"grounded\": true when the answer makes any claim about this workspace or any of \
+its members — you MUST have gathered at least one observation first; such an answer \
+is never given from prior knowledge alone. Set \"grounded\": false ONLY for a purely \
+conversational turn that makes no workspace claim (a greeting, or a meta-question \
+about this chat) — that answers directly with no tool steps. Ground every claim in \
+the subagents' observations. Never invent a tool result.",
+        name = federation.name,
+        roster = member_roster(federation),
+    )
+}
 
-/// The planner preamble for a turn over a **federated** backing:
-/// [`DEFAULT_PLANNER_PREAMBLE`] followed by [`WORKSPACE_PLANNER_ADDENDUM`].
-pub fn workspace_planner_preamble() -> String {
-    format!("{DEFAULT_PLANNER_PREAMBLE}\n\n{WORKSPACE_PLANNER_ADDENDUM}")
+/// The workspace's members, one line each with its declared kind
+/// ([FR-WS-32]) — `no declared kind` where the manifest declares none — and the
+/// default member marked; the block the workspace planner and Synthesizer
+/// preambles carry ([FR-WS-34]).
+///
+/// The names are [`Member::name`](logos_core::federation::Member::name), the
+/// value a repo-addressed tool's `repo` takes. Reading them touches the manifest's
+/// resolution only: no member engine is started ([NFR-PE-10]).
+///
+/// [FR-WS-32]: ../../../docs/specs/requirements/FR-WS-32.md
+/// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+pub fn member_roster(federation: &Federation) -> String {
+    let mut roster = format!(
+        "The workspace has {} member(s) — each name, exactly as written, is the `repo` a \
+         member tool takes (name: declared kind):",
+        federation.members.len()
+    );
+    for member in &federation.members {
+        let kind = federation
+            .member_kinds
+            .get(&member.name)
+            .map_or("no declared kind", |kind| kind.as_str());
+        let _ = write!(roster, "\n- {}: {kind}", member.name);
+        if federation.default.as_deref() == Some(member.name.as_str()) {
+            roster.push_str(" (the default member)");
+        }
+    }
+    roster
 }
 
 /// The plan→act→observe→replan planner over a `rig` `Agent` ([ADR-41]).
@@ -294,19 +365,90 @@ fn escape_control_chars_in_strings(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::orchestrator::plan::StepRole;
+    use logos_core::federation::{Member, MemberKind};
 
-    /// [S-431]: the workspace preamble is today's, extended with the cross-service
-    /// routing — and today's names no `xservice_*` tool, so a single-root planner
-    /// is never told about a tool its Graph-Navigator does not have.
+    /// A federation of `members` (name, declared kind) under `root`; building it
+    /// opens nothing.
+    fn federation(members: &[(&str, Option<MemberKind>)], default: Option<&str>) -> Federation {
+        let root = std::path::PathBuf::from("/ws");
+        Federation {
+            name: "shop".to_string(),
+            root: root.clone(),
+            members: members
+                .iter()
+                .map(|(name, _)| Member { name: name.to_string(), root: root.join(name) })
+                .collect(),
+            default: default.map(str::to_string),
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+            member_kinds: members
+                .iter()
+                .filter_map(|(name, kind)| kind.map(|kind| (name.to_string(), kind)))
+                .collect(),
+        }
+    }
+
+    /// [S-481]: the workspace planner preamble names each role's tools from the
+    /// lists the workspace roster registers them from — so it can never offer a
+    /// tool the roster lacks — while the member planner's preamble names neither
+    /// the Workspace-Analyst nor any workspace or cross-service tool.
     ///
-    /// [S-431]: ../../../docs/planning/journal.md#s-431-the-chat-agents-tool-surface-is-workspace-aware
+    /// [S-481]: ../../../docs/planning/journal.md#s-481-a-workspace-roster-centred-on-the-workspace-and-the-member-roster-single-backing-only
     #[test]
-    fn the_workspace_preamble_extends_the_default_and_the_default_names_no_xservice_tool() {
-        let workspace = workspace_planner_preamble();
-        assert!(workspace.starts_with(DEFAULT_PLANNER_PREAMBLE), "{workspace}");
-        assert!(workspace.contains("xservice_callers"), "{workspace}");
-        assert!(workspace.contains("UNRESOLVED"), "{workspace}");
-        assert!(!DEFAULT_PLANNER_PREAMBLE.contains("xservice"), "{DEFAULT_PLANNER_PREAMBLE}");
+    fn the_workspace_planner_names_every_registered_tool_and_the_member_planner_none() {
+        let preamble = workspace_planner_preamble(&federation(&[("api", None)], None));
+        let tools = WORKSPACE_TOOL_NAMES
+            .iter()
+            .chain(XSERVICE_TOOL_NAMES)
+            .chain(ToolDomain::ALL.iter().flat_map(|d| d.tool_names()));
+        for tool in tools {
+            assert!(preamble.contains(tool), "{tool}: {preamble}");
+        }
+        for absent in ["workspace_analyst", "xservice", "workspace_"] {
+            assert!(!DEFAULT_PLANNER_PREAMBLE.contains(absent), "{absent}");
+        }
+    }
+
+    /// Both planner preambles teach the same two JSON decisions, and each
+    /// example parses as the decision it names — the contract cannot drift
+    /// between the two rosters' planners.
+    #[test]
+    fn both_planner_preambles_teach_decisions_the_parser_reads() {
+        let workspace = workspace_planner_preamble(&federation(&[("api", None)], None));
+        for preamble in [DEFAULT_PLANNER_PREAMBLE, workspace.as_str()] {
+            let examples: Vec<&str> = preamble
+                .lines()
+                .filter(|line| line.starts_with("{\"action\""))
+                .collect();
+            assert_eq!(examples.len(), 2, "{preamble}");
+            assert!(matches!(
+                parse_decision(&examples[0].replace('…', "x")),
+                Ok(PlannerDecision::Plan { .. })
+            ));
+            assert_eq!(
+                parse_decision(examples[1]).unwrap(),
+                PlannerDecision::Final { grounded: true }
+            );
+        }
+    }
+
+    /// The member roster block: one line per member in manifest order, its kind
+    /// or `no declared kind`, the default marked.
+    #[test]
+    fn the_member_roster_lists_each_member_with_its_kind_and_marks_the_default() {
+        let roster = member_roster(&federation(
+            &[("web", None), ("api", Some(MemberKind::Mock)), ("docs", Some(MemberKind::Documentation))],
+            Some("web"),
+        ));
+        assert_eq!(
+            roster,
+            "The workspace has 3 member(s) — each name, exactly as written, is the `repo` a \
+             member tool takes (name: declared kind):\n\
+             - web: no declared kind (the default member)\n\
+             - api: mock\n\
+             - docs: documentation"
+        );
     }
 
     #[test]
