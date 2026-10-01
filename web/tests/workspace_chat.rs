@@ -57,6 +57,26 @@ const HOST: &str = "127.0.0.1:4983";
 const ANSWER: &str = "WORKSPACE_ANSWER_SENTINEL";
 const WS_KEY: &str = "sk-workspace-tier-ws42";
 const MEMBER_KEY: &str = "sk-member-complete-mb77";
+/// A complete workspace tier whose endpoint already ends in the
+/// `/chat/completions` path rig appends, so a production turn gets past
+/// configure-first and is stopped by the deterministic pre-send preflight — an
+/// egress-free production turn ([NFR-SE-07]). A tier without a `base_url` would
+/// dial the default OpenRouter endpoint for real.
+///
+/// [NFR-SE-07]: ../../docs/specs/requirements/NFR-SE-07.md
+const PREFLIGHT_STOPPED_TIER: &str = "[chat]\nmodel = \"workspace/model\"\n\
+     base_url = \"https://workspace.example/v1/chat/completions\"\n";
+
+/// The production turn reached the provider seam and was stopped there by the
+/// preflight on the workspace's endpoint — never dialled, never configure-first.
+fn assert_stopped_at_the_preflight(body: &str) {
+    assert!(
+        body.contains("event: error") && body.contains("workspace.example/v1/chat/completions"),
+        "the production turn stops at the preflight on the workspace endpoint: {body}"
+    );
+    assert!(!body.contains("not configured"), "{body}");
+    assert!(!body.contains(WS_KEY), "{body}");
+}
 
 fn post(uri: &str, intent: &IntentToken, body: &'static str) -> Request<Body> {
     Request::builder()
@@ -246,24 +266,15 @@ async fn a_complete_member_chat_does_not_configure_the_workspace_chat() {
 async fn a_complete_workspace_tier_reaches_the_preflight_on_its_own_endpoint() {
     let tmp = workspace_chat::workspace();
     let root = tmp.path();
-    write(
-        root,
-        "config.toml",
-        "[chat]\nmodel = \"workspace/model\"\n\
-         base_url = \"https://workspace.example/v1/chat/completions\"\n",
-    );
+    write(root, "config.toml", PREFLIGHT_STOPPED_TIER);
     write(root, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
     let intent = IntentToken::generate();
     let router = workspace_chat::router(root, &intent);
 
     let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!body.contains("not configured"), "{body}");
-    assert!(
-        body.contains("event: error") && body.contains("workspace.example/v1/chat/completions"),
-        "the workspace's endpoint reached the preflight: {body}"
-    );
-    assert!(!body.contains(WS_KEY) && !body.contains("ws42"), "{body}");
+    assert_stopped_at_the_preflight(&body);
+    assert!(!body.contains("ws42"), "{body}");
     assert_eq!(threads_at(root).len(), 1, "the question is recorded at the workspace root");
 }
 
@@ -300,7 +311,9 @@ async fn a_turn_stores_at_the_workspace_root_and_leaves_the_tracked_root_clean()
     sh_git(root, &["init", "-q", "-b", "main"]);
     let members = logos_core::federation::discover(root).unwrap().expect("a workspace").members;
     logos_core::federation::enable::enable(root, "shop", &members).expect("enables");
-    write(root, "config.toml", "[chat]\nmodel = \"workspace/model\"\n");
+    // The endpoint carries rig's own `/chat/completions` suffix, so the production
+    // turn below stops at the pre-send preflight: nothing leaves loopback.
+    write(root, "config.toml", PREFLIGHT_STOPPED_TIER);
     sh_git(root, &["add", "-A"]);
     sh_git(root, &["commit", "-q", "-m", "the workspace root, enabled"]);
     // The key is the user's own, and ignored like every credential.
@@ -325,7 +338,7 @@ async fn a_turn_stores_at_the_workspace_root_and_leaves_the_tracked_root_clean()
         post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=again"),
     )
     .await;
-    assert!(body.contains("event: error"), "the production turn stopped at the provider: {body}");
+    assert_stopped_at_the_preflight(&body);
 
     let store = ChatStore::open(root).unwrap();
     let threads = store.list_threads().unwrap();
