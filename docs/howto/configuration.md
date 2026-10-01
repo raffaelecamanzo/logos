@@ -1265,8 +1265,9 @@ source_roots = ["src/main/java", "src/test/java"]
 ```
 
 A file under one of these roots is keyed by the path after the root, so the file
-above is `com.x.Svc`, the name its imports spell. Java ships with the table; every
-other plugin leaves it out and keeps its module keys unchanged. With it:
+above is `com.x.Svc`, the name its imports spell. Java ships with the table, and
+Kotlin with the same shape under `src/main/kotlin` and `src/test/kotlin`; every other
+plugin leaves it out and keeps its module keys unchanged. With it:
 
 - a single-type import binds to the **class** it names, a static import to the
   member, and a wildcard import (`a.b.*`, `static a.b.C.*`) brings the package's or

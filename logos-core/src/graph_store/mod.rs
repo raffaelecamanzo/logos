@@ -156,6 +156,26 @@ pub const LAST_FULL_INDEX_AT_KEY: &str = "last_full_index_at";
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub const BUILD_FACTS_EXTRACTED_KEY: &str = "build_facts_extracted";
 
+/// The `project_metadata` key recording that this member's **declared-type
+/// facts** are complete (S-472, [CR-152] §3.2 B) — the
+/// [`BUILD_FACTS_EXTRACTED_KEY`] twin for migration 24's tables.
+///
+/// Written by a full [`index`](crate::pipeline::index), which extracts every
+/// source file and reads every schema, and by the first
+/// [`SyncScope::FullWalk`](crate::pipeline::SyncScope::FullWalk) sync over a
+/// store that lacks it, which re-extracts the member's package-shaped source
+/// files once to fill the table — for a member with no Java/Kotlin/Avro file
+/// too. Never by a partial sync, which sees a subset of the member. Its value
+/// is `"1"`; only presence is read ([`GraphStore::declared_types_extracted`]).
+///
+/// It separates "read, no declared types" from "never extracted": migration 24
+/// creates the tables empty, and a store upgraded from v23 re-extracts a source
+/// file only when it changes, so without the marker an upgraded member would
+/// read as declaring nothing.
+///
+/// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+pub const DECLARED_TYPES_EXTRACTED_KEY: &str = "declared_types_extracted";
+
 /// A row read back from the `nodes` table, mapped to model types.
 ///
 /// `kind` is recovered via [`NodeKind::try_from`] and `symbol` via
@@ -1345,6 +1365,79 @@ pub struct BuildArtifactRow {
     pub reason: Option<String>,
 }
 
+/// One declared type as the store records it (S-472, migration 24) — the
+/// store-local row shape, following [`NewBuildArtifact`]: the extraction engine
+/// produces a
+/// [`SourceType`](crate::extract::declared_types::SourceType) or an
+/// [`AvroType`](crate::extract::declared_types::AvroType) and
+/// [`pipeline`](crate::pipeline) adapts it here, so the store depends on no
+/// extraction type. The string fields carry migration 24's vocabulary, which
+/// its CHECKs enforce.
+#[derive(Debug, Clone, Copy)]
+pub struct NewDeclaredType<'a> {
+    /// The type's own name, as declared.
+    pub name: &'a str,
+    /// The dotted fully-qualified name; `None` exactly when refused.
+    pub fqn: Option<&'a str>,
+    /// `class`, `interface`, `enum` or `record`.
+    pub kind: &'a str,
+    /// The declaring node's symbol — a source fact only.
+    pub symbol: Option<&'a str>,
+    /// `main` or `test` — a source fact only.
+    pub tree: Option<&'a str>,
+    /// Why no name is recorded; `None` exactly when `fqn` is `Some`.
+    pub reason: Option<&'a str>,
+}
+
+/// One Avro schema file and the types it declares, as the store records them
+/// (S-472, migration 24).
+#[derive(Debug, Clone)]
+pub struct NewAvroSchema<'a> {
+    /// Project-relative path of the schema.
+    pub path: &'a str,
+    /// blake3 of the schema text; `None` only when it could not be read.
+    pub content_hash: Option<&'a str>,
+    /// `read`, `malformed` or `unreadable`.
+    pub status: &'a str,
+    /// Why it yielded no type; `None` exactly when `status` is `read`.
+    pub detail: Option<&'a str>,
+    /// Its records and enums, in document order.
+    pub types: Vec<NewDeclaredType<'a>>,
+}
+
+/// One persisted declared type with its provenance (S-472, migration 24) — the
+/// member-local fact the workspace type index is built from ([ADR-70] point 2).
+///
+/// [ADR-70]: ../../../docs/specs/architecture/decisions/ADR-70.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeclaredTypeRow {
+    /// `source` (a Java/Kotlin file) or `avro` (an `.avsc` schema).
+    pub origin: String,
+    /// Project-relative path of the declaring file or schema — the provenance.
+    pub path: String,
+    pub name: String,
+    /// The dotted fully-qualified name; `None` exactly when refused.
+    pub fqn: Option<String>,
+    pub kind: String,
+    /// The declaring node's symbol; `None` for an Avro type.
+    pub symbol: Option<String>,
+    /// `main` or `test`; `None` for an Avro type.
+    pub tree: Option<String>,
+    /// `resolved` or `refused`.
+    pub resolution: String,
+    pub reason: Option<String>,
+}
+
+/// One persisted Avro schema, read or not (S-472, migration 24) — the
+/// "schemas read, of schemas found" denominator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AvroSchemaRow {
+    pub path: String,
+    pub content_hash: Option<String>,
+    pub status: String,
+    pub detail: Option<String>,
+}
+
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind)` — the
@@ -1460,6 +1553,26 @@ pub trait GraphStore {
     ///
     /// [CR-148]: ../../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
     fn build_manifests(&self) -> Result<Vec<BuildManifestRow>>;
+
+    /// **The read API over one member's declared-type facts** (S-472,
+    /// [CR-152] §3.2 B): every type this member's last index or sync recorded,
+    /// from source and from Avro, each with its provenance path.
+    ///
+    /// Ordered by provenance path, then in the order each file's or schema's
+    /// facts were recorded (source node order, schema document order). Refused
+    /// facts are returned too — a caller indexing names filters on
+    /// `resolution`, and a census counts both. Empty for a member with no
+    /// Java/Kotlin/Avro file; read [`declared_types_extracted`] to tell that
+    /// member from one whose facts were never extracted.
+    ///
+    /// [`declared_types_extracted`]: GraphStore::declared_types_extracted
+    /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+    fn declared_types(&self) -> Result<Vec<DeclaredTypeRow>>;
+
+    /// Every Avro schema this member's last index or sync found, read or not,
+    /// ordered by path (S-472) — the schema denominator beside
+    /// [`declared_types`](GraphStore::declared_types).
+    fn avro_schemas(&self) -> Result<Vec<AvroSchemaRow>>;
 
     /// Every inbound edge of **any** kind: `(edge kind, source node)` pairs,
     /// ordered by `(kind, source id)`.
@@ -1901,6 +2014,17 @@ pub trait GraphStore {
     /// nothing about the member's manifests.
     fn build_facts_extracted(&self) -> Result<bool> {
         Ok(self.project_metadata(BUILD_FACTS_EXTRACTED_KEY)?.is_some())
+    }
+
+    /// Whether this member's declared-type facts are complete — the presence of
+    /// [`DECLARED_TYPES_EXTRACTED_KEY`] (S-472).
+    ///
+    /// `false` on a store upgraded across migration 24 until its first full
+    /// index or full-walk reconcile, and on a store never indexed: in both,
+    /// [`declared_types`](GraphStore::declared_types) being empty says nothing
+    /// about the member's types.
+    fn declared_types_extracted(&self) -> Result<bool> {
+        Ok(self.project_metadata(DECLARED_TYPES_EXTRACTED_KEY)?.is_some())
     }
 }
 
@@ -2410,6 +2534,51 @@ impl GraphStore for SqliteGraphStore {
                 .context("collecting build artifacts for manifest")?;
         }
         Ok(manifests.into_iter().map(|(_, m)| m).collect())
+    }
+
+    fn declared_types(&self) -> Result<Vec<DeclaredTypeRow>> {
+        self.conn
+            .prepare_cached(
+                "SELECT CASE WHEN d.file_id IS NULL THEN 'avro' ELSE 'source' END, \
+                        COALESCE(f.path, s.path), d.name, d.fqn, d.kind, d.symbol, d.tree, \
+                        d.resolution, d.reason \
+                 FROM declared_types d \
+                 LEFT JOIN files f ON f.id = d.file_id \
+                 LEFT JOIN avro_schemas s ON s.id = d.schema_id \
+                 ORDER BY 2, d.id",
+            )?
+            .query_map([], |row| {
+                Ok(DeclaredTypeRow {
+                    origin: row.get(0)?,
+                    path: row.get(1)?,
+                    name: row.get(2)?,
+                    fqn: row.get(3)?,
+                    kind: row.get(4)?,
+                    symbol: row.get(5)?,
+                    tree: row.get(6)?,
+                    resolution: row.get(7)?,
+                    reason: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting declared types")
+    }
+
+    fn avro_schemas(&self) -> Result<Vec<AvroSchemaRow>> {
+        self.conn
+            .prepare_cached(
+                "SELECT path, content_hash, status, detail FROM avro_schemas ORDER BY path",
+            )?
+            .query_map([], |row| {
+                Ok(AvroSchemaRow {
+                    path: row.get(0)?,
+                    content_hash: row.get(1)?,
+                    status: row.get(2)?,
+                    detail: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting Avro schemas")
     }
 
     fn neighbours_in(&self, id: NodeId) -> Result<Vec<(EdgeKind, NodeRow)>> {
@@ -3544,6 +3713,16 @@ fn first_identifier_token(text: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
+/// Migration 24's `resolution` token for a declared type: `refused` exactly
+/// when it carries a reason.
+fn resolution_token(t: &NewDeclaredType<'_>) -> &'static str {
+    if t.reason.is_some() {
+        "refused"
+    } else {
+        "resolved"
+    }
+}
+
 /// A writer scoped to an open transaction (see [`SqliteGraphStore::write_batch`]).
 ///
 /// Exposes the same insert primitives as the store, but every call participates
@@ -4005,6 +4184,94 @@ impl BatchWriter<'_> {
                     .with_context(|| format!("inserting a build artifact of {}", manifest.path))?;
             }
         }
+        Ok(())
+    }
+
+    /// Replace the declared-type facts a **source file** proves (S-472,
+    /// [CR-152] §3.2 B): delete the file's previous facts, then record `types`.
+    ///
+    /// Per file, the replace-wholesale contract
+    /// [`replace_config_source`](Self::replace_config_source) gives the
+    /// configuration corpus: a re-extract calls it for exactly the file it
+    /// re-extracts, so a one-file change moves only that file's facts. On a file
+    /// that never declared a type the delete matches no row and an empty
+    /// `types` writes none — a member with no Java/Kotlin source is
+    /// byte-for-byte unaffected. Removing the file cascades its facts away
+    /// (migration 24's FK).
+    ///
+    /// # Errors
+    /// Returns an error if a constraint fires (a token migration 24 does not
+    /// admit, a refusal without a reason, a source fact without a symbol) or
+    /// I/O fails.
+    ///
+    /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+    pub fn replace_file_declared_types(&self, file_id: i64, types: &[NewDeclaredType<'_>]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM declared_types WHERE file_id = ?1", [file_id])
+            .context("deleting the previous declared types of a file")?;
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO declared_types (file_id, name, fqn, kind, symbol, tree, resolution, reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for t in types {
+            stmt.execute(rusqlite::params![
+                file_id,
+                t.name,
+                t.fqn,
+                t.kind,
+                t.symbol,
+                t.tree,
+                resolution_token(t),
+                t.reason
+            ])
+            .with_context(|| format!("inserting declared type {}", t.name))?;
+        }
+        Ok(())
+    }
+
+    /// Record one Avro schema and its types, replacing whatever was recorded
+    /// under its path (S-472): the schema row is deleted — cascading its types
+    /// away — and re-inserted. Every other schema's facts are untouched, so a
+    /// one-schema change moves only that schema's facts.
+    ///
+    /// # Errors
+    /// Returns an error if a constraint fires or I/O fails.
+    pub fn replace_avro_schema(&self, schema: &NewAvroSchema<'_>) -> Result<()> {
+        self.delete_avro_schema(schema.path)?;
+        self.conn
+            .execute(
+                "INSERT INTO avro_schemas (path, content_hash, status, detail) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![schema.path, schema.content_hash, schema.status, schema.detail],
+            )
+            .with_context(|| format!("inserting Avro schema {}", schema.path))?;
+        let schema_id = self.conn.last_insert_rowid();
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO declared_types (schema_id, name, fqn, kind, resolution, reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for t in &schema.types {
+            stmt.execute(rusqlite::params![
+                schema_id,
+                t.name,
+                t.fqn,
+                t.kind,
+                resolution_token(t),
+                t.reason
+            ])
+            .with_context(|| format!("inserting a declared type of {}", schema.path))?;
+        }
+        Ok(())
+    }
+
+    /// Forget the Avro schema recorded under `path`, with its types (the FK
+    /// cascades). A path never recorded matches no row.
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn delete_avro_schema(&self, path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM avro_schemas WHERE path = ?1", [path])
+            .with_context(|| format!("deleting Avro schema {path}"))?;
         Ok(())
     }
 

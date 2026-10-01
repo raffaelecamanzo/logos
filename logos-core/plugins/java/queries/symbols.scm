@@ -29,3 +29,10 @@
 (field_declaration
   declarator: (variable_declarator
     name: (identifier) @symbol.field))
+
+; The file's `package` statement (S-472). Not a declaration — its capture group
+; is `package`, not `symbol`, so the declaration walk skips it; the declared-type
+; reader compares it with the package the file's directory keys it by, and a
+; disagreement is recorded refused rather than resolved to the path.
+(package_declaration
+  [(identifier) (scoped_identifier)] @package.name)

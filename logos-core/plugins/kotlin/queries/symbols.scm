@@ -50,3 +50,10 @@
   (property_declaration
     (variable_declaration
       (identifier) @symbol.field)))
+
+; The file's `package` header (S-472). Not a declaration — its capture group is
+; `package`, not `symbol`, so the declaration walk skips it; the declared-type
+; reader compares it with the package the file's directory keys it by, and a
+; disagreement is recorded refused rather than resolved to the path.
+(package_header
+  (qualified_identifier) @package.name)

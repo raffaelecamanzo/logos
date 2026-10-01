@@ -83,6 +83,18 @@ http_client_detectors = [
   "java::net::http",
 ]
 
+# A Kotlin file's module identity follows its PACKAGE (S-472, CR-152), exactly as
+# a Java file's does (CR-149, FR-RS-01) — the "data change later" CR-149 named for
+# Kotlin. Under a Gradle/Maven Kotlin source root the path after the root is the
+# package, so `src/main/kotlin/com/x/Svc.kt` keys as `com::x::Svc` and a type it
+# declares is named `com.x.<Type>` by the one derivation
+# (`resolve::package_key::PackageLayout`), which is how the declared-type facts
+# name it. A Kotlin file outside both roots keeps the default key. Both roots
+# are listed for the reason Java lists both: one fully-qualified name declared
+# under both is ambiguous and binds neither (NFR-RA-05).
+[package_modules]
+source_roots = ["src/main/kotlin", "src/test/kotlin"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"

@@ -13,6 +13,28 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **Members record the types they declare.** An index records every top-level Java/Kotlin
+  class, interface, enum and record under its package-aware fully-qualified name, with its
+  node's symbol and whether it sits in the main or the test tree, and every Avro `.avsc`
+  record and enum (nested named types included) under its namespace, with the schema's path.
+  A source file whose `package` statement disagrees with its directory is recorded refused
+  with both named; a malformed schema is recorded with its reason and yields no name. Store
+  migration 24 (two new tables); a store upgraded from 1.7.0 fills them on its first full
+  reconcile, which re-extracts the member's Java/Kotlin files once. A member with no
+  Java/Kotlin/Avro file gains only the empty tables and one marker row.
+
+### Changed
+
+- **Kotlin files are keyed by their package, as Java files are.** The Kotlin plugin now
+  declares `[package_modules]` under `src/main/kotlin` and `src/test/kotlin`, so a Kotlin
+  file there is `com.x.Svc` rather than `main::kotlin::com::x::Svc`: Kotlin imports of
+  in-repository types can bind, and a type declared under one name in both trees stays
+  unbound. Kotlin projects will see more resolved imports after their first full reconcile or
+  re-index, and `status` reports the Kotlin row's `call_residue` as it does Java's. Kotlin type
+  relations (`Extends`/`Implements`/`TypeUses`) are still not captured.
+
 ## [1.7.0] — 2026-09-30
 
 ### Added

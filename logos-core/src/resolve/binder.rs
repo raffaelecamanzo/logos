@@ -30,7 +30,7 @@
 //! 5. **workspace** — policy-gated unique-candidate fallbacks
 //!    ([`BindingPolicy`]).
 //!
-//! A file of a **package-shaped** language (Java, [CR-149]) is keyed by its
+//! A file of a **package-shaped** language (Java, [CR-149]; Kotlin, S-472) is keyed by its
 //! package ([`PackageLayout`]) and, after the lexical chain, takes its own
 //! rungs instead of 2–5: its single-type/static imports, the top-level types of
 //! its own package, what its wildcards bring into view, then a path read as a
