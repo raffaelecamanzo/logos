@@ -781,6 +781,8 @@ fn the_api_answers_owners_importers_symbols_and_members() {
 
     let lib = index.member("lib").expect("read");
     assert_eq!((lib.imports.len(), lib.imported_by.len(), lib.type_only.len()), (0, 3, 1));
+    let stray = index.member("stray").expect("read");
+    assert_eq!(stray.type_only.len(), 2, "the importer's end lists its type-only matches too");
     let app = index.member("app").expect("read");
     assert_eq!((app.imports.len(), app.imported_by.len()), (4, 0));
     assert!(index.member("nope").is_none());
