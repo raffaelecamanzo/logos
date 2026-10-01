@@ -938,7 +938,26 @@ mod fixtures {
     fn the_registry_keeps_target_references_and_the_spring_census() {
         let mut c = corpus(&[(FORK, Tier::Deploy, "x")]);
         c.spring_by_flat.insert("ab".into(), set(&["a-b"]));
+        // A target reference — what S-384's site judgement iterates: a
+        // registry without it would empty the fork-free path-only set.
+        c.targets.push(identity::TargetRef {
+            member: "agg".into(),
+            overlay: ".helm".into(),
+            label: "archive-api".into(),
+            scheme: "http".into(),
+            port: Some("9009".into()),
+            via_flat: "envfromarchiveapibaseurl".into(),
+            via_key: "envFrom.ARCHIVE_API_BASE_URL".into(),
+            file: "agg/.helm/values.yaml".into(),
+        });
         let r = scoped(&c, &["m"]);
+        let refs = |c: &Corpus| -> Vec<(String, String, String)> {
+            c.targets
+                .iter()
+                .map(|t| (t.member.clone(), t.label.clone(), t.via_flat.clone()))
+                .collect()
+        };
+        assert_eq!(refs(&r), refs(&c));
         assert_eq!(r.spring_by_flat, c.spring_by_flat);
         assert_eq!(r.members, c.members);
         assert!(r.claims.is_empty());
