@@ -13,6 +13,42 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **The workspace chat is its own service, route and store** (`agents` builds, workspace
+  serve only). `POST /workspace/chat` runs a turn with the same intent guard, host guard,
+  consent disclosure and SSE/buffered contract as `POST /chat`; its conversations are at
+  `GET /api/v1/workspace/chat/threads[/{id}]` and `POST …/{id}/delete`. It ignores `?repo=`
+  and answers `404` in a single-root or `--standalone` serve. Its policy and credential come
+  from the workspace tier alone — a member's own `[chat]` does not configure it, and the
+  configure-first state names the workspace root and the missing half. Turns are stored in
+  `<workspace root>/.logos/chat.db`, which the generated workspace-root ignore entry now
+  covers; no member's `chat.db` is created or changed. There is no in-app view yet.
+- **A workspace-centred chat roster.** The workspace chat's planner and Synthesizer are told
+  the workspace's members and their kinds; a Workspace-Analyst holds the workspace
+  read-model tools (`workspace_status`, `workspace_reachability`, `workspace_check`,
+  `xservice_build_deps`, `workspace_roster`) and the four `xservice_*` tools under its own
+  cap; Graph-Navigator, Governance-Analyst and Source-Reader take a required `repo` and open
+  only the member they address, reading through that member's own sandbox and its
+  *effective* `[chat] read_roots`. The Synthesizer ranks members by their own named signals
+  and never states a composite workspace score.
+- **Follow-up chat turns see prior turns.** The planner and the Synthesizer of both chats
+  receive a bounded window of the thread's earlier turns, oldest first, bounded by two new
+  `[chat]` keys: `history_max_turns` (default 6, in `[1, 50]`) and `history_max_chars`
+  (default 16000, in `[1, 200000]`). When turns are dropped the prompt says how many. The
+  first turn of a thread renders exactly as before.
+- **Cross-service answers name the members they read.** `xservice callers`, `impact` and
+  `route-providers` — CLI `--json`, MCP and `/api/v1/workspace/*` — carry a `member_reads`
+  field: `read`, and `unread` with each member's reason.
+
+### Changed
+
+- **The member chat in a workspace serve is single-backing.** `/chat?repo=<member>` no
+  longer carries the `xservice_*` tools or the federated addenda; cross-service questions
+  belong to the workspace chat.
+- **A warm cross-service bridge reads only the members a query needs** instead of every
+  member's sync stamp on each query; results are unchanged.
+
 ## [1.8.1] — 2026-10-01
 
 ### Changed
