@@ -556,6 +556,24 @@ fn a_pair_with_unread_build_facts_is_never_bound_and_never_type_only() {
     assert!(index.pair_unread.iter().all(|r| r.evidence == PairEvidence::PairUnread));
 }
 
+/// The owner's side too: with `lib`'s build facts unread, `stray`'s import of
+/// `Dto` is pair-unread — nobody read whether `stray` builds against `lib` —
+/// never type-only.
+#[test]
+fn a_pair_whose_owner_has_unread_build_facts_is_pair_unread() {
+    let federation = fed(&MEMBERS, &[]);
+    let mut facts = build_facts();
+    facts.retain(|(m, _)| m != "lib");
+    let build = join(&federation.members, &federation.member_kinds, &facts, &["lib".to_string()]);
+    let index = build_index(&federation.members, &type_facts(), &[], &build);
+    assert!(
+        index.pair_unread.iter().any(|r| r.importer.member == "stray" && r.owner.member == "lib"),
+        "{:?}",
+        keys(&index.pair_unread)
+    );
+    assert!(index.type_only.iter().all(|r| r.owner.member != "lib"), "{:?}", keys(&index.type_only));
+}
+
 // ── the headline ──────────────────────────────────────────────────────────
 
 /// **Every row in exactly one bucket**, the headline beside them, in one line.
