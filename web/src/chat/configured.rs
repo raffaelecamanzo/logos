@@ -94,6 +94,10 @@ impl ConfiguredChatService {
 /// orchestrator run. One shape and one constructor ([`prepare_turn`]), so the two
 /// chats cannot drift on how a conversation is opened, recorded and bounded.
 pub(super) struct TurnSetup {
+    /// The root whose `.logos/chat.db` holds the conversation — where the
+    /// question was recorded, and so where the scratchpad and the durable answer
+    /// go ([`into_run`](Self::into_run)): one value, so the two cannot diverge.
+    pub(super) store_root: PathBuf,
     pub(super) memory: Arc<MemoryStore>,
     pub(super) thread_id: i64,
     pub(super) turn: i64,
@@ -115,12 +119,13 @@ pub(super) struct TurnSetup {
 impl TurnSetup {
     /// Split the setup into what the roster runs on and what dials the provider,
     /// grounding the Synthesizer on the turn's memory and aiming the scratchpad
-    /// and durable answer at `store_root`'s `.logos/chat.db` — the store the
-    /// setup recorded the question in ([FR-UI-26] AC-2).
+    /// and durable answer at the store the setup recorded the question in
+    /// ([FR-UI-26] AC-2).
     ///
     /// [FR-UI-26]: ../../../docs/specs/requirements/FR-UI-26.md
-    pub(super) fn into_run(self, store_root: PathBuf, question: String) -> (TurnRun, Dial) {
+    pub(super) fn into_run(self, question: String) -> (TurnRun, Dial) {
         let TurnSetup {
+            store_root,
             memory,
             thread_id,
             turn,
@@ -265,6 +270,7 @@ pub(super) fn prepare_turn(
     );
 
     Ok(TurnSetup {
+        store_root: store_root.to_path_buf(),
         memory,
         thread_id,
         turn,
@@ -283,11 +289,10 @@ pub(super) fn prepare_turn(
 impl ChatService for ConfiguredChatService {
     fn start_turn(&self, question: String, thread_id: Option<i64>) -> ChatStream {
         let engine = Arc::clone(&self.engine);
-        let root = engine.root().to_path_buf();
+        let setup_root = engine.root().to_path_buf();
         let workspace_root = self.workspace_root.clone();
         let setup_question = question.clone();
-        let setup_root = root.clone();
-        spawn_configured_turn(root, question, move || {
+        spawn_configured_turn(question, move || {
             let ChatSetup { sandbox, turn } = build_setup(
                 &setup_root,
                 workspace_root.as_deref(),
@@ -367,11 +372,12 @@ impl RosterLaunch for MemberRoster {
 /// Spawn a configured turn: run `setup` (config resolution, sandbox, stores) on
 /// the blocking pool ([ADR-03]), then build the provider the resolved policy
 /// names, preflight it, and launch the roster `setup` returned — the shared
-/// production turn body of both chats. `store_root` is where the turn's
-/// scratchpad and durable answer are written: the member root, or the
-/// workspace root for the workspace chat. A configure-first or setup fault is an
-/// honest single `error` frame, never a crash ([NFR-CC-04]).
-pub(super) fn spawn_configured_turn<L, F>(store_root: PathBuf, question: String, setup: F) -> ChatStream
+/// production turn body of both chats. The turn's scratchpad and durable answer
+/// are written to the store `setup` recorded the question in
+/// ([`TurnSetup::store_root`]): the member root, or the workspace root for the
+/// workspace chat. A configure-first or setup fault is an honest single `error`
+/// frame, never a crash ([NFR-CC-04]).
+pub(super) fn spawn_configured_turn<L, F>(question: String, setup: F) -> ChatStream
 where
     L: RosterLaunch,
     F: FnOnce() -> Result<(TurnSetup, L), String> + Send + 'static,
@@ -397,8 +403,7 @@ where
 
         // The scratchpad AND the durable answer go to the same `.logos/chat.db`
         // the setup recorded the user's question in ([FR-UI-26] AC-2).
-        let (run, Dial { provider, model_id, api_key, base_url, retry }) =
-            setup.into_run(store_root, question);
+        let (run, Dial { provider, model_id, api_key, base_url, retry }) = setup.into_run(question);
 
         // Resolve the provider config, then run the deterministic pre-send
         // preflight ([S-199], [FR-UI-24]): a model is set, the key is present,

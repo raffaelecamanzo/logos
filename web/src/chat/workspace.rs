@@ -73,11 +73,10 @@ impl WorkspaceChatService {
 
 impl ChatService for WorkspaceChatService {
     fn start_turn(&self, question: String, thread_id: Option<i64>) -> ChatStream {
-        let root = self.workspace_root();
+        let setup_root = self.workspace_root();
         let xservice = self.xservice.clone();
-        let setup_root = root.clone();
         let setup_question = question.clone();
-        spawn_configured_turn(root, question, move || {
+        spawn_configured_turn(question, move || {
             let turn = build_workspace_setup(&setup_root, thread_id, &setup_question)?;
             Ok((turn, WorkspaceLaunch(xservice)))
         })
@@ -402,7 +401,7 @@ mod tests {
     ) -> (i64, Vec<ChatFrame>) {
         let setup = build_workspace_setup(ws, thread, question).expect("a configured tier");
         let thread_id = setup.thread_id;
-        let (run, _dial) = setup.into_run(ws.to_path_buf(), question.to_string());
+        let (run, _dial) = setup.into_run(question.to_string());
         let (tx, mut rx) = unbounded_chat_channel();
         launch_workspace(xs.clone(), model, run, tx).await;
         let mut frames = Vec::new();
