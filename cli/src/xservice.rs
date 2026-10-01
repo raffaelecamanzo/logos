@@ -13,13 +13,14 @@
 //! [FR-WS-05]: ../../docs/specs/requirements/FR-WS-05.md
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
     app_wide_reachability, cross_service_coverage, discover, open_state, query, workspace_governance,
     xservice_build_deps, BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope,
-    RegistryMode,
+    RegistryMode, TypeReferenceIndex, TypeReferences,
 };
 use logos_core::{model::NodeKind, Engine};
 
@@ -65,6 +66,15 @@ pub(crate) enum XserviceCommands {
     },
     /// Cross-service callers of a symbol: each member's intra-repo callers plus
     /// the cross-service consumers that reach it over a bridge edge.
+    ///
+    /// Apart from those, never merged with them, `via_type_reference` lists the
+    /// importers an advisory type reference reaches ([FR-WS-35], [BR-60]) — for
+    /// a type's node or its dotted name — each tagged `via type reference` with
+    /// the reference, whose importer (member, file, line) is the class-grain
+    /// caller; absent when none.
+    ///
+    /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
+    /// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation
     Callers {
         /// Symbol whose cross-service callers to list.
         symbol: String,
@@ -77,6 +87,15 @@ pub(crate) enum XserviceCommands {
     },
     /// Cross-service impact of changing a symbol: the seed member's impact plus
     /// the far member's impact stitched across each bridge edge.
+    ///
+    /// Apart from those, never merged with them, `via_type_reference` carries
+    /// each importing file reached through an advisory type reference
+    /// ([FR-WS-35], [BR-60]) — for a type's node or its dotted name — tagged
+    /// `via type reference` with the reference, and the files depending on it
+    /// in its member; absent when none.
+    ///
+    /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
+    /// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation
     Impact {
         /// Symbol whose cross-service impact to trace.
         symbol: String,
@@ -118,6 +137,25 @@ pub(crate) enum XserviceCommands {
     #[command(name = "build-deps", alias = "build_deps")]
     BuildDeps {
         /// Scope to one workspace member.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Cross-member type references ([FR-WS-35]): per provider member, the
+    /// types other members import — an import of a type exactly one other
+    /// member declares, in main-tree source or an Avro schema, between members
+    /// the build relation relates — each importer with its file and line, under
+    /// the `type_reference` headline beside its denominators.
+    ///
+    /// An **advisory type reference, never a coupling** ([BR-60]): no row is a
+    /// bridge edge or enters a coverage or build figure. `--repo` scopes the
+    /// listing to one provider member while the headline stays workspace-wide;
+    /// a name that is not a member read says so in `scope_note`.
+    ///
+    /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
+    /// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation
+    #[command(name = "type-refs", alias = "type_refs")]
+    TypeRefs {
+        /// Scope to one provider member.
         #[arg(long)]
         repo: Option<String>,
     },
@@ -226,14 +264,10 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
             repo,
         } => {
             let (edges, residue) = query::reachability_inputs(&bridge, &registry);
-            out.print(&query::xservice_callers(
-                &registry,
-                &edges,
-                &residue,
-                &symbol,
-                limit,
-                repo.as_deref(),
-            ))?;
+            out.print(
+                &query::xservice_callers(&registry, &edges, &residue, &symbol, limit, repo.as_deref())
+                    .with_type_references(&registry, &type_references(&registry)),
+            )?;
         }
         XserviceCommands::Impact {
             symbol,
@@ -241,14 +275,10 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
             repo,
         } => {
             let (edges, residue) = query::reachability_inputs(&bridge, &registry);
-            out.print(&query::xservice_impact(
-                &registry,
-                &edges,
-                &residue,
-                &symbol,
-                depth,
-                repo.as_deref(),
-            ))?;
+            out.print(
+                &query::xservice_impact(&registry, &edges, &residue, &symbol, depth, repo.as_deref())
+                    .with_type_references(&registry, &type_references(&registry)),
+            )?;
         }
         XserviceCommands::Search {
             query: q,
@@ -268,8 +298,20 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
             let relation = BuildDependencies::new().relation(&registry);
             out.print(&xservice_build_deps(&relation, repo.as_deref()))?;
         }
+        XserviceCommands::TypeRefs { repo } => {
+            out.print(&query::xservice_type_refs(&type_references(&registry), repo.as_deref()))?;
+        }
     }
     Ok(0)
+}
+
+/// The type-reference overlay over `registry` ([FR-WS-35]), built once for a
+/// CLI one-shot: its build relation comes from a fresh holder, exactly as
+/// `build-deps` joins it.
+///
+/// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
+fn type_references(registry: &EngineRegistry<Engine>) -> Arc<TypeReferenceIndex> {
+    TypeReferences::new().index(registry, &BuildDependencies::new())
 }
 
 /// Route one `workspace` subcommand to its read-model, then map the workspace's

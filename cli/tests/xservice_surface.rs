@@ -998,8 +998,8 @@ fn the_xservice_group_keeps_exit_zero_over_a_degraded_workspace() {
     );
     // … and every `xservice` subcommand still exits 0. "Every" is read off the
     // shipped `xservice --help`, not a hand list — a later subcommand
-    // (`build-deps`, S-464) with no representative invocation below fails here
-    // instead of silently escaping the boundary.
+    // (`build-deps`, S-464; `type-refs`, S-474) with no representative
+    // invocation below fails here instead of silently escaping the boundary.
     let help = logos(tmp.path(), &["xservice", "--help"]);
     assert!(help.status.success(), "xservice --help runs");
     let text = String::from_utf8(help.stdout).expect("utf8 help");
@@ -1020,6 +1020,7 @@ fn the_xservice_group_keeps_exit_zero_over_a_degraded_workspace() {
             "impact" => &["xservice", "impact", "f", "--json"],
             "search" => &["xservice", "search", "f", "--json"],
             "build-deps" => &["xservice", "build-deps", "--json"],
+            "type-refs" => &["xservice", "type-refs", "--json"],
             other => panic!(
                 "`xservice {other}` has no representative invocation here — add one so its \
                  degraded exit code is pinned (CR-100 §4.4 scope)"
@@ -1032,6 +1033,16 @@ fn the_xservice_group_keeps_exit_zero_over_a_degraded_workspace() {
             "{args:?} is outside CR-100 §4.4's scope and must not gate: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        // Exit 0 is not silence: `type-refs` names the unopenable member inside
+        // its answer, with its reason, rather than aborting or dropping it
+        // (ADR-53, S-474).
+        if name == "type-refs" {
+            let answer: Value = serde_json::from_slice(&out.stdout).expect("type-refs --json is JSON");
+            assert_eq!(
+                answer["headline"]["members"]["unread_reasons"]["broken"], "declared types could not be read",
+                "the degraded member is a per-member error inside the answer: {answer}"
+            );
+        }
     }
 }
 

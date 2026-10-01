@@ -96,8 +96,8 @@ fn single_root_roster_is_the_declared_set_with_no_repo_dimension() {
 /// The single-root tools appear **byte-identical** under the federated
 /// backing, which adds exactly the declared cross-service tools on top
 /// (FR-WS-05, plus S-257's `workspace_reachability` union view, FR-WS-12,
-/// S-258's `workspace_check` governance tool, FR-WS-13, and S-464's
-/// `xservice_build_deps`, FR-WS-33).
+/// S-258's `workspace_check` governance tool, FR-WS-13, S-464's
+/// `xservice_build_deps`, FR-WS-33, and S-474's `xservice_type_refs`, FR-WS-35).
 #[test]
 fn federated_backing_adds_xservice_without_touching_the_single_roster() {
     let single = single_tools();
@@ -332,4 +332,52 @@ fn route_providers_and_status_name_the_declared_relations_as_declared_not_observ
         status.contains("a bound-external row stays `no-provider-in-workspace`"),
         "the status description says the bound row does not move: {status}",
     );
+}
+
+/// `xservice_type_refs` is federation-only, takes the `repo` scope, and its
+/// description says the reference is **advisory** and **not a coupling**
+/// ([BR-60]) — the two words an agent must not miss, because an importer looks
+/// exactly like the cross-service callers its sibling tools return. The
+/// `callers`/`impact` descriptions name their `via_type_reference` section as
+/// apart from `cross_service` and tagged `via type reference`.
+///
+/// Near misses pinned out: "a coupling" alone would match a sentence asserting
+/// one, so the check is the negated phrase; and "advisory" is checked in the
+/// type-refs description itself, not in a sibling's.
+///
+/// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn xservice_type_refs_says_it_is_advisory_and_not_a_coupling() {
+    assert!(
+        !single_tools().iter().any(|t| t.name == "xservice_type_refs"),
+        "xservice_type_refs must not exist without a workspace manifest",
+    );
+    let federated = federated_tools();
+    let description = |name: &str| {
+        federated
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("the federated backing registers {name}"))
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let text = description("xservice_type_refs");
+    for phrase in ["advisory", "not a coupling", "NOT A COUPLING (BR-60)"] {
+        assert!(text.contains(phrase), "the description says {phrase:?}: {text}");
+    }
+    for field in ["`providers`", "`importers`", "`file`", "`line`", "`headline`", "`scope_note`"] {
+        assert!(text.contains(field), "the description names {field}: {text}");
+    }
+    let tool = federated.iter().find(|t| t.name == "xservice_type_refs").unwrap();
+    let schema = serde_json::to_string(&tool.input_schema).expect("schema serialises");
+    assert!(schema.contains("\"repo\""), "the tool takes the repo scope: {schema}");
+
+    for name in ["xservice_callers", "xservice_impact"] {
+        let text = description(name);
+        for clause in ["`via_type_reference`", "APART FROM `cross_service`", "via type reference", "NOT a coupling"] {
+            assert!(text.contains(clause), "{name} names its type-reference section with {clause:?}: {text}");
+        }
+    }
 }

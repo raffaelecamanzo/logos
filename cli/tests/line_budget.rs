@@ -380,12 +380,34 @@ fn adapter_lines() -> usize {
 ///
 /// [CR-148]: ../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
 /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
+///
+/// **S-474/[CR-152] 900→906** for `xservice type-refs` and the type-reference
+/// stitch in `callers`/`impact` ([FR-WS-35]): measured 899→903 (+4), 3 lines of
+/// headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `TypeRefs { repo }` variant (`#[command]`, the field and its `#[arg]`) | **+5** |
+/// | its dispatch arm (one `xservice_type_refs` print) | **+3** |
+/// | `type_references`, the one-shot overlay (one `TypeReferences::index` over a fresh `BuildDependencies`) | **+3** |
+/// | `use std::sync::Arc` for that helper's return type | **+1** |
+/// | the `callers`/`impact` arms: each chains one `.with_type_references(…)`, and the call folds from 8 lines to 4 | **−8** |
+/// | | **+4** |
+///
+/// Delegation only: the listing, the scope note, the stitch's match, the
+/// importer's file closure and the per-member error all live in
+/// `logos_core::federation::query`, shared with the MCP twin. The helper is
+/// shared by the three arms rather than repeated in each, which is what keeps
+/// the reflowed arms one line apiece.
+///
+/// [CR-152]: ../../docs/requests/CR-152-cross-member-type-references-overlay.md
+/// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 900,
-        "cli adapter exceeds the 900 production-LOC budget (NFR-MA-02): \
+        lines <= 906,
+        "cli adapter exceeds the 906 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

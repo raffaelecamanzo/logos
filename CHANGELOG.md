@@ -36,6 +36,19 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   never a bridge edge, a coupling or a gate input: the coverage figures, the build headline
   and every member's `scan`/`gate` are unchanged. A workspace with no Java/Kotlin/Avro member
   shows no new section.
+- **`logos xservice type-refs [--repo]` lists the type references, and `callers`/`impact`
+  follow them.** Per provider member, `type-refs` lists the types other members import, each
+  with its declaration and every importer's file and line, under the `type_reference`
+  headline beside its denominators; `--repo` scopes the listing to one provider, and a name
+  that is not a member read answers a `scope_note` instead of an error. The MCP twin is
+  `xservice_type_refs`. `xservice callers` and `xservice impact` on a type — its node, or its
+  dotted name, the only handle an Avro type has — add a `via_type_reference` section, apart
+  from the bridge-reached results and never merged with them: each entry is tagged
+  `via type reference` with the reference it was reached through, and for `impact` carries the
+  files depending on the importing file in its member, or that member's error when it will not
+  open. A symbol no type reference names answers exactly as before. Advisory, never a
+  coupling. As with every `xservice_*` tool, `logos serve --mcp` does not yet route the twin:
+  it serves the single-root engine even inside a workspace.
 
 ### Changed
 
