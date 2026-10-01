@@ -200,23 +200,13 @@ fn reachability(registry: &EngineRegistry<Engine>, index: &TypeReferenceIndex, s
     let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), registry);
     let callers = || query::xservice_callers(registry, &edges, &residue, symbol, None, None);
     let impact = || query::xservice_impact(registry, &edges, &residue, symbol, None, None);
-    let json = |v: &dyn erased::Ser| v.to_value();
+    fn json(v: &impl serde::Serialize) -> Value {
+        serde_json::to_value(v).expect("the read-model serializes")
+    }
     [
         (json(&callers()), json(&callers().with_type_references(registry, index))),
         (json(&impact()), json(&impact().with_type_references(registry, index, None))),
     ]
-}
-
-/// Serialize either read-model without naming its type.
-mod erased {
-    pub trait Ser {
-        fn to_value(&self) -> serde_json::Value;
-    }
-    impl<T: serde::Serialize> Ser for T {
-        fn to_value(&self) -> serde_json::Value {
-            serde_json::to_value(self).expect("the read-model serializes")
-        }
-    }
 }
 
 /// **The listing** ([FR-WS-35]): per provider member, in roster order, each
