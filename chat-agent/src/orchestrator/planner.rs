@@ -435,6 +435,26 @@ mod tests {
         }
     }
 
+    /// The workspace planner is told how to narrow ([FR-WS-34]) — name the member
+    /// in each repo-addressed step, one step per member — and that an UNRESOLVED or
+    /// NOT CHECKED reading reaches the answer as such, never as "none" ([BR-53]).
+    ///
+    /// [FR-WS-34]: ../../../docs/specs/requirements/FR-WS-34.md
+    /// [BR-53]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[test]
+    fn the_workspace_planner_is_told_to_narrow_by_member_and_to_carry_the_residue() {
+        let preamble = workspace_planner_preamble(&federation(&[("api", None)], None));
+        for sentence in [
+            "graph_navigator, governance_analyst and source_reader each address one member: name \
+             that member in the step's instruction exactly as it is listed above. To look into \
+             several members, give each its own step.",
+            "An observation line marked UNRESOLVED or NOT CHECKED means a cross-service answer is \
+             incomplete: it must reach the answer as such, never as \"none\".",
+        ] {
+            assert!(preamble.contains(sentence), "{sentence}\n---\n{preamble}");
+        }
+    }
+
     /// Both planner preambles teach the same two JSON decisions, and each
     /// example parses as the decision it names — the contract cannot drift
     /// between the two rosters' planners.
