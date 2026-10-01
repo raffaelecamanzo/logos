@@ -348,6 +348,16 @@ mod static_import_routes;
 #[path = "operand_resolvability/sequence_addressed_pairs.rs"]
 mod sequence_addressed_pairs;
 
+/// S-479's read-only measurement of the first-party TypeScript method-call
+/// residue by receiver shape — its own module, so the classifier does not
+/// co-edit a sibling gate. Reads member stores through the shipped read-only
+/// open and parses with the shipped TypeScript grammars; it starts no engine.
+///
+/// `#[path]`-attached for the same reason every sibling above is: a plain
+/// `tests/ts_method_residue.rs` would become a second cargo test target.
+#[path = "operand_resolvability/ts_method_residue.rs"]
+mod ts_method_residue;
+
 /// S-374's recorded verdict, reproduced by
 /// [`measure_recorded_client_call_refusals_over_the_reference_workspace`] and
 /// printed by it.
