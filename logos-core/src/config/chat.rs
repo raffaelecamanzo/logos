@@ -914,32 +914,30 @@ mod tests {
             matches!(r, Err(ConfigError::InvalidValue { ref key, .. }) if key == want)
         };
 
-        assert!(names(
-            bad(ChatConfig { history_max_turns: 0, ..Default::default() }),
-            "chat.history_max_turns"
-        ));
-        assert!(names(
-            bad(ChatConfig {
-                history_max_turns: MAX_HISTORY_TURNS_CEILING + 1,
-                ..Default::default()
-            }),
-            "chat.history_max_turns"
-        ));
-        assert!(names(
-            bad(ChatConfig { history_max_chars: 0, ..Default::default() }),
-            "chat.history_max_chars"
-        ));
-        assert!(names(
-            bad(ChatConfig {
-                history_max_chars: MAX_HISTORY_CHARS_CEILING + 1,
-                ..Default::default()
-            }),
-            "chat.history_max_chars"
-        ));
-        for ok in [1, MAX_HISTORY_TURNS_CEILING] {
+        // Literals, not the ceiling constants: the documented ranges [1, 50] and
+        // [1, 200000] are what is pinned, so moving a constant fails here.
+        for bad_turns in [0, 51] {
+            assert!(
+                names(
+                    bad(ChatConfig { history_max_turns: bad_turns, ..Default::default() }),
+                    "chat.history_max_turns"
+                ),
+                "{bad_turns} must be rejected"
+            );
+        }
+        for bad_chars in [0, 200_001] {
+            assert!(
+                names(
+                    bad(ChatConfig { history_max_chars: bad_chars, ..Default::default() }),
+                    "chat.history_max_chars"
+                ),
+                "{bad_chars} must be rejected"
+            );
+        }
+        for ok in [1, 50] {
             assert!(bad(ChatConfig { history_max_turns: ok, ..Default::default() }).is_ok());
         }
-        for ok in [1, MAX_HISTORY_CHARS_CEILING] {
+        for ok in [1, 200_000] {
             assert!(bad(ChatConfig { history_max_chars: ok, ..Default::default() }).is_ok());
         }
     }
