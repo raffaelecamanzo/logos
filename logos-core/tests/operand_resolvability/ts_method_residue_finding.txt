@@ -27,7 +27,7 @@ RESULT
 DENOMINATOR first-party .ts/.tsx: method-form Calls rows 510, resolved 58, unresolved 452
 SHAPES first-party .ts/.tsx: this.<field> (declared type) 50 · imported symbol 5 · library/global 96 · chained/untyped 301 (sum 452)
 UPPER BOUND first-party .ts/.tsx: would bind 20 of 452 (self-tie 0 · cross-class 20 · via supertype 0) · ambiguous 0 (two types 0 · two callables 0)
-INFERENCE EXTENSION first-party .ts/.tsx (not the declared-type rule): of 82 untyped this.f rows, 56 have an inject(T)/new T() initialiser; would bind 14 more (self-tie 0 · cross-class 14 · via supertype 0) · ambiguous 0
+INFERENCE EXTENSION first-party .ts/.tsx (not the declared-type rule): of 82 untyped this.f rows, 60 have an inject(T)/new T() initialiser; would bind 18 more (self-tie 0 · cross-class 18 · via supertype 0) · ambiguous 0
 
 DENOMINATOR first-party .js: method-form Calls rows 300, resolved 42, unresolved 258
 SHAPES first-party .js: this.<field> (declared type) 0 · imported symbol 41 · library/global 66 · chained/untyped 151 (sum 258)
@@ -48,8 +48,8 @@ On the stated denominator a declared-type receiver rule — CR-150's approach,
 transposed — reaches at most 20 of 452 unresolved rows (4.4 %). If every one of
 them bound, first-party .ts method-form resolution would move from 58 of 510
 (11.4 %) to at most 78 of 510 (15.3 %). Adding the initialiser inference that is
-NOT a declared-type rule (Angular `inject(T)`, `new T()`) lifts the bound to 34
-(7.5 %). All 20 sit in one member, pec-agid-statistics-informer, the estate's only
+NOT a declared-type rule (Angular `inject(T)`, `new T()`) lifts the bound to 38
+(8.4 %). All 20 sit in one member, pec-agid-statistics-informer, the estate's only
 first-party TypeScript application. Precision is not what limits it (0 ambiguous,
 0 self-ties); reach is, and the residue is not reach a receiver-typing rule can buy:
 
@@ -96,7 +96,7 @@ Outcome split, first-party .ts (452):
 Outcome split, first-party .js (258): would bind 86 — 84 via supertype (webmail
 selenium page objects calling, with `this.m()`, methods inherited from BasePage
 and the layout classes between it and the page) and the 2
-name-coincidence rows above; misses 172 (no receiver type 115, type not in member 57).
+name-coincidence rows above; misses 172 (no receiver type 114, type not in member 58).
 
 
 SUB-SHAPES (first-party .ts, 452)

@@ -510,6 +510,18 @@ pub struct Initialiser {
     pub ty: Option<String>,
 }
 
+/// The type an expression names, as `inject(…)`'s argument or `new …()`'s
+/// constructor spells it: `T`, `T<A, B>` (an `instantiation_expression`), or
+/// `ns.T` (its last segment).
+pub fn type_name_of(n: Node, src: &str) -> Option<String> {
+    match n.kind() {
+        "identifier" => Some(text(n, src).to_string()),
+        "instantiation_expression" => n.named_child(0).and_then(|c| type_name_of(c, src)),
+        "member_expression" => n.child_by_field_name("property").map(|p| text(p, src).to_string()),
+        _ => None,
+    }
+}
+
 impl Initialiser {
     pub fn read(value: Option<Node>, src: &str) -> Self {
         let Some(v) = value else {
@@ -522,8 +534,7 @@ impl Initialiser {
                 let arg = v
                     .child_by_field_name("arguments")
                     .and_then(|a| a.named_child(0))
-                    .filter(|a| a.kind() == "identifier")
-                    .map(|a| text(a, src).to_string());
+                    .and_then(|a| type_name_of(a, src));
                 match name {
                     Some("inject") => Initialiser { label: "inject(T)".into(), ty: arg },
                     Some(n) => Initialiser { label: format!("{n}()"), ty: None },
@@ -532,10 +543,7 @@ impl Initialiser {
             }
             "new_expression" => Initialiser {
                 label: "new T()".into(),
-                ty: v
-                    .child_by_field_name("constructor")
-                    .filter(|c| c.kind() == "identifier")
-                    .map(|c| text(c, src).to_string()),
+                ty: v.child_by_field_name("constructor").and_then(|c| type_name_of(c, src)),
             },
             kind => Initialiser { label: kind.into(), ty: None },
         }
@@ -702,12 +710,9 @@ pub fn receiver(
         "as_expression" | "satisfies_expression" => {
             (Sub::Other, obj.named_child(1).and_then(|t| type_head(t, src)))
         }
-        "new_expression" => (
-            Sub::Other,
-            obj.child_by_field_name("constructor")
-                .filter(|c| c.kind() == "identifier")
-                .map(|c| text(c, src).to_string()),
-        ),
+        "new_expression" => {
+            (Sub::Other, obj.child_by_field_name("constructor").and_then(|c| type_name_of(c, src)))
+        }
         _ => (Sub::Other, None),
     }
 }
@@ -1568,6 +1573,16 @@ export class Wizard {
             (Shape::ChainedUntyped, Sub::LocalTyped, Some("Foo".into())),
             "an unannotated same-name declaration never poisons the annotated one (toward binding)"
         );
+    }
+
+    #[test]
+    fn an_initialiser_names_its_type_through_generics_and_qualified_names() {
+        let s = "class K {\n  q = inject(QueryService<A, B>);\n  r = new ns.Repo();\n  t = new Box<T>();\n  m() { this.q.a(); this.r.b(); this.t.c(); new ns.Repo().d(); }\n}";
+        let init = |m: &str| site(s, m).init.and_then(|i| i.ty);
+        assert_eq!(init("a"), Some("QueryService".into()), "inject(T<A, B>) names T");
+        assert_eq!(init("b"), Some("Repo".into()), "new ns.T() names T");
+        assert_eq!(init("c"), Some("Box".into()), "new T<U>() names T");
+        assert_eq!(site(s, "d").ty, Some("Repo".into()), "a `new ns.T()` receiver names T");
     }
 
     // ── Site location ───────────────────────────────────────────────────────
