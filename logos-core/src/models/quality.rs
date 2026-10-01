@@ -839,6 +839,12 @@ pub struct ScanResult {
     pub temporal: TemporalTier,
     /// Degradations (reconcile skips, unreadable files) — never an error.
     pub warnings: Vec<String>,
+    /// Advisory notes — never a `warnings` entry, so a CI parser scanning
+    /// `warnings` is unaffected (CR-119, HF-1). Carries the reconcile's
+    /// minified-JS exclusion notice; elided from the serialized report when
+    /// empty, so a run with nothing to note renders byte-identical to before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// The non-gated temporal tier rendered in scan detail ([FR-GH-07]).
@@ -1162,6 +1168,12 @@ pub struct GateResult {
     pub message: String,
     /// Degradations — never an error.
     pub warnings: Vec<String>,
+    /// Advisory notes — never a `warnings` entry, so a CI parser scanning
+    /// `warnings` is unaffected (CR-119, HF-1). Carries the reconcile's
+    /// minified-JS exclusion notice; elided from the serialized report when
+    /// empty, so a run with nothing to note renders byte-identical to before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// The Health bundle's snapshot-derived pair ([FR-UI-04]): the read-only gate
@@ -1256,6 +1268,12 @@ pub struct RulesReport {
     pub freshness: String,
     /// Degradations — never an error.
     pub warnings: Vec<String>,
+    /// Advisory notes — never a `warnings` entry, so a CI parser scanning
+    /// `warnings` is unaffected (CR-119, HF-1). Carries the reconcile's
+    /// minified-JS exclusion notice; elided from the serialized report when
+    /// empty, so a run with nothing to note renders byte-identical to before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl RulesReport {
@@ -1341,6 +1359,12 @@ pub struct DsmReport {
     pub freshness: String,
     /// Degradations — never an error.
     pub warnings: Vec<String>,
+    /// Advisory notes — never a `warnings` entry, so a CI parser scanning
+    /// `warnings` is unaffected (CR-119, HF-1). Carries the reconcile's
+    /// minified-JS exclusion notice; elided from the serialized report when
+    /// empty, so a run with nothing to note renders byte-identical to before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// One row (= column) of the DSM.
@@ -1382,6 +1406,12 @@ pub struct DocGapsReport {
     pub freshness: String,
     /// Degradations — never an error.
     pub warnings: Vec<String>,
+    /// Advisory notes — never a `warnings` entry, so a CI parser scanning
+    /// `warnings` is unaffected (CR-119, HF-1). Carries the reconcile's
+    /// minified-JS exclusion notice; elided from the serialized report when
+    /// empty, so a run with nothing to note renders byte-identical to before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// One undocumented exported function/method (FR-GV-14).

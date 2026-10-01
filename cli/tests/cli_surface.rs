@@ -357,6 +357,49 @@ fn the_zero_admission_warning_becomes_a_root_scope_note_after_enrolment() {
     );
 }
 
+// ── HF-1: the minified-JS exclusion notice is advisory, never a warning ────
+
+/// A tree holding two minified files the default `exclude` keeps out.
+fn minified_fixture() -> TempDir {
+    let tmp = fixture();
+    write(tmp.path(), "app.min.js", "function a(){return 1}\n");
+    write(tmp.path(), "static/js/lib.min.js", "function l(){return 2}\n");
+    tmp
+}
+
+/// `index --json` and the reconcile-backed `scan --json` state the minified-JS
+/// exclusion on `notes` and keep it off `warnings` — the channel a CI parser
+/// scans (CR-119, FR-CL-03). Exit 0 throughout.
+#[test]
+fn the_minified_js_exclusion_is_a_note_on_index_and_scan_never_a_warning() {
+    let tmp = minified_fixture();
+    let mentions = |v: &serde_json::Value| {
+        v.as_array()
+            .map(|a| a.iter().any(|e| e.as_str().unwrap_or("").contains("minified JavaScript file(s)")))
+            .unwrap_or(false)
+    };
+
+    let index = logos(tmp.path(), &["index", "--json"]);
+    assert_eq!(exit_code(&index), 0, "{}", String::from_utf8_lossy(&index.stderr));
+    let index_json: serde_json::Value = serde_json::from_slice(&index.stdout).unwrap();
+    assert!(mentions(&index_json["notes"]), "index states it on `notes`: {index_json}");
+    assert!(!mentions(&index_json["warnings"]), "index must not warn: {index_json}");
+
+    let scan = logos(tmp.path(), &["scan", "--json"]);
+    assert_eq!(exit_code(&scan), 0, "{}", String::from_utf8_lossy(&scan.stderr));
+    let scan_json: serde_json::Value = serde_json::from_slice(&scan.stdout).unwrap();
+    assert!(mentions(&scan_json["notes"]), "scan states it on `notes`: {scan_json}");
+    assert!(!mentions(&scan_json["warnings"]), "scan must not warn: {scan_json}");
+
+    // The human rendering is the same read-model, so it carries the note too.
+    let human = logos(tmp.path(), &["index"]);
+    assert_eq!(exit_code(&human), 0, "{}", String::from_utf8_lossy(&human.stderr));
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("minified JavaScript file(s)"),
+        "the human index output carries the note"
+    );
+}
+
 #[test]
 fn usage_errors_exit_two() {
     let tmp = TempDir::new().unwrap();

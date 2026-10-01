@@ -3017,6 +3017,7 @@ impl Engine {
                     unresolved_refs: outcome.resolution.refs_unresolved,
                     files_failed: outcome.files_failed,
                     warnings: outcome.warnings,
+                    notes: outcome.notes,
                 })
             }
             PolicyFile::Rules => {

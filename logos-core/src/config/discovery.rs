@@ -466,26 +466,34 @@ pub struct DiscoveryReport {
 }
 
 impl DiscoveryReport {
-    /// The human-readable notices: one oversize notice per skipped file
-    /// ([FR-CF-04]), then — when [`MINIFIED_JS_GLOB`] kept any file out — one line
-    /// stating the count ([FR-CF-05], [CR-154]).
+    /// The human-readable **warnings**: one oversize notice per skipped file
+    /// ([FR-CF-04]) — a file the user may have expected indexed and was not.
     ///
-    /// The surface logs these to stderr; keeping the text here (not at the
-    /// emission site) lets the core own and test the notice contract.
+    /// Keeping the text here (not at the emission site) lets the core own and
+    /// test the notice contract. The minified-JavaScript line is deliberately
+    /// **not** here: see [`notes`](Self::notes).
+    pub fn notices(&self) -> impl Iterator<Item = String> + '_ {
+        self.skipped_oversize.iter().map(ToString::to_string)
+    }
+
+    /// The advisory **notes**: when [`MINIFIED_JS_GLOB`] kept any file out, one
+    /// line stating the count, the glob and the way out ([FR-CF-05], [CR-154]).
+    ///
+    /// A permanent, benign statement about a default working as intended — it
+    /// repeats on every `index` and every reconcile-backed readout, so it rides
+    /// the advisory `notes` channel (CR-119), never `warnings`: a CI parser that
+    /// scans `warnings` must not trip on it (HF-1, sprint 83).
     ///
     /// [CR-154]: ../../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
-    pub fn notices(&self) -> impl Iterator<Item = String> + '_ {
-        let minified_js = (self.excluded_minified_js > 0).then(|| {
+    pub fn notes(&self) -> impl Iterator<Item = String> + '_ {
+        (self.excluded_minified_js > 0).then(|| {
             format!(
                 "{} minified JavaScript file(s) excluded from indexing by the `{MINIFIED_JS_GLOB}` \
                  exclude glob (set your own `exclude` in .logos/config.toml to re-admit them)",
                 self.excluded_minified_js
             )
-        });
-        self.skipped_oversize
-            .iter()
-            .map(ToString::to_string)
-            .chain(minified_js)
+        })
+        .into_iter()
     }
 }
 
@@ -1581,10 +1589,13 @@ mod tests {
     }
 
     #[test]
-    fn the_minified_js_notice_states_the_count_the_glob_and_the_remedy_after_oversize() {
-        // The core owns the notice text: silent at zero, one line after the
-        // oversize notices otherwise, naming the count, the glob and the way out.
+    fn the_minified_js_note_states_the_count_the_glob_and_the_remedy_and_is_never_a_warning() {
+        // The core owns the notice text: silent at zero on both channels. The
+        // minified-JS line is an advisory NOTE naming the count, the glob and the
+        // way out; the oversize notice stays a WARNING — and neither leaks into
+        // the other channel (HF-1).
         assert_eq!(DiscoveryReport::default().notices().count(), 0, "silent at zero");
+        assert_eq!(DiscoveryReport::default().notes().count(), 0, "silent at zero");
         let report = DiscoveryReport {
             excluded_minified_js: 1,
             skipped_oversize: vec![OversizeSkip {
@@ -1594,13 +1605,21 @@ mod tests {
             }],
             ..DiscoveryReport::default()
         };
-        let notices: Vec<String> = report.notices().collect();
-        assert_eq!(notices.len(), 2, "{notices:?}");
-        assert!(notices[0].contains("big.bin"), "oversize first: {notices:?}");
+        let warnings: Vec<String> = report.notices().collect();
+        assert_eq!(warnings.len(), 1, "only the oversize skip is a warning: {warnings:?}");
+        assert!(warnings[0].contains("big.bin"), "{warnings:?}");
+        assert!(
+            !warnings.iter().any(|w| w.contains("minified JavaScript")),
+            "the minified-JS line must not ride the warnings channel: {warnings:?}"
+        );
+        let notes: Vec<String> = report.notes().collect();
         assert_eq!(
-            notices[1],
-            "1 minified JavaScript file(s) excluded from indexing by the `**/*.min.js` \
-             exclude glob (set your own `exclude` in .logos/config.toml to re-admit them)"
+            notes,
+            vec![
+                "1 minified JavaScript file(s) excluded from indexing by the `**/*.min.js` \
+                 exclude glob (set your own `exclude` in .logos/config.toml to re-admit them)"
+                    .to_string()
+            ]
         );
     }
 

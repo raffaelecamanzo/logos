@@ -482,7 +482,12 @@ refresh_cmd = "cargo llvm-cov --lcov --output-path target/coverage/lcov.info"
 depth: a minified file is never meaningfully navigable, and on a workspace with
 vendored front-end libraries it can carry a large share of the TypeScript-language
 access and method-call rows the resolver then cannot bind. `logos index` says
-how many files the glob kept out, so the exclusion is never silent:
+how many files the glob kept out, so the exclusion is never silent. The line is an
+advisory **note**: it appears under `notes` in `index --json` (and in the human
+output), never under `warnings`, so a CI step that scans `warnings` does not trip
+on a default working as intended. The reconcile-backed readouts — `scan`, `check`,
+`gate`, `dsm`, `doc_gaps` and the config-apply result — carry it on their own
+`notes` field too, and omit that field entirely when there is nothing to note:
 
 ```text
 73 minified JavaScript file(s) excluded from indexing by the `**/*.min.js` exclude glob (set your own `exclude` in .logos/config.toml to re-admit them)

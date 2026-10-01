@@ -496,6 +496,9 @@ pub(crate) struct Freshness {
     assumed: bool,
     /// Degradations folded from the reconcile — surfaced on the read-model.
     warnings: Vec<String>,
+    /// Advisory notes folded from the reconcile (the minified-JS exclusion,
+    /// HF-1) — surfaced on the read-model's own `notes`, never its `warnings`.
+    notes: Vec<String>,
 }
 
 impl Freshness {
@@ -566,6 +569,7 @@ fn reconcile_step(engine: &Engine, reconcile: bool) -> Result<Freshness> {
         unresolved: outcome.resolution.refs_unresolved,
         assumed: false,
         warnings: outcome.warnings,
+        notes: outcome.notes,
     })
 }
 
@@ -1858,6 +1862,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // an n/a tier + warning, never failing the gated scan (BR-26 two-tier rule).
     let freshness = fresh.line();
     let mut warnings = fresh.warnings;
+    let notes = fresh.notes;
     let temporal = scan_temporal_tier(engine, &mut warnings);
 
     Ok(ScanResult {
@@ -1868,6 +1873,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
         worst_offenders,
         temporal,
         warnings,
+        notes,
     })
 }
 
@@ -2073,6 +2079,7 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<MetricSnapshot>) -> Scan
         worst_offenders: Default::default(),
         temporal,
         warnings,
+        notes: Vec::new(),
     }
 }
 
@@ -2125,6 +2132,7 @@ fn gate_from_snapshot(engine: &Engine, snapshot: Option<&MetricSnapshot>) -> Res
         freshness: String::new(),
         message: String::new(),
         warnings: Vec::new(),
+        notes: Vec::new(),
     };
 
     let baseline = runtime.submit_read(|store| store.baseline_snapshot(SCOPE_PROJECT))?;
@@ -2527,6 +2535,7 @@ pub(crate) fn check_rules(
         ran_at: Some(ran_at),
         freshness: fresh.line(),
         warnings: fresh.warnings,
+        notes: fresh.notes,
     })
 }
 
@@ -2565,6 +2574,7 @@ pub(crate) fn gate(
         freshness: fresh.line(),
         message: String::new(),
         warnings: fresh.warnings,
+        notes: fresh.notes,
     };
 
     if save {
@@ -2963,6 +2973,7 @@ pub(crate) fn dsm(
         matrix,
         freshness: fresh.line(),
         warnings: fresh.warnings,
+        notes: fresh.notes,
     })
 }
 
@@ -3058,6 +3069,7 @@ pub(crate) fn doc_gaps(
         caveat: DOC_GAPS_CAVEAT.to_string(),
         freshness: fresh.line(),
         warnings: fresh.warnings,
+        notes: fresh.notes,
     })
 }
 
