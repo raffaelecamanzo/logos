@@ -1498,6 +1498,26 @@ mod fixtures {
         assert!(!outside_every_reading(test));
     }
 
+    #[test]
+    fn each_reading_counts_its_own_population_and_only_directory_counts_the_fork() {
+        // DIRECTORY and the decisive reading recorded the same net-new figure on
+        // the estate, so no estate pin can tell them apart: only this can.
+        let manifest = set(&["a"]);
+        let directories = set(&["a", "fork"]);
+        assert_eq!(
+            Reading::Directory.members(&manifest, &directories),
+            &directories
+        );
+        assert_eq!(
+            Reading::Decisive.members(&manifest, &directories),
+            &manifest
+        );
+        assert_eq!(
+            Reading::TestTree.members(&manifest, &directories),
+            &manifest
+        );
+    }
+
     // ── A1: value resolution through the shipped topic_identity ─────────────
 
     #[test]
