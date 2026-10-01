@@ -13,6 +13,13 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`logos sync --help` no longer claims `sync` defaults to all changed files.** With no
+  path `sync` re-reads no file, as `docs/howto/commands.md` says; the help now says the
+  same and points at `logos scan` / `logos index` for folding in every change. Help text
+  only — `sync`'s behaviour is unchanged.
+
 ## [1.8.0] — 2026-10-01
 
 ### Added

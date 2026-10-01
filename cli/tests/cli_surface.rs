@@ -2536,3 +2536,22 @@ fn health_reports_the_architecture_read_model_through_the_binary() {
         "--no-reconcile skips the pre-evaluation reconcile (FR-RC-04): {fast_json}"
     );
 }
+
+#[test]
+fn sync_help_states_that_no_path_re_reads_nothing() {
+    let tmp = TempDir::new().expect("temp root");
+    let out = logos(tmp.path(), &["sync", "--help"]);
+    assert!(out.status.success(), "`sync --help` exits 0");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        !text.contains("defaults to all changed files"),
+        "sync help still carries the retired claim — with no path sync re-reads nothing:\n{text}"
+    );
+    for wanted in ["exactly", "re-reads no file", "logos scan", "logos index"] {
+        assert!(
+            text.contains(wanted),
+            "sync help must carry {wanted:?} (the manual's wording):\n{text}"
+        );
+    }
+}
