@@ -534,6 +534,43 @@ async fn the_sandbox_carries_the_addressed_members_own_ignored_dirs_and_read_roo
     );
 }
 
+/// A member whose `config.toml` will not load is an error naming it — never a
+/// sandbox built on the defaults, which would silently drop the member's own
+/// `ignored_dirs` and make what it excludes readable.
+#[tokio::test]
+async fn a_members_unloadable_config_is_an_error_not_a_default_sandbox() {
+    let ws = Workspace::new();
+    let xs = ws.backing(false);
+    // `web` ignores `generated`; a config that will not parse must not fall back
+    // to defaults that do not.
+    write(
+        &ws.root().join("web"),
+        ".logos/config.toml",
+        "[semantics]\nignored_dirs = [\"generated\"]\nnot_a_key = 1\n",
+    );
+    match source_call(
+        &xs,
+        "read",
+        json!({ "repo": "web", "path": "generated/stub.rs" }),
+    )
+    .await
+    {
+        Err(DispatchError::Tool(err)) => {
+            let message = err.to_string();
+            assert!(
+                message.contains("config.toml"),
+                "names the config: {message}"
+            );
+        }
+        other => panic!("expected a recoverable error naming the config, got {other:?}"),
+    }
+    // The sibling's sandbox is unaffected.
+    let api = source_call(&xs, "read", json!({ "repo": "api", "path": "src/lib.rs" }))
+        .await
+        .expect("api's config is fine");
+    assert!(api.contains("api_only"), "{api}");
+}
+
 // ── 4. The workspace read-models answer their twins ─────────────────────────
 
 /// Call a workspace tool through its toolset: its reading, lifted, and the
