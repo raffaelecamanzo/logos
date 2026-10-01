@@ -70,6 +70,27 @@ pub const DEFAULT_MAX_PROVIDER_RETRIES: u32 = 2;
 /// byte-identical to `agent-core`'s `DEFAULT_PROVIDER_RETRY_BASE_MS`.
 pub const DEFAULT_PROVIDER_RETRY_BASE_MS: u32 = 200;
 
+/// Prior-turn window default turn count — **6** ([S-483], [FR-UI-20]): the number
+/// of most recent earlier turns of a thread the planner and Synthesizer see.
+///
+/// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+/// [FR-UI-20]: ../../../docs/specs/requirements/FR-UI-20.md
+pub const DEFAULT_HISTORY_MAX_TURNS: u32 = 6;
+
+/// Prior-turn window default character ceiling — **16000** ([S-483]): the most
+/// characters of earlier user/assistant text the window carries, however few turns
+/// that is. Whole turns only — the oldest are dropped first.
+///
+/// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+pub const DEFAULT_HISTORY_MAX_CHARS: u32 = 16_000;
+
+/// The upper bound on `history_max_turns`: a window deeper than this only bloats
+/// every planner round's prompt, so it fails loud at load.
+const MAX_HISTORY_TURNS_CEILING: u32 = 50;
+
+/// The upper bound on `history_max_chars` — the same reason, in characters.
+const MAX_HISTORY_CHARS_CEILING: u32 = 200_000;
+
 /// The upper bound on `max_provider_retries`: a retry count above this can never
 /// help and only amplifies load against the provider, so it fails loud at load.
 const MAX_PROVIDER_RETRIES_CEILING: u32 = 10;
@@ -92,6 +113,14 @@ fn default_max_subagent_tool_calls() -> u32 {
 
 fn default_max_replans() -> u32 {
     DEFAULT_MAX_REPLANS
+}
+
+fn default_history_max_turns() -> u32 {
+    DEFAULT_HISTORY_MAX_TURNS
+}
+
+fn default_history_max_chars() -> u32 {
+    DEFAULT_HISTORY_MAX_CHARS
 }
 
 fn default_max_provider_retries() -> u32 {
@@ -224,6 +253,23 @@ pub struct ChatConfig {
     #[serde(default = "default_max_replans")]
     pub max_replans: u32,
 
+    /// Prior-turn window: how many of a thread's most recent **earlier turns** the
+    /// planner and Synthesizer are shown ([S-483]); default
+    /// [`DEFAULT_HISTORY_MAX_TURNS`] (6). Must be in `[1, 50]`.
+    ///
+    /// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+    #[serde(default = "default_history_max_turns")]
+    pub history_max_turns: u32,
+
+    /// Prior-turn window: the **character ceiling** on the earlier turns' text
+    /// ([S-483]); default [`DEFAULT_HISTORY_MAX_CHARS`] (16000). Must be in
+    /// `[1, 200000]`. Whole turns only — when the window overflows, the oldest turns
+    /// are dropped first and the prompt says how many were omitted.
+    ///
+    /// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+    #[serde(default = "default_history_max_chars")]
+    pub history_max_chars: u32,
+
     /// Bounded provider-retry: the number of transient-fault retries **beyond**
     /// the first attempt ([CR-060], [S-240]); default
     /// [`DEFAULT_MAX_PROVIDER_RETRIES`] (2). `0` disables retries (a single
@@ -274,6 +320,8 @@ impl Default for ChatConfig {
             max_tool_calls: default_max_tool_calls(),
             max_subagent_tool_calls: default_max_subagent_tool_calls(),
             max_replans: default_max_replans(),
+            history_max_turns: default_history_max_turns(),
+            history_max_chars: default_history_max_chars(),
             max_provider_retries: default_max_provider_retries(),
             provider_retry_base_ms: default_provider_retry_base_ms(),
             read_roots: Vec::new(),
@@ -312,6 +360,9 @@ impl ChatConfig {
     ///   above the global ceiling is meaningless — the global bound wins first);
     /// - `max_tokens`, if set, ≥ 1;
     /// - `temperature`, if set, in `[0.0, 2.0]`;
+    /// - `history_max_turns` in `[1, 50]` and `history_max_chars` in `[1, 200000]`
+    ///   (a zero window would silently drop all follow-up context; a huge one only
+    ///   bloats every planner prompt);
     /// - `max_provider_retries` ≤ [`MAX_PROVIDER_RETRIES_CEILING`] (a higher
     ///   count only amplifies load; `0` is valid — retries disabled);
     /// - `provider_retry_base_ms` ≥ 1 (a zero base delay would busy-retry);
@@ -363,6 +414,26 @@ impl ChatConfig {
                     format!("{temperature} is outside the valid range [0.0, {MAX_TEMPERATURE}]"),
                 ));
             }
+        }
+        if !(1..=MAX_HISTORY_TURNS_CEILING).contains(&self.history_max_turns) {
+            return Err(invalid(
+                "history_max_turns",
+                format!(
+                    "{} is outside the valid range [1, {MAX_HISTORY_TURNS_CEILING}] (the prior \
+                     turns the planner and Synthesizer see)",
+                    self.history_max_turns
+                ),
+            ));
+        }
+        if !(1..=MAX_HISTORY_CHARS_CEILING).contains(&self.history_max_chars) {
+            return Err(invalid(
+                "history_max_chars",
+                format!(
+                    "{} is outside the valid range [1, {MAX_HISTORY_CHARS_CEILING}] (the \
+                     character ceiling on the prior turns' text)",
+                    self.history_max_chars
+                ),
+            ));
         }
         if self.max_provider_retries > MAX_PROVIDER_RETRIES_CEILING {
             return Err(invalid(
@@ -615,6 +686,8 @@ mod tests {
         assert_eq!(cfg.chat.max_tool_calls, 48);
         assert_eq!(cfg.chat.max_subagent_tool_calls, 16);
         assert_eq!(cfg.chat.max_replans, 3);
+        assert_eq!(cfg.chat.history_max_turns, 6);
+        assert_eq!(cfg.chat.history_max_chars, 16_000);
         assert_eq!(cfg.chat.max_provider_retries, 2);
         assert_eq!(cfg.chat.provider_retry_base_ms, 200);
         assert!(cfg.chat.model.is_none());
@@ -760,6 +833,8 @@ mod tests {
             max_tool_calls: 8,
             max_subagent_tool_calls: 8,
             max_replans: 0,
+            history_max_turns: MAX_HISTORY_TURNS_CEILING,
+            history_max_chars: MAX_HISTORY_CHARS_CEILING,
             max_provider_retries: DEFAULT_MAX_PROVIDER_RETRIES,
             provider_retry_base_ms: DEFAULT_PROVIDER_RETRY_BASE_MS,
             read_roots: vec!["../logos-docs".to_string()],
@@ -807,6 +882,64 @@ mod tests {
             Err(ConfigError::InvalidValue { ref key, ref message })
                 if key == "chat.read_roots" && message.contains("entry 1")
         ));
+    }
+
+    /// [S-483] AC: the prior-turn window keys default to 6 turns / 16000 characters
+    /// when absent and honor explicit values.
+    ///
+    /// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+    #[test]
+    fn history_window_keys_default_and_honor_explicit_values() {
+        let defaulted: Config = toml::from_str("[chat]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(defaulted.chat.history_max_turns, DEFAULT_HISTORY_MAX_TURNS);
+        assert_eq!(defaulted.chat.history_max_chars, DEFAULT_HISTORY_MAX_CHARS);
+
+        let explicit: Config =
+            toml::from_str("[chat]\nhistory_max_turns = 2\nhistory_max_chars = 500\n").unwrap();
+        assert_eq!(explicit.chat.history_max_turns, 2);
+        assert_eq!(explicit.chat.history_max_chars, 500);
+        assert!(explicit.validate().is_ok());
+    }
+
+    /// [S-483] AC: out-of-range window keys are rejected at load like the budget
+    /// keys, each naming its own key; the boundary values are valid.
+    #[test]
+    fn history_window_out_of_range_values_are_rejected() {
+        let bad = |chat: ChatConfig| Config {
+            chat,
+            ..Default::default()
+        }
+        .validate();
+        let names = |r: Result<(), ConfigError>, want: &str| {
+            matches!(r, Err(ConfigError::InvalidValue { ref key, .. }) if key == want)
+        };
+
+        // Literals, not the ceiling constants: the documented ranges [1, 50] and
+        // [1, 200000] are what is pinned, so moving a constant fails here.
+        for bad_turns in [0, 51] {
+            assert!(
+                names(
+                    bad(ChatConfig { history_max_turns: bad_turns, ..Default::default() }),
+                    "chat.history_max_turns"
+                ),
+                "{bad_turns} must be rejected"
+            );
+        }
+        for bad_chars in [0, 200_001] {
+            assert!(
+                names(
+                    bad(ChatConfig { history_max_chars: bad_chars, ..Default::default() }),
+                    "chat.history_max_chars"
+                ),
+                "{bad_chars} must be rejected"
+            );
+        }
+        for ok in [1, 50] {
+            assert!(bad(ChatConfig { history_max_turns: ok, ..Default::default() }).is_ok());
+        }
+        for ok in [1, 200_000] {
+            assert!(bad(ChatConfig { history_max_chars: ok, ..Default::default() }).is_ok());
+        }
     }
 
     /// [CR-060]/[FR-CF-06] AC: the provider-retry keys default to the documented

@@ -57,8 +57,8 @@ use agent_core::{
 };
 use agent_core::{Sandbox, XserviceBacking};
 use chat_agent::{
-    BudgetTree, ChatRole, ChatStore, MemoryGrounding, MemoryStore, Orchestrator, Planner,
-    SubagentRoster, SynthesizerGrounding,
+    thread_window, BudgetTree, ChatRole, ChatStore, ConversationWindow, MemoryGrounding,
+    MemoryStore, Orchestrator, Planner, SubagentRoster, SynthesizerGrounding,
 };
 use logos_core::config::{resolve_chat, ChatOrigin, ChatProvider};
 use logos_core::Engine;
@@ -124,6 +124,11 @@ struct ChatSetup {
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     retry: RetryPolicy,
+    /// The thread's bounded prior turns, read before this turn's question was
+    /// appended ([S-483]); empty on a thread's first turn.
+    ///
+    /// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+    history: ConversationWindow,
 }
 
 /// Resolve the policy + credential through the seam, open the source sandbox,
@@ -166,11 +171,27 @@ fn build_setup(
     // scratchpad's foreign key requires the thread to exist first.
     let mut store =
         ChatStore::open(root).map_err(|e| format!("could not open the chat store: {e}"))?;
-    let thread_id = match thread_id {
-        Some(id) => id,
-        None => store
-            .create_thread_from_message(question)
-            .map_err(|e| format!("could not create a chat thread: {e}"))?,
+    // The prior turns come from the thread store, read BEFORE this turn's question
+    // is appended so the window never contains the question it is answering
+    // ([S-483]). A new thread has none; a deleted one has no messages either.
+    let (thread_id, history) = match thread_id {
+        Some(id) => {
+            let window = thread_window(
+                &store,
+                id,
+                question,
+                chat.history_max_turns as usize,
+                chat.history_max_chars as usize,
+            )
+            .map_err(|e| format!("could not read the conversation history: {e}"))?;
+            (id, window)
+        }
+        None => (
+            store
+                .create_thread_from_message(question)
+                .map_err(|e| format!("could not create a chat thread: {e}"))?,
+            ConversationWindow::default(),
+        ),
     };
     // The question is durable from the start; its ANSWER is appended by
     // `run_orchestrated` once the turn genuinely produces one, so a restored
@@ -209,6 +230,7 @@ fn build_setup(
         temperature,
         max_tokens,
         retry,
+        history,
     })
 }
 
@@ -263,6 +285,7 @@ impl ChatService for ConfiguredChatService {
                 temperature,
                 max_tokens,
                 retry,
+                history,
             } = setup;
             let grounding: Arc<dyn SynthesizerGrounding> =
                 Arc::new(MemoryGrounding::new(Arc::clone(&memory), thread_id, turn));
@@ -300,7 +323,7 @@ impl ChatService for ConfiguredChatService {
                 ChatProvider::Anthropic => match anthropic_completion_model(&cfg, retry) {
                     Ok(model) => {
                         launch(engine, sandbox, xservice, model, grounding, budget, temperature,
-                            max_tokens, question, memory, target, tx).await
+                            max_tokens, question, history, memory, target, tx).await
                     }
                     Err(e) => {
                         let _ = tx.send(ChatFrame::Error(format!(
@@ -311,7 +334,7 @@ impl ChatService for ConfiguredChatService {
                 ChatProvider::OpenAi => match openai_compatible_completion_model(&cfg, retry) {
                     Ok(model) => {
                         launch(engine, sandbox, xservice, model, grounding, budget, temperature,
-                            max_tokens, question, memory, target, tx).await
+                            max_tokens, question, history, memory, target, tx).await
                     }
                     Err(e) => {
                         let _ = tx.send(ChatFrame::Error(format!(
@@ -350,6 +373,7 @@ async fn launch<M>(
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     question: String,
+    history: ConversationWindow,
     memory: Arc<MemoryStore>,
     target: TurnTarget,
     tx: UnboundedSender<ChatFrame>,
@@ -363,7 +387,7 @@ async fn launch<M>(
         .with_synthesizer_grounding(grounding);
     // The roster names the planner preamble that matches its tools.
     let planner = Planner::with_preamble(model, roster.planner_preamble());
-    let orchestrator = Orchestrator::with_planner(planner, roster, budget);
+    let orchestrator = Orchestrator::with_planner(planner, roster, budget).with_history(history);
     run_orchestrated(orchestrator, question, memory, target, tx).await;
 }
 
@@ -609,6 +633,57 @@ mod tests {
             (11, 5, 2)
         );
         assert_eq!(setup.retry, RetryPolicy::new(4, 321));
+    }
+
+    /// [S-483]: a follow-up turn on an existing thread is set up with the thread's
+    /// bounded prior turns, read from the thread store BEFORE the new question is
+    /// appended (so the window never holds the question it is answering) and bounded
+    /// by the resolved `[chat]` window keys; a first turn has none.
+    ///
+    /// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+    #[test]
+    fn a_follow_up_setup_carries_the_threads_prior_turns_bounded_by_the_chat_keys() {
+        use chat_agent::{ChatRole, ChatStore};
+
+        let e = estate(Half::Declared, Half::Declared, Half::Declared, Half::Declared);
+        write(
+            &e.member,
+            "config.toml",
+            &format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\nhistory_max_turns = 2\n"),
+        );
+
+        let first = build_setup(&e.member, None, None, "first question").expect("a turn");
+        assert!(first.history.is_empty(), "a thread's first turn has no window");
+        let thread = first.thread_id;
+        let mut store = ChatStore::open(&e.member).unwrap();
+        store.append_message(thread, ChatRole::Assistant, "first answer", &[]).unwrap();
+        for (q, a) in [("second question", "second answer"), ("third question", "third answer")] {
+            store.append_message(thread, ChatRole::User, q, &[]).unwrap();
+            store.append_message(thread, ChatRole::Assistant, a, &[]).unwrap();
+        }
+        drop(store);
+
+        let followup =
+            build_setup(&e.member, None, Some(thread), "fourth question").expect("a follow-up");
+        let text = followup.history.render();
+        assert_eq!(followup.history.omitted(), 1, "history_max_turns = 2 keeps two of three: {text}");
+        assert!(text.contains("second question") && text.contains("third answer"), "{text}");
+        assert!(!text.contains("first question"), "the oldest turn went first: {text}");
+        assert!(!text.contains("fourth question"), "the window never holds the live question: {text}");
+
+        // `history_max_chars` bounds the window too (and the turn key, left at its
+        // default of 6 here, no longer binds): "fourth question" (15 characters, never
+        // answered) fits a 30-character ceiling, the 27-character third turn does not.
+        write(
+            &e.member,
+            "config.toml",
+            &format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\nhistory_max_chars = 30\n"),
+        );
+        let capped =
+            build_setup(&e.member, None, Some(thread), "fifth question").expect("a follow-up");
+        let text = capped.history.render();
+        assert_eq!(capped.history.omitted(), 3, "history_max_chars = 30 keeps one of four: {text}");
+        assert!(text.contains("fourth question") && !text.contains("third question"), "{text}");
     }
 
     /// Sprint-79 HF-1: `[chat] read_roots` resolve against the root that
@@ -1074,8 +1149,8 @@ mod tests {
 
         use agent_core::{MockCompletionModel, MockTurn, Sandbox, XserviceBacking};
         use chat_agent::{
-            BudgetTree, ChatStore, MemoryGrounding, MemoryStore, OrchestratorEvent, StepRole,
-            SynthesizerGrounding,
+            BudgetTree, ChatStore, ConversationWindow, MemoryGrounding, MemoryStore,
+            OrchestratorEvent, StepRole, SynthesizerGrounding,
         };
         use logos_core::federation::{
             Backing, ContractBridge, EngineRegistry, Federation, Member, RegistryMode,
@@ -1156,6 +1231,7 @@ mod tests {
                 None,
                 None,
                 "find alpha across services".to_string(),
+                ConversationWindow::default(),
                 memory,
                 TurnTarget::new(project, thread, turn),
                 tx,

@@ -671,6 +671,16 @@ max_subagent_tool_calls = 16
 # no replanning).
 max_replans = 3
 
+# ── Prior-turn window (follow-up turns) ─────────────────────────────────────
+# A follow-up turn sees the thread's earlier turns (user + assistant, oldest
+# first) in the planner's prompt and the Synthesizer's instruction — bounded by
+# BOTH keys below; the oldest whole turns are dropped first and the prompt says
+# how many were omitted.
+# How many of the most recent earlier turns to show. Default: 6. In [1, 50].
+history_max_turns = 6
+# Character ceiling on the earlier turns' text. Default: 16000. In [1, 200000].
+history_max_chars = 16000
+
 # ── Provider resilience (retry) ─────────────────────────────────────────────
 # Transient provider faults (transport errors, HTTP 429/5xx, and unclassified
 # deserialization hiccups on a 2xx gateway body) are retried with bounded
@@ -713,6 +723,8 @@ synthesizer        = "anthropic/claude-sonnet-4"
 | `max_tool_calls` | integer | `48` | Budget tree: global per-turn tool-call ceiling. Must be ≥ 1. |
 | `max_subagent_tool_calls` | integer | `16` | Budget tree: per-subagent tool-call cap. Must be in `[1, max_tool_calls]`. |
 | `max_replans` | integer | `3` | Budget tree: max planner replans per turn. `0` = a single plan pass. |
+| `history_max_turns` | integer | `6` | Prior-turn window: how many of the thread's most recent earlier turns a follow-up shows the planner and Synthesizer. Must be in `[1, 50]`. |
+| `history_max_chars` | integer | `16000` | Prior-turn window: character ceiling on those turns' text. Must be in `[1, 200000]`. Whole turns only — an earlier answer is never cut mid-text, so a single turn larger than the ceiling is omitted. |
 | `max_provider_retries` | integer | `2` | Retries after the first attempt for a transient provider fault. `0` disables retry. Out-of-range fails loud. Inherited by the wiki generator. |
 | `provider_retry_base_ms` | integer | `200` | Base backoff (ms) for the exponential + jitter retry delay. Must be ≥ 1 (`0` fails loud). Inherited by the wiki generator. |
 | `read_roots` | list of strings | `[]` | Extra directories the Source-Reader may read, reached **only through symlinks inside the project** — see [Reading symlinked docs](#reading-symlinked-docs--read_roots). Relative to the declaring root, or absolute. A blank entry fails loud at load. |
@@ -792,6 +804,32 @@ its cost is bounded:
   observing subagent results. `0` means the planner produces one plan and does
   not replan. Like the global ceiling, reaching it yields a best-effort bounded
   answer when observations exist, or an honest bare halt when they do not.
+
+### Follow-up turns: the prior-turn window
+
+The planner's prompt is the current question plus this turn's observations, so
+without a window a follow-up such as "and for mailbox-manager?" would be answered
+as if nothing had been said. A follow-up turn is therefore shown a **bounded
+window of the thread's earlier turns** — the user's messages and the assistant's
+answers, oldest first — both in the planner's prompt and in the Synthesizer's
+instruction. They are read from the conversation itself (the thread's stored
+messages), and are context only: the prompt tells both roles that a claim about
+the codebase must still rest on this turn's observations, not on an earlier
+answer.
+
+- **`history_max_turns`** and **`history_max_chars`** bound the window together:
+  the newest turns are kept until either bound would be breached, and the oldest
+  go first. When anything is dropped, the prompt states how many earlier turns
+  were omitted — the window never passes itself off as the whole conversation.
+  Turns are kept whole, so a single turn larger than `history_max_chars` is
+  omitted rather than cut. Both are validated at load like the budget keys; a
+  value of `0`, or above the maximum, fails loud.
+- The first turn of a thread has no earlier turns and is prompted exactly as
+  before. A deleted conversation contributes nothing.
+- **Regenerate** replaces: a regenerated turn takes its predecessor's place in the
+  window rather than appearing twice. A turn that was halted or failed has no
+  answer, so the window shows its question with no answer rather than inventing
+  one.
 
 ### Recoverable-fault degradation
 

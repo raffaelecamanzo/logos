@@ -7,9 +7,10 @@
 //!   observation, and intermediate findings the planner and the [Synthesizer]
 //!   read across steps within ONE orchestrated turn (S-173 holds this in-memory
 //!   as a `Vec<(PlanStep, StepObservation)>`; this persists it);
-//! - a **per-thread working/conversation memory** — a running summary carried
-//!   across turns so a follow-up turn in the same thread sees prior context after
-//!   a `serve --ui` restart.
+//! - a **per-thread working/conversation memory** — a running summary row per
+//!   thread, persisted across a `serve --ui` restart. (It is storage only: a
+//!   follow-up turn's context is the bounded window of the thread's *stored
+//!   messages* — [`thread_window`] — not this summary, [S-483].)
 //!
 //! It is emphatically **not** a semantic store: **no embeddings, no vector index,
 //! no RAG** in v1 ([FR-UI-20]) — a static fitness check (`tests/no_embeddings.rs`)
@@ -27,6 +28,7 @@
 //! [S-168]: ../../docs/planning/journal.md#s-168-chat-persistence-store-threads-messages-and-clear-history
 //! [S-173]: ../../docs/planning/journal.md#s-173-planner-and-plan-act-observe-replan-orchestration-loop-with-budget-tree
 //! [S-175]: ../../docs/planning/journal.md#s-175-multi-step-agent-memory-store-scratchpad-and-working-memory
+//! [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
 //! [FR-UI-20]: ../../docs/specs/requirements/FR-UI-20.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 //! [ADR-41]: ../../docs/specs/architecture/decisions/ADR-41.md
@@ -38,9 +40,10 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{ensure_db_dir, open_migrated};
+use crate::db::{ensure_db_dir, open_migrated, ChatMessage, ChatRole, ChatStore};
 use crate::orchestrator::{
-    EventSink, OrchestratorEvent, PlanStep, StepRole, SynthesizerGrounding,
+    ConversationWindow, EventSink, OrchestratorEvent, PlanStep, PriorTurn, StepRole,
+    SynthesizerGrounding,
 };
 
 /// One typed entry in the per-turn scratchpad, stored as verbatim JSON in the
@@ -321,8 +324,11 @@ impl MemoryStore {
 
     // ---- per-thread working / conversation memory ----------------------------
 
-    /// Upsert a thread's running working/conversation-memory summary — the
-    /// context a follow-up turn reads after a `serve --ui` restart ([FR-UI-20]).
+    /// Upsert a thread's running working/conversation-memory summary, persisted
+    /// across a `serve --ui` restart ([FR-UI-20]). A follow-up turn does not read it:
+    /// its context is [`thread_window`] over the stored messages ([S-483]).
+    ///
+    /// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
     ///
     /// One row per thread (PK = `thread_id`); a second call replaces the summary.
     ///
@@ -373,6 +379,79 @@ impl MemoryStore {
             .context("counting working-memory rows")?;
         Ok(scratchpad == 0 && working == 0)
     }
+}
+
+/// The thread's earlier turns as [`PriorTurn`]s, oldest first, from its stored
+/// `messages` ([S-483], [FR-UI-20] AC-2).
+///
+/// `messages` is the thread **before** the current question is appended; `question`
+/// is that question. A turn is a user message plus the assistant answer that
+/// follows it (system and tool rows are not conversation). Two rules keep the
+/// window honest about regeneration:
+///
+/// - a user message that repeats the one before it **replaces** that earlier turn
+///   (a regenerate re-runs the user message, so the thread holds
+///   `U1, A1, U1, A1′` — only `U1, A1′` is the conversation; if the repeat was
+///   never answered, `A1` stands rather than leaving the turn blank);
+/// - a `question` that repeats the last stored user message is a regenerate **in
+///   progress**: the predecessor it is about to replace is left out.
+///
+/// An empty `messages` (a first turn, a deleted or unknown thread) yields no turns.
+///
+/// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+/// [FR-UI-20]: ../../docs/specs/requirements/FR-UI-20.md
+pub fn prior_turns(messages: &[ChatMessage], question: &str) -> Vec<PriorTurn> {
+    let mut turns: Vec<PriorTurn> = Vec::new();
+    for message in messages {
+        match message.role {
+            ChatRole::User => {
+                // A repeat replaces its predecessor; the predecessor's answer stands
+                // until (unless) the repeat is itself answered.
+                let carried = match turns.last() {
+                    Some(prev) if prev.user.trim() == message.content.trim() => {
+                        turns.pop().and_then(|prev| prev.assistant)
+                    }
+                    _ => None,
+                };
+                turns.push(PriorTurn::new(message.content.clone(), carried));
+            }
+            ChatRole::Assistant => {
+                if let Some(turn) = turns.last_mut() {
+                    turn.assistant = Some(message.content.clone());
+                }
+            }
+            ChatRole::System | ChatRole::Tool => {}
+        }
+    }
+    if turns.last().is_some_and(|prev| prev.user.trim() == question.trim()) {
+        turns.pop();
+    }
+    turns
+}
+
+/// The bounded [`ConversationWindow`] for `question`'s turn on `thread_id`, read
+/// from the thread **store** (not [`MemoryStore::working_memory`]) and bounded by
+/// the `[chat]` window keys ([S-483]). Call it **before** the question is
+/// appended to the thread. A deleted conversation has no messages, so it
+/// contributes an empty window.
+///
+/// # Errors
+/// Returns an error on a store failure or a corrupt stored `role`.
+///
+/// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+pub fn thread_window(
+    store: &ChatStore,
+    thread_id: i64,
+    question: &str,
+    max_turns: usize,
+    max_chars: usize,
+) -> Result<ConversationWindow> {
+    let messages = store.messages(thread_id)?;
+    Ok(ConversationWindow::bounded(
+        prior_turns(&messages, question),
+        max_turns,
+        max_chars,
+    ))
 }
 
 /// An [`EventSink`] that **persists** an orchestrated turn's scratchpad to a

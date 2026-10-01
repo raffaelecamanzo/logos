@@ -31,6 +31,7 @@
 
 pub mod budget;
 pub mod event;
+pub mod history;
 pub mod plan;
 pub mod planner;
 pub mod roster;
@@ -38,6 +39,7 @@ pub mod step;
 
 pub use budget::{BudgetBound, BudgetTree};
 pub use event::{CapturingSink, EventSink, FanOut, OrchestratorEvent};
+pub use history::{ConversationWindow, PriorTurn};
 pub use plan::{PlanStep, PlannerDecision, StepRole};
 pub use planner::{
     workspace_planner_preamble, Planner, DEFAULT_PLANNER_PREAMBLE, WORKSPACE_PLANNER_ADDENDUM,
@@ -174,6 +176,10 @@ pub struct Orchestrator<M, E> {
     planner: Planner<M>,
     executor: E,
     budget: BudgetTree,
+    /// The thread's bounded prior turns ([S-483]); empty on a thread's first turn.
+    ///
+    /// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+    history: ConversationWindow,
 }
 
 impl<M, E> Orchestrator<M, E>
@@ -188,6 +194,7 @@ where
             planner: Planner::new(planner_model),
             executor,
             budget,
+            history: ConversationWindow::default(),
         }
     }
 
@@ -198,6 +205,32 @@ where
             planner,
             executor,
             budget,
+            history: ConversationWindow::default(),
+        }
+    }
+
+    /// Show the planner and the Synthesizer the thread's bounded prior turns
+    /// ([S-483], [FR-UI-20] AC-2) — what lets a follow-up be answered in context.
+    /// An empty window leaves every prompt exactly as it was without one.
+    ///
+    /// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+    /// [FR-UI-20]: ../../docs/specs/requirements/FR-UI-20.md
+    #[must_use]
+    pub fn with_history(mut self, history: ConversationWindow) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// `instruction` for a Synthesizer pass, led by the prior-turn window when there
+    /// is one — so the Synthesizer, which otherwise reads only this turn, can
+    /// resolve a follow-up. The window goes **first**, as in the planner's prompt, so
+    /// the instruction (and the current question it ends on) is the last thing read.
+    /// Unchanged when the window is empty.
+    fn with_window(&self, instruction: String) -> String {
+        if self.history.is_empty() {
+            instruction
+        } else {
+            format!("{}\n\n{instruction}", self.history.render())
         }
     }
 
@@ -244,7 +277,10 @@ where
         let mut correction: Option<&str> = None;
 
         loop {
-            let decision = self.planner.decide(request, &scratchpad, correction.take()).await?;
+            let decision = self
+                .planner
+                .decide(request, &scratchpad, correction.take(), &self.history)
+                .await?;
             let steps = match decision {
                 // The turn is finalized. The planner's decision carries no prose
                 // ([CR-086], [FR-UI-30]) — the tool-less streaming Synthesizer
@@ -293,7 +329,7 @@ where
                     limit: self.budget.max_replans(),
                 };
                 return self
-                    .finalize_on_hard_halt(bound, plans_executed, &scratchpad, sink)
+                    .finalize_on_hard_halt(request, bound, plans_executed, &scratchpad, sink)
                     .await;
             }
 
@@ -307,7 +343,7 @@ where
                     limit: self.budget.global_limit(),
                 };
                 return self
-                    .finalize_on_hard_halt(bound, plans_executed, &scratchpad, sink)
+                    .finalize_on_hard_halt(request, bound, plans_executed, &scratchpad, sink)
                     .await;
             }
 
@@ -350,7 +386,7 @@ where
                     // scratchpad when observations exist ([CR-048] A′, [NFR-CC-04]).
                     Err(StepError::Budget(bound)) => {
                         return self
-                            .finalize_on_hard_halt(bound, plans_executed, &scratchpad, sink)
+                            .finalize_on_hard_halt(request, bound, plans_executed, &scratchpad, sink)
                             .await;
                     }
                     Err(StepError::Failed(message)) => {
@@ -407,6 +443,7 @@ where
     /// inventing an answer.
     async fn finalize_on_hard_halt(
         &self,
+        request: &str,
         bound: BudgetBound,
         round: u32,
         scratchpad: &[(PlanStep, StepObservation)],
@@ -432,11 +469,20 @@ where
         // One tool-free Synthesizer pass over the scratchpad. In production the
         // roster injects the rendered scratchpad as the Synthesizer's grounding
         // (S-175); the step instruction only frames the bounded intent.
-        let instruction = "The turn was bounded by its budget before it could finish. Using only \
+        let mut instruction = String::from(
+            "The turn was bounded by its budget before it could finish. Using only \
              the observations gathered so far, compose the best-effort grounded answer to the \
              user's question and make clear it may be incomplete. Ground every claim in those \
-             observations; never invent facts.";
-        match self.synthesize_answer(instruction, sink).await {
+             observations; never invent facts.",
+        );
+        // With a prior-turn window the instruction must say WHICH question is the
+        // current one, or "the user's question" is ambiguous against the earlier
+        // turns it is led by. Without one it is left exactly as it always was.
+        if !self.history.is_empty() {
+            instruction.push_str(&format!("\n\nThe user's question was:\n{request}"));
+        }
+        let instruction = self.with_window(instruction);
+        match self.synthesize_answer(&instruction, sink).await {
             Ok(summary) => {
                 let answer = format!("{marker}\n{summary}");
                 sink.emit(OrchestratorEvent::FinalAnswer {
@@ -480,12 +526,12 @@ where
         // observations); a conversational turn has no observations at all — so the
         // request is carried in the instruction, the one place the Synthesizer can
         // read what it is answering.
-        let instruction = format!(
+        let instruction = self.with_window(format!(
             "Compose the final, grounded answer to the user's question in clear prose \
              (markdown is fine). Ground every claim about the codebase in the observations \
              gathered this turn; if they are insufficient, say so honestly rather than \
              inventing facts. The user's question was:\n{request}"
-        );
+        ));
         match self.synthesize_answer(&instruction, sink).await {
             Ok(answer) => {
                 sink.emit(OrchestratorEvent::FinalAnswer {
