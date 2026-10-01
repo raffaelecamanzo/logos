@@ -22,7 +22,8 @@
 //! **first** answer reads every member (an edge binds the *sole* provider of a
 //! key, which only every member's surface can establish); after that a read
 //! checks the sync-stamps of the members that can have changed — the resident
-//! ones — and starts no other for the check (S-484,
+//! ones — and starts no other for the check; when one of those stamps has
+//! moved, the read recomputes over every member (S-484,
 //! `ContractBridge::edges_read`). Each answer names the members it read in
 //! `member_reads`, beside the read-model; the `reading` line is unchanged by it.
 //!

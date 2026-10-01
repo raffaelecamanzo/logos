@@ -1216,11 +1216,13 @@ What gets read depends on whether the bridge has already answered once. Its
 key, and only every member's surface can say a provider is the sole one — so a
 CLI one-shot, whose bridge starts empty, always lists every member. A
 long-running surface (`serve`, the MCP server, the chat) keeps the bridge's
-answer, and each later answer only re-checks the members whose index can have
+answer, and each later answer only checks the members whose index can have
 changed since — those with a live engine — and retries any it could not open
-before. It starts no other member. `callers`
-also reads the members of its per-member fan-out, and `impact` the far member
-of each edge it crosses. The type-reference section and the declared relations
+before or whose store file has gone; the check starts no other member. When a
+stamp it checks has moved, the answer recomputes, and a recompute reads every
+member again. `callers` also reads the members of its per-member fan-out and
+`impact` those of its seed — the one member `--repo` names, or every member
+without it — and `impact` the far member of each edge it crosses. The type-reference section and the declared relations
 of `route-providers` state their own coverage (`type_reference_unread`, the
 headlines' denominators) and are not counted in `member_reads`.
 
