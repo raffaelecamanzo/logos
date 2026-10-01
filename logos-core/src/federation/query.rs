@@ -50,6 +50,7 @@ use super::open_state::{self, DegradedRollup, MemberOpenState};
 use super::registry::{AnswerScope, EngineRegistry, MemberScoped};
 use super::residue::{AnswerReach, EgressResidue, WorkspaceEgressResidue};
 use super::topics::{workspace_topics, MemberTopics};
+use super::type_refs::{self, MemberTypeFacts, MemberTypeFactsRead, TypeReferenceHeadline};
 use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
 
 /// One member's outcome for a repo-qualified fan-out query ([FR-WS-03]).
@@ -133,44 +134,53 @@ fn fan<T>(
 /// `MemberResult`'s exactly-one-channel contract while making the second failure
 /// visible to [`MemberStatus`].
 ///
-/// # The same walk reads each member's build-manifest facts ([FR-WS-33])
-/// The `build_dependency` headline is joined from facts read **here**, on the
-/// engine this walk already opened, so it costs no walk of its own and
+/// # The same walk reads each member's build-manifest and declared-type facts
+/// The `build_dependency` headline ([FR-WS-33]) and the `type_reference`
+/// section ([FR-WS-35]) are built from facts read **here**, on the engine this
+/// walk already opened, so they cost no walk of their own and
 /// `WALKS_PER_STATUS` stays at 4 ([NFR-PE-10]). A member whose facts cannot be
 /// read is left out of them with a warning — the join names it unread — and
 /// its freshness row is untouched. A member whose store holds no extracted
 /// facts yet is returned by name, apart, so the join names it unread with that
-/// reason rather than as a member with no manifests.
+/// reason rather than as a member with no manifests or no types.
 ///
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+/// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 fn fan_status(answer: &AnswerScope<'_, Engine>) -> (Vec<MemberResult<StatusInfo>>, FactsWalked) {
     let mut walked = FactsWalked::default();
     let freshness = answer
-        .fan_out(|_, engine| (engine.try_status(), engine.build_manifests()))
+        .fan_out(|_, engine| (engine.try_status(), engine.build_manifests(), engine.type_facts()))
         .into_iter()
         .map(|scoped| split_status_and_facts(scoped, &mut walked))
         .collect();
     (freshness, walked)
 }
 
-/// What the freshness walk reads off one member's engine: its freshness read and
-/// its build-manifest facts (`None`: not yet extracted), each with its own
-/// failure channel.
-type StatusAndFacts = (anyhow::Result<StatusInfo>, anyhow::Result<Option<Vec<BuildManifestRow>>>);
+/// What the freshness walk reads off one member's engine: its freshness read,
+/// its build-manifest facts and its declared-type facts (`None`: not yet
+/// extracted), each with its own failure channel.
+type StatusAndFacts = (
+    anyhow::Result<StatusInfo>,
+    anyhow::Result<Option<Vec<BuildManifestRow>>>,
+    anyhow::Result<Option<MemberTypeFacts>>,
+);
 
-/// The build facts the freshness walk read, as [`build_deps::join`] takes them:
-/// the members read, and apart from them the members whose store holds no
-/// extracted facts yet.
+/// The facts the freshness walk read, as [`build_deps::join`] and
+/// [`type_refs::build_index`] take them: the members read, and apart from them
+/// the members whose store holds no extracted facts yet.
 #[derive(Debug, Default)]
 struct FactsWalked {
     facts: Vec<MemberBuildFacts>,
     not_extracted: Vec<String>,
+    types: Vec<MemberTypeFactsRead>,
+    types_not_extracted: Vec<String>,
 }
 
-/// One member of the freshness walk: its freshness row, with its build facts
-/// pushed onto `walked` only when they were read ([FR-WS-33]).
+/// One member of the freshness walk: its freshness row, with its build and
+/// declared-type facts each pushed onto `walked` only when they were read
+/// ([FR-WS-33], [FR-WS-35]).
 ///
 /// A facts read that failed — or an engine that never started — pushes
 /// nothing, so the join names the member unread instead of counting it read
@@ -181,12 +191,26 @@ struct FactsWalked {
 /// assertable without a corrupt on-disk store, as [`flatten_status`] is.
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+/// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
 fn split_status_and_facts(
     scoped: MemberScoped<anyhow::Result<StatusAndFacts>>,
     walked: &mut FactsWalked,
 ) -> MemberResult<StatusInfo> {
     let member = scoped.member;
-    let value = scoped.value.map(|(status, facts)| {
+    let value = scoped.value.map(|(status, facts, types)| {
+        match types {
+            Ok(read) => build_deps::sort_read(
+                member.clone(),
+                read,
+                &mut walked.types,
+                &mut walked.types_not_extracted,
+            ),
+            Err(err) => tracing::warn!(
+                member = %member,
+                "reading a workspace member's declared-type facts failed; \
+                 the type-reference section reports it unread: {err:#}"
+            ),
+        }
         match facts {
             Ok(read) => build_deps::sort_read(
                 member.clone(),
@@ -691,6 +715,25 @@ pub struct WorkspaceStatus {
     /// [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_dependency: Option<BuildDependencyHeadline>,
+    /// The **cross-member type-reference** headline — member pairs bound by an
+    /// import of a type exactly one other member declares, admitted only
+    /// between members the build relation relates (or a build collision
+    /// backs), beside every row considered and the members read ([FR-WS-35],
+    /// [ADR-70]).
+    ///
+    /// **Advisory, never a coupling** ([BR-60]): it sits beside
+    /// [`build_dependency`](Self::build_dependency) and
+    /// [`coverage`](Self::coverage), and neither reads it — nor does it enter
+    /// the build headline. Absent only when every member was read and none is
+    /// Java/Kotlin/Avro; a member whose declared types could not be read, or
+    /// are not yet extracted, keeps it present, named under `members.unread`
+    /// ([NFR-CC-04]).
+    ///
+    /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+    /// [ADR-70]: ../../../docs/specs/architecture/decisions/ADR-70.md
+    /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_reference: Option<TypeReferenceHeadline>,
 }
 
 /// The member-kind **candidate hint** on `workspace status` ([FR-WS-32]).
@@ -919,11 +962,17 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         &members_holding_api_documents(&coverage),
         &registry.federation().member_kinds,
     );
-    let build_dependency = build_dependency_headline(
-        registry.federation(),
-        &build_facts.facts,
-        &build_facts.not_extracted,
-    );
+    let federation = registry.federation();
+    let relation =
+        build_deps::join(&federation.members, &federation.member_kinds, &build_facts.facts, &build_facts.not_extracted);
+    let type_reference = type_refs::build_index(
+        &federation.members,
+        &build_facts.types,
+        &build_facts.types_not_extracted,
+        &relation,
+    )
+    .section();
+    let build_dependency = build_dependency_section(relation);
 
     // `zip`, not a name-keyed join: `fan_status` and `open_states` are two
     // projections of the SAME list — both map over `federation.members` in
@@ -954,6 +1003,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         topics,
         kind_candidates,
         build_dependency,
+        type_reference,
     }
 }
 
@@ -992,10 +1042,11 @@ fn split_call_residue_across_members(freshness: &mut [MemberResult<StatusInfo>])
     }
 }
 
-/// The `build_dependency` headline over the facts the freshness walk read, or
-/// `None` when every member was read and none holds a build manifest — so a
-/// workspace without one serializes exactly as before the relation existed
-/// ([FR-WS-33]).
+/// The `build_dependency` headline over the build relation the freshness walk's
+/// facts were joined into, or `None` when every member was read and none holds
+/// a build manifest — so a workspace without one serializes exactly as before
+/// the relation existed ([FR-WS-33]). [`workspace_status`] joins the facts once
+/// and hands the same relation to the type-reference overlay.
 ///
 /// A member whose facts could not be read — or whose store holds none extracted
 /// yet (`not_extracted`) — keeps the headline present: "unread" is not "no
@@ -1004,13 +1055,7 @@ fn split_call_residue_across_members(freshness: &mut [MemberResult<StatusInfo>])
 ///
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-fn build_dependency_headline(
-    federation: &super::Federation,
-    facts: &[MemberBuildFacts],
-    not_extracted: &[String],
-) -> Option<BuildDependencyHeadline> {
-    let relation =
-        build_deps::join(&federation.members, &federation.member_kinds, facts, not_extracted);
+fn build_dependency_section(relation: build_deps::BuildDependencyRelation) -> Option<BuildDependencyHeadline> {
     let members = &relation.headline.members;
     (members.with_manifests > 0 || !members.unread.is_empty()).then_some(relation.headline)
 }
@@ -1052,6 +1097,20 @@ mod tests {
 
     // ── the build-dependency headline on the status payload (S-463) ─────
 
+    /// [`build_dependency_section`] over a fresh join of `facts`.
+    fn build_dependency_headline(
+        federation: &super::super::Federation,
+        facts: &[MemberBuildFacts],
+        not_extracted: &[String],
+    ) -> Option<BuildDependencyHeadline> {
+        build_dependency_section(build_deps::join(
+            &federation.members,
+            &federation.member_kinds,
+            facts,
+            not_extracted,
+        ))
+    }
+
     fn two_member_federation() -> super::super::Federation {
         let root = std::path::PathBuf::from("/ws");
         super::super::Federation {
@@ -1073,35 +1132,57 @@ mod tests {
     /// facts not yet extracted (named apart, never counted read), facts
     /// unreadable on a live engine (not pushed — the member reads unread — and
     /// its freshness row untouched), and an engine that never started (not
-    /// pushed, error row).
+    /// pushed, error row) — for the build facts and the declared-type facts
+    /// alike, each on its own channel (S-473).
     #[test]
     fn a_failed_build_facts_read_is_unread_and_leaves_the_freshness_row_alone() {
         let scoped = |value| MemberScoped { member: "api".to_string(), value };
         let mut walked = FactsWalked::default();
 
         let row = split_status_and_facts(
-            scoped(Ok((Ok(StatusInfo::default()), Ok(Some(Vec::new()))))),
+            scoped(Ok((Ok(StatusInfo::default()), Ok(Some(Vec::new())), Ok(Some(MemberTypeFacts::default()))))),
             &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none());
         assert_eq!(walked.facts.len(), 1, "facts read are pushed, even when empty");
+        assert_eq!(walked.types.len(), 1, "declared types read are pushed, even when empty");
 
         let row =
-            split_status_and_facts(scoped(Ok((Ok(StatusInfo::default()), Ok(None)))), &mut walked);
+            split_status_and_facts(scoped(Ok((Ok(StatusInfo::default()), Ok(None), Ok(None)))), &mut walked);
         assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
         assert_eq!(walked.facts.len(), 1, "a store with no extracted facts is never counted read");
         assert_eq!(walked.not_extracted, ["api"], "…it is named apart");
+        assert_eq!(walked.types.len(), 1, "no extracted declared types is never counted read");
+        assert_eq!(walked.types_not_extracted, ["api"], "…it is named apart too");
 
         let row = split_status_and_facts(
-            scoped(Ok((Ok(StatusInfo::default()), Err(anyhow::anyhow!("store read failed"))))),
+            scoped(Ok((
+                Ok(StatusInfo::default()),
+                Err(anyhow::anyhow!("store read failed")),
+                Err(anyhow::anyhow!("store read failed")),
+            ))),
             &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
         assert_eq!(walked.facts.len(), 1, "an unreadable member is never counted read");
+        assert_eq!(
+            (walked.types.len(), walked.types_not_extracted.len()),
+            (1, 1),
+            "a failed declared-type read pushes nothing: the member reads unread, failed"
+        );
+
+        // The two fact channels are independent: build facts read, type facts failed.
+        let row = split_status_and_facts(
+            scoped(Ok((Ok(StatusInfo::default()), Ok(Some(Vec::new())), Err(anyhow::anyhow!("read failed"))))),
+            &mut walked,
+        );
+        assert!(row.result.is_some() && row.error.is_none());
+        assert_eq!((walked.facts.len(), walked.types.len()), (2, 1));
 
         let row = split_status_and_facts(scoped(Err(anyhow::anyhow!("store is corrupt"))), &mut walked);
         assert!(row.error.is_some());
-        assert_eq!((walked.facts.len(), walked.not_extracted.len()), (1, 1));
+        assert_eq!((walked.facts.len(), walked.not_extracted.len()), (2, 1));
+        assert_eq!((walked.types.len(), walked.types_not_extracted.len()), (1, 1));
 
         let headline = build_dependency_headline(&two_member_federation(), &[], &[]).unwrap();
         assert_eq!(headline.members.unread, ["a", "b"], "no fact pushed ⇒ named unread");

@@ -80,9 +80,9 @@ use serde::Serialize;
 use crate::extract::build_manifest::ReferenceKind;
 use crate::graph_store::BuildManifestRow;
 
-use super::bridge::{current_stamps, read_members, MemberContracts, StampCache};
+use super::bridge::{current_stamps, read_members, MemberContracts, StampCache, Stamps};
 use super::manifest::MemberKind;
-use super::registry::{EngineRegistry, MemberEngine};
+use super::registry::{AnswerScope, EngineRegistry, MemberEngine};
 use super::Member;
 
 /// The kind of one `builds-against` edge — the kind of the reference it was
@@ -373,6 +373,11 @@ pub struct BuildDependencyRelation {
     /// over. Not serialized: the headline's [`MembersRead`] states it.
     #[serde(skip)]
     roster_read: Vec<String>,
+    /// Colliding coordinate → the members whose references reached it — what
+    /// [`collisions_referenced_by`](Self::collisions_referenced_by) answers.
+    /// Not serialized, so the build headline's bytes do not move with it.
+    #[serde(skip)]
+    collision_referencers: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// One member's side of the relation: what it builds against and what builds
@@ -406,6 +411,22 @@ impl BuildDependencyRelation {
             .filter_map(|member| self.member(member))
             .collect()
     }
+
+    /// The collisions `member`'s references reach — each counted in its
+    /// [`to_collision`](ReferenceAccounting::to_collision) — sorted by
+    /// coordinate. The type-reference overlay reads them as pair evidence
+    /// ([`super::type_refs`]): a coordinate resolving to neither producer
+    /// still says the member builds against one of them.
+    pub fn collisions_referenced_by<'a>(
+        &'a self,
+        member: &'a str,
+    ) -> impl Iterator<Item = &'a ArtifactCollision> + 'a {
+        self.headline.collisions.iter().filter(move |c| {
+            self.collision_referencers
+                .get(&c.artifact)
+                .is_some_and(|members| members.contains(member))
+        })
+    }
 }
 
 /// One member's build-manifest facts as read: its name and every manifest row
@@ -427,16 +448,16 @@ pub const UNREAD_NOT_EXTRACTED: &str = "build facts not yet extracted";
 /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 pub const UNREAD_FAILED: &str = "build facts could not be read";
 
-/// Sort one member's facts read into [`join`]'s two inputs: its rows onto
+/// Sort one member's facts read into a join's two inputs: its facts onto
 /// `facts` when its store marks them extracted, its name onto `not_extracted`
-/// when it does not (the `None` of
-/// [`MemberContracts::build_manifests`]). Shared by both read paths — the lazy
-/// relation and `workspace status`'s freshness walk — so they cannot disagree
-/// about which member is read.
-pub(super) fn sort_read(
+/// when it does not (the `None` of [`MemberContracts::build_manifests`] and
+/// of `MemberContracts::type_facts`). Shared by every read path — the lazy
+/// build relation and type-reference index, and `workspace status`'s
+/// freshness walk — so they cannot disagree about which member is read.
+pub(super) fn sort_read<T>(
     member: String,
-    read: Option<Vec<BuildManifestRow>>,
-    facts: &mut Vec<MemberBuildFacts>,
+    read: Option<T>,
+    facts: &mut Vec<(String, T)>,
     not_extracted: &mut Vec<String>,
 ) {
     match read {
@@ -510,6 +531,7 @@ pub fn join(
     };
     let mut references = ReferenceAccounting::default();
     let mut collided: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut collision_referencers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut edges: BTreeMap<(String, String, BuildEdgeKind, Option<String>, String), u64> =
         BTreeMap::new();
     for (member, rows) in &read {
@@ -543,6 +565,10 @@ pub fn join(
                     Some((key, set)) if set.len() > 1 => {
                         references.to_collision += 1;
                         *collided.entry(key.as_str()).or_default() += 1;
+                        collision_referencers
+                            .entry(key.clone())
+                            .or_default()
+                            .insert((*member).to_string());
                     }
                     Some((_, set)) if set.contains(member) => references.in_member += 1,
                     Some((_, set)) => {
@@ -641,6 +667,7 @@ pub fn join(
         .collect();
     BuildDependencyRelation {
         roster_read,
+        collision_referencers,
         edges,
         headline: BuildDependencyHeadline {
             build_dependency_pairs: headline_pairs,
@@ -729,9 +756,29 @@ impl BuildDependencies {
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
+        self.relation_in(registry, &answer, stamps)
+    }
+
+    /// [`relation`](Self::relation) inside a caller's [`AnswerScope`], keyed on
+    /// the stamps it already read — so a read-model built beside the relation
+    /// (the type-reference overlay) shares one open attempt per member and one
+    /// stamp snapshot with it, as `ContractBridge::reachability_inputs` does
+    /// for its two caches ([FR-WS-16], [CR-125]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+    pub(super) fn relation_in<E>(
+        &self,
+        registry: &EngineRegistry<E>,
+        answer: &AnswerScope<'_, E>,
+        stamps: Stamps,
+    ) -> Arc<BuildDependencyRelation>
+    where
+        E: MemberEngine + MemberContracts,
+    {
         self.cache.get_or_compute(stamps, || {
             let (mut facts, mut not_extracted) = (Vec::new(), Vec::new());
-            for (member, read) in read_members(&answer, "build-manifest facts", |engine| {
+            for (member, read) in read_members(answer, "build-manifest facts", |engine| {
                 engine.build_manifests()
             }) {
                 sort_read(member, read, &mut facts, &mut not_extracted);

@@ -1,0 +1,113 @@
+S-473 T1 — RECORDED RUN: THE TYPE-REFERENCE OVERLAY RECONCILED WITH THE S-471 GATE
+================================================================================
+
+Measured (UTC):  2026-10-01T02:08:35Z (reconciliation), 02:03:12Z–02:07:16Z (on/off),
+                 re-run after the task review's fixes (review-fix commits through ab51d63f);
+                 the first run (01:18:53Z, 01:19:22Z–01:24:43Z, at aa738a93) gave the same
+                 bound figures, its single no-owner bucket (39,292) since split into
+                 unqualified (21,406) and no owner (17,886)
+Measured by:     Dev Session 2.1 (sprint-83, branch sprint-83-I2-S1), logos-core 1.7.0
+                 + this branch (no schema migration of its own; S-472's migration 24)
+Estate:          a private copy (`cp -Rp`, 2026-10-01T01:13:45Z) of ~/source/pec-services
+                 at ~/source/.estate-copies/pec-services-S-473. 84 clones, 83 manifest
+                 members, every store at v23; each member re-indexed by this branch's
+                 release binary (`logos index --project <member>`; first 01:17:16Z–
+                 01:18:27Z, 83 of 83 exit 0, all now v24, 67.5 s total; again before each
+                 later run, since the "off" step deletes the facts — 83 of 83 exit 0 each
+                 time; the review changed no indexing code, so aa738a93's binary and the
+                 post-review one index identically).
+                 The live estate was never opened by a branch binary.
+Command:         LOGOS_REF_WORKSPACE=~/source/.estate-copies/pec-services-S-473 \
+                   cargo test -p logos-core --test operand_resolvability \
+                   reconcile_the_type_reference_overlay_with_the_s471_gate -- --nocapture
+                 (exit 0; 1 passed of 1 selected). Estate-gated: it skips in gate.sh and
+                 CI, so this file is the run's only record.
+
+VERDICT — RECONCILED. One triple apart from the gate, attributed; none unattributed.
+
+  Product headline: 80 pairs (77 build · 3 collision-backed) bind 2,356 of 41,788 rows
+  (20,179 imports · 21,609 type uses). The rest: 3 type-only, 0 pair-unread,
+  131 ambiguous-owner, 6 self-owned, 21,406 unqualified (bare type-use names, never
+  looked up) and 17,886 no owner in the workspace. 83 of 83 members read; no
+  default-package declaration.
+
+  Reach (main-tree triples): recorded 434 · gate rule re-run on these stores 434 ·
+  product 433. The one: official-log-export-job-worker → poste-pec-common
+  `…common.tracing.annotation.Traced`, an annotation type (`@interface`) that has no
+  declared-type fact (S-472: symbols.scm captures no annotation-type node). The same
+  mechanism moves the platform pair split 31 → 30 and the precision denominator
+  2,492 → 2,490 (its 2 import rows are exactly-one in the gate, no-owner in the
+  product).
+
+  The rows: 24,732 import rows recorded (1.5.0 stores) against 20,179 on these
+  stores, 4,553 fewer. That is consistent with S-465/S-472 binding in-member
+  imports: the gate recorded 4,432 self-owned rows, and the product's self-owned
+  bucket here holds 6 (imports and type uses together). It is NOT attributed row
+  by row, because the 1.5.0 ledger no longer exists. What this run does establish
+  is that the gate's own rule gives the same Reach count (434) and the same Reach
+  by provider (all 15 equal) on both ledgers.
+
+BYTE-IDENTITY, OVERLAY ON AND OFF (estate copy)
+
+  Run with the post-review release binary. "Off" = every member's declared_types, avro_schemas and declared_types_extracted
+  marker deleted (`sqlite3 <copy store> DELETE …`), so the overlay reads every member
+  unread and binds nothing. Then `logos --project <copy> workspace status --json` and
+  `xservice route-providers --json` were run, and in each member
+  `scan --no-reconcile --json` and `gate --no-reconcile --json`, all with the branch
+  release binary.
+    coverage (resolved_cross_service_edges 70, egress_resolution 0.496): identical
+    build_dependency, topics, warm_rollup, degraded_rollup, workspace:    identical
+    xservice route-providers (the bridge edge set, 135,708 bytes):         identical
+    166 member outputs (83 scan + 83 gate):                                identical
+    members: differs ONLY in last_sync_at (the store file's mtime) and db_size_bytes
+      (its size), 83 × 2 fields, moved by the withholding sqlite3 write itself.
+    type_reference: on = the headline below; off = 0 of 83 members read.
+
+THE RECONCILIATION RUN'S OUTPUT
+-------------------------------
+
+S-473 RECONCILIATION — THE OVERLAY AGAINST THE S-471 GATE, BY NAME
+root: /Users/raffaelecamanzo/source/.estate-copies/pec-services-S-473
+
+PRODUCT HEADLINE
+  80 member pairs (77 build · 3 collision-backed) bind 2356 of 41788 unresolved Java/Kotlin import and type-use rows to a type another member declares (3 type-only, 0 pair unread, 131 ambiguous-owner, 6 self-owned, 21406 unqualified, 17886 no owner in the workspace), over 83 of 83 members read; an advisory type reference, never a coupling
+  rows: TypeRowAccounting { considered: 41788, imports: 20179, type_uses: 21609, bound: 2356, type_only: 3, pair_unread: 0, ambiguous_owner: 131, self_owned: 6, unqualified: 21406, no_owner: 17886 }
+  members: 83 of 83 read; 59 Java/Kotlin/Avro; owned declarations 1951, test-tree 510, default-package 0, refused 0; schemas 70 read of 70
+  collision-backed: [CollisionBackedPair { from: "mailbox-api", to: "mailbox-domain", artifacts: ["com.sourcesense.poste.pec.mailbox.core:common-domain"], references: 53 }, CollisionBackedPair { from: "mailbox-manager", to: "mailbox-domain", artifacts: ["com.sourcesense.poste.pec.mailbox.core:common-domain"], references: 155 }, CollisionBackedPair { from: "mailbox-unread-mail-batch", to: "mailbox-domain", artifacts: ["com.sourcesense.poste.pec.mailbox.core:common-domain"], references: 12 }]
+  type-only: [TypeOnlyPair { from: "official-log-legal-storage-batch", to: "postel-cpx-creation-lib", types: ["com.sourcesense.postel.legalstorage.cpxlib.exception.CpxCreationException", "com.sourcesense.postel.legalstorage.cpxlib.model.builder.CpxIndexBuilder", "com.sourcesense.postel.legalstorage.cpxlib.model.builder.PdvArchiveDirector"], references: 3 }]
+  ambiguous-owner: [AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.configuration.AbstractMongoConfiguration", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 1 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.configuration.MongoMailboxConfiguration", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 2 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.exception.ExistingResourceException", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 11 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.exception.ResourceNotFoundException", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 55 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.model.dto.configuration.MultipleMongoProperties", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 3 }, AmbiguousType { fqn: "com.sourcesense.poste.pec.mailbox.core.commondomain.repository.mailbox.MailboxRepository", owners: ["deprecated-mailbox-core", "mailbox-domain"], references: 59 }]
+
+THREE FIGURES — recorded (1.5.0 stores) · gate rule re-run (these stores) · product
+  import rows:          24732 · 20179 · (same rows)
+  Reach (main triples): 434 · 434 · 433
+  main triples by pair (build, platform, collision, type-only): (379, 31, 24, 3) · (379, 31, 24, 3) · (379, 30, 24, 3)
+  precision (ambiguous, cross): (131, 2492) · (131, 2492) · (131, 2490)
+
+REACH BY PROVIDER — recorded · re-run · product
+  archive-kafka-models                   30 ·   30 ·   30
+  filters-domain                          8 ·    8 ·    8
+  filters-kafka-models                    7 ·    7 ·    7
+  mailbox-domain                         24 ·   24 ·   24
+  mailbox-kafka-models                  145 ·  145 ·  145
+  mailserver-common                       4 ·    4 ·    4
+  notification-domain                    11 ·   11 ·   11
+  notification-kafka-models              12 ·   12 ·   12
+  official-log-batch-lib                 64 ·   64 ·   64
+  official-log-export-domain             13 ·   13 ·   13
+  official-log-ingestion-domain          24 ·   24 ·   24
+  official-log-kafka-models              22 ·   22 ·   22
+  poste-pec-common                       27 ·   27 ·   26
+  reporting-domain                       29 ·   29 ·   29
+  reporting-kafka-models                 14 ·   14 ·   14
+
+THE NAMED NON-BUILD PAIRS (CR-152 §2.1) on the product
+  mailbox-api → mailbox-domain: collision-backed via ["com.sourcesense.poste.pec.mailbox.core:common-domain"], 9 main triples
+  mailbox-manager → mailbox-domain: collision-backed via ["com.sourcesense.poste.pec.mailbox.core:common-domain"], 9 main triples
+  mailbox-unread-mail-batch → mailbox-domain: collision-backed via ["com.sourcesense.poste.pec.mailbox.core:common-domain"], 6 main triples
+  official-log-legal-storage-batch → postel-cpx-creation-lib: type-only, 3 row(s), types ["com.sourcesense.postel.legalstorage.cpxlib.exception.CpxCreationException", "com.sourcesense.postel.legalstorage.cpxlib.model.builder.CpxIndexBuilder", "com.sourcesense.postel.legalstorage.cpxlib.model.builder.PdvArchiveDirector"]
+
+RE-RUN → PRODUCT, BY NAME
+  gate Reach triples the product does not bind: 1
+         1  annotation type, no declared-type fact
+        official-log-export-job-worker → poste-pec-common  com.sourcesense.poste.pec.common.tracing.annotation.Traced  [AnnotationTypeHasNoFact("poste-pec-common/common-tracing/src/main/java/com/sourcesense/poste/pec/common/tracing/annotation/Traced.java")]
+  product triples outside the gate's Reach: 0

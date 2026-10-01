@@ -142,6 +142,14 @@ pub(crate) enum WorkspaceCommands {
     /// from — its own section, apart from every runtime figure above ([FR-WS-33],
     /// [BR-58]); `xservice build-deps` lists the rows.
     ///
+    /// When any member is Java, Kotlin or Avro, `type_reference` states
+    /// `type_reference_pairs` — member pairs bound by an import of a type
+    /// exactly one other member declares, admitted only between members the
+    /// build relation relates — beside the rows considered, bound,
+    /// ambiguous-owner and type-only and the members read: an advisory type
+    /// reference, never a coupling, apart from both sections above ([FR-WS-35],
+    /// [BR-60]).
+    ///
     /// When a member holds a vendored spec, `coverage.declared_contracts` states
     /// `declared_contract_pairs` beside the spec documents read, and
     /// `coverage.bound_external` the calls bound to a named external beside the
@@ -153,7 +161,9 @@ pub(crate) enum WorkspaceCommands {
     /// [BR-57]: ../../docs/specs/software-spec.md#327-workspace-federation
     /// [FR-WS-32]: ../../docs/specs/requirements/FR-WS-32.md
     /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
+    /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
     /// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
+    /// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation
     Status,
     /// App-wide cross-service dead code (FR-WS-12): the union of every member's
     /// call graph plus the bridge's edges as extra live roots. Advisory only —

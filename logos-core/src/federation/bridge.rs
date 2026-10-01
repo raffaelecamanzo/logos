@@ -430,6 +430,34 @@ pub trait MemberContracts {
     fn build_manifests(&self) -> Result<Option<Vec<crate::graph_store::BuildManifestRow>>> {
         Ok(Some(Vec::new()))
     }
+
+    /// Read this member's **declared-type facts** and its still-unresolved
+    /// Java/Kotlin `Imports`/`TypeUses` rows — the two inputs of the
+    /// cross-member type overlay ([FR-WS-35], [ADR-70] point 2).
+    ///
+    /// Read-only and member-local: the cross-member match is
+    /// [`super::type_refs`]'s, and it never feeds this bridge's matcher, its
+    /// edge set or any runtime figure ([BR-60]).
+    ///
+    /// `None` when the store does not mark its declared types extracted
+    /// ([`crate::graph_store::DECLARED_TYPES_EXTRACTED_KEY`] absent) — a store
+    /// upgraded across migration 24, or one never indexed — so the overlay
+    /// reports it unread, never as a member declaring nothing.
+    ///
+    /// The default is **extracted and empty** — every lightweight test double
+    /// contributes no fact and reads as a member with no Java/Kotlin/Avro file.
+    ///
+    /// # Errors
+    /// Propagates a read failure so the caller can skip the member as degraded
+    /// rather than aborting the whole workspace ([ADR-53]).
+    ///
+    /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+    /// [ADR-70]: ../../../docs/specs/architecture/decisions/ADR-70.md
+    /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    fn type_facts(&self) -> Result<Option<super::type_refs::MemberTypeFacts>> {
+        Ok(Some(super::type_refs::MemberTypeFacts::default()))
+    }
 }
 
 impl MemberContracts for crate::Engine {
@@ -483,6 +511,14 @@ impl MemberContracts for crate::Engine {
             }
             store.build_manifests().map(Some)
         })
+    }
+
+    fn type_facts(&self) -> Result<Option<super::type_refs::MemberTypeFacts>> {
+        let runtime = self.runtime().context(
+            "reading a member's declared-type facts requires a long-lived engine \
+             (Engine::start) with a read-only pool",
+        )?;
+        runtime.submit_read(super::type_refs::read_type_facts)
     }
 
     fn topic_surface(&self) -> Result<Vec<super::topics::TopicSummary>> {

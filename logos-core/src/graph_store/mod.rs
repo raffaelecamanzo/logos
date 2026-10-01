@@ -1428,6 +1428,25 @@ pub struct DeclaredTypeRow {
     pub reason: Option<String>,
 }
 
+/// One still-unresolved `Imports`/`TypeUses` ledger row of a Java or Kotlin
+/// file, with the file's path (S-473) — what the workspace's cross-member type
+/// overlay matches against every member's declared types ([ADR-70] point 2).
+///
+/// [ADR-70]: ../../../docs/specs/architecture/decisions/ADR-70.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TypeRefRow {
+    /// The referencing declaration's stable symbol string.
+    pub source_symbol: String,
+    /// Project-relative path of the importing file.
+    pub path: String,
+    /// 1-based source line of the reference, when known.
+    pub line: Option<i64>,
+    /// The target as the ledger holds it (`com::x::Svc` for an import).
+    pub target: String,
+    /// [`EdgeKind::Imports`] or [`EdgeKind::TypeUses`].
+    pub kind: EdgeKind,
+}
+
 /// One persisted Avro schema, read or not (S-472, migration 24) — the
 /// "schemas read, of schemas found" denominator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1779,6 +1798,17 @@ pub trait GraphStore {
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn unresolved_refs(&self) -> Result<Vec<UnresolvedRefRow>>;
+
+    /// The still-unresolved `Imports` and `TypeUses` rows of this member's
+    /// `.java` and `.kt` files, each with its file's path, ordered by path and
+    /// then ledger id (S-473).
+    ///
+    /// A targeted read for the workspace type overlay, which reads it on the
+    /// `workspace status` freshness walk: the whole ledger
+    /// ([`unresolved_refs`](GraphStore::unresolved_refs)) would cost every
+    /// member a full ledger read for the few rows a JVM file holds. A row whose
+    /// file is no longer indexed is not returned.
+    fn unresolved_type_refs(&self) -> Result<Vec<TypeRefRow>>;
 
     /// Stream every node with its **annotation-pass** columns, ordered by `id`
     /// (S-014).
@@ -3062,6 +3092,39 @@ impl GraphStore for SqliteGraphStore {
                     })
                 },
             )
+            .collect()
+    }
+
+    fn unresolved_type_refs(&self) -> Result<Vec<TypeRefRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.source_symbol, f.path, r.line, r.target, r.kind \
+             FROM unresolved_refs r JOIN files f ON f.id = r.file_id \
+             WHERE r.resolved = 0 AND r.kind IN (?1, ?2) \
+               AND (f.path GLOB '*.java' OR f.path GLOB '*.kt') \
+             ORDER BY f.path, r.id",
+        )?;
+        let raws = stmt
+            .query_map(
+                rusqlite::params![EdgeKind::Imports.as_i32(), EdgeKind::TypeUses.as_i32()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i32>(4)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting the unresolved type references")?;
+        raws.into_iter()
+            .map(|(source_symbol, path, line, target, kind)| {
+                let kind = EdgeKind::try_from(kind).map_err(|e| {
+                    anyhow!("corrupt ref kind {kind} in {path}: {e}; rebuild advised (NFR-RA-08)")
+                })?;
+                Ok(TypeRefRow { source_symbol, path, line, target, kind })
+            })
             .collect()
     }
 

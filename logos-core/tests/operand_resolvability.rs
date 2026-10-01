@@ -319,6 +319,14 @@ mod external_join_reconciliation;
 #[path = "operand_resolvability/cross_member_type_refs.rs"]
 mod cross_member_type_refs;
 
+/// S-473's reconciliation of the shipped type-reference overlay with S-471's
+/// gate, by name — its own module, beside the gate it reads. Builds the
+/// shipped index from member stores opened read-only; it starts no engine.
+///
+/// `#[path]`-attached for the same reason every sibling above is.
+#[path = "operand_resolvability/type_refs_reconciliation.rs"]
+mod type_refs_reconciliation;
+
 /// S-470's estate report — each concatenated Spring mapping path, promoted or
 /// counted, per member. Its own module, so the fold's measurement does not
 /// co-edit a sibling gate; it reads only `corpus_root` and indexes copies of the

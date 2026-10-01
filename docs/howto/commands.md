@@ -1391,6 +1391,32 @@ coverage tab renders the same section as its own card, after every runtime
 board. A workspace with no build manifest, every member indexed, prints exactly
 what it printed before. See [`kind = "platform"`](configuration.md#kind--platform--build-hubs).
 
+Members also import each other's types. When any member is Java, Kotlin or Avro
+— or a member's declared types could not be read — both renderings carry a
+`type_reference` section after `build_dependency`. A still-unresolved
+import (or qualified type use) in a `.java`/`.kt` file that names a type
+**exactly one other** member declares, in its main source tree or in an `.avsc`
+schema, is a type reference, with the importing file and line and the declaring
+file or schema. It counts only between members the build relation relates, or
+where the importer references a colliding artifact the owner produces. Those
+pairs are listed under `collision_backed`, with the artifact named. Any other
+match is listed under `type_only` and counted there, but never bound and never
+part of `type_reference_pairs`. A type several members
+declare stays unbound and is listed under `ambiguous_owner`, with the owners
+named. The headline `type_reference_pairs` (split `build_pairs` /
+`collision_backed_pairs`) sits beside `rows`, every row considered filed into
+exactly one of `bound`, `type_only`, `pair_unread`, `ambiguous_owner`,
+`self_owned`, `unqualified` (a bare type use such as `Dto`, which names no
+package and so is never looked up) and `no_owner`, and the `members` read. Read `summary` for the
+one-line form. A type reference is advisory and never a coupling: it is not a
+bridge edge, and nothing in `coverage` or `build_dependency` moves with it.
+**After upgrading from 1.7.0**, a member's declared types exist only once it has
+been fully re-read (`logos index` or `logos health` in the member); until then
+it is listed under `members.unread` with `"declared types not yet extracted"`.
+The web coverage tab does not render this section yet. A workspace with no
+Java/Kotlin/Avro member, every member indexed, prints exactly what it printed
+before.
+
 ##### Each reference names the other end
 
 `bound: 96` and `ambiguous: 169` are not actionable on their own — the obvious
