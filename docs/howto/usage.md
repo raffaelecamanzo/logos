@@ -484,7 +484,9 @@ self-only `Content-Security-Policy` on every response. Every non-GET request is
 answered `405` **except** a `POST` to one of a small, enumerated set of mutating
 routes — the config-write/apply routes (`/config/save`, `/config/apply`,
 `/config/secret`), the Chat turn route (`/chat`), and the per-conversation
-delete (`/api/v1/chat/threads/{id}/delete`); those — and only
+delete (`/api/v1/chat/threads/{id}/delete`) — in a workspace serve with `agents`,
+also the workspace chat's `/workspace/chat` and
+`/api/v1/workspace/chat/threads/{id}/delete`; those — and only
 those — are additionally gated by a same-origin + per-session intent (CSRF)
 guard, so a request missing the `x-logos-intent` token or arriving cross-origin
 is rejected `403` before any handler runs. The whole React app — its hashed
