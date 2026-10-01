@@ -1518,6 +1518,43 @@ mod fixtures {
         );
     }
 
+    #[test]
+    fn a_reading_reads_only_its_population_when_the_scalars_cover_more() {
+        // The estate run folds scalars over all 84 directories and reads the
+        // decisive population (83) out of them: this filter alone keeps the
+        // fork's declarations out of the headline.
+        let c = corpus(vec![
+            source(
+                "a/src/main/resources/application.yml",
+                "a",
+                None,
+                &[("spring.kafka.topics.orders", "orders")],
+            ),
+            source(
+                "fork/src/main/resources/application.yml",
+                "fork",
+                None,
+                &[("spring.kafka.topics.orders", "orders")],
+            ),
+        ]);
+        let manifest = set(&["a"]);
+        let directories = set(&["a", "fork"]);
+        let scalars = application_scalars(&c, &directories);
+        let o = observed(&[("a", "orders")]);
+        let decisive = measure_reading(Reading::Decisive, &c, &scalars, &manifest, &o);
+        assert_eq!(
+            decisive.net_new(),
+            0,
+            "the fork is not in the decisive population"
+        );
+        assert_eq!(decisive.declarations.len(), 1);
+        assert_eq!(decisive.sources_read, 1);
+        let directory = measure_reading(Reading::Directory, &c, &scalars, &directories, &o);
+        assert!(directory
+            .pairs(Status::NetNew)
+            .contains_key(&("fork".to_string(), "orders".to_string())));
+    }
+
     // ── A1: value resolution through the shipped topic_identity ─────────────
 
     #[test]
