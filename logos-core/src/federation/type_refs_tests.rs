@@ -720,6 +720,13 @@ fn headline_lists_count_every_row_and_name_every_collision_artifact() {
     );
 }
 
+/// `schemas_read` counts only the schemas read, beside every schema found.
+#[test]
+fn schemas_read_counts_only_the_schemas_that_parsed() {
+    let members = rich_index().headline.members;
+    assert_eq!((members.schemas, members.schemas_read), (2, 1), "one of `models`' two schemas is malformed");
+}
+
 // ── the API S-474 reads ───────────────────────────────────────────────────
 
 /// The index, the per-type importers, the per-symbol references and the
