@@ -143,6 +143,29 @@ RECONCILIATION AGAINST S-411 (13 TOPICS / 36 DECLARATIONS)
   topics; no committed value equals them, so they join nothing in either run.
 
 
+TWO READINGS OF THE FLOOR'S INSTRUMENTS, RECORDED HERE (THE FLOOR IS NOT EDITED)
+--------------------------------------------------------------------------------
+
+  Both are named so the record is complete. Neither moves a figure: the run on
+  651674bf (2026-10-01T17:01Z, after both) reproduced every pinned figure, the
+  verdict line included.
+
+  1. A REFUSED SITE IS WIDER THAN FLOOR ITEM 8 AS WRITTEN. Item 8 says "unbound
+     for a reason other than no-provider". `refusal_of` also counts a row whose
+     provenance is `ConfigUnresolved` — a refusal the product carries on the
+     row while the site keeps its placeholder — whatever its bucket. On this
+     run every refusal is `topic-not-literal`; none is `config-unresolved`.
+
+  2. A PLACEHOLDER HOP IS READ AS ITS DECLARING PROFILE READS IT, NARROWER THAN
+     FLOOR ITEM 4's "carrying the profiles its `ConfigBound` names". Added at the
+     task review: a declaration in an `application-p` file admits only the
+     compositions profile `p` proves, else the unprofiled base's, else it is
+     refused `MissingKey` (Spring under `p` never reads another profile's file);
+     and each admitted topic carries its own composition's profiles, not the
+     union. It can only remove a pair, never add one, and on this estate it
+     removes none: every figure is identical before (11168b21) and after it.
+
+
 CR-157 CRA-01 — VALIDATED
 -------------------------
 

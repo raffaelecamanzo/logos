@@ -452,6 +452,12 @@ pub fn site_state(broker_rows: usize, has_promoted_topics: bool, refusals: &[Str
 /// The refusal one broker coverage row carries, or `None` when the product
 /// did not refuse it. A keyed publish with no subscriber is unbound
 /// `no-provider-in-workspace`, and that is an observed site, not a refusal.
+///
+/// **Wider than floor item 8 as written**, which says "unbound for a reason
+/// other than no-provider": a row whose provenance is `ConfigUnresolved` is a
+/// refusal the product carries on the row (the site keeps its placeholder), so
+/// it counts too, whatever its bucket. Recorded in `declared_topics_finding.txt`;
+/// on the recorded run every refusal is `topic-not-literal`, so no figure moves.
 pub fn refusal_of(state: &CoverageState, provenance: &ValueProvenance) -> Option<String> {
     if let ValueProvenance::ConfigUnresolved { refusal, .. } = provenance {
         return Some(format!("config-unresolved: {}", refusal.label()));
