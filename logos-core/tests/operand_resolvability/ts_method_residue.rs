@@ -1466,6 +1466,13 @@ export class Wizard {
             (Shape::ThisField, Sub::ThisFieldTyped, Some("StatsService".into())),
             "a field typed `T | null`, read through `!`, carries T"
         );
+        let ro = "class K { constructor(readonly ro: Foo, override ov: Bar) {} m() { this.ro.a(); this.ov.b(); } }";
+        assert_eq!(
+            shape_of(ro, "a"),
+            (Shape::ThisField, Sub::ThisFieldTyped, Some("Foo".into())),
+            "`readonly` alone, with no accessibility modifier, makes a parameter property"
+        );
+        assert_eq!(shape_of(ro, "b").1, Sub::ThisFieldTyped, "so does `override` alone");
     }
 
     #[test]
