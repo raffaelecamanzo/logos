@@ -784,6 +784,13 @@ async fn a_follow_up_turn_shows_prior_turns_oldest_first_to_planner_and_synthesi
         "the planner sees the history before the question it must answer: {planner}"
     );
     assert!(synth.contains("The user's question was:\nand for mailbox-manager?"), "{synth}");
+    // The window LEADS the instruction, as it leads the planner's prompt, so the
+    // current question is the last thing the Synthesizer reads.
+    assert!(
+        synth.find("earlier answer 2") < synth.find("Compose the final, grounded answer"),
+        "the window precedes the instruction: {synth}"
+    );
+    assert!(synth.ends_with("The user's question was:\nand for mailbox-manager?"), "{synth}");
 }
 
 /// [S-483] AC-2: a one-turn window keeps the NEWEST turn and the prompt states how
@@ -861,7 +868,20 @@ async fn the_best_effort_synthesizer_after_a_hard_halt_also_sees_the_window() {
 
     let with = halted_instruction(ConversationWindow::bounded(vec![prior(1)], 6, 16_000)).await;
     assert!(with.contains("earlier question 1") && with.contains("earlier answer 1"), "{with}");
+    // Led by the window, and — because "the user's question" would otherwise be
+    // ambiguous against the earlier turns — it names the CURRENT question, last.
+    assert!(with.starts_with("Earlier in this conversation"), "{with}");
+    assert!(with.find("earlier answer 1") < with.find("The turn was bounded"), "{with}");
+    assert!(with.ends_with("The user's question was:\nq"), "{with}");
+
+    // Without a window the halt instruction is exactly what it always was —
+    // pinned as a literal (no stray separator, no question line).
     let without = halted_instruction(ConversationWindow::default()).await;
-    assert!(!without.contains("earlier"), "{without}");
-    assert!(with.starts_with(&without), "the window is appended to the unchanged instruction");
+    assert_eq!(
+        without,
+        "The turn was bounded by its budget before it could finish. Using only \
+         the observations gathered so far, compose the best-effort grounded answer to the \
+         user's question and make clear it may be incomplete. Ground every claim in those \
+         observations; never invent facts."
+    );
 }

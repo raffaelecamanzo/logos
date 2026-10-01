@@ -221,14 +221,16 @@ where
         self
     }
 
-    /// `instruction` for a Synthesizer pass, with the prior-turn window appended
-    /// when there is one — so the Synthesizer, which otherwise reads only this
-    /// turn, can resolve a follow-up. Unchanged when the window is empty.
+    /// `instruction` for a Synthesizer pass, led by the prior-turn window when there
+    /// is one — so the Synthesizer, which otherwise reads only this turn, can
+    /// resolve a follow-up. The window goes **first**, as in the planner's prompt, so
+    /// the instruction (and the current question it ends on) is the last thing read.
+    /// Unchanged when the window is empty.
     fn with_window(&self, instruction: String) -> String {
         if self.history.is_empty() {
             instruction
         } else {
-            format!("{instruction}\n\n{}", self.history.render())
+            format!("{}\n\n{instruction}", self.history.render())
         }
     }
 
@@ -327,7 +329,7 @@ where
                     limit: self.budget.max_replans(),
                 };
                 return self
-                    .finalize_on_hard_halt(bound, plans_executed, &scratchpad, sink)
+                    .finalize_on_hard_halt(request, bound, plans_executed, &scratchpad, sink)
                     .await;
             }
 
@@ -341,7 +343,7 @@ where
                     limit: self.budget.global_limit(),
                 };
                 return self
-                    .finalize_on_hard_halt(bound, plans_executed, &scratchpad, sink)
+                    .finalize_on_hard_halt(request, bound, plans_executed, &scratchpad, sink)
                     .await;
             }
 
@@ -384,7 +386,7 @@ where
                     // scratchpad when observations exist ([CR-048] A′, [NFR-CC-04]).
                     Err(StepError::Budget(bound)) => {
                         return self
-                            .finalize_on_hard_halt(bound, plans_executed, &scratchpad, sink)
+                            .finalize_on_hard_halt(request, bound, plans_executed, &scratchpad, sink)
                             .await;
                     }
                     Err(StepError::Failed(message)) => {
@@ -441,6 +443,7 @@ where
     /// inventing an answer.
     async fn finalize_on_hard_halt(
         &self,
+        request: &str,
         bound: BudgetBound,
         round: u32,
         scratchpad: &[(PlanStep, StepObservation)],
@@ -466,13 +469,19 @@ where
         // One tool-free Synthesizer pass over the scratchpad. In production the
         // roster injects the rendered scratchpad as the Synthesizer's grounding
         // (S-175); the step instruction only frames the bounded intent.
-        let instruction = self.with_window(
+        let mut instruction = String::from(
             "The turn was bounded by its budget before it could finish. Using only \
              the observations gathered so far, compose the best-effort grounded answer to the \
              user's question and make clear it may be incomplete. Ground every claim in those \
-             observations; never invent facts."
-                .to_string(),
+             observations; never invent facts.",
         );
+        // With a prior-turn window the instruction must say WHICH question is the
+        // current one, or "the user's question" is ambiguous against the earlier
+        // turns it is led by. Without one it is left exactly as it always was.
+        if !self.history.is_empty() {
+            instruction.push_str(&format!("\n\nThe user's question was:\n{request}"));
+        }
+        let instruction = self.with_window(instruction);
         match self.synthesize_answer(&instruction, sink).await {
             Ok(summary) => {
                 let answer = format!("{marker}\n{summary}");
