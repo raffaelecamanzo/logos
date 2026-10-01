@@ -96,6 +96,15 @@ hard-to-hold-in-your-head functions, not merely long or merely branchy ones.
 `1 − low-cohesion ratio` over classes, using LCOM4: a class is low-cohesion when
 its methods and fields split into more than one connected component (the methods
 don't share state, so the class is really several classes in a trench coat).
+"Sharing state" means two methods read or write a field of their own class
+through an own-field access (`this.x`, `self.x`) that binds to exactly one field
+of that class; an access that binds to nothing connects nothing. In TypeScript
+and TSX, declared class fields, `#private` fields and constructor parameter
+properties (`constructor(private readonly http: Client)`) are fields of the
+class. Getters, inherited members, and the fields of an abstract class or a
+class expression are not, so accesses to them stay unbound. A TypeScript class
+whose methods share fields can therefore score higher on Cohesion after a
+re-index with this version than it did before.
 **n/a drop-out:** a repo with no classes that have production methods reports
 Cohesion as `n/a` rather than a fabricated score — see
 [Applicability and the n/a drop-out](#applicability-and-the-na-drop-out).
