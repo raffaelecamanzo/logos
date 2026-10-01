@@ -507,6 +507,29 @@ fn a_regenerated_turn_replaces_its_predecessor_in_the_window() {
     assert_eq!(text.matches("what is X?").count(), 1, "no duplicated user turn: {text}");
 }
 
+/// [S-483]: the regenerate match is exact (modulo surrounding whitespace) — a
+/// question that merely shares a prefix with the previous one is a new turn, never a
+/// regenerate, in the stored sequence AND for the live question.
+#[test]
+fn a_near_miss_question_is_not_mistaken_for_a_regenerate() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    converse(
+        &mut store,
+        thread,
+        &[("what is X?", "answer one"), ("what is X? in detail", "answer two")],
+    );
+
+    let text = thread_window(&store, thread, "what is X? in detail please", 6, 16_000)
+        .unwrap()
+        .render();
+    assert!(text.contains("answer one") && text.contains("answer two"), "{text}");
+    assert_eq!(prior_turns(&store.messages(thread).unwrap(), "what is X?").len(), 2);
+    // Whitespace around an otherwise identical message does not defeat the match.
+    assert_eq!(prior_turns(&store.messages(thread).unwrap(), "  what is X? in detail\n").len(), 1);
+}
+
 /// [S-483] AC-3: a regenerate IN PROGRESS — the stored thread ends `U1, A1` and the
 /// question being run is `U1` again — leaves the predecessor out of the window, since
 /// the turn about to be generated replaces it.
