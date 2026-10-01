@@ -1047,6 +1047,9 @@ mod fixtures {
         assert!(!void.contains("HOLDS") && !void.contains("FALSIFIED") && !void.contains(" 0 "));
         assert!(headline(Some(floor), floor).ends_with("HOLDS"));
         assert!(headline(Some(floor - 1), floor).ends_with("FALSIFIED"));
+        // Each figure in its own place: the count is not the floor.
+        let line = headline(Some(floor - 1), floor);
+        assert!(line.contains(&format!("{} against a floor of {floor}", floor - 1)), "{line}");
     }
 
     #[test]
