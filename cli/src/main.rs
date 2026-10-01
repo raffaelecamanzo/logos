@@ -393,8 +393,9 @@ pub(crate) enum Commands {
         command: WikiCommands,
     },
     /// Cross-service workspace queries (federation, FR-WS-05): route-providers,
-    /// callers, impact, search, and build-deps (a build dependency, never a
-    /// runtime coupling) — each with an optional `--repo` member filter.
+    /// callers, impact, search, build-deps (a build dependency, never a
+    /// runtime coupling) and type-refs (an advisory type reference, never a
+    /// coupling) — each with an optional `--repo` member filter.
     Xservice {
         #[command(subcommand)]
         command: XserviceCommands,
@@ -1006,6 +1007,7 @@ mod surface_parity {
         ("xservice_impact", Twin("xservice impact")),
         ("xservice_search", Twin("xservice search")),
         ("xservice_build_deps", Twin("xservice build-deps")),
+        ("xservice_type_refs", Twin("xservice type-refs")),
         ("workspace_status", Twin("workspace status")),
         ("workspace_reachability", Twin("workspace reachability")),
         ("workspace_check", Twin("workspace check")),

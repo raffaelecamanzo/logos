@@ -35,7 +35,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::model::NodeKind;
-use crate::models::{CallersResult, ImpactResult, SearchResult, StatusInfo};
+use crate::models::{AffectedResult, CallersResult, ImpactResult, SearchResult, StatusInfo};
 use crate::Engine;
 
 use super::bridge::{BridgeEdge, BridgeIntake, MemberContracts};
@@ -50,7 +50,10 @@ use super::open_state::{self, DegradedRollup, MemberOpenState};
 use super::registry::{AnswerScope, EngineRegistry, MemberScoped};
 use super::residue::{AnswerReach, EgressResidue, WorkspaceEgressResidue};
 use super::topics::{workspace_topics, MemberTopics};
-use super::type_refs::{self, MemberTypeFacts, MemberTypeFactsRead, TypeReferenceHeadline};
+use super::type_refs::{
+    self, MemberTypeFacts, MemberTypeFactsRead, MemberTypeReferences, PairEvidence, TypeImporter, TypeNaming, TypeOwner, TypeRefForm,
+    TypeReference, TypeReferenceHeadline, TypeReferenceIndex,
+};
 use super::warm_state::{self, MemberWarmState, WarmEvidence, WarmRollup};
 
 /// One member's outcome for a repo-qualified fan-out query ([FR-WS-03]).
@@ -292,6 +295,26 @@ pub struct XserviceCallers {
     /// queried symbol — the consumer endpoint (`from`) is the cross-boundary
     /// caller. Never fabricated (exactly-one, [NFR-RA-05]).
     pub cross_service: Vec<BridgeEdge>,
+    /// Cross-member callers reached across a [`TypeReference`]: each importing
+    /// declaration a bound reference names, with its file and line — **apart
+    /// from** [`cross_service`](Self::cross_service) and never merged with it
+    /// ([BR-60]); filled by [`with_type_references`](Self::with_type_references).
+    /// Absent when no bound type reference names the symbol, so such an answer
+    /// serializes exactly as before the overlay existed.
+    ///
+    /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via_type_reference: Vec<TypeReferenceCaller>,
+    /// The members whose declared types the type-reference overlay could not
+    /// read, each with its reason ([NFR-CC-04]): an importer there cannot be
+    /// reached, so [`via_type_reference`](Self::via_type_reference) is stated
+    /// over the members read and its absence is not "no importer". Filled by
+    /// [`with_type_references`](Self::with_type_references); absent when every
+    /// member was read.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub type_reference_unread: BTreeMap<String, &'static str>,
     /// What this answer **could not reach**: the unresolved egress residue of the
     /// members in scope ([FR-WS-05], [BR-53], [CR-125]).
     ///
@@ -351,6 +374,35 @@ pub fn xservice_callers(
             },
         ),
         cross_service,
+        via_type_reference: Vec::new(),
+        type_reference_unread: BTreeMap::new(),
+    }
+}
+
+impl XserviceCallers {
+    /// Stitch the type-reference tier on ([FR-WS-35], [BR-60]): every bound
+    /// [`TypeReference`] reaching the queried type, its importer the caller.
+    ///
+    /// At class grain the importer **is** the caller — a reference binds the
+    /// import of a type, not a call of one of its methods — as the bridge
+    /// tier's consumer endpoint is, so no engine is opened. See
+    /// [`references_reaching`] for what the query matches. A member the overlay
+    /// could not read is named in `type_reference_unread`. Nothing else in the
+    /// answer moves: `cross_service` and the residue's resolved count are the
+    /// bridge's alone.
+    ///
+    /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+    /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[must_use]
+    pub fn with_type_references(mut self, registry: &EngineRegistry<Engine>, index: &TypeReferenceIndex) -> Self {
+        self.via_type_reference = references_reaching(registry, index, &self.query)
+            .map(|reference| TypeReferenceCaller {
+                reached: VIA_TYPE_REFERENCE,
+                via: reference.clone(),
+            })
+            .collect();
+        self.type_reference_unread = index.headline.members.unread_reasons.clone();
+        self
     }
 }
 
@@ -379,6 +431,28 @@ pub struct XserviceImpact {
     /// Far-side impacts reached by fanning across the bridge edges the queried
     /// symbol is an endpoint of.
     pub cross_service: Vec<CrossServiceImpact>,
+    /// One entry per bound [`TypeReference`] reaching the symbol — per import
+    /// row, so a file importing the type and a static member of it is reached
+    /// twice — each with what depends on the importing file in its member —
+    /// **apart from**
+    /// [`cross_service`](Self::cross_service) and never merged with it
+    /// ([BR-60]); filled by [`with_type_references`](Self::with_type_references).
+    /// Absent when no bound type reference names the symbol, so such an answer
+    /// serializes exactly as before the overlay existed.
+    ///
+    /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub via_type_reference: Vec<TypeReferenceImpact>,
+    /// The members whose declared types the type-reference overlay could not
+    /// read, each with its reason ([NFR-CC-04]): an importer there cannot be
+    /// reached, so [`via_type_reference`](Self::via_type_reference) is stated
+    /// over the members read and its absence is not "no importer". Filled by
+    /// [`with_type_references`](Self::with_type_references); absent when every
+    /// member was read.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub type_reference_unread: BTreeMap<String, &'static str>,
     /// What this answer **could not reach**: the unresolved egress residue of the
     /// members in scope ([FR-WS-05], [BR-53], [CR-125]).
     ///
@@ -440,7 +514,268 @@ pub fn xservice_impact(
             },
         ),
         cross_service,
+        via_type_reference: Vec::new(),
+        type_reference_unread: BTreeMap::new(),
     }
+}
+
+impl XserviceImpact {
+    /// Stitch the type-reference tier on ([FR-WS-35], [BR-60]): every bound
+    /// [`TypeReference`] reaching the queried type, with the importing file's
+    /// reach in its member — the files depending on it, directly or
+    /// transitively ([`Engine::affected`]), within `depth` hops (the surfaces
+    /// pass the `depth` they passed [`xservice_impact`]; its default when
+    /// `None`), so the bound reads the same in every tier of the answer.
+    ///
+    /// The reach is **file-grain**, not the importing declaration's
+    /// [`Engine::impact`]: a Java/Kotlin import row is held by the importing
+    /// file's module node, whose symbol impact is empty however much depends on
+    /// the file's classes, while the file closure follows the member's own
+    /// calls, imports and references from it. A reference binds the import of a
+    /// type, not a call of one of its methods, so every importer of the type is
+    /// reached ([CR-152] CRA-04). See [`references_reaching`] for what the
+    /// query matches. A member the overlay could not read is named in
+    /// `type_reference_unread`; an importing member read when the overlay was
+    /// built whose engine will not start now yields an entry carrying its
+    /// error, never an abort ([ADR-53]). Nothing else in the answer moves.
+    ///
+    /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+    /// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
+    #[must_use]
+    pub fn with_type_references(
+        mut self,
+        registry: &EngineRegistry<Engine>,
+        index: &TypeReferenceIndex,
+        depth: Option<usize>,
+    ) -> Self {
+        let hops = depth.unwrap_or(crate::navigate::DEFAULT_IMPACT_DEPTH);
+        let within = |mut affected: AffectedResult| {
+            affected.affected.retain(|file| usize::try_from(file.distance).is_ok_and(|d| d <= hops));
+            affected
+        };
+        // One open per importing member per answer: a member that will not
+        // start is attempted — and logged, and counted — once, and its error
+        // replayed on every entry reaching it, as an `AnswerScope` replays a
+        // failed open within one walk ([ADR-53]).
+        let mut engines: BTreeMap<&str, Result<Arc<Engine>, String>> = BTreeMap::new();
+        // One closure per importing file: several rows of one file (an import
+        // and a static-member import of one type) share it.
+        let mut closures: BTreeMap<(&str, &str), AffectedResult> = BTreeMap::new();
+        self.via_type_reference = references_reaching(registry, index, &self.query)
+            .map(|reference| {
+                let importer = &reference.importer;
+                let engine = engines
+                    .entry(importer.member.as_str())
+                    .or_insert_with(|| registry.engine_for(&importer.member).map_err(|err| format!("{err:#}")));
+                TypeReferenceImpact {
+                    reached: VIA_TYPE_REFERENCE,
+                    via: reference.clone(),
+                    reach: MemberResult::from_scoped(MemberScoped {
+                        member: importer.member.clone(),
+                        value: engine
+                            .as_ref()
+                            .map(|engine| {
+                                closures
+                                    .entry((importer.member.as_str(), importer.file.as_str()))
+                                    .or_insert_with(|| {
+                                        within(engine.affected(std::slice::from_ref(&importer.file), false))
+                                    })
+                                    .clone()
+                            })
+                            .map_err(|err| anyhow::anyhow!("{err}")),
+                    }),
+                }
+            })
+            .collect();
+        self.type_reference_unread = index.headline.members.unread_reasons.clone();
+        self
+    }
+}
+
+/// The tag every entry of a `via_type_reference` section carries: the entry
+/// was reached through an advisory type reference, never a bridge edge
+/// ([BR-60]).
+///
+/// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+pub const VIA_TYPE_REFERENCE: &str = "via type reference";
+
+/// One cross-member caller reached across a [`TypeReference`] ([FR-WS-35]):
+/// the reference, whose importer — member, file, line and declaration — is
+/// the caller.
+///
+/// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+#[derive(Debug, Serialize)]
+pub struct TypeReferenceCaller {
+    /// Always [`VIA_TYPE_REFERENCE`].
+    pub reached: &'static str,
+    /// The bound reference: the type, the importer's file and line, the owner
+    /// and the pair evidence.
+    pub via: TypeReference,
+}
+
+/// One bound [`TypeReference`] reached across ([FR-WS-35]): the reference,
+/// and the importing member's affected-file closure of the importing file — or, when that member's engine will not start, its error
+/// ([ADR-53]).
+///
+/// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+#[derive(Debug, Serialize)]
+pub struct TypeReferenceImpact {
+    /// Always [`VIA_TYPE_REFERENCE`].
+    pub reached: &'static str,
+    /// The bound reference: the type, the importer's file and line, the owner
+    /// and the pair evidence.
+    pub via: TypeReference,
+    /// The importing member, and its affected-file closure of the importing
+    /// file (`changed` is that file) or its error.
+    #[serde(flatten)]
+    pub reach: MemberResult<AffectedResult>,
+}
+
+/// Every bound [`TypeReference`] reaching `symbol` ([FR-WS-35]).
+///
+/// `symbol` reaches a reference when it is the owner's node — the
+/// `references_to` entry, asked of every member — or the type's dotted name —
+/// the `importers` entry, which is how an Avro-declared type (no node in any
+/// store) is reached, and which a source type answers as well. The two never
+/// overlap: a `LogosSymbol` carries spaces and a dotted name none. Like the
+/// bridge tier, the match is on the symbol alone, never narrowed by a `repo`
+/// scope.
+///
+/// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+fn references_reaching<'a>(
+    registry: &'a EngineRegistry<Engine>,
+    index: &'a TypeReferenceIndex,
+    symbol: &'a str,
+) -> impl Iterator<Item = &'a TypeReference> + 'a {
+    let by_node = registry.federation().members.iter().flat_map(move |m| index.references_to(&m.name, symbol));
+    by_node.chain(index.importers(symbol))
+}
+
+/// The `xservice type-refs` read-model ([FR-WS-05], [FR-WS-35]) — one per
+/// surface: the CLI and the MCP twin serialize it alike.
+///
+/// Per **provider** member, the types other members import from it, each with
+/// its importers' file and line; the overlay's headline beside them, with its
+/// denominators ([BR-51]). An advisory type reference, never a coupling
+/// ([BR-60]).
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct XserviceTypeRefs {
+    /// The `--repo` scope, when one was applied: the provider member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Set when the scope names no member the overlay was built over — so the
+    /// empty [`providers`](Self::providers) is never read as "nothing imports
+    /// its types" ([NFR-CC-04]). It states why: the member's unread reason, or
+    /// "not in the workspace".
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_note: Option<String>,
+    /// The workspace-wide headline, whatever the scope: `type_reference_pairs`
+    /// beside the rows considered and the members read — the denominator the
+    /// listing is read against.
+    pub headline: TypeReferenceHeadline,
+    /// Unscoped: every member read whose types another member imports, in
+    /// roster order. Scoped: the scoped member alone, listed even when nothing
+    /// imports its types.
+    pub providers: Vec<ProviderTypeRefs>,
+}
+
+/// One provider member's imported types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderTypeRefs {
+    /// The declaring member.
+    pub member: String,
+    /// Its types other members import, sorted by name.
+    pub types: Vec<ImportedType>,
+}
+
+/// One type another member imports, with every importer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImportedType {
+    /// The type, dotted.
+    pub fqn: String,
+    /// Where it is declared: source file and node, or Avro schema.
+    pub owner: TypeOwner,
+    /// Each bound reference to it, sorted by importer.
+    pub importers: Vec<TypeImport>,
+}
+
+/// One importer of an [`ImportedType`]: the importing member, file and line,
+/// and how the reference bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TypeImport {
+    /// The importing member, file, line and declaration.
+    #[serde(flatten)]
+    pub importer: TypeImporter,
+    /// Exactly, or through its enclosing name.
+    pub naming: TypeNaming,
+    /// The row's form.
+    pub form: TypeRefForm,
+    /// What admits the pair.
+    pub evidence: PairEvidence,
+}
+
+/// The `xservice type-refs` answer over `index`, scoped to one provider member
+/// when `repo` is given ([FR-WS-35]).
+///
+/// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+#[must_use]
+pub fn xservice_type_refs(index: &TypeReferenceIndex, repo: Option<&str>) -> XserviceTypeRefs {
+    let read: Vec<MemberTypeReferences> = match repo {
+        Some(member) => index.member(member).into_iter().collect(),
+        None => index.per_member().into_iter().filter(|m| !m.imported_by.is_empty()).collect(),
+    };
+    let providers: Vec<ProviderTypeRefs> = read
+        .into_iter()
+        .map(|member| ProviderTypeRefs {
+            member: member.member,
+            types: imported_types(member.imported_by),
+        })
+        .collect();
+    let scope_note = build_deps::scope_note(
+        repo,
+        !providers.is_empty(),
+        &index.headline.members.unread_reasons,
+        "type-reference overlay was built over",
+    );
+    XserviceTypeRefs {
+        scope: repo.map(str::to_string),
+        scope_note,
+        headline: index.headline.clone(),
+        providers,
+    }
+}
+
+/// Group one provider's bound references by the type they name.
+fn imported_types(references: Vec<TypeReference>) -> Vec<ImportedType> {
+    let mut by_type: BTreeMap<String, ImportedType> = BTreeMap::new();
+    for reference in references {
+        let import = TypeImport {
+            importer: reference.importer,
+            naming: reference.naming,
+            form: reference.form,
+            evidence: reference.evidence,
+        };
+        by_type
+            .entry(reference.fqn.clone())
+            .or_insert_with(|| ImportedType {
+                fqn: reference.fqn,
+                owner: reference.owner,
+                importers: Vec::new(),
+            })
+            .importers
+            .push(import);
+    }
+    by_type.into_values().collect()
 }
 
 /// The resolved cross-service route bindings ([FR-WS-05]): the [bridge](super::bridge)
@@ -1904,5 +2239,83 @@ mod tests {
             0,
             "the vocabulary is present but `warming` is unreachable today"
         );
+    }
+
+    // ── the `xservice type-refs` listing (S-474) ─────────────────────────
+
+    /// A bound reference to `fqn`, owned by `lib`'s source, from `importer`'s
+    /// `file`, by import, through the build relation.
+    fn type_reference(fqn: &str, importer: &str, file: &str) -> TypeReference {
+        TypeReference {
+            fqn: fqn.to_string(),
+            naming: TypeNaming::Exact,
+            form: TypeRefForm::Import,
+            importer: TypeImporter {
+                member: importer.to_string(),
+                file: file.to_string(),
+                line: Some(3),
+                symbol: format!("{importer} {file}"),
+            },
+            owner: TypeOwner {
+                member: "lib".to_string(),
+                origin: type_refs::TypeOrigin::Source,
+                declared_in: format!("{fqn}.java"),
+                symbol: Some(format!("lib {fqn}#")),
+                kind: "class".to_string(),
+            },
+            evidence: PairEvidence::Build { platform: false },
+        }
+    }
+
+    /// **One entry per type, its importers under it**: references arrive in
+    /// the index's order (owner, type, importer) and leave grouped by type,
+    /// types sorted by name and each type's importers in arrival order — so a
+    /// type with 131 importers on the estate is one entry, not 131.
+    #[test]
+    fn imported_types_groups_references_by_type_in_name_then_importer_order() {
+        let types = imported_types(vec![
+            type_reference("com.acme.lib.Bean", "app", "App.java"),
+            type_reference("com.acme.lib.Dto", "app", "Also.java"),
+            type_reference("com.acme.lib.Dto", "app", "App.java"),
+            type_reference("com.acme.lib.Dto", "web", "Web.java"),
+        ]);
+        let shape: Vec<(&str, Vec<&str>)> = types
+            .iter()
+            .map(|t| (t.fqn.as_str(), t.importers.iter().map(|i| i.importer.file.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("com.acme.lib.Bean", vec!["App.java"]),
+                ("com.acme.lib.Dto", vec!["Also.java", "App.java", "Web.java"]),
+            ]
+        );
+        assert_eq!(types[1].owner.declared_in, "com.acme.lib.Dto.java", "the type's one owner, once");
+    }
+
+    /// **Each importer row says how it bound**: `naming`, `form` and
+    /// `evidence` are the reference's own, copied through — an enclosing
+    /// type-use row admitted through a collision is listed as exactly that,
+    /// never as the exact build-admitted import the fixtures mostly hold.
+    #[test]
+    fn imported_types_carries_each_references_naming_form_and_evidence() {
+        let mut reference = type_reference("com.acme.lib.Dto", "user", "User.java");
+        reference.naming = TypeNaming::Enclosing;
+        reference.form = TypeRefForm::TypeUse;
+        reference.evidence = PairEvidence::Collision {
+            artifacts: vec!["com.acme:dup".to_string()],
+        };
+        let types = imported_types(vec![reference]);
+        let row = serde_json::to_value(&types[0].importers[0]).unwrap();
+        assert_eq!(
+            (&row["naming"], &row["form"], &row["evidence"]),
+            (
+                &serde_json::json!("enclosing"),
+                &serde_json::json!("type-use"),
+                &serde_json::json!({"via": "collision", "artifacts": ["com.acme:dup"]})
+            ),
+            "{row:#}"
+        );
+        assert_eq!(row["file"], "User.java", "the importer is flattened beside them: {row:#}");
     }
 }

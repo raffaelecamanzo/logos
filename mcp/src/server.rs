@@ -15,6 +15,7 @@ use std::time::Instant;
 use anyhow::Context as _;
 use logos_core::federation::{
     self, query, workspace_governance, Backing, BuildDependencies, ContractBridge, EngineRegistry,
+    TypeReferences,
 };
 use logos_core::{governance::DsmGranularity, model::NodeKind, Engine};
 use rmcp::{
@@ -50,6 +51,9 @@ pub struct LogosMcp {
     /// The build-dependency relation beside the bridge, joined on first query
     /// and cached on member sync-stamps ([FR-WS-33]); never a runtime coupling.
     build_deps: Arc<BuildDependencies>,
+    /// The type-reference overlay, built on first query over the relation above
+    /// and cached on member sync-stamps ([FR-WS-35]); never a coupling.
+    type_refs: Arc<TypeReferences>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -62,6 +66,7 @@ impl LogosMcp {
             backing: Arc::new(Backing::Single(engine.into())),
             bridge: Arc::new(ContractBridge::new()),
             build_deps: Arc::new(BuildDependencies::new()),
+            type_refs: Arc::new(TypeReferences::new()),
             tool_router: Self::single_tool_router(),
         }
     }
@@ -75,6 +80,7 @@ impl LogosMcp {
             backing: Arc::new(Backing::Federated(Box::new(registry))),
             bridge: Arc::new(ContractBridge::new()),
             build_deps: Arc::new(BuildDependencies::new()),
+            type_refs: Arc::new(TypeReferences::new()),
             tool_router: Self::single_tool_router() + Self::xservice_tool_router(),
         }
     }
@@ -868,29 +874,33 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Cross-service callers of a symbol (FR-WS-05): each member's intra-repo callers (repo-qualified) plus the cross-service consumers that reach it over a bridge edge. `repo` scopes the intra-repo fan-out to one member. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. Advisory only, never a gate input."
+        description = "Cross-service callers of a symbol (FR-WS-05): each member's intra-repo callers (repo-qualified) plus the cross-service consumers that reach it over a bridge edge. `repo` scopes the intra-repo fan-out to one member. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. APART FROM `cross_service`, never merged with it: `via_type_reference` lists the importers an ADVISORY TYPE REFERENCE reaches (FR-WS-35, BR-60) when the symbol is a type's node or its dotted name (an Avro-declared type has only the name) — each entry carries `reached: \"via type reference\"` and `via`, the reference (`fqn`, `importer` member, file, line and declaration, `owner`, `evidence`), whose importer IS the caller at class grain: an import of a type, not a call of one of its methods. It is NOT a coupling, never a bridge edge, and never counted in `unresolved_egress`; the key is absent when no bound type reference names the symbol. `type_reference_unread` names, with its reason, every member whose declared types the overlay could NOT read: an importer there cannot be reached, so an absent section beside it is NOT \"nothing imports this\"; it is absent when every member was read. Advisory only, never a gate input."
     )]
     async fn xservice_callers(
         &self,
         Parameters(p): Parameters<XserviceCallersParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let (deps, types) = (Arc::clone(&self.build_deps), Arc::clone(&self.type_refs));
         self.run_xservice("xservice_callers", move |reg, bridge| {
             let (edges, residue) = query::reachability_inputs(bridge, reg);
             query::xservice_callers(reg, &edges, &residue, &p.symbol, p.limit, p.repo.as_deref())
+                .with_type_references(reg, &types.index(reg, &deps))
         })
         .await
     }
 
     #[tool(
-        description = "Cross-service impact of changing a symbol (FR-WS-05): the seed member's impact plus the far member's impact stitched across every bridge edge the symbol is an endpoint of, all repo-qualified. `repo` scopes the seed to one member. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. Advisory only, never a gate input."
+        description = "Cross-service impact of changing a symbol (FR-WS-05): the seed member's impact plus the far member's impact stitched across every bridge edge the symbol is an endpoint of, all repo-qualified. `repo` scopes the seed to one member. EVERY ANSWER CARRIES ITS UNRESOLVED RESIDUE (CR-125, BR-53): `unresolved_egress` reports the captured outbound call sites in scope that did NOT resolve — `unresolved_sites` (the count), `measured_sites` (its denominator, the same `bound+ambiguous+unbound` egress population `workspace_status`'s `egress_resolution` is taken over, so `unresolved_sites = measured_sites - bound`), `by_reason` (the per-reason breakdown, summing exactly to `unresolved_sites`), `no_provider_in_workspace` (sites whose provider is outside this workspace — bucketed APART, never inside the residue), `members_in_scope` (how many members the unresolved sites are SPREAD ACROSS — not the workspace roster size), `covers_all_members` and `summary`, the one composed line carrying all of it. THE FIELD IS ABSENT EXACTLY WHEN THE RESIDUE IS ZERO, and only then: an EMPTY `cross_service` list WITH an `unresolved_egress` block does NOT mean \"nothing reaches this\" — it means the question was answered over a graph missing that many outbound calls. Do not read it as an absence. `repo` scopes the residue to that member's egress, exactly as it scopes the per-member fan-out — but NOT the cross-service tier, which matches on the symbol alone; under a `repo` scope the `summary` says so, marking the resolved count workspace-wide and naming the member the residue covers. APART FROM `cross_service`, never merged with it: `via_type_reference` carries each importer's impact reached through an ADVISORY TYPE REFERENCE (FR-WS-35, BR-60) when the symbol is a type's node or its dotted name (an Avro-declared type has only the name) — one entry per bound reference (per import row, so a file importing the type and a static member of it appears twice), every importer of the type reached since a reference is an import, not a call — each entry carrying `reached: \"via type reference\"`, `via` (the reference: `fqn`, `importer` member, file, line and declaration, `owner`, `evidence`), `member`, and as `result` the importing member's affected-file closure of the importing file (`changed` is that file, `affected` every file depending on it directly or transitively, within `depth` hops like the rest of the answer), or its `error` when that member will not open. It is NOT a coupling, never a bridge edge, and never counted in `unresolved_egress`; the key is absent when no bound type reference names the symbol. `type_reference_unread` names, with its reason, every member whose declared types the overlay could NOT read: an importer there cannot be reached, so an absent section beside it is NOT \"nothing imports this\"; it is absent when every member was read. Advisory only, never a gate input."
     )]
     async fn xservice_impact(
         &self,
         Parameters(p): Parameters<XserviceImpactParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let (deps, types) = (Arc::clone(&self.build_deps), Arc::clone(&self.type_refs));
         self.run_xservice("xservice_impact", move |reg, bridge| {
             let (edges, residue) = query::reachability_inputs(bridge, reg);
             query::xservice_impact(reg, &edges, &residue, &p.symbol, p.depth, p.repo.as_deref())
+                .with_type_references(reg, &types.index(reg, &deps), p.depth)
         })
         .await
     }
@@ -905,6 +915,20 @@ impl LogosMcp {
         let deps = Arc::clone(&self.build_deps);
         self.run_xservice("xservice_build_deps", move |reg, _bridge| {
             federation::xservice_build_deps(&deps.relation(reg), p.repo.as_deref())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Cross-member type references (FR-WS-35), advisory and not a coupling: per provider member (`providers`), the types other members import from it (`types`, each with its `fqn` and `owner` — the declaring source file and node, or the Avro schema, which has no node) and every importer (`importers`: `member`, `file`, `line`, the importing declaration's `symbol`, `naming` exact or enclosing, `form` import or type-use, and `evidence`). A row binds only when EXACTLY ONE other member declares the type in main-tree source or an Avro schema, and only where the build relation relates the pair (`evidence.via: build`) or the importer references a colliding artifact the owner produces (`via: collision`, the `artifacts` named). THIS IS AN ADVISORY TYPE REFERENCE, NOT A COUPLING (BR-60): no row is a bridge edge, a resolved call, a build dependency or a coverage figure, and none may be read as one. `headline` is `workspace_status`'s `type_reference` section, workspace-wide whatever the scope: `type_reference_pairs` (split `build_pairs`/`collision_backed_pairs`) beside its denominator `rows` (every row considered, filed into exactly one bucket) and the `members` read — a member whose declared types could not be read or are not yet extracted is named in `members.unread` with `members.unread_reasons`, never counted as a member declaring nothing. `type_only` and `ambiguous_owner` there list the matches never bound. `repo` scopes `providers` to one provider member, listed even when nothing imports its types; a name that is not a member read yields an empty list with `scope_note` stating why."
+    )]
+    async fn xservice_type_refs(
+        &self,
+        Parameters(p): Parameters<XserviceRepoParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (deps, types) = (Arc::clone(&self.build_deps), Arc::clone(&self.type_refs));
+        self.run_xservice("xservice_type_refs", move |reg, _bridge| {
+            query::xservice_type_refs(&types.index(reg, &deps), p.repo.as_deref())
         })
         .await
     }

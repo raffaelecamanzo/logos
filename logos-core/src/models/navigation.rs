@@ -1487,7 +1487,7 @@ pub struct LanguageCount {
 /// as affected — the union is trivially available to the caller.
 ///
 /// [`changed`]: AffectedResult::changed
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AffectedResult {
     /// The changed files as resolved (normalised project-relative form).
     pub changed: Vec<String>,
@@ -1508,7 +1508,7 @@ pub struct AffectedResult {
 }
 
 /// One dependent file in an [`AffectedResult`] closure.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AffectedFile {
     /// Project-relative file path.
     pub file: String,

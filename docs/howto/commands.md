@@ -959,6 +959,12 @@ server but are **not yet exposed over `serve --mcp`** (which still runs
 single-backed today); wiring the served MCP loop to the workspace lands with a
 later CR-061 story.
 
+**One exception, since S-474:** `xservice type-refs` and the
+`via_type_reference` section of `callers`/`impact` are on the CLI and its MCP
+twins only. `/api/v1/workspace/callers` and `/api/v1/workspace/impact`, and the
+chat agent's `xservice_*` tools, answer without the section — exactly the bytes
+they answered before — and there is no `type-refs` web route.
+
 ### `xservice` (workspace federation queries)
 
 ```bash
@@ -967,6 +973,7 @@ logos xservice search <QUERY> [--kind <K>] [--limit <N>] [--repo <MEMBER>] [--js
 logos xservice callers <SYMBOL> [--limit <N>] [--repo <MEMBER>] [--json]
 logos xservice impact <SYMBOL> [--depth <N>] [--repo <MEMBER>] [--json]
 logos xservice build-deps [--repo <MEMBER>] [--json]          # what each member builds against — never a runtime coupling
+logos xservice type-refs [--repo <MEMBER>] [--json]           # which members import each member's types — advisory, never a coupling
 ```
 
 **Method wildcards.** A provider declared without an explicit verb — Spring's
@@ -1077,10 +1084,35 @@ nor counted yet.
   with its member. `--repo X` scopes the fan to member `X`.
 - **`callers`** — direct callers of a symbol per member, plus the cross-service
   callers stitched across bridge edges (a consumer in another member that binds
-  the symbol's route).
+  the symbol's route). For a type another member imports (see `type-refs`
+  below), a `via_type_reference` section lists each importer — member, file and
+  line — as a class-grain caller, each entry tagged `"reached": "via type
+  reference"` with the reference under `via`.
 - **`impact`** — transitive impact per member, extended across bridge edges: a
   handler reachable only via a matched cross-service call is included, tagged
-  with the bridge edge it was reached through.
+  with the bridge edge it was reached through. For a type another member
+  imports, a `via_type_reference` section carries, per bound reference (one
+  per import row, so a file importing the type and a static member of it is
+  listed twice, with one closure), the importing
+  member's [`affected`](#affected) closure of the importing file — `changed` is
+  that file, `affected` every file depending on it there, within `--depth`
+  hops like the rest of the answer — or that member's
+  `error` when its store will not open.
+
+  Both sections sit **apart from** `cross_service` and are never merged with
+  it: a type reference is not a bridge edge, and `unresolved_egress` counts
+  neither. Name the type by its node (``…/`Dto.java`/Dto#``) or by its dotted
+  name (`com.acme.lib.Dto`); an Avro-declared type has no node, so its dotted
+  name is the only way to reach it. The match is on the symbol alone, like the
+  bridge tier, whatever `--repo` says. A member whose declared types could
+  not be read (not yet extracted after an upgrade, or a store that will not
+  open) holds references nobody can reach, so both answers then carry
+  `type_reference_unread`, naming each such member with its reason — an absent
+  `via_type_reference` beside it is not "nothing imports this". A symbol no
+  type reference names, in a workspace whose members were all read, answers
+  exactly the bytes it did before. The reach is **file grain**: a
+  Java/Kotlin import is held by the importing file, so every importer of the
+  type is reached, whichever of its methods the importer calls.
 - **`build-deps`** (since S-464) — what each member **builds against** and what
   is **built against it**, joined from the members' Maven/Gradle manifests
   ([FR-WS-33](../specs/requirements/FR-WS-33.md)). Every member read gets a
@@ -1123,6 +1155,46 @@ nor counted yet.
                    "built_against_by": [ { "from": "archive-feeder", "to": "archive-kafka-models", "kind": "dependency",
                                            "scope": null, "artifact": "com.sourcesense.poste.pec.archive:kafka-models", "references": 1 }, … ] } ],
     "cross_context": [] }
+  ```
+- **`type-refs`** (since S-474) — the cross-member type references
+  ([FR-WS-35](../specs/requirements/FR-WS-35.md)): per **provider** member, the
+  types other members import from it, each with its `owner` (the declaring
+  source file and node, or the Avro schema, which has no node) and every
+  importer under `importers` — `member`, `file`, `line`, the importing
+  declaration's `symbol`, `naming` (`exact`, or `enclosing` for a static-member
+  or nested-type import), `form` (`import` or `type-use`) and `evidence` (`via:
+  build`, or `via: collision` with the `artifacts` named). The `headline` is
+  the `type_reference` section of `workspace status` — `type_reference_pairs`
+  beside every row considered and the members read — and stays workspace-wide
+  under `--repo`. Unscoped, only members whose types another member imports are
+  listed. `--repo X` lists provider `X` alone, with an empty `types` list when
+  nothing imports its types; a name that is not a member read (unknown, or its
+  declared types could not be read or are not yet extracted) answers an empty
+  `providers` list **with** a `scope_note` stating which, and exits 0. A
+  `type_only` match is never an importer here: it stays in the headline's
+  `type_only` list. The MCP twin is `xservice_type_refs`; there is no web
+  route yet.
+
+  **A type reference is advisory, never a coupling**
+  ([BR-60](../specs/software-spec.md#327-workspace-federation)): no row is a
+  bridge edge, a resolved call or a build dependency, and nothing in
+  `coverage` or `build_dependency` counts it.
+
+  ```jsonc
+  // logos xservice type-refs --repo lib --json (the fixture in cli/tests/xservice_type_refs.rs)
+  { "scope": "lib",
+    "headline": { "type_reference_pairs": 1, "build_pairs": 1, "collision_backed_pairs": 0, "triples": 1,
+                  "rows": { "considered": 5, "imports": 2, "type_uses": 3, "bound": 1, "type_only": 1, "unqualified": 3, … },
+                  "members": { "members": 5, "read": 5, … },
+                  "type_only": [ { "from": "stray", "to": "lib", "types": ["com.acme.lib.Dto"], "references": 1 } ],
+                  "summary": "1 member pairs (1 build · 0 collision-backed) bind 1 of 5 unresolved …" },
+    "providers": [ { "member": "lib", "types": [ {
+        "fqn": "com.acme.lib.Dto",
+        "owner": { "member": "lib", "origin": "source", "declared_in": "src/main/java/com/acme/lib/Dto.java",
+                   "symbol": "logos . . . src/main/java/com/acme/lib/`Dto.java`/Dto#", "kind": "class" },
+        "importers": [ { "member": "app", "file": "src/main/java/com/acme/app/App.java", "line": 3,
+                         "symbol": "logos . . . src/main/java/com/acme/app/`App.java`/",
+                         "naming": "exact", "form": "import", "evidence": { "via": "build" } } ] } ] } ] }
   ```
 
 `--repo` constructs only the member engines the answer needs (a one-shot never
@@ -1409,7 +1481,9 @@ exactly one of `bound`, `type_only`, `pair_unread`, `ambiguous_owner`,
 `self_owned`, `unqualified` (a bare type use such as `Dto`, which names no
 package and so is never looked up) and `no_owner`, and the `members` read. Read `summary` for the
 one-line form. A type reference is advisory and never a coupling: it is not a
-bridge edge, and nothing in `coverage` or `build_dependency` moves with it.
+bridge edge, and nothing in `coverage` or `build_dependency` moves with it. The
+references behind it are
+[`xservice type-refs`](#xservice-workspace-federation-queries).
 **After upgrading from 1.7.0**, a member's declared types exist only once it has
 been fully re-read (`logos index` or `logos health` in the member); until then
 it is listed under `members.unread` with `"declared types not yet extracted"`.

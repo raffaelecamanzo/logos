@@ -208,6 +208,27 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// costs zero lines. Three lines of headroom, not six: no follow-up is known to
 /// land on these arms.
 ///
+/// **S-474/[CR-152] 1010→1035** for the `xservice_type_refs` twin and the
+/// type-reference stitch in `xservice_callers`/`xservice_impact` ([FR-WS-35]):
+/// measured 1009→1032 (+23), 3 lines of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `TypeReferences` import | **+1** |
+/// | the `type_refs` field and its doc | **+3** |
+/// | the two constructors' `type_refs` line | **+2** |
+/// | `xservice_callers` and `xservice_impact`: one `Arc::clone` pair and one chained `.with_type_references(…)` each | **+4** |
+/// | the `xservice_type_refs` arm (attribute, signature, one `Arc::clone` pair, one delegation) | **+13** |
+/// | | **+23** |
+///
+/// Delegation only: each arm hands ONE `query::*` call the overlay from the
+/// holder beside `build_deps`, whose relation it is built over. The listing,
+/// the scope note, the stitch's match, the importer's file closure and the
+/// per-member error live in `logos_core::federation::query`, so the CLI prints
+/// the same read-models. The three descriptions grew and cost zero lines.
+///
+/// [CR-152]: ../../docs/requests/CR-152-cross-member-type-references-overlay.md
+/// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
 /// [CR-148]: ../../docs/requests/CR-148-build-manifests-yield-a-build-dependency-relation.md
 /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
 /// [S-403]: ../../docs/planning/journal.md#s-403-the-resolved-edge-headline-agrees-with-its-payload
@@ -219,8 +240,8 @@ fn mcp_surface_line_budget() {
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1010,
-        "mcp adapter exceeds the 1010 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1035,
+        "mcp adapter exceeds the 1035 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }
