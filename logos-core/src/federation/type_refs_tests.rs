@@ -508,6 +508,27 @@ fn a_collision_backed_match_binds_and_names_the_collision_artifact() {
     assert_eq!((index.headline.build_pairs, index.headline.collision_backed_pairs), (2, 1));
 }
 
+/// **Collision evidence names the owner among the producers** (review finding
+/// A4-F1): `user` references the colliding `com.acme:dup`, but `lib` — the
+/// one owner of `com.acme.lib.Dto` — produces no part of it, so `user`'s
+/// import of `Dto` is type-only, never collision-backed.
+#[test]
+fn a_referenced_collision_admits_only_an_owner_among_its_producers() {
+    let federation = fed(&MEMBERS, &[]);
+    let build = join(&federation.members, &federation.member_kinds, &build_facts(), &[]);
+    let mut facts = type_facts();
+    let user = facts.iter_mut().find(|(m, _)| m == "user").expect("user");
+    user.1.rows.push(import("com::acme::lib::Dto", "src/main/kotlin/U.kt", 3));
+    let index = build_index(&federation.members, &facts, &[], &build);
+    let dto = index
+        .type_only
+        .iter()
+        .find(|r| r.importer.member == "user")
+        .unwrap_or_else(|| panic!("user's import of Dto is type-only: {:?}", keys(&index.references)));
+    assert_eq!((dto.owner.member.as_str(), &dto.evidence), ("lib", &PairEvidence::TypeOnly));
+    assert!(index.references.iter().all(|r| !(r.importer.member == "user" && r.owner.member == "lib")));
+}
+
 /// A declared `platform` owner still binds — its build edge is counted apart
 /// in the build headline, and the reference says so.
 #[test]
