@@ -15,14 +15,16 @@
 //! Constructing the tools touches no engine. A member is started only when a
 //! dispatched call reaches it, and the resident-engine ceiling stays the
 //! registry's own budget. A `repo`-scoped `xservice_search` starts that one
-//! member. The other three read the contract bridge, exactly as
-//! `logos xservice …` and the MCP tools do: its **first** answer reads every
-//! member (an edge binds the *sole* provider of a key, which only every
-//! member's surface can establish); after that a read checks the sync-stamps of
-//! the members that can have changed — the resident ones — and starts no other
-//! (S-484, `ContractBridge::edges_read`). Each answer names the members it read
-//! in `member_reads`, beside the read-model; the `reading` line is unchanged by
-//! it.
+//! member, and so does the per-member tier of a `repo`-scoped `xservice_callers`
+//! (its intra-repo fan-out) or `xservice_impact` (its seed); unscoped, those
+//! tiers open every member. All three bridge-backed tools also read the
+//! contract bridge, exactly as `logos xservice …` and the MCP tools do: its
+//! **first** answer reads every member (an edge binds the *sole* provider of a
+//! key, which only every member's surface can establish); after that a read
+//! checks the sync-stamps of the members that can have changed — the resident
+//! ones — and starts no other for the check (S-484,
+//! `ContractBridge::edges_read`). Each answer names the members it read in
+//! `member_reads`, beside the read-model; the `reading` line is unchanged by it.
 //!
 //! # The residue rides the answer ([BR-53], [NFR-CC-04])
 //! Each output is an [`XserviceAnswer`]: the read-model verbatim, plus one
@@ -483,19 +485,34 @@ pub struct XserviceSearchArgs {
     pub repo: Option<String>,
 }
 
-/// The `repo` property every `xservice_*` schema carries. `opens_one` is true
-/// only for `xservice_search`: what a bridge-backed tool opens is the bridge's
-/// to decide — every member on its first answer, the members that can have
-/// changed after that — and `repo` does not change it ([NFR-PE-10]).
+/// What a `repo` scope costs a tool, stated in its schema ([NFR-PE-10]).
 ///
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
-fn repo_property(scoped: &str, opens_one: bool) -> serde_json::Value {
-    let cost = if opens_one {
-        "which starts only that member's engine"
-    } else {
-        "which narrows the answer but not what is read: the cross-service bridge reads \
-         every member on its first answer and only the members it needs after that, and \
-         `member_reads` names them"
+#[derive(Clone, Copy)]
+enum RepoCost {
+    /// `xservice_search`: only the scoped member's engine is started.
+    OpensOne,
+    /// `xservice_callers` / `xservice_impact`: the per-member tier opens only
+    /// the scoped member, and the bridge reads what it reads either way.
+    TierAndBridge,
+    /// `xservice_route_providers`: no per-member tier, so the scope narrows the
+    /// answer and changes nothing that is read.
+    BridgeOnly,
+}
+
+/// What the bridge reads, whatever `repo` says — one sentence shared by the
+/// bridge-backed tools' schemas.
+const BRIDGE_READS: &str = "the cross-service bridge reads every member on its first \
+    answer and, after that, only the members that can have changed (every member again \
+    when one has), and `member_reads` names what was read";
+
+/// The `repo` property every `xservice_*` schema carries, with what scoping
+/// costs that tool.
+fn repo_property(scoped: &str, cost: RepoCost) -> serde_json::Value {
+    let cost = match cost {
+        RepoCost::OpensOne => "which starts only that member's engine".to_string(),
+        RepoCost::TierAndBridge => format!("which also opens only that member for this tier; {BRIDGE_READS}"),
+        RepoCost::BridgeOnly => format!("which narrows the answer but not what is read: {BRIDGE_READS}"),
     };
     json!({
         "type": "string",
@@ -550,7 +567,7 @@ impl Tool for XserviceRouteProvidersTool {
                 .to_string(),
             parameters: json!({
                 "type": "object",
-                "properties": { "repo": repo_property("the bindings", false) }
+                "properties": { "repo": repo_property("the bindings", RepoCost::BridgeOnly) }
             }),
         }
     }
@@ -602,7 +619,7 @@ impl Tool for XserviceCallersTool {
                 "properties": {
                     "symbol": { "type": "string", "description": SYMBOL_ARGUMENT },
                     "limit": { "type": "integer", "minimum": 1, "description": "Maximum intra-repo callers per member (default 50)." },
-                    "repo": repo_property("the intra-repo fan-out and the residue", false)
+                    "repo": repo_property("the intra-repo fan-out and the residue", RepoCost::TierAndBridge)
                 },
                 "required": ["symbol"]
             }),
@@ -661,7 +678,7 @@ impl Tool for XserviceImpactTool {
                 "properties": {
                     "symbol": { "type": "string", "description": SYMBOL_ARGUMENT },
                     "depth": { "type": "integer", "minimum": 1, "description": "Traversal depth bound per member (default 3)." },
-                    "repo": repo_property("the seed impact and the residue", false)
+                    "repo": repo_property("the seed impact and the residue", RepoCost::TierAndBridge)
                 },
                 "required": ["symbol"]
             }),
@@ -720,7 +737,7 @@ impl Tool for XserviceSearchTool {
                     "query": { "type": "string", "description": "Symbol name or free text to search for." },
                     "kind": { "type": "string", "description": "Optional node-kind filter, e.g. \"function\", \"route\"." },
                     "limit": { "type": "integer", "minimum": 1, "description": "Maximum hits per member (default 20)." },
-                    "repo": repo_property("the search", true)
+                    "repo": repo_property("the search", RepoCost::OpensOne)
                 },
                 "required": ["query"]
             }),
