@@ -109,9 +109,13 @@ pub(crate) enum Commands {
         /// The member repository roots to warm, in queue order.
         members: Vec<PathBuf>,
     },
-    /// Incrementally sync changed files into the index.
+    /// Reconcile exactly the given paths into the index.
+    ///
+    /// With no path it re-reads no file. To fold in every change at once, run
+    /// `logos scan` or rebuild with `logos index`.
     Sync {
-        /// Paths to sync (defaults to all changed files).
+        /// Paths to reconcile — exactly these and nothing else; with none, no
+        /// file is re-read (use `logos scan` or `logos index` for every change).
         paths: Vec<PathBuf>,
     },
     /// Show the current index and sync health.
