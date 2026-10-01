@@ -25,9 +25,9 @@ RESULT
 ------
 
 DENOMINATOR first-party .ts/.tsx: method-form Calls rows 510, resolved 58, unresolved 452
-SHAPES first-party .ts/.tsx: this.<field> (declared type) 50 · imported symbol 5 · library/global 96 · chained/untyped 301 (sum 452)
+SHAPES first-party .ts/.tsx: this.<field> (declared type) 51 · imported symbol 5 · library/global 96 · chained/untyped 300 (sum 452)
 UPPER BOUND first-party .ts/.tsx: would bind 20 of 452 (self-tie 0 · cross-class 20 · via supertype 0) · ambiguous 0 (two types 0 · two callables 0)
-INFERENCE EXTENSION first-party .ts/.tsx (not the declared-type rule): of 82 untyped this.f rows, 60 have an inject(T)/new T() initialiser; would bind 18 more (self-tie 0 · cross-class 18 · via supertype 0) · ambiguous 0
+INFERENCE EXTENSION first-party .ts/.tsx (not the declared-type rule): of 81 untyped this.f rows, 60 have an inject(T)/new T() initialiser; would bind 18 more (self-tie 0 · cross-class 18 · via supertype 0) · ambiguous 0
 
 DENOMINATOR first-party .js: method-form Calls rows 300, resolved 42, unresolved 258
 SHAPES first-party .js: this.<field> (declared type) 0 · imported symbol 41 · library/global 66 · chained/untyped 151 (sum 258)
@@ -55,9 +55,10 @@ first-party TypeScript application. Precision is not what limits it (0 ambiguous
 
   - 96 library/global receivers (cy 20, Number 15, Object 9, Math 6, console 5 …;
     26 package imports: TestBed, Logger, …) — never bindable (NFR-RA-05).
-  - 38 of the 50 typed `this.f` receivers name a library type (HttpClient,
-    WritableSignal, ChangeDetectorRef, HttpService …); so do 27 of the 30 typed
-    locals/parameters (ComponentFixture …) and 3 `new T()` receivers (Date).
+  - 39 of the 51 typed `this.f` receivers name a library type (HttpClient,
+    WritableSignal, ChangeDetectorRef, HttpService, Array …); so do 33 of the 37
+    typed locals/parameters (ComponentFixture, Array …), both getters
+    (FormArray), and 2 `new T()` receivers (Date).
   - 117 call-result receivers (`.pipe().subscribe()`, `expect(x).toBe()`) need
     return-type inference, which no declared-type rule provides.
   - 18 rows are Angular signal reads `this.x()`: the method name is a Field of the
@@ -90,8 +91,8 @@ Outcome split, first-party .ts (452):
     this.mailboxesService.getStatisticsForPeriod; 5 imported static calls —
     P01RequestBody.Build, P02RequestBody.Build; 3 typed locals/parameters —
     breadcrumbsService.getBreadcrumbs, headers.getHeadersAsArray)
-  miss: type not declared in the member 94 · the member is a field 18 · no receiver
-    type 320 · ambiguous 0
+  miss: type not declared in the member 103 · the member is a field 18 · no receiver
+    type 311 · ambiguous 0
 
 Outcome split, first-party .js (258): would bind 86 — 84 via supertype (webmail
 selenium page objects calling, with `this.m()`, methods inherited from BasePage
@@ -102,24 +103,37 @@ name-coincidence rows above; misses 172 (no receiver type 114, type not in membe
 SUB-SHAPES (first-party .ts, 452)
 ---------------------------------
 
-  this.<field> (declared type)  this.f, f declared with a type              50
-  imported symbol               relative import / require                    5
-  library/global                package import                              26
-                                global (declared nowhere in the file)       70
-  chained/untyped               call result  a.b().m()                     117
-                                this.f, f declared without a type           82
-                                local/parameter with a declared type        30
-                                local/parameter without one                 26
-                                member chain  a.b.m()                       22
-                                this.m()                                    19
-                                other (new / literal / await / subscript)    3
-                                this.f, f not declared by the class          2
+  sub-shape                                         rows   declared-type rule
+  this.<field> (declared type)
+    this.f, f declared with a type                    51   bind 12 · type not in member 39
+  imported symbol
+    relative import / require                          5   bind 5
+  library/global
+    package import                                    26   type not in member 26
+    global (declared nowhere in the file)             70   no receiver type 70
+  chained/untyped
+    call result  a.b().m()                           117   no receiver type 117
+    this.f, f declared without a type                 81   no receiver type 81
+    local/parameter with a declared type              37   bind 3 · type not in member 33
+                                                             · no receiver type 1
+    member chain  a.b.m()                             22   no receiver type 22
+    local/parameter without one                       19   no receiver type 19
+    this.m()                                          19   member is a field 18 · type not
+                                                             in member 1
+    other (new / literal / await / subscript / as)     3   type not in member 2 · no
+                                                             receiver type 1
+    this.f, f a getter                                 2   type not in member 2
+
+"this.f, f declared with a type" counts every annotated field or parameter
+property, including an annotation that names no single head (`Foo | Bar`, a
+function type) and an array, read as `Array`. A local annotated with two
+disagreeing types is "with a declared type" whose rule yields no type.
 
 "chained/untyped" is the remainder shape: it holds every receiver that is none of
 the first three, including typed locals and bare `this`. The upper bound types
 those too; the shape label is S-479's, the sub-shape says what each row is.
 Untyped `this.f` receivers by initialiser: new T() 40 · inject(T) 20 · signal() 19
-· other 3.
+· other 2.
 
 
 DENOMINATOR RECONCILIATION

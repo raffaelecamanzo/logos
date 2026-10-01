@@ -37,7 +37,7 @@
 //!   - **library/global** — the receiver is a name a package `import` binds, or a
 //!     name nothing in the file declares (`console`, `Math`, `cy`).
 //!   - **chained/untyped** — every other receiver: a call result, a member chain,
-//!     an untyped or undeclared `this.f`, bare `this`/`super`, a local or
+//!     an untyped or undeclared `this.f`, a getter, bare `this`/`super`, a local or
 //!     parameter, a type declared in the file, `new X()`, a literal. Its sub-shapes
 //!     are printed, because "untyped" is not true of all of them — a local with a
 //!     declared type sits here, since the four shapes are [S-479]'s, not ours.
@@ -203,6 +203,7 @@ pub enum Sub {
     MemberChain,
     ThisFieldUntyped,
     ThisFieldUndeclared,
+    ThisGetter,
     This,
     Super,
     LocalTyped,
@@ -212,7 +213,7 @@ pub enum Sub {
 }
 
 impl Sub {
-    pub const ALL: [Sub; 14] = [
+    pub const ALL: [Sub; 15] = [
         Sub::ThisFieldTyped,
         Sub::RelativeImport,
         Sub::PackageImport,
@@ -221,6 +222,7 @@ impl Sub {
         Sub::MemberChain,
         Sub::ThisFieldUntyped,
         Sub::ThisFieldUndeclared,
+        Sub::ThisGetter,
         Sub::This,
         Sub::Super,
         Sub::LocalTyped,
@@ -238,6 +240,7 @@ impl Sub {
             | Sub::MemberChain
             | Sub::ThisFieldUntyped
             | Sub::ThisFieldUndeclared
+            | Sub::ThisGetter
             | Sub::This
             | Sub::Super
             | Sub::LocalTyped
@@ -257,6 +260,7 @@ impl Sub {
             Sub::MemberChain => "member chain  a.b.m()",
             Sub::ThisFieldUntyped => "this.f, f declared without a type",
             Sub::ThisFieldUndeclared => "this.f, f not declared by the class",
+            Sub::ThisGetter => "this.f, f a getter",
             Sub::This => "this.m()",
             Sub::Super => "super.m()",
             Sub::LocalTyped => "local/parameter with a declared type",
@@ -287,14 +291,17 @@ fn each_node<'t>(root: Node<'t>, mut f: impl FnMut(Node<'t>)) {
 }
 
 /// The head of a declared type: `Foo`, `Foo<T>`, `ns.Foo`, `Foo | null`,
-/// `string`. `None` when the annotation names no single type (a function or
-/// object type, a union of two types, `any`).
+/// `string`, and `Array` for `Foo[]` or a tuple. `None` when the annotation
+/// names no single type (a function or object type, a union of two types,
+/// `any`).
 pub fn type_head(node: Node, src: &str) -> Option<String> {
     match node.kind() {
         "type_annotation" | "parenthesized_type" => {
             node.named_child(0).and_then(|c| type_head(c, src))
         }
         "type_identifier" => Some(text(node, src).to_string()),
+        "array_type" | "tuple_type" => Some("Array".to_string()),
+        "readonly_type" => node.named_child(0).and_then(|c| type_head(c, src)),
         "nested_type_identifier" | "generic_type" => {
             node.child_by_field_name("name").and_then(|n| type_head(n, src))
         }
@@ -322,14 +329,43 @@ pub fn type_head(node: Node, src: &str) -> Option<String> {
     }
 }
 
+/// A declaration's type annotation, as [`type_head`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Annotation {
+    /// Declared without one.
+    None,
+    /// Annotated with a type naming one head.
+    Head(String),
+    /// Annotated, but with a type naming no single head (`Foo | Bar`, a
+    /// function type, `any`) — still a declared type, never "untyped".
+    Unread,
+}
+
+impl Annotation {
+    /// The annotation in `decl`'s `type` field (a field, parameter, variable,
+    /// or `catch` binding; a getter's in its `return_type`).
+    pub fn of(decl: Node, field: &str, src: &str) -> Self {
+        match decl.child_by_field_name(field) {
+            None => Annotation::None,
+            Some(t) => type_head(t, src).map_or(Annotation::Unread, Annotation::Head),
+        }
+    }
+
+    pub fn head(&self) -> Option<String> {
+        match self {
+            Annotation::Head(h) => Some(h.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// The bindings a file declares, file-scoped (shadowing ignored, toward binding).
 #[derive(Debug, Default)]
 pub struct FileFacts {
     /// Imported name → whether its specifier is relative (first-party).
     pub imports: BTreeMap<String, bool>,
-    /// Local / parameter name → the declared type head of each declaration
-    /// (`None` for an unannotated one).
-    pub locals: BTreeMap<String, Vec<Option<String>>>,
+    /// Local / parameter name → the annotation of each declaration.
+    pub locals: BTreeMap<String, Vec<Annotation>>,
     /// Classes, interfaces, enums, type aliases and functions declared here.
     pub type_names: BTreeSet<String>,
 }
@@ -440,18 +476,18 @@ impl FileFacts {
                     }
                     return;
                 }
-                let head = n.child_by_field_name("type").and_then(|t| type_head(t, src));
+                let ann = Annotation::of(n, "type", src);
                 for b in names {
-                    f.locals.entry(b).or_default().push(head.clone());
+                    f.locals.entry(b).or_default().push(ann.clone());
                 }
             }
             "required_parameter" | "optional_parameter" => {
                 let Some(p) = n.child_by_field_name("pattern") else { return };
                 let mut names = Vec::new();
                 pattern_names(p, src, &mut names);
-                let head = n.child_by_field_name("type").and_then(|t| type_head(t, src));
+                let ann = Annotation::of(n, "type", src);
                 for b in names {
-                    f.locals.entry(b).or_default().push(head.clone());
+                    f.locals.entry(b).or_default().push(ann.clone());
                 }
             }
             "arrow_function" | "catch_clause" | "for_in_statement" => {
@@ -461,11 +497,11 @@ impl FileFacts {
                     _ => "left",
                 };
                 if let Some(p) = n.child_by_field_name(field) {
-                    let head = n.child_by_field_name("type").and_then(|t| type_head(t, src));
+                    let ann = Annotation::of(n, "type", src);
                     let mut names = Vec::new();
                     pattern_names(p, src, &mut names);
                     for b in names {
-                        f.locals.entry(b).or_default().push(head.clone());
+                        f.locals.entry(b).or_default().push(ann.clone());
                     }
                 }
             }
@@ -490,9 +526,10 @@ impl FileFacts {
 #[derive(Debug, Default)]
 pub struct ClassFacts {
     pub name: Option<String>,
-    /// Field / parameter-property name → its declared type head (`None` when
-    /// declared without an annotation the head rule reads).
-    pub fields: BTreeMap<String, Option<String>>,
+    /// Field / parameter-property name → its annotation.
+    pub fields: BTreeMap<String, Annotation>,
+    /// Getter name → its declared return type head.
+    pub getters: BTreeMap<String, Option<String>>,
     /// The `extends` clause's type head.
     pub extends: Option<String>,
     /// An untyped field's initialiser — report-only, see [`Initialiser`].
@@ -583,16 +620,21 @@ impl ClassFacts {
             match member.kind() {
                 "public_field_definition" => {
                     if let Some(name) = member.child_by_field_name("name") {
-                        let head =
-                            member.child_by_field_name("type").and_then(|t| type_head(t, src));
-                        if head.is_none() {
+                        let ann = Annotation::of(member, "type", src);
+                        if ann == Annotation::None {
                             let init = Initialiser::read(member.child_by_field_name("value"), src);
                             out.inits.insert(text(name, src).to_string(), init);
                         }
-                        out.fields.insert(text(name, src).to_string(), head);
+                        out.fields.insert(text(name, src).to_string(), ann);
                     }
                 }
                 "method_definition" => {
+                    let mut c2 = member.walk();
+                    let is_getter = member.children(&mut c2).any(|ch| ch.kind() == "get");
+                    if let (true, Some(name)) = (is_getter, member.child_by_field_name("name")) {
+                        let head = Annotation::of(member, "return_type", src).head();
+                        out.getters.insert(text(name, src).to_string(), head);
+                    }
                     let is_ctor = member
                         .child_by_field_name("name")
                         .is_some_and(|n| text(n, src) == "constructor");
@@ -607,9 +649,7 @@ impl ClassFacts {
                             if pat.kind() != "identifier" {
                                 continue;
                             }
-                            let head =
-                                p.child_by_field_name("type").and_then(|t| type_head(t, src));
-                            out.fields.insert(text(pat, src).to_string(), head);
+                            out.fields.insert(text(pat, src).to_string(), Annotation::of(p, "type", src));
                         }
                     }
                 }
@@ -679,10 +719,14 @@ pub fn receiver(
             let prop = obj.child_by_field_name("property");
             match (inner, prop) {
                 (Some(i), Some(p)) if i.kind() == "this" => {
-                    match class.and_then(|c| c.fields.get(text(p, src))) {
-                        Some(Some(ty)) => (Sub::ThisFieldTyped, Some(ty.clone())),
-                        Some(None) => (Sub::ThisFieldUntyped, None),
-                        None => (Sub::ThisFieldUndeclared, None),
+                    let name = text(p, src);
+                    match class.and_then(|c| c.fields.get(name)) {
+                        Some(Annotation::None) => (Sub::ThisFieldUntyped, None),
+                        Some(ann) => (Sub::ThisFieldTyped, ann.head()),
+                        None => match class.and_then(|c| c.getters.get(name)) {
+                            Some(head) => (Sub::ThisGetter, head.clone()),
+                            None => (Sub::ThisFieldUndeclared, None),
+                        },
                     }
                 }
                 _ => (Sub::MemberChain, None),
@@ -696,10 +740,14 @@ pub fn receiver(
                 return (sub, Some(name.to_string()));
             }
             if let Some(decls) = facts.locals.get(name) {
-                let typed: BTreeSet<&String> = decls.iter().flatten().collect();
-                return match typed.into_iter().collect::<Vec<_>>().as_slice() {
-                    [one] => (Sub::LocalTyped, Some((*one).clone())),
-                    _ => (Sub::LocalUntyped, None),
+                // An unannotated declaration never poisons an annotated one
+                // (toward binding); two disagreeing annotations name no type.
+                let annotated: BTreeSet<&Annotation> =
+                    decls.iter().filter(|a| **a != Annotation::None).collect();
+                return match annotated.into_iter().collect::<Vec<_>>().as_slice() {
+                    [] => (Sub::LocalUntyped, None),
+                    [one] => (Sub::LocalTyped, one.head()),
+                    _ => (Sub::LocalTyped, None),
                 };
             }
             if facts.type_names.contains(name) {
@@ -1274,6 +1322,18 @@ fn report_population(e: &Estate, population: Population) -> Tally {
             cells.iter().map(|(o, n)| format!("{} {n}", o.label())).collect::<Vec<_>>().join(" · ");
         println!("    {:<30} {row}", shape.label());
     }
+    println!("  declared-type rule, sub-shape x outcome:");
+    for sub in Sub::ALL {
+        let mut cells = BTreeMap::new();
+        for c in e.classified.iter().filter(|c| c.population == population && c.site.sub == sub) {
+            *cells.entry(c.outcome).or_insert(0usize) += 1;
+        }
+        if !cells.is_empty() {
+            let row =
+                cells.iter().map(|(o, n)| format!("{} {n}", o.label())).collect::<Vec<_>>().join(" · ");
+            println!("    {:<48} {row}", sub.label());
+        }
+    }
     let of = |pred: &dyn Fn(&Classified) -> Option<String>| {
         let mut m: BTreeMap<String, usize> = BTreeMap::new();
         for c in e.classified.iter().filter(|c| c.population == population) {
@@ -1536,6 +1596,20 @@ export class Wizard {
     }
 
     #[test]
+    fn an_annotation_naming_no_single_head_is_still_a_declared_type() {
+        let s = "class K {\n  items: Foo[] = [];\n  u: Foo | Bar;\n  cb: () => void;\n  constructor(private xs: readonly Foo[]) {}\n  get svc(): Svc { return x; }\n  get raw() { return x; }\n  m(loose) { this.items.push(1); this.u.go(); this.cb.call(); this.xs.at(0); this.svc.run(); this.raw.peek(); const ys: Foo[] = []; ys.filter(g); loose.any(); }\n}";
+        let t = Some("Array".to_string());
+        assert_eq!(shape_of(s, "push"), (Shape::ThisField, Sub::ThisFieldTyped, t.clone()), "Foo[]");
+        assert_eq!(shape_of(s, "go"), (Shape::ThisField, Sub::ThisFieldTyped, None), "Foo | Bar");
+        assert_eq!(shape_of(s, "call"), (Shape::ThisField, Sub::ThisFieldTyped, None), "a function type");
+        assert_eq!(shape_of(s, "at"), (Shape::ThisField, Sub::ThisFieldTyped, t.clone()), "readonly Foo[]");
+        assert_eq!(shape_of(s, "run"), (Shape::ChainedUntyped, Sub::ThisGetter, Some("Svc".into())));
+        assert_eq!(shape_of(s, "peek"), (Shape::ChainedUntyped, Sub::ThisGetter, None));
+        assert_eq!(shape_of(s, "filter"), (Shape::ChainedUntyped, Sub::LocalTyped, t));
+        assert_eq!(shape_of(s, "any"), (Shape::ChainedUntyped, Sub::LocalUntyped, None), "unannotated");
+    }
+
+    #[test]
     fn a_plain_constructor_parameter_is_not_a_field() {
         let s = "class K { constructor(plain: Other) { plain.x(); } m() { this.plain.y(); } }";
         assert_eq!(
@@ -1574,7 +1648,11 @@ export class Wizard {
     #[test]
     fn a_local_declared_with_two_types_has_none() {
         let s = "function f(a: Foo) { a.x(); }\nfunction g(a: Bar) { a.y(); }\nfunction h(b: Foo) { let b2 = b; b.z(); }\nfunction i() { const b = make(); b.w(); }";
-        assert_eq!(shape_of(s, "x").1, Sub::LocalUntyped, "two disagreeing types poison the name");
+        assert_eq!(
+            shape_of(s, "x"),
+            (Shape::ChainedUntyped, Sub::LocalTyped, None),
+            "declared, but two disagreeing types name no single head"
+        );
         assert_eq!(
             shape_of(s, "z"),
             (Shape::ChainedUntyped, Sub::LocalTyped, Some("Foo".into())),
