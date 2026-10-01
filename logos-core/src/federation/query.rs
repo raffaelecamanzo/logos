@@ -2240,4 +2240,56 @@ mod tests {
             "the vocabulary is present but `warming` is unreachable today"
         );
     }
+
+    // ── the `xservice type-refs` listing (S-474) ─────────────────────────
+
+    /// A bound reference to `fqn`, owned by `lib`'s source, from `importer`'s
+    /// `file`, by import, through the build relation.
+    fn type_reference(fqn: &str, importer: &str, file: &str) -> TypeReference {
+        TypeReference {
+            fqn: fqn.to_string(),
+            naming: TypeNaming::Exact,
+            form: TypeRefForm::Import,
+            importer: TypeImporter {
+                member: importer.to_string(),
+                file: file.to_string(),
+                line: Some(3),
+                symbol: format!("{importer} {file}"),
+            },
+            owner: TypeOwner {
+                member: "lib".to_string(),
+                origin: type_refs::TypeOrigin::Source,
+                declared_in: format!("{fqn}.java"),
+                symbol: Some(format!("lib {fqn}#")),
+                kind: "class".to_string(),
+            },
+            evidence: PairEvidence::Build { platform: false },
+        }
+    }
+
+    /// **One entry per type, its importers under it**: references arrive in
+    /// the index's order (owner, type, importer) and leave grouped by type,
+    /// types sorted by name and each type's importers in arrival order — so a
+    /// type with 131 importers on the estate is one entry, not 131.
+    #[test]
+    fn imported_types_groups_references_by_type_in_name_then_importer_order() {
+        let types = imported_types(vec![
+            type_reference("com.acme.lib.Bean", "app", "App.java"),
+            type_reference("com.acme.lib.Dto", "app", "Also.java"),
+            type_reference("com.acme.lib.Dto", "app", "App.java"),
+            type_reference("com.acme.lib.Dto", "web", "Web.java"),
+        ]);
+        let shape: Vec<(&str, Vec<&str>)> = types
+            .iter()
+            .map(|t| (t.fqn.as_str(), t.importers.iter().map(|i| i.importer.file.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("com.acme.lib.Bean", vec!["App.java"]),
+                ("com.acme.lib.Dto", vec!["Also.java", "App.java", "Web.java"]),
+            ]
+        );
+        assert_eq!(types[1].owner.declared_in, "com.acme.lib.Dto.java", "the type's one owner, once");
+    }
 }
