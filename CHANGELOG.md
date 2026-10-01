@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-10-01
+
 ### Changed
 
 - **The minified-JavaScript exclusion notice is an advisory note, not a warning.** The
