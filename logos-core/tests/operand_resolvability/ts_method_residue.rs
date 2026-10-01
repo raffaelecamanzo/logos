@@ -658,7 +658,8 @@ impl ClassFacts {
                             if pat.kind() != "identifier" {
                                 continue;
                             }
-                            out.fields.insert(text(pat, src).to_string(), Annotation::of(p, "type", src));
+                            out.fields
+                                .insert(text(pat, src).to_string(), Annotation::of(p, "type", src));
                         }
                     }
                 }
@@ -1359,8 +1360,11 @@ fn report_population(e: &Estate, population: Population) -> Tally {
             *cells.entry(c.outcome).or_insert(0usize) += 1;
         }
         if !cells.is_empty() {
-            let row =
-                cells.iter().map(|(o, n)| format!("{} {n}", o.label())).collect::<Vec<_>>().join(" · ");
+            let row = cells
+                .iter()
+                .map(|(o, n)| format!("{} {n}", o.label()))
+                .collect::<Vec<_>>()
+                .join(" · ");
             println!("    {:<48} {row}", sub.label());
         }
     }
@@ -1636,14 +1640,33 @@ export class Wizard {
     fn an_annotation_naming_no_single_head_is_still_a_declared_type() {
         let s = "class K {\n  items: Foo[] = [];\n  u: Foo | Bar;\n  cb: () => void;\n  constructor(private xs: readonly Foo[]) {}\n  get svc(): Svc { return x; }\n  get raw() { return x; }\n  m(loose) { this.items.push(1); this.u.go(); this.cb.call(); this.xs.at(0); this.svc.run(); this.raw.peek(); const ys: Foo[] = []; ys.filter(g); loose.any(); }\n}";
         let t = Some("Array".to_string());
-        assert_eq!(shape_of(s, "push"), (Shape::ThisField, Sub::ThisFieldTyped, t.clone()), "Foo[]");
+        assert_eq!(
+            shape_of(s, "push"),
+            (Shape::ThisField, Sub::ThisFieldTyped, t.clone()),
+            "Foo[]"
+        );
         assert_eq!(shape_of(s, "go"), (Shape::ThisField, Sub::ThisFieldTyped, None), "Foo | Bar");
-        assert_eq!(shape_of(s, "call"), (Shape::ThisField, Sub::ThisFieldTyped, None), "a function type");
-        assert_eq!(shape_of(s, "at"), (Shape::ThisField, Sub::ThisFieldTyped, t.clone()), "readonly Foo[]");
-        assert_eq!(shape_of(s, "run"), (Shape::ChainedUntyped, Sub::ThisGetter, Some("Svc".into())));
+        assert_eq!(
+            shape_of(s, "call"),
+            (Shape::ThisField, Sub::ThisFieldTyped, None),
+            "a function type"
+        );
+        assert_eq!(
+            shape_of(s, "at"),
+            (Shape::ThisField, Sub::ThisFieldTyped, t.clone()),
+            "readonly Foo[]"
+        );
+        assert_eq!(
+            shape_of(s, "run"),
+            (Shape::ChainedUntyped, Sub::ThisGetter, Some("Svc".into()))
+        );
         assert_eq!(shape_of(s, "peek"), (Shape::ChainedUntyped, Sub::ThisGetter, None));
         assert_eq!(shape_of(s, "filter"), (Shape::ChainedUntyped, Sub::LocalTyped, t));
-        assert_eq!(shape_of(s, "any"), (Shape::ChainedUntyped, Sub::LocalUntyped, None), "unannotated");
+        assert_eq!(
+            shape_of(s, "any"),
+            (Shape::ChainedUntyped, Sub::LocalUntyped, None),
+            "unannotated"
+        );
     }
 
     #[test]
@@ -1656,8 +1679,16 @@ export class Wizard {
         assert_eq!(sub("f4"), Sub::LocalUntyped, "an arrow function's bare parameter");
         assert_eq!(sub("f5"), Sub::LocalUntyped, "a catch parameter");
         assert_eq!(sub("f6"), Sub::LocalUntyped, "a for-of binding");
-        assert_eq!(shape_of(s, "f7"), (Shape::ChainedUntyped, Sub::Other, Some("Bar".into())), "`as T`");
-        assert_eq!(shape_of(s, "f8"), (Shape::ThisField, Sub::ThisFieldTyped, Some("Foo".into())), "parens");
+        assert_eq!(
+            shape_of(s, "f7"),
+            (Shape::ChainedUntyped, Sub::Other, Some("Bar".into())),
+            "`as T`"
+        );
+        assert_eq!(
+            shape_of(s, "f8"),
+            (Shape::ThisField, Sub::ThisFieldTyped, Some("Foo".into())),
+            "parens"
+        );
         assert_eq!(sub("f9"), Sub::Global, "an aliased import binds only its alias");
         assert_eq!(Population::of("m", "src/x.mts"), Population::FirstPartyTs);
         assert_eq!(Population::of("m", "src/x.cts"), Population::FirstPartyTs);
@@ -1956,7 +1987,11 @@ export class Wizard {
         assert_eq!(init("y"), Some(("new T()".into(), Some("Repo".into()))));
         assert_eq!(init("set"), Some(("signal()".into(), None)));
         assert_eq!(init("z"), Some(("no initialiser".into(), None)));
-        assert_eq!(init("w"), None, "a typed field takes the declared-type rule, never the extension");
+        assert_eq!(
+            init("w"),
+            None,
+            "a typed field takes the declared-type rule, never the extension"
+        );
     }
 
     #[test]
@@ -2002,13 +2037,18 @@ export class Wizard {
         stale.totals.insert(Population::FirstPartyTs, (10, 1));
         assert_eq!(void_reason(&stale), None, "engaged, with no member flagged");
         stale.pre_s477 = vec!["web".into()];
-        assert!(void_reason(&stale).is_some_and(|r| r.starts_with("web ") && r.contains("before S-477")));
+        assert!(void_reason(&stale)
+            .is_some_and(|r| r.starts_with("web ") && r.contains("before S-477")));
     }
 
     #[test]
     fn the_s477_guard_counts_the_fields_the_symbol_query_captures() {
         let s = "class A { x = 1; #p = 2; constructor(private y: T, plain: U) {} }\nabstract class B { z = 1; }\nconst C = class { w = 1; };\nfunction f() {}\n";
-        assert_eq!(declared_class_fields(&parse("x.ts", s), s), 3, "x, #p, y — not B's, C's or `plain`");
+        assert_eq!(
+            declared_class_fields(&parse("x.ts", s), s),
+            3,
+            "x, #p, y — not B's, C's or `plain`"
+        );
         let none = "export default function handler(req, res) { res.status(200).json({}); }";
         assert_eq!(declared_class_fields(&parse("x.ts", none), none), 0);
     }
