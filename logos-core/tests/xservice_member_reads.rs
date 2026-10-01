@@ -230,6 +230,20 @@ fn a_member_whose_store_is_unreadable_is_named_with_its_reason() {
             assert!(reads.read.contains("api"), "{pass} {read_model}: {reads:?}");
         }
     }
+
+    // And on the wire: the reason rides the serialized payload every surface
+    // prints, keyed by the member, beside `read` ([NFR-CC-04]).
+    let inputs = query::reachability_inputs(&bridge, &registry);
+    let route = inputs.edges[0].to.symbol.as_str().to_string();
+    for answer in [
+        serde_json::to_value(query::xservice_callers(&registry, &inputs, &route, None, Some("api"))).unwrap(),
+        serde_json::to_value(query::xservice_impact(&registry, &inputs, &route, None, Some("api"))).unwrap(),
+        serde_json::to_value(query::xservice_route_providers(&query::bridge_read(&bridge, &registry), None)).unwrap(),
+    ] {
+        let reason = answer["member_reads"]["unread"]["audit"].as_str().unwrap_or_default();
+        assert!(reason.contains("starting the engine for workspace member \"audit\""), "{answer:#}");
+        assert!(answer["member_reads"]["read"].as_array().is_some_and(|read| !read.contains(&"audit".into())));
+    }
 }
 
 /// **Each tier names the member it opened itself** — the reads the bridge's
