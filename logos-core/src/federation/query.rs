@@ -553,17 +553,26 @@ impl XserviceImpact {
             affected.affected.retain(|file| usize::try_from(file.distance).is_ok_and(|d| d <= hops));
             affected
         };
+        // One open per importing member per answer: a member that will not
+        // start is attempted — and logged, and counted — once, and its error
+        // replayed on every entry reaching it, as an `AnswerScope` replays a
+        // failed open within one walk ([ADR-53]).
+        let mut engines: BTreeMap<&str, Result<Arc<Engine>, String>> = BTreeMap::new();
         self.via_type_reference = references_reaching(registry, index, &self.query)
             .map(|reference| {
                 let importer = &reference.importer;
+                let engine = engines
+                    .entry(importer.member.as_str())
+                    .or_insert_with(|| registry.engine_for(&importer.member).map_err(|err| format!("{err:#}")));
                 TypeReferenceImpact {
                     reached: VIA_TYPE_REFERENCE,
                     via: reference.clone(),
                     reach: MemberResult::from_scoped(MemberScoped {
                         member: importer.member.clone(),
-                        value: registry
-                            .engine_for(&importer.member)
-                            .map(|engine| within(engine.affected(std::slice::from_ref(&importer.file), false))),
+                        value: engine
+                            .as_ref()
+                            .map(|engine| within(engine.affected(std::slice::from_ref(&importer.file), false)))
+                            .map_err(|err| anyhow::anyhow!("{err}")),
                     }),
                 }
             })

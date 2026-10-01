@@ -98,6 +98,10 @@ public class Top {
 }
 ";
 
+/// In `app`, a second importer of `Dto` — so a broken `app` is reached by
+/// two references.
+const ALSO_JAVA: &str = "package com.acme.app;\n\nimport com.acme.lib.Dto;\n\npublic class Also {}\n";
+
 const STRAY_JAVA: &str = "package com.acme.stray;\n\nimport com.acme.lib.Dto;\n\npublic class Stray {}\n";
 
 fn pom(artifact: &str, dependencies: &[&str]) -> String {
@@ -153,6 +157,7 @@ fn workspace(root: &Path) {
                 write(&dir, "src/main/java/com/acme/app/App.java", APP_JAVA);
                 write(&dir, "src/main/java/com/acme/app/Main.java", MAIN_JAVA);
                 write(&dir, "src/main/java/com/acme/app/Top.java", TOP_JAVA);
+                write(&dir, "src/main/java/com/acme/app/Also.java", ALSO_JAVA);
                 write(&dir, "pom.xml", &pom("app", &["lib", "models"]));
             }
             "stray" => {
@@ -242,8 +247,13 @@ fn type_refs_lists_each_provider_with_its_imported_types_and_their_importers() {
     assert_eq!(dto["owner"]["declared_in"], "src/main/java/com/acme/lib/Dto.java");
     assert_eq!(dto["owner"]["origin"], "source");
     let importers = dto["importers"].as_array().unwrap();
-    assert_eq!(importers.len(), 1, "stray's type-only match is not an importer: {dto:#}");
-    let app = &importers[0];
+    let files: Vec<&str> = importers.iter().map(|i| i["file"].as_str().unwrap()).collect();
+    assert_eq!(
+        files,
+        ["src/main/java/com/acme/app/Also.java", "src/main/java/com/acme/app/App.java"],
+        "both of app's importers, in importer order; stray's type-only match is not an importer: {dto:#}"
+    );
+    let app = &importers[1];
     assert_eq!(
         (&app["member"], &app["file"], &app["line"]),
         (&json!("app"), &json!("src/main/java/com/acme/app/App.java"), &json!(3)),
@@ -323,14 +333,16 @@ fn callers_and_impact_on_a_provider_type_stitch_each_importer_apart_from_the_bri
     let registry = registry(tmp.path());
     let index = index(&registry);
     let dto = dto_symbol(&index);
-    let reference = index.references_to("lib", &dto).next().expect("app's import binds");
+    let references: Vec<Value> =
+        index.references_to("lib", &dto).map(|r| serde_json::to_value(r).unwrap()).collect();
+    assert_eq!(references.len(), 2, "app's two imports bind");
     let [callers, impact] = reachability(&registry, &index, &dto);
 
     for (tool, (before, after)) in [("callers", &callers), ("impact", &impact)] {
         let section = after["via_type_reference"].as_array().unwrap_or_else(|| panic!("{tool}: {after:#}"));
-        assert_eq!(section.len(), 1, "{tool}: one bound importer, stray's type-only match excluded: {after:#}");
-        assert_eq!(section[0]["reached"], VIA_TYPE_REFERENCE, "{tool}");
-        assert_eq!(section[0]["via"], serde_json::to_value(reference).unwrap(), "{tool}: the reference reached through");
+        let via: Vec<&Value> = section.iter().map(|e| &e["via"]).collect();
+        assert_eq!(via, references.iter().collect::<Vec<_>>(), "{tool}: each bound reference, stray's type-only match excluded");
+        assert!(section.iter().all(|e| e["reached"] == VIA_TYPE_REFERENCE), "{tool}");
 
         let mut rest = after.clone();
         rest.as_object_mut().unwrap().remove("via_type_reference");
@@ -348,7 +360,16 @@ fn callers_and_impact_on_a_provider_type_stitch_each_importer_apart_from_the_bri
     let caller = &callers.1["via_type_reference"][0];
     assert_eq!(caller.as_object().map(|o| o.len()), Some(2), "the reference is the caller, nothing beside it: {caller:#}");
 
-    let entry = &impact.1["via_type_reference"][0];
+    let app_java = |section: &Value| -> Value {
+        section["via_type_reference"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["via"]["importer"]["file"] == "src/main/java/com/acme/app/App.java")
+            .cloned()
+            .expect("App.java is reached")
+    };
+    let entry = &app_java(&impact.1);
     assert_eq!(entry["member"], "app", "{entry:#}");
     assert!(entry.get("error").is_none(), "{entry:#}");
     assert_eq!(entry["result"]["changed"], json!(["src/main/java/com/acme/app/App.java"]), "{entry:#}");
@@ -366,7 +387,7 @@ fn callers_and_impact_on_a_provider_type_stitch_each_importer_apart_from_the_bri
     let shallow = query::xservice_impact(&registry, &edges, &residue, &dto, Some(1), None)
         .with_type_references(&registry, &index, Some(1));
     let shallow = serde_json::to_value(shallow).unwrap();
-    assert_eq!(files(&shallow["via_type_reference"][0]), ["src/main/java/com/acme/app/Main.java"], "{shallow:#}");
+    assert_eq!(files(&app_java(&shallow)), ["src/main/java/com/acme/app/Main.java"], "{shallow:#}");
 }
 
 /// **An Avro-declared type has no node**, so it is reached by its dotted name
@@ -447,11 +468,31 @@ fn an_importer_whose_engine_fails_is_a_per_member_error_inside_the_answer() {
 
     let broken = registry(tmp.path());
     let [(_, callers), (_, impact)] = reachability(&broken, &index, &dto);
-    let entry = &impact["via_type_reference"][0];
-    assert_eq!(entry["member"], "app", "{impact:#}");
-    assert_eq!(entry["via"]["fqn"], "com.acme.lib.Dto");
-    assert!(entry.get("result").is_none(), "{entry:#}");
-    assert!(entry["error"].as_str().is_some_and(|e| !e.is_empty()), "{entry:#}");
+    let failures = broken.start_failures();
+    let section = impact["via_type_reference"].as_array().expect("a section");
+    assert_eq!(section.len(), 2, "both of app's references are still reached: {impact:#}");
+    for entry in section {
+        assert_eq!(entry["member"], "app", "{impact:#}");
+        assert_eq!(entry["via"]["fqn"], "com.acme.lib.Dto");
+        assert!(entry.get("result").is_none(), "{entry:#}");
+        assert!(entry["error"].as_str().is_some_and(|e| !e.is_empty()), "{entry:#}");
+    }
+    assert_eq!(section[0]["error"], section[1]["error"], "one failure, replayed");
+    // One open attempt per answer, not one per reference: the seed fan-out's
+    // and the stitch's — so the stitch tried `app` once, whatever the count.
+    let one_more = {
+        let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), &broken);
+        let _ = query::xservice_impact(&broken, &edges, &residue, &dto, None, None)
+            .with_type_references(&broken, &index, None);
+        broken.start_failures() - failures
+    };
+    let seed_only = {
+        let before = broken.start_failures();
+        let (edges, residue) = query::reachability_inputs(&ContractBridge::new(), &broken);
+        let _ = query::xservice_impact(&broken, &edges, &residue, &dto, None, None);
+        broken.start_failures() - before
+    };
+    assert_eq!(one_more, seed_only + 1, "the stitch attempts a broken importer once per answer");
     assert_eq!(impact["seed"].as_array().map(Vec::len), Some(6), "every member is still answered for");
     assert_eq!(callers["via_type_reference"][0]["via"]["importer"]["member"], "app", "{callers:#}");
 
