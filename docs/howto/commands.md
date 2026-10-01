@@ -1145,6 +1145,17 @@ nor counted yet.
   bridge edge, none enters `route-providers`, `callers`, `impact` or any
   coverage figure, and a member that builds against another is not thereby
   coupled to it at runtime.
+
+  ```jsonc
+  // logos xservice build-deps --repo archive-kafka-models --json (abridged)
+  { "scope": "archive-kafka-models",
+    "headline": { "build_dependency_pairs": { "pairs": 148, "parent": 51, "dependency": 84, "managed": 15, "bom-import": 0 },
+                  "summary": "148 pairs (…) built against another member, from 184 of 1728 referenced artifacts (…); a build dependency, never a runtime coupling", … },
+    "members": [ { "member": "archive-kafka-models", "builds_against": [],
+                   "built_against_by": [ { "from": "archive-feeder", "to": "archive-kafka-models", "kind": "dependency",
+                                           "scope": null, "artifact": "com.sourcesense.poste.pec.archive:kafka-models", "references": 1 }, … ] } ],
+    "cross_context": [] }
+  ```
 - **`type-refs`** (since S-474) — the cross-member type references
   ([FR-WS-35](../specs/requirements/FR-WS-35.md)): per **provider** member, the
   types other members import from it, each with its `owner` (the declaring
@@ -1184,17 +1195,6 @@ nor counted yet.
         "importers": [ { "member": "app", "file": "src/main/java/com/acme/app/App.java", "line": 3,
                          "symbol": "logos . . . src/main/java/com/acme/app/`App.java`/",
                          "naming": "exact", "form": "import", "evidence": { "via": "build" } } ] } ] } ] }
-  ```
-
-  ```jsonc
-  // logos xservice build-deps --repo archive-kafka-models --json (abridged)
-  { "scope": "archive-kafka-models",
-    "headline": { "build_dependency_pairs": { "pairs": 148, "parent": 51, "dependency": 84, "managed": 15, "bom-import": 0 },
-                  "summary": "148 pairs (…) built against another member, from 184 of 1728 referenced artifacts (…); a build dependency, never a runtime coupling", … },
-    "members": [ { "member": "archive-kafka-models", "builds_against": [],
-                   "built_against_by": [ { "from": "archive-feeder", "to": "archive-kafka-models", "kind": "dependency",
-                                           "scope": null, "artifact": "com.sourcesense.poste.pec.archive:kafka-models", "references": 1 }, … ] } ],
-    "cross_context": [] }
   ```
 
 `--repo` constructs only the member engines the answer needs (a one-shot never
