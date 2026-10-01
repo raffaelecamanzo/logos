@@ -47,7 +47,8 @@ use logos_core::federation::query::{
     self, MemberResult, XserviceCallers, XserviceImpact, XserviceRouteProviders, XserviceSearch,
 };
 use logos_core::federation::{
-    Backing, BridgeEdge, BridgeEndpoint, ContractBridge, EgressResidue, EngineRegistry,
+    Backing, BridgeEdge, BridgeEndpoint, BuildDependencies, ContractBridge, EgressResidue,
+    EngineRegistry,
 };
 use logos_core::model::LogosSymbol;
 use logos_core::models::SymbolRef;
@@ -72,11 +73,21 @@ const READING_ENTRIES: usize = 5;
 /// which is what makes "compose the tools only when a federated backing is
 /// supplied" structural rather than a check someone has to remember.
 ///
+/// The same backing carries the workspace read-model tools and the
+/// repo-addressed member tools (S-480): one value, so the workspace roster's
+/// tools all stitch over one bridge and resolve members through one registry.
+///
 /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
 #[derive(Clone)]
 pub struct XserviceBacking {
-    backing: Arc<Backing<Engine>>,
-    bridge: Arc<ContractBridge>,
+    pub(super) backing: Arc<Backing<Engine>>,
+    pub(super) bridge: Arc<ContractBridge>,
+    /// The build-dependency relation `xservice_build_deps` reads, joined on its
+    /// first query and cached on member sync-stamps ([FR-WS-33]) — this
+    /// backing's own cache, as the MCP server holds its own.
+    ///
+    /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+    pub(super) build_deps: Arc<BuildDependencies>,
 }
 
 impl XserviceBacking {
@@ -89,7 +100,11 @@ impl XserviceBacking {
     /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
     pub fn federated(backing: Arc<Backing<Engine>>, bridge: Arc<ContractBridge>) -> Option<Self> {
         backing.as_federated()?;
-        Some(Self { backing, bridge })
+        Some(Self {
+            backing,
+            bridge,
+            build_deps: Arc::new(BuildDependencies::new()),
+        })
     }
 
     /// The member registry, for assertions on what a turn constructed
@@ -104,8 +119,9 @@ impl XserviceBacking {
     }
 }
 
-/// An `xservice_*` tool's output: one deterministic, repo-qualified `reading`
-/// line, then the read-model's own fields verbatim ([FR-WS-05] wire shape).
+/// An `xservice_*` tool's output — and a workspace read-model tool's (S-480):
+/// one deterministic, repo-qualified `reading` line, then the read-model's own
+/// fields verbatim ([FR-WS-05] wire shape).
 ///
 /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 #[derive(Debug, Serialize)]
@@ -133,6 +149,12 @@ pub fn xservice_reading(tool: &str, output: &str) -> Option<String> {
     if !XSERVICE_TOOL_NAMES.contains(&tool) {
         return None;
     }
+    reading_of(output)
+}
+
+/// The `reading` field of a serialized [`XserviceAnswer`], whichever tool
+/// produced it.
+pub(super) fn reading_of(output: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(output).ok()?;
     value.get("reading")?.as_str().map(str::to_string)
 }
@@ -152,7 +174,10 @@ pub const XSERVICE_TOOL_NAMES: &[&str] = &[
 ///
 /// [ADR-03]: ../../../docs/specs/architecture/decisions/ADR-03.md
 /// [FR-OB-10]: ../../../docs/specs/requirements/FR-OB-10.md
-async fn run_federated<T, F>(xs: XserviceBacking, call: F) -> Result<T, ToolCallError>
+pub(super) async fn run_federated<T, F>(
+    xs: XserviceBacking,
+    call: F,
+) -> Result<T, ToolCallError>
 where
     T: Send + 'static,
     F: FnOnce(&EngineRegistry<Engine>, &ContractBridge) -> T + Send + 'static,
@@ -176,12 +201,12 @@ fn qualified_ref(member: &str, hit: &SymbolRef) -> String {
 }
 
 /// `member:symbol` — a bridge endpoint, repo-qualified.
-fn qualified_endpoint(endpoint: &BridgeEndpoint) -> String {
+pub(super) fn qualified_endpoint(endpoint: &BridgeEndpoint) -> String {
     format!("{}:{}", endpoint.member, endpoint.symbol.as_str())
 }
 
 /// `consumer → provider [relation]` — one resolved cross-service binding.
-fn edge_line(edge: &BridgeEdge) -> String {
+pub(super) fn edge_line(edge: &BridgeEdge) -> String {
     format!(
         "{} → {} [{}]",
         qualified_endpoint(&edge.from),
@@ -191,7 +216,7 @@ fn edge_line(edge: &BridgeEdge) -> String {
 }
 
 /// Join at most [`READING_ENTRIES`] entries, naming how many were left out.
-fn bounded_list(entries: Vec<String>) -> String {
+pub(super) fn bounded_list(entries: Vec<String>) -> String {
     let total = entries.len();
     let mut shown: Vec<String> = entries.into_iter().take(READING_ENTRIES).collect();
     if total > READING_ENTRIES {

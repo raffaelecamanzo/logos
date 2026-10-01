@@ -1,0 +1,380 @@
+{
+  "graph": [
+    {
+      "name": "search",
+      "description": "FTS5 full-text symbol search over the code graph, optionally filtered by node kind. Returns ranked symbol hits.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Symbol name or free text to search for."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Optional node-kind filter, e.g. \"function\", \"struct\", \"route\"."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum hits (default 20)."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "context",
+      "description": "Deterministic multi-symbol context bundle for a task description — one call replaces several speculative file reads.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "Natural-language task description."
+          },
+          "max_nodes": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Cap on bundle size in nodes (default 25)."
+          },
+          "include_code": {
+            "type": "boolean",
+            "description": "Include source code in the bundle (default false)."
+          }
+        },
+        "required": [
+          "task"
+        ]
+      }
+    },
+    {
+      "name": "node",
+      "description": "Everything about one symbol: kind, location, signature, annotations, and immediate edges.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "The symbol to look up."
+          },
+          "include_code": {
+            "type": "boolean",
+            "description": "Include the node's source code (default false)."
+          }
+        },
+        "required": [
+          "symbol"
+        ]
+      }
+    },
+    {
+      "name": "callers",
+      "description": "Direct callers of a symbol (who invokes it).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Symbol whose direct callers to list."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum results (default 50)."
+          }
+        },
+        "required": [
+          "symbol"
+        ]
+      }
+    },
+    {
+      "name": "callees",
+      "description": "Direct callees of a symbol (what it invokes).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Symbol whose direct callees to list."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum results (default 50)."
+          }
+        },
+        "required": [
+          "symbol"
+        ]
+      }
+    },
+    {
+      "name": "impact",
+      "description": "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Symbol whose transitive impact to compute."
+          },
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Traversal depth bound (default 3)."
+          }
+        },
+        "required": [
+          "symbol"
+        ]
+      }
+    },
+    {
+      "name": "explore",
+      "description": "Neighbourhood exploration around a query, with matching source grouped by file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Symbol or text to explore around."
+          },
+          "max_files": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Cap on file groups returned (default 10)."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "affected",
+      "description": "Reverse-transitive closure of files affected by a changed set: every file depending — directly or transitively — on any of the given files. `tests_only` narrows the closure to test files.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Repo-relative changed files."
+          },
+          "tests_only": {
+            "type": "boolean",
+            "description": "Narrow the closure to test-marked files (default false)."
+          }
+        },
+        "required": [
+          "files"
+        ]
+      }
+    }
+  ],
+  "governance": [
+    {
+      "name": "scan",
+      "description": "Full architecture-quality scan (reconcile-then-score): the 0-10000 quality signal, rule violations, and a persisted snapshot. The freshness line reports what was reconciled.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "no_reconcile": {
+            "type": "boolean",
+            "description": "Skip the pre-evaluation reconcile for a tight loop (default false)."
+          }
+        }
+      }
+    },
+    {
+      "name": "check_rules",
+      "description": "Architecture-rules compliance report against rules.toml: constraints, layer ordering (unassigned files exempt), and boundary checks.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "no_reconcile": {
+            "type": "boolean",
+            "description": "Skip the pre-evaluation reconcile for a tight loop (default false)."
+          }
+        }
+      }
+    },
+    {
+      "name": "hotspots",
+      "description": "Hotspot ranking: indexed files ranked by churn-rank × structural-complexity-rank, with a per-file coverage column. The advisory temporal+coverage tier — never moves the gate. Non-git or shallow repos return n/a with a notice.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Cap the ranked files returned (default: all)."
+          },
+          "untested": {
+            "type": "boolean",
+            "description": "Rank only files with no fresh coverage (default false)."
+          }
+        }
+      }
+    },
+    {
+      "name": "dsm",
+      "description": "Dependency structure matrix: cell (i,j) counts dependency edges i->j; rows ordered by layer order then name. Module granularity by default.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "granularity": {
+            "type": "string",
+            "enum": [
+              "module",
+              "file"
+            ],
+            "description": "Matrix granularity (default module)."
+          },
+          "no_reconcile": {
+            "type": "boolean",
+            "description": "Skip the pre-evaluation reconcile (default false)."
+          }
+        }
+      }
+    },
+    {
+      "name": "gate",
+      "description": "Quality-gate verdict: the 0-10000 signal compared to the pass/fail threshold, pass/fail, and the contributing breakdown. Read-only — computes the verdict without persisting a snapshot.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "threshold": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000,
+            "description": "Override the pass/fail threshold (default: configured)."
+          },
+          "no_reconcile": {
+            "type": "boolean",
+            "description": "Skip the pre-evaluation reconcile (default false)."
+          }
+        }
+      }
+    },
+    {
+      "name": "evolution",
+      "description": "Quality-signal evolution over stored snapshots with per-metric deltas (default window 30).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Snapshot window size (default 30)."
+          }
+        }
+      }
+    },
+    {
+      "name": "doc_gaps",
+      "description": "Documentation-gap analysis: exported functions/methods referenced by no documentation section over doc->code edges (carries the reference-presence caveat).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Cap on listed gaps (default 50)."
+          },
+          "no_reconcile": {
+            "type": "boolean",
+            "description": "Skip the pre-evaluation reconcile (default false)."
+          }
+        }
+      }
+    },
+    {
+      "name": "health",
+      "description": "Architecture health: DB integrity, schema version, FTS coherence, and graph counts. For INDEX freshness use the graph tools' status instead.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "no_reconcile": {
+            "type": "boolean",
+            "description": "Skip the pre-evaluation reconcile for a tight loop (default false)."
+          }
+        }
+      }
+    }
+  ],
+  "source": [
+    {
+      "name": "read",
+      "description": "Read a UTF-8 source file by its project-relative path. Confined to the project root; absolute paths, `..` traversal, and ignored directories are refused. Long files are truncated.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Project-relative path of the file to read."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "grep",
+      "description": "Regex search across project source files (gitignore- and ignored-dirs-aware). Optionally scope to a subdirectory. Returns matching lines with file path and line number.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regular expression to search for."
+          },
+          "path": {
+            "type": "string",
+            "description": "Optional project-relative subdirectory to scope the search."
+          },
+          "case_insensitive": {
+            "type": "boolean",
+            "description": "Case-insensitive match (default false)."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum matches to return (default 200)."
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    },
+    {
+      "name": "glob",
+      "description": "List project files whose project-relative path matches a glob pattern (e.g. `src/**/*.rs`), gitignore- and ignored-dirs-aware.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern matched against project-relative paths."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum paths to return (default 200)."
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    }
+  ]
+}

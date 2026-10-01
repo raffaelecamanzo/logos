@@ -63,15 +63,11 @@ impl Search {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Search {
-    const NAME: &'static str = "search";
-    type Error = ToolCallError;
-    type Args = SearchArgs;
-    type Output = SearchResult;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "FTS5 full-text symbol search over the code graph, \
@@ -87,6 +83,17 @@ impl Tool for Search {
                 "required": ["query"]
             }),
         }
+    }
+}
+
+impl Tool for Search {
+    const NAME: &'static str = "search";
+    type Error = ToolCallError;
+    type Args = SearchArgs;
+    type Output = SearchResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: SearchArgs) -> Result<SearchResult, ToolCallError> {
@@ -124,15 +131,11 @@ impl Context {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Context {
-    const NAME: &'static str = "context";
-    type Error = ToolCallError;
-    type Args = ContextArgs;
-    type Output = ContextBundle;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Deterministic multi-symbol context bundle for a task \
@@ -148,6 +151,17 @@ impl Tool for Context {
                 "required": ["task"]
             }),
         }
+    }
+}
+
+impl Tool for Context {
+    const NAME: &'static str = "context";
+    type Error = ToolCallError;
+    type Args = ContextArgs;
+    type Output = ContextBundle;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: ContextArgs) -> Result<ContextBundle, ToolCallError> {
@@ -181,15 +195,11 @@ impl Node {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Node {
-    const NAME: &'static str = "node";
-    type Error = ToolCallError;
-    type Args = NodeArgs;
-    type Output = NodeInfo;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Everything about one symbol: kind, location, signature, \
@@ -204,6 +214,17 @@ impl Tool for Node {
                 "required": ["symbol"]
             }),
         }
+    }
+}
+
+impl Tool for Node {
+    const NAME: &'static str = "node";
+    type Error = ToolCallError;
+    type Args = NodeArgs;
+    type Output = NodeInfo;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: NodeArgs) -> Result<NodeInfo, ToolCallError> {
@@ -248,6 +269,17 @@ impl Callers {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
+
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Direct callers of a symbol (who invokes it).".to_string(),
+            parameters: edge_parameters("callers"),
+        }
+    }
 }
 
 impl Tool for Callers {
@@ -257,11 +289,7 @@ impl Tool for Callers {
     type Output = CallersResult;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Direct callers of a symbol (who invokes it).".to_string(),
-            parameters: edge_parameters("callers"),
-        }
+        Self::tool_definition()
     }
 
     async fn call(&self, args: EdgeArgs) -> Result<CallersResult, ToolCallError> {
@@ -283,6 +311,17 @@ impl Callees {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
+
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Direct callees of a symbol (what it invokes).".to_string(),
+            parameters: edge_parameters("callees"),
+        }
+    }
 }
 
 impl Tool for Callees {
@@ -292,11 +331,7 @@ impl Tool for Callees {
     type Output = CalleesResult;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Direct callees of a symbol (what it invokes).".to_string(),
-            parameters: edge_parameters("callees"),
-        }
+        Self::tool_definition()
     }
 
     async fn call(&self, args: EdgeArgs) -> Result<CalleesResult, ToolCallError> {
@@ -330,15 +365,11 @@ impl Impact {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Impact {
-    const NAME: &'static str = "impact";
-    type Error = ToolCallError;
-    type Args = ImpactArgs;
-    type Output = ImpactResult;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Transitive impact of changing a symbol, both directions \
@@ -353,6 +384,17 @@ impl Tool for Impact {
                 "required": ["symbol"]
             }),
         }
+    }
+}
+
+impl Tool for Impact {
+    const NAME: &'static str = "impact";
+    type Error = ToolCallError;
+    type Args = ImpactArgs;
+    type Output = ImpactResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: ImpactArgs) -> Result<ImpactResult, ToolCallError> {
@@ -386,15 +428,11 @@ impl Explore {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Explore {
-    const NAME: &'static str = "explore";
-    type Error = ToolCallError;
-    type Args = ExploreArgs;
-    type Output = ExploreResult;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Neighbourhood exploration around a query, with matching \
@@ -409,6 +447,17 @@ impl Tool for Explore {
                 "required": ["query"]
             }),
         }
+    }
+}
+
+impl Tool for Explore {
+    const NAME: &'static str = "explore";
+    type Error = ToolCallError;
+    type Args = ExploreArgs;
+    type Output = ExploreResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: ExploreArgs) -> Result<ExploreResult, ToolCallError> {
@@ -442,15 +491,11 @@ impl Affected {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Affected {
-    const NAME: &'static str = "affected";
-    type Error = ToolCallError;
-    type Args = AffectedArgs;
-    type Output = AffectedResult;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Reverse-transitive closure of files affected by a changed \
@@ -470,6 +515,17 @@ impl Tool for Affected {
                 "required": ["files"]
             }),
         }
+    }
+}
+
+impl Tool for Affected {
+    const NAME: &'static str = "affected";
+    type Error = ToolCallError;
+    type Args = AffectedArgs;
+    type Output = AffectedResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: AffectedArgs) -> Result<AffectedResult, ToolCallError> {

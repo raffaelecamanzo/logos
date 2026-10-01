@@ -72,6 +72,20 @@ impl Scan {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
+
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Full architecture-quality scan (reconcile-then-score): the \
+                 0-10000 quality signal, rule violations, and a persisted snapshot. \
+                 The freshness line reports what was reconciled."
+                .to_string(),
+            parameters: reconcile_only_parameters(),
+        }
+    }
 }
 
 impl Tool for Scan {
@@ -81,14 +95,7 @@ impl Tool for Scan {
     type Output = ScanResult;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Full architecture-quality scan (reconcile-then-score): the \
-                 0-10000 quality signal, rule violations, and a persisted snapshot. \
-                 The freshness line reports what was reconciled."
-                .to_string(),
-            parameters: reconcile_only_parameters(),
-        }
+        Self::tool_definition()
     }
 
     async fn call(&self, args: ReconcileArgs) -> Result<ScanResult, ToolCallError> {
@@ -110,6 +117,20 @@ impl CheckRules {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
+
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Architecture-rules compliance report against rules.toml: \
+                 constraints, layer ordering (unassigned files exempt), and boundary \
+                 checks."
+                .to_string(),
+            parameters: reconcile_only_parameters(),
+        }
+    }
 }
 
 impl Tool for CheckRules {
@@ -119,14 +140,7 @@ impl Tool for CheckRules {
     type Output = RulesReport;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Architecture-rules compliance report against rules.toml: \
-                 constraints, layer ordering (unassigned files exempt), and boundary \
-                 checks."
-                .to_string(),
-            parameters: reconcile_only_parameters(),
-        }
+        Self::tool_definition()
     }
 
     async fn call(&self, args: ReconcileArgs) -> Result<RulesReport, ToolCallError> {
@@ -160,15 +174,11 @@ impl Hotspots {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Hotspots {
-    const NAME: &'static str = "hotspots";
-    type Error = ToolCallError;
-    type Args = HotspotsArgs;
-    type Output = HotspotReport;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Hotspot ranking: indexed files ranked by churn-rank × \
@@ -184,6 +194,17 @@ impl Tool for Hotspots {
                 }
             }),
         }
+    }
+}
+
+impl Tool for Hotspots {
+    const NAME: &'static str = "hotspots";
+    type Error = ToolCallError;
+    type Args = HotspotsArgs;
+    type Output = HotspotReport;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: HotspotsArgs) -> Result<HotspotReport, ToolCallError> {
@@ -242,15 +263,11 @@ impl Dsm {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Dsm {
-    const NAME: &'static str = "dsm";
-    type Error = ToolCallError;
-    type Args = DsmArgs;
-    type Output = DsmReport;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Dependency structure matrix: cell (i,j) counts dependency \
@@ -265,6 +282,17 @@ impl Tool for Dsm {
                 }
             }),
         }
+    }
+}
+
+impl Tool for Dsm {
+    const NAME: &'static str = "dsm";
+    type Error = ToolCallError;
+    type Args = DsmArgs;
+    type Output = DsmReport;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: DsmArgs) -> Result<DsmReport, ToolCallError> {
@@ -305,15 +333,11 @@ impl Gate {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Gate {
-    const NAME: &'static str = "gate";
-    type Error = ToolCallError;
-    type Args = GateArgs;
-    type Output = GateResult;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Quality-gate verdict: the 0-10000 signal compared to the \
@@ -328,6 +352,17 @@ impl Tool for Gate {
                 }
             }),
         }
+    }
+}
+
+impl Tool for Gate {
+    const NAME: &'static str = "gate";
+    type Error = ToolCallError;
+    type Args = GateArgs;
+    type Output = GateResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: GateArgs) -> Result<GateResult, ToolCallError> {
@@ -362,15 +397,11 @@ impl Evolution {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
-}
 
-impl Tool for Evolution {
-    const NAME: &'static str = "evolution";
-    type Error = ToolCallError;
-    type Args = EvolutionArgs;
-    type Output = EvolutionReport;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Quality-signal evolution over stored snapshots with \
@@ -383,6 +414,17 @@ impl Tool for Evolution {
                 }
             }),
         }
+    }
+}
+
+impl Tool for Evolution {
+    const NAME: &'static str = "evolution";
+    type Error = ToolCallError;
+    type Args = EvolutionArgs;
+    type Output = EvolutionReport;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        Self::tool_definition()
     }
 
     async fn call(&self, args: EvolutionArgs) -> Result<EvolutionReport, ToolCallError> {
@@ -403,6 +445,20 @@ impl DocGaps {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
+
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Documentation-gap analysis: exported functions/methods \
+                 referenced by no documentation section over doc->code edges \
+                 (carries the reference-presence caveat)."
+                .to_string(),
+            parameters: gaps_parameters("gaps"),
+        }
+    }
 }
 
 impl Tool for DocGaps {
@@ -412,14 +468,7 @@ impl Tool for DocGaps {
     type Output = DocGapsReport;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Documentation-gap analysis: exported functions/methods \
-                 referenced by no documentation section over doc->code edges \
-                 (carries the reference-presence caveat)."
-                .to_string(),
-            parameters: gaps_parameters("gaps"),
-        }
+        Self::tool_definition()
     }
 
     async fn call(&self, args: GapsArgs) -> Result<DocGapsReport, ToolCallError> {
@@ -441,6 +490,20 @@ impl Health {
     pub fn new(engine: Arc<Engine>) -> Self {
         Self { engine }
     }
+
+    /// The definition [`Tool::definition`] returns — independent of the
+    /// wrapped resource, so the repo-addressed wrapper derives its own
+    /// without one (S-480).
+    pub(super) fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Architecture health: DB integrity, schema version, FTS \
+                 coherence, and graph counts. For INDEX freshness use the graph \
+                 tools' status instead."
+                .to_string(),
+            parameters: reconcile_only_parameters(),
+        }
+    }
 }
 
 impl Tool for Health {
@@ -450,14 +513,7 @@ impl Tool for Health {
     type Output = HealthInfo;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Architecture health: DB integrity, schema version, FTS \
-                 coherence, and graph counts. For INDEX freshness use the graph \
-                 tools' status instead."
-                .to_string(),
-            parameters: reconcile_only_parameters(),
-        }
+        Self::tool_definition()
     }
 
     async fn call(&self, args: ReconcileArgs) -> Result<HealthInfo, ToolCallError> {
