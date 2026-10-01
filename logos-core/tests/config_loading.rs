@@ -1343,9 +1343,7 @@ fn reconcile_backed_readouts_carry_the_minified_js_notice_on_notes_never_warning
     use logos_core::config::{ConfigApplyOutcome, PolicyFile};
     use logos_core::Engine;
 
-    fn is_minified(s: &String) -> bool {
-        s.contains("minified JavaScript file(s)")
-    }
+    let is_minified = |s: &String| s.contains("minified JavaScript file(s)");
 
     let dir = tempdir().unwrap();
     let root = dir.path();
