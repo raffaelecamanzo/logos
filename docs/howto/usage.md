@@ -1083,8 +1083,10 @@ workspace. It has no cross-service tool. The cross-service tools (`xservice_rout
 belong to a separate **workspace chat** roster, whose Workspace-Analyst answers "which
 services call this endpoint?" across members, every cross-service result qualified by
 the member it belongs to, and an empty cross-service answer over a non-zero
-**unresolved** residue reported as unresolved, never as "none". That workspace chat is
-not served yet; until it is, a workspace serve has no cross-service chat.
+**unresolved** residue reported as unresolved, never as "none". In a workspace serve
+(`agents` build) the workspace chat is served over the web API — `POST /workspace/chat`
+and `/api/v1/workspace/chat/threads` — and has no in-app view yet; see
+[The workspace chat](configuration.md#the-workspace-chat--its-own-configuration-and-history).
 
 A working Chat exists **only** in an `--features agents` build. The default
 `logos` binary ships the dashboard and no networking client — there is no
