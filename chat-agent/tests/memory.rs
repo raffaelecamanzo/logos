@@ -22,7 +22,9 @@ use chat_agent::orchestrator::{
     BudgetBound, BudgetTree, EventSink, Orchestrator, OrchestratorEvent, PlanStep, StepContext,
     StepError, StepExecutor, StepObservation, StepRole, TurnOutcome,
 };
-use chat_agent::{ChatRole, ChatStore, MemoryStore, ScratchpadEntry, ScratchpadSink};
+use chat_agent::{
+    prior_turns, thread_window, ChatRole, ChatStore, MemoryStore, ScratchpadEntry, ScratchpadSink,
+};
 use tempfile::TempDir;
 
 /// A scripted stand-in for the S-174 subagent roster: each step charges
@@ -426,4 +428,167 @@ fn render_scratchpad_of_an_empty_turn_returns_a_placeholder() {
         memory.render_scratchpad(thread, 0).unwrap(),
         "(no observations recorded this turn)"
     );
+}
+
+// ---- prior turns come from the THREAD STORE ([S-483], [FR-UI-20] AC-2) ----------
+
+/// Append `question`/`answer` pairs to `thread` the way a served turn does.
+fn converse(store: &mut ChatStore, thread: i64, pairs: &[(&str, &str)]) {
+    for (question, answer) in pairs {
+        store.append_message(thread, ChatRole::User, question, &[]).unwrap();
+        store.append_message(thread, ChatRole::Assistant, answer, &[]).unwrap();
+    }
+}
+
+/// [S-483] AC-1: the window is read from the stored messages — NOT from
+/// `set_working_memory`, which has no production caller. A thread whose working
+/// memory holds a distinctive summary still shows the stored turns, and the summary
+/// never leaks into the window.
+#[test]
+fn the_window_is_built_from_stored_messages_not_working_memory() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let memory = MemoryStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    converse(&mut store, thread, &[("who calls Engine?", "three callers"), ("is it clean?", "yes")]);
+    memory.set_working_memory(thread, "WORKING-MEMORY-SENTINEL").unwrap();
+
+    let window = thread_window(&store, thread, "and for Planner?", 6, 16_000).unwrap();
+    let text = window.render();
+    assert!(text.find("who calls Engine?") < text.find("is it clean?"), "{text}");
+    assert!(text.contains("Assistant: three callers") && text.contains("Assistant: yes"), "{text}");
+    assert!(!text.contains("WORKING-MEMORY-SENTINEL"), "{text}");
+    assert_eq!(window.omitted(), 0);
+}
+
+/// [S-483] AC-1: a thread with no stored turns yields the empty window — the
+/// first turn renders exactly as before.
+#[test]
+fn a_thread_with_no_prior_turns_has_an_empty_window() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    assert!(thread_window(&store, thread, "first question", 6, 16_000).unwrap().is_empty());
+}
+
+/// [S-483] AC-3: a deleted conversation contributes nothing — its messages cascade
+/// away with the thread, so the window over it is empty and renders to "".
+#[test]
+fn a_deleted_conversation_contributes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("doomed").unwrap();
+    converse(&mut store, thread, &[("an old question", "an old answer")]);
+    assert!(!thread_window(&store, thread, "next", 6, 16_000).unwrap().is_empty());
+
+    assert!(store.delete_thread(thread).unwrap());
+    let window = thread_window(&store, thread, "next", 6, 16_000).unwrap();
+    assert!(window.is_empty());
+    assert_eq!(window.render(), "");
+}
+
+/// [S-483] AC-3: a regenerated turn replaces its predecessor. Regenerate re-runs the
+/// user message, so the store holds `U1, A1, U1, A1′`; only the latest answer is in
+/// the window, and the user message is not duplicated.
+#[test]
+fn a_regenerated_turn_replaces_its_predecessor_in_the_window() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    converse(
+        &mut store,
+        thread,
+        &[("what is X?", "first answer"), ("what is X?", "regenerated answer")],
+    );
+
+    let text = thread_window(&store, thread, "and Y?", 6, 16_000).unwrap().render();
+    assert!(text.contains("regenerated answer"), "{text}");
+    assert!(!text.contains("first answer"), "the predecessor is gone: {text}");
+    assert_eq!(text.matches("what is X?").count(), 1, "no duplicated user turn: {text}");
+}
+
+/// [S-483] AC-3: a regenerate IN PROGRESS — the stored thread ends `U1, A1` and the
+/// question being run is `U1` again — leaves the predecessor out of the window, since
+/// the turn about to be generated replaces it.
+#[test]
+fn a_regenerate_in_progress_leaves_its_predecessor_out() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    converse(&mut store, thread, &[("earlier", "kept"), ("what is X?", "to be replaced")]);
+
+    let window = thread_window(&store, thread, "what is X?", 6, 16_000).unwrap();
+    let text = window.render();
+    assert!(text.contains("kept"), "{text}");
+    assert!(!text.contains("to be replaced") && !text.contains("what is X?"), "{text}");
+
+    // The same question asked as a genuinely new follow-up keeps the prior turn.
+    let followup = thread_window(&store, thread, "something else", 6, 16_000).unwrap().render();
+    assert!(followup.contains("to be replaced"), "{followup}");
+}
+
+/// [S-483]: a halted turn persists no assistant row — the next window shows its
+/// question without inventing an answer, and a retried question replaces it.
+#[test]
+fn an_unanswered_turn_has_no_answer_and_a_retry_replaces_it() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    store.append_message(thread, ChatRole::User, "halted question", &[]).unwrap();
+    let messages = store.messages(thread).unwrap();
+    let turns = prior_turns(&messages, "a different question");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].assistant, None);
+
+    store.append_message(thread, ChatRole::User, "halted question", &[]).unwrap();
+    store.append_message(thread, ChatRole::Assistant, "now answered", &[]).unwrap();
+    let turns = prior_turns(&store.messages(thread).unwrap(), "next");
+    assert_eq!(turns.len(), 1, "the retry replaced the unanswered turn");
+    assert_eq!(turns[0].assistant.as_deref(), Some("now answered"));
+}
+
+/// [S-483]: the thread store's `system`/`tool` rows are not conversation and never
+/// reach the window.
+#[test]
+fn system_and_tool_rows_are_not_part_of_the_window() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    store.append_message(thread, ChatRole::System, "SYSTEM-ROW", &[]).unwrap();
+    converse(&mut store, thread, &[("q", "a")]);
+    store.append_message(thread, ChatRole::Tool, "TOOL-ROW", &[]).unwrap();
+
+    let text = thread_window(&store, thread, "next", 6, 16_000).unwrap().render();
+    assert!(!text.contains("SYSTEM-ROW") && !text.contains("TOOL-ROW"), "{text}");
+    assert!(text.contains("User: q") && text.contains("Assistant: a"), "{text}");
+}
+
+/// [S-483] end to end over a real `chat.db`: turn 3's planner prompt carries turns
+/// 1–2 from the thread store, oldest first, ahead of the question.
+#[tokio::test]
+async fn turn_three_of_a_stored_thread_prompts_the_planner_with_turns_one_and_two() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    converse(
+        &mut store,
+        thread,
+        &[("where is the binder?", "binder.rs"), ("who calls it?", "the indexer")],
+    );
+    let window = thread_window(&store, thread, "and for mailbox-manager?", 6, 16_000).unwrap();
+
+    let planner = MockCompletionModel::new([MockTurn::text(final_json(false))]);
+    let orchestrator = Orchestrator::new(
+        planner.clone(),
+        ScriptedExecutor::with_answer(0, "an answer"),
+        BudgetTree::new(24, 8, 3),
+    )
+    .with_history(window);
+    orchestrator.run("and for mailbox-manager?", &chat_agent::CapturingSink::new()).await.unwrap();
+
+    let prompt = planner.user_prompts().remove(0).unwrap();
+    let at = |needle: &str| prompt.find(needle).unwrap_or_else(|| panic!("{needle} in {prompt}"));
+    assert!(at("where is the binder?") < at("binder.rs"));
+    assert!(at("binder.rs") < at("who calls it?"));
+    assert!(at("the indexer") < at("User question:\nand for mailbox-manager?"));
 }

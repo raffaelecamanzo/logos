@@ -128,6 +128,9 @@ struct MockState {
     requests: AtomicUsize,
     /// Each served request's system prompt, in order (`None` when it had none).
     system_prompts: Mutex<Vec<Option<String>>>,
+    /// Each served request's final user prompt, in order (`None` when the request
+    /// ended on something other than a user text message).
+    user_prompts: Mutex<Vec<Option<String>>>,
 }
 
 /// A cloneable, scripted [`CompletionModel`] for offline tests.
@@ -145,6 +148,7 @@ impl MockCompletionModel {
                 turns: Mutex::new(turns.into_iter().collect()),
                 requests: AtomicUsize::new(0),
                 system_prompts: Mutex::new(Vec::new()),
+                user_prompts: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -172,6 +176,17 @@ impl MockCompletionModel {
             .clone()
     }
 
+    /// The final user prompt of every request served so far, in order — what a
+    /// caller actually asked the model (for the planner, its rendered prompt), so a
+    /// test can assert what a prompt carried (the scripted replies never read it).
+    pub fn user_prompts(&self) -> Vec<Option<String>> {
+        self.state
+            .user_prompts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     fn next_turn(&self) -> Option<MockTurn> {
         self.state
             .turns
@@ -193,6 +208,24 @@ impl MockCompletionModel {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(system);
+        let user = match request.chat_history.last() {
+            rig_core::completion::Message::User { content } => Some(
+                content
+                    .iter()
+                    .filter_map(|part| match part {
+                        rig_core::message::UserContent::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        };
+        self.state
+            .user_prompts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(user);
     }
 }
 

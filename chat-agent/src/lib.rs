@@ -53,12 +53,14 @@ pub use db::{
     db_path, latest_version, title_from_first_message, ChatMessage, ChatRole, ChatStore,
     ChatThread, ToolTrace, THREAD_TITLE_MAX,
 };
-pub use memory::{MemoryGrounding, MemoryStore, ScratchpadEntry, ScratchpadSink};
+pub use memory::{
+    prior_turns, thread_window, MemoryGrounding, MemoryStore, ScratchpadEntry, ScratchpadSink,
+};
 pub use orchestrator::{
-    workspace_planner_preamble, BudgetBound, BudgetTree, CapturingSink, EventSink, FanOut,
-    Orchestrator, OrchestratorError, OrchestratorEvent, PlanStep, Planner, PlannerDecision,
-    RoleModels, StepContext, StepError, StepExecutor, StepObservation, StepRole, SubagentRoster,
-    SynthesizerGrounding, TurnOutcome, GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE,
+    workspace_planner_preamble, BudgetBound, BudgetTree, CapturingSink, ConversationWindow,
+    EventSink, FanOut, Orchestrator, OrchestratorError, OrchestratorEvent, PlanStep, Planner,
+    PlannerDecision, PriorTurn, RoleModels, StepContext, StepError, StepExecutor, StepObservation,
+    StepRole, SubagentRoster, SynthesizerGrounding, TurnOutcome, GOVERNANCE_ANALYST_PREAMBLE, GRAPH_NAVIGATOR_PREAMBLE,
     GRAPH_NAVIGATOR_XSERVICE_ADDENDUM, SOURCE_READER_PREAMBLE, SYNTHESIZER_PREAMBLE,
     SYNTHESIZER_XSERVICE_ADDENDUM, WORKSPACE_PLANNER_ADDENDUM,
 };

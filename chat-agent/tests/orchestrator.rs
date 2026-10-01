@@ -18,10 +18,13 @@
 //! [ADR-41]: ../../docs/specs/architecture/decisions/ADR-41.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 
+use std::sync::{Arc, Mutex};
+
 use agent_core::{MockCompletionModel, MockTurn};
 use chat_agent::orchestrator::{
-    BudgetBound, BudgetTree, CapturingSink, Orchestrator, OrchestratorError, OrchestratorEvent,
-    PlanStep, Planner, StepContext, StepError, StepExecutor, StepObservation, StepRole, TurnOutcome,
+    BudgetBound, BudgetTree, CapturingSink, ConversationWindow, Orchestrator, OrchestratorError,
+    OrchestratorEvent, PlanStep, Planner, PriorTurn, StepContext, StepError, StepExecutor,
+    StepObservation, StepRole, TurnOutcome,
 };
 
 /// A scripted stand-in for the S-174 subagent roster. A tool-bearing step charges
@@ -689,4 +692,176 @@ fn orchestrator_error_names_the_failing_stage() {
         message: "the synthesizer provider failed".to_string(),
     };
     assert_eq!(synthesis_failure.stage(), "synthesis");
+}
+
+// ---- the bounded prior-turn window ([S-483], [FR-UI-20] AC-2) -------------------
+
+/// A Synthesizer-only executor that records every Synthesizer step's instruction —
+/// the text the follow-up turn's Synthesizer is actually prompted with.
+struct InstructionRecorder {
+    synth_instructions: Arc<Mutex<Vec<String>>>,
+}
+
+impl StepExecutor for InstructionRecorder {
+    fn execute(
+        &self,
+        step: &PlanStep,
+        _ctx: &StepContext<'_>,
+    ) -> impl std::future::Future<Output = Result<StepObservation, StepError>> + Send {
+        if step.role == StepRole::Synthesizer {
+            self.synth_instructions
+                .lock()
+                .unwrap()
+                .push(step.instruction.clone());
+        }
+        async { Ok(StepObservation::new("the answer")) }
+    }
+}
+
+/// Run one conversational turn of `question` under `window` and return what the
+/// planner was prompted with and what the Synthesizer was instructed with.
+async fn prompts_for(question: &str, window: ConversationWindow) -> (String, String) {
+    let planner = MockCompletionModel::new([MockTurn::text(final_json(false))]);
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = Orchestrator::new(
+        planner.clone(),
+        InstructionRecorder { synth_instructions: Arc::clone(&recorded) },
+        BudgetTree::new(24, 8, 3),
+    )
+    .with_history(window);
+    orchestrator
+        .run(question, &CapturingSink::new())
+        .await
+        .expect("the conversational turn answers");
+    let planner_prompt = planner.user_prompts().remove(0).expect("the planner got a user prompt");
+    let synth_instruction = recorded.lock().unwrap().remove(0);
+    (planner_prompt, synth_instruction)
+}
+
+fn prior(n: usize) -> PriorTurn {
+    PriorTurn::new(format!("earlier question {n}"), Some(format!("earlier answer {n}")))
+}
+
+/// [S-483] AC-1: a thread's first turn renders **exactly** as before windows
+/// existed — pinned as literals, not derived from the code under test, so the
+/// first-turn prompts cannot drift unnoticed.
+#[tokio::test]
+async fn the_first_turn_prompts_are_byte_identical_to_the_pre_window_rendering() {
+    let (planner, synth) = prompts_for("hello", ConversationWindow::default()).await;
+    assert_eq!(planner, "User question:\nhello\n\nNo observations yet — produce the initial plan.");
+    assert_eq!(
+        synth,
+        "Compose the final, grounded answer to the user's question in clear prose \
+         (markdown is fine). Ground every claim about the codebase in the observations \
+         gathered this turn; if they are insufficient, say so honestly rather than \
+         inventing facts. The user's question was:\nhello"
+    );
+}
+
+/// [S-483] AC-1: turn 3 carries turns 1–2, oldest first, in BOTH the planner's
+/// prompt and the Synthesizer's instruction — and the current question still comes
+/// last in the planner's prompt.
+#[tokio::test]
+async fn a_follow_up_turn_shows_prior_turns_oldest_first_to_planner_and_synthesizer() {
+    let window = ConversationWindow::bounded(vec![prior(1), prior(2)], 6, 16_000);
+    let (planner, synth) = prompts_for("and for mailbox-manager?", window).await;
+
+    for (name, text) in [("planner prompt", &planner), ("synthesizer instruction", &synth)] {
+        let order: Vec<usize> = [
+            "earlier question 1",
+            "earlier answer 1",
+            "earlier question 2",
+            "earlier answer 2",
+        ]
+        .iter()
+        .map(|needle| text.find(needle).unwrap_or_else(|| panic!("{name} lacks {needle}: {text}")))
+        .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{name} is not oldest-first: {text}");
+        assert!(!text.contains("omitted"), "{name}: nothing was truncated: {text}");
+    }
+    assert!(
+        planner.find("earlier answer 2") < planner.find("User question:\nand for mailbox-manager?"),
+        "the planner sees the history before the question it must answer: {planner}"
+    );
+    assert!(synth.contains("The user's question was:\nand for mailbox-manager?"), "{synth}");
+}
+
+/// [S-483] AC-2: a one-turn window keeps the NEWEST turn and the prompt states how
+/// many earlier turns it omitted — in both prompts.
+#[tokio::test]
+async fn a_turn_count_window_drops_the_oldest_and_states_the_omission_count() {
+    let window = ConversationWindow::bounded(vec![prior(1), prior(2), prior(3)], 1, 16_000);
+    let (planner, synth) = prompts_for("next?", window).await;
+    for (name, text) in [("planner", &planner), ("synthesizer", &synth)] {
+        assert!(text.contains("[2 earlier turn(s) omitted from this window]"), "{name}: {text}");
+        assert!(text.contains("earlier question 3"), "{name} keeps the newest: {text}");
+        assert!(
+            !text.contains("earlier question 1") && !text.contains("earlier question 2"),
+            "{name} dropped the older turns: {text}"
+        );
+    }
+}
+
+/// [S-483] AC-2: a tiny character ceiling truncates oldest-first too, and states
+/// the omission count even when nothing at all fits.
+#[tokio::test]
+async fn a_character_ceiling_window_drops_the_oldest_and_states_the_omission_count() {
+    // `prior(n)` is 18 + 16 = 34 characters; a 68-character ceiling fits exactly two.
+    let window = ConversationWindow::bounded(vec![prior(1), prior(2), prior(3)], 6, 68);
+    let (planner, synth) = prompts_for("next?", window).await;
+    for (name, text) in [("planner", &planner), ("synthesizer", &synth)] {
+        assert!(text.contains("[1 earlier turn(s) omitted from this window]"), "{name}: {text}");
+        assert!(!text.contains("earlier question 1"), "{name}: {text}");
+        assert!(text.contains("earlier question 2") && text.contains("earlier question 3"), "{name}: {text}");
+    }
+
+    let nothing_fits = ConversationWindow::bounded(vec![prior(1), prior(2)], 6, 1);
+    let (planner, _) = prompts_for("next?", nothing_fits).await;
+    assert!(planner.contains("[2 earlier turn(s) omitted from this window]"), "{planner}");
+    assert!(!planner.contains("earlier question"), "{planner}");
+}
+
+/// [S-483]: the hard-halt Synthesizer pass is a Synthesizer instruction too — it
+/// sees the window as well, and is unchanged without one.
+#[tokio::test]
+async fn the_best_effort_synthesizer_after_a_hard_halt_also_sees_the_window() {
+    async fn halted_instruction(window: ConversationWindow) -> String {
+        // One plan whose step the global ceiling (0 left after it) cannot extend.
+        let planner = MockCompletionModel::new([
+            MockTurn::text(plan_json("graph_navigator", "look")),
+            MockTurn::text(plan_json("graph_navigator", "look again")),
+        ]);
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        struct Charging(Arc<Mutex<Vec<String>>>);
+        impl StepExecutor for Charging {
+            fn execute(
+                &self,
+                step: &PlanStep,
+                ctx: &StepContext<'_>,
+            ) -> impl std::future::Future<Output = Result<StepObservation, StepError>> + Send {
+                let result = if step.role == StepRole::Synthesizer {
+                    self.0.lock().unwrap().push(step.instruction.clone());
+                    Ok(StepObservation::new("best effort"))
+                } else {
+                    ctx.charge_tool_call()
+                        .map(|()| StepObservation::new("found something"))
+                        .map_err(StepError::Budget)
+                };
+                async move { result }
+            }
+        }
+        let orchestrator =
+            Orchestrator::new(planner, Charging(Arc::clone(&recorded)), BudgetTree::new(1, 1, 3))
+                .with_history(window);
+        let outcome = orchestrator.run("q", &CapturingSink::new()).await.unwrap();
+        assert!(matches!(outcome, TurnOutcome::Answered(_)), "{outcome:?}");
+        let instruction = recorded.lock().unwrap().remove(0);
+        instruction
+    }
+
+    let with = halted_instruction(ConversationWindow::bounded(vec![prior(1)], 6, 16_000)).await;
+    assert!(with.contains("earlier question 1") && with.contains("earlier answer 1"), "{with}");
+    let without = halted_instruction(ConversationWindow::default()).await;
+    assert!(!without.contains("earlier"), "{without}");
+    assert!(with.starts_with(&without), "the window is appended to the unchanged instruction");
 }

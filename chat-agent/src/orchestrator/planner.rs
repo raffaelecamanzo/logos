@@ -19,6 +19,7 @@ use std::fmt::Write as _;
 use agent_core::rig::agent::AgentBuilder;
 use agent_core::rig::completion::{CompletionModel, Prompt};
 
+use super::history::ConversationWindow;
 use super::plan::{PlanStep, PlannerDecision};
 use super::step::StepObservation;
 use super::OrchestratorError;
@@ -106,8 +107,9 @@ where
         }
     }
 
-    /// Decide the next move: prompt the model with the request + scratchpad and
-    /// parse its reply into a [`PlannerDecision`].
+    /// Decide the next move: prompt the model with the thread's prior-turn
+    /// `history`, the request and the scratchpad, and parse its reply into a
+    /// [`PlannerDecision`].
     ///
     /// Surfaces a provider failure as [`OrchestratorError::Planner`] and an
     /// unparseable reply as [`OrchestratorError::PlanParse`] — both honest, never
@@ -117,8 +119,9 @@ where
         request: &str,
         scratchpad: &[(PlanStep, StepObservation)],
         correction: Option<&str>,
+        history: &ConversationWindow,
     ) -> Result<PlannerDecision, OrchestratorError> {
-        let prompt = render_prompt(request, scratchpad, correction);
+        let prompt = render_prompt(request, scratchpad, correction, history);
         // Build a fresh tool-less Agent per round; the same pattern S-166's
         // zero-egress test uses. The model is cloned (cheap; shared state for the
         // mock) so the planner can be consulted across replans.
@@ -139,6 +142,12 @@ where
 
 /// Render the planner's user prompt from the request and the scratchpad so far.
 ///
+/// `history`, when non-empty, leads the prompt as the thread's prior turns (oldest
+/// first, [S-483]); an empty window adds nothing, so a thread's first turn renders
+/// exactly as it did before windows existed.
+///
+/// [S-483]: ../../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+///
 /// Real providers reason over this; the mock ignores it and returns its scripted
 /// turn, so the orchestrated loop is exercised deterministically offline.
 ///
@@ -150,8 +159,14 @@ fn render_prompt(
     request: &str,
     scratchpad: &[(PlanStep, StepObservation)],
     correction: Option<&str>,
+    history: &ConversationWindow,
 ) -> String {
-    let mut prompt = format!("User question:\n{request}\n");
+    let mut prompt = if history.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", history.render())
+    };
+    let _ = writeln!(prompt, "User question:\n{request}");
     if scratchpad.is_empty() {
         prompt.push_str("\nNo observations yet — produce the initial plan.");
     } else {
@@ -361,7 +376,7 @@ mod tests {
             PlanStep::new(StepRole::GraphNavigator, "find Engine"),
             StepObservation::new("Engine has 3 callers"),
         )];
-        let prompt = render_prompt("who calls Engine?", &scratchpad, None);
+        let prompt = render_prompt("who calls Engine?", &scratchpad, None, &ConversationWindow::default());
         assert!(prompt.contains("who calls Engine?"));
         assert!(prompt.contains("Engine has 3 callers"));
     }
@@ -370,7 +385,12 @@ mod tests {
     fn a_correction_is_appended_to_the_prompt() {
         // The forced-grounding re-prompt ([FR-UI-30]): the corrective directive is
         // appended so a real planner sees why its premature finalize was refused.
-        let prompt = render_prompt("what does Engine do?", &[], Some("GATHER GROUNDING FIRST"));
+        let prompt = render_prompt(
+            "what does Engine do?",
+            &[],
+            Some("GATHER GROUNDING FIRST"),
+            &ConversationWindow::default(),
+        );
         assert!(prompt.contains("what does Engine do?"));
         assert!(prompt.ends_with("GATHER GROUNDING FIRST"));
     }
