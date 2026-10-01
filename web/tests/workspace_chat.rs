@@ -78,7 +78,7 @@ fn assert_stopped_at_the_preflight(body: &str) {
     assert!(!body.contains(WS_KEY), "{body}");
 }
 
-fn post(uri: &str, intent: &IntentToken, body: &'static str) -> Request<Body> {
+fn post(uri: &str, intent: &IntentToken, body: impl Into<Body>) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
@@ -87,7 +87,7 @@ fn post(uri: &str, intent: &IntentToken, body: &'static str) -> Request<Body> {
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .header(header::ACCEPT, "text/event-stream")
         .header(INTENT_HEADER, intent.as_str())
-        .body(Body::from(body))
+        .body(body.into())
         .unwrap()
 }
 
@@ -276,6 +276,42 @@ async fn a_complete_workspace_tier_reaches_the_preflight_on_its_own_endpoint() {
     assert_stopped_at_the_preflight(&body);
     assert!(!body.contains("ws42"), "{body}");
     assert_eq!(threads_at(root).len(), 1, "the question is recorded at the workspace root");
+}
+
+/// A follow-up turn on the production route appends to the thread it names
+/// ([S-483]): `thread=` reaches the workspace setup, so turn 2 lands in turn 1's
+/// conversation — the thread the prior-turn window is read from — rather than
+/// opening a fresh one. Both turns stop at the preflight, after the question is
+/// recorded, so nothing dials.
+///
+/// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follow_up_turn_appends_to_the_thread_it_names() {
+    let tmp = workspace_chat::workspace();
+    let root = tmp.path();
+    write(root, "config.toml", PREFLIGHT_STOPPED_TIER);
+    write(root, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
+    let intent = IntentToken::generate();
+    let router = workspace_chat::router(root, &intent);
+
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=first+question")).await;
+    assert_stopped_at_the_preflight(&body);
+    let threads = threads_at(root);
+    assert_eq!(threads.len(), 1, "turn 1 opened one thread");
+    let thread = threads[0];
+
+    let follow_up = format!("q=second+question&thread={thread}");
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, follow_up)).await;
+    assert_stopped_at_the_preflight(&body);
+    assert_eq!(threads_at(root), vec![thread], "turn 2 opened no second thread");
+    let messages = ChatStore::open(root).unwrap().messages(thread).unwrap();
+    assert_eq!(
+        messages.into_iter().map(|m| (m.role, m.content)).collect::<Vec<_>>(),
+        [
+            (ChatRole::User, "first question".to_string()),
+            (ChatRole::User, "second question".to_string()),
+        ],
+    );
 }
 
 // ── 4. The store: the workspace root's, and git-clean ───────────────────────
