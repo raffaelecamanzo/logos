@@ -13,11 +13,13 @@
 //! # Never a coupling ([BR-60], [ADR-53])
 //! A [`TypeReference`] is a read-model of its own, with its own headline
 //! (`type_reference_pairs`) and its own cache. It is never a
-//! [`BridgeEdge`](super::BridgeEdge), and nothing in the [`bridge`](super::bridge),
-//! [`coverage`](super::coverage) or [`build_deps`](super::build_deps) reads
-//! anything defined here, so `resolved_cross_service_edges`,
-//! `egress_resolution`, the bridge edge set and the build headline cannot move
-//! with it. It is never a gate input: `scan`/`gate`/`check_rules` run on one
+//! [`BridgeEdge`](super::BridgeEdge), and nothing computed here feeds the
+//! [`bridge`](super::bridge)'s matcher or edge set, the
+//! [`coverage`](super::coverage) figures or the [`build_deps`](super::build_deps)
+//! join — the bridge only carries [`MemberTypeFacts`] through its
+//! `MemberContracts` read seam, and this module reads the build relation, never
+//! the reverse — so `resolved_cross_service_edges`, `egress_resolution`, the
+//! bridge edge set and the build headline cannot move with it. It is never a gate input: `scan`/`gate`/`check_rules` run on one
 //! engine and never construct a registry.
 //!
 //! # The match ([NFR-RA-05])
