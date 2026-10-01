@@ -2317,8 +2317,6 @@ fn persist_config_source(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Re
     )
 }
 
-/// Persist a file's extracted references into the `unresolved_refs` ledger
-/// (S-011). Insertion is idempotent over the ledger's uniqueness rule.
 /// Adapt a file's extracted declared types to the store's row shape and write
 /// them (S-472, [CR-152] §3.2 B) — the extraction → store adaptation, beside
 /// [`persist_config_source`] for the reason given there. An empty set still
@@ -2342,6 +2340,8 @@ fn persist_declared_types(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> R
     w.replace_file_declared_types(file_id, &rows)
 }
 
+/// Persist a file's extracted references into the `unresolved_refs` ledger
+/// (S-011). Insertion is idempotent over the ledger's uniqueness rule.
 fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
     for r in &facts.refs {
         w.insert_unresolved_ref(&NewUnresolvedRef {
