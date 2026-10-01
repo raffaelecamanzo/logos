@@ -216,7 +216,7 @@ pub struct MemberScoped<T> {
 ///
 /// A member in neither set was not needed by this answer: a warm cross-service
 /// bridge whose stamp check proved nothing changed reads no member the check
-/// did not have to ([`ContractBridge::edges`](super::ContractBridge::edges)).
+/// did not have to ([`ContractBridge::edges_read`](super::ContractBridge::edges_read)).
 ///
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
@@ -367,7 +367,7 @@ impl Admission {
 /// `symlink_metadata` is deliberately **not** used: a symlink to a real store is
 /// a store, and `metadata` follows it. A dangling symlink resolves to `Err`,
 /// which lands in `Obstructed` — correct, since nothing can open that either.
-fn store_file(root: &Path) -> StoreFile {
+pub(super) fn store_file(root: &Path) -> StoreFile {
     match root.join(".logos").join("logos.db").metadata() {
         Ok(meta) if meta.is_file() => StoreFile::Present,
         Ok(_) => StoreFile::Obstructed,

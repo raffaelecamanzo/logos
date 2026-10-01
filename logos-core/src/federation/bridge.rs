@@ -54,6 +54,7 @@
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -302,20 +303,19 @@ pub trait MemberContracts {
     /// bridge caches against; it advances when the member re-syncs.
     fn contract_stamp(&self) -> u64;
 
-    /// The sync-stamp **every** freshly started engine of this type reports,
-    /// when that is a constant — `None` when a fresh engine's stamp can only be
-    /// learned by starting one ([NFR-PE-10]).
+    /// The sync-stamp a fresh start of the member engine rooted at `root`
+    /// would report, when that is known **without** starting it — `None` when
+    /// only a start can tell ([NFR-PE-10]).
     ///
     /// The stamp lives in the engine, not the store, so a member that was
     /// opened and then evicted has no stamp until it is started again — and a
-    /// restarted [`Engine`](crate::Engine) always begins at
+    /// restarted [`Engine`](crate::Engine) begins at
     /// [`SyncStamp::INITIAL`](crate::hydrate::SyncStamp::INITIAL). A stamp
-    /// check can therefore state such a member's stamp **without** starting
-    /// it, and state exactly the value starting it would have read
+    /// check can therefore state such a member's stamp without starting it
     /// ([`current_stamps`]). The default, `None`, keeps the start.
     ///
     /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
-    fn restart_stamp() -> Option<u64>
+    fn restart_stamp(_root: &Path) -> Option<u64>
     where
         Self: Sized,
     {
@@ -515,11 +515,14 @@ impl MemberContracts for crate::Engine {
         self.sync_stamp().0
     }
 
-    fn restart_stamp() -> Option<u64> {
-        // Every constructor seeds `sync_stamp` at `INITIAL`. The one advance
-        // inside a start is the diff-reconcile of a store just seeded into a
-        // DB-less worktree — never a member opened before, whose store exists.
-        Some(crate::hydrate::SyncStamp::INITIAL.0)
+    fn restart_stamp(root: &Path) -> Option<u64> {
+        // Every constructor seeds `sync_stamp` at `INITIAL`, and a start over a
+        // store that is there advances nothing. Only a store at the store path
+        // makes that claim: with none, a start creates one or seeds a worktree
+        // (the seed's diff-reconcile advances the stamp), and with something
+        // else there it fails — so either way it must really be attempted.
+        matches!(super::registry::store_file(root), super::open_state::StoreFile::Present)
+            .then_some(crate::hydrate::SyncStamp::INITIAL.0)
     }
 
     fn invocation_refs(&self) -> Result<Vec<InvocationRef>> {
@@ -1708,32 +1711,40 @@ fn reads_over<E: MemberEngine>(answer: &AnswerScope<'_, E>, snapshot: &EdgeSnaps
 ///   it again would read [`restart_stamp`](MemberContracts::restart_stamp), so
 ///   that is its entry, and it is neither started nor counted read. Opening it
 ///   to read a constant was the whole cost of the old check — every member, on
-///   every cross-service query, whatever `repo` said;
+///   every cross-service query, whatever `repo` said. An `Engine` states it only
+///   while the member's store file is there: a store deleted or obstructed since
+///   is opened, as below, so a member that will not start any more drops out of
+///   the vector and is named unread, as it was;
 /// - a member **never attempted, or whose last open failed**, is opened, as
 ///   before: whether it starts is not yet known, and a member that now starts
-///   adds an entry and invalidates the cache. Likewise every member of an
-///   engine type whose fresh stamp is not a constant (`restart_stamp` is
-///   `None`).
+///   adds an entry and invalidates the cache. Likewise every member whose
+///   restart stamp cannot be stated (`restart_stamp` is `None`).
 ///
-/// A member's store changed by another process while it was not resident is
-/// as invisible here as it was to the old check, which reopened it at the same
-/// constant.
+/// # Where it differs from opening every member
+/// A store that is **there but no longer opens** — corrupt contents, a schema
+/// newer than this binary, an `open(2)` refused — is not detected until a tier
+/// of the answer opens the member: the bridge serves the edges it last read
+/// from it, and the member is named unread only by a tier that opens it (the
+/// per-member fan-out, `impact`'s far side). The old check opened it and would
+/// have dropped it. A member's store **changed** by another process while it was
+/// not resident is as invisible here as it was to the old check, which reopened
+/// it at the same constant.
 pub(super) fn current_stamps<E>(answer: &AnswerScope<'_, E>) -> Stamps
 where
     E: MemberEngine + MemberContracts,
 {
     let registry = answer.registry();
-    let restart = E::restart_stamp();
-    let opened = restart.map(|_| registry.last_opened()).unwrap_or_default();
+    let opened = registry.last_opened();
     let mut stamps: Stamps = Vec::new();
     for member in registry.members() {
         let name = member.name.as_str();
-        let engine = match (registry.peek_resident(name), restart) {
+        let restart = || E::restart_stamp(&member.root);
+        let engine = match (registry.peek_resident(name), opened.contains(name).then(restart).flatten()) {
             (Some(engine), _) => {
                 answer.note_read(name);
                 engine
             }
-            (None, Some(stamp)) if opened.contains(name) => {
+            (None, Some(stamp)) => {
                 stamps.push((name.to_string(), stamp));
                 continue;
             }
@@ -2263,7 +2274,7 @@ mod tests {
 
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use super::super::{Federation, Member};
     use super::super::registry::RegistryMode;
@@ -2289,6 +2300,9 @@ mod tests {
         /// Members whose engine fails to start until removed from the set — a
         /// store that recovers, unlike the always-failing `"broken"`.
         static FAILS_TO_START: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+        /// Members whose store file is gone or obstructed — what `Engine`'s
+        /// `restart_stamp` reads off the store path.
+        static STORE_GONE: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     }
 
     #[derive(Clone, Default)]
@@ -2308,6 +2322,7 @@ mod tests {
         STAMP_READS.with(|c| c.borrow_mut().clear());
         RESTART_STAMP.with(|c| c.set(None));
         FAILS_TO_START.with(|c| c.borrow_mut().clear());
+        STORE_GONE.with(|c| c.borrow_mut().clear());
     }
 
     /// Commit `key` in `member`'s own configuration, once per `(file, profile,
@@ -2725,6 +2740,34 @@ mod tests {
         assert!(reads.read.contains("flaky") && reads.unread.is_empty(), "{reads:?}");
     }
 
+    /// **A member opened before whose store has since gone is opened, not
+    /// stated** (review finding A). Its restart cannot be stated without the
+    /// store, so the check attempts it; it fails to start, drops out of the
+    /// vector, the cache misses, and the answer no longer serves its edges and
+    /// names it unread — what opening every member did.
+    #[test]
+    fn an_evicted_member_whose_store_is_gone_is_opened_and_named_not_served() {
+        reset();
+        RESTART_STAMP.with(|c| c.set(Some(0)));
+        set_member("api", 0, vec![route("GET /users/{id}", "local api_route")]);
+        set_member("flaky", 0, Vec::new());
+        set_consumers("flaky", vec![http_call("GET /users/{id}", "local flaky_call")]);
+        let reg = registry(&["api", "flaky"]);
+        let bridge = ContractBridge::new();
+        let (cold, _) = bridge.edges_read(&reg);
+        assert_eq!(cold.len(), 1, "guard the guard: flaky's call binds api's route");
+
+        reg.evict_to_capacity(0);
+        STORE_GONE.with(|c| c.borrow_mut().insert("flaky".to_string()));
+        FAILS_TO_START.with(|c| c.borrow_mut().insert("flaky".to_string()));
+        let (warm, reads) = bridge.edges_read(&reg);
+        assert!(warm.is_empty(), "the gone member's edge is no longer served: {warm:?}");
+        assert!(
+            reads.unread.get("flaky").is_some_and(|r| r.contains("store is corrupt")),
+            "and the member is named with its reason: {reads:?}"
+        );
+    }
+
     /// Without a constant restart stamp the check opens every non-resident
     /// member, as before S-484: the narrowing is earned by the engine type, and
     /// one that cannot state its fresh stamp keeps the old read.
@@ -2838,8 +2881,10 @@ mod tests {
             STAMP_READS.with(|c| *c.borrow_mut().entry(self.member.clone()).or_default() += 1);
             FIXTURES.with(|f| f.borrow().get(&self.member).map(|m| m.stamp).unwrap_or(0))
         }
-        fn restart_stamp() -> Option<u64> {
-            RESTART_STAMP.with(Cell::get)
+        fn restart_stamp(root: &Path) -> Option<u64> {
+            // A member whose store is gone cannot have its restart stated.
+            let gone = STORE_GONE.with(|c| c.borrow().contains(&member_of(root)));
+            RESTART_STAMP.with(Cell::get).filter(|_| !gone)
         }
         // The single ledger seam — the bridge and the coverage tier both read it and
         // apply the role themselves, so a fixture's provider-role rows (a broker

@@ -95,6 +95,23 @@ fn five_members(root: &Path) -> EngineRegistry<Engine> {
     EngineRegistry::with_budget(federation, RegistryMode::Lazy, tight)
 }
 
+/// Overwrite a member's store with bytes that are not a database, leaving a
+/// regular file at the store path.
+fn corrupt_store(member: &Path) {
+    let db = member.join(".logos/logos.db");
+    for sidecar in ["logos.db-wal", "logos.db-shm"] {
+        let _ = fs::remove_file(member.join(".logos").join(sidecar));
+    }
+    fs::write(&db, b"this is not a sqlite database, whatever its name says").expect("overwrite the store");
+}
+
+/// Replace a member's store with a directory — nothing can open it.
+fn obstruct_store(member: &Path) {
+    let db = member.join(".logos/logos.db");
+    fs::remove_file(&db).expect("clear the store file");
+    fs::create_dir_all(&db).expect("a directory where the store must be");
+}
+
 fn names(members: &[&str]) -> BTreeSet<String> {
     members.iter().map(|m| (*m).to_string()).collect()
 }
@@ -192,9 +209,7 @@ fn a_member_whose_store_is_unreadable_is_named_with_its_reason() {
     let root = tmp.path();
     let registry = five_members(root);
     // `audit`'s store becomes a directory before the registry ever opens it.
-    let db = root.join("audit/.logos/logos.db");
-    fs::remove_file(&db).expect("clear the store file");
-    fs::create_dir_all(&db).expect("a directory where the store must be");
+    obstruct_store(&root.join("audit"));
     let bridge = ContractBridge::new();
 
     for pass in ["cold", "warm"] {
@@ -246,15 +261,39 @@ fn each_tier_names_the_member_it_opened_and_the_one_that_would_not_open() {
     assert_eq!(registry.engine_starts(), starts + 1, "the far side opened web");
     assert_eq!(impact.member_reads.read, two, "and the answer names it");
 
-    // `web` was opened before, so the stamp check states its restart stamp
-    // without starting it; the far side is the first to find it broken.
+    // `web` was opened before and its store file is still there, so the stamp
+    // check states its restart stamp without starting it. Corrupt contents are
+    // what that cannot see; the far side is the first to find them.
     only("api");
-    let db = root.join("web/.logos/logos.db");
-    fs::remove_file(&db).expect("clear the store file");
-    fs::create_dir_all(&db).expect("a directory where the store must be");
+    corrupt_store(&root.join("web"));
     let impact = query::xservice_impact(&registry, &query::reachability_inputs(&bridge, &registry), &route, None, Some("api"));
     assert!(impact.cross_service.is_empty(), "the far member is skipped, not fatal");
     let reason = impact.member_reads.unread.get("web").expect("…and named");
     assert!(reason.contains("starting the engine for workspace member \"web\""), "{reason}");
     assert_eq!(impact.member_reads.read, names(&["api"]));
+}
+
+/// **A member opened before whose store is gone since is not served from the
+/// cache** (review finding A). Over five real stores: a warm bridge, every
+/// engine evicted, then `web`'s store replaced by a directory. The stamp
+/// check cannot state the restart of a member with no store, so it attempts
+/// `web`, which fails: `route-providers` — which has no per-member tier that
+/// would have opened it — no longer lists `web`'s binding, and names `web`
+/// with its reason, as a fresh bridge does.
+#[test]
+fn an_evicted_member_whose_store_is_gone_is_not_served_from_the_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let registry = five_members(root);
+    let bridge = ContractBridge::new();
+    assert_eq!(query::bridge_read(&bridge, &registry).edges.len(), 1, "guard the guard: the warm set has web's edge");
+
+    registry.evict_to_capacity(0);
+    obstruct_store(&root.join("web"));
+    let warm = query::xservice_route_providers(&query::bridge_read(&bridge, &registry), None);
+    let fresh = query::xservice_route_providers(&query::bridge_read(&ContractBridge::new(), &registry), None);
+    assert!(warm.providers.is_empty(), "web's binding is no longer served: {:?}", warm.providers);
+    assert_eq!(warm.providers.len(), fresh.providers.len(), "the warm answer is the fresh one");
+    let reason = warm.member_reads.unread.get("web").expect("web is named");
+    assert!(reason.contains("starting the engine for workspace member \"web\""), "{reason}");
 }
