@@ -1400,7 +1400,8 @@ schema, is a type reference, with the importing file and line and the declaring
 file or schema. It counts only between members the build relation relates, or
 where the importer references a colliding artifact the owner produces. Those
 pairs are listed under `collision_backed`, with the artifact named. Any other
-match is listed under `type_only` and never counted. A type several members
+match is listed under `type_only` and counted there, but never bound and never
+part of `type_reference_pairs`. A type several members
 declare stays unbound and is listed under `ambiguous_owner`, with the owners
 named. The headline `type_reference_pairs` (split `build_pairs` /
 `collision_backed_pairs`) sits beside `rows`, every row considered filed into
