@@ -2664,6 +2664,30 @@ mod tests {
         assert!(warm_reads.unread.is_empty(), "{warm_reads:?}");
     }
 
+    /// **Checking the stamps does not reorder the eviction queue**
+    /// ([NFR-PE-10]): a resident member's stamp is read without marking it
+    /// touched, so the members the answers actually used stay the hot ones.
+    /// `api` is touched after `web`; a stamp check that touched them in roster
+    /// order would leave `web` the most recent, and admitting `billing` would
+    /// then evict `api` instead of `web`.
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    #[test]
+    fn a_stamp_check_leaves_the_eviction_order_as_the_answers_left_it() {
+        reset();
+        let reg = five_member_workspace();
+        let bridge = ContractBridge::new();
+        let _ = bridge.edges(&reg);
+        reg.evict_to_capacity(0);
+        reg.engine_for("web").unwrap();
+        reg.engine_for("api").unwrap();
+        let (_, reads) = bridge.edges_read(&reg);
+        assert_eq!(reads.read, names(&["api", "web"]), "guard the guard: both resident stamps were read");
+
+        reg.engine_for("billing").unwrap();
+        assert_eq!(reg.resident_members(), ["api", "billing"], "web, the least recently used, was evicted");
+    }
+
     /// The other half of the rule, and why it is sound: a **resident** member
     /// is read whether or not the answer involves it, because a stamp lives in
     /// the engine and only a resident engine can advance one — and its advance
