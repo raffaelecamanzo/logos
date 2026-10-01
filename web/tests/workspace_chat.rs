@@ -138,7 +138,13 @@ async fn a_single_root_serve_answers_every_workspace_chat_route_404() {
     std::fs::create_dir_all(dir.path().join(".logos")).unwrap();
     let intent = IntentToken::generate();
     let router = web::router_with_intent(Arc::new(Engine::open(dir.path())), intent.clone());
+    // A guarded turn whose body is not a form at all: the 404 is the extractor's,
+    // decided from the request head before the body is read — never the form
+    // extractor's `415` for a request that has no workspace chat to reach.
+    let mut unformed = post(WORKSPACE_CHAT_POST_ROUTE, &intent, "{\"q\":\"hello\"}");
+    unformed.headers_mut().insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
     for req in [
+        unformed,
         post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello"),
         get(WORKSPACE_CHAT_THREADS_ROUTE),
         get(&format!("{WORKSPACE_CHAT_THREADS_ROUTE}/1")),

@@ -495,7 +495,7 @@ pub(crate) struct WebState {
     ///
     /// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
     #[cfg(feature = "agents")]
-    workspace_chat: WorkspaceChat,
+    workspace_chat: Option<Arc<dyn chat::ChatService>>,
     /// The wiki-generation seam (S-178): production resolves the configured wiki
     /// model and drives [`run_configured`](wiki_agent::run_configured); the
     /// carve-out tests inject a mock-provider service. Behind an [`Arc`] so the
@@ -550,42 +550,27 @@ impl FromRef<WebState> for Arc<dyn chat::ChatService> {
     }
 }
 
-#[cfg(feature = "agents")]
-impl FromRef<WebState> for WorkspaceChat {
-    fn from_ref(state: &WebState) -> Self {
-        state.workspace_chat.clone()
-    }
-}
-
-/// The workspace chat service, when this serve has one ([S-482]). As an
-/// extractor it is the service itself or the workspace family's `404`, answered
-/// from the request head before the body is read — the [`WorkspaceRoot`]
-/// extractor's rule for the workspace config routes.
+/// The workspace chat service, extracted for its turn route ([S-482]) — or, when
+/// this serve has none (a single root), the workspace family's `404`, answered
+/// from the request head before the body is read. The [`WorkspaceRoot`]
+/// extractor's rule for the workspace config routes: the state holds the
+/// `Option`, the extractor yields the service, and the 404 is decided once.
 ///
 /// [S-482]: ../../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
 /// [`WorkspaceRoot`]: crate::member::WorkspaceRoot
 #[cfg(feature = "agents")]
-#[derive(Clone)]
-pub(crate) struct WorkspaceChat(Option<Arc<dyn chat::ChatService>>);
+pub(crate) struct WorkspaceChat(Arc<dyn chat::ChatService>);
 
 #[cfg(feature = "agents")]
 #[axum::async_trait]
-impl<S> axum::extract::FromRequestParts<S> for WorkspaceChat
-where
-    S: Send + Sync,
-    WorkspaceChat: FromRef<S>,
-{
+impl axum::extract::FromRequestParts<WebState> for WorkspaceChat {
     type Rejection = Response;
 
     async fn from_request_parts(
         _parts: &mut axum::http::request::Parts,
-        state: &S,
+        state: &WebState,
     ) -> Result<Self, Self::Rejection> {
-        let seam = WorkspaceChat::from_ref(state);
-        match seam.0 {
-            Some(_) => Ok(seam),
-            None => Err(api_v1::not_a_workspace()),
-        }
+        state.workspace_chat.clone().map(Self).ok_or_else(api_v1::not_a_workspace)
     }
 }
 
@@ -670,7 +655,7 @@ pub fn workspace_router_with_chat(
     let backing = Arc::new(Backing::Federated(Box::new(registry)));
     let engine = backing.default_engine()?;
     let mut state = make_state(engine, backing, intent);
-    state.workspace_chat = WorkspaceChat(Some(workspace_chat));
+    state.workspace_chat = Some(workspace_chat);
     Ok(build_router(state))
 }
 
@@ -745,15 +730,14 @@ fn make_state(engine: Arc<Engine>, backing: Arc<Backing<Engine>>, intent: Intent
         // The workspace chat stitches over the same bridge and build-dependency
         // cache the `/api/v1/workspace/*` routes read (S-482); a single root
         // mints no query backing, so it has no workspace chat.
-        let workspace_chat = WorkspaceChat(
+        let workspace_chat =
             agent_core::XserviceBacking::federated(Arc::clone(&backing), Arc::clone(&bridge)).map(
                 |xservice| {
                     Arc::new(chat::WorkspaceChatService::new(
                         xservice.with_build_deps(Arc::clone(&build_deps)),
                     )) as Arc<dyn chat::ChatService>
                 },
-            ),
-        );
+            );
         WebState {
             engine,
             backing,
@@ -827,7 +811,7 @@ pub fn router_with_chat(
         build_deps: Arc::new(BuildDependencies::new()),
         intent,
         chat,
-        workspace_chat: WorkspaceChat(None),
+        workspace_chat: None,
         wiki,
         wiki_state: wikigen::WikiRunState::new(),
     })
@@ -859,7 +843,7 @@ pub fn router_with_wiki(
         build_deps: Arc::new(BuildDependencies::new()),
         intent,
         chat,
-        workspace_chat: WorkspaceChat(None),
+        workspace_chat: None,
         wiki,
         wiki_state: wikigen::WikiRunState::new(),
     })
@@ -1121,10 +1105,7 @@ async fn workspace_chat_turn(
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    match chat {
-        Some(chat) => serve_turn(chat, &headers, &form).await,
-        None => api_v1::not_a_workspace(),
-    }
+    serve_turn(chat, &headers, &form).await
 }
 
 /// Run one chat turn on `chat` from the turn form and answer per `Accept` — the
@@ -2098,7 +2079,7 @@ mod tests {
 
         // [S-482]: the federated reach is the workspace chat's alone — minted once,
         // beside the member chat, and never what `chat_for` hands a member turn.
-        let workspace = state.workspace_chat.0.clone().expect("a federated serve has a workspace chat");
+        let workspace = state.workspace_chat.clone().expect("a federated serve has a workspace chat");
         for member in [&state.chat, &scoped] {
             assert!(!Arc::ptr_eq(member, &workspace), "a member turn never gets the workspace chat");
         }
@@ -2107,7 +2088,7 @@ mod tests {
             Arc::new(Backing::Single(Arc::clone(&default))),
             IntentToken::generate(),
         );
-        assert!(single.workspace_chat.0.is_none(), "a single root has no workspace chat");
+        assert!(single.workspace_chat.is_none(), "a single root has no workspace chat");
     }
 
     /// The [`bridge`] installs the boundary scope its caller names, and
