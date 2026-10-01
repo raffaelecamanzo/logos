@@ -49,8 +49,10 @@ transposed — reaches at most 20 of 452 unresolved rows (4.4 %). If every one o
 them bound, first-party .ts method-form resolution would move from 58 of 510
 (11.4 %) to at most 78 of 510 (15.3 %). Adding the initialiser inference that is
 NOT a declared-type rule (Angular `inject(T)`, `new T()`) lifts the bound to 38
-(8.4 %). All 20 sit in one member, pec-agid-statistics-informer, the estate's only
-first-party TypeScript application. Precision is not what limits it (0 ambiguous,
+(8.4 %). All 20 sit in one member, pec-agid-statistics-informer (an Angular client
+and a NestJS server), which holds 500 of the 510 rows; ptpec-assistance-tool's
+Next.js API routes hold the other 10 (`res.status().json()`, `res.setHeader()` on a
+library `NextApiResponse`). Precision is not what limits it (0 ambiguous,
 0 self-ties); reach is, and the residue is not reach a receiver-typing rule can buy:
 
   - 96 library/global receivers (cy 20, Number 15, Object 9, Math 6, console 5 …;
