@@ -217,7 +217,7 @@ pub use telemetry::{
 };
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
 pub use type_refs::{
-    build_index, AmbiguousReference, AmbiguousType, CollisionBackedPair, MemberTypeFacts,
+    build_index, read_type_facts, AmbiguousReference, AmbiguousType, CollisionBackedPair, MemberTypeFacts,
     MemberTypeReferences, PairEvidence, TypeImporter, TypeMembersRead, TypeNaming, TypeOnlyPair,
     TypeOrigin, TypeOwner, TypeRefForm, TypeReference, TypeReferenceHeadline, TypeReferenceIndex,
     TypeReferences, TypeRowAccounting, AMBIGUOUS_OWNER,

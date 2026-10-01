@@ -28,8 +28,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use logos_core::federation::{build_index, MemberTypeFacts, PairEvidence, TypeRefForm, TypeReferenceIndex};
-use logos_core::graph_store::GraphStore;
+use logos_core::federation::{
+    build_index, read_type_facts, MemberTypeFacts, PairEvidence, TypeRefForm, TypeReferenceIndex,
+};
 
 use super::cross_member_type_refs::{
     consumer_tree, judge, open_member_store, read_estate, Estate, OwnerIndex, PairClass, Rule,
@@ -59,25 +60,15 @@ pub enum Mechanism {
     Unattributed,
 }
 
-/// Every member store's overlay inputs, read the way the shipped
-/// `MemberContracts::type_facts` reads them — marker first, `None` when not
-/// extracted.
-fn read_type_facts(e: &Estate, root: &Path) -> (Vec<(String, MemberTypeFacts)>, Vec<String>) {
+/// Every member store's overlay inputs, through the shipped reader the
+/// engine's `MemberContracts::type_facts` calls — marker first, `None` when
+/// not extracted.
+fn read_estate_type_facts(e: &Estate, root: &Path) -> (Vec<(String, MemberTypeFacts)>, Vec<String>) {
     let (mut facts, mut not_extracted) = (Vec::new(), Vec::new());
     for member in &e.members {
         let store = open_member_store(&root.join(member).join(".logos").join("logos.db"))
             .unwrap_or_else(|err| panic!("{member}: {err}"));
-        let read = || -> anyhow::Result<Option<MemberTypeFacts>> {
-            if !store.declared_types_extracted()? {
-                return Ok(None);
-            }
-            Ok(Some(MemberTypeFacts {
-                declared: store.declared_types()?,
-                schemas: store.avro_schemas()?,
-                rows: store.unresolved_type_refs()?,
-            }))
-        };
-        match read().unwrap_or_else(|err| panic!("{member}: {err:#}")) {
+        match read_type_facts(&store).unwrap_or_else(|err| panic!("{member}: {err:#}")) {
             Some(read) => facts.push((member.clone(), read)),
             None => not_extracted.push(member.clone()),
         }
@@ -294,7 +285,7 @@ fn reconcile_the_type_reference_overlay_with_the_s471_gate_over_the_reference_wo
     let gate = judge(&e.rows, &gate_index, &e.pairs);
     let gate_reach = gate.reach();
 
-    let (facts, not_extracted) = read_type_facts(&e, &root);
+    let (facts, not_extracted) = read_estate_type_facts(&e, &root);
     let federation = logos_core::federation::discover(&root).expect("parses").expect("a workspace");
     let index = build_index(&federation.members, &facts, &not_extracted, &e.relation);
     assert!(

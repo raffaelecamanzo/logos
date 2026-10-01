@@ -518,18 +518,7 @@ impl MemberContracts for crate::Engine {
             "reading a member's declared-type facts requires a long-lived engine \
              (Engine::start) with a read-only pool",
         )?;
-        // One pooled read, four statements, marker first — the same order and
-        // reasoning as `build_manifests` above.
-        runtime.submit_read(|store| {
-            if !store.declared_types_extracted()? {
-                return Ok(None);
-            }
-            Ok(Some(super::type_refs::MemberTypeFacts {
-                declared: store.declared_types()?,
-                schemas: store.avro_schemas()?,
-                rows: store.unresolved_type_refs()?,
-            }))
-        })
+        runtime.submit_read(super::type_refs::read_type_facts)
     }
 
     fn topic_surface(&self) -> Result<Vec<super::topics::TopicSummary>> {

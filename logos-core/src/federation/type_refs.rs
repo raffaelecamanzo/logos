@@ -85,7 +85,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::graph_store::{AvroSchemaRow, DeclaredTypeRow, TypeRefRow};
+use crate::graph_store::{AvroSchemaRow, DeclaredTypeRow, GraphStore, TypeRefRow};
 use crate::model::EdgeKind;
 
 use super::bridge::{current_stamps, read_members, MemberContracts, StampCache};
@@ -112,6 +112,29 @@ impl MemberTypeFacts {
     fn is_java_kotlin_avro(&self) -> bool {
         !(self.declared.is_empty() && self.schemas.is_empty() && self.rows.is_empty())
     }
+}
+
+/// Read one member's overlay inputs off its store — the one reader the
+/// engine's `MemberContracts::type_facts` and the estate reconciliation both
+/// call, so the harness measures exactly what ships.
+///
+/// One read, four statements, marker first — the order and reasoning of
+/// `MemberContracts::build_manifests`: the marker is never removed and a full
+/// walk commits it with its facts, so rows read after it are at least as fresh
+/// as the facts it vouches for. `None` when the store does not mark its
+/// declared types extracted.
+///
+/// # Errors
+/// Propagates a store read failure.
+pub fn read_type_facts(store: &dyn GraphStore) -> anyhow::Result<Option<MemberTypeFacts>> {
+    if !store.declared_types_extracted()? {
+        return Ok(None);
+    }
+    Ok(Some(MemberTypeFacts {
+        declared: store.declared_types()?,
+        schemas: store.avro_schemas()?,
+        rows: store.unresolved_type_refs()?,
+    }))
 }
 
 /// One member's facts as read: its name and its [`MemberTypeFacts`].
