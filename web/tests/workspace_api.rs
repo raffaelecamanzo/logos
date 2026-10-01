@@ -652,10 +652,9 @@ async fn workspace_impact_exposes_seed_and_cross_service_tiers() {
     let (status, body, _h) = body_string(resp).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(
-        v["member_reads"]["read"].as_array().is_some_and(|read| read.contains(&"web".into())),
-        "callers names the members it read, the scoped one among them: {body}"
-    );
+    // The scoped fan-out reads web alone; api is named because the bridge's
+    // stamp check read it (resident since the impact answer above).
+    assert_eq!(v["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{body}");
 }
 
 /// Each parametrised workspace handler rejects a missing/empty required query

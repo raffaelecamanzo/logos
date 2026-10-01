@@ -1241,6 +1241,9 @@ fn callers_lists_cross_service_consumers_and_repo_scopes() {
     );
     assert_eq!(scoped["scope"], "web");
     assert_eq!(scoped["members"].as_array().unwrap().len(), 1);
+    // The scoped fan-out reads web alone; api is named because the bridge read
+    // it — the one-shot's bridge is cold (S-484).
+    assert_eq!(scoped["member_reads"], serde_json::json!({ "read": ["api", "web"] }), "{scoped}");
 }
 
 /// AC1 (degrade-don't-abort): an unknown `--repo` surfaces as a single
