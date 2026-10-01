@@ -1173,9 +1173,10 @@ nor counted yet.
   // logos xservice type-refs --repo lib --json (the fixture in cli/tests/xservice_type_refs.rs)
   { "scope": "lib",
     "headline": { "type_reference_pairs": 1, "build_pairs": 1, "collision_backed_pairs": 0, "triples": 1,
-                  "rows": { "considered": 2, "bound": 1, "type_only": 1, … }, "members": { "members": 5, "read": 5, … },
+                  "rows": { "considered": 5, "imports": 2, "type_uses": 3, "bound": 1, "type_only": 1, "unqualified": 3, … },
+                  "members": { "members": 5, "read": 5, … },
                   "type_only": [ { "from": "stray", "to": "lib", "types": ["com.acme.lib.Dto"], "references": 1 } ],
-                  "summary": "1 member pairs (1 build · 0 collision-backed) bind 1 of 2 unresolved …" },
+                  "summary": "1 member pairs (1 build · 0 collision-backed) bind 1 of 5 unresolved …" },
     "providers": [ { "member": "lib", "types": [ {
         "fqn": "com.acme.lib.Dto",
         "owner": { "member": "lib", "origin": "source", "declared_in": "src/main/java/com/acme/lib/Dto.java",
