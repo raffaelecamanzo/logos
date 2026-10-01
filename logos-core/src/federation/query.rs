@@ -431,8 +431,10 @@ pub struct XserviceImpact {
     /// Far-side impacts reached by fanning across the bridge edges the queried
     /// symbol is an endpoint of.
     pub cross_service: Vec<CrossServiceImpact>,
-    /// Importing files reached across a [`TypeReference`], each with what
-    /// depends on it in its member — **apart from**
+    /// One entry per bound [`TypeReference`] reaching the symbol — per import
+    /// row, so a file importing the type and a static member of it is reached
+    /// twice — each with what depends on the importing file in its member —
+    /// **apart from**
     /// [`cross_service`](Self::cross_service) and never merged with it
     /// ([BR-60]); filled by [`with_type_references`](Self::with_type_references).
     /// Absent when no bound type reference names the symbol, so such an answer
@@ -558,6 +560,9 @@ impl XserviceImpact {
         // replayed on every entry reaching it, as an `AnswerScope` replays a
         // failed open within one walk ([ADR-53]).
         let mut engines: BTreeMap<&str, Result<Arc<Engine>, String>> = BTreeMap::new();
+        // One closure per importing file: several rows of one file (an import
+        // and a static-member import of one type) share it.
+        let mut closures: BTreeMap<(&str, &str), AffectedResult> = BTreeMap::new();
         self.via_type_reference = references_reaching(registry, index, &self.query)
             .map(|reference| {
                 let importer = &reference.importer;
@@ -571,7 +576,14 @@ impl XserviceImpact {
                         member: importer.member.clone(),
                         value: engine
                             .as_ref()
-                            .map(|engine| within(engine.affected(std::slice::from_ref(&importer.file), false)))
+                            .map(|engine| {
+                                closures
+                                    .entry((importer.member.as_str(), importer.file.as_str()))
+                                    .or_insert_with(|| {
+                                        within(engine.affected(std::slice::from_ref(&importer.file), false))
+                                    })
+                                    .clone()
+                            })
                             .map_err(|err| anyhow::anyhow!("{err}")),
                     }),
                 }
@@ -603,9 +615,8 @@ pub struct TypeReferenceCaller {
     pub via: TypeReference,
 }
 
-/// One importing file reached across a [`TypeReference`] ([FR-WS-35]): the
-/// reference it was reached through, and the importing member's affected-file
-/// closure of it — or, when that member's engine will not start, its error
+/// One bound [`TypeReference`] reached across ([FR-WS-35]): the reference,
+/// and the importing member's affected-file closure of the importing file — or, when that member's engine will not start, its error
 /// ([ADR-53]).
 ///
 /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md

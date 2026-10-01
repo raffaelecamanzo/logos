@@ -1091,7 +1091,9 @@ nor counted yet.
 - **`impact`** — transitive impact per member, extended across bridge edges: a
   handler reachable only via a matched cross-service call is included, tagged
   with the bridge edge it was reached through. For a type another member
-  imports, a `via_type_reference` section carries, per importer, the importing
+  imports, a `via_type_reference` section carries, per bound reference (one
+  per import row, so a file importing the type and a static member of it is
+  listed twice, with one closure), the importing
   member's [`affected`](#affected) closure of the importing file — `changed` is
   that file, `affected` every file depending on it there, within `--depth`
   hops like the rest of the answer — or that member's
