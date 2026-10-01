@@ -789,6 +789,30 @@ fn the_api_answers_owners_importers_symbols_and_members() {
     assert_eq!(index.per_member().len(), MEMBERS.len());
 }
 
+/// The documented orders hold whatever the roster order: references by
+/// `(owner member, type, importer)`, and owners by member — here over a
+/// roster listing `fork-b` before `fork-a`.
+#[test]
+fn references_and_owners_come_out_in_their_documented_order() {
+    assert_eq!(
+        keys(&index().references),
+        [
+            ("user", Some(2), "com.acme.dup.Only", "fork-a"),
+            ("app", Some(3), "com.acme.lib.Dto", "lib"),
+            ("app", Some(5), "com.acme.lib.Dto", "lib"),
+            ("app", Some(13), "com.acme.lib.Dto", "lib"),
+            ("app", Some(4), "com.acme.events.Evt", "models"),
+        ]
+    );
+    let reversed: Vec<&str> = MEMBERS.iter().rev().copied().collect();
+    let federation = fed(&reversed, &[]);
+    let build = join(&federation.members, &federation.member_kinds, &build_facts(), &[]);
+    let index = build_index(&federation.members, &type_facts(), &[], &build);
+    let owners: Vec<&str> = index.owners("com.acme.dup.Thing").iter().map(|o| o.member.as_str()).collect();
+    assert_eq!(owners, ["fork-a", "fork-b"]);
+    assert_eq!(index.ambiguous[0].owners, ["fork-a", "fork-b"]);
+}
+
 /// The serialized index carries the matches and the headline, never the
 /// private FQN map or roster.
 #[test]
