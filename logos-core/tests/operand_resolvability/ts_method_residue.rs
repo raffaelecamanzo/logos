@@ -69,17 +69,18 @@
 //!
 //! [`open_member_store`] is the one way this module opens a member database: the
 //! shipped read-only open, which refuses — never migrates — a store at another
-//! schema version. A store this binary can read was therefore written by a
-//! binary carrying this sprint's migration, so the run cannot measure a store
-//! that predates [S-477]'s fields; [`void_reason`] refuses one with no TypeScript
-//! `Field` node as well. The estate run skips in `gate.sh` and CI; a run that
-//! sees no estate reports **VOID**, never zero.
+//! schema version. That proves only the schema (migration 24 is [S-472]'s), not
+//! that [S-477]'s fields are in the store: [`void_reason`] refuses a run in which
+//! any member's first-party source declares a class field while its store holds
+//! no TypeScript `Field` node — a store indexed before S-477. The estate run skips
+//! in `gate.sh` and CI; a run that sees no estate reports **VOID**, never zero.
 //!
 //! [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
 //! [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 //! [CR-154]: ../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
 //! [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+//! [S-472]: ../../../docs/planning/journal.md#s-472-members-record-the-types-they-declare-from-source-and-from-avro-schemas
 //! [S-477]: ../../../docs/planning/journal.md#s-477-typescript-class-fields-and-parameter-properties-are-field-nodes-so-own-field-accesses-bind
 //! [S-479]: ../../../docs/planning/journal.md#s-479-measure-the-first-party-typescript-method-call-residue-by-receiver-shape
 
@@ -955,6 +956,20 @@ pub fn judge(site: &Site, path: &str, index: &TypeIndex) -> Outcome {
     Outcome::MemberMissing
 }
 
+/// How many fields (incl. parameter properties) the file's `class_declaration`s
+/// declare — the class form [S-477]'s symbol query captures them on.
+///
+/// [S-477]: ../../../docs/planning/journal.md#s-477-typescript-class-fields-and-parameter-properties-are-field-nodes-so-own-field-accesses-bind
+pub fn declared_class_fields(tree: &Tree, src: &str) -> usize {
+    let mut n_fields = 0;
+    each_node(tree.root_node(), |n| {
+        if n.kind() == "class_declaration" {
+            n_fields += ClassFacts::read(n, src).fields.len();
+        }
+    });
+    n_fields
+}
+
 /// `(file, class name) → extends head` for every class a parsed file declares.
 pub fn class_extends(
     tree: &Tree,
@@ -1018,11 +1033,12 @@ pub struct Estate {
     pub classified: Vec<Classified>,
     /// First-party unresolved rows whose recorded line holds no site.
     pub unlocated: Vec<String>,
-    /// TypeScript `Field` nodes across the members read — zero means the stores
-    /// predate [S-477].
+    /// Members whose first-party source declares a class field while their store
+    /// holds no TypeScript `Field` node: indexed before [S-477]. Per member — a
+    /// member declaring no class field (Next.js API routes) rightly has none.
     ///
     /// [S-477]: ../../../docs/planning/journal.md#s-477-typescript-class-fields-and-parameter-properties-are-field-nodes-so-own-field-accesses-bind
-    pub ts_fields: usize,
+    pub pre_s477: Vec<String>,
 }
 
 /// Why a run measured nothing worth recording, or `None` when it engaged.
@@ -1035,12 +1051,13 @@ pub fn void_reason(e: &Estate) -> Option<String> {
                 .into(),
         );
     }
-    if e.ts_fields == 0 {
-        return Some(
-            "no TypeScript Field node exists in any member read — the stores predate S-477, so \
-             the residue would be measured on the wrong graph"
-                .into(),
-        );
+    if !e.pre_s477.is_empty() {
+        return Some(format!(
+            "{} declare(s) TypeScript class fields in source but the store holds no Field \
+             node — indexed before S-477 (or by another binary), so the residue would be \
+             measured on the wrong graph",
+            e.pre_s477.join(", ")
+        ));
     }
     None
 }
@@ -1148,16 +1165,21 @@ pub fn read_estate(root: &Path) -> Estate {
         let ts_paths: BTreeSet<String> = ts.values().cloned().collect();
         let MemberGraph { mut index, ts_fields, spans } =
             member_graph(&store, &ts_paths).unwrap_or_else(|e| panic!("{}: {e}", member.name));
-        estate.ts_fields += ts_fields;
         if by_file.is_empty() {
             continue;
         }
         // The supertype walk's `extends` heads, read from every first-party
-        // declaring file (the plugins record no `Extends` edge for TypeScript).
+        // declaring file (the plugins record no `Extends` edge for TypeScript);
+        // the same pass counts the class fields the source declares.
         let mut extends = BTreeMap::new();
+        let mut source_fields = 0;
         for path in ts_paths.iter().filter(|p| !is_vendored(&member.name, p)) {
             let (tree, src) = parse_file(&registry, &member.root, path);
             class_extends(&tree, &src, path, &mut extends);
+            source_fields += declared_class_fields(&tree, &src);
+        }
+        if source_fields > 0 && ts_fields == 0 {
+            estate.pre_s477.push(member.name.clone());
         }
         for (name, nodes) in &mut index.types {
             for node in nodes {
@@ -1953,9 +1975,17 @@ export class Wizard {
         assert!(void_reason(&blind).is_some_and(|r| r.contains("no first-party")));
         let mut stale = Estate::default();
         stale.totals.insert(Population::FirstPartyTs, (10, 1));
-        assert!(void_reason(&stale).is_some_and(|r| r.contains("predate S-477")));
-        stale.ts_fields = 1;
-        assert_eq!(void_reason(&stale), None);
+        assert_eq!(void_reason(&stale), None, "engaged, with no member flagged");
+        stale.pre_s477 = vec!["web".into()];
+        assert!(void_reason(&stale).is_some_and(|r| r.starts_with("web ") && r.contains("before S-477")));
+    }
+
+    #[test]
+    fn the_s477_guard_counts_the_fields_the_symbol_query_captures() {
+        let s = "class A { x = 1; #p = 2; constructor(private y: T, plain: U) {} }\nabstract class B { z = 1; }\nconst C = class { w = 1; };\nfunction f() {}\n";
+        assert_eq!(declared_class_fields(&parse("x.ts", s), s), 3, "x, #p, y — not B's, C's or `plain`");
+        let none = "export default function handler(req, res) { res.status(200).json({}); }";
+        assert_eq!(declared_class_fields(&parse("x.ts", none), none), 0);
     }
 
     #[test]
