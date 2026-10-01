@@ -1,8 +1,9 @@
 S-479 T1 — RECORDED FINDING: THE FIRST-PARTY TYPESCRIPT METHOD-CALL RESIDUE
 ==========================================================================
 
-Measured (UTC):  2026-10-01 (estate run after the re-index below; the final
-                 recording run is named in the sprint-83 implementation notes)
+Measured (UTC):  2026-10-01T03:25:20Z — the recording run, after the task review's
+                 fixes (first run 02:53:27Z; the review moved the SHAPES and
+                 INFERENCE lines, recorded here; the UPPER BOUND did not move)
 Measured by:     Dev Session 3.2 (sprint-83, branch sprint-83-I3-S2), logos-core
                  1.7.0 at merged main 3516fc87 — S-477 (TypeScript Field nodes),
                  S-478 (`**/*.min.js` excluded) and S-472's migration 24 in effect.
