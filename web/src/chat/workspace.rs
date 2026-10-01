@@ -457,6 +457,23 @@ mod tests {
         let planner_prompt = two.user_prompts().first().cloned().flatten().unwrap_or_default();
         assert!(planner_prompt.contains("which members are there?"), "{planner_prompt}");
         assert!(planner_prompt.contains("ANSWER-ONE: svc and web"), "{planner_prompt}");
+        // The workspace **Synthesizer** sees turn 1 too, ahead of the live question
+        // — the window reaches it only through the shared orchestrator, so pin it
+        // on the roster that serves this route.
+        assert_eq!(
+            two.system_prompts().last().cloned().flatten(),
+            Some(chat_agent::workspace_synthesizer_preamble(&federation)),
+            "the last call is the workspace Synthesizer's"
+        );
+        let synthesizer_prompt = two.user_prompts().last().cloned().flatten().unwrap_or_default();
+        assert!(synthesizer_prompt.contains("Earlier in this conversation"), "{synthesizer_prompt}");
+        assert!(synthesizer_prompt.contains("which members are there?"), "{synthesizer_prompt}");
+        let answer_one = synthesizer_prompt.find("ANSWER-ONE: svc and web");
+        let live_question = synthesizer_prompt.rfind("and web alone?");
+        assert!(
+            answer_one.is_some() && answer_one < live_question,
+            "the window precedes the live question: {synthesizer_prompt}"
+        );
         assert_eq!(xs.registry().resident_count(), 0, "neither turn opened a member");
         assert!(!e.svc.join(".logos/chat.db").exists(), "no member store is touched");
     }
