@@ -24,6 +24,17 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   migration 24 (two new tables); a store upgraded from 1.7.0 fills them on its first full
   reconcile, which re-extracts the member's Java/Kotlin files once. A member with no
   Java/Kotlin/Avro file gains only the empty tables and one marker row.
+- **An import of another member's type binds, as an advisory type reference.** In a
+  workspace, a still-unresolved Java/Kotlin import naming a type exactly one other member
+  declares (main-tree source or an Avro schema) is matched to it, with the importing file and
+  line and the declaring file or schema. It is admitted only where the build relation relates
+  the two members, or a build collision names the owner as a producer (the artifact named);
+  every other match is listed `type-only`, and a type several members declare stays unbound
+  as `ambiguous-owner`, owners named. `workspace status` gains a `type_reference` section:
+  `type_reference_pairs` beside every row considered, by bucket, and the members read. It is
+  never a bridge edge, a coupling or a gate input: the coverage figures, the build headline
+  and every member's `scan`/`gate` are unchanged. A workspace with no Java/Kotlin/Avro member
+  shows no new section.
 
 ### Changed
 

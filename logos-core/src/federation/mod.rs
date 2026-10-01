@@ -62,6 +62,14 @@
 //!   the member denominator it summed over and naming every member it could not
 //!   read with its reason. Constructs no member engine, in the same spirit as
 //!   the manifest-only roster ([FR-UI-37], [NFR-PE-10], [NFR-CC-04]).
+//! - the [`type_refs`] — the in-memory **cross-member type-reference overlay**:
+//!   an unresolved Java/Kotlin import of a type exactly one other member
+//!   declares (in main-tree source or an Avro schema) binds to it, admitted
+//!   only between members the build relation relates or a build collision
+//!   backs; everything else is counted `type-only`, `ambiguous-owner`,
+//!   `self-owned` or `no owner`, with its own `type_reference_pairs` headline.
+//!   An advisory `TypeReference`, never a `BridgeEdge`, never a coupling and
+//!   never a gate input ([FR-WS-35], [BR-60], [ADR-70]).
 //! - the [`warm`] — the bounded background index warm: the effective-bound
 //!   resolution seam (K = `max(1, cores / 4)` capped at 4, override-ready) and
 //!   the bounded queue one detached supervisor runs over the newly approved
@@ -80,7 +88,10 @@
 //!   reported degraded ([FR-WS-16], [NFR-CC-04], [BR-45]).
 //!
 //! [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
+//! [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
 //! [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
+//! [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
+//! [ADR-70]: ../../../docs/specs/architecture/decisions/ADR-70.md
 //! [ADR-69]: ../../../docs/specs/architecture/decisions/ADR-69.md
 //! [FR-WS-31]: ../../../docs/specs/requirements/FR-WS-31.md
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
@@ -136,6 +147,7 @@ pub mod registry;
 pub mod residue;
 pub mod telemetry;
 pub mod topics;
+pub mod type_refs;
 pub mod warm;
 pub mod warm_state;
 
@@ -204,6 +216,12 @@ pub use telemetry::{
     workspace_statistics, UnreadMember, UnreadReason, WorkspaceStatistics,
 };
 pub use topics::{workspace_topics, MemberTopics, TopicSummary};
+pub use type_refs::{
+    build_index, AmbiguousReference, AmbiguousType, CollisionBackedPair, MemberTypeFacts,
+    MemberTypeReferences, PairEvidence, TypeImporter, TypeMembersRead, TypeNaming, TypeOnlyPair,
+    TypeOrigin, TypeOwner, TypeRefForm, TypeReference, TypeReferenceHeadline, TypeReferenceIndex,
+    TypeReferences, TypeRowAccounting, AMBIGUOUS_OWNER,
+};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};
 
 /// One resolved, validated member repository of a [`Federation`] ([FR-WS-01]).

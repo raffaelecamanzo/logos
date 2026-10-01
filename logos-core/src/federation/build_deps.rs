@@ -373,6 +373,11 @@ pub struct BuildDependencyRelation {
     /// over. Not serialized: the headline's [`MembersRead`] states it.
     #[serde(skip)]
     roster_read: Vec<String>,
+    /// Colliding coordinate → the members whose references reached it — what
+    /// [`collisions_referenced_by`](Self::collisions_referenced_by) answers.
+    /// Not serialized, so the build headline's bytes do not move with it.
+    #[serde(skip)]
+    collision_referencers: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// One member's side of the relation: what it builds against and what builds
@@ -405,6 +410,22 @@ impl BuildDependencyRelation {
             .iter()
             .filter_map(|member| self.member(member))
             .collect()
+    }
+
+    /// The collisions `member`'s references reach — each counted in its
+    /// [`to_collision`](ReferenceAccounting::to_collision) — sorted by
+    /// coordinate. The type-reference overlay reads them as pair evidence
+    /// ([`super::type_refs`]): a coordinate resolving to neither producer
+    /// still says the member builds against one of them.
+    pub fn collisions_referenced_by<'a>(
+        &'a self,
+        member: &'a str,
+    ) -> impl Iterator<Item = &'a ArtifactCollision> + 'a {
+        self.headline.collisions.iter().filter(move |c| {
+            self.collision_referencers
+                .get(&c.artifact)
+                .is_some_and(|members| members.contains(member))
+        })
     }
 }
 
@@ -510,6 +531,7 @@ pub fn join(
     };
     let mut references = ReferenceAccounting::default();
     let mut collided: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut collision_referencers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut edges: BTreeMap<(String, String, BuildEdgeKind, Option<String>, String), u64> =
         BTreeMap::new();
     for (member, rows) in &read {
@@ -543,6 +565,10 @@ pub fn join(
                     Some((key, set)) if set.len() > 1 => {
                         references.to_collision += 1;
                         *collided.entry(key.as_str()).or_default() += 1;
+                        collision_referencers
+                            .entry(key.clone())
+                            .or_default()
+                            .insert((*member).to_string());
                     }
                     Some((_, set)) if set.contains(member) => references.in_member += 1,
                     Some((_, set)) => {
@@ -641,6 +667,7 @@ pub fn join(
         .collect();
     BuildDependencyRelation {
         roster_read,
+        collision_referencers,
         edges,
         headline: BuildDependencyHeadline {
             build_dependency_pairs: headline_pairs,
