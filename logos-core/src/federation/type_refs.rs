@@ -903,7 +903,9 @@ impl TypeReferences {
     /// The overlay over `registry`'s members: the stamps are read first, and
     /// the facts are read and matched only on a miss — the first call, or any
     /// call after a member re-synced. The pair restriction reads `build`'s
-    /// relation, itself cached on the same stamps.
+    /// relation inside the same answer scope and on the same stamp snapshot,
+    /// so the facts and the relation judging them are one generation and an
+    /// unopenable member is attempted once.
     ///
     /// A member whose engine will not open or whose read fails is skipped with
     /// a warning and named unread, reason [`UNREAD_FAILED`] ([ADR-53]); a
@@ -917,12 +919,12 @@ impl TypeReferences {
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
-        self.cache.get_or_compute(stamps, || {
+        self.cache.get_or_compute(stamps.clone(), || {
             let (mut facts, mut not_extracted) = (Vec::new(), Vec::new());
             for (member, read) in read_members(&answer, "declared-type facts", |engine| engine.type_facts()) {
                 sort_read(member, read, &mut facts, &mut not_extracted);
             }
-            let relation = build.relation(registry);
+            let relation = build.relation_in(registry, &answer, stamps);
             build_index(&registry.federation().members, &facts, &not_extracted, &relation)
         })
     }

@@ -673,6 +673,8 @@ thread_local! {
     static STAMPS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
     /// Every `type_facts` read served, by member.
     static READS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+    /// Every `contract_stamp` read served — one per member per stamp walk.
+    static STAMP_READS: RefCell<u64> = const { RefCell::new(0) };
 }
 
 #[derive(Debug)]
@@ -699,6 +701,7 @@ impl MemberContracts for FakeEngine {
         Ok(Vec::new())
     }
     fn contract_stamp(&self) -> u64 {
+        STAMP_READS.with(|n| *n.borrow_mut() += 1);
         STAMPS.with(|s| s.borrow().get(&self.member).copied().unwrap_or(0))
     }
     fn type_facts(&self) -> Result<Option<MemberTypeFacts>> {
@@ -741,6 +744,22 @@ fn the_index_is_built_on_first_query_never_at_startup_and_cached_on_stamps() {
     let third = holder.index(&registry, &build);
     assert_eq!(reads(), 2 * MEMBERS.len() as u64, "a stamp advance re-matches");
     assert_eq!(third.headline.rows.type_only, 5);
+}
+
+/// **One answer scope, one stamp snapshot** (review finding A2-F1): building
+/// the index reads every member's stamp once — the build relation it judges
+/// pairs with is built inside the same scope on the same stamps, never through
+/// a second walk that could see a member re-sync in between.
+#[test]
+fn the_index_and_its_build_relation_share_one_stamp_walk() {
+    let registry = EngineRegistry::<FakeEngine>::new(fed(&MEMBERS, &[]), RegistryMode::Lazy);
+    let (holder, build) = (TypeReferences::new(), BuildDependencies::new());
+    let _ = holder.index(&registry, &build);
+    assert_eq!(
+        STAMP_READS.with(|n| *n.borrow()),
+        MEMBERS.len() as u64,
+        "one stamp walk over the roster, shared with the build relation"
+    );
 }
 
 /// A member that will not open, and one not yet extracted, are named unread

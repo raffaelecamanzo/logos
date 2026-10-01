@@ -80,9 +80,9 @@ use serde::Serialize;
 use crate::extract::build_manifest::ReferenceKind;
 use crate::graph_store::BuildManifestRow;
 
-use super::bridge::{current_stamps, read_members, MemberContracts, StampCache};
+use super::bridge::{current_stamps, read_members, MemberContracts, StampCache, Stamps};
 use super::manifest::MemberKind;
-use super::registry::{EngineRegistry, MemberEngine};
+use super::registry::{AnswerScope, EngineRegistry, MemberEngine};
 use super::Member;
 
 /// The kind of one `builds-against` edge — the kind of the reference it was
@@ -756,9 +756,29 @@ impl BuildDependencies {
     {
         let answer = registry.answer();
         let stamps = current_stamps(&answer);
+        self.relation_in(registry, &answer, stamps)
+    }
+
+    /// [`relation`](Self::relation) inside a caller's [`AnswerScope`], keyed on
+    /// the stamps it already read — so a read-model built beside the relation
+    /// (the type-reference overlay) shares one open attempt per member and one
+    /// stamp snapshot with it, as `ContractBridge::reachability_inputs` does
+    /// for its two caches ([FR-WS-16], [CR-125]).
+    ///
+    /// [FR-WS-16]: ../../../docs/specs/requirements/FR-WS-16.md
+    /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
+    pub(super) fn relation_in<E>(
+        &self,
+        registry: &EngineRegistry<E>,
+        answer: &AnswerScope<'_, E>,
+        stamps: Stamps,
+    ) -> Arc<BuildDependencyRelation>
+    where
+        E: MemberEngine + MemberContracts,
+    {
         self.cache.get_or_compute(stamps, || {
             let (mut facts, mut not_extracted) = (Vec::new(), Vec::new());
-            for (member, read) in read_members(&answer, "build-manifest facts", |engine| {
+            for (member, read) in read_members(answer, "build-manifest facts", |engine| {
                 engine.build_manifests()
             }) {
                 sort_read(member, read, &mut facts, &mut not_extracted);
