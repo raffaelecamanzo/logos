@@ -1,0 +1,162 @@
+S-479 T1 — RECORDED FINDING: THE FIRST-PARTY TYPESCRIPT METHOD-CALL RESIDUE
+==========================================================================
+
+Measured (UTC):  2026-10-01T03:25:20Z — the recording run, after the task review's
+                 fixes (first run 02:53:27Z; the review moved the SHAPES and
+                 INFERENCE lines, recorded here; the UPPER BOUND did not move)
+Measured by:     Dev Session 3.2 (sprint-83, branch sprint-83-I3-S2), logos-core
+                 1.7.0 at merged main 3516fc87 — S-477 (TypeScript Field nodes),
+                 S-478 (`**/*.min.js` excluded) and S-472's migration 24 in effect.
+Estate:          a private copy (`/bin/cp -R`, 2026-10-01) of ~/source/pec-services
+                 at ~/source/.estate-copies/pec-services-S-479. All 83 manifest
+                 members re-indexed with that commit's `logos` binary
+                 (`logos --project <member> index`, 2026-10-01T02:37:28Z ..
+                 02:39:14Z, 83 ok / 0 failed); every member store then at schema
+                 v24, opened read-only through `SqliteGraphStore::open_readonly` —
+                 none refused, none migrated, no engine started. The live estate
+                 was opened only with `sqlite3 -readonly`, for the delta below.
+Command:         LOGOS_REF_WORKSPACE=~/source/.estate-copies/pec-services-S-479 \
+                   cargo test -p logos-core --test operand_resolvability \
+                   measure_ts_method_residue_over_the_reference_workspace -- --nocapture
+Visibility:      the estate run skips (reporting VOID) in `gate.sh` and in CI. These
+                 figures exist only because the run above was made by hand.
+
+
+RESULT
+------
+
+DENOMINATOR first-party .ts/.tsx: method-form Calls rows 510, resolved 58, unresolved 452
+SHAPES first-party .ts/.tsx: this.<field> (declared type) 51 · imported symbol 5 · library/global 96 · chained/untyped 300 (sum 452)
+UPPER BOUND first-party .ts/.tsx: would bind 20 of 452 (self-tie 0 · cross-class 20 · via supertype 0) · ambiguous 0 (two types 0 · two callables 0)
+INFERENCE EXTENSION first-party .ts/.tsx (not the declared-type rule): of 81 untyped this.f rows, 60 have an inject(T)/new T() initialiser; would bind 18 more (self-tie 0 · cross-class 18 · via supertype 0) · ambiguous 0
+
+DENOMINATOR first-party .js: method-form Calls rows 300, resolved 42, unresolved 258
+SHAPES first-party .js: this.<field> (declared type) 0 · imported symbol 41 · library/global 66 · chained/untyped 151 (sum 258)
+UPPER BOUND first-party .js: would bind 86 of 258 (self-tie 0 · cross-class 2 · via supertype 84) · ambiguous 0 (two types 0 · two callables 0)
+INFERENCE EXTENSION first-party .js (not the declared-type rule): of 0 untyped this.f rows, 0 have an inject(T)/new T() initialiser; would bind 0 more (self-tie 0 · cross-class 0 · via supertype 0) · ambiguous 0
+
+The eight lines above are reproduced by string equality by the estate test; a run
+that prints any other line fails until this file is re-recorded. The test also
+asserts that the shape counts sum to each unresolved denominator, that every row
+has exactly one outcome, and that no first-party row is unlocated (all 452 + 258
+rows were located at their recorded line).
+
+
+RECOMMENDATION — DO NOT FILE TYPESCRIPT RECEIVER TYPING (advisory)
+-----------------------------------------------------------------
+
+On the stated denominator a declared-type receiver rule — CR-150's approach,
+transposed — reaches at most 20 of 452 unresolved rows (4.4 %). If every one of
+them bound, first-party .ts method-form resolution would move from 58 of 510
+(11.4 %) to at most 78 of 510 (15.3 %). Adding the initialiser inference that is
+NOT a declared-type rule (Angular `inject(T)`, `new T()`) lifts the bound to 38
+(8.4 %). All 20 sit in one member, pec-agid-statistics-informer (an Angular client
+and a NestJS server), which holds 500 of the 510 rows; ptpec-assistance-tool's
+Next.js API routes hold the other 10 (`res.status().json()`, `res.setHeader()` on a
+library `NextApiResponse`). Precision is not what limits it (0 ambiguous,
+0 self-ties); reach is, and the residue is not reach a receiver-typing rule can buy:
+
+  - 96 library/global receivers (cy 20, Number 15, Object 9, Math 6, console 5 …;
+    26 package imports: TestBed, Logger, …) — never bindable (NFR-RA-05).
+  - 39 of the 51 typed `this.f` receivers name a library type (HttpClient,
+    WritableSignal, ChangeDetectorRef, HttpService, Array …); so do 33 of the 37
+    typed locals/parameters (ComponentFixture, Array …), both getters
+    (FormArray), and 2 `new T()` receivers (Date).
+  - 117 call-result receivers (`.pipe().subscribe()`, `expect(x).toBe()`) need
+    return-type inference, which no declared-type rule provides.
+  - 18 rows are Angular signal reads `this.x()`: the method name is a Field of the
+    caller's own class, so a callable-binding rule correctly refuses them.
+
+Re-entry condition: revisit when CR-150 has shipped a reusable receiver-typing
+mechanism for Java (making a TypeScript port cheap), or when an estate carries a
+first-party TypeScript population large enough that 4.4 % is material. This figure
+is an upper bound from one estate — never a floor or an acceptance target for any
+later story.
+
+
+THE UPPER BOUND, AND WHY IT IS ONE
+----------------------------------
+
+Every judgement call is resolved toward binding:
+  - typing is file-scoped: shadowing is ignored, and an unannotated declaration of
+    the same name never poisons an annotated one;
+  - a type is matched by NAME across the member, not through the import path —
+    the one first-party .js "cross-class" pair binds only because
+    `const addresbook_page = require('../pages/AddressbookPage')` happens to share
+    its name with the class that module instantiates (`module.exports = new
+    addresbook_page()`): right answer, wrong reason;
+  - a method a type lacks is looked up through the type's source `extends` chain
+    (CR-150 section 3.2 B), up to 8 hops; the TypeScript plugins record no Extends
+    edge, so a shipped rule would first need one.
+
+Outcome split, first-party .ts (452):
+  would bind 20 (cross-class 20: 12 typed `this.f` — e.g. this.agidService.sendP01Report,
+    this.mailboxesService.getStatisticsForPeriod; 5 imported static calls —
+    P01RequestBody.Build, P02RequestBody.Build; 3 typed locals/parameters —
+    breadcrumbsService.getBreadcrumbs, headers.getHeadersAsArray)
+  miss: type not declared in the member 103 · the member is a field 18 · no receiver
+    type 311 · ambiguous 0
+
+Outcome split, first-party .js (258): would bind 86 — 84 via supertype (webmail
+selenium page objects calling, with `this.m()`, methods inherited from BasePage
+and the layout classes between it and the page) and the 2
+name-coincidence rows above; misses 172 (no receiver type 114, type not in member 58).
+
+
+SUB-SHAPES (first-party .ts, 452)
+---------------------------------
+
+  sub-shape                                         rows   declared-type rule
+  this.<field> (declared type)
+    this.f, f declared with a type                    51   bind 12 · type not in member 39
+  imported symbol
+    relative import / require                          5   bind 5
+  library/global
+    package import                                    26   type not in member 26
+    global (declared nowhere in the file)             70   no receiver type 70
+  chained/untyped
+    call result  a.b().m()                           117   no receiver type 117
+    this.f, f declared without a type                 81   no receiver type 81
+    local/parameter with a declared type              37   bind 3 · type not in member 33
+                                                             · no receiver type 1
+    member chain  a.b.m()                             22   no receiver type 22
+    local/parameter without one                       19   no receiver type 19
+    this.m()                                          19   member is a field 18 · type not
+                                                             in member 1
+    other (new / literal / await / subscript / as)     3   type not in member 2 · no
+                                                             receiver type 1
+    this.f, f a getter                                 2   type not in member 2
+
+"this.f, f declared with a type" counts every annotated field or parameter
+property, including an annotation that names no single head (`Foo | Bar`, a
+function type) and an array, read as `Array`. A local annotated with two
+disagreeing types is "with a declared type" whose rule yields no type.
+
+"chained/untyped" is the remainder shape: it holds every receiver that is none of
+the first three, including typed locals and bare `this`. The upper bound types
+those too; the shape label is S-479's, the sub-shape says what each row is.
+Untyped `this.f` receivers by initialiser: new T() 40 · inject(T) 20 · signal() 19
+· other 2.
+
+
+DENOMINATOR RECONCILIATION
+--------------------------
+
+CR-154 section 3.1's filing baseline: 58 of 498 resolved (logos 1.5.0). This run:
+58 of 510. The +12 is S-477, by name: refs inside a field initialiser or a
+parameter decorator are now owned by the Field, not the class, and the ledger keys
+a row by (caller, method). Comparing the live estate's stores (v23, read with
+`sqlite3 -readonly`) with the copy's: 484 keys common; 14 class-owned keys
+(`…/QueryStatisticsDTO#` → parseInt) became 26 field-owned keys
+(`…/QueryStatisticsDTO#page.`, `#year.` … → parseInt); 484 + 14 = 498, 484 + 26 =
+510; resolved 58 on both sides.
+
+Row granularity: one row is one (caller, method name); it is classified by the
+site at its recorded line. 10 of the 452 rows have a caller holding another site of
+the same name with a different shape — the de-duplication is visible, not assumed.
+
+First-party / vendored split (S-477's path rule, harness-only, never shipped):
+vendored = a `.min.` file name, any file of `styleguide`, or `webmail` `plugins/`,
+`skins/`, `a11y_report/`. Vendored rows: 16,281 (850 resolved), counted, never
+classified. The first-party .js population (300) is reported as its own table and
+never folded into the headline.
