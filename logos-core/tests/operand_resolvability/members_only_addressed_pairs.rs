@@ -502,13 +502,24 @@ fn report_gained_and_lost(m: &MembersOnly, reading: Reading) {
     }
     println!("    lost:");
     for (a, b) in before.difference(&now) {
-        let fell: BTreeSet<&str> = m
+        let evidence: Vec<_> = m
             .before_after()
             .filter(|(was, _)| was.outcome == PairOutcome::Addressed)
             .filter(|(was, _)| was.target.member == *a && was.provider.as_deref() == Some(*b))
-            .map(|(_, t)| t.outcome.label())
             .collect();
-        println!("      {a} -> {b}    now: {fell:?}");
+        let overlays: BTreeSet<&str> =
+            evidence.iter().map(|(was, _)| was.target.overlay.as_str()).collect();
+        println!("      {a} -> {b}    overlays {overlays:?}");
+        for (was, t) in evidence {
+            println!(
+                "          {} = {:?}  [{}]  {}   (now: {})",
+                was.target.via_key,
+                was.target.value,
+                was.target.source.label(),
+                was.target.file,
+                t.outcome.label()
+            );
+        }
     }
 }
 
