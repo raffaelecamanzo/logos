@@ -7,9 +7,10 @@
 //!   observation, and intermediate findings the planner and the [Synthesizer]
 //!   read across steps within ONE orchestrated turn (S-173 holds this in-memory
 //!   as a `Vec<(PlanStep, StepObservation)>`; this persists it);
-//! - a **per-thread working/conversation memory** — a running summary carried
-//!   across turns so a follow-up turn in the same thread sees prior context after
-//!   a `serve --ui` restart.
+//! - a **per-thread working/conversation memory** — a running summary row per
+//!   thread, persisted across a `serve --ui` restart. (It is storage only: a
+//!   follow-up turn's context is the bounded window of the thread's *stored
+//!   messages* — [`thread_window`] — not this summary, [S-483].)
 //!
 //! It is emphatically **not** a semantic store: **no embeddings, no vector index,
 //! no RAG** in v1 ([FR-UI-20]) — a static fitness check (`tests/no_embeddings.rs`)
@@ -27,6 +28,7 @@
 //! [S-168]: ../../docs/planning/journal.md#s-168-chat-persistence-store-threads-messages-and-clear-history
 //! [S-173]: ../../docs/planning/journal.md#s-173-planner-and-plan-act-observe-replan-orchestration-loop-with-budget-tree
 //! [S-175]: ../../docs/planning/journal.md#s-175-multi-step-agent-memory-store-scratchpad-and-working-memory
+//! [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
 //! [FR-UI-20]: ../../docs/specs/requirements/FR-UI-20.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
 //! [ADR-41]: ../../docs/specs/architecture/decisions/ADR-41.md
@@ -322,8 +324,11 @@ impl MemoryStore {
 
     // ---- per-thread working / conversation memory ----------------------------
 
-    /// Upsert a thread's running working/conversation-memory summary — the
-    /// context a follow-up turn reads after a `serve --ui` restart ([FR-UI-20]).
+    /// Upsert a thread's running working/conversation-memory summary, persisted
+    /// across a `serve --ui` restart ([FR-UI-20]). A follow-up turn does not read it:
+    /// its context is [`thread_window`] over the stored messages ([S-483]).
+    ///
+    /// [S-483]: ../../docs/planning/journal.md#s-483-follow-up-turns-see-prior-turns
     ///
     /// One row per thread (PK = `thread_id`); a second call replaces the summary.
     ///

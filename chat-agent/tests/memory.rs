@@ -507,6 +507,23 @@ fn a_regenerated_turn_replaces_its_predecessor_in_the_window() {
     assert_eq!(text.matches("what is X?").count(), 1, "no duplicated user turn: {text}");
 }
 
+/// [S-483]: a regenerate that was never answered (halted, failed, or still
+/// streaming) leaves the predecessor's answer standing rather than blanking the
+/// turn — and the stored-pair match tolerates surrounding whitespace.
+#[test]
+fn an_unanswered_regenerate_keeps_its_predecessors_answer() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ChatStore::open(dir.path()).unwrap();
+    let thread = store.create_thread("t").unwrap();
+    store.append_message(thread, ChatRole::User, "what is X?", &[]).unwrap();
+    store.append_message(thread, ChatRole::Assistant, "first answer", &[]).unwrap();
+    store.append_message(thread, ChatRole::User, "what is X?\n", &[]).unwrap();
+
+    let turns = prior_turns(&store.messages(thread).unwrap(), "next");
+    assert_eq!(turns.len(), 1, "the whitespace-different repeat still collapsed: {turns:?}");
+    assert_eq!(turns[0].assistant.as_deref(), Some("first answer"));
+}
+
 /// [S-483]: the regenerate match is exact (modulo surrounding whitespace) — a
 /// question that merely shares a prefix with the previous one is a new turn, never a
 /// regenerate, in the stored sequence AND for the live question.
