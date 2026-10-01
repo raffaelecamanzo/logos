@@ -17,6 +17,7 @@ import { ToastProvider } from "../../components/index.ts";
 import type { ConfigReadModel, VerifyReport } from "../../api/types.ts";
 import type { WorkspaceRoster } from "../../api/types.ts";
 import { ConfigView } from "./ConfigView.tsx";
+import styles from "./ConfigView.module.css";
 import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 
@@ -858,6 +859,35 @@ describe("ConfigView explicit Apply, decoupled from Save (FR-UI-13)", () => {
     expect(panel.textContent).toContain("A full index was performed");
     expect(panel.textContent).toContain("Could not read/extract: src/broken.rs");
     expect(panel.textContent).toContain("Warnings: a degradation");
+  });
+
+  it("shows a reconcile's advisory notes as plain text without downgrading to a warning (HF-1)", async () => {
+    mockFetch({
+      "POST /config/apply": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({
+          action: "reconciled",
+          reconciled_files: 3,
+          full_index: false,
+          unresolved_refs: 0,
+          files_failed: [],
+          warnings: [],
+          notes: ["2 minified JavaScript file(s) excluded from indexing by the `**/*.min.js` exclude glob"],
+        }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply & reindex" }));
+    const panel = await screen.findByText(/Applied — reconciled 3 files\./);
+    expect(panel.textContent).toContain("Note: 2 minified JavaScript file(s) excluded from indexing");
+    // A benign default is not a degradation: the banner stays a clean success.
+    expect(panel.textContent).not.toContain("Warnings:");
+    // Class PLACEMENT, via the module's own (proxied) names — see the css:false note.
+    expect(panel.classList.contains(styles.warn)).toBe(false);
+    expect(panel.classList.contains(styles.ok)).toBe(true);
   });
 
   it("renders the honest rules.toml re-evaluation outcome", async () => {

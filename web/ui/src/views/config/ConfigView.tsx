@@ -348,6 +348,11 @@ function describeApply(outcome: ConfigApplyOutcome): ResultMessage {
       kind = "warn";
       note += ` Could not read/extract: ${outcome.files_failed.join(", ")}.`;
     }
+    // Advisory notes (HF-1) read as plain text and never move `kind`: a default
+    // working as intended must not downgrade an Apply to a warning.
+    if (outcome.notes && outcome.notes.length > 0) {
+      note += ` Note: ${outcome.notes.join("; ")}.`;
+    }
   } else {
     const signal = outcome.signal == null ? "n/a" : outcome.signal;
     note = `Applied — gate re-evaluated (no reindex). Signal ${signal}, ${plural(outcome.violations, "violation")}. ${outcome.freshness}.`;

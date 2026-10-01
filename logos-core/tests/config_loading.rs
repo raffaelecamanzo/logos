@@ -1280,12 +1280,20 @@ fn fresh_init_then_index_excludes_minified_js_and_a_user_exclude_re_admits_it() 
         BTreeSet::from(["app.js".to_string()]),
         "only app.js is admitted by default"
     );
+    // The count is stated on the advisory `notes` channel — a permanent, benign
+    // notice about a default working as intended — and NEVER on `warnings`
+    // (HF-1, CR-119): a CI parser scanning `warnings` must not trip on it.
     assert!(
         result
-            .warnings
+            .notes
             .iter()
-            .any(|w| w.contains("2 minified JavaScript file(s)")),
-        "the excluded count is stated: {:?}",
+            .any(|n| n.contains("2 minified JavaScript file(s)")),
+        "the excluded count is stated on `notes`: {:?}",
+        result.notes
+    );
+    assert!(
+        !result.warnings.iter().any(|w| w.contains("minified")),
+        "the minified-JS notice must not ride `warnings`: {:?}",
         result.warnings
     );
 
@@ -1319,4 +1327,111 @@ fn fresh_init_then_index_excludes_minified_js_and_a_user_exclude_re_admits_it() 
         "no minified exclusion to report: {:?}",
         result2.warnings
     );
+    assert!(
+        !result2.notes.iter().any(|n| n.contains("minified")),
+        "no minified exclusion to note: {:?}",
+        result2.notes
+    );
+}
+
+/// HF-1: the minified-JS exclusion notice rides the advisory `notes` channel on
+/// **every reconcile-backed read-model**, never `warnings` — on the never-indexed
+/// degrade-to-full-index branch of `reconcile` and on the incremental walk branch
+/// alike, for each of `scan`, `check`, `gate`, `dsm` and `doc_gaps`.
+#[test]
+fn reconcile_backed_readouts_carry_the_minified_js_notice_on_notes_never_warnings() {
+    use logos_core::config::{ConfigApplyOutcome, PolicyFile};
+    use logos_core::Engine;
+
+    let is_minified = |s: &String| s.contains("minified JavaScript file(s)");
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app.js", "function app() { return 1; }\n");
+    write(root, "app.min.js", "function a(){return 1}\n");
+    write(root, "static/js/lib.min.js", "function l(){return 2}\n");
+
+    Engine::init(root).expect("init runs");
+    let engine = Engine::start(root).expect("engine starts");
+
+    // Branch 1 — a never-indexed tree degrades to a full index inside `reconcile`.
+    let first = engine.scan(true).expect("scan runs");
+    assert!(
+        first.notes.iter().any(is_minified),
+        "scan (degrade-to-index branch) states the count on `notes`: {:?}",
+        first.notes
+    );
+    assert!(
+        !first.warnings.iter().any(is_minified),
+        "scan must not carry it on `warnings`: {:?}",
+        first.warnings
+    );
+
+    // Branch 2 — the graph is populated, so `reconcile` walks incrementally.
+    let scan = engine.scan(true).expect("scan runs");
+    assert!(scan.notes.iter().any(is_minified), "scan: {:?}", scan.notes);
+    assert!(!scan.warnings.iter().any(is_minified), "scan: {:?}", scan.warnings);
+
+    let check = engine.check_rules(None, true).expect("check runs");
+    assert!(check.notes.iter().any(is_minified), "check: {:?}", check.notes);
+    assert!(!check.warnings.iter().any(is_minified), "check: {:?}", check.warnings);
+
+    let gate = engine.gate(None, false, true).expect("gate runs");
+    assert!(gate.notes.iter().any(is_minified), "gate: {:?}", gate.notes);
+    assert!(!gate.warnings.iter().any(is_minified), "gate: {:?}", gate.warnings);
+
+    let dsm = engine.dsm(None, true).expect("dsm runs");
+    assert!(dsm.notes.iter().any(is_minified), "dsm: {:?}", dsm.notes);
+    assert!(!dsm.warnings.iter().any(is_minified), "dsm: {:?}", dsm.warnings);
+
+    let gaps = engine.doc_gaps(None, true).expect("doc_gaps runs");
+    assert!(gaps.notes.iter().any(is_minified), "doc_gaps: {:?}", gaps.notes);
+    assert!(!gaps.warnings.iter().any(is_minified), "doc_gaps: {:?}", gaps.warnings);
+
+    // The UI's config Apply is a reconcile too.
+    engine
+        .config_write(PolicyFile::Config, "exclude = [\"**/*.min.js\"]\n")
+        .expect("a valid config write succeeds");
+    match engine.config_apply(PolicyFile::Config).expect("apply runs") {
+        ConfigApplyOutcome::Reconciled { warnings, notes, .. } => {
+            assert!(notes.iter().any(is_minified), "apply: {notes:?}");
+            assert!(!warnings.iter().any(is_minified), "apply: {warnings:?}");
+        }
+        other => panic!("a config.toml apply must reconcile, got {other:?}"),
+    }
+
+    // A reconcile-free readout (`--no-reconcile`) walks nothing, so it states
+    // nothing — and in particular never puts the notice on `warnings`.
+    let readout = engine.quality_readout().expect("readout runs");
+    assert!(!readout.warnings.iter().any(is_minified), "{:?}", readout.warnings);
+}
+
+/// HF-1: with nothing to note, every read-model that gained a `notes` field
+/// serialises WITHOUT the key — not an empty array — so a tree with no minified
+/// files renders byte-identical to before the field existed (the CHANGELOG's
+/// promise). A `skip_serializing_if` dropped from any one struct fails here.
+#[test]
+fn readouts_with_nothing_to_note_serialise_without_a_notes_key() {
+    use logos_core::config::PolicyFile;
+    use logos_core::Engine;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app.js", "function app() { return 1; }\n");
+
+    Engine::init(root).expect("init runs");
+    let engine = Engine::start(root).expect("engine starts");
+    engine.index();
+
+    let has_notes = |v: serde_json::Value| v.as_object().expect("an object").contains_key("notes");
+    assert!(!has_notes(serde_json::to_value(engine.scan(true).unwrap()).unwrap()), "scan");
+    assert!(!has_notes(serde_json::to_value(engine.check_rules(None, true).unwrap()).unwrap()), "check");
+    assert!(!has_notes(serde_json::to_value(engine.gate(None, false, true).unwrap()).unwrap()), "gate");
+    assert!(!has_notes(serde_json::to_value(engine.dsm(None, true).unwrap()).unwrap()), "dsm");
+    assert!(!has_notes(serde_json::to_value(engine.doc_gaps(None, true).unwrap()).unwrap()), "doc_gaps");
+    engine
+        .config_write(PolicyFile::Config, "exclude = [\"generated/**\"]\n")
+        .expect("a valid config write succeeds");
+    let applied = engine.config_apply(PolicyFile::Config).expect("apply runs");
+    assert!(!has_notes(serde_json::to_value(applied).unwrap()), "config apply");
 }

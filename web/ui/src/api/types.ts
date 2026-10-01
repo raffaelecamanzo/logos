@@ -1049,6 +1049,9 @@ export type ConfigApplyOutcome =
       unresolved_refs: number;
       files_failed: string[];
       warnings: string[];
+      /** Advisory notes (e.g. the minified-JS exclusion, HF-1) — never a warning;
+       *  the key is omitted by the server when there is nothing to note. */
+      notes?: string[];
     }
   | {
       action: "reevaluated";

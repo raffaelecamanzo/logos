@@ -153,7 +153,7 @@ pub fn index(
     // (FR-OB-01, CR-057) so they join the per-phase index breakdown (FR-OB-06)
     // — the same measurement that reaches telemetry is handed back here, never
     // a parallel timing path (NFR-OO-01).
-    let (Discovery { candidates, build_manifests, avro_schemas }, discover_ms) = {
+    let (Discovery { candidates, build_manifests, avro_schemas, notes }, discover_ms) = {
         let (res, ms) = crate::observability::traced_timed(Tool::Discover, || {
             discover_candidates(root, config, registry, &mut warnings)
         });
@@ -329,10 +329,11 @@ pub fn index(
         },
         warnings,
         files_failed,
-        // The FR-WS-02 root-scope note (CR-119) is appended by the caller
+        // Advisory discovery notes (the minified-JS exclusion, HF-1). The FR-WS-02
+        // root-scope note (CR-119) is appended after these by the caller
         // (`Engine::run_index`), which alone knows the project root; this
         // pipeline function is root-agnostic.
-        notes: Vec::new(),
+        notes,
     })
 }
 
@@ -877,6 +878,7 @@ pub fn reconcile(
             files_failed: result.files_failed,
             resolution: result.resolution,
             warnings: result.warnings,
+            notes: result.notes,
         });
     }
 
@@ -885,6 +887,7 @@ pub fn reconcile(
         candidates,
         build_manifests,
         avro_schemas,
+        notes,
     } = discover_candidates(root, config, registry, &mut warnings)?;
     let candidate_keys: HashSet<&str> = candidates.iter().map(|c| c.rel.as_str()).collect();
 
@@ -977,6 +980,7 @@ pub fn reconcile(
         files_failed: result.files_failed,
         resolution,
         warnings,
+        notes,
     })
 }
 
@@ -1008,6 +1012,11 @@ pub struct ReconcileOutcome {
     pub resolution: crate::models::pipeline::ResolutionStats,
     /// Degradations folded from discovery and the sync — never an error.
     pub warnings: Vec<String>,
+    /// Advisory notes folded from discovery (the minified-JS exclusion, HF-1) —
+    /// never a `warnings` entry, so a CI parser scanning `warnings` is unaffected
+    /// (CR-119). The reconcile-backed read-models surface them on their own
+    /// `notes` field, elided when empty.
+    pub notes: Vec<String>,
 }
 
 /// Auto-index on first use ([FR-IX-07]): index only if the graph is empty.
@@ -1477,10 +1486,15 @@ struct Discovery {
     /// Every `.avsc` schema the walk admitted (S-472) — read into member-local
     /// declared-type facts, never into nodes.
     avro_schemas: Vec<Candidate>,
+    /// Advisory discovery notes (the minified-JS exclusion, HF-1) — the
+    /// `notes` channel's counterpart of the `warnings` the walk folds.
+    notes: Vec<String>,
 }
 
 /// Discover the supported source files under `root`, honouring config and
-/// gitignore, and fold any oversize-skip notices into `warnings`.
+/// gitignore, and fold any oversize-skip notices into `warnings` — and any
+/// advisory note (the minified-JS exclusion) into [`Discovery::notes`], never
+/// `warnings`.
 ///
 /// The build manifests are collected from the **same** walk, so they obey the
 /// same gitignore, nested-`.git`, glob and size admission as source and cost no
@@ -1495,6 +1509,7 @@ fn discover_candidates(
     for notice in report.notices() {
         warnings.push(notice);
     }
+    let notes: Vec<String> = report.notes().collect();
     // Surface any documentation directory-symlink that exists under the doc-
     // include set but ended up unindexed ([FR-IX-11]) — a git-ignored symlink with
     // no sanctioned bypass, or one whose target escapes containment — so the
@@ -1574,6 +1589,7 @@ fn discover_candidates(
         candidates,
         build_manifests,
         avro_schemas,
+        notes,
     })
 }
 

@@ -117,6 +117,7 @@ fn config_apply_on_config_reconciles_to_the_new_admission_policy() {
             unresolved_refs,
             files_failed,
             warnings,
+            notes,
         } => {
             assert!(
                 reconciled_files >= 1,
@@ -129,6 +130,7 @@ fn config_apply_on_config_reconciles_to_the_new_admission_policy() {
             );
             assert!(files_failed.is_empty(), "clean reconcile: {files_failed:?}");
             assert!(warnings.is_empty(), "clean reconcile: {warnings:?}");
+            assert!(notes.is_empty(), "nothing to note: {notes:?}");
         }
         other => panic!("a config.toml apply must reconcile, got {other:?}"),
     }

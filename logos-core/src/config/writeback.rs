@@ -423,6 +423,10 @@ pub enum ConfigApplyOutcome {
         files_failed: Vec<String>,
         /// Degradations folded from the reconcile — never an error.
         warnings: Vec<String>,
+        /// Advisory notes folded from the reconcile (the minified-JS exclusion,
+        /// HF-1) — never a `warnings` entry (CR-119). Elided when empty.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
     },
     /// A `rules.toml` apply: governance / the gate was re-evaluated against the
     /// current graph with **no** reindex, so the new contract is reflected.

@@ -13,6 +13,18 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **The minified-JavaScript exclusion notice is an advisory note, not a warning.** The
+  "`<N>` minified JavaScript file(s) excluded from indexing by the `**/*.min.js` exclude
+  glob" line moved from `warnings` to the advisory `notes` channel that `index` already
+  uses. It is a permanent, benign statement about a default working as intended, yet it
+  repeated on every `index` and every reconcile-backed readout and could trip a CI parser
+  that scans `warnings`. It now appears under `notes` on `index` (human and `--json`) and
+  on `scan`, `check`, `gate`, `dsm`, `doc_gaps` and the config-apply result, and no longer
+  under `warnings`; each read-model's `notes` key is omitted when empty, so output with
+  nothing to note is byte-identical to before. The oversize-file notice stays a warning.
+
 ### Fixed
 
 - **`logos sync --help` no longer claims `sync` defaults to all changed files.** With no
