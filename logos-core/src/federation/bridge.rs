@@ -1439,7 +1439,7 @@ where
 /// The two caches are **separate slots**, so an `xservice search` or
 /// `route-providers` call pays only for the edges and never for a residue it
 /// will not render ([NFR-PE-01]). They are nonetheless filled through **one**
-/// entry point on the reachability path ([`reachability_inputs`](Self::reachability_inputs)),
+/// entry point on the reachability path ([`reachability_read`](Self::reachability_read)),
 /// keyed on one stamp snapshot, because two independent snapshots can straddle a
 /// member re-sync and make the answer contradict its own residue.
 ///
@@ -1599,25 +1599,6 @@ impl ContractBridge {
         let stamps = current_stamps(&answer);
         let snapshot = self.edge_snapshot(&answer, stamps);
         (Arc::clone(&snapshot.edges), reads_over(&answer, &snapshot))
-    }
-
-    /// **The derived read-models one cross-service reachability answer needs**,
-    /// resolved against a **single** stamp snapshot ([CR-125], [FR-WS-05]).
-    ///
-    /// [`reachability_read`](Self::reachability_read) without the member reads,
-    /// for a caller that renders none.
-    ///
-    /// [CR-125]: ../../../docs/requests/CR-125-an-unresolved-egress-must-not-read-as-an-absence.md
-    /// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
-    pub fn reachability_inputs<E>(
-        &self,
-        registry: &EngineRegistry<E>,
-    ) -> (Arc<Vec<BridgeEdge>>, Arc<WorkspaceEgressResidue>)
-    where
-        E: MemberEngine + MemberContracts,
-    {
-        let (edges, residue, _) = self.reachability_read(registry);
-        (edges, residue)
     }
 
     /// **The derived read-models one cross-service reachability answer needs**,
@@ -2428,7 +2409,7 @@ mod tests {
     /// what `logos serve`'s watcher does while a request is in flight: the
     /// fixture bumps `web`'s stamp on the first contract-surface read. Two
     /// independent snapshots would then straddle that bump and key the two slots
-    /// differently; [`ContractBridge::reachability_inputs`] takes the snapshot
+    /// differently; [`ContractBridge::reachability_read`] takes the snapshot
     /// **before** either slot is filled, so both are keyed on one vector and the
     /// window does not exist.
     ///
@@ -2444,7 +2425,7 @@ mod tests {
 
         // `web` re-indexes the instant this answer starts reading surfaces.
         RESYNC_ON_FIRST_READ.with(|c| c.set(true));
-        let (edges, residue) = bridge.reachability_inputs(&reg);
+        let (edges, residue, _) = bridge.reachability_read(&reg);
 
         assert_eq!(
             bridge.edge_cache.cached_stamps(),
@@ -2483,7 +2464,7 @@ mod tests {
     ///
     /// [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
     #[test]
-    fn reachability_inputs_hits_both_caches_without_re_reading_any_member_surface() {
+    fn reachability_read_hits_both_caches_without_re_reading_any_member_surface() {
         reset();
         set_member("api", 3, vec![op("GET /users/{id}", "local op_get")]);
         set_member("web", 7, vec![route("GET /users/{id}", "local route_get")]);
@@ -2491,7 +2472,7 @@ mod tests {
         let reg = registry(&["api", "web"]);
         let bridge = ContractBridge::new();
 
-        let (edges_a, residue_a) = bridge.reachability_inputs(&reg);
+        let (edges_a, residue_a, _) = bridge.reachability_read(&reg);
         let reads = surface_reads();
         assert!(reads >= 2, "the first call reads each member");
         assert_eq!(
@@ -2500,7 +2481,7 @@ mod tests {
             "guard the guard: a residue that is empty proves nothing about caching"
         );
 
-        let (edges_b, residue_b) = bridge.reachability_inputs(&reg);
+        let (edges_b, residue_b, _) = bridge.reachability_read(&reg);
         assert_eq!(
             surface_reads(),
             reads,
@@ -2515,7 +2496,7 @@ mod tests {
 
         // A stamp advance invalidates BOTH, together.
         bump_stamp("web");
-        let (edges_c, residue_c) = bridge.reachability_inputs(&reg);
+        let (edges_c, residue_c, _) = bridge.reachability_read(&reg);
         assert!(surface_reads() > reads, "the advance forces a recompute");
         assert!(!Arc::ptr_eq(&edges_a, &edges_c));
         assert!(!Arc::ptr_eq(&residue_a, &residue_c));
@@ -2542,7 +2523,7 @@ mod tests {
         let reg = registry(&["api", "unreadable"]);
         let bridge = ContractBridge::new();
 
-        let (_edges, residue) = bridge.reachability_inputs(&reg);
+        let (_edges, residue, _) = bridge.reachability_read(&reg);
         assert!(
             !residue.covers_all_members,
             "one member's surface could not be read: {residue:?}"
@@ -2564,7 +2545,7 @@ mod tests {
         set_consumers("api", vec![http_call("", "local api_call")]);
         set_member("web", 1, Vec::new());
         let reg = registry(&["api", "web"]);
-        let (_edges, residue) = ContractBridge::new().reachability_inputs(&reg);
+        let (_edges, residue, _) = ContractBridge::new().reachability_read(&reg);
         assert!(residue.covers_all_members, "both members read: {residue:?}");
     }
 
