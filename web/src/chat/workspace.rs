@@ -15,10 +15,9 @@
 //!   *declared there*), and an incomplete tier is the configure-first state
 //!   naming the workspace root, the missing half and Workspace Config
 //!   ([`workspace_turn_provider`]). Members' `[chat]` tables are read for one
-//!   thing only: before the turn touches a store, every sandbox its source tools
-//!   read through — the workspace tier's read roots, then each member's
-//!   effective ones — must open, or the turn fails naming the root and entry
-//!   ([`check_read_roots`]);
+//!   thing only: before the turn touches a store, the workspace tier's read
+//!   roots and then each member's effective ones must open, or the turn fails
+//!   naming the root and entry ([`check_read_roots`]);
 //! - **the store** — `<workspace root>/.logos/chat.db`. No member's `chat.db` is
 //!   opened: the repo-addressed tools read member graphs and sources, never a
 //!   member's conversation store. The workspace root's generated ignore rules
@@ -107,19 +106,21 @@ fn build_workspace_setup(
     prepare_turn(workspace_root, provider, resolution.policy, thread_id, question)
 }
 
-/// Fail the turn up front, by name, when a source sandbox the turn's tools read
-/// through would not open ([NFR-SE-04], sprint-84 HF-1) — rather than letting
-/// each addressed source call fail on its own while the turn answers without
-/// the docs.
+/// Fail the turn up front, by name, when a declared read root would not open
+/// ([NFR-SE-04], sprint-84 HF-1) — rather than letting each addressed source
+/// call fail on its own while the turn answers without the docs.
 ///
-/// Two checks, each the member chat's ([`chat_sandbox`]) and in this order: the
-/// workspace tier's `[chat] read_roots` against the workspace root (`resolution`
-/// is [`resolve_chat`] there with no tier above it), then each member's
-/// **effective** read roots in manifest order, resolved through the seam over the
-/// member and the workspace root exactly as its addressed sandbox resolves them.
-/// A member that inherits the workspace's table reads through the workspace's
-/// read roots, so a bad workspace entry is named against the workspace root
-/// before any member is checked.
+/// Two checks, each the member chat's ([`chat_sandbox`]) and in this order:
+///
+/// 1. the workspace tier's `[chat] read_roots` against the workspace root
+///    (`resolution` is [`resolve_chat`] there with no tier above it). These are
+///    the roots every inheriting member reads through, and they are checked even
+///    when no member inherits them, so a bad workspace entry is always named
+///    against the workspace root that declared it;
+/// 2. each member's **effective** read roots, in the federation's member order
+///    (explicit members as the manifest lists them, then autodiscovered ones),
+///    resolved through the seam over the member and the workspace root as its
+///    addressed sandbox (agent-core's `member_sandbox`) resolves them.
 ///
 /// Config reads and canonicalisation only: no member engine is started
 /// ([NFR-PE-10]). A member whose `[chat]` cannot be read fails the turn by name

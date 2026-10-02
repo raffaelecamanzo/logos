@@ -20,10 +20,9 @@
 //! 6. a `/chat?repo=web` turn in a workspace serve is the member chat: it resolves
 //!    the member's own policy and writes the member's store, never the
 //!    workspace's;
-//! 7. every read root the turn's source tools may reach is checked before the
-//!    turn touches a store: a missing one — the workspace tier's, or a member's
-//!    effective one — fails the turn by name and records no thread
-//!    ([NFR-SE-04], sprint-84 HF-1).
+//! 7. the workspace tier's read roots and every member's effective ones are
+//!    checked before the turn touches a store: a missing one fails the turn by
+//!    name and records no thread ([NFR-SE-04], sprint-84 HF-1).
 //!
 //! [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
 //! [FR-WS-34]: ../../docs/specs/requirements/FR-WS-34.md
@@ -578,8 +577,9 @@ async fn a_members_missing_read_root_fails_the_turn_up_front_naming_the_member()
 /// `read_roots = ["nope"]` over members that declare no `[chat]`. Each member
 /// inherits the workspace table, so the sandbox its addressed source tools read
 /// through refuses with `BadReadRoot` — the per-call `DispatchError::Tool` the
-/// review saw, reproduced here on the very resolution the tools perform. The
-/// turn now fails before any tool is offered, naming the workspace root.
+/// review saw, reproduced here by composing the resolution the addressed tool
+/// performs (`resolve_chat` + `with_chat_read_roots` over the inheriting member).
+/// The turn now fails before any tool is offered, naming the workspace root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_reviewers_repro_now_fails_the_turn_instead_of_the_call() {
     let tmp = workspace_chat::workspace();
