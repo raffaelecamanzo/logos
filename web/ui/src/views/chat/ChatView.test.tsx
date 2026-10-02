@@ -2201,6 +2201,17 @@ describe("WorkspaceChatView (S-485, FR-WS-34, frontend-design §4.22)", () => {
       "Extra read roots: shared-docs (relative to the workspace root; read by web); ../api-docs (relative to api) — files under them, reached through each member's symlinks, can be sent too.",
     );
   });
+
+  it("names an absolute read root as written, never as relative to its member", async () => {
+    mockFetchReadRoots.mockResolvedValue([
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs", "/abs/docs"] },
+    ]);
+    renderWorkspaceChat();
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent(
+      "Extra read roots: ../api-docs (relative to api); /abs/docs (read by api) — files under them",
+    );
+  });
 });
 
 describe("scope-keyed client state (S-485, FR-UI-26, NFR-SE-07)", () => {

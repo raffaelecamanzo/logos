@@ -624,7 +624,7 @@ describe("the read-roots disclosure (sprint-79 HF-1, S-485)", () => {
     const d = workspaceReadRootsDisclosure(members);
     expect(d.groups).toEqual([
       { roots: ["shared"], relativeTo: "the workspace root", readBy: ["web", "orders"] },
-      { roots: ["../api-docs"], relativeTo: "api", readBy: ["api"] },
+      { roots: ["../api-docs"], relativeTo: "api", readBy: [] },
     ]);
     expect(d.unreadable).toEqual(["broken"]);
     expect(consentEntries(d)).toEqual([
@@ -632,6 +632,34 @@ describe("the read-roots disclosure (sprint-79 HF-1, S-485)", () => {
       "api: ../api-docs",
       "unreadable: broken",
     ]);
+  });
+
+  it("never calls an absolute root relative to anything (S-485 review)", () => {
+    const d = workspaceReadRootsDisclosure([
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs", "/abs/docs"] },
+      { name: "web", policy_origin: "workspace", declared_by: "workspace", read_roots: ["shared", "C:\\srv\\specs"] },
+    ]);
+    expect(d.groups).toEqual([
+      { roots: ["shared"], relativeTo: "the workspace root", readBy: ["web"] },
+      { roots: ["C:\\srv\\specs"], relativeTo: null, readBy: ["web"] },
+      { roots: ["../api-docs"], relativeTo: "api", readBy: [] },
+      { roots: ["/abs/docs"], relativeTo: null, readBy: ["api"] },
+    ]);
+    // An absolute entry is the same directory whoever declared it.
+    expect(consentEntries(d)).toContain("/abs/docs");
+    // The member chat's inherited table splits the same way; its own table keeps
+    // one group in declared order.
+    const inherited = memberReadRootsDisclosure({
+      ...READY,
+      policyOrigin: "workspace",
+      policy: { ...POLICY, read_roots: ["/srv/specs", "../d"] },
+    });
+    expect(inherited.groups).toEqual([
+      { roots: ["../d"], relativeTo: "the workspace root", readBy: [] },
+      { roots: ["/srv/specs"], relativeTo: null, readBy: [] },
+    ]);
+    const own = memberReadRootsDisclosure({ ...READY, policy: { ...POLICY, read_roots: ["/srv/specs", "../d"] } });
+    expect(own.groups).toEqual([{ roots: ["/srv/specs", "../d"], relativeTo: null, readBy: [] }]);
   });
 
   it("asks again when the same root moves to another declaring root", () => {

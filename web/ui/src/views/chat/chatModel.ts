@@ -752,11 +752,12 @@ export function rememberConsent(scope: ChatStorageScope, roots: string[] = []): 
 /** One run of extra read roots that resolve against the same root. */
 export interface ReadRootGroup {
   roots: string[];
-  /** The root relative entries resolve against, in words (`the workspace root`,
-   *  a member's name), or `null` for the chat's own root. */
+  /** The root these entries resolve against, in words (`the workspace root`, a
+   *  member's name), or `null` when they need no qualifier: the chat's own root,
+   *  or absolute entries, which resolve as written. */
   relativeTo: string | null;
-  /** The members whose source calls read through these roots — the workspace
-   *  chat's disclosure only; empty for the member chat. */
+  /** The members whose source calls read through these roots, when the group
+   *  does not already say so — the workspace chat's disclosure only. */
   readBy: string[];
 }
 
@@ -772,15 +773,42 @@ export interface ReadRootsDisclosure {
   through: string;
 }
 
+/** Is `root` absolute — resolved as written, never against the root that
+ *  declared it? A POSIX path, a drive-letter path, or a UNC share. */
+function isAbsoluteRoot(root: string): boolean {
+  return root.startsWith("/") || root.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(root);
+}
+
+/** `roots` as disclosure groups: the relative entries qualified by `relativeTo`,
+ *  the absolute ones unqualified — an absolute entry is not relative to anything,
+ *  and saying so would misstate where its files come from (NFR-SE-07). With no
+ *  qualifier at all the order is kept as declared, in one group. `readers` names
+ *  who reads through them wherever the qualifier does not already say so. */
+function anchoredGroups(
+  roots: string[],
+  relativeTo: string | null,
+  readers: { relative: string[]; absolute: string[] },
+): ReadRootGroup[] {
+  if (relativeTo === null) {
+    return roots.length === 0 ? [] : [{ roots, relativeTo: null, readBy: readers.relative }];
+  }
+  const relative = roots.filter((root) => !isAbsoluteRoot(root));
+  const absolute = roots.filter(isAbsoluteRoot);
+  return [
+    ...(relative.length > 0 ? [{ roots: relative, relativeTo, readBy: readers.relative }] : []),
+    ...(absolute.length > 0 ? [{ roots: absolute, relativeTo: null, readBy: readers.absolute }] : []),
+  ];
+}
+
 /** The member chat's disclosure: the effective policy's own read roots, relative
  *  to the workspace root when the policy is inherited (sprint-79 HF-1). */
 export function memberReadRootsDisclosure(ready: ChatReady): ReadRootsDisclosure {
-  const roots = readRoots(ready.policy);
   return {
-    groups:
-      roots.length === 0
-        ? []
-        : [{ roots, relativeTo: ready.policyOrigin === "workspace" ? "the workspace root" : null, readBy: [] }],
+    groups: anchoredGroups(
+      readRoots(ready.policy),
+      ready.policyOrigin === "workspace" ? "the workspace root" : null,
+      { relative: [], absolute: [] },
+    ),
     unreadable: [],
     through: "this project's",
   };
@@ -794,7 +822,7 @@ export function memberReadRootsDisclosure(ready: ChatReady): ReadRootsDisclosure
  * that owns its policy gets its own group, relative to that member.
  */
 export function workspaceReadRootsDisclosure(members: MemberChatReadRoots[]): ReadRootsDisclosure {
-  const inherited: ReadRootGroup = { roots: [], relativeTo: "the workspace root", readBy: [] };
+  const inherited = { roots: [] as string[], readBy: [] as string[] };
   const owned: ReadRootGroup[] = [];
   const unreadable: string[] = [];
   for (const member of members) {
@@ -810,11 +838,19 @@ export function workspaceReadRootsDisclosure(members: MemberChatReadRoots[]): Re
       for (const root of roots) if (!inherited.roots.includes(root)) inherited.roots.push(root);
       inherited.readBy.push(member.name);
     } else {
-      owned.push({ roots, relativeTo: member.name, readBy: [member.name] });
+      // Relative to the member says whose roots they are; an absolute entry
+      // names its member as its reader instead.
+      owned.push(...anchoredGroups(roots, member.name, { relative: [], absolute: [member.name] }));
     }
   }
   return {
-    groups: [...(inherited.roots.length > 0 ? [inherited] : []), ...owned],
+    groups: [
+      ...anchoredGroups(inherited.roots, "the workspace root", {
+        relative: inherited.readBy,
+        absolute: inherited.readBy,
+      }),
+      ...owned,
+    ],
     unreadable,
     through: "each member's",
   };

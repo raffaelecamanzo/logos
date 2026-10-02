@@ -447,12 +447,7 @@ function ReadRootsNote({ disclosure }: { disclosure: ReadRootsDisclosure }) {
                   <code>{root}</code>
                 </span>
               ))}
-              {group.relativeTo !== null &&
-                ` (relative to ${group.relativeTo}${
-                  group.readBy.length > 0 && group.readBy.join() !== group.relativeTo
-                    ? `; read by ${group.readBy.join(", ")}`
-                    : ""
-                })`}
+              {readRootQualifier(group)}
             </span>
           ))}{" "}
           — files under them, reached through {through} symlinks, can be sent too.
@@ -468,6 +463,16 @@ function ReadRootsNote({ disclosure }: { disclosure: ReadRootsDisclosure }) {
       )}
     </>
   );
+}
+
+/** A group's parenthetical: the root its entries resolve against and who reads
+ *  through them, whichever it has — or nothing (the chat's own roots). */
+function readRootQualifier(group: ReadRootsDisclosure["groups"][number]): string {
+  const parts = [
+    ...(group.relativeTo !== null ? [`relative to ${group.relativeTo}`] : []),
+    ...(group.readBy.length > 0 ? [`read by ${group.readBy.join(", ")}`] : []),
+  ];
+  return parts.length === 0 ? "" : ` (${parts.join("; ")})`;
 }
 
 /** The empty-thread hint: what to ask. The turn's budget bounds used to live here
