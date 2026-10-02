@@ -207,8 +207,8 @@ fn build_setup(
 ///
 /// Config reads and path canonicalisation only: no engine, no store. The member
 /// chat builds its turn's sandbox here; the workspace chat checks every member's
-/// here before its turn touches a store (sprint-84 HF-1), so a turn either
-/// opens all of them or fails naming the one that would not open.
+/// here before its turn touches a store (sprint-84 HF-1), so a bad read-root
+/// entry fails the turn naming the member that declared it.
 ///
 /// # Errors
 /// A config-load or root-canonicalisation failure, or a declared read root that

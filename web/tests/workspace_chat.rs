@@ -611,12 +611,16 @@ async fn the_reviewers_repro_now_fails_the_turn_instead_of_the_call() {
     assert!(threads_at(&root).is_empty(), "no thread is recorded");
 }
 
-/// A member whose `[chat]` cannot be read has read roots nobody can establish,
-/// and its addressed sandbox would refuse every call for that reason: the turn
-/// fails up front naming the member and the file, never echoing the file's
-/// content, and records no thread.
+/// Only a bad read-root entry is turn-fatal (sprint-84 HF-1, coordinator
+/// decision on review item 5). A member whose `[chat]` cannot be read is
+/// skipped by the up-front check, so the turn proceeds and that member's fault
+/// stays on its own addressed source calls, exactly as before the check —
+/// while another member's addressed `read` still works. A member root removed
+/// mid-serve is skipped the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_member_whose_chat_cannot_be_read_fails_the_turn_up_front_naming_it() {
+async fn a_member_whose_chat_cannot_be_read_keeps_its_fault_per_call() {
+    use agent_core::tools::{addressed_toolset, ToolDomain};
+
     let tmp = workspace_chat::workspace();
     let root = tmp.path();
     write(root, "config.toml", PREFLIGHT_STOPPED_TIER);
@@ -627,13 +631,28 @@ async fn a_member_whose_chat_cannot_be_read_fails_the_turn_up_front_naming_it() 
 
     let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        body.contains("event: error\ndata: could not read the workspace member web's chat secret — check that"),
-        "{body}"
-    );
-    assert!(body.contains("web/.logos/secrets.toml is valid TOML"), "{body}");
-    assert!(!body.contains("mb77") && !body.contains(WS_KEY), "no secret is echoed: {body}");
-    assert!(threads_at(root).is_empty(), "the refused turn recorded no thread");
+    assert_stopped_at_the_preflight(&body);
+    assert!(!body.contains("workspace member web") && !body.contains("mb77"), "{body}");
+    assert_eq!(threads_at(root).len(), 1, "the turn proceeded and was recorded");
+
+    let xs = ScriptedWorkspaceChat::over(root, "", "").xservice;
+    let read = |repo: &str| {
+        let call = serde_json::json!({ "repo": repo, "path": "src/lib.rs" }).to_string();
+        let set = addressed_toolset(ToolDomain::Source, xs.clone());
+        async move { set.call("read", call).await }
+    };
+    let refused = read("web").await.expect_err("web's addressed read still fails per call");
+    assert!(refused.to_string().contains("secrets.toml"), "{refused}");
+    assert!(!refused.to_string().contains("mb77"), "no secret is echoed: {refused}");
+    let served = read("api").await.expect("api's addressed read is unaffected");
+    assert!(served.contains("alpha"), "{served}");
+
+    // A member root gone mid-serve is a sandbox fault, not a read-root entry:
+    // skipped the same way, so the turn still proceeds.
+    std::fs::remove_dir_all(root.join("web")).unwrap();
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=again")).await;
+    assert_stopped_at_the_preflight(&body);
+    assert_eq!(threads_at(root).len(), 2, "the second turn proceeded too");
 }
 
 /// The configure-first verdict comes before the read-root check, as in the

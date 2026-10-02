@@ -1012,10 +1012,11 @@ order. An entry that does not exist, or is not a directory, fails the
 turn with the member chat's message, naming the root that declared it, the entry and
 why — `could not open the source sandbox of the workspace root /work/shop: [chat]
 read_roots entry "no-such-docs" … does not exist`, or `… of the workspace member web:
-…` for a member that owns its `[chat]`. A member whose `config.toml` or `secrets.toml`
-cannot be read fails the turn the same way, naming the member. The refused turn
-creates no conversation. The check reads config files only and starts no member
-engine.
+…` for a member that owns its `[chat]`. The refused turn creates no conversation.
+Only a bad entry fails the turn: a member whose `config.toml` or `secrets.toml` cannot
+be read, or whose directory is gone, is skipped, and the fault is reported on that
+member's own source calls instead. The check reads config files only and starts no
+member engine.
 
 | Route | Does |
 |---|---|

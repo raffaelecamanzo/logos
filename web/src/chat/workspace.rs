@@ -15,8 +15,8 @@
 //!   *declared there*), and an incomplete tier is the configure-first state
 //!   naming the workspace root, the missing half and Workspace Config
 //!   ([`workspace_turn_provider`]). Members' `[chat]` tables are read for one
-//!   thing only: before the turn touches a store, the workspace tier's read
-//!   roots and then each member's effective ones must open, or the turn fails
+//!   thing only: before the turn touches a store, a bad entry among the
+//!   workspace tier's read roots or a member's effective ones fails the turn
 //!   naming the root and entry ([`check_read_roots`]);
 //! - **the store** — `<workspace root>/.logos/chat.db`. No member's `chat.db` is
 //!   opened: the repo-addressed tools read member graphs and sources, never a
@@ -40,7 +40,7 @@ use std::future::Future;
 use std::path::Path;
 
 use agent_core::rig::completion::CompletionModel;
-use agent_core::XserviceBacking;
+use agent_core::{SandboxError, XserviceBacking};
 use chat_agent::{Orchestrator, Planner, WorkspaceRoster};
 use logos_core::config::{resolve_chat, ChatOrigin, ChatResolution};
 use logos_core::federation::{Federation, Member};
@@ -122,10 +122,13 @@ fn build_workspace_setup(
 ///    resolved through the seam over the member and the workspace root as its
 ///    addressed sandbox (agent-core's `member_sandbox`) resolves them.
 ///
+/// Only a bad read-root **entry** is turn-fatal. A member whose `[chat]` cannot
+/// be read, or whose sandbox fails for any other reason (its root is gone), is
+/// skipped: its fault stays on its own addressed calls, as it was before this
+/// check, rather than refusing every workspace turn.
+///
 /// Config reads and canonicalisation only: no member engine is started
-/// ([NFR-PE-10]). A member whose `[chat]` cannot be read fails the turn by name
-/// too — its read roots cannot be established, and its addressed sandbox would
-/// refuse every call for the same reason.
+/// ([NFR-PE-10]).
 ///
 /// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
@@ -138,11 +141,15 @@ fn check_read_roots(federation: &Federation, resolution: &ChatResolution) -> Res
         )
     })?;
     for Member { name, root } in &federation.members {
-        let member = resolve_chat(root, Some(workspace_root))
-            .map_err(|e| resolution_fault(&format!("workspace member {name}'s chat"), &e))?;
-        chat_sandbox(root, Some(workspace_root), &member).map_err(|e| {
-            format!("could not open the source sandbox of the workspace member {name}: {e}")
-        })?;
+        let Ok(member) = resolve_chat(root, Some(workspace_root)) else { continue };
+        match chat_sandbox(root, Some(workspace_root), &member) {
+            Err(e) if matches!(e.downcast_ref(), Some(SandboxError::BadReadRoot { .. })) => {
+                return Err(format!(
+                    "could not open the source sandbox of the workspace member {name}: {e}"
+                ));
+            }
+            Ok(_) | Err(_) => {}
+        }
     }
     Ok(())
 }
