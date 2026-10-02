@@ -19,13 +19,17 @@
 //!    workspace tier's, on the workspace config read-model the view reads;
 //! 6. a `/chat?repo=web` turn in a workspace serve is the member chat: it resolves
 //!    the member's own policy and writes the member's store, never the
-//!    workspace's.
+//!    workspace's;
+//! 7. the workspace tier's read roots and every member's effective ones are
+//!    checked before the turn touches a store: a missing one fails the turn by
+//!    name and records no thread ([NFR-SE-04], sprint-84 HF-1).
 //!
 //! [S-482]: ../../docs/planning/journal.md#s-482-the-workspace-chat-is-its-own-service-route-and-store
 //! [FR-WS-34]: ../../docs/specs/requirements/FR-WS-34.md
 //! [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
 //! [ADR-71]: ../../docs/specs/architecture/decisions/ADR-71.md
 //! [ADR-67]: ../../docs/specs/architecture/decisions/ADR-67.md
+//! [NFR-SE-04]: ../../docs/specs/requirements/NFR-SE-04.md
 
 #![cfg(feature = "agents")]
 
@@ -467,4 +471,207 @@ async fn a_scoped_member_turn_is_the_members_own_chat() {
     assert_eq!(status, StatusCode::OK);
     let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(rows.as_array().map(Vec::len), Some(1), "{body}");
+}
+
+// ── 7. Read roots are checked up front (sprint-84 HF-1) ─────────────────────
+
+/// A workspace `[chat]` with `model` and a key whose `read_roots` names a
+/// directory that does not exist: the turn fails up front with the member
+/// chat's wording shape — which root declared it, which entry, why — and
+/// records no thread at `<root>/.logos/chat.db`. Once the directory exists the
+/// same tier runs its turn to the preflight, so the refusal is the entry's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_workspace_read_root_fails_the_turn_up_front_by_name() {
+    let tmp = workspace_chat::workspace();
+    let root = tmp.path();
+    write(root, "config.toml", &format!("{PREFLIGHT_STOPPED_TIER}read_roots = [\"no-such-docs\"]\n"));
+    write(root, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
+    let intent = IntentToken::generate();
+    let router = workspace_chat::router(root, &intent);
+
+    let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
+    assert_eq!(status, StatusCode::OK);
+    let canonical = root.canonicalize().unwrap();
+    assert!(
+        body.contains(&format!(
+            "event: error\ndata: could not open the source sandbox of the workspace root {}: \
+             [chat] read_roots entry \"no-such-docs\" (resolved to \"{}\") does not exist",
+            canonical.display(),
+            canonical.join("no-such-docs").display()
+        )),
+        "{body}"
+    );
+    assert!(!body.contains("chat/completions"), "the provider seam was never reached: {body}");
+    assert!(!body.contains(WS_KEY), "{body}");
+    assert!(!root.join(".logos/chat.db").exists(), "the refused turn opened no store");
+
+    std::fs::create_dir_all(root.join("no-such-docs")).unwrap();
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
+    assert_stopped_at_the_preflight(&body);
+    assert_eq!(threads_at(root).len(), 1, "the control turn is recorded");
+}
+
+/// A member's **effective** read roots are checked, as its addressed sandbox
+/// resolves them. `web` declaring `read_roots` but no `model` inherits the
+/// workspace table whole — its own entry goes with the rest of its table — so
+/// the turn runs. Once `web` owns its policy the same missing entry fails the
+/// turn up front, naming `web` and the entry, and records no second thread.
+/// Every member is checked, the first and default one (`api`) included: with
+/// both failing the first in member order is named, and with only `api`
+/// failing the turn still fails naming it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_members_missing_read_root_fails_the_turn_up_front_naming_the_member() {
+    let tmp = workspace_chat::workspace();
+    let root = tmp.path();
+    let web_root = root.join("web");
+    write(root, "config.toml", PREFLIGHT_STOPPED_TIER);
+    write(root, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
+    write(&web_root, "config.toml", "[chat]\nread_roots = [\"../no-such-member-docs\"]\n");
+    let intent = IntentToken::generate();
+    let router = workspace_chat::router(root, &intent);
+
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
+    assert_stopped_at_the_preflight(&body);
+    assert_eq!(threads_at(root).len(), 1, "an inherited table drops web's own read roots");
+
+    write(
+        &web_root,
+        "config.toml",
+        "[chat]\nmodel = \"web/model\"\nread_roots = [\"../no-such-member-docs\"]\n",
+    );
+    let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=again")).await;
+    assert_eq!(status, StatusCode::OK);
+    let web_canonical = web_root.canonicalize().unwrap();
+    assert!(
+        body.contains(&format!(
+            "event: error\ndata: could not open the source sandbox of the workspace member web: \
+             [chat] read_roots entry \"../no-such-member-docs\" (resolved to \"{}\") does not exist",
+            web_canonical.join("../no-such-member-docs").display()
+        )),
+        "{body}"
+    );
+    assert!(!body.contains("chat/completions"), "the provider seam was never reached: {body}");
+    assert_eq!(threads_at(root).len(), 1, "the refused turn recorded no thread");
+
+    let api_fails = format!(
+        "event: error\ndata: could not open the source sandbox of the workspace member api: \
+         [chat] read_roots entry \"../no-such-api-docs\" (resolved to \"{}\") does not exist",
+        root.canonicalize().unwrap().join("api/../no-such-api-docs").display()
+    );
+    write(
+        &root.join("api"),
+        "config.toml",
+        "[chat]\nmodel = \"api/model\"\nread_roots = [\"../no-such-api-docs\"]\n",
+    );
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=both")).await;
+    assert!(body.contains(&api_fails), "both fail: the first in member order is named: {body}");
+    assert!(!body.contains("member web"), "{body}");
+
+    write(&web_root, "config.toml", "[chat]\nmodel = \"web/model\"\n");
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=api")).await;
+    assert!(body.contains(&api_fails), "the first and default member alone fails the turn: {body}");
+    assert_eq!(threads_at(root).len(), 1, "neither refused turn recorded a thread");
+}
+
+/// The sprint-84 review's reproduction (Agent 3): a workspace tier declaring
+/// `read_roots = ["nope"]` over members that declare no `[chat]`. Each member
+/// inherits the workspace table, so the sandbox its addressed source tools read
+/// through refuses with `BadReadRoot` — the per-call `DispatchError::Tool` the
+/// review saw, reproduced here by composing the resolution the addressed tool
+/// performs (`resolve_chat` + `with_chat_read_roots` over the inheriting member).
+/// The turn now fails before any tool is offered, naming the workspace root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_reviewers_repro_now_fails_the_turn_instead_of_the_call() {
+    let tmp = workspace_chat::workspace();
+    let root = tmp.path().canonicalize().unwrap();
+    write(&root, "config.toml", &format!("{PREFLIGHT_STOPPED_TIER}read_roots = [\"nope\"]\n"));
+    write(&root, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
+
+    // The precondition: the fault the addressed call raised is still there.
+    let api = root.join("api");
+    let resolution = logos_core::config::resolve_chat(&api, Some(&root)).unwrap();
+    assert_eq!(resolution.policy_origin, logos_core::config::ChatOrigin::Workspace);
+    let per_call = agent_core::Sandbox::from_root(&api)
+        .unwrap()
+        .with_chat_read_roots(&api, Some(&root), &resolution)
+        .expect_err("the inheriting member's sandbox refuses the entry");
+    assert!(matches!(per_call, agent_core::SandboxError::BadReadRoot { .. }), "{per_call}");
+
+    let intent = IntentToken::generate();
+    let router = workspace_chat::router(&root, &intent);
+    let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains(&format!(
+            "event: error\ndata: could not open the source sandbox of the workspace root {}: {per_call}",
+            root.display()
+        )),
+        "the turn fails with the call's own fault, named against the workspace root: {body}"
+    );
+    assert!(threads_at(&root).is_empty(), "no thread is recorded");
+}
+
+/// Only a bad read-root entry is turn-fatal (sprint-84 HF-1, coordinator
+/// decision on review item 5). A member whose `[chat]` cannot be read is
+/// skipped by the up-front check, so the turn proceeds and that member's fault
+/// stays on its own addressed source calls, exactly as before the check —
+/// while another member's addressed `read` still works. A member root removed
+/// mid-serve is skipped the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_chat_cannot_be_read_keeps_its_fault_per_call() {
+    use agent_core::tools::{addressed_toolset, ToolDomain};
+
+    let tmp = workspace_chat::workspace();
+    let root = tmp.path();
+    write(root, "config.toml", PREFLIGHT_STOPPED_TIER);
+    write(root, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
+    write(&root.join("web"), "secrets.toml", "[chat]\napi_key = \"sk-unterminated-mb77\n");
+    let intent = IntentToken::generate();
+    let router = workspace_chat::router(root, &intent);
+
+    let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_stopped_at_the_preflight(&body);
+    assert!(!body.contains("workspace member web") && !body.contains("mb77"), "{body}");
+    assert_eq!(threads_at(root).len(), 1, "the turn proceeded and was recorded");
+
+    let xs = ScriptedWorkspaceChat::over(root, "", "").xservice;
+    let read = |repo: &str| {
+        let call = serde_json::json!({ "repo": repo, "path": "src/lib.rs" }).to_string();
+        let set = addressed_toolset(ToolDomain::Source, xs.clone());
+        async move { set.call("read", call).await }
+    };
+    let refused = read("web").await.expect_err("web's addressed read still fails per call");
+    assert!(refused.to_string().contains("secrets.toml"), "{refused}");
+    assert!(!refused.to_string().contains("mb77"), "no secret is echoed: {refused}");
+    let served = read("api").await.expect("api's addressed read is unaffected");
+    assert!(served.contains("alpha"), "{served}");
+
+    // A member root gone mid-serve is a sandbox fault, not a read-root entry:
+    // skipped the same way, so the turn still proceeds.
+    std::fs::remove_dir_all(root.join("web")).unwrap();
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=again")).await;
+    assert_stopped_at_the_preflight(&body);
+    assert_eq!(threads_at(root).len(), 2, "the second turn proceeded too");
+}
+
+/// The configure-first verdict comes before the read-root check, as in the
+/// member chat: a workspace tier with no key is the configure-first frame naming
+/// the missing half and Workspace Config — even with a missing workspace entry
+/// and an unreadable member `secrets.toml` both present — and records no thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unconfigured_workspace_is_configure_first_before_any_read_root_check() {
+    let tmp = workspace_chat::workspace();
+    let root = tmp.path();
+    write(root, "config.toml", &format!("{PREFLIGHT_STOPPED_TIER}read_roots = [\"nope\"]\n"));
+    write(&root.join("web"), "secrets.toml", "[chat]\napi_key = \"sk-unterminated-mb77\n");
+    let intent = IntentToken::generate();
+    let router = workspace_chat::router(root, &intent);
+
+    let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("— no API key is declared there; its provider model is declared."), "{body}");
+    assert!(body.contains("Add an API key in Workspace Config"), "{body}");
+    assert!(!body.contains("source sandbox") && !body.contains("workspace member web"), "{body}");
+    assert!(threads_at(root).is_empty(), "the refused turn recorded no thread");
 }

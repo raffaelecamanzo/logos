@@ -985,9 +985,10 @@ web API. Two things set it apart from a member's chat:
 
 - **Its configuration comes from the workspace tier alone** — the
   `<workspace-root>/.logos/config.toml` `[chat]` table and
-  `<workspace-root>/.logos/secrets.toml` key above. No member's `[chat]` is read for
-  it, so a member that declares a complete `[chat]` of its own does **not** configure
-  the workspace chat. With either half missing at the workspace root, a turn answers
+  `<workspace-root>/.logos/secrets.toml` key above. No member's `[chat]` configures
+  it (a member's table is read only for its `read_roots`, below), so a member that
+  declares a complete `[chat]` of its own does **not** configure the workspace
+  chat. With either half missing at the workspace root, a turn answers
   the configure-first message naming the workspace root and the missing half, and
   points at the workspace **Config** view. Every other `[chat]` key — budgets,
   retries, `history_max_turns` / `history_max_chars` — is the workspace table's too.
@@ -1003,6 +1004,19 @@ sandbox — its root, its `ignored_dirs` and the `read_roots` its own chat would
 A member that declares no `[chat] model` inherits the workspace table whole, so the
 workspace table's `read_roots` (resolved against the workspace root) apply to it and
 its own `read_roots` do not.
+
+These read roots are checked **when a turn starts**, before anything is recorded:
+first the workspace table's against the workspace root (always, even when no member
+inherits the table), then each member's effective ones in the workspace's member
+order. An entry that does not exist, or is not a directory, fails the
+turn with the member chat's message, naming the root that declared it, the entry and
+why — `could not open the source sandbox of the workspace root /work/shop: [chat]
+read_roots entry "no-such-docs" … does not exist`, or `… of the workspace member web:
+…` for a member that owns its `[chat]`. The refused turn creates no conversation.
+Only a bad entry fails the turn: a member whose `config.toml` or `secrets.toml` cannot
+be read, or whose directory is gone, is skipped, and the fault is reported on that
+member's own source calls instead. The check reads config files only and starts no
+member engine.
 
 | Route | Does |
 |---|---|
