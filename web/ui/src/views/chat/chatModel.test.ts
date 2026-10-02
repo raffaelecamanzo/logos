@@ -662,6 +662,15 @@ describe("the read-roots disclosure (sprint-79 HF-1, S-485)", () => {
     expect(own.groups).toEqual([{ roots: ["/srv/specs", "../d"], relativeTo: null, readBy: [] }]);
   });
 
+  it("names a repeated declaration once (S-485 review)", () => {
+    const d = workspaceReadRootsDisclosure([
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["docs", "docs", "/abs", "/abs"] },
+    ]);
+    expect(d.groups.map((g) => g.roots)).toEqual([["docs"], ["/abs"]]);
+    const own = memberReadRootsDisclosure({ ...READY, policy: { ...POLICY, read_roots: ["d", "d"] } });
+    expect(own.groups.map((g) => g.roots)).toEqual([["d"]]);
+  });
+
   it("asks again when the same root moves to another declaring root", () => {
     const owned = workspaceReadRootsDisclosure([
       { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["docs"] },

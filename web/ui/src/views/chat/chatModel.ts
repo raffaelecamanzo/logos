@@ -782,13 +782,16 @@ function isAbsoluteRoot(root: string): boolean {
 /** `roots` as disclosure groups: the relative entries qualified by `relativeTo`,
  *  the absolute ones unqualified — an absolute entry is not relative to anything,
  *  and saying so would misstate where its files come from (NFR-SE-07). With no
- *  qualifier at all the order is kept as declared, in one group. `readers` names
- *  who reads through them wherever the qualifier does not already say so. */
+ *  qualifier at all the order is kept as declared, in one group. Each entry is
+ *  named once — a repeated declaration is still one directory, and one row key.
+ *  `readers` names who reads through them wherever the qualifier does not already
+ *  say so. */
 function anchoredGroups(
-  roots: string[],
+  declared: string[],
   relativeTo: string | null,
   readers: { relative: string[]; absolute: string[] },
 ): ReadRootGroup[] {
+  const roots = [...new Set(declared)];
   if (relativeTo === null) {
     return roots.length === 0 ? [] : [{ roots, relativeTo: null, readBy: readers.relative }];
   }
