@@ -714,19 +714,7 @@ fn extract_one(
             }
         }
         let is_callable = matches!(node_kind, NodeKind::Function | NodeKind::Method);
-        let metrics = is_callable.then(|| {
-            // S-500 / FR-EX-11: the has-body fact and its body's token count,
-            // captured in the same AST-in-hand pass.
-            let body = shape::callable_body(decl.node, body_kinds);
-            FunctionMetrics {
-                cyclomatic_complexity: complexity::cyclomatic_complexity(decl.node, keywords),
-                // `end_line >= start_line` always holds for a tree-sitter node;
-                // `saturating_sub` is belt-and-braces against any future change.
-                line_count: decl.end_line.saturating_sub(decl.start_line) + 1,
-                has_body: body.is_some(),
-                body_tokens: body.map_or(0, shingle::token_count),
-            }
-        });
+        let metrics = is_callable.then(|| function_metrics(decl, keywords, body_kinds));
         facts.nodes.push(NodeFact {
             symbol: symbol.clone(),
             kind: node_kind,
@@ -2287,6 +2275,26 @@ struct CapturedCall {
     /// binds. See [`capture_http_client_call_arm`] for why the operand rather
     /// than the whole call is the grain.
     operand: std::ops::Range<usize>,
+}
+
+/// The [`FunctionMetrics`] of one callable declaration, captured while its AST
+/// is in hand: complexity and line count ([FR-EX-03], [FR-EX-04]), and the
+/// has-body fact with its body's token count (S-500, [FR-EX-11]) from the
+/// language's declared `body_kinds`.
+///
+/// [FR-EX-03]: ../../../docs/specs/requirements/FR-EX-03.md
+/// [FR-EX-04]: ../../../docs/specs/requirements/FR-EX-04.md
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String]) -> FunctionMetrics {
+    let body = shape::callable_body(decl.node, body_kinds);
+    FunctionMetrics {
+        cyclomatic_complexity: complexity::cyclomatic_complexity(decl.node, keywords),
+        // `end_line >= start_line` always holds for a tree-sitter node;
+        // `saturating_sub` is belt-and-braces against any future change.
+        line_count: decl.end_line.saturating_sub(decl.start_line) + 1,
+        has_body: body.is_some(),
+        body_tokens: body.map_or(0, shingle::token_count),
+    }
 }
 
 /// Lift a captured name's parent past any C-family *declarator* wrapper to the
