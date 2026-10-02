@@ -13,6 +13,16 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **The workspace chat checks its read roots before a turn starts.** The workspace
+  tier's `[chat] read_roots` and every member's effective ones are checked when a
+  `POST /workspace/chat` turn starts — config reads only, no member engine is started.
+  A bad read-root entry fails the turn up front, by name (the declaring root, the entry
+  and why), before anything is recorded, as the member chat already does. A member whose
+  `[chat]` cannot be read, or whose root is gone, is skipped by that check and keeps its
+  fault on its own addressed source calls.
+
 ## [1.8.2] — 2026-10-02
 
 ### Added
