@@ -41,6 +41,7 @@ impl NoSymbolsPlugin {
                 package_modules: None,
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
+                body_node_kinds: Vec::new(),
                 abi_version: 15,
                 framework_detectors: Vec::new(),
                 http_client_detectors: Vec::new(),
@@ -5273,4 +5274,299 @@ fn a_rust_file_records_no_extends_instantiates_or_type_use_rows() {
     assert!(!kinds.contains(&EdgeKind::Instantiates));
     assert!(!kinds.contains(&EdgeKind::TypeUses));
     assert_eq!(implements_refs(&facts).len(), 1);
+}
+
+// ── S-500 / FR-EX-11: the callable has-body fact ──────────────────────────────
+
+/// Fixtures for the four languages that declare no body node kind (Rust, Go,
+/// Python, C). Each carries functions, methods and — where the language has one
+/// — a bodyless signature that is **not** extracted as a node (a Rust trait
+/// `function_signature_item`, a Go interface method, a C prototype).
+const NO_BODY_KIND_FIXTURES: [(&str, &str, &str); 4] = [
+    (
+        "rs",
+        "src/shapes.rs",
+        "pub trait Area { fn area(&self) -> f64; fn unit(&self) -> &str { \"m2\" } }\n\
+pub struct Sq { side: f64 }\n\
+impl Area for Sq {\n    fn area(&self) -> f64 {\n        if self.side > 0.0 { self.side * self.side } else { 0.0 }\n    }\n}\n\
+impl Sq { pub fn new(side: f64) -> Self { Sq { side } } }\n\
+fn helper(xs: &[u32]) -> u32 {\n    let mut t = 0;\n    for x in xs { if *x > 1 { t += x; } }\n    t\n}\n\
+#[cfg(test)]\nmod tests { #[test] fn t() { assert_eq!(super::helper(&[2]), 2); } }\n",
+    ),
+    (
+        "go",
+        "shapes/shapes.go",
+        "package shapes\n\n\
+type Area interface {\n\tArea() float64\n}\n\n\
+type Sq struct{ side float64 }\n\n\
+func (s Sq) Area() float64 {\n\tif s.side > 0 {\n\t\treturn s.side * s.side\n\t}\n\treturn 0\n}\n\n\
+func New(side float64) Sq { return Sq{side: side} }\n\n\
+func helper(xs []int) int {\n\tt := 0\n\tfor _, x := range xs {\n\t\tt += x\n\t}\n\treturn t\n}\n",
+    ),
+    (
+        "py",
+        "shapes/area.py",
+        "import abc\n\n\
+class Area(abc.ABC):\n    @abc.abstractmethod\n    def area(self):\n        ...\n\n\
+class Sq(Area):\n    def __init__(self, side):\n        self.side = side\n\n    def area(self):\n        if self.side > 0:\n            return self.side * self.side\n        return 0\n\n\
+def helper(xs):\n    t = 0\n    for x in xs:\n        t += x\n    return t\n\n\
+def test_helper():\n    assert helper([2]) == 2\n",
+    ),
+    (
+        "c",
+        "src/shapes.c",
+        "#include <stdio.h>\n\n\
+int helper(const int *xs, int n);\n\n\
+struct sq { double side; };\n\n\
+static double area(struct sq *s) {\n    if (s->side > 0) { return s->side * s->side; }\n    return 0;\n}\n\n\
+int helper(const int *xs, int n) {\n    int t = 0;\n    for (int i = 0; i < n; i++) { t += xs[i]; }\n    return t;\n}\n",
+    ),
+];
+
+/// A canonical text rendering of every fact extraction produced **before**
+/// S-500 — every `NodeFact` field that existed then, plus edges, refs, the
+/// partial flag and the warnings. The has-body fact and its token count are
+/// deliberately left out: this is the "before" half of the byte-identity
+/// comparison, so it must render only what the old graph carried.
+fn pre_s500_rendering(facts: &Facts) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(out, "{} {} partial={}", facts.path, facts.language, facts.partial).unwrap();
+    for n in &facts.nodes {
+        writeln!(
+            out,
+            "N {} {} {} {}-{} m={:?} x={} fp={:?} te={} b={:?} nd={:?} sh={:?}",
+            n.symbol.as_str(),
+            n.kind.as_str(),
+            n.name,
+            n.start_line,
+            n.end_line,
+            n.metrics.map(|m| (m.cyclomatic_complexity, m.line_count)),
+            n.exported,
+            n.fingerprint,
+            n.test_evidence,
+            n.body,
+            n.max_nesting_depth,
+            n.shingles,
+        )
+        .unwrap();
+    }
+    for e in &facts.edges {
+        writeln!(out, "E {e:?}").unwrap();
+    }
+    for r in &facts.refs {
+        writeln!(out, "R {r:?}").unwrap();
+    }
+    for w in &facts.warnings {
+        writeln!(out, "W {w}").unwrap();
+    }
+    out
+}
+
+/// The blake3 digest of [`pre_s500_rendering`] over [`NO_BODY_KIND_FIXTURES`],
+/// computed on the base commit (`e80309fd`, before S-500) and pinned here.
+const PRE_S500_DIGEST: &str = "25987e59b78f8651e8d3ffdf7996a40f978a08291440ddcacc2031a8c40f8717";
+
+#[test]
+fn languages_declaring_no_body_kind_extract_byte_identically_to_before() {
+    let mut hasher = blake3::Hasher::new();
+    for (ext, path, src) in NO_BODY_KIND_FIXTURES {
+        let facts = extract_lang(ext, path, src);
+        assert!(!facts.partial, "{path}: fixture parses cleanly");
+        hasher.update(pre_s500_rendering(&facts).as_bytes());
+    }
+    let digest = hasher.finalize().to_hex().to_string();
+    assert_eq!(
+        digest, PRE_S500_DIGEST,
+        "the Rust/Go/Python/C graphs moved: every pre-S-500 fact must be byte-identical"
+    );
+}
+
+/// `(name, has_body, body_tokens)` for every `Function`/`Method` node, in node
+/// order — the S-500 fact a fixture asserts on.
+fn callable_bodies(facts: &Facts) -> Vec<(String, bool, u32)> {
+    facts
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| {
+            let m = n.metrics.expect("a callable carries metrics");
+            (n.name.clone(), m.has_body, m.body_tokens)
+        })
+        .collect()
+}
+
+/// The has-body fact of the one callable named `name`.
+fn has_body(facts: &Facts, name: &str) -> bool {
+    let hits: Vec<bool> = callable_bodies(facts)
+        .into_iter()
+        .filter(|(n, _, _)| n == name)
+        .map(|(_, b, _)| b)
+        .collect();
+    assert_eq!(hits.len(), 1, "exactly one callable named {name}: {:?}", callable_bodies(facts));
+    hits[0]
+}
+
+#[test]
+#[cfg(feature = "lang-java")]
+fn java_abstract_and_interface_methods_record_no_body_and_implemented_ones_do() {
+    let src = "package com.x;\n\
+public abstract class Shape {\n    public abstract double area();\n    public String label() { return \"shape\"; }\n}\n\
+interface Port {\n    void send(String m);\n    default void ping() { send(\"ping\"); }\n}\n\
+class Raw { native int peek(); }\n";
+    let facts = extract_lang("java", "src/main/java/com/x/Shape.java", src);
+    assert!(!has_body(&facts, "area"), "an abstract method has no body");
+    assert!(!has_body(&facts, "send"), "an interface method with no default has no body");
+    assert!(!has_body(&facts, "peek"), "a native method has no body");
+    assert!(has_body(&facts, "label"), "an implemented method has a body");
+    assert!(has_body(&facts, "ping"), "a default interface method has a body");
+}
+
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn kotlin_abstract_members_record_no_body_and_implemented_ones_do() {
+    let src = "package com.x\n\n\
+abstract class Shape {\n    abstract fun area(): Double\n    fun label(): String { return \"shape\" }\n    fun short() = \"s\"\n}\n\n\
+interface Port {\n    fun send(m: String)\n    fun ping() { send(\"ping\") }\n}\n";
+    let facts = extract_lang("kt", "src/main/kotlin/com/x/Shape.kt", src);
+    assert!(!has_body(&facts, "area"), "an abstract fun has no body");
+    assert!(!has_body(&facts, "send"), "an interface fun with no default has no body");
+    assert!(has_body(&facts, "label"), "a block-bodied fun has a body");
+    assert!(has_body(&facts, "short"), "an expression-bodied fun has a body");
+    assert!(has_body(&facts, "ping"), "an interface fun with a default has a body");
+}
+
+#[test]
+#[cfg(feature = "lang-c-sharp")]
+fn csharp_abstract_members_record_no_body_and_implemented_ones_do() {
+    let src = "namespace X {\n\
+public abstract class Shape {\n    public abstract double Area();\n    public string Label() { return \"shape\"; }\n    public string Short() => \"s\";\n}\n\
+public interface IPort { void Send(string m); }\n}\n";
+    let facts = extract_lang("cs", "src/Shape.cs", src);
+    assert!(!has_body(&facts, "Area"), "an abstract method has no body");
+    assert!(!has_body(&facts, "Send"), "an interface method with no default has no body");
+    assert!(has_body(&facts, "Label"), "a block-bodied method has a body");
+    assert!(has_body(&facts, "Short"), "an expression-bodied method has a body");
+}
+
+#[test]
+#[cfg(feature = "lang-cpp")]
+fn cpp_pure_virtuals_and_prototypes_record_no_body_and_definitions_do() {
+    let src = "class Shape {\npublic:\n    virtual double area() const = 0;\n    virtual const char* label() const { return \"shape\"; }\n    void declared();\n};\n\
+int proto(int x);\n\
+int helper(int x) { return x + 1; }\n";
+    let facts = extract_lang("cpp", "src/shape.cpp", src);
+    assert!(!has_body(&facts, "area"), "a pure-virtual member has no body");
+    assert!(!has_body(&facts, "declared"), "an in-class prototype has no body");
+    assert!(!has_body(&facts, "proto"), "a free prototype has no body");
+    assert!(has_body(&facts, "label"), "an in-class definition has a body");
+    assert!(has_body(&facts, "helper"), "a free definition has a body");
+}
+
+/// TypeScript's bodyless callables are separate node kinds — an overload is a
+/// `function_signature`, an abstract or interface member a
+/// `(abstract_)method_signature` — that the symbols query does not capture, so
+/// none reaches the graph as a callable at all. What does reach it — the
+/// overload set's implementation, a method, an arrow or function-expression
+/// binding — records a body.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_overload_signatures_record_no_bodied_callable_and_implementations_do() {
+    let src = "export function parse(input: string): number;\n\
+export function parse(input: number): number;\n\
+export function parse(input: string | number): number {\n  return Number(input);\n}\n\
+export const twice = (n: number) => n * 2;\n\
+export const named = function (n: number) { return n; };\n\
+export abstract class Shape {\n  abstract area(): number;\n  label(): string { return \"shape\"; }\n}\n\
+export interface Port { send(m: string): void; }\n";
+    for (ext, path) in [("ts", "src/shape.ts"), ("tsx", "src/shape.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        assert!(has_body(&facts, "parse"), "{ext}: the one `parse` callable is the implementation");
+        assert!(has_body(&facts, "twice"), "{ext}: an expression-bodied arrow has a body");
+        assert!(has_body(&facts, "named"), "{ext}: a function expression has a body");
+        assert!(has_body(&facts, "label"), "{ext}: an implemented method has a body");
+        let names: Vec<String> = callable_bodies(&facts).into_iter().map(|(n, _, _)| n).collect();
+        assert!(
+            !names.iter().any(|n| n == "area" || n == "send"),
+            "{ext}: abstract and interface signatures are not callables: {names:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-scala")]
+fn scala_abstract_defs_record_no_body_and_defined_ones_do() {
+    let src = "package x\n\n\
+abstract class Shape {\n  def area: Double\n  def label: String = \"shape\"\n  def block(): Int = { 1 + 2 }\n}\n\n\
+trait Port { def send(m: String): Unit }\n";
+    let facts = extract_lang("scala", "src/main/scala/x/Shape.scala", src);
+    assert!(!has_body(&facts, "area"), "an abstract def has no body");
+    assert!(!has_body(&facts, "send"), "a trait def with no default has no body");
+    assert!(has_body(&facts, "label"), "an expression-bodied def has a body");
+    assert!(has_body(&facts, "block"), "a block-bodied def has a body");
+}
+
+#[test]
+#[cfg(feature = "lang-php")]
+fn php_abstract_and_interface_methods_record_no_body_and_implemented_ones_do() {
+    let src = "<?php\n\
+abstract class Shape {\n    abstract public function area(): float;\n    public function label(): string { return \"shape\"; }\n}\n\
+interface Port { public function send(string $m): void; }\n\
+function helper(int $x): int { return $x + 1; }\n";
+    let facts = extract_lang("php", "src/Shape.php", src);
+    assert!(!has_body(&facts, "area"), "an abstract method has no body");
+    assert!(!has_body(&facts, "send"), "an interface method has no body");
+    assert!(has_body(&facts, "label"), "an implemented method has a body");
+    assert!(has_body(&facts, "helper"), "a function has a body");
+}
+
+/// A language declaring no body node kind treats every callable as bodied —
+/// a Python `@abstractmethod` stub included.
+#[test]
+fn every_callable_is_bodied_in_a_language_declaring_no_body_kind() {
+    for (ext, path, src) in NO_BODY_KIND_FIXTURES {
+        let facts = extract_lang(ext, path, src);
+        let bodies = callable_bodies(&facts);
+        assert!(bodies.len() >= 2, "{path}: the fixture yields callables: {bodies:?}");
+        assert!(
+            bodies.iter().all(|(_, has_body, _)| *has_body),
+            "{path}: every callable is bodied: {bodies:?}"
+        );
+    }
+}
+
+/// The token count is the body's normalized stream — the one the near-clone
+/// shingles k-gram — and `0` for a declaration with no body.
+#[test]
+fn the_body_token_count_is_the_normalized_body_stream_and_zero_without_one() {
+    // `{ 1 + 2 }` → `{`, literal, `+`, literal, `}`: five tokens, the signature
+    // never counted.
+    let facts = extract_src("src/lib.rs", "fn small() { 1 + 2 }\n");
+    assert_eq!(callable_bodies(&facts), vec![("small".to_string(), true, 5)]);
+    // A renamed twin with different literals normalizes to the same count.
+    let twin = extract_src("src/lib.rs", "pub fn other_name(x: u32) -> u32 { 7 + 9 }\n");
+    assert_eq!(callable_bodies(&twin)[0].2, 5);
+    #[cfg(feature = "lang-java")]
+    {
+        let java = extract_lang(
+            "java",
+            "src/main/java/com/x/A.java",
+            "package com.x;\nabstract class A {\n    abstract int f();\n    int g() { return 1 + 2; }\n}\n",
+        );
+        let bodies = callable_bodies(&java);
+        assert_eq!(bodies[0], ("f".to_string(), false, 0), "no body, no tokens");
+        // `{ return 1 + 2 ; }` → 7 tokens.
+        assert_eq!(bodies[1], ("g".to_string(), true, 7));
+    }
+}
+
+/// NFR-RA-06: extracting an unchanged file again yields the identical fact.
+#[test]
+#[cfg(feature = "lang-java")]
+fn re_extracting_an_unchanged_file_yields_an_identical_has_body_fact() {
+    let src = "package com.x;\npublic abstract class Shape {\n    public abstract double area();\n    public String label() { return \"shape\"; }\n}\n";
+    let first = callable_bodies(&extract_lang("java", "src/main/java/com/x/Shape.java", src));
+    let second = callable_bodies(&extract_lang("java", "src/main/java/com/x/Shape.java", src));
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 2);
 }

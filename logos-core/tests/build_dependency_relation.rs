@@ -240,13 +240,15 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// disk: both build tables absent (their one index goes with them), migration
 /// 22 unrecorded, `user_version` 21 — and so no extraction marker. The exact
 /// inverse of migrations 22, 23 (S-487, only adds
-/// `metric_snapshots.modularity_applicable`) and 24 (S-472, two declared-type
-/// tables and their marker); the next open re-applies all three, as a real
-/// upgrade does. Duplicated from `build_manifest_facts.rs` (no shared test module).
+/// `metric_snapshots.modularity_applicable`), 24 (S-472, two declared-type
+/// tables and their marker) and 25 (S-500, two `nodes` columns); the next open
+/// re-applies all four, as a real upgrade does. Duplicated from `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE declared_types; DROP TABLE avro_schemas; \
+        "ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
+         DELETE FROM schema_versions WHERE version = 25; \
+         DROP TABLE declared_types; DROP TABLE avro_schemas; \
          DELETE FROM schema_versions WHERE version = 24; \
          DELETE FROM project_metadata WHERE key = '{DECLARED_TYPES_EXTRACTED_KEY}'; \
          ALTER TABLE metric_snapshots DROP COLUMN modularity_applicable; \
@@ -305,7 +307,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 24, "{name} was opened at the latest version (v24)");
+        assert_eq!(user_version(&root.join(name)), 25, "{name} was opened at the latest version (v25)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

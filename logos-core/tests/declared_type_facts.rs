@@ -139,12 +139,15 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// Take a member store back to what the release before migration 24 left on
 /// disk: both declared-type tables absent (their indexes go with them),
 /// migration 24 unrecorded, `user_version` 23 — and so no extraction marker. The
-/// exact inverse of migration 24; the next [`Engine::start`] re-applies it, as a
-/// real upgrade does.
+/// exact inverse of migration 24, and of migration 25 (S-500, two `nodes`
+/// columns) after it; the next [`Engine::start`] re-applies both, as a real
+/// upgrade does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE declared_types; DROP TABLE avro_schemas; \
+        "ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
+         DELETE FROM schema_versions WHERE version = 25; \
+         DROP TABLE declared_types; DROP TABLE avro_schemas; \
          DELETE FROM schema_versions WHERE version = 24; \
          DELETE FROM project_metadata WHERE key = '{DECLARED_TYPES_EXTRACTED_KEY}'; \
          PRAGMA user_version = 23;"

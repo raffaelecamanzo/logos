@@ -2393,8 +2393,10 @@ mod tests {
             22,
             "PRAGMA user_version advances by exactly one (21 → 22)"
         );
-        // Forward-only: re-running the full ledger on a v22 store applies nothing.
-        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        // Forward-only: re-running the ledger through v22 on a v22 store applies
+        // nothing. Through v22, not the full ledger: a later migration may itself
+        // add a `nodes` column (migration 25 does), which is not this one's effect.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..22]).unwrap();
         let recorded: i64 = conn
             .query_row("SELECT count(*) FROM schema_versions WHERE version = 22", [], |r| r.get(0))
             .unwrap();
@@ -2653,8 +2655,10 @@ mod tests {
             24,
             "PRAGMA user_version advances by exactly one (23 → 24)"
         );
-        // Forward-only: re-running the full ledger on a v24 store applies nothing.
-        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        // Forward-only: re-running the ledger through v24 on a v24 store applies
+        // nothing. Through v24, not the full ledger: a later migration may itself
+        // add a `nodes` column (migration 25 does), which is not this one's effect.
+        apply_migrations_from(&mut conn, &MIGRATIONS[..24]).unwrap();
         let recorded: i64 = conn
             .query_row("SELECT count(*) FROM schema_versions WHERE version = 24", [], |r| r.get(0))
             .unwrap();
@@ -2781,6 +2785,112 @@ mod tests {
         conn.execute("DELETE FROM avro_schemas WHERE id = 1", []).unwrap();
         assert_eq!(count(&conn), 0, "deleting a schema cascades exactly its two facts");
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 24");
+    }
+
+    /// S-500 / CR-163 / FR-EX-11: a populated v24 store upgrades to v25 forward
+    /// only. `nodes` gains `has_body` and `body_tokens` in place — `NULL` on every
+    /// existing row until re-extraction — while every pre-existing column of
+    /// `nodes`, and all of `edges`, `shingles` and the ledger, is byte-for-byte
+    /// unchanged. Every `files.content_hash` is cleared, the re-extraction
+    /// trigger: the next sync treats each file as modified (asserted end to end by
+    /// `tests/indexing.rs`'s `migration_25_triggers_a_re_extraction_that_fills_the_has_body_column`).
+    #[test]
+    fn migration_25_adds_the_has_body_columns_and_triggers_reextraction() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..24]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/main/java/com/x/Svc.java', 'java', 'h-java'),
+                 (2, 'docs/guide.md', 'markdown', 'h-md');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, line_count, fingerprint,
+                                max_nesting_depth, is_test, body) VALUES
+                 (10, 1, 7,  'caller',   1, 1, 3,    4,    'fp', 1,    0, NULL),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, NULL, NULL, NULL, 0, 'the body prose');
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'helper', 'h', 1, 2, 42, 1, NULL);",
+        )
+        .unwrap();
+        let (nodes_before, edges_before, shingles_before) = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+        assert!(
+            conn.query_row("SELECT has_body FROM nodes WHERE id = 10", [], |r| r.get::<_, Option<i64>>(0))
+                .is_err(),
+            "has_body does not exist at v24"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..25]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 25, "24 → 25, exactly one step");
+        // Forward-only: re-running the full ledger on a v25 store applies nothing.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 25", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 25 is recorded once and never re-applied");
+
+        // The two columns are appended NULL; every other column is untouched.
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        let (old_columns, new_columns): (Vec<Vec<String>>, Vec<Vec<String>>) = nodes_after
+            .iter()
+            .map(|row| {
+                let (old, new) = row.split_at(row.len() - 2);
+                (old.to_vec(), new.to_vec())
+            })
+            .unzip();
+        assert_eq!(old_columns, nodes_before, "every pre-v25 nodes column is byte-for-byte unchanged");
+        assert_eq!(
+            new_columns,
+            vec![vec!["NULL".to_string(), "NULL".to_string()]; 2],
+            "has_body and body_tokens are NULL on every existing row until re-extraction"
+        );
+        assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
+        assert_eq!(read_ledger(&conn), ledger_before, "the reference ledger is unchanged");
+        let tail: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 2")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(tail, ["body_tokens", "has_body"], "the appended columns are the two S-500 adds");
+
+        // The re-extraction trigger: every file's hash is cleared, nothing else.
+        let files: Vec<(i64, String, Option<String>, Option<String>)> = conn
+            .prepare("SELECT id, path, language, content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                (1, "src/main/java/com/x/Svc.java".to_string(), Some("java".to_string()), None),
+                (2, "docs/guide.md".to_string(), Some("markdown".to_string()), None),
+            ],
+            "every content_hash is cleared, so the next sync re-extracts the file; ids, \
+             paths and languages stay"
+        );
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (an in-place ADD COLUMN, NFR-RA-09)");
+
+        // The extraction values are admitted; out-of-range ones are refused.
+        conn.execute("UPDATE nodes SET has_body = 0, body_tokens = 0 WHERE id = 10", [])
+            .expect("a bodyless callable is admitted");
+        conn.execute("UPDATE nodes SET has_body = 1, body_tokens = 57 WHERE id = 10", [])
+            .expect("a bodied callable is admitted");
+        assert!(
+            conn.execute("UPDATE nodes SET has_body = 2 WHERE id = 10", []).is_err(),
+            "has_body is a 0/1 flag"
+        );
+        assert!(
+            conn.execute("UPDATE nodes SET body_tokens = -1 WHERE id = 10", []).is_err(),
+            "a token count is never negative"
+        );
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 25");
     }
 
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —

@@ -57,6 +57,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (22, MIGRATION_22),
     (23, MIGRATION_23),
     (24, MIGRATION_24),
+    (25, MIGRATION_25),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2283,12 +2284,64 @@ CREATE INDEX idx_declared_types_file   ON declared_types(file_id);
 CREATE INDEX idx_declared_types_schema ON declared_types(schema_id);
 ";
 
+/// Migration 25 — the per-callable **has-body** fact and its body's token count
+/// (S-500, [CR-163], [FR-EX-11]).
+///
+/// Two nullable columns added **in place** on `nodes` (`ALTER TABLE … ADD
+/// COLUMN`, the migration-10 shape — no rebuild, every existing row and id
+/// untouched, the FTS index, its triggers and the `annotations` view
+/// unaffected):
+///
+/// 1. **`nodes.has_body`** — `1` when a `Function`/`Method` declaration carries
+///    an implementation body, `0` for an abstract method, an interface method
+///    with no default, a C++ pure-virtual or prototype; from the language's
+///    declared `body_node_kinds`. Read by duplicate eligibility, LCOM4 and the
+///    Focus method count.
+/// 2. **`nodes.body_tokens`** — that body's normalized token count, the stream
+///    the near-clone shingles k-gram (`0` when there is no body); the input to
+///    the exact-duplicate `duplicate_min_tokens` floor (S-501). The `shingles`
+///    table holds winnowed hashes, not a count, so nothing persisted before
+///    could stand in for it.
+///
+/// Both are `NULL` on every non-callable node, and on a callable until its file
+/// is re-extracted. **Re-extraction is triggered here**, per the house
+/// migration-plus-reindex convention ([FR-EX-07]'s migration 10): every
+/// `files.content_hash` is cleared, so the next sync re-extracts each file it
+/// meets — a full-walk sync every file — exactly as it would a modified one,
+/// and records the fresh hash. `content_hash` is read by incremental-sync dirty
+/// detection alone, so clearing it costs one re-extraction and changes nothing
+/// else; no graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_25_adds_the_has_body_columns_and_triggers_reextraction` in
+/// [`super::migrate`].
+///
+/// [CR-163]: ../../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+/// [FR-EX-07]: ../../../../docs/specs/requirements/FR-EX-07.md
+/// [FR-EX-11]: ../../../../docs/specs/requirements/FR-EX-11.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_25: &str = "\
+-- 1. Per-callable has-body fact (FR-EX-11): nullable, added in place. NULL on
+-- every non-callable node and on rows indexed before this migration.
+ALTER TABLE nodes ADD COLUMN has_body INTEGER CHECK (has_body IN (0,1));
+
+-- 2. The body's normalized token count (S-501's duplicate floor input): NULL
+-- exactly where has_body is.
+ALTER TABLE nodes ADD COLUMN body_tokens INTEGER CHECK (body_tokens >= 0);
+
+-- 3. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next sync like a modified one, filling both columns.
+UPDATE files SET content_hash = NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
-        MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_3, MIGRATION_4, MIGRATION_8,
+        MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_3, MIGRATION_4,
+        MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, RefForm};
 
@@ -3441,5 +3494,36 @@ mod tests {
                 "migration 22 must not mention `{untouched}` (additive upgrade in place)"
             );
         }
+    }
+
+    /// S-500 / CR-163 / FR-EX-11: migration 25 adds the two per-callable columns
+    /// to `nodes` in place and clears `files.content_hash` to trigger
+    /// re-extraction — and does nothing else: no table is created, dropped or
+    /// rebuilt, and no other table is written (NFR-MA-06). The populated-store
+    /// upgrade is asserted by
+    /// `migration_25_adds_the_has_body_columns_and_triggers_reextraction` in
+    /// `super::migrate`.
+    #[test]
+    fn migration_25_adds_two_nodes_columns_and_clears_the_file_hashes_only() {
+        let statements: Vec<String> = MIGRATION_25
+            .split(';')
+            .map(|stmt| {
+                stmt.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|stmt| stmt.trim().to_string())
+            .filter(|stmt| !stmt.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "ALTER TABLE nodes ADD COLUMN has_body INTEGER CHECK (has_body IN (0,1))",
+                "ALTER TABLE nodes ADD COLUMN body_tokens INTEGER CHECK (body_tokens >= 0)",
+                "UPDATE files SET content_hash = NULL",
+            ],
+            "exactly the two in-place columns and the re-extraction trigger"
+        );
     }
 }

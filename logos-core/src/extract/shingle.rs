@@ -104,6 +104,15 @@ pub(crate) fn shingles(node: Node<'_>) -> Vec<u64> {
     fingerprints
 }
 
+/// The number of normalized tokens in `node`'s subtree — the length of the
+/// stream [`shingles`] k-grams (S-500, CR-163). Persisted beside the has-body
+/// fact so the exact-duplicate token floor (`duplicate_min_tokens`, S-501)
+/// measures the same stream the near-clone `clone_min_tokens` floor does.
+/// Saturates at `u32::MAX`.
+pub(crate) fn token_count(node: Node<'_>) -> u32 {
+    u32::try_from(normalized_tokens(node).len()).unwrap_or(u32::MAX)
+}
+
 /// The normalized token stream of `node`'s subtree, in source (pre-order) order.
 ///
 /// Leaf tokens only (a tree-sitter leaf has no children): identifier-class

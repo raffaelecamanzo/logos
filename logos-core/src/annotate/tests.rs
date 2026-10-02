@@ -1360,6 +1360,8 @@ fn is_test_marked_covers_evidence_path_and_affix_with_negatives() {
             is_test: false,
             layer_membership: None,
             clone_group: None,
+            has_body: None,
+            body_tokens: None,
         }
     }
     let m = markers();

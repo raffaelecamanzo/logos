@@ -51,6 +51,13 @@ pub struct Semantics {
     ///
     /// [FR-EX-07]: ../../../docs/specs/requirements/FR-EX-07.md
     pub nesting_block_kinds: Vec<String>,
+    /// Tree-sitter node kinds that mark a callable as implemented (S-500,
+    /// [FR-EX-11]; see [`PluginManifest::body_node_kinds`]); consumed by
+    /// `extract::shape` to record each callable's has-body fact. Empty = every
+    /// callable is bodied.
+    ///
+    /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+    pub body_node_kinds: Vec<String>,
     /// The tree-sitter ABI version declared by the descriptor and asserted
     /// against the compiled grammar at load.
     pub abi_version: usize,
@@ -250,6 +257,7 @@ impl CompiledPlugin {
             package_modules: manifest.package_modules,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,
+            body_node_kinds: manifest.body_node_kinds,
             abi_version: manifest.abi_version,
             framework_detectors: manifest.framework_detectors,
             http_client_detectors: manifest.http_client_detectors,

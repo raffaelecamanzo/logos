@@ -31,6 +31,15 @@ complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&"
 # each nested statement adds one.
 nesting_block_kinds = ["if_statement", "for_statement", "for_in_statement", "while_statement", "do_statement", "switch_statement", "try_statement"]
 
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11): a
+# Function/Method is implemented when its declaration is, or has a direct
+# child of, one of these kinds — a function/method `statement_block`, or the `arrow_function`/
+# `function_expression` a `const f = …` declarator binds. Overload signatures,
+# `abstract` and interface method signatures are separate node kinds
+# (`function_signature`, `method_signature`, …) the symbols query does not
+# capture, so no bodyless callable reaches the graph from them.
+body_node_kinds = ["statement_block", "arrow_function", "function_expression"]
+
 # TS/JS exports are structural: a declaration under an `export_statement`
 # ancestor is an exported dead-code root (FR-AN-01).
 export_convention = "export-statement"

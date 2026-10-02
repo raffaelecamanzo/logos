@@ -28,6 +28,12 @@ complexity_keywords = ["if", "else", "elseif", "for", "foreach", "while", "do", 
 # each nested statement adds one.
 nesting_block_kinds = ["if_statement", "for_statement", "foreach_statement", "while_statement", "do_statement", "switch_statement", "try_statement", "match_expression"]
 
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11): a
+# Function/Method is implemented when its declaration is, or has a direct
+# child of, one of these kinds — the method/function `compound_statement`. An `abstract` method and an
+# interface method end in `;` and carry none.
+body_node_kinds = ["compound_statement"]
+
 # PHP's export rule (FR-AN-01): public-by-default — a declaration is exported
 # unless a `visibility_modifier` child carries `private`/`protected`. Top-level
 # functions and modifier-less members are public. (S-060 bounded variant — the

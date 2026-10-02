@@ -23,6 +23,12 @@ complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&"
 # each nested statement adds one.
 nesting_block_kinds = ["if_statement", "for_statement", "enhanced_for_statement", "while_statement", "do_statement", "switch_expression", "try_statement", "try_with_resources_statement"]
 
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11): a
+# Function/Method is implemented when its declaration is, or has a direct
+# child of, one of these kinds — the method `block`. An abstract method, an interface method with no
+# `default`, and a `native` method end in `;` and carry none.
+body_node_kinds = ["block"]
+
 # Java's export rule: a `public` token inside the declaration's `modifiers`
 # (FR-AN-01 — package-private and stricter are non-roots).
 export_convention = "public-modifier"
