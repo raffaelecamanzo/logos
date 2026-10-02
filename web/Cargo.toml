@@ -133,7 +133,7 @@ http-body-util = "0.1"
 # (NFR-SE-01). Already in the workspace graph via logos-core.
 serde_json     = { workspace = true }
 tempfile       = { workspace = true }
-tokio          = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+tokio          = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time", "io-util"] }
 # The read-only-view fitness test (tests/read_only_views.rs, S-082/CR-018) opens
 # logos.db / history.db read-only to assert the snapshot-row counts are unchanged
 # after repeated dashboard GETs. Test-only: never enters the shipped graph the
@@ -147,3 +147,11 @@ rusqlite       = { workspace = true }
 # grounded-fixture dependency. Test-only: never enters the shipped no-network tree
 # (NFR-SE-01).
 logos-core     = { path = "../logos-core", features = ["lang-rust"] }
+# The MCP-parity suite (tests/mcp_parity_workspace_tools.rs, HF-2) calls the MCP
+# workspace tools over the real protocol to compare them with their agent-tool
+# twins, through `mcp/tests/support/federated.rs` (included by path); `io-util`
+# above is the in-process duplex transport that harness boots on. Moved here from
+# agent-core, which dev-depended on `mcp` + `rmcp` for it — the one lower-crate →
+# surface-crate edge in the workspace. Test-only: dev edges are excluded from the
+# no-network fitness scan, so neither reaches the shipped tree (NFR-SE-01).
+rmcp           = { workspace = true, features = ["client"] }
