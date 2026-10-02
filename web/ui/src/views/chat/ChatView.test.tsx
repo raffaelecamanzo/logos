@@ -2176,6 +2176,17 @@ describe("WorkspaceChatView (S-485, FR-WS-34, frontend-design §4.22)", () => {
     expect(screen.getByRole("link", { name: "Workspace Config" })).toBeInTheDocument();
   });
 
+  it("names an unreadable workspace secrets.toml on the page", async () => {
+    mockFetchWorkspaceConfig.mockResolvedValue({
+      effective_chat: null,
+      config: { error: null },
+      chat_key_error: "secrets.toml line 1: invalid key",
+    });
+    renderWorkspaceChat();
+    expect(await screen.findByText(/could not be read: secrets\.toml line 1: invalid key/)).toBeInTheDocument();
+    expect(screen.queryByText(/not configured yet/)).toBeNull();
+  });
+
   it("says, on an empty rail, that member conversations live in a --standalone serve", async () => {
     renderWorkspaceChat();
     const rail = await screen.findByRole("navigation", { name: "Conversations" });

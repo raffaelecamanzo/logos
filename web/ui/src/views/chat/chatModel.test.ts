@@ -736,6 +736,22 @@ describe("workspaceChatReadiness (S-485)", () => {
     });
   });
 
+  it("names a secrets.toml fault too, alongside a config.toml one", () => {
+    const model: WorkspaceChatConfigReadModel = {
+      effective_chat: null,
+      config: { error: "config.toml line 2: expected `]`" },
+      chat_key_error: "secrets.toml line 1: invalid key",
+    };
+    expect(workspaceChatReadiness(model)).toEqual({
+      ready: false,
+      unreadable: true,
+      faults: ["config.toml line 2: expected `]`", "secrets.toml line 1: invalid key"],
+    });
+    expect(
+      workspaceChatReadiness({ ...model, config: { error: null } }),
+    ).toMatchObject({ faults: ["secrets.toml line 1: invalid key"] });
+  });
+
   it("words configure-first as the workspace turn's refusal: the root, the half, no member", () => {
     const state = workspaceChatReadiness(tierModel("member", "unset"));
     if (state.ready || state.unreadable) throw new Error("expected configure-first");
