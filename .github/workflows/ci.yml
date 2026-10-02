@@ -131,6 +131,14 @@ jobs:
           LOGOS_PERF_TOLERANCE: "3"
         run: cargo test --workspace
 
+      # The agent-tool ↔ MCP-twin payload parity (HF-2). The suite lives in `web`
+      # because `agent-core` may not dev-depend on the `mcp` surface crate, and it
+      # is `agents`-gated — so `cargo test --workspace` above, which builds no
+      # `agents` feature, compiles it to zero tests. It used to run there from
+      # agent-core; this step keeps it enforced.
+      - name: MCP-parity of the workspace agent tools (--features agents)
+        run: cargo test -p web --features agents --test mcp_parity_workspace_tools
+
       # Supply-chain gate — license allowlist + RustSec advisories (NFR-CR-01).
       # cargo-deny is version-pinned: an unpinned tool fetched at run time is
       # itself a supply-chain/determinism hazard, and cargo-deny has changed its

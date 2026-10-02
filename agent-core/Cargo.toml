@@ -80,7 +80,7 @@ url        = "2"
 # The mock round-trip / zero-egress harness drives rig's async Agent loop and
 # the mock's async stream, so the tests need a runtime. tokio is already a
 # workspace dep (the web/mcp adapters own runtimes); here it is dev-only.
-tokio     = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time", "io-util"] }
+tokio     = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
 futures   = "0.3"
 # Construct a typed `http::StatusCode` in the provider-error classification tests
 # (the structured-status path rig produces on some transports). Dev-only and
@@ -95,11 +95,3 @@ tempfile  = { workspace = true }
 # so the fixture engine has the Rust language plugin available; the library
 # build itself stays default-features = false.
 logos-core = { path = "../logos-core", features = ["lang-rust"] }
-# Payload parity for the workspace read-model tools (S-480): each is compared
-# with its MCP twin's serialized payload, called over the real protocol through
-# `mcp/tests/support/federated.rs` — the mcp crate's own boot-and-call harness,
-# included by path rather than copied. Dev-only, so neither reaches the `logos`
-# tree the carve-out scans (they exclude dev edges); `io-util` above is the
-# in-process duplex transport that harness boots on.
-mcp       = { path = "../mcp", default-features = false }
-rmcp      = { workspace = true, features = ["client"] }
