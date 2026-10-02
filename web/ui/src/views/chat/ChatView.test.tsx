@@ -2202,6 +2202,44 @@ describe("WorkspaceChatView (S-485, FR-WS-34, frontend-design §4.22)", () => {
     );
   });
 
+  it("asks again when a member's read roots change after the workspace consent (NFR-SE-07)", async () => {
+    const user = userEvent.setup();
+    const shared: MemberChatReadRoots = {
+      name: "web",
+      policy_origin: "workspace",
+      declared_by: "workspace",
+      read_roots: ["shared-docs"],
+    };
+    mockFetchReadRoots.mockResolvedValue([shared]);
+    const first = renderWorkspaceChat();
+    await acceptConsent(user);
+    await screen.findByText("CHAT");
+    first.unmount();
+
+    // The same set: the consent covers it, no banner.
+    const same = renderWorkspaceChat();
+    await screen.findByText("CHAT");
+    expect(screen.queryByRole("button", { name: "Start chatting" })).toBeNull();
+    same.unmount();
+
+    // A new root on a member: the banner is back, naming it, before anything is sent.
+    mockFetchReadRoots.mockResolvedValue([
+      shared,
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs"] },
+    ]);
+    const grown = renderWorkspaceChat();
+    expect(await screen.findByRole("button", { name: "Start chatting" })).toBeInTheDocument();
+    expect(screen.getByText(/source and graph excerpts/).closest("section")).toHaveTextContent(
+      "../api-docs (relative to api)",
+    );
+    grown.unmount();
+
+    // The same entry moving to another declaring root asks again too.
+    mockFetchReadRoots.mockResolvedValue([{ ...shared, policy_origin: "member", declared_by: "member" }]);
+    renderWorkspaceChat();
+    expect(await screen.findByRole("button", { name: "Start chatting" })).toBeInTheDocument();
+  });
+
   it("names an absolute read root as written, never as relative to its member", async () => {
     mockFetchReadRoots.mockResolvedValue([
       { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs", "/abs/docs"] },
