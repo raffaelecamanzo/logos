@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.8.3] — 2026-10-02
+
 ### Changed
 
 - **The workspace chat checks its read roots before a turn starts.** The workspace
