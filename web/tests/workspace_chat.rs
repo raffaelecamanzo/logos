@@ -517,6 +517,9 @@ async fn a_missing_workspace_read_root_fails_the_turn_up_front_by_name() {
 /// workspace table whole — its own entry goes with the rest of its table — so
 /// the turn runs. Once `web` owns its policy the same missing entry fails the
 /// turn up front, naming `web` and the entry, and records no second thread.
+/// Every member is checked, the first and default one (`api`) included: with
+/// both failing the first in member order is named, and with only `api`
+/// failing the turn still fails naming it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_members_missing_read_root_fails_the_turn_up_front_naming_the_member() {
     let tmp = workspace_chat::workspace();
@@ -550,6 +553,25 @@ async fn a_members_missing_read_root_fails_the_turn_up_front_naming_the_member()
     );
     assert!(!body.contains("chat/completions"), "the provider seam was never reached: {body}");
     assert_eq!(threads_at(root).len(), 1, "the refused turn recorded no thread");
+
+    let api_fails = format!(
+        "event: error\ndata: could not open the source sandbox of the workspace member api: \
+         [chat] read_roots entry \"../no-such-api-docs\" (resolved to \"{}\") does not exist",
+        root.canonicalize().unwrap().join("api/../no-such-api-docs").display()
+    );
+    write(
+        &root.join("api"),
+        "config.toml",
+        "[chat]\nmodel = \"api/model\"\nread_roots = [\"../no-such-api-docs\"]\n",
+    );
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=both")).await;
+    assert!(body.contains(&api_fails), "both fail: the first in member order is named: {body}");
+    assert!(!body.contains("member web"), "{body}");
+
+    write(&web_root, "config.toml", "[chat]\nmodel = \"web/model\"\n");
+    let (_, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=api")).await;
+    assert!(body.contains(&api_fails), "the first and default member alone fails the turn: {body}");
+    assert_eq!(threads_at(root).len(), 1, "neither refused turn recorded a thread");
 }
 
 /// The sprint-84 review's reproduction (Agent 3): a workspace tier declaring
