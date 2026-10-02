@@ -2240,6 +2240,16 @@ describe("WorkspaceChatView (S-485, FR-WS-34, frontend-design §4.22)", () => {
     expect(await screen.findByRole("button", { name: "Start chatting" })).toBeInTheDocument();
   });
 
+  it("deletes a conversation from the workspace's own store, never a member's", async () => {
+    const user = userEvent.setup();
+    mockFetchThreads.mockResolvedValue([thread(4, "Workspace four", 100)]);
+    renderWorkspaceChat();
+    await user.click(await screen.findByRole("button", { name: "Delete conversation “Workspace four”" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(mockDeleteThread).toHaveBeenCalledTimes(1));
+    expect(mockDeleteThread).toHaveBeenCalledWith(WORKSPACE_CHAT_ROUTES, 4);
+  });
+
   it("names an absolute read root as written, never as relative to its member", async () => {
     mockFetchReadRoots.mockResolvedValue([
       { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs", "/abs/docs"] },
