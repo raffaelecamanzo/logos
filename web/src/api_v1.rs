@@ -1799,16 +1799,19 @@ pub(crate) struct MemberChatReadRoots {
 /// [NFR-PE-10]: ../../docs/specs/requirements/NFR-PE-10.md
 pub(crate) async fn workspace_chat_read_roots(
     State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
 ) -> Response {
-    let Some(registry) = backing.as_federated() else {
-        return not_a_workspace();
-    };
-    let federation = registry.federation().clone();
-    let roots = run_blocking("api_v1_workspace_chat_read_roots", Surface::Web, move || {
-        member_chat_read_roots(&federation)
-    })
-    .await;
-    ok(roots)
+    // Through the shared fan-out adapter like every other workspace read: its
+    // single-root guard, blocking hop and surface scope. The closure reads the
+    // federation's roster only — it never asks the registry for an engine.
+    workspace_fan(
+        backing,
+        bridge,
+        "api_v1_workspace_chat_read_roots",
+        Surface::Web,
+        |registry, _bridge| member_chat_read_roots(registry.federation()),
+    )
+    .await
 }
 
 /// [`workspace_chat_read_roots`]'s read-model over `federation`, touching no engine.
