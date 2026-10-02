@@ -2250,6 +2250,30 @@ describe("WorkspaceChatView (S-485, FR-WS-34, frontend-design §4.22)", () => {
     expect(mockDeleteThread).toHaveBeenCalledWith(WORKSPACE_CHAT_ROUTES, 4);
   });
 
+  it("names a member whose chat config cannot be read, with or without other roots (NFR-CC-04)", async () => {
+    const broken: MemberChatReadRoots = { name: "broken", policy_origin: null, declared_by: null, read_roots: [] };
+    mockFetchReadRoots.mockResolvedValue([broken]);
+    const alone = renderWorkspaceChat();
+    let banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent(
+      "The chat configuration of broken could not be read, so its read roots are not listed here; a source call on that member fails until it is repaired.",
+    );
+    expect(banner?.textContent).not.toMatch(/Extra read roots/);
+    alone.unmount();
+
+    mockFetchReadRoots.mockResolvedValue([
+      broken,
+      { name: "also-broken", policy_origin: null, declared_by: null, read_roots: [] },
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs"] },
+    ]);
+    renderWorkspaceChat();
+    banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("Extra read roots: ../api-docs (relative to api)");
+    expect(banner).toHaveTextContent(
+      "The chat configuration of broken, also-broken could not be read, so their read roots are not listed here; a source call on those members fails until it is repaired.",
+    );
+  });
+
   it("names an absolute read root as written, never as relative to its member", async () => {
     mockFetchReadRoots.mockResolvedValue([
       { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs", "/abs/docs"] },
