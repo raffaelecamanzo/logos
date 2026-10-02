@@ -635,3 +635,24 @@ async fn a_member_whose_chat_cannot_be_read_fails_the_turn_up_front_naming_it() 
     assert!(!body.contains("mb77") && !body.contains(WS_KEY), "no secret is echoed: {body}");
     assert!(threads_at(root).is_empty(), "the refused turn recorded no thread");
 }
+
+/// The configure-first verdict comes before the read-root check, as in the
+/// member chat: a workspace tier with no key is the configure-first frame naming
+/// the missing half and Workspace Config — even with a missing workspace entry
+/// and an unreadable member `secrets.toml` both present — and records no thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unconfigured_workspace_is_configure_first_before_any_read_root_check() {
+    let tmp = workspace_chat::workspace();
+    let root = tmp.path();
+    write(root, "config.toml", &format!("{PREFLIGHT_STOPPED_TIER}read_roots = [\"nope\"]\n"));
+    write(&root.join("web"), "secrets.toml", "[chat]\napi_key = \"sk-unterminated-mb77\n");
+    let intent = IntentToken::generate();
+    let router = workspace_chat::router(root, &intent);
+
+    let (status, body) = send(&router, post(WORKSPACE_CHAT_POST_ROUTE, &intent, "q=hello")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("— no API key is declared there; its provider model is declared."), "{body}");
+    assert!(body.contains("Add an API key in Workspace Config"), "{body}");
+    assert!(!body.contains("source sandbox") && !body.contains("workspace member web"), "{body}");
+    assert!(threads_at(root).is_empty(), "the refused turn recorded no thread");
+}
