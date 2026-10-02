@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-10-02
+
 ### Added
 
 - **The workspace chat is its own service, route and store** (`agents` builds, workspace
