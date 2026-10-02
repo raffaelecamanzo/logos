@@ -14,7 +14,11 @@
 //!   origins are therefore relative to the workspace root (`member` means
 //!   *declared there*), and an incomplete tier is the configure-first state
 //!   naming the workspace root, the missing half and Workspace Config
-//!   ([`workspace_turn_provider`]);
+//!   ([`workspace_turn_provider`]). Members' `[chat]` tables are read for one
+//!   thing only: before the turn touches a store, every sandbox its source tools
+//!   read through — the workspace tier's read roots, then each member's
+//!   effective ones — must open, or the turn fails naming the root and entry
+//!   ([`check_read_roots`]);
 //! - **the store** — `<workspace root>/.logos/chat.db`. No member's `chat.db` is
 //!   opened: the repo-addressed tools read member graphs and sources, never a
 //!   member's conversation store. The workspace root's generated ignore rules
@@ -34,15 +38,18 @@
 //! [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use agent_core::rig::completion::CompletionModel;
 use agent_core::XserviceBacking;
 use chat_agent::{Orchestrator, Planner, WorkspaceRoster};
 use logos_core::config::{resolve_chat, ChatOrigin, ChatResolution};
+use logos_core::federation::{Federation, Member};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::configured::{prepare_turn, spawn_configured_turn, RosterLaunch, TurnRun, TurnSetup};
+use super::configured::{
+    chat_sandbox, prepare_turn, spawn_configured_turn, RosterLaunch, TurnRun, TurnSetup,
+};
 use super::{
     resolution_fault, run_orchestrated, usable_provider, ChatFrame, ChatService, ChatStream,
     TurnProvider,
@@ -62,42 +69,81 @@ impl WorkspaceChatService {
     pub(crate) fn new(xservice: XserviceBacking) -> Self {
         Self { xservice }
     }
-
-    /// The workspace root: the config root this chat resolves at and the root
-    /// whose `.logos/chat.db` holds its conversations. Taken from the registry
-    /// that already resolved it, never discovered.
-    fn workspace_root(&self) -> PathBuf {
-        self.xservice.registry().federation().root.clone()
-    }
 }
 
 impl ChatService for WorkspaceChatService {
     fn start_turn(&self, question: String, thread_id: Option<i64>) -> ChatStream {
-        let setup_root = self.workspace_root();
         let xservice = self.xservice.clone();
         let setup_question = question.clone();
         spawn_configured_turn(question, move || {
-            let turn = build_workspace_setup(&setup_root, thread_id, &setup_question)?;
+            // The federation the registry already resolved, never discovered: its
+            // root is the config root and store root, its members the roots the
+            // addressed source tools read.
+            let federation = xservice.registry().federation();
+            let turn = build_workspace_setup(federation, thread_id, &setup_question)?;
             Ok((turn, WorkspaceLaunch(xservice)))
         })
     }
 }
 
 /// The workspace chat's blocking setup: the policy and credential from the
-/// workspace tier alone, then the conversation at the workspace root
+/// workspace tier alone, every read root its source tools may reach
+/// ([`check_read_roots`]), then the conversation at the workspace root
 /// ([`prepare_turn`], shared with the member chat). A refused turn touches no
 /// store, as the member chat's does not.
 fn build_workspace_setup(
-    workspace_root: &Path,
+    federation: &Federation,
     thread_id: Option<i64>,
     question: &str,
 ) -> Result<TurnSetup, String> {
+    let workspace_root = federation.root.as_path();
     // No tier above the workspace root: `None` is what makes "the workspace tier
-    // alone" structural — no member root is passed, so no member is read.
+    // alone" structural — no member root is passed, so no member's `[chat]`
+    // drives this chat.
     let resolution =
         resolve_chat(workspace_root, None).map_err(|e| resolution_fault("chat", &e))?;
     let provider = workspace_turn_provider(workspace_root, &resolution)?;
+    check_read_roots(federation, &resolution)?;
     prepare_turn(workspace_root, provider, resolution.policy, thread_id, question)
+}
+
+/// Fail the turn up front, by name, when a source sandbox the turn's tools read
+/// through would not open ([NFR-SE-04], sprint-84 HF-1) — rather than letting
+/// each addressed source call fail on its own while the turn answers without
+/// the docs.
+///
+/// Two checks, each the member chat's ([`chat_sandbox`]) and in this order: the
+/// workspace tier's `[chat] read_roots` against the workspace root (`resolution`
+/// is [`resolve_chat`] there with no tier above it), then each member's
+/// **effective** read roots in manifest order, resolved through the seam over the
+/// member and the workspace root exactly as its addressed sandbox resolves them.
+/// A member that inherits the workspace's table reads through the workspace's
+/// read roots, so a bad workspace entry is named against the workspace root
+/// before any member is checked.
+///
+/// Config reads and canonicalisation only: no member engine is started
+/// ([NFR-PE-10]). A member whose `[chat]` cannot be read fails the turn by name
+/// too — its read roots cannot be established, and its addressed sandbox would
+/// refuse every call for the same reason.
+///
+/// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn check_read_roots(federation: &Federation, resolution: &ChatResolution) -> Result<(), String> {
+    let workspace_root = federation.root.as_path();
+    chat_sandbox(workspace_root, None, resolution).map_err(|e| {
+        format!(
+            "could not open the source sandbox of the workspace root {}: {e}",
+            workspace_root.display()
+        )
+    })?;
+    for Member { name, root } in &federation.members {
+        let member = resolve_chat(root, Some(workspace_root))
+            .map_err(|e| resolution_fault(&format!("workspace member {name}'s chat"), &e))?;
+        chat_sandbox(root, Some(workspace_root), &member).map_err(|e| {
+            format!("could not open the source sandbox of the workspace member {name}: {e}")
+        })?;
+    }
+    Ok(())
 }
 
 /// The workspace chat's readiness verdict ([FR-WS-34], [NFR-CC-04]): the
@@ -206,8 +252,8 @@ mod tests {
     use logos_core::Engine;
     use tempfile::TempDir;
 
-    use super::{build_workspace_setup, launch_workspace};
-    use crate::chat::{unbounded_chat_channel, ChatFrame};
+    use super::{build_workspace_setup, launch_workspace, TurnSetup, WorkspaceChatService};
+    use crate::chat::{unbounded_chat_channel, ChatFrame, ChatService};
 
     const WS_MODEL: &str = "workspace/model";
     const WS_KEY: &str = "sk-workspace-only-ws42";
@@ -242,8 +288,30 @@ mod tests {
         Estate { _tmp: tmp, ws, svc }
     }
 
+    /// The two-member federation over `ws` (`svc`, `web`) the setup reads.
+    fn federation(ws: &Path) -> Federation {
+        Federation {
+            name: "shop".to_string(),
+            root: ws.to_path_buf(),
+            members: ["svc", "web"]
+                .into_iter()
+                .map(|name| Member { name: name.to_string(), root: ws.join(name) })
+                .collect(),
+            default: None,
+            links: Vec::new(),
+            governance: Default::default(),
+            warm_concurrency: None,
+            member_kinds: Default::default(),
+        }
+    }
+
+    /// The workspace setup over `e`'s federation.
+    fn setup(e: &Estate, thread: Option<i64>, question: &str) -> Result<TurnSetup, String> {
+        build_workspace_setup(&federation(&e.ws), thread, question)
+    }
+
     fn refusal(e: &Estate) -> String {
-        build_workspace_setup(&e.ws, None, "q")
+        setup(e, None, "q")
             .err()
             .expect("an incomplete workspace tier refuses the turn")
     }
@@ -311,7 +379,7 @@ mod tests {
             &format!("[chat]\nmodel = \"{WS_MODEL}\"\nbase_url = \"https://workspace.example/v1\"\n"),
         );
         write(&e.ws, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
-        let setup = build_workspace_setup(&e.ws, None, "which services exist?").expect("a turn");
+        let setup = setup(&e, None, "which services exist?").expect("a turn");
         assert_eq!((setup.model_id.as_str(), setup.api_key.as_str()), (WS_MODEL, WS_KEY));
         assert_eq!(setup.base_url, "https://workspace.example/v1");
 
@@ -336,7 +404,7 @@ mod tests {
             &format!("[chat]\nmodel = \"{WS_MODEL}\"\nhistory_max_turns = 1\n"),
         );
         write(&e.ws, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
-        let first = build_workspace_setup(&e.ws, None, "first question").expect("turn 1");
+        let first = setup(&e, None, "first question").expect("turn 1");
         let thread = first.thread_id;
         let answer = |text: &str| {
             ChatStore::open(&e.ws)
@@ -345,9 +413,9 @@ mod tests {
                 .unwrap();
         };
         answer("first answer");
-        build_workspace_setup(&e.ws, Some(thread), "second question").expect("turn 2");
+        setup(&e, Some(thread), "second question").expect("turn 2");
         answer("second answer");
-        let third = build_workspace_setup(&e.ws, Some(thread), "third question").expect("turn 3");
+        let third = setup(&e, Some(thread), "third question").expect("turn 3");
         assert_eq!(third.history.turns().len(), 1, "{:?}", third.history);
         assert_eq!(third.history.turns()[0].user, "second question");
         assert_eq!(third.history.omitted(), 1);
@@ -356,21 +424,8 @@ mod tests {
     /// A lazy two-member federation over `ws` (`svc`, `web`), as the serve's
     /// registry holds it.
     fn xservice(ws: &Path) -> XserviceBacking {
-        let federation = Federation {
-            name: "shop".to_string(),
-            root: ws.to_path_buf(),
-            members: ["svc", "web"]
-                .into_iter()
-                .map(|name| Member { name: name.to_string(), root: ws.join(name) })
-                .collect(),
-            default: None,
-            links: Vec::new(),
-            governance: Default::default(),
-            warm_concurrency: None,
-            member_kinds: Default::default(),
-        };
         let backing = Arc::new(Backing::Federated(Box::new(EngineRegistry::<Engine>::new(
-            federation,
+            federation(ws),
             RegistryMode::Lazy,
         ))));
         XserviceBacking::federated(backing, Arc::new(ContractBridge::new())).expect("federated")
@@ -399,7 +454,7 @@ mod tests {
         thread: Option<i64>,
         question: &str,
     ) -> (i64, Vec<ChatFrame>) {
-        let setup = build_workspace_setup(ws, thread, question).expect("a configured tier");
+        let setup = build_workspace_setup(&federation(ws), thread, question).expect("a configured tier");
         let thread_id = setup.thread_id;
         let (run, _dial) = setup.into_run(question.to_string());
         let (tx, mut rx) = unbounded_chat_channel();
@@ -483,5 +538,56 @@ mod tests {
         );
         assert_eq!(xs.registry().resident_count(), 0, "neither turn opened a member");
         assert!(!e.svc.join(".logos/chat.db").exists(), "no member store is touched");
+    }
+
+    /// Sprint-84 HF-1: checking every member's read roots is config reads only —
+    /// no member engine starts ([NFR-PE-10]). The production service runs its
+    /// whole setup over a lazy registry; both members own a policy with a valid
+    /// read root, and the turn stops at the pre-send preflight — past the check,
+    /// before the turn's first tool call — with no member resident and none ever
+    /// started. The refusal leg (`web`'s entry missing) is measured the same way.
+    ///
+    /// The instrument sees engines started **through the serve's registry**,
+    /// which is the only way a member engine is reached here; an engine opened
+    /// outside it would move neither counter.
+    ///
+    /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+    #[tokio::test]
+    async fn checking_the_read_roots_starts_no_member_engine() {
+        let e = estate();
+        write(
+            &e.ws,
+            "config.toml",
+            &format!(
+                "[chat]\nmodel = \"{WS_MODEL}\"\n\
+                 base_url = \"https://workspace.example/v1/chat/completions\"\n"
+            ),
+        );
+        write(&e.ws, "secrets.toml", &format!("[chat]\napi_key = \"{WS_KEY}\"\n"));
+        fs::create_dir_all(e.ws.join("shared-docs")).unwrap();
+        let owned = |entry: &str| {
+            format!("[chat]\nmodel = \"{MEMBER_MODEL}\"\nread_roots = [\"{entry}\"]\n")
+        };
+        write(&e.svc, "config.toml", &owned("../shared-docs"));
+        write(&e.ws.join("web"), "config.toml", &owned("../shared-docs"));
+        let xs = xservice(&e.ws);
+        let service = WorkspaceChatService::new(xs.clone());
+        let cost = || (xs.registry().resident_count(), xs.registry().engine_starts());
+
+        let answer = service.start_turn("q".to_string(), None).into_buffered().await;
+        assert!(
+            answer.contains("workspace.example/v1/chat/completions"),
+            "past the check, stopped at the preflight: {answer}"
+        );
+        assert_eq!(cost(), (0, 0), "no member resident, none started");
+
+        write(&e.ws.join("web"), "config.toml", &owned("../no-such-docs"));
+        let refused = service.start_turn("q".to_string(), None).into_buffered().await;
+        assert!(
+            refused.contains("the source sandbox of the workspace member web")
+                && refused.contains("../no-such-docs"),
+            "{refused}"
+        );
+        assert_eq!(cost(), (0, 0), "the refusal started none either");
     }
 }

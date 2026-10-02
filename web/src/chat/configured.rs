@@ -58,7 +58,7 @@ use chat_agent::{
     thread_window, BudgetTree, ChatRole, ChatStore, ConversationWindow, MemoryGrounding,
     MemoryStore, Orchestrator, Planner, SubagentRoster, SynthesizerGrounding,
 };
-use logos_core::config::{resolve_chat, ChatConfig, ChatProvider};
+use logos_core::config::{resolve_chat, ChatConfig, ChatProvider, ChatResolution};
 use logos_core::Engine;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -186,22 +186,42 @@ fn build_setup(
     // is the seam's origins — the same facts the tab reads ([ADR-67] §6).
     let provider = turn_provider(root, workspace_root, &resolution)?;
 
-    // `[chat] read_roots` travel with the policy table, so they resolve against
-    // the root that declared that table: the workspace root for an inherited
-    // policy, else this member (sprint-79 HF-1) — the rule the workspace chat's
-    // addressed source tools read through too. A missing entry fails the turn
-    // by name — reported, never dropped — and, like the configure-first
-    // verdict, before any store is touched, so it records no orphan thread.
+    // A missing read root fails the turn by name — reported, never dropped —
+    // and, like the configure-first verdict, before any store is touched, so it
+    // records no orphan thread.
     let sandbox = Arc::new(
-        Sandbox::from_root(root)
-            .and_then(|sandbox| {
-                Ok(sandbox.with_chat_read_roots(root, workspace_root, &resolution)?)
-            })
+        chat_sandbox(root, workspace_root, &resolution)
             .map_err(|e| format!("could not open the source sandbox: {e}"))?,
     );
 
     let turn = prepare_turn(root, provider, resolution.policy, thread_id, question)?;
     Ok(ChatSetup { sandbox, turn })
+}
+
+/// The source sandbox the chat reading `root` reads through: `root`'s
+/// `ignored_dirs` and its effective `[chat] read_roots` ([`resolution`] from
+/// [`resolve_chat`] over `root` and `workspace_root`). The read roots travel with
+/// the policy table, so they resolve against the root that declared that table:
+/// the workspace root for an inherited policy, else `root` (sprint-79 HF-1) —
+/// the rule the workspace chat's addressed source tools read through too.
+///
+/// Config reads and path canonicalisation only: no engine, no store. The member
+/// chat builds its turn's sandbox here; the workspace chat checks every member's
+/// here before its turn touches a store (sprint-84 HF-1), so a turn either
+/// opens all of them or fails naming the one that would not open.
+///
+/// # Errors
+/// A config-load or root-canonicalisation failure, or a declared read root that
+/// does not exist, is not a directory, or cannot be canonicalised
+/// ([`SandboxError::BadReadRoot`](agent_core::SandboxError::BadReadRoot)).
+///
+/// [`resolution`]: logos_core::config::ChatResolution
+pub(super) fn chat_sandbox(
+    root: &Path,
+    workspace_root: Option<&Path>,
+    resolution: &ChatResolution,
+) -> anyhow::Result<Sandbox> {
+    Ok(Sandbox::from_root(root)?.with_chat_read_roots(root, workspace_root, resolution)?)
 }
 
 /// Open the conversation a turn appends to under `store_root`'s
