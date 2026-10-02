@@ -47,7 +47,7 @@
  */
 
 import { useCallback, useState } from "react";
-import type { MouseEvent } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import {
   ActionBarPrimitive,
   AssistantRuntimeProvider,
@@ -57,7 +57,11 @@ import {
   useMessage,
 } from "@assistant-ui/react";
 
-import { fetchChatConfig } from "../../api/chatClient.ts";
+import {
+  fetchChatConfig,
+  MEMBER_CHAT_ROUTES,
+  WORKSPACE_CHAT_ROUTES,
+} from "../../api/chatClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import { Button, Callout, Card } from "../../components/index.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
@@ -68,10 +72,12 @@ import {
   chatReadiness,
   chatScope,
   configureFirstCopy,
+  consentEntries,
   endpointHost,
   hasConsent,
+  memberChatStorageScope,
+  memberReadRootsDisclosure,
   modelLabel,
-  readRoots,
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
@@ -80,7 +86,9 @@ import {
   WORKSPACE_SECRETS_FILE,
   type ChatConfigReadModel,
   type ChatReady,
+  type ChatStorageScope,
   type ConfigureFirst as ConfigureFirstState,
+  type ReadRootsDisclosure,
   type TurnState,
 } from "./chatModel.ts";
 import styles from "./Chat.module.css";
@@ -89,6 +97,7 @@ export function ChatView() {
   const config = useApiResource<ChatConfigReadModel>(() => fetchChatConfig(), []);
   const { mode, member } = useWorkspace();
   const scope = chatScope(mode, member);
+  const storageScope = memberChatStorageScope(scope);
   const repairHref = workspaceConfigRepairHref(scope);
   return (
     <div className={styles.view}>
@@ -102,7 +111,20 @@ export function ChatView() {
           const verdict = chatReadiness(model, scope);
           // Only the effective policy crosses into the configured body — the
           // credential is presence-only and never reaches it (NFR-SE-07).
-          return verdict.ready ? <ChatConfigured ready={verdict} /> : <ConfigureFirst state={verdict} />;
+          // Keyed by the storage scope, so a scope change re-seeds the remembered
+          // thread and consent even where the shell's own member key does not
+          // remount this view (S-485).
+          return verdict.ready ? (
+            <ChatConfigured
+              key={storageScope}
+              ready={verdict}
+              surface="member"
+              storageScope={storageScope}
+              disclosure={memberReadRootsDisclosure(verdict)}
+            />
+          ) : (
+            <ConfigureFirst state={verdict} />
+          );
         }}
       </AsyncResource>
     </div>
@@ -177,26 +199,58 @@ function ConfigureFirst({ state }: { state: ConfigureFirstState }) {
   );
 }
 
+/** Which chat a configured surface serves (S-485, [FR-WS-34], [ADR-71]): the
+ *  member chat, or the workspace chat. It picks the routes the surface talks to and
+ *  the words its disclosures use; nothing else about the surface differs. */
+export type ChatSurfaceKind = "member" | "workspace";
+
+export interface ChatConfiguredProps {
+  ready: ChatReady;
+  surface: ChatSurfaceKind;
+  /** The scope the remembered thread and the consent are keyed by. */
+  storageScope: ChatStorageScope;
+  /** The extra read roots the consent banner and status band name. */
+  disclosure: ReadRootsDisclosure;
+  /** What an empty history rail says, when the chat has more to say than the
+   *  member chat's default. */
+  emptyRailNote?: ReactNode;
+}
+
 /** The configured chat surface: the lead callout (the consent banner, then the
  *  S-309 status band), the conversation-history rail (S-210/S-211), and the
  *  assistant-ui thread inside the view's `Card` (S-308,
  *  [FR-UI-33]). There is no global Clear-history — deletion is per conversation,
- *  in the rail (S-211, [FR-UI-26], [ADR-47]). */
-function ChatConfigured({ ready }: { ready: ChatReady }) {
+ *  in the rail (S-211, [FR-UI-26], [ADR-47]).
+ *
+ *  Shared by the member chat and the Workspace Chat (S-485, frontend-design
+ *  §4.22): the component set is reused whole, with the chat it serves as a
+ *  parameter. */
+export function ChatConfigured({
+  ready,
+  surface,
+  storageScope,
+  disclosure,
+  emptyRailNote,
+}: ChatConfiguredProps) {
+  const routes = surface === "workspace" ? WORKSPACE_CHAT_ROUTES : MEMBER_CHAT_ROUTES;
   // Consent covers the disclosed read roots too (HF-1): a new or changed set
-  // shows the banner again, naming them before anything is sent.
-  const [consented, setConsented] = useState<boolean>(() => hasConsent(readRoots(ready.policy)));
+  // shows the banner again, naming them before anything is sent. It is this
+  // chat's own consent (S-485): another scope's acceptance does not carry over.
+  const entries = consentEntries(disclosure);
+  const [consented, setConsented] = useState<boolean>(() => hasConsent(storageScope, entries));
   // The rail collapses behind a toggle below ~1023px (S-210 AC-3); `railOpen`
   // drives that toggle. At ≥1024px the rail is always shown (CSS), so this state
   // is inert there — it only gates the narrow-viewport disclosure.
   const [railOpen, setRailOpen] = useState(false);
   const { runtime, threads, activeThreadId, selectThread, newChat, deleteThread, threadsError } =
-    useChatRuntime(consented);
+    useChatRuntime(consented, routes, storageScope);
 
+  // The entries are re-derived each render; their joined form is the stable dep.
+  const entriesKey = JSON.stringify(entries);
   const acceptConsent = useCallback(() => {
-    rememberConsent(readRoots(ready.policy));
+    rememberConsent(storageScope, JSON.parse(entriesKey) as string[]);
     setConsented(true);
-  }, [ready.policy]);
+  }, [storageScope, entriesKey]);
 
   // Deleting keeps the rail OPEN (unlike select / new chat): the user is managing
   // the list and usually deletes more than one row.
@@ -223,7 +277,16 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
           persistent status band (S-309, [FR-UI-33]) once consented. Here rather
           than inside `.main`, it leads the view at every width — below ~1023px the
           panes stack and the rail toggle and list come before `.main`. */}
-      {consented ? <StatusBand ready={ready} /> : <ConsentBanner ready={ready} onAccept={acceptConsent} />}
+      {consented ? (
+        <StatusBand ready={ready} disclosure={disclosure} />
+      ) : (
+        <ConsentBanner
+          ready={ready}
+          surface={surface}
+          disclosure={disclosure}
+          onAccept={acceptConsent}
+        />
+      )}
 
       <div className={styles.layout}>
         <button
@@ -247,6 +310,7 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
             onNewChat={onNewChat}
             onDelete={onDelete}
             error={threadsError}
+            emptyNote={emptyRailNote}
           />
         </aside>
 
@@ -278,16 +342,34 @@ function ChatConfigured({ ready }: { ready: ChatReady }) {
 /** The first-use consent disclosure (NFR-SE-07): names the EFFECTIVE endpoint and
  *  what is sent before any outbound call — and, when the policy or the key is
  *  inherited, says so, since the endpoint is then one this member's own
- *  `config.toml` never names. The composer is disabled until it is accepted. */
-function ConsentBanner({ ready, onAccept }: { ready: ChatReady; onAccept: () => void }) {
+ *  `config.toml` never names. The composer is disabled until it is accepted.
+ *
+ *  The Workspace Chat's disclosure (S-485) names the workspace root as the
+ *  endpoint's declarer and the members as the excerpts' source. */
+function ConsentBanner({
+  ready,
+  surface,
+  disclosure,
+  onAccept,
+}: {
+  ready: ChatReady;
+  surface: ChatSurfaceKind;
+  disclosure: ReadRootsDisclosure;
+  onAccept: () => void;
+}) {
   const chat = ready.policy;
   return (
     <Callout label="BEFORE YOU START" tone="warm" className={styles.consent}>
       <p>
         Asking a question sends your message together with{" "}
-        <strong>source and graph excerpts</strong> from this project to{" "}
+        <strong>source and graph excerpts</strong> from{" "}
+        {surface === "workspace" ? "this workspace's members" : "this project"} to{" "}
         <strong>{endpointHost(chat)}</strong>{" "}
-        {ready.policyOrigin === "workspace" ? (
+        {surface === "workspace" ? (
+          <>
+            (the <code>{chat.provider}</code> endpoint declared at the workspace root)
+          </>
+        ) : ready.policyOrigin === "workspace" ? (
           <>
             (the <code>{chat.provider}</code> endpoint inherited from the workspace root)
           </>
@@ -299,7 +381,7 @@ function ConsentBanner({ ready, onAccept }: { ready: ChatReady; onAccept: () => 
         .{ready.credentialOrigin === "workspace" && " The API key is inherited from the workspace root."}{" "}
         Nothing is sent until you ask.
       </p>
-      <ReadRootsNote ready={ready} />
+      <ReadRootsNote disclosure={disclosure} />
       <p className={styles.providerLine}>
         {chat.provider} · {endpointHost(chat)} · {chat.model}
       </p>
@@ -323,7 +405,7 @@ function ConsentBanner({ ready, onAccept }: { ready: ChatReady; onAccept: () => 
  * and vanish after the first message ({@link EmptyHint}) — they now persist
  * here instead, moved rather than duplicated.
  */
-function StatusBand({ ready }: { ready: ChatReady }) {
+function StatusBand({ ready, disclosure }: { ready: ChatReady; disclosure: ReadRootsDisclosure }) {
   const chat = ready.policy;
   return (
     <Callout label="CHAT" tone="muted" className={styles.status}>
@@ -334,32 +416,57 @@ function StatusBand({ ready }: { ready: ChatReady }) {
         Budget tree: {chat.max_tool_calls} tool calls, {chat.max_subagent_tool_calls} per
         subagent, {chat.max_replans} replans.
       </p>
-      <ReadRootsNote ready={ready} />
+      <ReadRootsNote disclosure={disclosure} />
     </Callout>
   );
 }
 
 /** The extra read roots (`[chat] read_roots`, sprint-79 HF-1), named wherever the
- *  view says what is sent: files under them can be read through this project's
- *  symlinks and quoted to the endpoint, so the consent banner and the status band
- *  both name them. Renders nothing when none are declared — the default. An
- *  inherited table's entries are relative to the workspace root that declared it,
- *  which is said, since this member's own `config.toml` never names them. */
-function ReadRootsNote({ ready }: { ready: ChatReady }) {
-  const roots = readRoots(ready.policy);
-  if (roots.length === 0) return null;
+ *  view says what is sent: files under them can be read through symlinks and
+ *  quoted to the endpoint, so the consent banner and the status band both name
+ *  them. Renders nothing when none are declared — the default. A root relative to
+ *  another root than the chat's own says which (an inherited table's entries are
+ *  relative to the workspace root that declared it, which this member's own
+ *  `config.toml` never names); the Workspace Chat's groups also name the members
+ *  that read through them, and any member whose roots could not be listed
+ *  (S-485). */
+function ReadRootsNote({ disclosure }: { disclosure: ReadRootsDisclosure }) {
+  const { groups, unreadable, through } = disclosure;
+  if (groups.length === 0 && unreadable.length === 0) return null;
   return (
-    <p className={styles.budgetLine}>
-      Extra read roots:{" "}
-      {roots.map((root, i) => (
-        <span key={root}>
-          {i > 0 && ", "}
-          <code>{root}</code>
-        </span>
-      ))}
-      {ready.policyOrigin === "workspace" && " (relative to the workspace root)"} — files
-      under them, reached through this project&apos;s symlinks, can be sent too.
-    </p>
+    <>
+      {groups.length > 0 && (
+        <p className={styles.budgetLine}>
+          Extra read roots:{" "}
+          {groups.map((group, g) => (
+            <span key={`${group.relativeTo ?? ""}-${g}`}>
+              {g > 0 && "; "}
+              {group.roots.map((root, i) => (
+                <span key={root}>
+                  {i > 0 && ", "}
+                  <code>{root}</code>
+                </span>
+              ))}
+              {group.relativeTo !== null &&
+                ` (relative to ${group.relativeTo}${
+                  group.readBy.length > 0 && group.readBy.join() !== group.relativeTo
+                    ? `; read by ${group.readBy.join(", ")}`
+                    : ""
+                })`}
+            </span>
+          ))}{" "}
+          — files under them, reached through {through} symlinks, can be sent too.
+        </p>
+      )}
+      {unreadable.length > 0 && (
+        <p className={styles.budgetLine}>
+          The chat configuration of {unreadable.join(", ")} could not be read, so{" "}
+          {unreadable.length === 1 ? "its" : "their"} read roots are not listed here; a source
+          call on {unreadable.length === 1 ? "that member" : "those members"} fails until it is
+          repaired.
+        </p>
+      )}
+    </>
   );
 }
 

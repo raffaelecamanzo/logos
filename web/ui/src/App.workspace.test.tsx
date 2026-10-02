@@ -82,6 +82,8 @@ const { APP_ROUTES, pathname } = vi.hoisted(() => ({
     "/workspace-health",
     "/workspace-statistics",
     "/workspace-config",
+    // S-485: the Workspace Chat — app-scoped, so a member switch must not remount it.
+    "/workspace-chat",
   ] as string[],
   pathname: { current: "/" },
 }));
@@ -299,6 +301,61 @@ describe("the /overview migration keeps the member (S-426, S-194)", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
     expect(screen.queryByTestId("view")).toBeNull();
     expect(viewCalls(calls())).toEqual([]);
+  });
+});
+
+describe("/chat lands on the Workspace Chat in a workspace (S-485, FR-UI-35, ADR-71)", () => {
+  const realRouter = async () => await vi.importActual<typeof import("./router.tsx")>("./router.tsx");
+
+  /** Route `redirect` through the REAL one, and move the pinned pathname with it. */
+  async function followRedirects() {
+    const { redirect: realRedirect } = await realRouter();
+    // This suite's `afterEach` resets no mock, so start from a clean one.
+    vi.mocked(redirect).mockReset();
+    vi.mocked(redirect).mockImplementation((path: string) => {
+      realRedirect(path);
+      pathname.current = window.location.pathname;
+    });
+  }
+
+  it.each(["/chat", "/chat?repo=web"])("redirects %s to /workspace-chat, keeping the member", async (url) => {
+    await followRedirects();
+    pathname.current = "/chat";
+    openAt(url);
+    const calls = stubApi();
+    render(app());
+
+    // The app-scoped Workspace Chat mounted — not the member chat — on its own route.
+    await waitFor(() => expect(appViewCalls(calls())).toHaveLength(1));
+    expect(viewCalls(calls())).toEqual([]);
+    expect(window.location.pathname).toBe("/workspace-chat");
+    // A replace, carrying the member the URL named (or the default's stamp).
+    expect(window.location.search).toBe(url.includes("repo=web") ? "?repo=web" : "?repo=api");
+    expect(vi.mocked(redirect)).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries an UNKNOWN ?repo= across, so the refusal is not bypassed", async () => {
+    await followRedirects();
+    pathname.current = "/chat";
+    openAt("/chat?repo=ghost");
+    stubApi();
+    render(app());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/No workspace member/);
+    expect(window.location.search).toBe("?repo=ghost");
+    expect(screen.queryByTestId("view")).toBeNull();
+  });
+
+  it("does not redirect /chat in a single-root serve — the member chat is served as always", async () => {
+    vi.mocked(redirect).mockReset();
+    pathname.current = "/chat";
+    openAt("/chat");
+    const calls = stubApi({ probeStatus: 404 });
+    render(app());
+
+    await waitFor(() => expect(viewCalls(calls()).length).toBe(1));
+    expect(vi.mocked(redirect)).not.toHaveBeenCalled();
+    expect(appViewCalls(calls())).toEqual([]);
   });
 });
 

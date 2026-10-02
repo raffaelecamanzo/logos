@@ -4,7 +4,11 @@ import {
   ANTHROPIC_HOST,
   applyFrame,
   boundNote,
+  chatStorageKey,
+  consentEntries,
   CONSENT_KEY,
+  memberChatStorageScope,
+  memberReadRootsDisclosure,
   READ_ROOTS_CONSENT_KEY,
   endpointHost,
   hasConsent,
@@ -20,12 +24,21 @@ import {
   rememberConsent,
   roleLabel,
   turnEndedEmpty,
+  workspaceChatReadiness,
   workspaceConfigRepairHref,
+  workspaceConfigureFirstCopy,
+  workspaceReadRootsDisclosure,
+  WORKSPACE_CHAT_SCOPE,
+  WORKSPACE_CONFIG_FILE,
+  WORKSPACE_SECRETS_FILE,
   type ChatConfigReadModel,
   type ChatOrigin,
   type ChatPolicy,
+  type ChatReady,
   type ChatScope,
+  type MemberChatReadRoots,
   type SseFrame,
+  type WorkspaceChatConfigReadModel,
   type TurnState,
   WORKSPACE_CONFIG_HREF,
 } from "./chatModel.ts";
@@ -525,26 +538,177 @@ describe("turnEndedEmpty", () => {
 describe("consent gate", () => {
   afterEach(() => window.localStorage.clear());
 
-  it("remembers an acknowledgement across reads", () => {
-    expect(hasConsent()).toBe(false);
-    rememberConsent();
-    expect(window.localStorage.getItem(CONSENT_KEY)).toBe("1");
-    expect(hasConsent()).toBe(true);
+  it("remembers an acknowledgement across reads, under its scope's key", () => {
+    expect(hasConsent("single")).toBe(false);
+    rememberConsent("single");
+    expect(window.localStorage.getItem(chatStorageKey(CONSENT_KEY, "single"))).toBe("1");
+    expect(window.localStorage.getItem(CONSENT_KEY)).toBeNull();
+    expect(hasConsent("single")).toBe(true);
   });
 
   it("covers declared read roots only for the exact set it disclosed (HF-1)", () => {
     // A plain first-use consent — given before any read root was declared —
     // still covers a policy with none, but not one that declares some.
-    rememberConsent();
-    expect(hasConsent([])).toBe(true);
-    expect(hasConsent(["../logos-docs"])).toBe(false);
+    rememberConsent("single");
+    expect(hasConsent("single", [])).toBe(true);
+    expect(hasConsent("single", ["../logos-docs"])).toBe(false);
 
-    rememberConsent(["../logos-docs", "/srv/specs"]);
-    expect(window.localStorage.getItem(READ_ROOTS_CONSENT_KEY)).toBe('["../logos-docs","/srv/specs"]');
+    rememberConsent("single", ["../logos-docs", "/srv/specs"]);
+    expect(window.localStorage.getItem(chatStorageKey(READ_ROOTS_CONSENT_KEY, "single"))).toBe(
+      '["../logos-docs","/srv/specs"]',
+    );
     // Order and repetition do not matter; the SET does.
-    expect(hasConsent(["/srv/specs", "../logos-docs", "/srv/specs"])).toBe(true);
-    expect(hasConsent(["../logos-docs"])).toBe(false);
-    expect(hasConsent(["../logos-docs", "/srv/specs", "/extra"])).toBe(false);
+    expect(hasConsent("single", ["/srv/specs", "../logos-docs", "/srv/specs"])).toBe(true);
+    expect(hasConsent("single", ["../logos-docs"])).toBe(false);
+    expect(hasConsent("single", ["../logos-docs", "/srv/specs", "/extra"])).toBe(false);
+  });
+
+  it("never lets one scope's consent cover another's (S-485)", () => {
+    rememberConsent("member:api");
+    expect(hasConsent("member:api")).toBe(true);
+    for (const other of ["member:web", "single", WORKSPACE_CHAT_SCOPE] as const) {
+      expect(hasConsent(other)).toBe(false);
+    }
+  });
+
+  it("does not trust the member-blind key every chat shared before S-485", () => {
+    // Its scope is unknown — a workspace serve's member chat wrote it — so it is
+    // fail-safe ignored: one fresh prompt, never a borrowed consent.
+    window.localStorage.setItem(CONSENT_KEY, "1");
+    expect(hasConsent("single")).toBe(false);
+    expect(hasConsent(WORKSPACE_CHAT_SCOPE)).toBe(false);
+  });
+});
+
+describe("the chat storage scope (S-485)", () => {
+  it("spells the member chat's scope as the shell spells its cache key", () => {
+    expect(memberChatStorageScope({ mode: "single" })).toBe("single");
+    expect(memberChatStorageScope({ mode: "workspace", member: "api" })).toBe("member:api");
+    expect(WORKSPACE_CHAT_SCOPE).toBe("workspace");
+  });
+
+  it("qualifies a key base by scope, so two scopes never share a key", () => {
+    expect(chatStorageKey("logos.chat.activeThread", "member:api")).toBe(
+      "logos.chat.activeThread:member:api",
+    );
+    expect(chatStorageKey("k", "member:api")).not.toBe(chatStorageKey("k", "member:web"));
+    expect(chatStorageKey("k", "single")).not.toBe(chatStorageKey("k", "workspace"));
+  });
+});
+
+const READY: ChatReady = { ready: true, policy: POLICY, policyOrigin: "member", credentialOrigin: "member" };
+
+describe("the read-roots disclosure (sprint-79 HF-1, S-485)", () => {
+  it("member chat: the policy's own roots, qualified only when inherited", () => {
+    expect(memberReadRootsDisclosure(READY).groups).toEqual([]);
+    const own = memberReadRootsDisclosure({ ...READY, policy: { ...POLICY, read_roots: ["../d"] } });
+    expect(own.groups).toEqual([{ roots: ["../d"], relativeTo: null, readBy: [] }]);
+    // Bare entries — the consent identity the member chat always had.
+    expect(consentEntries(own)).toEqual(["../d"]);
+    const inherited = memberReadRootsDisclosure({
+      ...READY,
+      policyOrigin: "workspace",
+      policy: { ...POLICY, read_roots: ["../d"] },
+    });
+    expect(inherited.groups[0].relativeTo).toBe("the workspace root");
+  });
+
+  it("workspace chat: inherited roots once with their readers, owned roots per member, unreadable named", () => {
+    const members: MemberChatReadRoots[] = [
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs"] },
+      { name: "web", policy_origin: "workspace", declared_by: "workspace", read_roots: ["shared"] },
+      { name: "orders", policy_origin: "workspace", declared_by: "workspace", read_roots: ["shared"] },
+      { name: "plain", policy_origin: "unset", declared_by: "member", read_roots: [] },
+      { name: "broken", policy_origin: null, declared_by: null, read_roots: [] },
+    ];
+    const d = workspaceReadRootsDisclosure(members);
+    expect(d.groups).toEqual([
+      { roots: ["shared"], relativeTo: "the workspace root", readBy: ["web", "orders"] },
+      { roots: ["../api-docs"], relativeTo: "api", readBy: ["api"] },
+    ]);
+    expect(d.unreadable).toEqual(["broken"]);
+    expect(consentEntries(d)).toEqual([
+      "the workspace root: shared",
+      "api: ../api-docs",
+      "unreadable: broken",
+    ]);
+  });
+
+  it("asks again when the same root moves to another declaring root", () => {
+    const owned = workspaceReadRootsDisclosure([
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["docs"] },
+    ]);
+    const inherited = workspaceReadRootsDisclosure([
+      { name: "api", policy_origin: "workspace", declared_by: "workspace", read_roots: ["docs"] },
+    ]);
+    expect(consentEntries(owned)).not.toEqual(consentEntries(inherited));
+  });
+});
+
+/** The workspace tier's chat slice, declared (`member` = at the workspace root) or not. */
+function tierModel(policy: ChatOrigin, credential: ChatOrigin): WorkspaceChatConfigReadModel {
+  return {
+    ...configModel(policy, credential),
+    config: { error: null },
+    chat_key_error: null,
+  };
+}
+
+describe("workspaceChatReadiness (S-485)", () => {
+  it("is ready only when the workspace root declares both halves", () => {
+    expect(workspaceChatReadiness(tierModel("member", "member")).ready).toBe(true);
+    for (const [p, c] of [
+      ["unset", "unset"],
+      ["member", "unset"],
+      ["unset", "member"],
+    ] as const) {
+      expect(workspaceChatReadiness(tierModel(p, c)).ready).toBe(false);
+    }
+  });
+
+  it("names the absent half, the present one, and the workspace-root files", () => {
+    expect(workspaceChatReadiness(tierModel("unset", "unset"))).toEqual({
+      ready: false,
+      unreadable: false,
+      absent: "both",
+      present: null,
+      workspaceFiles: [WORKSPACE_CONFIG_FILE, WORKSPACE_SECRETS_FILE],
+    });
+    expect(workspaceChatReadiness(tierModel("member", "unset"))).toMatchObject({
+      absent: "key",
+      present: "model",
+      workspaceFiles: [WORKSPACE_SECRETS_FILE],
+    });
+    expect(workspaceChatReadiness(tierModel("unset", "member"))).toMatchObject({
+      absent: "model",
+      present: "key",
+      workspaceFiles: [WORKSPACE_CONFIG_FILE],
+    });
+  });
+
+  it("is the unreadable state — never 'not configured' — when a tier file does not parse", () => {
+    const model: WorkspaceChatConfigReadModel = {
+      effective_chat: null,
+      config: { error: "config.toml line 2: expected `]`" },
+      chat_key_error: null,
+    };
+    expect(workspaceChatReadiness(model)).toEqual({
+      ready: false,
+      unreadable: true,
+      faults: ["config.toml line 2: expected `]`"],
+    });
+  });
+
+  it("words configure-first as the workspace turn's refusal: the root, the half, no member", () => {
+    const state = workspaceChatReadiness(tierModel("member", "unset"));
+    if (state.ready || state.unreadable) throw new Error("expected configure-first");
+    const copy = workspaceConfigureFirstCopy(state, "shop");
+    expect(copy.summary).toBe(
+      "The workspace chat is not configured yet for the workspace root of shop — no API key is declared there.",
+    );
+    expect(copy.present).toBe("Its provider model is declared.");
+    expect(copy.memberNote).toBe("A member's own [chat] does not configure the workspace chat.");
+    expect(copy.action).toBe("Add an API key");
   });
 });
 

@@ -528,6 +528,26 @@ impl ChatResolution {
     pub fn api_key(&self) -> Option<&str> {
         self.secrets.chat_api_key()
     }
+
+    /// The root that declared [`policy`](Self::policy)'s `read_roots` — the root
+    /// its relative entries resolve against (sprint-79 HF-1, [ADR-67]):
+    /// [`ChatOrigin::Workspace`] for an inherited policy, else
+    /// [`ChatOrigin::Member`]. Never [`ChatOrigin::Unset`]: with no root
+    /// declaring a model the policy is the member's own table, read roots
+    /// included.
+    ///
+    /// The one spelling of that rule, read by the source sandbox a chat reads
+    /// through and by the read-model that discloses those roots before a turn
+    /// ([S-485]), so the disclosure cannot name a root the sandbox does not use.
+    ///
+    /// [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
+    /// [S-485]: ../../../docs/planning/journal.md#s-485-workspace-chat-in-the-workspace-section-and-no-member-chat-in-workspace-mode
+    pub fn read_roots_origin(&self) -> ChatOrigin {
+        match self.policy_origin {
+            ChatOrigin::Workspace => ChatOrigin::Workspace,
+            ChatOrigin::Member | ChatOrigin::Unset => ChatOrigin::Member,
+        }
+    }
 }
 
 /// `Debug` that **omits** the raw key ([NFR-SE-07]) — the masked
@@ -1290,6 +1310,29 @@ mod resolution_tests {
         let r = e.resolve();
         assert_eq!(r.policy_origin, ChatOrigin::Workspace);
         assert_eq!(r.policy, parsed(WORKSPACE_CHAT));
+    }
+
+    /// [S-485]: the read roots are declared by whichever root the policy came
+    /// from — the workspace for an inherited table, the member otherwise,
+    /// including an unset policy, which is the member's own table.
+    #[test]
+    fn the_read_roots_are_declared_by_the_root_the_policy_came_from() {
+        let owned = Estate::new();
+        Estate::policy(&owned.member, MEMBER_CHAT);
+        Estate::policy(&owned.workspace, WORKSPACE_CHAT);
+        assert_eq!(owned.resolve().read_roots_origin(), ChatOrigin::Member);
+
+        let inherited = Estate::new();
+        Estate::policy(&inherited.member, "[chat]\nread_roots = [\"member-docs\"]\n");
+        Estate::policy(&inherited.workspace, WORKSPACE_CHAT);
+        assert_eq!(inherited.resolve().read_roots_origin(), ChatOrigin::Workspace);
+
+        let unset = Estate::new();
+        Estate::policy(&unset.member, "[chat]\nread_roots = [\"member-docs\"]\n");
+        let r = unset.resolve();
+        assert_eq!(r.policy_origin, ChatOrigin::Unset);
+        assert_eq!(r.read_roots_origin(), ChatOrigin::Member);
+        assert_eq!(r.policy.read_roots, ["member-docs"]);
     }
 
     /// A workspace table with no `model` declares no policy: the member's own

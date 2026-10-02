@@ -17,11 +17,14 @@
 
 import { useCallback, useRef, useState, type MutableRefObject } from "react";
 
-import { deleteChatThread, fetchThreads } from "../../api/chatClient.ts";
+import { deleteChatThread, fetchThreads, type ChatRoutes } from "../../api/chatClient.ts";
 import type { ThreadSummary } from "./chatModel.ts";
 
 /** What the rail needs from the conversation surface it lives beside. */
 export interface ThreadRailDeps {
+  /** The chat whose conversations this rail lists and deletes (S-485) — the
+   *  member's, or the workspace's own store. */
+  routes: ChatRoutes;
   /** The open conversation, read inside async callbacks without re-binding them. */
   activeThreadIdRef: MutableRefObject<number | null>;
   /** Adopt the conversation a first send just created (S-210 first-send persistence). */
@@ -56,6 +59,7 @@ export interface ThreadRail {
  * adoption, and the per-conversation delete (S-209/S-210/S-211).
  */
 export function useThreadRail({
+  routes,
   activeThreadIdRef,
   adoptThread,
   resetSurface,
@@ -91,7 +95,7 @@ export function useThreadRail({
   const loadThreads = useCallback(async () => {
     const gen = nextThreadsGen();
     try {
-      const list = await fetchThreads();
+      const list = await fetchThreads(routes);
       // A newer read (or a delete) started while this one was in flight — it knows
       // more than we do, so drop this result rather than overwrite it.
       if (threadsGenRef.current !== gen) return;
@@ -103,7 +107,7 @@ export function useThreadRail({
         `Could not load your conversations: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
-  }, [nextThreadsGen]);
+  }, [routes, nextThreadsGen]);
 
   // After a turn settles, refresh the rail (updated_at re-orders the list; the first
   // send auto-titles the new thread). For a genuine new-conversation send, adopt the
@@ -118,7 +122,7 @@ export function useThreadRail({
       const gen = nextThreadsGen();
       let list: ThreadSummary[];
       try {
-        list = await fetchThreads();
+        list = await fetchThreads(routes);
       } catch {
         // The turn itself succeeded and is durable server-side; a rail-refresh
         // failure is non-fatal. But for a brand-new conversation we could not learn
@@ -148,7 +152,7 @@ export function useThreadRail({
         if (created) adoptThread(created.id);
       }
     },
-    [nextThreadsGen, activeThreadIdRef, adoptThread],
+    [routes, nextThreadsGen, activeThreadIdRef, adoptThread],
   );
 
   // Per-conversation delete (S-211, [FR-UI-26], [FR-UI-20], [ADR-47]) — the granular
@@ -166,7 +170,7 @@ export function useThreadRail({
     async (id: number) => {
       let resp: Response;
       try {
-        resp = await deleteChatThread(id);
+        resp = await deleteChatThread(routes, id);
       } catch (e) {
         setThreadsError(
           `Could not delete that conversation: ${e instanceof Error ? e.message : String(e)}`,
@@ -191,7 +195,7 @@ export function useThreadRail({
       setThreadsError(null);
       await loadThreads();
     },
-    [activeThreadIdRef, resetSurface, loadThreads, nextThreadsGen],
+    [routes, activeThreadIdRef, resetSurface, loadThreads, nextThreadsGen],
   );
 
   return {

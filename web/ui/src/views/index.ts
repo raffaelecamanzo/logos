@@ -19,6 +19,7 @@ import type { ComponentType } from "react";
 
 import { ArchitectureView } from "./architecture/ArchitectureView.tsx";
 import { ChatView } from "./chat/ChatView.tsx";
+import { WorkspaceChatView } from "./chat/WorkspaceChatView.tsx";
 import { ConfigView } from "./config/ConfigView.tsx";
 import { DashboardView } from "./dashboard/DashboardView.tsx";
 import { GapsView } from "./gaps/GapsView.tsx";
@@ -83,6 +84,12 @@ export const VIEW_REGISTRY: Readonly<Record<string, ViewComponent>> = {
   // single-root serve states that this is not a workspace; its nav item is
   // workspace-mode-only (nav.ts), and its endpoints answer `404` there.
   "/workspace-config": WorkspaceConfigView,
+  // S-485 — the Workspace Chat (FR-WS-34, ADR-71) over the S-482 workspace chat
+  // routes. Registered unconditionally like the views above, so a hand-typed URL in
+  // a single-root serve states that this is not a workspace; its nav item is
+  // workspace-mode-only, and its endpoints answer `404` there. It lives beside the
+  // member chat in `views/chat/` because it reuses that surface whole.
+  "/workspace-chat": WorkspaceChatView,
 };
 
 /**

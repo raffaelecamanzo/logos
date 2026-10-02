@@ -75,6 +75,9 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   // S-430: the app-level Config editor answers "what is configured", one scope up
   // from the member-scoped Config tab, so it carries the same icon (FR-UI-38).
   "workspace-config": IconConfig,
+  // S-485: the Workspace Chat answers the member Chat's question for the whole
+  // workspace — the member chat it replaces there — so it carries the same icon.
+  "workspace-chat": IconChat,
 };
 
 function NavLink({ item, active, muted }: { item: NavItem; active: boolean; muted?: boolean }) {

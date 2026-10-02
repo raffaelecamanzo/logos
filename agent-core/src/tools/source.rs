@@ -290,7 +290,7 @@ impl Sandbox {
         workspace_root: Option<&Path>,
         resolution: &ChatResolution,
     ) -> Result<Self, SandboxError> {
-        let declaring_root = match (resolution.policy_origin, workspace_root) {
+        let declaring_root = match (resolution.read_roots_origin(), workspace_root) {
             (ChatOrigin::Workspace, Some(workspace_root)) => workspace_root,
             _ => member_root,
         };

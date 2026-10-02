@@ -64,8 +64,8 @@ use logos_core::config::{self as core_config, ConfigReadModel, TierSaveOutcome};
 use logos_core::federation::{
     app_wide_reachability, open_state, query as fed_query, workspace_governance,
     workspace_statistics, xservice_build_deps, Backing, BoundedReachability, BuildDependencies,
-    ContractBridge, DegradedRollup, EngineRegistry, ReachabilityScope, WorkspaceGovernance,
-    WorkspaceStatistics,
+    ContractBridge, DegradedRollup, EngineRegistry, Federation, ReachabilityScope,
+    WorkspaceGovernance, WorkspaceStatistics,
 };
 use logos_core::federation::manifest::{self, ManifestDocument, ManifestSaveOutcome};
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
@@ -1750,6 +1750,88 @@ pub(crate) async fn workspace_config(WorkspaceRoot(root): WorkspaceRoot) -> Resp
     })
     .await;
     respond(model)
+}
+
+/// One member's **effective** chat read roots, as the Workspace Chat's consent
+/// disclosure names them ([S-485], [FR-WS-34]): the roots a repo-addressed source
+/// call on this member reads through, resolved exactly as its sandbox resolves
+/// them ([`ChatResolution::read_roots_origin`]).
+///
+/// [S-485]: ../../docs/planning/journal.md#s-485-workspace-chat-in-the-workspace-section-and-no-member-chat-in-workspace-mode
+/// [FR-WS-34]: ../../docs/specs/requirements/FR-WS-34.md
+/// [`ChatResolution::read_roots_origin`]: logos_core::config::ChatResolution::read_roots_origin
+#[derive(Debug, Serialize)]
+pub(crate) struct MemberChatReadRoots {
+    /// The member's repo-qualified manifest name.
+    name: String,
+    /// Where the member's effective `[chat]` policy came from; `null` when its
+    /// chat config cannot be read — its addressed source calls then fail on
+    /// their own, which is where the workspace turn's read-root check leaves
+    /// that fault too (`chat::workspace`).
+    policy_origin: Option<core_config::ChatOrigin>,
+    /// The root that declared [`read_roots`](Self::read_roots), which is the
+    /// root relative entries resolve against: `member` or `workspace`. `null`
+    /// alongside a `null` origin.
+    declared_by: Option<core_config::ChatOrigin>,
+    /// The effective `[chat] read_roots`, as declared. Empty when none are, or
+    /// when the config cannot be read.
+    read_roots: Vec<String>,
+}
+
+/// `GET /api/v1/workspace/config/read-roots` — every member's effective chat
+/// read roots ([S-485], [FR-WS-34]), in the federation's member order: the
+/// engine-free aggregate the Workspace Chat's consent banner names before any
+/// outbound call ([NFR-SE-07]).
+///
+/// Built from [`resolve_chat`](core_config::resolve_chat)`(member, Some(workspace
+/// root))` per member — config reads only. It is a sibling of
+/// [`workspace_config`] rather than a fan-out over `GET /api/v1/config?repo=<m>`
+/// because that route's [`MemberEngine`] extractor starts the member's engine, so
+/// rendering the banner would warm every member ([NFR-PE-10], the 2026-10-02
+/// planning decision). A member whose config cannot be read is listed with a
+/// `null` origin rather than failing the whole read: one broken member must not
+/// hide the roots every other member discloses. A single-root serve answers the
+/// family's `404`.
+///
+/// [S-485]: ../../docs/planning/journal.md#s-485-workspace-chat-in-the-workspace-section-and-no-member-chat-in-workspace-mode
+/// [FR-WS-34]: ../../docs/specs/requirements/FR-WS-34.md
+/// [NFR-SE-07]: ../../docs/specs/requirements/NFR-SE-07.md
+/// [NFR-PE-10]: ../../docs/specs/requirements/NFR-PE-10.md
+pub(crate) async fn workspace_chat_read_roots(
+    State(backing): State<Arc<Backing<Engine>>>,
+) -> Response {
+    let Some(registry) = backing.as_federated() else {
+        return not_a_workspace();
+    };
+    let federation = registry.federation().clone();
+    let roots = run_blocking("api_v1_workspace_chat_read_roots", Surface::Web, move || {
+        member_chat_read_roots(&federation)
+    })
+    .await;
+    ok(roots)
+}
+
+/// [`workspace_chat_read_roots`]'s read-model over `federation`, touching no engine.
+fn member_chat_read_roots(federation: &Federation) -> Vec<MemberChatReadRoots> {
+    let workspace_root = federation.root.as_path();
+    federation
+        .members
+        .iter()
+        .map(|member| match core_config::resolve_chat(&member.root, Some(workspace_root)) {
+            Ok(resolution) => MemberChatReadRoots {
+                name: member.name.clone(),
+                policy_origin: Some(resolution.policy_origin),
+                declared_by: Some(resolution.read_roots_origin()),
+                read_roots: resolution.policy.read_roots,
+            },
+            Err(_) => MemberChatReadRoots {
+                name: member.name.clone(),
+                policy_origin: None,
+                declared_by: None,
+                read_roots: Vec::new(),
+            },
+        })
+        .collect()
 }
 
 /// `POST /api/v1/workspace/config/save` → [`write_workspace_config`], the

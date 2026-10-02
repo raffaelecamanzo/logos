@@ -40,6 +40,17 @@ export interface NavItem {
   group: NavGroup;
   /** REQUIRED — the scope this view answers for. See {@link NavScope}. */
   scope: NavScope;
+  /**
+   * The id of the {@link WORKSPACE_NAV_ITEMS} entry that answers this view's
+   * question in workspace mode, where this view is therefore NOT offered (S-485,
+   * FR-UI-35, ADR-71): the sidebar drops it, and its route redirects to the
+   * replacement's ({@link workspaceReplacementPath}). Absent — the case for every
+   * view but the member Chat — means offered in both modes.
+   *
+   * Declared on the replaced entry, never derived from a shared label: two views
+   * may share a name across scopes and BOTH be offered (Dashboard, Health…).
+   */
+  replacedInWorkspaceBy?: string;
 }
 
 /** Every navigable view, in sidebar order. */
@@ -50,8 +61,17 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "health", label: "Health", path: "/health", group: "A", scope: "member" },
   { id: "graph", label: "Graph", path: "/graph", group: "A", scope: "member" },
   // Chat — migrated (S-190) to a React SSE client over the unchanged
-  // intent-guarded `POST /chat` stream.
-  { id: "chat", label: "Chat", path: "/chat", group: "A", scope: "member" },
+  // intent-guarded `POST /chat` stream. The MEMBER chat: offered in single-root and
+  // `--standalone` serves only. In a workspace the chat is the Workspace Chat
+  // (S-485, ADR-71), and a member's conversations live in its `--standalone` serve.
+  {
+    id: "chat",
+    label: "Chat",
+    path: "/chat",
+    group: "A",
+    scope: "member",
+    replacedInWorkspaceBy: "workspace-chat",
+  },
   { id: "wiki", label: "Wiki", path: "/wiki", group: "A", scope: "member" },
   {
     id: "architecture",
@@ -113,6 +133,14 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   },
   { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
+  // S-485 (CR-155, FR-WS-34, ADR-71): the Workspace Chat — the workspace roster on
+  // its own route and store (S-482). App-scoped: it answers for the whole
+  // workspace and reads no `?repo=`, so a member switch must not remount it. It
+  // REPLACES the member Chat in workspace mode rather than sitting beside it
+  // (`replacedInWorkspaceBy` on that entry). Group A after the cross-service
+  // surfaces, as frontend-design §3 draws it; a sibling of `/workspace`, not a
+  // child, for the reason the S-428 entries above give.
+  { id: "workspace-chat", label: "Chat", path: "/workspace-chat", group: "A", scope: "app" },
   // S-429 (CR-137, FR-UI-37): usage summed across every member, over an aggregate
   // that constructs no member engine (NFR-PE-10).
   //
@@ -165,10 +193,37 @@ export const NAV_SCOPE_LABELS: Readonly<Record<NavScope, string>> = {
 
 /**
  * The navigable views for the current serve: the unchanged {@link NAV_ITEMS} in
- * single-root mode, plus {@link WORKSPACE_NAV_ITEMS} in workspace mode.
+ * single-root mode; in workspace mode, every one of them a workspace view does not
+ * replace ({@link NavItem.replacedInWorkspaceBy}), plus {@link WORKSPACE_NAV_ITEMS}.
  */
 export function navItemsFor(isWorkspace: boolean): readonly NavItem[] {
-  return isWorkspace ? [...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS] : NAV_ITEMS;
+  return isWorkspace
+    ? [...NAV_ITEMS.filter((item) => item.replacedInWorkspaceBy === undefined), ...WORKSPACE_NAV_ITEMS]
+    : NAV_ITEMS;
+}
+
+/**
+ * Workspace mode only: the route `pathname` redirects to because the view it
+ * resolves to is replaced there (S-485 — `/chat` and its sub-routes land on the
+ * Workspace Chat), or `null` when it is offered as-is. The caller carries the query
+ * and fragment across; this answers for the path alone.
+ *
+ * Read off the same declaration {@link navItemsFor} filters on, so the sidebar
+ * cannot drop a view whose route still mounts it, nor redirect away from one it
+ * still lists.
+ */
+export function workspaceReplacementPath(pathname: string): string | null {
+  const replaced = NAV_ITEMS.find(
+    (item) => item.replacedInWorkspaceBy !== undefined && navItemMatches(item, pathname),
+  );
+  if (!replaced) return null;
+  const replacement = WORKSPACE_NAV_ITEMS.find((item) => item.id === replaced.replacedInWorkspaceBy);
+  if (!replacement) {
+    throw new Error(
+      `nav.ts: "${replaced.id}" is replaced in workspace mode by "${replaced.replacedInWorkspaceBy}", which is not registered`,
+    );
+  }
+  return replacement.path;
 }
 
 /**

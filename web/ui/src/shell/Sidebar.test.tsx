@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StatsInfo } from "../api/types.ts";
-import { NAV_GROUPS, NAV_ITEMS, WORKSPACE_NAV_ITEMS } from "../nav.ts";
+import { NAV_GROUPS, NAV_ITEMS, navItemsFor, WORKSPACE_NAV_ITEMS } from "../nav.ts";
 import { Sidebar } from "./Sidebar.tsx";
 import styles from "./Sidebar.module.css";
 import { WorkspaceProvider } from "../workspace/WorkspaceContext.tsx";
@@ -196,10 +196,13 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
 
     // The app-scoped tabs, above the boundary the selector governs…
     expect(names("Workspace")).toEqual(WORKSPACE_NAV_ITEMS.map((i) => i.label));
-    // …and every member-scoped tab below it. Same list, same order as the
-    // single-root sidebar: the CR-042 A/B/C groups survive INSIDE the section
-    // rather than being re-ordered by it.
-    expect(names("Service")).toEqual(NAV_ITEMS.map((i) => i.label));
+    // …and every member-scoped tab below it. Same order as the single-root
+    // sidebar: the CR-042 A/B/C groups survive INSIDE the section rather than
+    // being re-ordered by it — less the member Chat, which a workspace replaces
+    // with the Workspace Chat (S-485).
+    expect(names("Service")).toEqual(
+      NAV_ITEMS.filter((i) => i.id !== "chat").map((i) => i.label),
+    );
   });
 
   it("keeps each section's CR-042 groups as separate lists in the markup (S-454)", async () => {
@@ -219,7 +222,9 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
       NAV_GROUPS.map((g) => items.filter((i) => i.group === g).length).filter((n) => n > 0);
 
     expect(lists("Workspace")).toEqual(groupSizes(WORKSPACE_NAV_ITEMS));
-    expect(lists("Service")).toEqual(groupSizes(NAV_ITEMS));
+    expect(lists("Service")).toEqual(
+      groupSizes(navItemsFor(true).filter((i) => i.scope === "member")),
+    );
     // Not pinned as 2/3 (see the single-root snapshot below for why), but the
     // property needs a seam to exist: one Workspace group would make it vacuous.
     expect(lists("Workspace").length).toBeGreaterThan(1);
@@ -346,6 +351,28 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
 // nothing in the SPA tree asserted the muting behaviour at all, and the icon count
 // covered only the member roster.
 
+describe("the Workspace Chat replaces the member Chat in a workspace (S-485, FR-WS-34)", () => {
+  it("lists Chat in the Workspace section at /workspace-chat, and none under Service", async () => {
+    mountWithMode(200);
+    await screen.findByRole("link", { name: /Workspace/ });
+    expect(within(region("Workspace")).getByRole("link", { name: /^Chat$/ })).toHaveAttribute(
+      "href",
+      "/workspace-chat",
+    );
+    expect(within(region("Service")).queryByRole("link", { name: /^Chat$/ })).toBeNull();
+    // Exactly one Chat in the whole sidebar — never the member one beside it.
+    expect(screen.getAllByRole("link", { name: /^Chat$/ })).toHaveLength(1);
+  });
+
+  it("offers the member Chat at /chat and no /workspace-chat in a single-root serve", async () => {
+    mountWithMode(404);
+    await waitFor(() => expect(screen.getByRole("link", { name: /^Chat$/ })).toBeInTheDocument());
+    expect(screen.getAllByRole("link", { name: /^Chat$/ }).map((a) => a.getAttribute("href"))).toEqual([
+      "/chat",
+    ]);
+  });
+});
+
 describe("the app-scoped Statistics tab (S-429, FR-UI-37)", () => {
   it("mutes the MEMBER-scoped Statistics item on an empty store and never the app-scoped one", async () => {
     // The muting probe reads `/api/v1/statistics` at the SELECTED MEMBER's scope, so
@@ -381,7 +408,8 @@ describe("the app-scoped Statistics tab (S-429, FR-UI-37)", () => {
 
     for (const [scope, roster] of [
       ["Workspace", WORKSPACE_NAV_ITEMS],
-      ["Service", NAV_ITEMS],
+      // What a workspace's Service section renders (less the replaced member Chat).
+      ["Service", navItemsFor(true).filter((i) => i.scope === "member")],
     ] as const) {
       expect(roster.length).toBeGreaterThan(0);
       expect(

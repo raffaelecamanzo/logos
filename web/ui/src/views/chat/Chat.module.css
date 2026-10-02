@@ -37,6 +37,14 @@
   gap: var(--space-4);
 }
 
+/* The Workspace Chat's heading (S-485, frontend-design §4.22): it names its scope in
+   words, so a screenshot says what it answered for. The member chat has none. */
+.title {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+
 /* ── Two-pane layout: history rail + conversation (S-210, S-308, FR-UI-26/33) ── */
 /* Desktop (≥1024px): the Wiki menu's fluid rail track and column gap, verbatim
    (`WikiView.module.css` `.layout` — the design-system guard reads both files and
