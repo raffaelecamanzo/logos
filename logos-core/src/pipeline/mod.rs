@@ -2440,6 +2440,10 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             // The CR-005 per-function max nesting depth (FR-EX-07) — NULL on
             // every non-callable node.
             max_nesting_depth: n.max_nesting_depth.map(i64::from),
+            // The S-500 has-body fact and its body's token count (FR-EX-11) —
+            // NULL on every non-callable node.
+            has_body: n.metrics.map(|m| m.has_body),
+            body_tokens: n.metrics.map(|m| i64::from(m.body_tokens)),
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
         // The CR-005 winnowed near-clone shingle set (FR-EX-09) — persisted into

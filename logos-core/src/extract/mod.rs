@@ -152,13 +152,33 @@ impl FileInput {
 }
 
 /// Per-function quality metrics attached to a [`NodeFact`] ([FR-EX-03],
-/// [FR-EX-04]).
+/// [FR-EX-04]), and the has-body fact with its body's token count (S-500,
+/// [FR-EX-11]).
+///
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionMetrics {
     /// Cyclomatic complexity: `1 + decision points` (see [`complexity`]).
     pub cyclomatic_complexity: u32,
     /// Physical line span of the definition (`end_line - start_line + 1`).
     pub line_count: u32,
+    /// `true` when the declaration carries an implementation body (S-500,
+    /// [FR-EX-11]), from the language's declared `body_node_kinds` (see
+    /// [`shape::callable_body`]). `false` for an abstract method, an interface
+    /// method with no default, a C++ pure-virtual or prototype; always `true`
+    /// for a language declaring no body kind. Read by duplicate eligibility,
+    /// LCOM4 and the Focus method count.
+    ///
+    /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+    pub has_body: bool,
+    /// The normalized token count of that body ([`shingle::token_count`] over
+    /// [`shape::callable_body`]). Where the declaration names a `body` field
+    /// this is the very stream the near-clone shingles k-gram, so the
+    /// exact-duplicate floor (`duplicate_min_tokens`, S-501) and
+    /// `clone_min_tokens` are comparable; a Kotlin `function_body` or a TS
+    /// declarator's arrow body is counted too, though shingles read neither.
+    /// `0` when [`has_body`](Self::has_body) is `false`.
+    pub body_tokens: u32,
 }
 
 /// A graph vertex produced by extraction, keyed by its canonical SCIP symbol.
@@ -174,7 +194,8 @@ pub struct NodeFact {
     pub start_line: u32,
     /// 1-based last line of the declaration.
     pub end_line: u32,
-    /// Complexity + line count, present for `Function`/`Method` nodes only.
+    /// Complexity, line count and the has-body fact (S-500), present for
+    /// `Function`/`Method` nodes only.
     pub metrics: Option<FunctionMetrics>,
     /// `true` when the declaration carries a visibility modifier — the
     /// exported-is-live dead-code root set (S-014, [FR-AN-01]).
@@ -656,6 +677,7 @@ fn extract_one(
     // 6) Emit node facts (with per-function metrics) and Contains edges.
     let keywords = &plugin.semantics().complexity_keywords;
     let block_kinds = &plugin.semantics().nesting_block_kinds;
+    let body_kinds = &plugin.semantics().body_node_kinds;
     let export_convention = plugin.semantics().export_convention;
     let test_convention = plugin.semantics().test_convention;
     // Trait-implementation reference rows (S-281, CR-073, FR-RS-08): one per
@@ -695,12 +717,7 @@ fn extract_one(
             }
         }
         let is_callable = matches!(node_kind, NodeKind::Function | NodeKind::Method);
-        let metrics = is_callable.then(|| FunctionMetrics {
-            cyclomatic_complexity: complexity::cyclomatic_complexity(decl.node, keywords),
-            // `end_line >= start_line` always holds for a tree-sitter node;
-            // `saturating_sub` is belt-and-braces against any future change.
-            line_count: decl.end_line.saturating_sub(decl.start_line) + 1,
-        });
+        let metrics = is_callable.then(|| function_metrics(decl, keywords, body_kinds));
         facts.nodes.push(NodeFact {
             symbol: symbol.clone(),
             kind: node_kind,
@@ -2261,6 +2278,26 @@ struct CapturedCall {
     /// binds. See [`capture_http_client_call_arm`] for why the operand rather
     /// than the whole call is the grain.
     operand: std::ops::Range<usize>,
+}
+
+/// The [`FunctionMetrics`] of one callable declaration, captured while its AST
+/// is in hand: complexity and line count ([FR-EX-03], [FR-EX-04]), and the
+/// has-body fact with its body's token count (S-500, [FR-EX-11]) from the
+/// language's declared `body_kinds`.
+///
+/// [FR-EX-03]: ../../../docs/specs/requirements/FR-EX-03.md
+/// [FR-EX-04]: ../../../docs/specs/requirements/FR-EX-04.md
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String]) -> FunctionMetrics {
+    let body = shape::callable_body(decl.node, body_kinds);
+    FunctionMetrics {
+        cyclomatic_complexity: complexity::cyclomatic_complexity(decl.node, keywords),
+        // `end_line >= start_line` always holds for a tree-sitter node;
+        // `saturating_sub` is belt-and-braces against any future change.
+        line_count: decl.end_line.saturating_sub(decl.start_line) + 1,
+        has_body: body.is_some(),
+        body_tokens: body.map_or(0, shingle::token_count),
+    }
 }
 
 /// Lift a captured name's parent past any C-family *declarator* wrapper to the

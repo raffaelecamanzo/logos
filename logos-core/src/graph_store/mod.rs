@@ -295,6 +295,14 @@ pub struct NewNode<'a> {
     ///
     /// [FR-EX-07]: ../../../docs/specs/requirements/FR-EX-07.md
     pub max_nesting_depth: Option<i64>,
+    /// Whether the callable carries an implementation body, captured by Pass 1
+    /// (S-500, [FR-EX-11]); `Function`/`Method` nodes only, `None` otherwise.
+    ///
+    /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+    pub has_body: Option<bool>,
+    /// The normalized token count of that body (S-500) — the input to the
+    /// exact-duplicate token floor (S-501); `Function`/`Method` nodes only.
+    pub body_tokens: Option<i64>,
 }
 
 impl<'a> NewNode<'a> {
@@ -317,6 +325,8 @@ impl<'a> NewNode<'a> {
             test_evidence: false,
             body: None,
             max_nesting_depth: None,
+            has_body: None,
+            body_tokens: None,
         }
     }
 }
@@ -389,6 +399,17 @@ pub struct AnnotationNodeRow {
     /// [FR-AN-06]: ../../../docs/specs/requirements/FR-AN-06.md
     /// [FR-QM-13]: ../../../docs/specs/requirements/FR-QM-13.md
     pub clone_group: Option<NodeId>,
+    /// Whether the callable carries an implementation body (S-500,
+    /// [FR-EX-11]) — the `nodes.has_body` column. `None` for a non-callable,
+    /// and for a callable indexed before migration 25 that has not been
+    /// re-extracted since.
+    ///
+    /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+    pub has_body: Option<bool>,
+    /// The normalized token count of the callable's body (S-500) — the
+    /// `nodes.body_tokens` column the exact-duplicate floor reads; `None`
+    /// exactly when [`has_body`](Self::has_body) is.
+    pub body_tokens: Option<i64>,
 }
 
 /// One indexed file with the content hash recorded at its last (re-)index.
@@ -3133,7 +3154,8 @@ impl GraphStore for SqliteGraphStore {
         let mut stmt = self.conn.prepare_cached(
             "SELECT n.id, n.kind, n.name, n.exported, n.derived, n.fingerprint, \
                     n.test_evidence, n.file_id, f.path, n.is_dead, n.is_duplicate, \
-                    n.is_test, n.layer_membership, n.clone_group \
+                    n.is_test, n.layer_membership, n.clone_group, n.has_body, \
+                    n.body_tokens \
              FROM nodes n \
              LEFT JOIN files f ON f.id = n.file_id \
              ORDER BY n.id",
@@ -3155,13 +3177,15 @@ impl GraphStore for SqliteGraphStore {
                     row.get::<_, i64>(11)?,
                     row.get::<_, Option<String>>(12)?,
                     row.get::<_, Option<i64>>(13)?,
+                    row.get::<_, Option<i64>>(14)?,
+                    row.get::<_, Option<i64>>(15)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting nodes for the annotation pass")?;
         raws.into_iter()
             .map(
-                |(id, kind, name, exported, derived, fingerprint, test_evidence, file_id, file_path, dead, dup, test, layer, clone_group)| {
+                |(id, kind, name, exported, derived, fingerprint, test_evidence, file_id, file_path, dead, dup, test, layer, clone_group, has_body, body_tokens)| {
                     let kind = NodeKind::try_from(kind).map_err(|e| {
                         anyhow!(
                             "corrupt node kind {kind} for node {id}: {e}; rebuild advised (NFR-RA-08)"
@@ -3182,6 +3206,8 @@ impl GraphStore for SqliteGraphStore {
                         is_test: test != 0,
                         layer_membership: layer,
                         clone_group: clone_group.map(NodeId),
+                        has_body: has_body.map(|v| v != 0),
+                        body_tokens,
                     })
                 },
             )
@@ -4899,8 +4925,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
     conn.execute(
         "INSERT INTO nodes (symbol_id, kind, name, file_id, start_line, end_line, \
                             derived, exported, cyclomatic_complexity, line_count, fingerprint, \
-                            test_evidence, body, max_nesting_depth) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                            test_evidence, body, max_nesting_depth, has_body, body_tokens) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
          ON CONFLICT(symbol_id) DO UPDATE SET \
              kind = excluded.kind, \
              name = excluded.name, \
@@ -4914,7 +4940,9 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
              fingerprint = excluded.fingerprint, \
              test_evidence = excluded.test_evidence, \
              body = excluded.body, \
-             max_nesting_depth = excluded.max_nesting_depth",
+             max_nesting_depth = excluded.max_nesting_depth, \
+             has_body = excluded.has_body, \
+             body_tokens = excluded.body_tokens",
         rusqlite::params![
             node.symbol_id,
             node.kind.as_i32(),
@@ -4930,6 +4958,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
             i64::from(node.test_evidence),
             node.body,
             node.max_nesting_depth,
+            node.has_body.map(i64::from),
+            node.body_tokens,
         ],
     )
     .context("upserting node")?;

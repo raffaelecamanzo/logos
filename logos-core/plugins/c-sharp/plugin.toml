@@ -25,6 +25,12 @@ complexity_keywords = ["if", "else", "for", "foreach", "while", "do", "case", "c
 # each nested statement adds one.
 nesting_block_kinds = ["if_statement", "for_statement", "foreach_statement", "while_statement", "do_statement", "switch_statement", "try_statement", "using_statement", "lock_statement"]
 
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11): a
+# Function/Method is implemented when its declaration is, or has a direct
+# child of, one of these kinds — the method `block` or its `=> expr` `arrow_expression_clause`. An
+# `abstract`/`extern` method and an interface method with no default end in `;`.
+body_node_kinds = ["block", "arrow_expression_clause"]
+
 # C#'s export rule: an explicit `public` access modifier among the declaration's
 # flat `modifier` children (FR-AN-01). Types default to `internal` and members to
 # `private`, so `public` is the API root; stricter modifiers are non-roots.

@@ -424,6 +424,37 @@ pub(crate) struct RegistryLoadTimings {
     pub construction: Duration,
 }
 
+/// Fail fast when a declared `body_node_kinds` entry (S-500, [FR-EX-11]) names
+/// no named node kind of the built grammar — the same posture as a query that
+/// does not compile ([FR-PL-02]). A misspelt kind would otherwise match nothing,
+/// silently recording every callable of the language as bodyless.
+///
+/// Checked here, beside the queries, because both registry load paths compile
+/// a descriptor's queries through [`compile_capabilities`].
+///
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+/// [FR-PL-02]: ../../../docs/specs/requirements/FR-PL-02.md
+fn check_body_node_kinds(
+    entry: &GrammarEntry,
+    manifest: &PluginManifest,
+    language: &Language,
+) -> Result<(), PluginError> {
+    match manifest
+        .body_node_kinds
+        .iter()
+        .find(|kind| language.id_for_node_kind(kind, true) == 0)
+    {
+        Some(unknown) => Err(PluginError::Manifest {
+            file: entry.manifest_label.to_string(),
+            detail: format!(
+                "body_node_kinds entry '{unknown}' is not a named node kind of the '{}' grammar",
+                manifest.name
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Resolve and compile every capability's query for one grammar.
 ///
 /// Returns the capability → compiled query map and the list of query keys whose
@@ -435,6 +466,8 @@ fn compile_capabilities(
     language: &Language,
     override_dir: Option<&Path>,
 ) -> Result<(CompiledQueries, Vec<String>), PluginError> {
+    check_body_node_kinds(entry, manifest, language)?;
+
     let mut compiled = BTreeMap::new();
     let mut overridden = Vec::new();
 
@@ -587,6 +620,63 @@ mod tests {
             semantics.export_convention,
             crate::plugin::ExportConvention::UnderscorePrivate
         );
+    }
+
+    /// S-500 / FR-EX-11 / FR-PL-02: a `body_node_kinds` entry must name a node
+    /// kind of the descriptor's own grammar. A misspelt one would match nothing
+    /// and silently record every callable bodyless, so the load fails naming
+    /// the descriptor instead; a real kind loads and reaches the semantics.
+    #[test]
+    fn an_unknown_body_node_kind_fails_the_load_naming_the_descriptor() {
+        fn entry(manifest: &'static str) -> GrammarEntry {
+            GrammarEntry {
+                manifest_label: "toybody/plugin.toml",
+                manifest_toml: manifest,
+                language: tree_sitter_rust::LANGUAGE,
+                embedded_queries: &[grammars::EmbeddedQuery {
+                    relative_path: "queries/symbols.scm",
+                    label: "toybody/queries/symbols.scm",
+                    source: "(function_item name: (identifier) @symbol.function)",
+                }],
+            }
+        }
+        const MISSPELT: &str = r#"
+            name = "toybody"
+            extensions = ["toyb"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = ["symbols"]
+            body_node_kinds = ["block", "blok"]
+            [queries]
+            symbols = "queries/symbols.scm"
+        "#;
+        const REAL: &str = r#"
+            name = "toybody"
+            extensions = ["toyb"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = ["symbols"]
+            body_node_kinds = ["block"]
+            [queries]
+            symbols = "queries/symbols.scm"
+        "#;
+
+        let mut entries = grammars::compiled();
+        entries.push(entry(MISSPELT));
+        let err = LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+            .expect_err("a misspelt body kind fails the load");
+        let message = err.to_string();
+        assert!(
+            message.contains("toybody/plugin.toml") && message.contains("'blok'"),
+            "the error names the descriptor and the kind: {message}"
+        );
+
+        let mut entries = grammars::compiled();
+        entries.push(entry(REAL));
+        let reg = LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+            .expect("a real body kind loads");
+        let toy = reg.for_extension("toyb").expect("toybody claims .toyb");
+        assert_eq!(toy.semantics().body_node_kinds, ["block"]);
     }
 
     #[test]

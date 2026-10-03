@@ -1558,3 +1558,124 @@ fn an_ordinary_repository_is_silent_on_all_three_surfaces() {
         "`doctor` reports an honest absent, never an empty string (NFR-CC-04)"
     );
 }
+
+// ── S-500 / FR-EX-11: the persisted has-body column ──────────────────────────
+
+/// `(name, has_body, body_tokens)` of every `Function`/`Method` node, by name —
+/// the persisted column S-501 reads through `annotation_nodes()`.
+#[cfg(feature = "lang-java")]
+fn persisted_bodies(rt: &Runtime) -> Vec<(String, Option<bool>, Option<i64>)> {
+    let mut rows: Vec<_> = rt
+        .submit_read(|store| store.annotation_nodes())
+        .expect("annotation snapshot")
+        .into_iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| (n.name, n.has_body, n.body_tokens))
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[cfg(feature = "lang-java")]
+const SHAPE_JAVA: &str = "package com.x;\n\
+public abstract class Shape {\n    public abstract double area();\n    public String label() { return \"shape\" + area(); }\n}\n";
+
+/// A store indexed before migration 25 carries no has-body column. Opening it
+/// applies migration 25, which leaves the column `NULL` and clears every file
+/// hash; the next full-walk sync then re-extracts every file — unchanged on disk
+/// though they are — and fills the column with exactly what a fresh index
+/// writes.
+#[test]
+#[cfg(feature = "lang-java")]
+fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
+    let tmp = TempDir::new().expect("temp root");
+    write(tmp.path(), "src/main/java/com/x/Shape.java", SHAPE_JAVA);
+    write(tmp.path(), "src/lib.rs", "pub fn hello() -> u32 { 1 + 2 }\n");
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let fresh = persisted_bodies(engine.runtime().expect("runtime"));
+    assert_eq!(
+        fresh,
+        vec![
+            ("area".to_string(), Some(false), Some(0)),
+            ("hello".to_string(), Some(true), Some(5)),
+            ("label".to_string(), Some(true), Some(11)),
+        ],
+        "a fresh index persists the fact for every callable"
+    );
+    let non_callables: Vec<_> = engine
+        .runtime()
+        .expect("runtime")
+        .submit_read(|store| store.annotation_nodes())
+        .expect("annotation snapshot")
+        .into_iter()
+        .filter(|n| !matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| (n.name, n.kind, n.has_body, n.body_tokens))
+        .collect();
+    assert!(!non_callables.is_empty(), "the fixture has classes and modules");
+    assert!(
+        non_callables.iter().all(|(_, _, b, t)| b.is_none() && t.is_none()),
+        "a non-callable carries no has-body fact: {non_callables:?}"
+    );
+    drop(engine);
+
+    // Back to what the release before migration 25 left on disk: the columns
+    // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
+    let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
+         DELETE FROM schema_versions WHERE version = 25; PRAGMA user_version = 24;",
+    )
+    .expect("downgrade the store to v24");
+    drop(conn);
+
+    let engine = Engine::start(tmp.path()).expect("engine reopens, applying migration 25");
+    let rt = engine.runtime().expect("runtime");
+    assert!(
+        persisted_bodies(rt).iter().all(|(_, b, t)| b.is_none() && t.is_none()),
+        "the upgrade alone leaves the column NULL: {:?}",
+        persisted_bodies(rt)
+    );
+    let unhashed = rt
+        .submit_read(|s| s.indexed_files())
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.content_hash.is_none())
+        .count();
+    assert_eq!(unhashed, 2, "every file awaits re-extraction");
+
+    engine.health(true).expect("a full-walk reconcile runs");
+    assert_eq!(persisted_bodies(rt), fresh, "the re-extraction fills the column as a fresh index does");
+    assert!(
+        rt.submit_read(|s| s.indexed_files())
+            .unwrap()
+            .iter()
+            .all(|f| f.content_hash.is_some()),
+        "every re-extracted file records its hash again"
+    );
+}
+
+/// NFR-RA-06: re-extracting an unchanged file writes an identical column. The
+/// file's recorded hash is cleared so the sync must re-extract it, and does.
+#[test]
+#[cfg(feature = "lang-java")]
+fn re_extracting_an_unchanged_file_yields_an_identical_has_body_column() {
+    let tmp = TempDir::new().expect("temp root");
+    let rel = "src/main/java/com/x/Shape.java";
+    write(tmp.path(), rel, SHAPE_JAVA);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let rt = engine.runtime().expect("runtime");
+    let first = persisted_bodies(rt);
+    assert_eq!(first.len(), 2);
+
+    rt.submit_write(|w| {
+        let id = w.file_id(rel)?.expect("the file row");
+        w.update_file(id, Some("java"), None)
+    })
+    .expect("clear the recorded hash");
+    let result = engine.sync(&[PathBuf::from(rel)]);
+    assert_eq!(result.files_modified, 1, "the unchanged file was re-extracted");
+    assert_eq!(persisted_bodies(rt), first);
+}

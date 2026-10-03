@@ -35,6 +35,12 @@ complexity_keywords = ["if", "else", "for", "while", "do", "when", "catch", "&&"
 # is a flat body; each nested control-flow construct adds one.
 nesting_block_kinds = ["if_expression", "for_statement", "while_statement", "do_while_statement", "when_expression", "try_expression"]
 
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11): a
+# Function/Method is implemented when its declaration is, or has a direct
+# child of, one of these kinds — the `function_body` (`{ … }` or `= expr`). An `abstract` member and an
+# interface function with no default carry none.
+body_node_kinds = ["function_body"]
+
 # Kotlin's export rule: public-by-default (FR-AN-01). Declarations are exported
 # unless an explicit `private`/`internal`/`protected` visibility modifier
 # narrows them; `All` is the safe under-reporting direction (AR-05) and the

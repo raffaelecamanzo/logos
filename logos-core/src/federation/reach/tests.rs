@@ -507,6 +507,8 @@ fn arow(id: i64, is_dead: Option<bool>) -> AnnotationNodeRow {
         is_test: false,
         layer_membership: None,
         clone_group: None,
+        has_body: None,
+        body_tokens: None,
     }
 }
 

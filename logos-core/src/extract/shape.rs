@@ -1,6 +1,8 @@
 //! Declaration-shape helpers for the annotation columns Pass 1 captures
 //! (S-014): the `exported` visibility flag ([FR-AN-01]) and the normalised
-//! AST-shape `fingerprint` ([FR-AN-02]).
+//! AST-shape `fingerprint` ([FR-AN-02]) — and, since S-500, the callable's
+//! implementation body ([`callable_body`], [FR-EX-11]), whose presence is the
+//! has-body fact.
 //!
 //! Both run here — inside extraction — because this is the only moment the
 //! tree-sitter AST exists: the canonical store keeps nodes and edges, not
@@ -30,6 +32,7 @@
 //!
 //! [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
 //! [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
+//! [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 
 use tree_sitter::Node;
 
@@ -199,6 +202,47 @@ fn has_child_of_kind(node: Node<'_>, kind: &str) -> bool {
     found
 }
 
+/// The implementation body of a `Function`/`Method` declaration, or `None` when
+/// the declaration has none (S-500, [FR-EX-11]).
+///
+/// `body_kinds` is the language's declared `body_node_kinds`. The declaration
+/// is bodied when it **is**, or has a **direct child** that is, a node of one of
+/// those kinds; an abstract method, an interface method with no default, a C++
+/// pure-virtual or a prototype matches none and yields `None`. A language that
+/// declares no kind treats every callable as bodied ([NFR-MA-01]), so its
+/// extraction is unchanged.
+///
+/// The returned subtree is the declaration's `body` field when the grammar
+/// names one — the very subtree the near-clone shingles read
+/// ([`super::shingle::shingles`]), so a token count over it is comparable to the
+/// `clone_min_tokens` floor. Otherwise it is the matched node's own `body` field
+/// (a TypeScript `const f = (…) => …` declarator's arrow body, never its
+/// parameters), else the matched node itself (Kotlin's `function_body`), else
+/// the whole declaration for an undeclared language whose callable names no
+/// `body`.
+///
+/// Deterministic ([NFR-RA-06]): a pure function of the parse tree.
+///
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+pub(super) fn callable_body<'tree>(node: Node<'tree>, body_kinds: &[String]) -> Option<Node<'tree>> {
+    let declared = |n: &Node<'_>| body_kinds.iter().any(|k| k == n.kind());
+    let matched = if body_kinds.is_empty() || declared(&node) {
+        node
+    } else {
+        let mut cursor = node.walk();
+        // Bound to a local so the cursor's borrow of `node` ends before return.
+        let child = node.children(&mut cursor).find(|c| declared(c));
+        child?
+    };
+    Some(
+        node.child_by_field_name("body")
+            .or_else(|| matched.child_by_field_name("body"))
+            .unwrap_or(matched),
+    )
+}
+
 /// The normalised AST-shape fingerprint of one declaration ([FR-AN-02]).
 ///
 /// Deterministic ([NFR-RA-06]): a pure function of the parse tree's shape and
@@ -319,6 +363,58 @@ mod tests {
             }
         }
         panic!("no {kind} node in fixture");
+    }
+
+    /// The first pre-order node of `kind` in `tree`.
+    #[cfg(feature = "lang-java")]
+    fn first_of<'t>(tree: &'t tree_sitter::Tree, kind: &str) -> Node<'t> {
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if n.kind() == kind {
+                return n;
+            }
+            for i in (0..n.child_count()).rev() {
+                stack.push(n.child(i).expect("child in range"));
+            }
+        }
+        panic!("no {kind} node in fixture");
+    }
+
+    /// S-500 / FR-EX-11: a declared body kind counts as the declaration itself
+    /// or as a **direct** child — never deeper. A `class_body` holding a bodied
+    /// method has that method's `block` as a grandchild, one level too deep, and
+    /// is not itself bodied; the method that owns the `block` is, and its body is
+    /// the `body` field. An empty kind list makes every declaration bodied.
+    #[test]
+    #[cfg(feature = "lang-java")]
+    fn callable_body_matches_the_declaration_or_a_direct_child_only() {
+        let language: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("grammar binds");
+        let tree = parser
+            .parse("abstract class A { abstract int f(); int g() { return 1; } }", None)
+            .expect("source parses");
+        let block = vec!["block".to_string()];
+        let class = first_of(&tree, "class_declaration");
+        let members = first_of(&tree, "class_body");
+        assert!(callable_body(members, &block).is_none(), "a grandchild block is not a body");
+
+        let mut cursor = tree.walk();
+        let methods: Vec<Node<'_>> = members
+            .children(&mut cursor)
+            .filter(|n| n.kind() == "method_declaration")
+            .collect();
+        assert!(callable_body(methods[0], &block).is_none(), "an abstract method has no body");
+        let g = callable_body(methods[1], &block).expect("g is bodied");
+        assert_eq!(g.kind(), "block");
+        assert_eq!(g.id(), methods[1].child_by_field_name("body").unwrap().id());
+
+        // The declaration's own kind declared: bodied, its body still the field.
+        let own = vec!["method_declaration".to_string()];
+        assert!(callable_body(methods[0], &own).is_some());
+        // No kind declared: every declaration bodied.
+        assert!(callable_body(methods[0], &[]).is_some());
+        assert_eq!(callable_body(class, &[]).map(|n| n.id()), Some(class.child_by_field_name("body").unwrap().id()));
     }
 
     /// FR-AN-01 / S-015: the TS/JS convention — an `export_statement`

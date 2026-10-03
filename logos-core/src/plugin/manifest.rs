@@ -317,6 +317,25 @@ pub struct PluginManifest {
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
     #[serde(default)]
     pub nesting_block_kinds: Vec<String>,
+    /// Tree-sitter node kinds that mark a callable as **implemented** — the
+    /// declarative input to the per-callable has-body fact ([FR-EX-11],
+    /// CR-163), the same descriptor pattern as
+    /// [`nesting_block_kinds`](Self::nesting_block_kinds). A `Function`/`Method`
+    /// declaration has a body when the declaration node itself, or one of its
+    /// direct children, is of a listed kind: usually the body child (`block`,
+    /// `function_body`, `compound_statement`), or — for a grammar that tells a
+    /// definition from a declaration by node kind, as Scala does — the bodied
+    /// declaration kind itself. An abstract method, an interface method with no
+    /// default or a C++ pure-virtual carries none of them.
+    ///
+    /// Defaults to empty when omitted, and a language declaring none treats
+    /// every callable as bodied, so its extraction is byte-identical to before
+    /// ([NFR-MA-01]).
+    ///
+    /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub body_node_kinds: Vec<String>,
     /// Capability → relative `.scm` query path (resolved against the descriptor
     /// directory). Defaults to empty when the `[queries]` table is omitted.
     #[serde(default)]
@@ -1104,6 +1123,8 @@ mod tests {
         // A descriptor that does not declare nesting block kinds defaults to
         // empty — every pre-CR-005 descriptor stays valid (NFR-MA-01).
         assert!(m.nesting_block_kinds.is_empty());
+        // Nor body node kinds (S-500, FR-EX-11): every callable is bodied.
+        assert!(m.body_node_kinds.is_empty());
         assert_eq!(m.queries.get("symbols").unwrap(), "queries/symbols.scm");
         // The S-015 framework/export fields default to empty/All when omitted,
         // so pre-existing descriptors keep parsing unchanged (NFR-MA-01).

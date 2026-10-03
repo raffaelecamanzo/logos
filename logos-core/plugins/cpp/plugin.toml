@@ -33,6 +33,13 @@ complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "got
 # FR-EX-07): the C++ control-flow statements (`for_range_loop` is the range-for).
 nesting_block_kinds = ["if_statement", "for_statement", "for_range_loop", "while_statement", "do_statement", "switch_statement", "try_statement", "catch_clause"]
 
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11): a
+# Function/Method is implemented when its declaration is, or has a direct
+# child of, one of these kinds — a `function_definition`'s `compound_statement` (or its function-try-block
+# `try_statement`). A pure-virtual (`= 0`), a `= default`/`= delete` member and a
+# prototype (`void f();`, in-class or free) carry none.
+body_node_kinds = ["compound_statement", "try_statement"]
+
 # C++ export rule (FR-AN-01): a declaration has external linkage — exported —
 # unless `static`-qualified or in an anonymous namespace. The bounded core
 # variant this idiom required (C++ default visibility is external, the inverse of
