@@ -587,14 +587,9 @@ fn extract_one(
             // a capture identifies one declaration.
             let name_node = cap.node;
             let decl_node = lift_to_declaration(name_node.parent().unwrap_or(name_node));
-            // A MISSING (error-recovery) or zero-width name names nothing: its
-            // descriptor would be the bare suffix, which is not a valid SCIP
-            // symbol, and storing it aborted the whole index (S-512 — a C++
-            // `enum : uint8_t {}`, a C `typedef struct {…} ;`). The declaration
-            // emits nothing; the file's other declarations still do. Checked
-            // before `seen_decls` so another pattern naming the same declaration
-            // properly is still taken.
-            if name_node.is_missing() || name_node.start_byte() == name_node.end_byte() {
+            // Checked before `seen_decls`, so another pattern naming the same
+            // declaration properly is still taken.
+            if names_nothing(name_node) {
                 continue;
             }
             if !seen_decls.insert(decl_node.id()) {
@@ -2335,6 +2330,17 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
         has_body: body.is_some(),
         body_tokens: body.map_or(0, shingle::token_count),
     }
+}
+
+/// `true` for a captured name node that names nothing: a MISSING
+/// (error-recovery) or zero-width node. Its descriptor would be the bare suffix,
+/// which is not a valid SCIP symbol, and storing it made the graph unreadable
+/// (S-512 — a C++ `enum : uint8_t {}`, a C `typedef struct {…} ;`). Such a
+/// declaration emits nothing; the file's other declarations still do. A MISSING
+/// node is always zero-width, so the second test is the one that decides; the
+/// first names the case it exists for.
+fn names_nothing(name_node: Node<'_>) -> bool {
+    name_node.is_missing() || name_node.start_byte() == name_node.end_byte()
 }
 
 /// Lift a captured name's parent past any C-family *declarator* wrapper to the
