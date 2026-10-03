@@ -83,7 +83,13 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             concurrency,
             members,
         } => Ok(crate::workspace_init::run_supervisor(&members, concurrency)),
-        Commands::Sync { paths } => out.report_gate(root, |e| Ok(e.sync(&paths)), |r| !r.failed),
+        Commands::Sync { paths } => {
+            // As `index` above: a malformed `config.toml` is a usage fault (exit 2,
+            // FR-CF-03), validated up front — `Engine::sync` would fold it into a
+            // `failed` run (exit 1, FR-EH-05) instead.
+            load_config_from_root(root)?;
+            out.report_gate(root, |e| Ok(e.sync(&paths)), |r| !r.failed)
+        }
         Commands::Status => out.query(root, |e| e.status()),
         Commands::Search { query, kind, limit } => out.query(root, |e| e.search(&query, kind, limit)),
         Commands::Query {
