@@ -13,6 +13,35 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **Health shows the worst offenders its snapshot computed.** Every `scan`, `gate`,
+  `session_start` and `session_end` now persists its per-dimension worst-offender lists
+  with the snapshot (migration 26), and the Health page reads them from the same single
+  snapshot read as the signal. Each drill-down renders one of three states: the offender
+  table, *No offenders flagged within thresholds* (only for a recorded-empty result), or
+  *Offenders were not recorded for this snapshot — run `logos scan`* for a snapshot
+  written before this release. `scan --json`'s `worst_offenders` carries a `recorded` flag.
+- **The Workspace Chat has its own view.** In a workspace serve the Workspace section
+  lists Chat at `/workspace-chat` and the Service section lists none; `/chat` redirects
+  there with its query. Chat state is kept per scope, so a thread from one chat is never
+  reopened in another. `GET /api/v1/workspace/config/read-roots` lists each member's
+  effective read roots without starting an engine.
+- **`[metric_thresholds] duplicate_min_tokens`** (default 50): a function counts as an
+  exact duplicate only when it has a body and at least that many normalized tokens.
+
+### Changed
+
+- **Metric semantics v7: declarative code stops counting.** Extraction records whether a
+  callable has a body (migration 25). Cohesion (LCOM4) and Focus count only bodied
+  methods; bodyless declarations never count as duplicates; the Uniqueness list ranks
+  clone groups by mass (members × mean lines). The first `gate` after upgrading re-baselines
+  once (`baseline reset: metric semantics changed`). Signals rise on declarative code: on a
+  real 84-member Spring estate, no member's signal fell.
+- **Upgrade:** opening a store applies migrations 25 and 26, and the next `logos scan` (or
+  `logos index`) re-extracts every file once. Until then callables count as bodied. A bare
+  `logos sync` re-reads no file. Earlier `logos` versions refuse an upgraded store.
+
 ## [1.8.3] — 2026-10-02
 
 ### Changed
