@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use super::{
     anchor_sharers, is_registration_edge, line_u32, precedent_anchors,
-    precedent_degraded, read_code, PrecedentAnchor,
+    precedent_degraded, prefer_code, read_code, PrecedentAnchor,
 };
 use crate::graph_store::NodeRow;
 use crate::model::{LogosSymbol, NodeId, NodeKind};
@@ -592,4 +592,119 @@ fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure(
         ),
         "only the language without a figure is named, with its state and counts"
     );
+}
+
+// ── FR-NV-15: a bare name prefers code to a module to a doc node ─────────────
+
+/// A node of `kind` named `Utils`, with the given row id.
+fn named(id: i64, kind: NodeKind) -> NodeRow {
+    NodeRow {
+        id: NodeId(id),
+        symbol: LogosSymbol::parse(&format!("local {id}")).expect("local symbol parses"),
+        kind,
+        name: "Utils".to_string(),
+        file_path: None,
+        start_line: None,
+        end_line: None,
+    }
+}
+
+/// `matches` in the order the store returns them (by id), ranked: the winner's
+/// kind, then the passed-over kinds in order.
+fn ranked(matches: Vec<NodeRow>) -> (NodeKind, Vec<NodeKind>) {
+    let (chosen, rest) = prefer_code(matches).expect("a match");
+    (chosen.kind, rest.iter().map(|r| r.kind).collect())
+}
+
+#[test]
+fn a_bare_name_ranks_code_type_then_callable_then_module_then_doc() {
+    // Stored in the REVERSE of the preference order, so lowest-id-wins — the
+    // rule this replaced — would pick the doc section.
+    let (winner, passed_over) = ranked(vec![
+        named(1, NodeKind::DocSection),
+        named(2, NodeKind::Module),
+        named(3, NodeKind::Function),
+        named(4, NodeKind::Class),
+    ]);
+    assert_eq!(winner, NodeKind::Class);
+    assert_eq!(
+        passed_over,
+        [NodeKind::Function, NodeKind::Module, NodeKind::DocSection],
+        "the alternatives follow in preference order"
+    );
+}
+
+#[test]
+fn every_code_type_kind_outranks_a_callable_a_module_and_a_doc() {
+    for kind in [
+        NodeKind::Class,
+        NodeKind::Interface,
+        NodeKind::Trait,
+        NodeKind::Struct,
+        NodeKind::Enum,
+        NodeKind::TypeAlias,
+    ] {
+        let (winner, _) = ranked(vec![
+            named(1, NodeKind::DocFile),
+            named(2, NodeKind::Module),
+            named(3, NodeKind::Method),
+            named(4, kind),
+        ]);
+        assert_eq!(winner, kind, "{kind:?} is a code type");
+    }
+}
+
+#[test]
+fn a_callable_outranks_a_module_and_a_doc_when_no_type_matches() {
+    for kind in [NodeKind::Function, NodeKind::Method] {
+        let (winner, passed_over) =
+            ranked(vec![named(1, NodeKind::Module), named(2, NodeKind::Adr), named(3, kind)]);
+        assert_eq!(winner, kind);
+        assert_eq!(passed_over, [NodeKind::Module, NodeKind::Adr]);
+    }
+}
+
+#[test]
+fn a_module_outranks_every_doc_kind() {
+    for doc in [
+        NodeKind::DocFile,
+        NodeKind::DocSection,
+        NodeKind::Requirement,
+        NodeKind::Adr,
+        NodeKind::Story,
+    ] {
+        let (winner, _) = ranked(vec![named(1, doc), named(2, NodeKind::Module)]);
+        assert_eq!(winner, NodeKind::Module, "a module beats {doc:?}");
+    }
+}
+
+#[test]
+fn a_declaration_outside_the_four_classes_outranks_the_module_that_holds_it() {
+    let (winner, passed_over) = ranked(vec![
+        named(1, NodeKind::DocSection),
+        named(2, NodeKind::Module),
+        named(3, NodeKind::Constant),
+    ]);
+    assert_eq!(winner, NodeKind::Constant);
+    assert_eq!(passed_over, [NodeKind::Module, NodeKind::DocSection]);
+}
+
+#[test]
+fn within_one_class_the_lowest_id_still_wins() {
+    let (chosen, rest) = prefer_code(vec![
+        named(5, NodeKind::Class),
+        named(7, NodeKind::Struct),
+        named(9, NodeKind::Module),
+    ])
+    .expect("a match");
+    assert_eq!(chosen.id, NodeId(5), "ties keep the id order the store returns");
+    assert_eq!(rest.iter().map(|r| r.id).collect::<Vec<_>>(), [NodeId(7), NodeId(9)]);
+}
+
+#[test]
+fn a_single_match_passes_over_nothing_and_no_match_is_none() {
+    let (chosen, rest) = prefer_code(vec![named(1, NodeKind::Module)]).expect("a match");
+    assert_eq!(chosen.kind, NodeKind::Module);
+    assert!(rest.is_empty());
+    assert!(prefer_code(Vec::new()).is_none());
 }

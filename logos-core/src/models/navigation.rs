@@ -127,6 +127,15 @@ pub struct NodeInfo {
     pub node: Option<NodeDetail>,
     /// "Did you mean" names when the symbol is unknown (FR-NV-09).
     pub suggestions: Vec<String>,
+    /// The other nodes a **bare name** matched and the lookup passed over, in
+    /// preference order — code type, callable, module, documentation
+    /// ([FR-NV-15]). Empty — and absent from the wire — for a qualified name, a
+    /// SCIP symbol, or a name only one node carries, so those answers are
+    /// unchanged. Each entry's `symbol` round-trips into `node` to reach it.
+    ///
+    /// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<SymbolRef>,
     /// Degradation channel (ADR-14).
     pub warnings: Vec<String>,
 }

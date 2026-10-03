@@ -2652,3 +2652,32 @@ fn sync_help_states_that_no_path_re_reads_nothing() {
         );
     }
 }
+
+/// S-550 / FR-NV-15: `logos node <bare name>` prints the code declaration and
+/// names the module it passed over; the SCIP symbol of that module reaches it
+/// with no alternatives.
+#[test]
+fn node_on_a_bare_name_prints_the_class_and_names_the_module_alternative() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/Monolog/Utils.php",
+        "<?php\n\nnamespace Monolog;\n\nfinal class Utils\n{\n    public static function canonicalize(string $path): string\n    {\n        return $path;\n    }\n}\n",
+    );
+    logos(tmp.path(), &["index"]);
+
+    let out = logos(tmp.path(), &["node", "Utils", "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let payload: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json emits one machine-readable object");
+    assert_eq!(payload["node"]["kind"], "class", "{payload}");
+    assert_eq!(payload["alternatives"].as_array().map(Vec::len), Some(1), "{payload}");
+    assert_eq!(payload["alternatives"][0]["kind"], "module", "{payload}");
+
+    let module = payload["alternatives"][0]["symbol"].as_str().expect("a symbol");
+    let out = logos(tmp.path(), &["node", module, "--json"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let by_symbol: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(by_symbol["node"]["kind"], "module", "{by_symbol}");
+    assert!(by_symbol.get("alternatives").is_none(), "{by_symbol}");
+}
