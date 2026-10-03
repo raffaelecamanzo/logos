@@ -195,6 +195,27 @@ fn a_failed_file_deleted_from_disk_leaves_no_mark() {
 }
 
 #[test]
+fn a_stale_file_purged_by_a_config_narrowing_leaves_no_mark() {
+    // The removal path itself clears the mark: a config narrowing purges the
+    // stale file through the navigation prologue — no sync names it, so only
+    // `remove_file` can say it is no longer stale.
+    let (_tmp, root) = project();
+    {
+        let engine = Engine::start(&root).unwrap();
+        engine.index();
+        write(&root, "src/b.rs", "pub fn beta_new() {}\n");
+        runtime(&engine).inject_persist_fault("src/b.rs");
+        engine.sync(&[root.join("src/b.rs")]);
+        assert_eq!(engine.status().persistence.stale_files, ["src/b.rs"]);
+    }
+    write(&root, ".logos/config.toml", "exclude = [\"src/b.rs\"]\n");
+    let engine = Engine::start(&root).unwrap();
+    assert!(has(&engine, "alpha_entry"), "the read runs the prologue purge");
+    assert!(!has(&engine, "beta_old"), "the narrowing purged the stale file");
+    assert!(engine.status().persistence.is_clean(), "a purged file is no longer stale");
+}
+
+#[test]
 fn a_run_that_persists_nothing_it_reached_is_failed_on_index_and_sync() {
     let (_tmp, root) = project();
     let engine = Engine::start(&root).unwrap();
