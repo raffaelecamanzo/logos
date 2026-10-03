@@ -22,10 +22,10 @@
 //!   the self-only CSP across the flow
 //!   (`uat_ui_06_carve_out_holds_loopback_and_self_only_csp_through_the_flow`).
 //!
-//! Gated on `lang-rust`: the apply path indexes Rust fixtures, so a
-//! `--no-default-features` build (which excludes the grammar) excludes this suite,
-//! matching `logos-core/tests/config_apply.rs`.
-#![cfg(feature = "lang-rust")]
+//! Deliberately **not** gated on `lang-rust`: the apply path indexes Rust fixtures,
+//! but the test build always carries the Rust grammar (the `[dev-dependencies]`
+//! logos-core enables it), and neither `gate.sh` nor CI passes that feature to
+//! `web`, so a crate-level gate skipped the whole suite everywhere.
 
 use std::path::Path;
 use std::sync::Arc;

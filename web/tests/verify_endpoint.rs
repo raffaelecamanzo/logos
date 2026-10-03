@@ -16,9 +16,11 @@
 //!   verify in flight does not stall concurrent reads (the [ADR-46] mitigation);
 //! - the response body never carries the masked write-only key ([NFR-SE-07]).
 //!
-//! The guard/method cases are grammar-independent and run under a bare
-//! `cargo test -p web`; the populated-graph clean/drift assertions (which need a
-//! reindex to produce symbols) are `#[cfg(feature = "lang-rust")]`.
+//! Every case runs under a bare `cargo test -p web` with no `lang-rust` gate: the
+//! populated-graph clean/drift assertions reindex Rust fixtures, and the test build
+//! always carries the Rust grammar (the `[dev-dependencies]` logos-core enables it)
+//! while neither `gate.sh` nor CI passes that feature to `web` itself, so a gated
+//! test would compile out of both.
 
 use std::sync::Arc;
 
@@ -38,10 +40,6 @@ const VERIFY: &str = "/api/v1/verify";
 
 // ── Fixtures & helpers ────────────────────────────────────────────────────────
 
-// Consumed only by the `#[cfg(feature = "lang-rust")]` tests below (which index a
-// store), so dead code without that feature. Keep it compiled (its imports are
-// shared) and silence the lint rather than cfg-gating it and its imports.
-#[allow(dead_code)]
 fn write(root: &std::path::Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -178,7 +176,6 @@ async fn get_to_verify_route_is_405() {
 /// A same-origin, intent-bearing verify over a **clean** freshly-indexed store
 /// returns `200` with a `VerifyReport` whose `ok:true`, zero deltas, and empty
 /// leaked/orphaned samples — under the byte-identical self-only CSP ([FR-UI-25]).
-#[cfg(feature = "lang-rust")]
 #[tokio::test]
 async fn clean_store_returns_ok_true_json() {
     let dir = TempDir::new().expect("temp dir");
@@ -210,7 +207,6 @@ async fn clean_store_returns_ok_true_json() {
 /// a `file_delta ≥ 1`, and a leaked-symbol sample naming the removed file's
 /// symbols ([FR-UI-25] AC, [FR-GV-19]). The live store is opened read-only for the
 /// census, so the leak is *reported*, never healed.
-#[cfg(feature = "lang-rust")]
 #[tokio::test]
 async fn drifted_store_returns_deltas_and_leaked_sample() {
     let dir = TempDir::new().expect("temp dir");
@@ -257,7 +253,6 @@ async fn drifted_store_returns_deltas_and_leaked_sample() {
 /// and takes no exclusive lock, so the reads are genuinely served *while* the
 /// verify runs — had the handler blocked the executor inline (or held a write
 /// lock) the reads could not be driven to completion beside it.
-#[cfg(feature = "lang-rust")]
 #[tokio::test]
 async fn verify_runs_off_the_serve_loop_concurrent_reads_still_served() {
     let dir = TempDir::new().expect("temp dir");
@@ -294,12 +289,13 @@ async fn verify_runs_off_the_serve_loop_concurrent_reads_still_served() {
         verify,
         read("/api/v1/health"),
         read("/api/v1/overview"),
-        read("/api/v1/status"),
+        read("/api/v1/no-such-read-model"),
     );
     assert_eq!(v, StatusCode::OK, "the verify itself completes");
     assert_eq!(r1, StatusCode::OK, "a health read is served during the verify");
     assert_eq!(r2, StatusCode::OK, "an overview read is served during the verify");
-    // `/api/v1/status` is not a route — an unknown non-navigation GET is a 404,
-    // proving the read reached the router (not stalled) even for a miss.
+    // A deliberately unrouted name (never a real read-model, so it cannot start to
+    // resolve the way `/api/v1/status` did in S-315) — an unknown non-navigation
+    // GET is a 404, proving the read reached the router (not stalled) even for a miss.
     assert_eq!(r3, StatusCode::NOT_FOUND, "an unknown read still routes (not stalled) during the verify");
 }

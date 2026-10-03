@@ -17,9 +17,11 @@
 //! - a `node`/`search` call without its required query param is a `400`, and an
 //!   unknown wiki slug is an honest `404`.
 //!
-//! The snapshot-count and contract invariants are grammar-independent, so the bulk
-//! of the suite runs under a bare `cargo test -p web` (no `lang-rust` gate); the
-//! one populated-graph assertion is `#[cfg(feature = "lang-rust")]`.
+//! The whole suite runs under a bare `cargo test -p web` with no `lang-rust` gate:
+//! the populated-graph assertions index Rust fixtures, and the test build always
+//! carries the Rust grammar (the `[dev-dependencies]` logos-core enables it) while
+//! neither `gate.sh` nor CI passes that feature to `web` itself, so a gated test
+//! would compile out of both.
 
 use std::path::Path;
 use std::process::Command;
@@ -1483,7 +1485,6 @@ async fn wiki_asset_rejects_a_post() {
 /// Over an indexed graph the `/api/v1/graph` snapshot carries real nodes (a `layer`
 /// field) and `/api/v1/search` returns ranked hits — proving the endpoints reach
 /// the accessors end-to-end, not merely parse-then-drop ([FR-UI-21], [NFR-RA-05]).
-#[cfg(feature = "lang-rust")]
 #[tokio::test]
 async fn graph_and_search_serialize_real_graph_fields_over_an_indexed_repo() {
     let dir = TempDir::new().expect("temp dir");
@@ -1511,7 +1512,6 @@ async fn graph_and_search_serialize_real_graph_fields_over_an_indexed_repo() {
 /// `node?code=1` serializes the declaration source excerpt; without it the excerpt
 /// is withheld (the field is `null`) — the `truthy` toggle reaches the
 /// `include_code` accessor end-to-end ([FR-NV-04]).
-#[cfg(feature = "lang-rust")]
 #[tokio::test]
 async fn node_code_param_serializes_the_source_excerpt() {
     let dir = TempDir::new().expect("temp dir");
