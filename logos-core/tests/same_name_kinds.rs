@@ -8,8 +8,8 @@
 //! second `Contains` edge to it failed `UNIQUE(source, target, kind)`, and that
 //! aborted the whole index with exit 0 and `files_indexed: 0`. Each fixture here
 //! is one shape the 2026-10-03 language inspection found doing that on a real
-//! repository, and each must now index every admitted file, warn nothing, and
-//! store both declarations as distinct nodes ([FR-EX-02], [ADR-07]).
+//! repository, and each must now index every admitted file, raise no `index
+//! failed` warning, and store both declarations as distinct nodes ([FR-EX-02], [ADR-07]).
 //!
 //! Every fixture writes the colliding file **and** a clean bystander file, so
 //! `files_indexed == 2` proves the run was not aborted rather than merely that
@@ -59,7 +59,8 @@ fn index(files: &[(&str, &str)]) -> (IndexResult, Vec<NodeRow>) {
 }
 
 /// Index `rel` (holding the collision) beside a clean bystander file, and assert
-/// the run indexed both files and warned nothing. Returns the stored nodes.
+/// the run indexed both files and raised no `index failed` warning. Returns the
+/// stored nodes.
 fn index_with_bystander(rel: &str, src: &str, bystander: (&str, &str)) -> Vec<NodeRow> {
     let (result, nodes) = index(&[(rel, src), bystander]);
     assert!(
