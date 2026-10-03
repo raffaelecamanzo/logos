@@ -2304,11 +2304,13 @@ CREATE INDEX idx_declared_types_schema ON declared_types(schema_id);
 ///    could stand in for it.
 ///
 /// Both are `NULL` on every non-callable node, and on a callable until its file
-/// is re-extracted. **Re-extraction is triggered here**, per the house
-/// migration-plus-reindex convention ([FR-EX-07]'s migration 10): every
-/// `files.content_hash` is cleared, so the next sync re-extracts each file it
-/// meets — a full-walk sync every file — exactly as it would a modified one,
-/// and records the fresh hash. `content_hash` is read by incremental-sync dirty
+/// is re-extracted. **Re-extraction is triggered here** — a departure from
+/// migration 10's ([FR-EX-07]) posture, which left its column `NULL` until a
+/// file happened to change, and simpler than S-472's marker-gated pipeline
+/// backfill after migration 24: every `files.content_hash` is cleared, so the
+/// next sync takes its existing "never hashed" arm for each file it meets — a
+/// full-walk sync every file — re-extracts it exactly as it would a modified
+/// one, and records the fresh hash. `content_hash` is read by incremental-sync dirty
 /// detection alone, so clearing it costs one re-extraction and changes nothing
 /// else; no graph row is deleted.
 ///
