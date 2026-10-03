@@ -2553,6 +2553,9 @@ mod tests {
 
         apply_migrations_from(&mut conn, &MIGRATIONS[..23]).unwrap();
         assert_eq!(current_version(&conn).unwrap(), 23, "22 → 23, exactly one step");
+        // Read at v23: migration 26 (S-498) adds a later `metric_snapshots`
+        // column of its own, which is not this migration's to account for.
+        let after = read_table(&conn, "metric_snapshots", "id");
         apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
         let recorded: i64 = conn
             .query_row("SELECT count(*) FROM schema_versions WHERE version = 23", [], |r| r.get(0))
@@ -2560,7 +2563,6 @@ mod tests {
         assert_eq!(recorded, 1, "migration 23 is recorded once and never re-applied");
 
         // Every pre-migration column verbatim; the one new column is NULL.
-        let after = read_table(&conn, "metric_snapshots", "id");
         assert_eq!(after.len(), before.len());
         for (old, new) in before.iter().zip(&after) {
             assert_eq!(new.len(), old.len() + 1, "exactly one column added");
@@ -2891,6 +2893,105 @@ mod tests {
             "a token count is never negative"
         );
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 25");
+    }
+
+    /// Migration 26 ([CR-162], S-498) is purely additive: every pre-migration
+    /// snapshot row survives byte for byte with `offenders_recorded` `NULL` —
+    /// the "offenders not recorded" reading, which no back-fill overwrites — and
+    /// the offender table arrives **empty**. Then the additions are exercised:
+    /// the flag admits only `1`, an offender row must name an existing snapshot
+    /// and a positive rank, and a `(snapshot, dimension, rank)` key is unique.
+    ///
+    /// [CR-162]: ../../../../docs/requests/CR-162-health-shows-the-worst-offenders-its-snapshot-computed.md
+    #[test]
+    fn migration_26_adds_snapshot_offenders_and_pre_migration_rows_read_not_recorded() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..25]).unwrap();
+        // Two v6 snapshots, the second the latest — the row the Health bundle reads.
+        for id in [1, 2] {
+            conn.execute(
+                "INSERT INTO metric_snapshots (
+                     id, created_at, node_count, edge_count, function_count,
+                     test_function_count, metric_version, empty,
+                     modularity_raw, modularity_normalized,
+                     acyclicity_raw, acyclicity_normalized,
+                     depth_raw, depth_normalized,
+                     equality_raw, equality_normalized,
+                     redundancy_raw, redundancy_normalized,
+                     nesting_raw, nesting_normalized,
+                     conciseness_raw, conciseness_normalized,
+                     cohesion_raw, cohesion_normalized, cohesion_applicable,
+                     focus_raw, focus_normalized, focus_applicable,
+                     uniqueness_raw, uniqueness_normalized,
+                     thresholds_hash, aggregate_signal, modularity_applicable)
+                 VALUES (?1, 1000, 14, 6, 9, 2, 6, 0,
+                         0.2, 0.46, 0.0, 1.0, 2.0, 0.8, 0.1, 0.9, 0.0, 1.0,
+                         0.1, 0.9, 0.0, 1.0,
+                         NULL, NULL, 0,
+                         0.0, 1.0, 1,
+                         0.0, 1.0,
+                         'h', 8000, 1)",
+                [id],
+            )
+            .unwrap();
+        }
+        let before = read_table(&conn, "metric_snapshots", "id");
+        assert!(
+            conn.query_row("SELECT count(*) FROM metric_snapshot_offenders", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "the offender table does not exist at v25"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..26]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 26, "25 → 26, exactly one step");
+        // Read at v26, so a later migration's column is never counted as this one's.
+        let after = read_table(&conn, "metric_snapshots", "id");
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 26", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 26 is recorded once and never re-applied");
+
+        // Every pre-migration column verbatim; the one new column is NULL.
+        assert_eq!(after.len(), before.len());
+        for (old, new) in before.iter().zip(&after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one column added");
+            assert_eq!(&new[..old.len()], &old[..], "every existing column verbatim");
+            assert_eq!(new[old.len()], "NULL", "a pre-migration snapshot recorded no offenders");
+        }
+        let offenders: i64 = conn
+            .query_row("SELECT count(*) FROM metric_snapshot_offenders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(offenders, 0, "no back-fill: old snapshots stay not recorded");
+
+        // The flag admits 1 only; NULL stays the pre-migration reading.
+        conn.execute("UPDATE metric_snapshots SET offenders_recorded = 1 WHERE id = 2", [])
+            .expect("1 is admitted");
+        for refused in [0, 2] {
+            assert!(
+                conn.execute(
+                    "UPDATE metric_snapshots SET offenders_recorded = ?1 WHERE id = 2",
+                    [refused],
+                )
+                .is_err(),
+                "offenders_recorded = {refused} is refused: the one append path always records"
+            );
+        }
+
+        // An offender row: keyed by an existing snapshot, rank ≥ 1, unique key.
+        let insert = |snapshot: i64, dimension: &str, rank: i64| {
+            conn.execute(
+                "INSERT INTO metric_snapshot_offenders
+                     (snapshot_id, dimension, rank, name, file, line, detail)
+                 VALUES (?1, ?2, ?3, 'f', NULL, NULL, 'nesting depth 5')",
+                rusqlite::params![snapshot, dimension, rank],
+            )
+        };
+        insert(2, "nesting", 1).expect("a well-formed row with an unbound file is admitted");
+        assert!(insert(2, "nesting", 1).is_err(), "a (snapshot, dimension, rank) is unique");
+        assert!(insert(2, "nesting", 0).is_err(), "ranks are 1-based");
+        assert!(insert(99, "nesting", 1).is_err(), "an offender names an existing snapshot");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 26");
     }
 
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —

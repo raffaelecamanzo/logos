@@ -429,14 +429,32 @@ fn applicable_new_dimensions(
     dims
 }
 
-/// Run a full metrics pass: snapshot the store, [`compute`], and append one
-/// `metric_snapshots` row ([FR-QM-07]).
+/// What [`snapshot`] persisted: the appended row's id, its read-model, and the
+/// worst-offender lists written with it ([FR-QM-15]).
+///
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+#[derive(Debug)]
+pub struct RecordedSnapshot {
+    /// The appended `metric_snapshots` row id.
+    pub id: i64,
+    /// The metric read-model the row persists.
+    pub metrics: MetricSnapshot,
+    /// The per-dimension lists persisted with the row, from the same read the
+    /// metrics were computed on; always [`recorded`](WorstOffenders::recorded).
+    pub worst_offenders: WorstOffenders,
+}
+
+/// Run a full metrics pass: snapshot the store, [`compute`] the metrics and
+/// the [`worst_offenders`] from that one read, and append one
+/// `metric_snapshots` row with its offender lists ([FR-QM-07], [FR-QM-15]).
 ///
 /// `view` must be hydrated from the store's current state (the caller — the
 /// governance engine's reconcile-then-score, S-020 — owns that freshness
 /// contract). `thresholds` is the effective CR-005 detection-threshold set the
 /// caller composed from `rules.toml` ([BR-25]); its hash is persisted on the
-/// row. Returns the persisted row id and the read-model.
+/// row, and the offender lists are computed under the same set. This is the
+/// one snapshot-append path, so every caller — `scan`, `gate`,
+/// `session_start`, `session_end` — persists the lists it computed.
 ///
 /// [BR-25]: ../../../docs/specs/software-spec.md#311-quality-metrics
 ///
@@ -445,14 +463,31 @@ fn applicable_new_dimensions(
 /// rolls back wholesale, [NFR-RA-07]).
 ///
 /// [FR-QM-07]: ../../../docs/specs/requirements/FR-QM-07.md
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
 pub fn snapshot(
     runtime: &Runtime,
     view: &GraphView,
     commit_sha: Option<&str>,
     thresholds: Thresholds,
-) -> Result<(i64, MetricSnapshot)> {
-    let computed = compute_snapshot(runtime, view, thresholds)?;
+) -> Result<RecordedSnapshot> {
+    let inputs = read_inputs(runtime)?;
+    let computed = compute(
+        view,
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.functions,
+        &inputs.test_ids,
+        thresholds,
+    );
+    let offenders = worst_offenders(
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.functions,
+        &inputs.test_ids,
+        thresholds,
+        WORST_OFFENDER_CAP,
+    );
 
     // created_at is bookkeeping, not part of the deterministic signal
     // (golden tests pin aggregate_signal, never the timestamp — ADR-08).
@@ -465,51 +500,91 @@ pub fn snapshot(
     let sha = commit_sha.map(str::to_owned);
     let row = OwnedSnapshotFields::from_model(&computed, created_at);
     let hash = computed.thresholds_hash.clone();
-    let id = runtime
+    // The lists ride into the write closure and back out, so the one batch
+    // that appends the row also appends them (NFR-RA-07) without a copy.
+    let (id, worst_offenders) = runtime
         .submit_write(move |writer| {
-            writer.insert_metric_snapshot(&NewMetricSnapshot {
-                created_at: row.created_at,
-                commit_sha: sha.as_deref(),
-                node_count: row.node_count,
-                edge_count: row.edge_count,
-                function_count: row.function_count,
-                test_function_count: row.test_function_count,
-                metric_version: METRIC_SEMANTICS_VERSION,
-                empty: row.empty,
-                modularity_raw: row.modularity.0,
-                modularity_normalized: row.modularity.1,
-                // Modularity keeps its computed pair even when it is not
-                // applicable (CR-156); only the flag records the drop-out.
-                modularity_applicable: Some(row.modularity_applicable),
-                acyclicity_raw: row.acyclicity.0,
-                acyclicity_normalized: row.acyclicity.1,
-                depth_raw: row.depth.0,
-                depth_normalized: row.depth.1,
-                equality_raw: row.equality.0,
-                equality_normalized: row.equality.1,
-                redundancy_raw: row.redundancy.0,
-                redundancy_normalized: row.redundancy.1,
-                nesting_raw: Some(row.nesting.0),
-                nesting_normalized: Some(row.nesting.1),
-                conciseness_raw: Some(row.conciseness.0),
-                conciseness_normalized: Some(row.conciseness.1),
-                // Cohesion/Focus persist NULL value + applicable=false when they
-                // dropped out of the mean (ADR-21 applicability drop-out).
-                cohesion_raw: row.cohesion.map(|c| c.0),
-                cohesion_normalized: row.cohesion.map(|c| c.1),
-                cohesion_applicable: Some(row.cohesion.is_some()),
-                focus_raw: row.focus.map(|f| f.0),
-                focus_normalized: row.focus.map(|f| f.1),
-                focus_applicable: Some(row.focus.is_some()),
-                uniqueness_raw: Some(row.uniqueness.0),
-                uniqueness_normalized: Some(row.uniqueness.1),
-                thresholds_hash: Some(hash.as_str()),
-                aggregate_signal: row.aggregate_signal,
-            })
+            let id = writer.insert_metric_snapshot(
+                &NewMetricSnapshot {
+                    created_at: row.created_at,
+                    commit_sha: sha.as_deref(),
+                    node_count: row.node_count,
+                    edge_count: row.edge_count,
+                    function_count: row.function_count,
+                    test_function_count: row.test_function_count,
+                    metric_version: METRIC_SEMANTICS_VERSION,
+                    empty: row.empty,
+                    modularity_raw: row.modularity.0,
+                    modularity_normalized: row.modularity.1,
+                    // Modularity keeps its computed pair even when it is not
+                    // applicable (CR-156); only the flag records the drop-out.
+                    modularity_applicable: Some(row.modularity_applicable),
+                    acyclicity_raw: row.acyclicity.0,
+                    acyclicity_normalized: row.acyclicity.1,
+                    depth_raw: row.depth.0,
+                    depth_normalized: row.depth.1,
+                    equality_raw: row.equality.0,
+                    equality_normalized: row.equality.1,
+                    redundancy_raw: row.redundancy.0,
+                    redundancy_normalized: row.redundancy.1,
+                    nesting_raw: Some(row.nesting.0),
+                    nesting_normalized: Some(row.nesting.1),
+                    conciseness_raw: Some(row.conciseness.0),
+                    conciseness_normalized: Some(row.conciseness.1),
+                    // Cohesion/Focus persist NULL value + applicable=false when they
+                    // dropped out of the mean (ADR-21 applicability drop-out).
+                    cohesion_raw: row.cohesion.map(|c| c.0),
+                    cohesion_normalized: row.cohesion.map(|c| c.1),
+                    cohesion_applicable: Some(row.cohesion.is_some()),
+                    focus_raw: row.focus.map(|f| f.0),
+                    focus_normalized: row.focus.map(|f| f.1),
+                    focus_applicable: Some(row.focus.is_some()),
+                    uniqueness_raw: Some(row.uniqueness.0),
+                    uniqueness_normalized: Some(row.uniqueness.1),
+                    thresholds_hash: Some(hash.as_str()),
+                    aggregate_signal: row.aggregate_signal,
+                },
+                &offenders,
+            )?;
+            Ok((id, offenders))
         })
         .context("persisting the metric snapshot")?;
 
-    Ok((id, computed))
+    Ok(RecordedSnapshot {
+        id,
+        metrics: computed,
+        worst_offenders,
+    })
+}
+
+/// The store facts every metrics pass scores: nodes, edges, per-function
+/// metrics and the persisted `is_test` verdict — read in one `submit_read`.
+struct SnapshotInputs {
+    nodes: Vec<NodeRow>,
+    edges: Vec<EdgeRow>,
+    functions: Vec<FunctionMetricRow>,
+    test_ids: HashSet<NodeId>,
+}
+
+fn read_inputs(runtime: &Runtime) -> Result<SnapshotInputs> {
+    let (nodes, edges, functions, test_ids) = runtime
+        .submit_read(|store| {
+            Ok((
+                store.all_nodes()?,
+                store.all_edges()?,
+                store.function_metrics()?,
+                store.test_node_ids()?,
+            ))
+        })
+        .context("reading the metrics snapshot inputs")?;
+    // Read the persisted is_test verdict — the single source of truth the
+    // annotation pass computes (FR-AN-05, CR-001); never re-derived here.
+    Ok(SnapshotInputs {
+        nodes,
+        edges,
+        functions,
+        test_ids: test_ids.into_iter().collect(),
+    })
 }
 
 /// Compute the metric snapshot **without persisting it** — the read-only twin of
@@ -538,26 +613,18 @@ pub fn compute_snapshot(
     view: &GraphView,
     thresholds: Thresholds,
 ) -> Result<MetricSnapshot> {
-    let (nodes, edges, functions, test_ids) = runtime
-        .submit_read(|store| {
-            Ok((
-                store.all_nodes()?,
-                store.all_edges()?,
-                store.function_metrics()?,
-                store.test_node_ids()?,
-            ))
-        })
-        .context("reading the metrics snapshot inputs")?;
-
-    // Read the persisted is_test verdict — the single source of truth the
-    // annotation pass computes (FR-AN-05, CR-001); never re-derived here.
-    let test_ids: HashSet<NodeId> = test_ids.into_iter().collect();
+    let inputs = read_inputs(runtime)?;
     // The effective CR-005 detection thresholds (BR-25): the governance engine
     // composes the documented defaults with the rules.toml [metric_thresholds]
     // overrides and passes the result here — the single seam S-044 left for
     // S-045. The persisted thresholds_hash follows automatically.
     Ok(compute(
-        view, &nodes, &edges, &functions, &test_ids, thresholds,
+        view,
+        &inputs.nodes,
+        &inputs.edges,
+        &inputs.functions,
+        &inputs.test_ids,
+        thresholds,
     ))
 }
 
@@ -715,6 +782,9 @@ pub fn worst_offenders(
         .collect();
 
     WorstOffenders {
+        // Computed here, so these are the lists — possibly all empty — and not
+        // the "not recorded" default (FR-QM-15).
+        recorded: true,
         nesting,
         conciseness,
         cohesion,

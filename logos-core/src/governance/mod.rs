@@ -72,7 +72,7 @@ use crate::models::quality::{
     EvolutionPoint, EvolutionReport, GateResult, HealthInfo, LatestHealth, MetricDelta,
     MetricRegression, MetricSnapshot, MetricValue, ModularityNotApplicable, QualityReadout,
     RulesReport, ScanResult, SessionInfo, SignalAbsence, TemporalTier, VerifyCensus, VerifyReport,
-    Violation,
+    Violation, WorstOffenders,
 };
 use crate::runtime::Runtime;
 
@@ -1816,8 +1816,15 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // BR-25: the snapshot scores under the effective rules.toml thresholds, so
     // its persisted hash gates the baseline (FR-GV-10) and the budgets agree.
     let thresholds = effective_thresholds(&compiled.rules);
-    let (snapshot_id, metrics) =
-        crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
+    // The per-dimension worst-offender lists (CR-005 §3.2) come back from the
+    // snapshot that persisted them (FR-QM-15): computed from the same read as
+    // the metrics, under the same thresholds, and written in the same batch —
+    // so what `scan` reports is exactly what the Health bundle later projects.
+    let crate::metrics::RecordedSnapshot {
+        id: snapshot_id,
+        metrics,
+        worst_offenders,
+    } = crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
     persist_violations(
         runtime,
         Some(snapshot_id),
@@ -1833,28 +1840,6 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
             operation: CHECK_RUN_OP_SCAN,
         },
     )?;
-
-    // Per-dimension worst-offender detail (CR-005 §3.2): the top-N offenders per
-    // new dimension, deterministically ordered and capped — review-phase
-    // visibility on the metric-bearing `scan` surface. Read fresh under the same
-    // thresholds the snapshot used; report detail only, never gated.
-    let (nodes, edges, functions, test_ids) = runtime.submit_read(|store| {
-        Ok((
-            store.all_nodes()?,
-            store.all_edges()?,
-            store.function_metrics()?,
-            store.test_node_ids()?,
-        ))
-    })?;
-    let test_ids: HashSet<NodeId> = test_ids.into_iter().collect();
-    let worst_offenders = crate::metrics::worst_offenders(
-        &nodes,
-        &edges,
-        &functions,
-        &test_ids,
-        thresholds,
-        crate::metrics::WORST_OFFENDER_CAP,
-    );
 
     // The non-gated temporal tier (CR-006, FR-GH-07): computed independently of
     // every gated column above and attached as advisory detail. Fail-soft — a
@@ -1960,14 +1945,33 @@ fn temporal_tier_from_report(report: crate::history::TemporalReport) -> Temporal
 // row ([FR-UI-03]). The CLI/MCP `scan`/`gate` paths are unchanged. None of these
 // reconcile, score, or persist — they read the last row the store already holds.
 
+/// The last persisted snapshot as the read path sees it: its metric breakdown
+/// and the worst-offender lists persisted with it ([FR-QM-15]) — two
+/// projections of the one row [`latest_metrics`] read.
+///
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+pub(crate) struct PersistedSnapshot {
+    /// The reconstructed [`MetricSnapshot`] breakdown.
+    pub(crate) metrics: MetricSnapshot,
+    /// The lists persisted with the row; `recorded: false` on a snapshot written
+    /// before they were persisted.
+    pub(crate) worst_offenders: WorstOffenders,
+}
+
 /// The most-recent persisted metric snapshot as a full read-model, or `None` on
 /// a never-`scan`-ned store ([ADR-28] `Engine::latest_metrics`). A pure read —
 /// no compute, no persist. Reconstructs the [`MetricSnapshot`] breakdown from the
 /// last `metric_snapshots` row, preserving the Cohesion/Focus applicability
-/// drop-out as `None` (the [NFR-CC-04] n/a sentinel), never a fabricated zero.
-pub(crate) fn latest_metrics(engine: &Engine) -> Result<Option<MetricSnapshot>> {
+/// drop-out as `None` (the [NFR-CC-04] n/a sentinel), never a fabricated zero,
+/// and carries the offender lists persisted with that same row ([FR-QM-15]).
+///
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+pub(crate) fn latest_metrics(engine: &Engine) -> Result<Option<PersistedSnapshot>> {
     let row = quality_runtime(engine)?.submit_read(|store| store.latest_metric_snapshot())?;
-    Ok(row.map(metric_snapshot_from_row))
+    Ok(row.map(|mut row| PersistedSnapshot {
+        worst_offenders: std::mem::take(&mut row.worst_offenders),
+        metrics: metric_snapshot_from_row(row),
+    }))
 }
 
 /// Read a persisted `modularity_applicable` flag back as the drop-out it
@@ -2032,12 +2036,15 @@ fn metric_snapshot_from_row(row: LatestMetricSnapshot) -> MetricSnapshot {
 }
 
 /// The read-only twin of [`scan`]: the last persisted snapshot's metric
-/// breakdown joined with the read-only temporal tier, or `None` on a
-/// never-`scan`-ned store ([ADR-28], [CR-018], S-082). Backs the web dashboard's
-/// Metrics and Health views. Carries **no** worst-offenders or rule violations
-/// (those are not persisted on the snapshot — they are review-phase detail the
-/// metric-bearing `scan` surface computes fresh, deliberately absent from the
-/// read-only dashboard so a GET stays a pure read).
+/// breakdown and the worst-offender lists persisted with it ([FR-QM-15]),
+/// joined with the read-only temporal tier, or `None` on a never-`scan`-ned
+/// store ([ADR-28], [CR-018], S-082). Backs the web dashboard's Metrics and
+/// Health views. Carries **no** rule violations — those are not persisted on
+/// the snapshot — and recomputes nothing, so a GET stays a pure read. A
+/// snapshot written before the lists were persisted projects them as
+/// [`recorded: false`](WorstOffenders::recorded), never as an empty result.
+///
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
 ///
 /// A never-`scan`-ned store yields a `ScanResult` whose `metrics.empty` is
 /// `true` — the same honest sentinel `scan` returns for an empty production graph,
@@ -2061,13 +2068,21 @@ pub(crate) fn latest_scan(engine: &Engine) -> Result<ScanResult> {
 ///
 /// `None` (a never-`scan`-ned store) becomes the honest empty sentinel, never a
 /// fabricated zero ([NFR-CC-04]) — see [`latest_scan`] for why the flag alone
-/// does not say which of the two empties happened.
+/// does not say which of the two empties happened. Its offender lists are
+/// "not recorded", like a pre-[FR-QM-15] snapshot's: there is nothing to show.
 ///
 /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
-fn scan_from_snapshot(engine: &Engine, snapshot: Option<MetricSnapshot>) -> ScanResult {
-    let metrics = snapshot.unwrap_or(MetricSnapshot {
-        empty: true,
-        ..MetricSnapshot::default()
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+fn scan_from_snapshot(engine: &Engine, snapshot: Option<PersistedSnapshot>) -> ScanResult {
+    let PersistedSnapshot {
+        metrics,
+        worst_offenders,
+    } = snapshot.unwrap_or(PersistedSnapshot {
+        metrics: MetricSnapshot {
+            empty: true,
+            ..MetricSnapshot::default()
+        },
+        worst_offenders: WorstOffenders::default(),
     });
     let mut warnings = Vec::new();
     let temporal = latest_temporal_tier(engine, &mut warnings);
@@ -2076,7 +2091,7 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<MetricSnapshot>) -> Scan
         freshness: String::new(),
         violations: Vec::new(),
         metrics,
-        worst_offenders: Default::default(),
+        worst_offenders,
         temporal,
         warnings,
         notes: Vec::new(),
@@ -2092,7 +2107,7 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<MetricSnapshot>) -> Scan
 /// A never-`scan`-ned store returns an `n/a` verdict naming the producing command.
 pub(crate) fn latest_gate(engine: &Engine) -> Result<GateResult> {
     let snapshot = latest_metrics(engine)?;
-    gate_from_snapshot(engine, snapshot.as_ref())
+    gate_from_snapshot(engine, snapshot.as_ref().map(|s| &s.metrics))
 }
 
 /// Project an **already-read** snapshot into the read-only gate verdict.
@@ -2219,7 +2234,9 @@ pub(crate) fn latest_health(engine: &Engine) -> Result<LatestHealth> {
     // a second `latest_metrics` call here, in either projection or at a caller
     // that wants both fields ([CR-135] §3.2).
     let snapshot = latest_metrics(engine)?;
-    let gate = gate_from_snapshot(engine, snapshot.as_ref())?;
+    let gate = gate_from_snapshot(engine, snapshot.as_ref().map(|s| &s.metrics))?;
+    // Offenders ride inside the same value, so they describe the same row as
+    // the signal and the verdict (FR-QM-15).
     let scan = scan_from_snapshot(engine, snapshot);
     Ok(LatestHealth { gate, scan })
 }
@@ -2557,9 +2574,13 @@ pub(crate) fn gate(
     // BR-25: the gate scores under the effective rules.toml thresholds, so the
     // snapshot's persisted hash is what the baseline comparison gates on.
     let thresholds = effective_thresholds(&load_rules_cached(engine, None)?.rules);
-    // FR-GV-09: every gate writes a snapshot, saved or compared.
-    let (snapshot_id, metrics) =
-        crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
+    // FR-GV-09: every gate writes a snapshot, saved or compared — with the
+    // offender lists it computed (FR-QM-15), which the verdict does not report.
+    let crate::metrics::RecordedSnapshot {
+        id: snapshot_id,
+        metrics,
+        ..
+    } = crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
 
     let mut result = GateResult {
         passed: true,
@@ -2772,8 +2793,12 @@ pub(crate) fn session_start(engine: &Engine) -> Result<SessionInfo> {
     // BR-25: baseline under the effective rules.toml thresholds (its hash gates
     // the later session_end comparison, FR-GV-10).
     let thresholds = effective_thresholds(&load_rules_cached(engine, None)?.rules);
-    let (snapshot_id, metrics) =
-        crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
+    // The baseline snapshot persists its offender lists too (FR-QM-15).
+    let crate::metrics::RecordedSnapshot {
+        id: snapshot_id,
+        metrics,
+        ..
+    } = crate::metrics::snapshot(runtime, &view, fresh.head.as_deref(), thresholds)?;
 
     let started_at = unix_now();
     runtime.submit_write(move |w| w.upsert_baseline(SCOPE_PROJECT, snapshot_id, started_at))?;

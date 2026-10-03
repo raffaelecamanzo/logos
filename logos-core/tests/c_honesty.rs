@@ -63,8 +63,9 @@ int withdraw(int balance, int amount) {
         .hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().unwrap();
-    let (_, model) =
-        metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("snapshot runs");
+    let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+        .expect("snapshot runs")
+        .metrics;
 
     assert!(!model.empty, "an indexed C repo is not the empty sentinel");
     assert!(

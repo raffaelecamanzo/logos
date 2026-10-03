@@ -315,8 +315,9 @@ fn aggregate_signal(root: &Path) -> Option<u32> {
         .hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
     let rt = engine.runtime().expect("runtime present");
-    let (_, model) = metrics::snapshot(rt, &view, Some("sha"), metrics::Thresholds::default())
-        .expect("snapshot runs");
+    let model = metrics::snapshot(rt, &view, Some("sha"), metrics::Thresholds::default())
+        .expect("snapshot runs")
+        .metrics;
     model.aggregate_signal
 }
 

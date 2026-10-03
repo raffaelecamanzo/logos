@@ -1883,15 +1883,19 @@ impl Engine {
     /// failure — never from compute (there is none).
     pub fn latest_metrics(&self) -> Result<Option<MetricSnapshot>> {
         crate::observability::traced(Tool::LatestMetrics, || {
-            crate::governance::latest_metrics(self)
+            Ok(crate::governance::latest_metrics(self)?.map(|s| s.metrics))
         })
     }
 
     /// The read-only twin of [`scan`](Self::scan): the last persisted snapshot's
-    /// metric breakdown plus the read-only temporal tier, or `None` when no
-    /// snapshot exists ([ADR-28]). Reads the last row — no reconcile, no score,
-    /// no persist; carries no worst-offenders/violations (review-phase detail the
-    /// metric-bearing `scan` computes fresh, off the read-only dashboard path).
+    /// metric breakdown, the worst-offender lists persisted with it
+    /// ([FR-QM-15]) and the read-only temporal tier, or `None` when no snapshot
+    /// exists ([ADR-28]). Reads the last row — no reconcile, no score, no
+    /// persist; carries no violations (those are not persisted on the snapshot).
+    /// A snapshot written before the lists were persisted reports them as
+    /// [`recorded: false`](crate::models::quality::WorstOffenders::recorded).
+    ///
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     ///
     /// # Errors
     /// Returns an error only on a transient engine or a store-read failure.
@@ -1911,7 +1915,9 @@ impl Engine {
     }
 
     /// **One** read of the last persisted snapshot, projected into the Health
-    /// bundle's gate verdict *and* its scan result ([FR-UI-04], [CR-135] §3.2).
+    /// bundle's gate verdict *and* its scan result ([FR-UI-04], [CR-135] §3.2) —
+    /// the scan result carrying the worst-offender lists persisted with that
+    /// same snapshot ([FR-QM-15]).
     ///
     /// The pair a caller that wants both fields must use.
     /// [`latest_gate`](Self::latest_gate) and [`latest_scan`](Self::latest_scan)
@@ -1927,6 +1933,7 @@ impl Engine {
     /// Returns an error only on a transient engine or a store-read failure.
     ///
     /// [FR-UI-04]: ../../../docs/specs/requirements/FR-UI-04.md
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
     /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
     pub fn latest_health(&self) -> Result<LatestHealth> {

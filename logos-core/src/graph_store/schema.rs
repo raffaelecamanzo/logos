@@ -58,6 +58,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (23, MIGRATION_23),
     (24, MIGRATION_24),
     (25, MIGRATION_25),
+    (26, MIGRATION_26),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2337,6 +2338,65 @@ ALTER TABLE nodes ADD COLUMN body_tokens INTEGER CHECK (body_tokens >= 0);
 -- 3. Trigger re-extraction: a file with no recorded hash is re-extracted on its
 -- next sync like a modified one, filling both columns.
 UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 26 — every metric snapshot persists the **worst-offender lists** it
+/// computed (S-498, [CR-162], [FR-QM-15]).
+///
+/// Two additions, both purely additive — no table is dropped, rebuilt or copied,
+/// so every existing row (the graph, the FTS index, every snapshot) crosses the
+/// boundary byte for byte and an upgraded store needs no re-index:
+///
+/// 1. **`metric_snapshots.offenders_recorded`** — `1` on a snapshot whose lists
+///    were written with it, `NULL` on every snapshot written before this
+///    migration. It is what tells a **recorded-empty** list (nothing crossed a
+///    threshold) from a snapshot that **recorded no lists**: both have zero
+///    offender rows, and only this column separates them ([NFR-CC-04]). The
+///    [migration-23](MIGRATION_23) shape — a nullable flag added in place whose
+///    `NULL` is the pre-migration reading. Only `1` is admitted, because the one
+///    append path always records; there is no third state to spell.
+/// 2. **`metric_snapshot_offenders`** — one row per offender entry, keyed by the
+///    snapshot that computed it and its 1-based rank within its dimension's list
+///    (computed order: severity, then node id). `file` is `NULL` for a node bound
+///    to no file, the `violations.file` convention. Rows are append-only like
+///    their snapshot; nothing updates or deletes them.
+///
+/// `dimension` carries **no** `CHECK` list on purpose: [CR-164] reuses this
+/// table for further lists, and a `CHECK` would make each one a table rebuild.
+/// The vocabulary is pinned in Rust instead
+/// ([`WorstOffenders::DIMENSIONS`](crate::models::quality::WorstOffenders::DIMENSIONS)),
+/// and the read path ignores a name outside it.
+///
+/// No back-fill: an old snapshot stays "not recorded". Recomputing its lists
+/// would describe today's graph under yesterday's signal ([CR-162] §3.3).
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_26_adds_snapshot_offenders_and_pre_migration_rows_read_not_recorded`
+/// in [`super::migrate`].
+///
+/// [CR-162]: ../../../../docs/requests/CR-162-health-shows-the-worst-offenders-its-snapshot-computed.md
+/// [CR-164]: ../../../../docs/requests/CR-164-insight-layer-ranks-what-to-fix-first.md
+/// [FR-QM-15]: ../../../../docs/specs/requirements/FR-QM-15.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_26: &str = "\
+-- 1. 1 = this snapshot's offender lists were written with it (possibly all
+-- empty); NULL = written before offenders were persisted (not recorded).
+ALTER TABLE metric_snapshots ADD COLUMN offenders_recorded INTEGER CHECK (offenders_recorded = 1);
+
+-- 2. One row per offender entry: the snapshot that computed it, its dimension
+-- and 1-based rank in that dimension's list, and the entry itself.
+CREATE TABLE metric_snapshot_offenders (
+    snapshot_id INTEGER NOT NULL REFERENCES metric_snapshots(id),
+    dimension   TEXT NOT NULL,
+    rank        INTEGER NOT NULL CHECK (rank >= 1),
+    name        TEXT NOT NULL,
+    file        TEXT,
+    line        INTEGER,
+    detail      TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, dimension, rank)
+) STRICT;
 ";
 
 #[cfg(test)]

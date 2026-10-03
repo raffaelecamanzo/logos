@@ -133,12 +133,15 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// inverse of migration 22, which is two `CREATE TABLE`s and one index, of
 /// migration 23 (S-487), which only adds `metric_snapshots.modularity_applicable`,
 /// of migration 24 (S-472), two declared-type tables with their indexes and
-/// marker, and of migration 25 (S-500), two `nodes` columns; the next
-/// [`Engine::start`] re-applies all four, as it does on a real upgrade.
+/// marker, of migration 25 (S-500), two `nodes` columns, and of migration 26
+/// (S-498), the snapshot offender table and its flag column; the next
+/// [`Engine::start`] re-applies all five, as it does on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
+        "DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
+         DELETE FROM schema_versions WHERE version = 26; \
+         ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
          DELETE FROM schema_versions WHERE version = 25; \
          DROP TABLE declared_types; DROP TABLE avro_schemas; \
          DELETE FROM schema_versions WHERE version = 24; \

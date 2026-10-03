@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        25,
-        "v25 = migration 25 (S-500 CR-163 callable has-body fact)"
+        26,
+        "v26 = migration 26 (S-498 CR-162 snapshot offender lists)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 25,
+        recorded, 26,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 25);
+        assert_eq!(store.schema_version().unwrap(), 26);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 25);
+    assert_eq!(store.schema_version().unwrap(), 26);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 25, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 26, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -474,7 +474,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 25);
+    assert_eq!(reopened.schema_version().unwrap(), 26);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1040,11 +1040,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v25 forward-only).
+    // data (the runner applies v2..v26 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        25,
+        26,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -2904,4 +2904,150 @@ fn a_refused_build_manifest_write_leaves_the_previous_facts_intact() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].content_hash.as_deref(), Some("h1"), "the previous facts are intact");
     assert_eq!(rows[0].artifacts.len(), 1);
+}
+
+// ── S-498 / FR-QM-15: a snapshot appends with the offender lists it computed ──
+
+/// A minimal valid `metric_snapshots` row; only the offender lists vary below.
+fn new_snapshot() -> NewMetricSnapshot<'static> {
+    NewMetricSnapshot {
+        created_at: 1,
+        commit_sha: None,
+        node_count: 3,
+        edge_count: 2,
+        function_count: 3,
+        test_function_count: 0,
+        metric_version: crate::metrics::METRIC_SEMANTICS_VERSION,
+        empty: false,
+        modularity_raw: 0.0,
+        modularity_normalized: 0.5,
+        modularity_applicable: Some(false),
+        acyclicity_raw: 0.0,
+        acyclicity_normalized: 1.0,
+        depth_raw: 1.0,
+        depth_normalized: 0.9,
+        equality_raw: 0.0,
+        equality_normalized: 1.0,
+        redundancy_raw: 0.0,
+        redundancy_normalized: 1.0,
+        nesting_raw: Some(0.0),
+        nesting_normalized: Some(1.0),
+        conciseness_raw: Some(0.0),
+        conciseness_normalized: Some(1.0),
+        cohesion_raw: None,
+        cohesion_normalized: None,
+        cohesion_applicable: Some(false),
+        focus_raw: None,
+        focus_normalized: None,
+        focus_applicable: Some(false),
+        uniqueness_raw: Some(0.0),
+        uniqueness_normalized: Some(1.0),
+        thresholds_hash: Some("h"),
+        aggregate_signal: Some(9000),
+    }
+}
+
+fn offender(name: &str, file: &str, line: Option<i64>, detail: &str) -> Offender {
+    Offender {
+        name: name.to_string(),
+        file: file.to_string(),
+        line,
+        detail: detail.to_string(),
+    }
+}
+
+fn snapshot_count(store: &SqliteGraphStore) -> i64 {
+    store
+        .conn
+        .query_row("SELECT count(*) FROM metric_snapshots", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// The lists round-trip through the append and the latest-snapshot read in
+/// computed (rank) order — not name order — in every dimension, and an
+/// offender bound to no file is stored `NULL` and read back as `""`.
+#[test]
+fn snapshot_offenders_round_trip_in_rank_order_through_the_latest_read() {
+    let mut store = mem();
+    let lists = WorstOffenders {
+        recorded: true,
+        nesting: vec![
+            offender("zeta", "src/z.rs", Some(9), "nesting depth 7"),
+            offender("alpha", "src/a.rs", Some(1), "nesting depth 5"),
+        ],
+        conciseness: vec![offender("brain", "src/b.rs", Some(3), "CC 20 · LOC 120 · nesting 4")],
+        cohesion: vec![offender("Split", "src/s.rs", Some(4), "LCOM4 3")],
+        focus: vec![offender("God", "src/g.rs", Some(5), "23 methods · span 540")],
+        uniqueness: vec![offender("unbound", "", None, "clone group #7")],
+    };
+    let id = store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &lists))
+        .unwrap();
+
+    let read = store.latest_metric_snapshot().unwrap().expect("a snapshot exists");
+    assert_eq!(read.worst_offenders, lists, "every list, entry for entry, in computed order");
+    let file: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT file FROM metric_snapshot_offenders WHERE snapshot_id = ?1 AND dimension = 'uniqueness'",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(file, None, "an unbound offender stores NULL, the violations.file convention");
+}
+
+/// The latest read pairs the newest snapshot with **its own** rows: an older
+/// snapshot's lists never leak into it, and a recorded-empty newest snapshot
+/// reads recorded with every list empty — not as the older snapshot's lists,
+/// and not as "not recorded".
+#[test]
+fn the_latest_read_carries_only_the_newest_snapshots_own_lists() {
+    let mut store = mem();
+    let older = WorstOffenders {
+        recorded: true,
+        nesting: vec![offender("old", "src/o.rs", Some(2), "nesting depth 6")],
+        ..WorstOffenders::default()
+    };
+    let newest_empty = WorstOffenders {
+        recorded: true,
+        ..WorstOffenders::default()
+    };
+    store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &older))
+        .unwrap();
+    store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &newest_empty))
+        .unwrap();
+
+    let read = store.latest_metric_snapshot().unwrap().unwrap().worst_offenders;
+    assert_eq!(read, newest_empty, "recorded-empty, and none of the older snapshot's rows");
+
+    // The same row with its flag cleared is the pre-migration reading.
+    store
+        .conn
+        .execute(
+            "UPDATE metric_snapshots SET offenders_recorded = NULL WHERE id = (SELECT max(id) FROM metric_snapshots)",
+            [],
+        )
+        .unwrap();
+    let read = store.latest_metric_snapshot().unwrap().unwrap().worst_offenders;
+    assert_eq!(read, WorstOffenders::default(), "a NULL flag reads not recorded");
+}
+
+/// The append refuses a "not recorded" set: [`WorstOffenders::default`] would
+/// otherwise persist as a recorded-empty result — exactly the false "none
+/// flagged" FR-QM-15 exists to remove — and the batch rolls back, so no
+/// snapshot row is left behind without its lists.
+#[test]
+fn the_append_refuses_an_unrecorded_offender_set_and_writes_nothing() {
+    let mut store = mem();
+    let err = store
+        .write_batch(|w| w.insert_metric_snapshot(&new_snapshot(), &WorstOffenders::default()))
+        .expect_err("a not-recorded set is refused");
+    assert!(
+        format!("{err:#}").contains("never computed as a recorded set"),
+        "the refusal says why: {err:#}"
+    );
+    assert_eq!(snapshot_count(&store), 0, "no snapshot row survives the refusal");
 }

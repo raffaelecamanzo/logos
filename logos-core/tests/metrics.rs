@@ -102,7 +102,9 @@ fn never_called() {}
         .hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().unwrap();
-    let (id, model) = metrics::snapshot(rt, &view, Some("abc1234"), metrics::Thresholds::default())
+    let metrics::RecordedSnapshot {
+        id, metrics: model, ..
+    } = metrics::snapshot(rt, &view, Some("abc1234"), metrics::Thresholds::default())
         .expect("snapshot runs");
 
     let all = rows(rt);
@@ -153,8 +155,9 @@ fn empty_graph_snapshot_persists_the_na_sentinel() {
         .hydrate(Granularity::ExcludeContains)
         .expect("an empty store hydrates an empty view");
     let rt = engine.runtime().unwrap();
-    let (_, model) =
-        metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("snapshot runs");
+    let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+        .expect("snapshot runs")
+        .metrics;
 
     assert!(model.empty, "node_count == 0 → empty (ADR-12)");
     assert_eq!(
@@ -198,10 +201,16 @@ fn two() {}
         .expect("view hydrates");
     let rt = engine.runtime().unwrap();
 
-    let (first_id, first) =
-        metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("first run");
-    let (second_id, second) =
-        metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("second run");
+    let metrics::RecordedSnapshot {
+        id: first_id,
+        metrics: first,
+        ..
+    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("first run");
+    let metrics::RecordedSnapshot {
+        id: second_id,
+        metrics: second,
+        ..
+    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("second run");
 
     assert_eq!(
         first.aggregate_signal, second.aggregate_signal,
@@ -330,8 +339,9 @@ fn covers_produce() {
     let view = engine
         .hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
-    let (id, model) =
-        metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("snapshot runs");
+    let metrics::RecordedSnapshot {
+        id, metrics: model, ..
+    } = metrics::snapshot(rt, &view, None, metrics::Thresholds::default()).expect("snapshot runs");
     assert_eq!(
         model.test_function_count, 1,
         "the one test function is excluded and counted"
