@@ -48,7 +48,12 @@ fn index(files: &[(&str, &str)]) -> (IndexResult, Vec<NodeRow>) {
         .runtime()
         .unwrap()
         .submit_read(|store| store.all_nodes())
-        .expect("nodes read back");
+        .unwrap_or_else(|err| {
+            panic!(
+                "every stored symbol reads back as a valid SCIP symbol \
+                 (an empty or MISSING name renders a bare suffix): {err:#}"
+            )
+        });
     (result, nodes)
 }
 
