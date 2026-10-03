@@ -1601,7 +1601,7 @@ async fn health_payload_distinguishes_recorded_recorded_empty_and_not_recorded()
         served_worst_offenders("pub fn api() {\n    helper();\n}\nfn helper() {}\n", true).await;
     let not_recorded = served_worst_offenders(NESTED_SRC, false).await;
 
-    // The recorded flag leads the object and is always present.
+    // The recorded flag is present in every state (key order is not asserted).
     assert_eq!(recorded["recorded"], true);
     let names: Vec<&str> = recorded["nesting"]
         .as_array()

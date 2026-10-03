@@ -524,7 +524,7 @@ export interface Offender {
  *  ones the snapshot's computation produced — so an empty list is "nothing flagged
  *  within thresholds" — and `false` means the snapshot never recorded offenders (a
  *  snapshot written before FR-QM-15, or no scan at all), so every list is `[]` and
- *  that `[]` means nothing (NFR-CC-04, CR-162). Always present, serialised first. */
+ *  that `[]` means nothing (NFR-CC-04, CR-162). Always present. */
 export interface WorstOffenders {
   recorded: boolean;
   nesting: Offender[];
