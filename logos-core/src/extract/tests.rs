@@ -5858,6 +5858,11 @@ fn parse_damage_is_counted_into_the_partial_extraction_warning() {
         "syntax error(s) present; partial extraction; \
          0 declaration(s) truncated and 1 skipped at a parse error"
     );
+    // A nameless declarator of a declaration another declarator names is not
+    // a skipped declaration: `a` is emitted, so the declaration was taken.
+    let named_too = extract_lang("c", "src/vals.c", "int a = 1, = 2;\n");
+    assert!(named_too.nodes.iter().any(|n| n.name == "a"));
+    assert_eq!(partial_warning(&named_too), "syntax error(s) present; partial extraction");
     assert_eq!(
         umask.warnings.iter().filter(|w| w.contains("partial extraction")).count(),
         1,
