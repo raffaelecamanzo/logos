@@ -2689,12 +2689,11 @@ fn is_test_source_set(parent: Option<&str>, seg: &str) -> bool {
     parent == Some("src") && (seg == "it" || is_gradle_source_set(seg, "Test"))
 }
 
-/// `<camelCaseName><suffix>` — the Gradle source-set name shape: a lowercase
-/// first letter and something before the suffix (`commonMain`, not `Main`).
+/// `<camelCaseName><suffix>` — the Gradle source-set name shape. The lowercase
+/// first letter is what rules out a bare `Main` / `Test` (the suffix itself
+/// starts uppercase) and a PascalCase directory such as `FooTest`.
 fn is_gradle_source_set(seg: &str, suffix: &str) -> bool {
-    seg.len() > suffix.len()
-        && seg.ends_with(suffix)
-        && seg.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+    seg.ends_with(suffix) && seg.chars().next().is_some_and(|c| c.is_ascii_lowercase())
 }
 
 // ── Shared plumbing ─────────────────────────────────────────────────────────

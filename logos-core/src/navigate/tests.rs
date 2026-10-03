@@ -177,6 +177,7 @@ fn is_test_path_respects_production_source_roots() {
     // Near misses of the root names are not roots.
     assert!(is_test_path("src/mainline/test/Foo.java"));
     assert!(is_test_path("Main/test/Foo.kt")); // bare `Main` is not a `*Main` source set
+    assert!(is_test_path("src/FooMain/kotlin/test/X.kt")); // PascalCase is not one either
     // `src/main` needs its `src/` parent: a bare `main` directory is no root.
     assert!(is_test_path("main/test/Foo.java"));
     assert!(is_test_path("cmd/main/test/x.go"));
@@ -195,6 +196,7 @@ fn is_test_path_marks_gradle_test_source_sets() {
     assert!(!is_test_path("src/it_support/Support.java"));
     assert!(!is_test_path("pkg/fooTest/Support.java"));
     assert!(!is_test_path("src/Test/Support.java")); // bare `Test` is no source-set name
+    assert!(!is_test_path("src/FooTest/Support.java")); // PascalCase is not a source-set name
     assert!(!is_test_path("src/commonMain/kotlin/Util.kt"));
 }
 
