@@ -234,14 +234,17 @@ impl Foo { fn run(&self, _x: u32) {} }
     );
 }
 
-/// The symbol of the node named `name` with `kind`.
+/// The symbol of the one node named `name` of `kind`.
 fn symbol_of_kind<'a>(facts: &'a Facts, name: &str, kind: NodeKind) -> &'a str {
-    facts
-        .nodes
-        .iter()
-        .find(|n| n.name == name && n.kind == kind)
-        .map(|n| n.symbol.as_str())
-        .unwrap_or_else(|| panic!("no {kind:?} named {name}: {:?}", facts.nodes))
+    node_of_kind(facts, name, kind).symbol.as_str()
+}
+
+/// The one node named `name` of `kind`.
+fn node_of_kind<'a>(facts: &'a Facts, name: &str, kind: NodeKind) -> &'a NodeFact {
+    let hits: Vec<&NodeFact> =
+        facts.nodes.iter().filter(|n| n.name == name && n.kind == kind).collect();
+    assert_eq!(hits.len(), 1, "exactly one {kind:?} named {name}: {:?}", facts.nodes);
+    hits[0]
 }
 
 #[test]
@@ -5741,14 +5744,6 @@ struct position : base_position
 }  // namespace detail
 LIB_NAMESPACE_END
 ";
-
-/// The one node named `name` of `kind`.
-fn node_of_kind<'a>(facts: &'a Facts, name: &str, kind: NodeKind) -> &'a NodeFact {
-    let hits: Vec<&NodeFact> =
-        facts.nodes.iter().filter(|n| n.name == name && n.kind == kind).collect();
-    assert_eq!(hits.len(), 1, "exactly one {kind:?} named {name}: {:?}", facts.nodes);
-    hits[0]
-}
 
 /// The file's partial-extraction warning (FR-IX-04).
 fn partial_warning(facts: &Facts) -> &str {
