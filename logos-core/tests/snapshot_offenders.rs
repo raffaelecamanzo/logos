@@ -488,3 +488,44 @@ fn persisted_lists_are_capped_at_the_worst_offender_cap_keeping_the_deepest() {
         "the cap keeps the two depth-5 functions, ahead of every depth-4 one"
     );
 }
+
+/// [BR-25]: the persisted lists are computed under the **effective**
+/// `rules.toml` thresholds — the ones the snapshot's hash records — not the
+/// defaults. Raising `nesting_depth` to 5 drops the depth-4 function from the
+/// list that `scan` persists and from the one a standalone `gate` persists.
+///
+/// [BR-25]: ../../docs/specs/software-spec.md#311-quality-metrics
+#[test]
+fn persisted_lists_follow_the_effective_rules_toml_thresholds() {
+    type EntryPoint = fn(&Engine);
+    let entry_points: [(&str, EntryPoint); 2] = [
+        ("scan", |e| {
+            e.scan(true).expect("scan runs");
+        }),
+        ("gate", |e| {
+            e.gate(None, false, true).expect("gate runs");
+        }),
+    ];
+    for (name, run) in entry_points {
+        let tmp = nested_project();
+        write(
+            tmp.path(),
+            ".logos/rules.toml",
+            "[metric_thresholds]\nnesting_depth = 5\n",
+        );
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        assert!(engine.index().warnings.is_empty());
+
+        run(&engine);
+        let projected = engine
+            .latest_health()
+            .expect("read-only health")
+            .scan
+            .worst_offenders;
+        assert_eq!(
+            nesting_names(&projected),
+            ["beta_depth_six", "gamma_depth_five"],
+            "`{name}` persisted the lists under nesting_depth = 5, not the default 4"
+        );
+    }
+}
