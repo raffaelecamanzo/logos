@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-10-03
+
 ### Added
 
 - **Health shows the worst offenders its snapshot computed.** Every `scan`, `gate`,
