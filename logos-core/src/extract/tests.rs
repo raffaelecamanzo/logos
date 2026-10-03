@@ -5815,6 +5815,12 @@ fn cpp_a_class_head_stranded_in_a_parse_error_is_a_class_on_its_own_line() {
     let fin = STRANDED_CLASS_HEAD_HPP.replace("class exception :", "class exception final :");
     let facts = extract_lang("cpp", "include/detail/exceptions.hpp", &fin);
     assert_eq!(node_of_kind(&facts, "exception", NodeKind::Class).start_line, 10);
+
+    // A `struct` head stranded the same way is a Struct on its own line.
+    let st = STRANDED_CLASS_HEAD_HPP.replace("class exception :", "struct exception :");
+    let facts = extract_lang("cpp", "include/detail/exceptions.hpp", &st);
+    let head = node_of_kind(&facts, "exception", NodeKind::Struct);
+    assert_eq!((head.start_line, head.end_line), (10, 10));
 }
 
 #[test]
