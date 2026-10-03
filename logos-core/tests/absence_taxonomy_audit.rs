@@ -78,6 +78,16 @@
 //! 42 production rows**, beside **116** in test scope; the delta is
 //! [`S502_ADDITION`].
 //!
+//! **[S-499] (2026-10-03) adds five test-scope occurrences, no production site,
+//! no correction.** The Health drill-downs' three offender states pin that an
+//! `n/a` dimension keeps its `n/a` rendering whatever the recorded flag says
+//! (`HealthView.test.tsx` 3, `healthModel.test.ts` 2) — assertions on the
+//! existing `n/a` sites, not new ones. The census reads **87 production
+//! occurrences over 42 production rows**, beside **121** in test scope; the
+//! delta is [`S499_ADDITION`].
+//!
+//! [S-499]: ../../docs/planning/journal.md#s-499-health-drill-downs-render-the-persisted-offenders-in-three-honest-states
+//!
 //! # What is enumerated, and what this cannot catch
 //!
 //! The walk covers [`SURFACES`] in full — every `.rs`, `.ts` and `.tsx` file
@@ -758,8 +768,8 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "web/ui/src/views/health/HealthView.test.tsx",
         "n/a",
         0,
-        2,
-        "NO PRODUCTION SITE — 2 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        5,
+        "NO PRODUCTION SITE — 5 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -862,8 +872,8 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "web/ui/src/views/health/healthModel.test.ts",
         "n/a",
         0,
-        3,
-        "NO PRODUCTION SITE — 3 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        5,
+        "NO PRODUCTION SITE — 5 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "spa",
@@ -2221,6 +2231,15 @@ const S306_ADDITION: (usize, usize, usize) = (0, 0, 7);
 /// [S-502]: ../../docs/planning/journal.md#s-502-cohesion-and-focus-count-bodied-methods-and-metric-semantics-move-to-v7
 const S502_ADDITION: (usize, usize, usize) = (0, 0, 1);
 
+/// What [S-499] added to the census on 2026-10-03: `(production rows added,
+/// production occurrences added, test occurrences added)` — no production
+/// site, five test-scope assertions that an `n/a` dimension keeps its `n/a`
+/// rendering beside the three offender states (`HealthView.test.tsx` 3,
+/// `healthModel.test.ts` 2).
+///
+/// [S-499]: ../../docs/planning/journal.md#s-499-health-drill-downs-render-the-persisted-offenders-in-three-honest-states
+const S499_ADDITION: (usize, usize, usize) = (0, 0, 5);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
@@ -2228,9 +2247,9 @@ fn the_audit_reports_its_count_with_its_denominator() {
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
-        (87, 42, 116),
-        "the census as it stands after S-502's addendum, 2026-10-03: 87 production \
-         occurrences over 42 production rows, beside 116 test-scope occurrences"
+        (87, 42, 121),
+        "the census as it stands after S-499's addendum, 2026-10-03: 87 production \
+         occurrences over 42 production rows, beside 121 test-scope occurrences"
     );
     // The 2026-09-20 reading the header and the tuple below state.
     let production_rows = production_rows_now
@@ -2238,18 +2257,21 @@ fn the_audit_reports_its_count_with_its_denominator() {
         - S444_ADDITION.0
         - S442_ADDITION.0
         - S306_ADDITION.0
-        - S502_ADDITION.0;
+        - S502_ADDITION.0
+        - S499_ADDITION.0;
     let production_occurrences = production_occurrences_now
         - S445_ADDITION.1
         - S444_ADDITION.1
         - S442_ADDITION.1
         - S306_ADDITION.1
-        - S502_ADDITION.1;
+        - S502_ADDITION.1
+        - S499_ADDITION.1;
     let test_occurrences = test_occurrences
         - S445_ADDITION.2
         - S444_ADDITION.2
         - S306_ADDITION.2
-        - S502_ADDITION.2;
+        - S502_ADDITION.2
+        - S499_ADDITION.2;
     let corrected_files: std::collections::BTreeSet<&str> =
         CORRECTIONS.iter().map(|(file, _, _, _)| *file).collect();
 
