@@ -12,10 +12,14 @@ CI, which have no estate.
   extracted twice into a scratch directory, so both binaries scored identical
   trees and neither ran in the estate or touched its enrolled stores.
 - **Before:** PATH `logos` 1.8.3 (metric semantics v6), sha256 `5393809c16bd92f1…`.
-- **After:** this branch's release build (`cargo build --release -p logos`, on
-  top of `eb2b5d6a` with S-502's change; it also reports `1.8.3`, the version
-  is not bumped until release), sha256 `82a4f5a78bae51c6…` (metric semantics
-  v7: S-501's duplicate floor, bodied LCOM4, bodied Focus).
+- **After:** this branch's release build (`cargo build --release -p logos` at
+  `e3dbf1d8`, after the S-502 review fixes; it also reports `1.8.3`, the
+  version is not bumped until release), sha256 `df7d1fdb581e4384…` (metric
+  semantics v7: S-501's duplicate floor, bodied LCOM4 with bodyless hooks kept
+  as connectors, bodied Focus). The first measurement, with the pre-review
+  build (`dc9ade35`, sha256 `82a4f5a78bae51c6…`), produced identical figures
+  for every member: no class on the estate reaches the template-method case
+  the review fix changed.
 - Each copy: `git init`, `logos index`, `logos --json scan`; the duplicate count
   and bodyless share read the copy's `.logos/logos.db` read-only. Members ran
   one at a time. Harness: `measure_estate.py`; table: `render_table.py`; raw
@@ -34,23 +38,28 @@ duplicates; **Bodyless share** is the new store's production callables
 recorded `has_body = 0` (the old store has no such column); the last column is
 the first Cohesion worst offender (`—` when there is none).
 
-## What moved (aggregate of the 70 scored members)
+## What moved
 
-- **Signal** rose on 53 members and was unchanged on 17; it fell on none.
-  Median change +240, mean +366, largest +1759 (`timestamp-service-client`).
-- **Redundancy** rose on 53 members (the duplicate floor): production
-  `is_duplicate` across the estate fell from 6283 to 2136.
-- **Cohesion** rose on 17 members and fell on none (bodied LCOM4). The top
-  Cohesion offender changed on 13 members — e.g. `mailbox-manager`'s
-  `MailboxMapper` (LCOM4 23) gave way to `MongoMailboxOperationService`
-  (LCOM4 9), `archive-api`'s `ArchiveMapper` to `ArchiveControllerV1`.
-- **Focus** rose on 4 members (bodied Focus): god containers fell from 32 to
-  28; `MailboxMapper` (23 methods, 106 lines) and `PecServerMapper` (27
-  methods) are no longer god containers.
-- **Uniqueness** is unchanged on every member (v7 reorders its offender list
-  only).
-- **Bodyless share:** 844 of 11368 production callables (7.4%) have no body.
-- No dimension changed applicability on any member.
+Computed by `render_table.py --summary estate_results.jsonl`, never typed by
+hand:
+
+- Members: 84; scored under both binaries: 70; empty-graph n/a: 11; error rows: 3; with `src/main/java`: 54.
+- Signal: rose on 53, unchanged on 17, fell on 0; median change +234, mean +366, largest +1759 (`timestamp-service-client`).
+- Redundancy: rose on 53, fell on 0, unchanged on 17.
+- Cohesion: rose on 17, fell on 0, unchanged on 53.
+- Focus: rose on 4, fell on 0, unchanged on 66.
+- Uniqueness: rose on 0, fell on 0, unchanged on 70.
+- Production `is_duplicate`: 6283 → 2136.
+- God containers: 32 → 28.
+- Bodyless production callables: 844 of 11368 (7.4%).
+- Top Cohesion offender changed on 13 members.
+
+Reading the rows: the Cohesion and Focus moves are the declarative mappers the
+CR is about — `mailbox-manager`'s `MailboxMapper` (LCOM4 23, a god container
+at 23 methods over 106 lines) gives way to `MongoMailboxOperationService`
+(LCOM4 9) and is no longer god; `archive-api`'s `ArchiveMapper` gives way to
+`ArchiveControllerV1`; `pecserver-facade`'s `PecServerMapper` (27 methods) is
+no longer god. No dimension changed applicability on any member.
 
 The largest signal moves come from Redundancy on members whose duplicates were
 small generated or constant-returning methods (`timestamp-service-client`,
