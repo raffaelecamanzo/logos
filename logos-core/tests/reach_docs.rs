@@ -183,7 +183,7 @@ fn with_block(text: &str, block: &str) -> String {
 fn check_or_write(rel: &str, expected: &str) {
     let path = repo_file(rel);
     let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    if std::env::var_os("LOGOS_WRITE_REACH_DOCS").is_some() {
+    if std::env::var("LOGOS_WRITE_REACH_DOCS").as_deref() == Ok("1") {
         fs::write(&path, with_block(&text, expected)).unwrap();
         return;
     }

@@ -38,7 +38,8 @@ use crate::models::{
     quality::{
         DocGapsReport, DoctorReport, DsmReport, EvolutionReport, GateResult, HealthInfo,
         LanguageDescriptor, LanguageReach, LanguagesInfo, LatestHealth, MetricSnapshot,
-        QualityReadout, RulesReport, ScanResult, SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
+        QualityReadout, RulesReport, ScanResult, SessionInfo, SkippedLanguage, StatsInfo,
+        VerifyReport,
     },
 };
 use crate::observability::{CallOutcome, Tool};
