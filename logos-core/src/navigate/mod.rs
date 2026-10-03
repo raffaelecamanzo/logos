@@ -2845,11 +2845,17 @@ fn resolve_symbol(store: &dyn GraphStore, text: &str) -> Result<Option<NodeRow>>
 
 /// How a bare name's matches are preferred — the lower the better ([FR-NV-15]).
 ///
-/// The four classes are the requirement's; `Other` is every kind it does not
-/// name (a field, a constant, a route, a config key, …) and sits between callable
-/// and module: a declaration is more specific than the file or package that
-/// merely contains it, and a lookup that matches only `Other` kinds keeps the
-/// order it always had.
+/// The four classes are the requirement's. Two more fill the kinds it does not
+/// name, each placed by what it is:
+/// - `Other` — a code declaration that is neither a type nor a callable (a field,
+///   a constant, a route, …). It sits between callable and module: a declaration
+///   is more specific than the file or package that merely contains it.
+/// - `Artifact` — a config-layer node (a YAML key, a shell function, a proto
+///   message, …; [`NodeKind::is_config`]). It sits after module and before doc: it
+///   is not a code declaration, so a `server` key in `application.yml` must not
+///   beat the code module `server.py`.
+///
+/// A lookup that matches only kinds of one class keeps the order it always had.
 ///
 /// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2858,6 +2864,7 @@ enum BareNameRank {
     Callable,
     Other,
     Module,
+    Artifact,
     Doc,
 }
 
@@ -2873,6 +2880,7 @@ impl BareNameRank {
             NodeKind::Function | NodeKind::Method => Self::Callable,
             NodeKind::Module => Self::Module,
             kind if kind.is_doc() => Self::Doc,
+            kind if kind.is_config() => Self::Artifact,
             _ => Self::Other,
         }
     }

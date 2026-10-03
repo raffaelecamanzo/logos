@@ -708,3 +708,57 @@ fn a_single_match_passes_over_nothing_and_no_match_is_none() {
     assert!(rest.is_empty());
     assert!(prefer_code(Vec::new()).is_none());
 }
+
+/// Every config/artifact kind ([`NodeKind::is_config`]) — a YAML key, a shell
+/// function, a Dockerfile stage, a proto message — is not a code declaration.
+const CONFIG_KINDS: [NodeKind; 12] = [
+    NodeKind::ConfigFile,
+    NodeKind::ConfigSection,
+    NodeKind::ShellFunction,
+    NodeKind::DockerfileStage,
+    NodeKind::MakeTarget,
+    NodeKind::ProtoMessage,
+    NodeKind::ProtoService,
+    NodeKind::GqlType,
+    NodeKind::SqlObject,
+    NodeKind::TfBlock,
+    NodeKind::ApiPath,
+    NodeKind::ApiOperation,
+];
+
+#[test]
+fn a_config_artifact_never_outranks_the_code_module_but_does_outrank_a_doc() {
+    assert!(CONFIG_KINDS.iter().all(|k| k.is_config()), "the list is the config layer");
+    for kind in CONFIG_KINDS {
+        // A `server` key in `application.yml` must not beat the module `server.py`.
+        let (winner, passed_over) = ranked(vec![
+            named(1, kind),
+            named(2, NodeKind::DocSection),
+            named(3, NodeKind::Module),
+        ]);
+        assert_eq!(winner, NodeKind::Module, "a module beats the config kind {kind:?}");
+        assert_eq!(passed_over, [kind, NodeKind::DocSection], "{kind:?} sits before a doc");
+    }
+}
+
+#[test]
+fn a_field_constant_or_route_ranks_after_a_callable_and_before_a_module() {
+    // The class `Other` — declarations the requirement does not name — pinned
+    // against BOTH neighbours it sits between, and against the code type above.
+    for kind in [NodeKind::Field, NodeKind::Constant, NodeKind::Variable, NodeKind::Macro, NodeKind::Route] {
+        let (winner, passed_over) = ranked(vec![
+            named(1, NodeKind::Module),
+            named(2, kind),
+            named(3, NodeKind::Function),
+            named(4, NodeKind::Class),
+        ]);
+        assert_eq!(winner, NodeKind::Class);
+        assert_eq!(
+            passed_over,
+            [NodeKind::Function, kind, NodeKind::Module],
+            "{kind:?} follows a callable and precedes a module"
+        );
+        let (winner, _) = ranked(vec![named(1, kind), named(2, NodeKind::Method)]);
+        assert_eq!(winner, NodeKind::Method, "a method beats {kind:?}");
+    }
+}

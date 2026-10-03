@@ -1909,3 +1909,22 @@ fn qualified_and_scip_lookups_and_unique_names_pass_over_nothing() {
     let ambiguous = serde_json::to_value(engine.node("Utils", false)).unwrap();
     assert_eq!(ambiguous["alternatives"][0]["kind"], "module", "{ambiguous}");
 }
+
+#[test]
+fn a_bare_name_prefers_a_code_module_to_a_config_key_of_the_same_name() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "app/server.py", "def start():\n    pass\n");
+    write(tmp.path(), "app/__init__.py", "");
+    write(tmp.path(), "application.yml", "server:\n  port: 8080\n");
+    let engine = indexed_engine(&tmp);
+
+    let info = engine.node("server", false);
+    let node = info.node.expect("`server` resolves");
+    assert_eq!(node.symbol.kind, NodeKind::Module, "the code module, not the YAML key");
+    assert_eq!(node.symbol.file.as_deref(), Some("app/server.py"));
+    assert!(
+        info.alternatives.iter().any(|a| a.kind == NodeKind::ConfigSection),
+        "the config key is named as an alternative: {:?}",
+        info.alternatives
+    );
+}
