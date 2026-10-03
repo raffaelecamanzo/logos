@@ -240,6 +240,33 @@ fn a_partial_sync_never_clears_the_mark_of_a_file_it_did_not_handle() {
 }
 
 #[test]
+fn a_new_file_failing_on_sync_is_absent_not_stale_and_its_reason_is_reported() {
+    // A file the graph never held has no last good facts: it is recorded
+    // absent, never stale, and its warning says so. The sync result carries
+    // the file with its reason.
+    let (_tmp, root) = project();
+    let engine = Engine::start(&root).unwrap();
+    engine.index();
+    write(&root, "src/d.rs", "pub fn delta_new() {}\n");
+    write(&root, "src/c.rs", "pub fn gamma_edited() {}\n");
+    runtime(&engine).inject_persist_fault("src/d.rs");
+    let synced = engine.sync(&[root.join("src/d.rs"), root.join("src/c.rs")]);
+    assert_eq!(synced.persist_failures.len(), 1, "{synced:?}");
+    assert_eq!(synced.persist_failures[0].path, "src/d.rs");
+    assert!(synced.persist_failures[0].reason.contains("injected persistence fault"));
+    let warning = synced
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("src/d.rs: could not be persisted"))
+        .expect("a warning names the file");
+    assert!(warning.contains("absent from the graph") && !warning.contains("stale"), "{warning}");
+    let p = engine.status().persistence;
+    assert_eq!(p.failed_to_persist, 1);
+    assert!(p.stale_files.is_empty(), "a never-held file is absent, not stale: {p:?}");
+    assert!(!has(&engine, "delta_new"));
+}
+
+#[test]
 fn a_failed_file_deleted_from_disk_leaves_no_mark() {
     let (_tmp, root) = project();
     let engine = Engine::start(&root).unwrap();
