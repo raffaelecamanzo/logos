@@ -217,6 +217,29 @@ fn a_stale_file_that_then_fails_to_load_keeps_its_mark_on_index_and_sync() {
 }
 
 #[test]
+fn a_partial_sync_never_clears_the_mark_of_a_file_it_did_not_handle() {
+    // A watcher or hook sync names only the files it saw change; another
+    // file's stale mark is not its to clear — clearing it would present that
+    // file as indexed (NFR-CC-04).
+    let (_tmp, root) = project();
+    let engine = Engine::start(&root).unwrap();
+    engine.index();
+    write(&root, "src/b.rs", "pub fn beta_new() {}\n");
+    runtime(&engine).inject_persist_fault("src/b.rs");
+    engine.sync(&[root.join("src/b.rs")]);
+    runtime(&engine).clear_persist_faults();
+
+    write(&root, "src/c.rs", "pub fn gamma_edited() {}\n");
+    let synced = engine.sync(&[root.join("src/c.rs")]);
+    assert_eq!(synced.files_modified, 1);
+    assert_eq!(
+        engine.status().persistence.stale_files,
+        ["src/b.rs"],
+        "an unrelated sync leaves b.rs's mark alone"
+    );
+}
+
+#[test]
 fn a_failed_file_deleted_from_disk_leaves_no_mark() {
     let (_tmp, root) = project();
     let engine = Engine::start(&root).unwrap();
