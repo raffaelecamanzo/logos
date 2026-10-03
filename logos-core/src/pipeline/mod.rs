@@ -208,7 +208,7 @@ pub fn index(
     // failure (ADR-14) the CLI exits 1 on — a zero-admission index, which
     // reaches persistence with nothing, is not one (FR-IX-13).
     let persist_failures = std::mem::take(&mut outcome.failed);
-    record_index_persist_failures(runtime, &persist_failures)?;
+    record_index_persist_failures(runtime, &persist_failures, &files_failed)?;
     files_failed.extend(persist_failures.iter().map(|f| f.path.clone()));
     let failed =
         flag_nothing_persisted(outcome.files + persist_failures.len(), persist_failures.len(), &mut warnings);
@@ -1476,19 +1476,33 @@ fn remove_file_rows(w: &BatchWriter<'_>, rel: &str) -> Result<()> {
 }
 
 /// A full index's persist-failure record (S-513, [FR-EH-05]): rewritten to
-/// exactly this run's failures — each absent from the graph, so none stale —
-/// because a full index re-persisted every other admitted file. Writes nothing
-/// when there is nothing to record and nothing to clear, so an index where no
-/// file ever failed pays one read and leaves the store untouched.
+/// this run's failures — each absent from the graph, so none stale — because
+/// a full index re-persisted every other admitted file. The one exception is a
+/// file this index could not even load (`unloaded`): it was neither re-persisted
+/// nor purged, so whatever the graph held for it is still there, and its earlier
+/// record is kept verbatim — the same rule a sync applies. Writes nothing when
+/// the record would not change, so an index where no file ever failed pays one
+/// read and leaves the store untouched.
 ///
 /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
-fn record_index_persist_failures(runtime: &Runtime, failed: &[PersistFailure]) -> Result<()> {
-    if failed.is_empty() && runtime.submit_read(|store| store.persist_failures())?.is_empty() {
+fn record_index_persist_failures(
+    runtime: &Runtime,
+    failed: &[PersistFailure],
+    unloaded: &[String],
+) -> Result<()> {
+    let prior = runtime.submit_read(|store| store.persist_failures())?;
+    let unloaded: HashSet<&str> = unloaded.iter().map(String::as_str).collect();
+    let prior_len = prior.len();
+    let kept: Vec<_> = prior.into_iter().filter(|r| unloaded.contains(r.path.as_str())).collect();
+    if failed.is_empty() && kept.len() == prior_len {
         return Ok(());
     }
     let failed = failed.to_vec();
     runtime.submit_write(move |w| {
         w.clear_persist_failures()?;
+        for r in &kept {
+            w.record_persist_failure(&r.path, &r.reason, r.stale)?;
+        }
         for f in &failed {
             w.record_persist_failure(&f.path, &f.reason, false)?;
         }

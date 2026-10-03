@@ -182,6 +182,41 @@ fn a_stale_file_reverted_to_its_indexed_content_is_no_longer_stale() {
 }
 
 #[test]
+fn a_stale_file_that_then_fails_to_load_keeps_its_mark_on_index_and_sync() {
+    // The graph still holds the stale file's last good facts, and neither a
+    // full index nor a sync that cannot read the file replaces them, so the
+    // mark must survive both — `status` must never present it as indexed.
+    for heal_with_index in [true, false] {
+        let (_tmp, root) = project();
+        let engine = Engine::start(&root).unwrap();
+        engine.index();
+        write(&root, "src/b.rs", "pub fn beta_new() {}\n");
+        runtime(&engine).inject_persist_fault("src/b.rs");
+        engine.sync(&[root.join("src/b.rs")]);
+        runtime(&engine).clear_persist_faults();
+        assert_eq!(engine.status().persistence.stale_files, ["src/b.rs"]);
+
+        fs::write(root.join("src/b.rs"), b"pub fn beta_new() {}\n\xff\xfe\n").unwrap();
+        let unread = if heal_with_index {
+            engine.index().files_failed
+        } else {
+            engine.sync(&[root.join("src/b.rs")]).files_failed
+        };
+        assert_eq!(unread, ["src/b.rs"], "the file failed to load");
+        assert_eq!(
+            engine.status().persistence.stale_files,
+            ["src/b.rs"],
+            "index = {heal_with_index}: the unreadable file keeps its stale mark"
+        );
+        assert!(has(&engine, "beta_old"), "its last good facts are still in the graph");
+
+        write(&root, "src/b.rs", "pub fn beta_new() {}\n");
+        engine.index();
+        assert!(engine.status().persistence.is_clean(), "readable again: persisted, cleared");
+    }
+}
+
+#[test]
 fn a_failed_file_deleted_from_disk_leaves_no_mark() {
     let (_tmp, root) = project();
     let engine = Engine::start(&root).unwrap();
