@@ -31,6 +31,8 @@ only project it onto an exit code or an MCP error tag. This is the design in
 | **Unparseable file** | Degraded | Skips the file, indexes the rest | `warnings` in the read-model; exit `0` | Fix the syntax, then `logos sync <file>` |
 | **Grammar ABI mismatch** | Degraded | Skips that one grammar, keeps every other language | `skipped` in `logos languages`; a startup warning on stderr | Rebuild Logos against a matching tree-sitter runtime |
 | **Oversized file** | Degraded | Skips the file with a notice | `warnings` in the read-model; exit `0` | Raise `max_file_bytes` in `.logos/config.toml` to include it |
+| **A file whose facts cannot be persisted** | Degraded | Rolls back that one file and persists every other. On `index` the file is absent from the graph; on `sync`, the watcher, or the reconcile inside `scan`/`check`/`gate` it keeps its last good facts and is marked **stale** | the path in `files_failed`, its reason in `persist_failures`, a warning naming it; `persistence` in `logos status` and `logos scan` until it persists; exit `0` | Usually a Logos defect — file an issue with the reason. The next reconcile retries the file and clears the mark once it persists or is deleted |
+| **No file persisted** — every file that reached persistence failed, or the pipeline itself failed | Correctness | Reports the run as failed | `"failed": true` and a `nothing was persisted` warning in the read-model; exit `1` | See the per-file reasons in `persist_failures`; an index that admits no file at all is not this case and exits `0` |
 | **Partial resolution** | Degraded | Returns the bound results + a coverage number | `resolution_coverage` in `logos status`; exit `0` | `logos sync` after the missing targets land (often nothing to fix — see below) |
 | Unknown-symbol query | Degraded | Returns an empty result (+ suggestions where available) | empty read-model; exit `0` | Check the name; re-index if the symbol is new |
 | **No index present** | Correctness | Aborts before doing anything | `error:` on stderr; exit `3` | Run `logos index` |
@@ -40,11 +42,14 @@ only project it onto an exit code or an MCP error tag. This is the design in
 | **Workspace member that cannot be opened** | Degraded *result*, loud exit | Returns the partial answer over the members that did open, names the ones that did not | `degraded_rollup` in the read-model + the member and its cause on stderr; exit `1` | Raise the process file-descriptor limit (`ulimit -n`) for a `host-resource-limit` cause; otherwise repair the named member's store |
 
 Degraded conditions are **never** fatal — a single bad file can never abort a
-whole index. They are also, with one deliberate exception, never reflected in
-the exit code: a `workspace` subcommand that could not **open** a member exits
-`1` while still printing its partial answer, because a run that silently
-answered over a fraction of the workspace was the defect
-([FR-WS-16](../specs/requirements/FR-WS-16.md)). Correctness conditions are **never** swallowed — Logos would rather
+whole index, nor empty it: a file that cannot be *persisted* is rolled back
+alone ([FR-EH-05](../specs/requirements/FR-EH-05.md)). They are
+also, with one deliberate exception, never reflected in the exit code: a
+`workspace` subcommand that could not **open** a member exits `1` while still
+printing its partial answer, because a run that silently answered over a
+fraction of the workspace was the defect
+([FR-WS-16](../specs/requirements/FR-WS-16.md)). An `index`/`sync` that
+persisted nothing is not a degraded run but a correctness one, and exits `1`. Correctness conditions are **never** swallowed — Logos would rather
 tell you the answer is unavailable than hand you a wrong one.
 
 ## How it surfaces on the CLI
@@ -57,7 +62,7 @@ scripting contract (full table in
 | Code | Meaning |
 |---|---|
 | `0` | Success — including a *degraded* run that skipped something and warned |
-| `1` | Completed, but violations/threshold failures found (`check`, `gate`), or structural/admission drift detected (`doctor`, `verify`) |
+| `1` | Completed, but violations/threshold failures found (`check`, `gate`), structural/admission drift detected (`doctor`, `verify`), or an `index`/`sync` persisted nothing of what it reached |
 | `2` | Usage error: bad flags, or an invalid `config.toml`/`rules.toml` |
 | `3` | Internal/environment error — no index, a corrupt store, an engine fault |
 | `4` | `check` only: **no rules contract was loaded and nothing fired** — the evaluated set was empty, so there is no verdict to report (pass `--allow-no-rules` to restore exit `0`) |

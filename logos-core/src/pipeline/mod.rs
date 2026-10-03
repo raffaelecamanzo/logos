@@ -81,8 +81,8 @@ use crate::graph_store::{
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::pipeline::{
-    AnnotationStats, DispatchStats, FrameworkStats, IndexResult, PhaseDurations, ResolutionStats,
-    SyncResult,
+    AnnotationStats, DispatchStats, FrameworkStats, IndexResult, PersistFailure, PhaseDurations,
+    ResolutionStats, SyncResult,
 };
 use crate::observability::Tool;
 use crate::plugin::LanguageRegistry;
@@ -197,8 +197,21 @@ pub fn index(
                 loaded.iter().map(|l| l.rel.as_str()),
             ));
 
-    let (outcome, extract_ms, persist_ms) =
+    let (mut outcome, extract_ms, persist_ms) =
         extract_and_persist(runtime, registry, &loaded, false, enrich, &mut warnings)?;
+
+    // S-513 / FR-EH-05: a file whose facts could not be persisted was rolled
+    // back alone and is absent from the graph; every other file persisted. It
+    // joins `files_failed` (the INCOMPLETE input) and the durable record
+    // `status`/`scan` read, which a full index rewrites to exactly this run's
+    // failures. Files reached persistence and none persisted: a correctness
+    // failure (ADR-14) the CLI exits 1 on — a zero-admission index, which
+    // reaches persistence with nothing, is not one (FR-IX-13).
+    let persist_failures = std::mem::take(&mut outcome.failed);
+    record_index_persist_failures(runtime, &persist_failures, &files_failed)?;
+    files_failed.extend(persist_failures.iter().map(|f| f.path.clone()));
+    let failed =
+        flag_nothing_persisted(outcome.files + persist_failures.len(), persist_failures.len(), &mut warnings);
 
     // CR-004 / FR-SY-07: a full index reconciles the stored set to *exactly* the
     // freshly-discovered candidates — index upserts the discovered files and
@@ -329,6 +342,8 @@ pub fn index(
         },
         warnings,
         files_failed,
+        persist_failures,
+        failed,
         // Advisory discovery notes (the minified-JS exclusion, HF-1). The FR-WS-02
         // root-scope note (CR-119) is appended after these by the caller
         // (`Engine::run_index`), which alone knows the project root; this
@@ -730,15 +745,10 @@ pub fn sync(
             ));
     crate::extract::doc::enrich::promote_facts(&mut facts, enrich);
 
-    for f in &facts {
-        let hash = hash_by_rel.get(f.path.as_str()).copied().unwrap_or("");
-        persist_one(runtime, f, hash, true, &mut warnings)?;
-        if added.contains(&f.path) {
-            result.files_added += 1;
-        } else {
-            result.files_modified += 1;
-        }
-    }
+    // S-513 / FR-EH-05: each file persists in its own transaction and fails alone.
+    let persist_failures =
+        persist_dirty_set(runtime, &facts, &hash_by_rel, &added, &stored, &mut result, &mut warnings);
+    files_failed.extend(persist_failures.iter().map(|(f, _)| f.path.clone()));
 
     // Removals: a file gone from disk, or a stored/on-disk file the current config
     // no longer admits (FR-SY-07). Both route through the shared removal path.
@@ -747,32 +757,21 @@ pub fn sync(
         result.files_removed += 1;
     }
 
+    result.persist_failures =
+        record_sync_persist_failures(runtime, persist_failures, &files_failed, &seen, scope)?;
+
     // Member-local facts (S-462 manifests, S-472 Avro schemas) among every path
     // this sync named, reconciled apart from the graph gates above.
+    let types_complete = backfill.complete(&result.persist_failures);
     let facts_changed =
-        sync_member_facts(runtime, &canon_root, &authority, &seen, scope, backfill.active)?;
+        sync_member_facts(runtime, &canon_root, &authority, &seen, scope, types_complete)?;
+    // Nothing persisted only if no removal or member fact committed either.
+    result.failed = result.files_removed == 0
+        && !facts_changed
+        && flag_nothing_persisted(facts.len(), result.persist_failures.len(), &mut warnings);
 
-    // CR-015 incremental resolution change-set (part 2 of 2): union the names that
-    // entered the changed files (this sync's freshly extracted facts) with those
-    // that left them (`old_names`) and the changed paths, tokenized. The resolve
-    // pass re-binds exactly the rows these can move and skips the rest — the same
-    // result as retrying the whole ledger (FR-RS-03), a fraction of the cost.
-    let mut dirty_tokens: HashSet<String> = HashSet::new();
-    for name in &old_names {
-        dirty_tokens.extend(crate::resolve::tokens(name));
-    }
-    for f in &facts {
-        for n in &f.nodes {
-            dirty_tokens.extend(crate::resolve::tokens(&n.name));
-        }
-    }
-    for path in &changed_paths {
-        dirty_tokens.extend(crate::resolve::tokens(path));
-    }
-    let delta = crate::resolve::Delta {
-        changed_paths,
-        dirty_tokens,
-    };
+    // CR-015 incremental resolution change-set (part 2 of 2) — see `sync_delta`.
+    let delta = sync_delta(changed_paths, &old_names, &facts);
 
     // Pass 2: a deferred reference binds once its target is indexed (UAT-RS-01)
     // and captured cross-file edges rebind (ADR-10) — now over just the
@@ -1458,13 +1457,102 @@ pub fn purge_on_config_change(
 /// a no-op, so a double removal (e.g. a purge then a sync of the same path) is
 /// idempotent.
 fn remove_file(runtime: &Runtime, rel: String) -> Result<()> {
+    runtime.submit_write(move |w| remove_file_rows(w, &rel))
+}
+
+/// [`remove_file`]'s body inside an open batch: the file's nodes, then its row —
+/// and its persist-failure record (S-513), since a file that left the graph is
+/// neither stale nor failed any more. Also the full index's answer to a file
+/// whose facts could not be persisted: such a file is absent from the graph
+/// ([FR-EH-05]), even where an earlier index had stored it.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+fn remove_file_rows(w: &BatchWriter<'_>, rel: &str) -> Result<()> {
+    if let Some(file_id) = w.file_id(rel)? {
+        w.delete_nodes_for_file(file_id)?;
+        w.delete_file(file_id)?;
+    }
+    w.clear_persist_failure(rel)
+}
+
+/// A full index's persist-failure record (S-513, [FR-EH-05]): rewritten to
+/// this run's failures — each absent from the graph, so none stale — because
+/// a full index re-persisted every other admitted file. The one exception is a
+/// file this index could not even load (`unloaded`): it was neither re-persisted
+/// nor purged, so whatever the graph held for it is still there, and its earlier
+/// record is kept verbatim — the same rule a sync applies. Writes nothing when
+/// the record would not change, so an index where no file ever failed pays one
+/// read and leaves the store untouched.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+fn record_index_persist_failures(
+    runtime: &Runtime,
+    failed: &[PersistFailure],
+    unloaded: &[String],
+) -> Result<()> {
+    let prior = runtime.submit_read(|store| store.persist_failures())?;
+    let unloaded: HashSet<&str> = unloaded.iter().map(String::as_str).collect();
+    let prior_len = prior.len();
+    let kept: Vec<_> = prior.into_iter().filter(|r| unloaded.contains(r.path.as_str())).collect();
+    if failed.is_empty() && kept.len() == prior_len {
+        return Ok(());
+    }
+    let failed = failed.to_vec();
     runtime.submit_write(move |w| {
-        if let Some(file_id) = w.file_id(&rel)? {
-            w.delete_nodes_for_file(file_id)?;
-            w.delete_file(file_id)?;
+        w.clear_persist_failures()?;
+        for r in &kept {
+            w.record_persist_failure(&r.path, &r.reason, r.stale)?;
+        }
+        for f in &failed {
+            w.record_persist_failure(&f.path, &f.reason, false)?;
         }
         Ok(())
     })
+}
+
+/// A sync's persist-failure record (S-513, [FR-EH-05]): record this run's
+/// failures, each stale or absent, and clear the marks this run made obsolete.
+///
+/// A recorded file's mark is obsolete when this sync handled the file
+/// (`seen`) without it failing again: it persisted, was found unchanged — the
+/// graph's facts then describe it exactly — or left the graph. A full walk
+/// also clears the mark of every file it no longer admits. A file that failed
+/// to load keeps its mark: the graph still does not hold it as it stands.
+/// Writes nothing when there is nothing to record or clear. Hands the failures
+/// back, without their stale flags, for the run's result.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+fn record_sync_persist_failures(
+    runtime: &Runtime,
+    failures: Vec<(PersistFailure, bool)>,
+    files_failed: &[String],
+    seen: &HashSet<String>,
+    scope: SyncScope,
+) -> Result<Vec<PersistFailure>> {
+    // The record as this sync found it — nothing but this function writes it
+    // during a sync, so reading it now sees the state before this run. Almost
+    // always empty.
+    let prior = runtime.submit_read(|store| store.persist_failures())?;
+    let still_failing: HashSet<&str> = files_failed.iter().map(String::as_str).collect();
+    let clear: Vec<String> = prior
+        .into_iter()
+        .map(|r| r.path)
+        .filter(|p| !still_failing.contains(p.as_str()))
+        .filter(|p| seen.contains(p) || scope == SyncScope::FullWalk)
+        .collect();
+    if !clear.is_empty() || !failures.is_empty() {
+        let record = failures.clone();
+        runtime.submit_write(move |w| {
+            for path in &clear {
+                w.clear_persist_failure(path)?;
+            }
+            for (f, stale) in &record {
+                w.record_persist_failure(&f.path, &f.reason, *stale)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(failures.into_iter().map(|(f, _)| f).collect())
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────
@@ -1655,6 +1743,11 @@ struct ExtractOutcome {
     files: usize,
     nodes: u64,
     edges: u64,
+    /// The files whose facts could not be persisted, each rolled back alone
+    /// (S-513, [FR-EH-05]), in persistence order.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    failed: Vec<PersistFailure>,
 }
 
 /// Extract `loaded` on the shared worker pool and persist each file's facts in
@@ -1723,18 +1816,20 @@ fn extract_and_persist(
 /// Files per Pass-1 write transaction on a full index (CR-057, [FR-IX-08]).
 ///
 /// Chunking collapses the per-file commit storm into a handful of larger
-/// transactions while keeping each transaction — and its rollback granularity
-/// (NFR-RA-07) — *bounded* regardless of repo size. A full index is an
-/// authoritative rebuild, so per-chunk (rather than per-file) atomicity is
-/// acceptable ([FR-IX-08]); incremental `sync` keeps its per-file
-/// capture-before-delete path ([ADR-10]).
+/// transactions while keeping each transaction *bounded* regardless of repo
+/// size. Rollback granularity is the **file**, not the chunk: each file runs
+/// under its own savepoint inside the chunk's transaction ([`persist_chunk`],
+/// S-513, [FR-EH-05]), so one file that cannot be persisted never takes its
+/// chunk-mates down with it. Incremental `sync` keeps its per-file
+/// capture-before-delete transaction ([ADR-10]).
 ///
 /// [FR-IX-08]: ../../../docs/specs/requirements/FR-IX-08.md
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
 /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
 const PERSIST_CHUNK_FILES: usize = 256;
 
 /// Persist every file's facts on a **full index** as bounded chunked write
-/// batches (CR-057, [FR-IX-08]).
+/// batches (CR-057, [FR-IX-08]), each file isolated within its chunk ([FR-EH-05]).
 ///
 /// Owned `Facts` are drained in extraction (= input) order and moved straight
 /// into the writer closure, so a full index pays **no per-file `Facts` clone**
@@ -1745,7 +1840,12 @@ const PERSIST_CHUNK_FILES: usize = 256;
 /// every chunk still funnels through the one [`Runtime::submit_write`] actor
 /// ([ADR-02]).
 ///
+/// A file whose facts cannot be persisted is rolled back alone, left absent
+/// from the graph, and returned in [`ExtractOutcome::failed`]; every other file
+/// persists. The returned `Err` is reserved for a fault of the batch itself.
+///
 /// [FR-IX-08]: ../../../docs/specs/requirements/FR-IX-08.md
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [ADR-02]: ../../../docs/specs/architecture/decisions/ADR-02.md
 fn persist_facts_chunked(
@@ -1765,8 +1865,9 @@ fn persist_facts_chunked(
         files: 0,
         nodes: 0,
         edges: 0,
+        failed: Vec::new(),
     };
-    let mut chunk: Vec<(Facts, String)> = Vec::with_capacity(chunk_files);
+    let mut chunk: Vec<ChunkFile> = Vec::with_capacity(chunk_files);
 
     for f in facts.drain(..) {
         // Non-fatal extraction diagnostics are surfaced on the calling thread —
@@ -1780,7 +1881,12 @@ fn persist_facts_chunked(
             .copied()
             .unwrap_or("")
             .to_string();
-        chunk.push((f, hash));
+        let fault = runtime.persist_fault(&f.path);
+        chunk.push(ChunkFile {
+            facts: f,
+            hash,
+            fault,
+        });
 
         if chunk.len() == chunk_files {
             let batch = std::mem::replace(&mut chunk, Vec::with_capacity(chunk_files));
@@ -1792,51 +1898,219 @@ fn persist_facts_chunked(
         persist_chunk(runtime, chunk, capture, &mut outcome)?;
     }
 
+    for failure in &outcome.failed {
+        let warning = persist_failure_warning(failure, false);
+        tracing::warn!("{warning}");
+        warnings.push(warning);
+    }
     Ok(outcome)
 }
 
+/// One file of a [`persist_chunk`] batch: its facts, its content hash, and
+/// whether the test-only fault seam fails it ([`Runtime::persist_fault`]).
+struct ChunkFile {
+    facts: Facts,
+    hash: String,
+    fault: bool,
+}
+
 /// Persist one bounded chunk of file facts as a **single write transaction**
-/// through the shared single writer ([ADR-02], [NFR-RA-07]).
+/// through the shared single writer ([ADR-02], [NFR-RA-07]), each file under its
+/// own savepoint ([`BatchWriter::isolated`], S-513, [FR-EH-05]).
 ///
-/// Every file in the chunk runs against the *same* [`BatchWriter`], so the
-/// chunk commits as a unit — or, on any file's error, rolls back **wholesale**
-/// with no partial rows ([NFR-RA-07]). The chunk moves into the closure (the
-/// writer runs it on its own thread), so there is no per-file clone and exactly
-/// one round-trip for the whole chunk. Counts are accumulated into `outcome`.
+/// A file whose write fails is rolled back to its savepoint — none of its rows
+/// survive — and then removed outright, so a re-index never leaves a previous
+/// version of it behind: on a full index a failed file is **absent** from the
+/// graph ([FR-EH-05]). The chunk's other files commit with the transaction. Only
+/// a fault of the transaction or the savepoint machinery itself fails the
+/// chunk, and then it rolls back wholesale ([NFR-RA-07]). The chunk moves into
+/// the closure (the writer runs it on its own thread), so there is no per-file
+/// clone and exactly one round-trip for the whole chunk. Counts and failures
+/// are accumulated into `outcome`.
 ///
 /// [ADR-02]: ../../../docs/specs/architecture/decisions/ADR-02.md
 /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
 fn persist_chunk(
     runtime: &Runtime,
-    chunk: Vec<(Facts, String)>,
+    chunk: Vec<ChunkFile>,
     capture: bool,
     outcome: &mut ExtractOutcome,
 ) -> Result<()> {
-    let (files, nodes, edges) = runtime.submit_write(move |w| {
+    let (files, nodes, edges, failed) = runtime.submit_write(move |w| {
         let mut files = 0usize;
         let mut nodes = 0u64;
         let mut edges = 0u64;
-        for (facts, hash) in &chunk {
-            let counts = persist_file(w, facts, hash, capture)?;
-            files += 1;
-            nodes += counts.nodes;
-            edges += counts.edges;
+        let mut failed = Vec::new();
+        for file in &chunk {
+            match w.isolated(|w| persist_file_checked(w, &file.facts, &file.hash, capture, file.fault))? {
+                Ok(counts) => {
+                    files += 1;
+                    nodes += counts.nodes;
+                    edges += counts.edges;
+                }
+                Err(err) => {
+                    remove_file_rows(w, &file.facts.path)?;
+                    failed.push(PersistFailure {
+                        path: file.facts.path.clone(),
+                        reason: format!("{err:#}"),
+                    });
+                }
+            }
         }
-        Ok((files, nodes, edges))
+        Ok((files, nodes, edges, failed))
     })?;
     outcome.files += files;
     outcome.nodes += nodes;
     outcome.edges += edges;
+    outcome.failed.extend(failed);
     Ok(())
+}
+
+/// [`persist_file`], then the test-only fault seam (S-513): a faulted file
+/// fails **after** its facts were written, so the isolation unit around this
+/// call must undo real rows — the rollback is exercised, never skipped.
+fn persist_file_checked(
+    w: &BatchWriter<'_>,
+    facts: &Facts,
+    hash: &str,
+    capture: bool,
+    fault: bool,
+) -> Result<PersistCounts> {
+    let counts = persist_file(w, facts, hash, capture)?;
+    if fault {
+        anyhow::bail!(crate::runtime::INJECTED_FAULT_REASON);
+    }
+    Ok(counts)
+}
+
+/// The warning naming one file whose facts could not be persisted ([FR-EH-05]):
+/// what happened to it in the graph, and why. `stale` is whether the graph
+/// still holds the file's last good facts.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+fn persist_failure_warning(failure: &PersistFailure, stale: bool) -> String {
+    let state = if stale {
+        "its last indexed facts are kept and marked stale until a later reconcile persists it"
+    } else {
+        "it is absent from the graph"
+    };
+    format!(
+        "{}: could not be persisted and was rolled back alone; {state} ({})",
+        failure.path, failure.reason
+    )
+}
+
+/// A sync's CR-015 incremental resolution change-set (part 2 of 2): union the
+/// names that entered the changed files (this sync's freshly extracted facts)
+/// with those that left them (`old_names`) and the changed paths, tokenized. The
+/// resolve pass re-binds exactly the rows these can move and skips the rest —
+/// the same result as retrying the whole ledger (FR-RS-03), a fraction of the
+/// cost.
+fn sync_delta(
+    changed_paths: HashSet<String>,
+    old_names: &[String],
+    facts: &[Facts],
+) -> crate::resolve::Delta {
+    let mut dirty_tokens: HashSet<String> = HashSet::new();
+    for name in old_names {
+        dirty_tokens.extend(crate::resolve::tokens(name));
+    }
+    for f in facts {
+        for n in &f.nodes {
+            dirty_tokens.extend(crate::resolve::tokens(&n.name));
+        }
+    }
+    for path in &changed_paths {
+        dirty_tokens.extend(crate::resolve::tokens(path));
+    }
+    crate::resolve::Delta {
+        changed_paths,
+        dirty_tokens,
+    }
+}
+
+/// Persist a sync's dirty set one file per transaction (S-513, [FR-EH-05]),
+/// counting each persisted file into `result` as added or modified, and return
+/// the files that failed with whether each is **stale** — the graph already
+/// held it, so its rollback left its last good facts (and its old hash, so the
+/// next reconcile retries it) in place. A file the graph did not hold stays
+/// absent. Every failure is named in a warning.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+fn persist_dirty_set(
+    runtime: &Runtime,
+    facts: &[Facts],
+    hash_by_rel: &HashMap<&str, &str>,
+    added: &HashSet<String>,
+    stored: &HashMap<String, Option<String>>,
+    result: &mut SyncResult,
+    warnings: &mut Vec<String>,
+) -> Vec<(PersistFailure, bool)> {
+    let mut failures = Vec::new();
+    for f in facts {
+        let hash = hash_by_rel.get(f.path.as_str()).copied().unwrap_or("");
+        match persist_one(runtime, f, hash, true, warnings) {
+            Ok(_) if added.contains(&f.path) => result.files_added += 1,
+            Ok(_) => result.files_modified += 1,
+            Err(err) => {
+                let failure = PersistFailure {
+                    path: f.path.clone(),
+                    reason: format!("{err:#}"),
+                };
+                let stale = stored.contains_key(&f.path);
+                let warning = persist_failure_warning(&failure, stale);
+                tracing::warn!("{warning}");
+                warnings.push(warning);
+                failures.push((failure, stale));
+            }
+        }
+    }
+    failures
+}
+
+/// Whether a run is a correctness failure because files reached persistence
+/// and none persisted ([FR-EH-05], [ADR-14]) — `attempted` files reached it and
+/// `failed` of them failed — and, if so, say so in `warnings`. A run that
+/// reached persistence with nothing (zero admission, [FR-IX-13]) is not one.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+/// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+/// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
+fn flag_nothing_persisted(attempted: usize, failed: usize, warnings: &mut Vec<String>) -> bool {
+    let nothing = attempted > 0 && failed == attempted;
+    if nothing {
+        let warning = nothing_persisted_warning(attempted);
+        tracing::warn!("{warning}");
+        warnings.push(warning);
+    }
+    nothing
+}
+
+/// The warning a run that persisted none of the `attempted` files it reached
+/// persistence with carries ([FR-EH-05], [ADR-14] correctness).
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+/// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+fn nothing_persisted_warning(attempted: usize) -> String {
+    format!(
+        "nothing was persisted: all {attempted} file(s) that reached persistence failed \
+         (see files_failed)"
+    )
 }
 
 /// Submit one file's facts to the writer actor and collect non-fatal warnings.
 ///
 /// This is the **incremental `sync`** persist unit: one transaction per file so
-/// each file's capture-before-delete is atomic ([ADR-10], [NFR-PE-03]). A full
-/// index instead batches files into bounded chunks via [`persist_facts_chunked`]
-/// (CR-057, [FR-IX-08]) — this per-file path is deliberately left unchanged for
-/// `sync`.
+/// each file's capture-before-delete is atomic ([ADR-10], [NFR-PE-03]) — and so
+/// a file that cannot be persisted rolls back alone, keeping its last good
+/// facts (S-513, [FR-EH-05]). An `Err` is that file's failure — its transaction
+/// rolled back and nothing else was touched — or a fault of the writer itself,
+/// which then fails every remaining file too, so the run reads as having
+/// persisted nothing. Either way the caller records it and moves on. A full index instead batches files into bounded chunks via
+/// [`persist_facts_chunked`] (CR-057, [FR-IX-08]).
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
 fn persist_one(
     runtime: &Runtime,
     facts: &Facts,
@@ -1850,9 +2124,10 @@ fn persist_one(
     // One transaction per file (NFR-RA-07). The closure owns its inputs because
     // the writer runs it on its own thread; cloning `Facts` here is the simple,
     // correct choice for the dirty-set-sized sync loop.
+    let fault = runtime.persist_fault(&facts.path);
     let facts = facts.clone();
     let hash = hash.to_string();
-    runtime.submit_write(move |w| persist_file(w, &facts, &hash, capture))
+    runtime.submit_write(move |w| persist_file_checked(w, &facts, &hash, capture, fault))
 }
 
 /// Persist one file's nodes, edges, and reference-ledger rows inside an open
@@ -2196,12 +2471,21 @@ impl DeclaredTypesBackfill {
     fn wants(&self, rel: &str) -> bool {
         self.active && self.layout.is_package_shaped(rel)
     }
+
+    /// Whether this sync completed the backfill, and so may mark the facts
+    /// extracted: it backfills, and no file it wanted failed to persist (S-513).
+    /// A wanted file that failed keeps its old hash, so an unmarked store retries
+    /// it on the next full walk; marking here would skip it as unchanged and
+    /// lose its declared types for good.
+    fn complete(&self, failed: &[PersistFailure]) -> bool {
+        self.active && !failed.iter().any(|f| self.wants(&f.path))
+    }
 }
 
 /// An incremental sync's member-local fact passes — build manifests (S-462)
 /// and Avro schemas (S-472) — returning whether either moved what a reader of
-/// the member's facts sees. `mark_declared_types` is the backfill's
-/// [`DeclaredTypesBackfill::active`].
+/// the member's facts sees. `mark_declared_types` is
+/// [`DeclaredTypesBackfill::complete`].
 fn sync_member_facts(
     runtime: &Runtime,
     canon_root: &Path,

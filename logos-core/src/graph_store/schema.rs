@@ -59,6 +59,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (24, MIGRATION_24),
     (25, MIGRATION_25),
     (26, MIGRATION_26),
+    (27, MIGRATION_27),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2396,6 +2397,51 @@ CREATE TABLE metric_snapshot_offenders (
     line        INTEGER,
     detail      TEXT NOT NULL,
     PRIMARY KEY (snapshot_id, dimension, rank)
+) STRICT;
+";
+
+/// Migration 27 — the record of files whose facts could not be persisted
+/// (S-513, [CR-168], [FR-EH-05]).
+///
+/// One table, purely additive — nothing existing is touched, so every row
+/// crosses the boundary byte for byte and an upgraded store needs no re-index.
+/// A pre-migration store reads as "no file failed", which is what it was: before
+/// this migration a persistence failure aborted the whole batch and recorded
+/// nothing.
+///
+/// **`persist_failures`** — one row per file whose latest persistence attempt
+/// failed, keyed by its project-relative path (the `files.path` key, but **not**
+/// a foreign key: a file that failed on a full index, or on its first sync, has
+/// no `files` row at all). `reason` is the error that rolled the file back.
+/// `stale` separates the two outcomes [FR-EH-05] distinguishes: `1` when the
+/// graph still holds the file's last successfully persisted facts (a `sync`, the
+/// `serve` watcher or a reconcile failed to replace them), `0` when the file is
+/// absent from the graph (a full index, or a file that never persisted).
+///
+/// Bounded: a row is replaced by the next failure of the same file and removed
+/// by the file's next successful persist, by an unchanged re-read, or by its
+/// removal from the graph; a full index rewrites the table to that run's
+/// failures plus the rows of files it could not load; and a full-walk reconcile
+/// clears the row of any file it no longer admits — which is how a file that
+/// never persisted, and so has no graph rows to remove, leaves the record once
+/// it leaves admission ([CR-168] §7).
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_27_adds_the_persist_failure_record_and_touches_nothing_else` in
+/// [`super::migrate`].
+///
+/// [CR-168]: ../../../../docs/requests/CR-168-an-index-never-silently-empties.md
+/// [FR-EH-05]: ../../../../docs/specs/requirements/FR-EH-05.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_27: &str = "\
+-- One row per file whose latest persistence attempt failed (FR-EH-05): its
+-- path, why, and whether the graph still holds its last good facts (stale = 1)
+-- or holds nothing for it (stale = 0).
+CREATE TABLE persist_failures (
+    path   TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    stale  INTEGER NOT NULL CHECK (stale IN (0,1))
 ) STRICT;
 ";
 

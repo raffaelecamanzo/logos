@@ -231,11 +231,35 @@ pub struct IndexResult {
     /// [FR-OB-01]: ../../../docs/specs/requirements/FR-OB-01.md
     pub phases: PhaseDurations,
     pub warnings: Vec<String>,
-    /// Files that could not be read/extracted this run (unreadable or
-    /// non-UTF-8). The per-file failure set the governance engine stamps an
-    /// `INCOMPLETE` freshness line from (NFR-RA-11, ADR-11, S-020); each is
-    /// also described in `warnings`.
+    /// Files that could not be read/extracted (unreadable or non-UTF-8) or
+    /// whose facts could not be persisted this run ([FR-EH-05]). The per-file
+    /// failure set the governance engine stamps an `INCOMPLETE` freshness line
+    /// from (NFR-RA-11, ADR-11, S-020); each is also described in `warnings`,
+    /// and a persistence failure's reason rides
+    /// [`persist_failures`](Self::persist_failures). Paths only, so every
+    /// consumer of this list reads it unchanged.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
     pub files_failed: Vec<String>,
+    /// The files whose facts could not be persisted, each with its reason
+    /// ([FR-EH-05]) — rolled back alone, so absent from the graph, while every
+    /// other file persisted. Elided when empty, so a run where nothing failed
+    /// renders byte-identical to before this field existed.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub persist_failures: Vec<PersistFailure>,
+    /// `true` when this run is a correctness failure ([ADR-14], [FR-EH-05]):
+    /// files reached persistence and **none** persisted, or the pipeline itself
+    /// failed. `warnings` says which. The CLI exits 1 on it ([FR-CL-03]); a run
+    /// where only some files failed is degraded, not failed, and leaves this
+    /// `false`. Elided when `false`.
+    ///
+    /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    /// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
     /// Advisory scope notes — never a `warnings` entry, so `FR-CL-03`'s
     /// exit-code contract and a CI parser scanning `warnings` are both
     /// unaffected (CR-119). Elided from the serialized report when empty, so a
@@ -261,9 +285,97 @@ pub struct SyncResult {
     pub annotation: AnnotationStats,
     pub duration_ms: u64,
     pub warnings: Vec<String>,
-    /// Files that could not be read/extracted this run — the `INCOMPLETE`
-    /// input (NFR-RA-11, S-020); each is also described in `warnings`.
+    /// Files that could not be read/extracted, or whose facts could not be
+    /// persisted, this run ([FR-EH-05]) — the `INCOMPLETE` input (NFR-RA-11,
+    /// S-020); each is also described in `warnings`.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
     pub files_failed: Vec<String>,
+    /// The files whose facts could not be persisted, each with its reason
+    /// ([FR-EH-05]). A file the graph already held keeps its last good facts
+    /// and is recorded **stale** until a later reconcile persists it; a file
+    /// it did not hold stays absent. Elided when empty.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub persist_failures: Vec<PersistFailure>,
+    /// `true` when this run is a correctness failure ([ADR-14], [FR-EH-05]):
+    /// files reached persistence and none persisted, or the pipeline itself
+    /// failed. The CLI exits 1 on it ([FR-CL-03]). Elided when `false`.
+    ///
+    /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    /// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+}
+
+/// One file whose facts could not be persisted, and why ([FR-EH-05]).
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistFailure {
+    /// The project-relative path.
+    pub path: String,
+    /// The error that rolled the file's write back.
+    pub reason: String,
+}
+
+/// The files the graph does not hold as they stand on disk because their
+/// facts could not be persisted ([FR-EH-05], [NFR-CC-04]) — the `persistence`
+/// readout of `status` and `scan`.
+///
+/// Read from the durable record, so it reports the state a previous process
+/// left, and it lasts exactly as long as any such file remains: elided (see
+/// [`is_clean`](Self::is_clean)) the moment none does.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistenceHealth {
+    /// Files whose latest persistence attempt failed — stale or absent alike.
+    pub failed_to_persist: u64,
+    /// Of those, the files whose last good facts the graph still holds, by
+    /// path. The rest are absent from the graph.
+    pub stale_files: Vec<String>,
+}
+
+impl PersistenceHealth {
+    /// Build the readout from the durable record's rows (ordered by path).
+    pub fn from_rows(rows: &[crate::graph_store::PersistFailureRow]) -> Self {
+        Self {
+            failed_to_persist: rows.len() as u64,
+            stale_files: rows
+                .iter()
+                .filter(|r| r.stale)
+                .map(|r| r.path.clone())
+                .collect(),
+        }
+    }
+
+    /// `true` when no file is failed or stale — the readout is then elided.
+    pub fn is_clean(&self) -> bool {
+        self.failed_to_persist == 0
+    }
+
+    /// The one-line degradation a surface carrying this readout adds to its
+    /// `warnings` while any file remains ([NFR-CC-04]: a failed or stale file
+    /// is never presented as indexed). `None` when clean.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub fn warning(&self) -> Option<String> {
+        if self.is_clean() {
+            return None;
+        }
+        let stale = self.stale_files.len() as u64;
+        Some(format!(
+            "{} file(s) failed to persist and are not indexed as they stand on disk: \
+             {stale} stale (the graph holds their last good facts), {} absent; a later \
+             reconcile retries them",
+            self.failed_to_persist,
+            self.failed_to_persist - stale,
+        ))
+    }
 }
 
 /// Action taken on one `init`-managed target (S-023, FR-IN-01..04).
@@ -305,4 +417,44 @@ pub struct InitResult {
     /// Per-target outcomes for every step this invocation ran (S-023,
     /// FR-IN-01..04).
     pub steps: Vec<InitStep>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PersistenceHealth;
+    use crate::graph_store::PersistFailureRow;
+
+    fn row(path: &str, stale: bool) -> PersistFailureRow {
+        PersistFailureRow {
+            path: path.into(),
+            reason: "boom".into(),
+            stale,
+        }
+    }
+
+    /// S-513: the readout counts every failed file, lists the stale ones by
+    /// path, and its warning splits the count into stale and absent — two
+    /// different states of the graph a reader must not confuse.
+    #[test]
+    fn the_readout_and_its_warning_split_stale_from_absent() {
+        assert_eq!(PersistenceHealth::from_rows(&[]).warning(), None, "clean says nothing");
+        assert!(PersistenceHealth::from_rows(&[]).is_clean());
+
+        let health = PersistenceHealth::from_rows(&[
+            row("src/a.rs", false),
+            row("src/b.rs", true),
+            row("src/c.rs", false),
+        ]);
+        assert_eq!(health.failed_to_persist, 3);
+        assert_eq!(health.stale_files, ["src/b.rs"]);
+        assert!(!health.is_clean());
+        assert_eq!(
+            health.warning().as_deref(),
+            Some(
+                "3 file(s) failed to persist and are not indexed as they stand on disk: \
+                 1 stale (the graph holds their last good facts), 2 absent; a later \
+                 reconcile retries them"
+            )
+        );
+    }
 }

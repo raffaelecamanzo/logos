@@ -168,7 +168,7 @@ Exit codes are a stable contract for scripting:
 | Code | Meaning |
 |---|---|
 | `0` | Success. |
-| `1` | Completed, but the answer is not the answer it claims to be: violations/threshold failures (`check`, `gate`), structural drift (`doctor`, `verify`), or **result-level incompleteness** — a `workspace` subcommand that could not **open** one or more members ([FR-CL-03](../specs/requirements/FR-CL-03.md), [FR-WS-16](../specs/requirements/FR-WS-16.md)). |
+| `1` | Completed, but the answer is not the answer it claims to be: violations/threshold failures (`check`, `gate`), structural drift (`doctor`, `verify`), **result-level incompleteness** — a `workspace` subcommand that could not **open** one or more members ([FR-CL-03](../specs/requirements/FR-CL-03.md), [FR-WS-16](../specs/requirements/FR-WS-16.md)) — or an `index`/`sync` that **persisted nothing** of the files it reached, or whose pipeline itself failed ([FR-EH-05](../specs/requirements/FR-EH-05.md)). A run in which only *some* files failed to persist exits `0` and lists them in `files_failed`; an index that admits no file at all still exits `0`. |
 | `2` | Usage error: bad flags, invalid config/rules file. |
 | `3` | Internal/environment error — e.g. no index present (the message tells you to run `logos index`), engine failure. Never a raw panic. |
 | `4` | `check` only: **no rules contract was loaded and nothing fired** ([FR-GV-22](../specs/requirements/FR-GV-22.md)). A verdict over an empty evaluated set is not a verdict, so `check` reports `passed: null` rather than a vacuous `true`. Note an always-on fold-in (structural, admission) can still raise a real violation with no `rules.toml` present — that stays exit `1`, not `4`. Pass `--allow-no-rules` to restore exit `0` when you have deliberately authored no contract yet. |
@@ -176,7 +176,9 @@ Exit codes are a stable contract for scripting:
 These codes are the CLI projection of Logos's **fail-soft / fail-loud** error
 contract: a *degraded* condition (a skipped file, a partial resolution) warns
 and still exits `0`, while a *correctness* condition (no index, corrupt store,
-bad config) aborts loud. The one place a degraded condition *does* move the exit
+bad config) aborts loud. A file whose facts cannot be persisted is degraded too:
+it fails alone, every other file persists, and the run exits `0` — only a run that
+persisted *nothing* exits `1`. The one place a degraded condition *does* move the exit
 code is a workspace member that could not be opened: the command still returns
 its partial answer, but exits `1` so a CI step cannot pass over a
 three-quarters-missing payload. A member that is merely un-indexed, never

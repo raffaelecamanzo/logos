@@ -1952,6 +1952,17 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         warnings.push(diagnostic.to_string());
     }
 
+    // The files whose facts could not be persisted (FR-EH-05, S-513), from the
+    // durable record, so a `status` in a later process still reports what an
+    // earlier `index`/`sync` left: a failed or stale file is never presented as
+    // indexed (NFR-CC-04). Elided, and silent, while none remains.
+    let persistence = crate::models::PersistenceHealth::from_rows(
+        &runtime.submit_read(|store| store.persist_failures())?,
+    );
+    if let Some(warning) = persistence.warning() {
+        warnings.push(warning);
+    }
+
     // The source/test physical-LOC roll-up (CR-085, FR-IX-12). The total is the
     // ingested-LOC sum; the persisted `test_loc` bucket is the roll-up's presence
     // marker, so the counts are reported only when BOTH keys are present. Two
@@ -2056,6 +2067,7 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         total_line_count,
         source_line_count,
         test_line_count,
+        persistence,
         freshness,
         warnings,
     })

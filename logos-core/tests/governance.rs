@@ -1569,14 +1569,14 @@ fn health_reports_store_integrity_and_counts() {
         health.structural_ok && health.structural_faults.is_empty(),
         "a clean graph is structurally sound (CR-052, NFR-RA-13)"
     );
-    // Migration 26 (S-498, CR-162) added the snapshot offender lists, after
-    // migration 25 (S-500, CR-163) added the callable has-body fact.
-    // This assertion tracks the latest applied migration — the store reports 26
+    // Migration 27 (S-513, CR-168) added the persist-failure record, after
+    // migration 26 (S-498, CR-162) added the snapshot offender lists.
+    // This assertion tracks the latest applied migration — the store reports 27
     // once fully migrated (`federation::broker`'s
     // `the_broker_arm_introduces_no_schema_migration`, `graph_store::tests`'s
     // four version-pinning tests and `build_dependency_relation.rs` carry the
     // same number).
-    assert_eq!(health.schema_version, 26, "migration 26 applied");
+    assert_eq!(health.schema_version, 27, "migration 27 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);

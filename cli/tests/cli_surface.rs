@@ -467,7 +467,7 @@ fn slim_build_serve_help_has_no_ui() {
 }
 
 #[test]
-fn a_malformed_config_makes_index_fail_loud_with_exit_two() {
+fn a_malformed_config_makes_index_and_sync_fail_loud_with_exit_two() {
     // FR-CF-03 / configuration.md: a typo in config.toml must fail loud with
     // exit 2, not degrade to a silent empty index. `Engine::index` is an
     // infallible surface (ADR-14), so the CLI validates config up front — the
@@ -496,6 +496,21 @@ fn a_malformed_config_makes_index_fail_loud_with_exit_two() {
         exit_code(&logos(tmp.path(), &["index"])),
         0,
         "a valid config.toml indexes cleanly"
+    );
+    // `sync` over that index validates the same way (S-513): without the guard
+    // the fault would reach `Engine::sync`, which reports it as a failed run —
+    // exit 1, not 2.
+    write(
+        tmp.path(),
+        ".logos/config.toml",
+        "[config_artifacts]\nenabled = true\nbogus_key = 7\n",
+    );
+    let out = logos(tmp.path(), &["sync", "src/core.rs"]);
+    assert_eq!(
+        exit_code(&out),
+        2,
+        "sync: an unknown config.toml key is a usage fault (exit 2): {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 

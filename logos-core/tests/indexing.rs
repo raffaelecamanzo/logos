@@ -793,6 +793,48 @@ fn sync_equiv_added_file_satisfies_a_deferred_ref() {
     );
 }
 
+/// S-513 / FR-EH-05: a sync whose file failed to persist, then a sync once the
+/// fault is gone, leaves the graph a reindex of the final tree would — the
+/// failed attempt leaves no residue (no half-captured ledger row, no stray
+/// edge) for the healing sync to carry forward.
+#[cfg(debug_assertions)]
+#[test]
+fn sync_equiv_after_a_failed_persist_heals() {
+    let initial = [
+        ("a.rs", "fn a() { b(); }\n"),
+        ("b.rs", "pub fn b() {}\n"),
+    ];
+    let edited = "pub fn b() {}\npub fn b2() { b(); }\n";
+
+    let tmp_a = TempDir::new().expect("temp a");
+    for (rel, body) in &initial {
+        write(tmp_a.path(), rel, body);
+    }
+    let engine_a = Engine::start(tmp_a.path()).expect("engine a starts");
+    engine_a.index();
+    let root_a = tmp_a.path().canonicalize().expect("canonicalize root a");
+    write(tmp_a.path(), "b.rs", edited);
+    let rt = engine_a.runtime().expect("runtime a");
+    rt.inject_persist_fault("b.rs");
+    let failed = engine_a.sync(&[root_a.join("b.rs")]);
+    assert_eq!(failed.files_failed, ["b.rs"], "the fault fired: {failed:?}");
+    rt.clear_persist_faults();
+    let healed = engine_a.sync(&[root_a.join("b.rs")]);
+    assert_eq!((healed.files_modified, healed.files_failed.len()), (1, 0));
+    let fp_sync = graph_fingerprint(rt);
+
+    let tmp_b = TempDir::new().expect("temp b");
+    write(tmp_b.path(), "a.rs", initial[0].1);
+    write(tmp_b.path(), "b.rs", edited);
+    let engine_b = Engine::start(tmp_b.path()).expect("engine b starts");
+    engine_b.index();
+    assert_eq!(
+        fp_sync,
+        graph_fingerprint(engine_b.runtime().expect("runtime b")),
+        "a healed sync must equal an index of the final tree"
+    );
+}
+
 #[test]
 fn sync_equiv_renaming_a_target_unbinds_the_edge() {
     // The reverse: renaming b.rs's `target` away must retract the a.rs -> target
@@ -1622,11 +1664,13 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migration 26 (S-498, the snapshot offender table and its flag column) is
-    // inverted first, since the reopen re-applies it too.
+    // Migrations 27 (S-513, the persist-failure record) and 26 (S-498, the
+    // snapshot offender table and its flag column) are inverted first, since
+    // the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
+        "DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
+         DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
          DELETE FROM schema_versions WHERE version = 26; \
          ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
          DELETE FROM schema_versions WHERE version = 25; PRAGMA user_version = 24;",

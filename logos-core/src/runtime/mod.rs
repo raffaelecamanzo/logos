@@ -47,8 +47,14 @@
 //! [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
 //! [AQ-04]: ../../../docs/specs/architecture.md#14-open-questions
 
+mod fault;
 mod reader;
 mod writer;
+
+#[cfg(debug_assertions)]
+pub use fault::PERSIST_FAULT_ENV;
+pub(crate) use fault::INJECTED_FAULT_REASON;
+use fault::PersistFaults;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -293,6 +299,9 @@ pub struct Runtime {
     /// single owner, so the two cases differ in ownership and in nothing else.
     pool: SharedWorkerPool,
     db_path: PathBuf,
+    /// The test-only persistence fault seam (S-513): zero-sized and inert in a
+    /// release build — see [`fault`].
+    persist_faults: PersistFaults,
 }
 
 impl Runtime {
@@ -341,6 +350,7 @@ impl Runtime {
             readers,
             pool,
             db_path,
+            persist_faults: PersistFaults::from_env(),
         })
     }
 
@@ -382,6 +392,7 @@ impl Runtime {
                 readers,
                 pool,
                 db_path,
+                persist_faults: PersistFaults::from_env(),
             },
             RuntimePhaseTimings {
                 store_connect: store_timings.connect,
@@ -453,5 +464,34 @@ impl Runtime {
     /// The on-disk path of the canonical store this runtime serves.
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Whether persisting the project-relative file `rel` must fail — the
+    /// test-only fault seam (S-513, [FR-EH-05]); a constant `false` in a
+    /// release build.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    #[inline]
+    pub(crate) fn persist_fault(&self, rel: &str) -> bool {
+        self.persist_faults.fails(rel)
+    }
+
+    /// **Test-only** (debug builds): fail every later persistence of the
+    /// project-relative file `rel` — `*` fails every file — until
+    /// [`clear_persist_faults`](Self::clear_persist_faults) (S-513). The file
+    /// fails after its facts were written inside its own isolation unit, so the
+    /// rollback is exercised. Scoped to this runtime, so parallel tests never
+    /// see each other's faults.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn inject_persist_fault(&self, rel: &str) {
+        self.persist_faults.inject(rel);
+    }
+
+    /// **Test-only** (debug builds): remove every injected persistence fault.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn clear_persist_faults(&self) {
+        self.persist_faults.clear();
     }
 }

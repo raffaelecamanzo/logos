@@ -402,12 +402,34 @@ fn adapter_lines() -> usize {
 ///
 /// [CR-152]: ../../docs/requests/CR-152-cross-member-type-references-overlay.md
 /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
+///
+/// **S-513/[CR-168] 906→908** for the `index`/`sync` exit-code split
+/// ([FR-EH-05], [FR-CL-03]): measured 903→907 (+4), 1 line of headroom.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | the `index` arm binds its result to project `failed` onto the exit code (`violation_code`, the existing helper) | **+1** |
+/// | the `sync` arm becomes a block: `load_config_from_root(root)?` before the existing `report_gate` chokepoint | **+3** |
+/// | | **+4** |
+///
+/// Delegation only: whether a run persisted nothing is decided in
+/// `logos_core::pipeline` and carried as `failed`; the adapter projects it.
+/// The `sync` config guard mirrors the one `index` already had — without it an
+/// invalid `config.toml` reaches `Engine::sync`, which now reports a failed run
+/// (exit 1) where the contract says usage fault (exit 2). The duplication hunt
+/// was run again: folding the guard into `report_gate` would put a config read
+/// on `check`/`gate`/`doctor`/`verify`, which load their own; rejected.
+/// Recorded, not laundered (CR-084 §6).
+///
+/// [CR-168]: ../../docs/requests/CR-168-an-index-never-silently-empties.md
+/// [FR-EH-05]: ../../docs/specs/requirements/FR-EH-05.md
+/// [FR-CL-03]: ../../docs/specs/requirements/FR-CL-03.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 906,
-        "cli adapter exceeds the 906 production-LOC budget (NFR-MA-02): \
+        lines <= 908,
+        "cli adapter exceeds the 908 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

@@ -1854,6 +1854,15 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     let mut warnings = fresh.warnings;
     let notes = fresh.notes;
     let temporal = scan_temporal_tier(engine, &mut warnings);
+    // The files whose facts could not be persisted (FR-EH-05, S-513), read after
+    // this run's reconcile retried them, when one ran (`--no-reconcile` reads
+    // the record as it stands) — the readout `status` carries too.
+    let persistence = crate::models::PersistenceHealth::from_rows(
+        &runtime.submit_read(|store| store.persist_failures())?,
+    );
+    if let Some(warning) = persistence.warning() {
+        warnings.push(warning);
+    }
 
     Ok(ScanResult {
         signal: metrics.aggregate_signal,
@@ -1862,6 +1871,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
         metrics,
         worst_offenders,
         temporal,
+        persistence,
         warnings,
         notes,
     })
@@ -2098,6 +2108,7 @@ fn scan_from_snapshot(engine: &Engine, snapshot: Option<PersistedSnapshot>) -> S
         metrics,
         worst_offenders,
         temporal,
+        persistence: crate::models::PersistenceHealth::default(),
         warnings,
         notes: Vec::new(),
     }

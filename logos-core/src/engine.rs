@@ -3378,19 +3378,32 @@ impl Engine {
 
 /// Log a pipeline failure and degrade to an [`IndexResult`] carrying the reason,
 /// honouring the infallible-surface posture (ADR-14 defers typed errors).
+///
+/// Reached only when the pipeline **itself** failed: since S-513 a file whose
+/// facts cannot be persisted fails alone inside the pipeline and never lands
+/// here ([FR-EH-05]). A failed pipeline is a correctness failure, not an empty
+/// success, so the result is marked [`failed`](IndexResult::failed) — the CLI
+/// exits 1 on it ([FR-CL-03]) — rather than reading as a run that indexed
+/// nothing.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+/// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
 fn degraded_index(err: &anyhow::Error) -> IndexResult {
     tracing::warn!("index failed: {err:#}");
     IndexResult {
         warnings: vec![format!("index failed: {err}")],
+        failed: true,
         ..IndexResult::default()
     }
 }
 
-/// Log a sync failure and degrade to a [`SyncResult`] carrying the reason.
+/// Log a sync failure and degrade to a [`SyncResult`] carrying the reason —
+/// marked [`failed`](SyncResult::failed), as [`degraded_index`] explains.
 fn degraded_sync(err: &anyhow::Error) -> SyncResult {
     tracing::warn!("sync failed: {err:#}");
     SyncResult {
         warnings: vec![format!("sync failed: {err}")],
+        failed: true,
         ..SyncResult::default()
     }
 }
@@ -3593,9 +3606,13 @@ mod tests {
             "the failure reason is surfaced in warnings, got {:?}",
             result.warnings
         );
+        // A failed pipeline is a correctness failure, never an empty success
+        // (FR-EH-05): the CLI exits 1 on `failed`.
+        assert!(result.failed, "a failed pipeline is marked failed");
         // `sync` and `ensure_indexed` share the same degradation path.
         let synced = engine.sync(&[PathBuf::from("a.rs")]);
         assert!(synced.warnings.iter().any(|w| w.contains("failed")));
+        assert!(synced.failed, "a failed sync pipeline is marked failed");
         let ensured = engine.ensure_indexed();
         assert!(ensured.warnings.iter().any(|w| w.contains("failed")));
     }

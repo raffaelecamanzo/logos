@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::history::{DegradedReason, FileTemporal};
 use crate::models::outcome::OutcomeCounts;
-use crate::models::pipeline::RelationCoverage;
+use crate::models::pipeline::{PersistenceHealth, RelationCoverage};
 
 /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
 /// [CR-095]) — what an agent-host session-start hook shows.
@@ -842,6 +842,14 @@ pub struct ScanResult {
     /// [BR-26]: ../../../docs/specs/software-spec.md#322-git-history-analytics
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub temporal: TemporalTier,
+    /// The files whose facts could not be persisted, read after this run's
+    /// reconcile — how many, and which are **stale** ([FR-EH-05], S-513).
+    /// Elided while none remains, so a healthy scan is byte-identical to
+    /// before the readout existed; while any does, `warnings` says so too.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    #[serde(skip_serializing_if = "PersistenceHealth::is_clean")]
+    pub persistence: PersistenceHealth,
     /// Degradations (reconcile skips, unreadable files) — never an error.
     pub warnings: Vec<String>,
     /// Advisory notes — never a `warnings` entry, so a CI parser scanning

@@ -140,13 +140,14 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// disk: both declared-type tables absent (their indexes go with them),
 /// migration 24 unrecorded, `user_version` 23 — and so no extraction marker. The
 /// exact inverse of migration 24, and of migrations 25 (S-500, two `nodes`
-/// columns) and 26 (S-498, the snapshot offender table and its flag column)
-/// after it; the next [`Engine::start`] re-applies all three, as a real upgrade
-/// does.
+/// columns), 26 (S-498, the snapshot offender table and its flag column) and
+/// 27 (S-513, the persist-failure record) after it; the next [`Engine::start`]
+/// re-applies all four, as a real upgrade does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
+        "DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
+         DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
          DELETE FROM schema_versions WHERE version = 26; \
          ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
          DELETE FROM schema_versions WHERE version = 25; \
@@ -562,6 +563,41 @@ fn the_first_full_walk_backfills_an_upgraded_members_declared_types() {
     let before = dump(root, &["schema_versions"]);
     engine.health(true).expect("a second full-walk reconcile runs");
     assert_eq!(dump(root, &["schema_versions"]), before, "once marked, a no-op full walk writes nothing");
+}
+
+/// S-513 / FR-EH-05: a backfill file that fails to persist keeps the backfill
+/// open. The marker is not written, so the next full walk re-extracts the file
+/// — its hash never moved — and only then marks the facts complete. Marking
+/// despite the failure would skip the file as unchanged forever and lose its
+/// declared types.
+#[cfg(debug_assertions)]
+#[test]
+fn a_backfill_file_that_fails_to_persist_keeps_the_backfill_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    member(root);
+    Engine::start(root).expect("engine starts").index();
+    downgrade_to_v23(root);
+
+    let engine = Engine::start(root).expect("the upgraded store opens");
+    let rt = engine.runtime().unwrap();
+    let service = "svc/src/main/java/com/x/mail/MailService.java";
+    rt.inject_persist_fault(service);
+    engine.health(true).expect("a full-walk reconcile runs");
+    assert!(!extracted(rt), "a failed backfill file leaves the facts unmarked");
+    assert!(
+        !types(rt).iter().any(|t| t.path == service),
+        "the failed file contributed no types"
+    );
+
+    rt.clear_persist_faults();
+    engine.health(true).expect("the next full walk retries it");
+    assert!(extracted(rt), "the retried backfill completes and marks the facts");
+    let fresh = tempfile::tempdir().unwrap();
+    copy_tree(root, fresh.path());
+    let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
+    fresh_engine.index();
+    assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "backfilled ≡ freshly indexed");
 }
 
 /// The marker alone: an upgraded member with no Java/Kotlin/Avro file has

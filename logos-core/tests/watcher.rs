@@ -203,6 +203,37 @@ fn watcher_syncs_a_deletion_as_removal() {
     });
 }
 
+/// S-513 / FR-EH-05: the watcher's reconcile follows the per-file rule — a file
+/// whose facts cannot be persisted never stops another file's change from
+/// persisting, and keeps its own last good facts, recorded stale. Both edits
+/// are written while the watcher runs, so only its own sync can land them.
+#[cfg(debug_assertions)]
+#[test]
+fn a_failing_file_never_stops_the_watcher_persisting_the_others() {
+    let (_tmp, root, engine) = indexed_project();
+    engine
+        .runtime()
+        .expect("runtime")
+        .inject_persist_fault("src/lib.rs");
+
+    let handle = engine.watch().expect("watcher starts");
+    write(&root, "src/lib.rs", "pub fn seed_alpha_renamed() -> u32 { 1 }\n");
+    write(&root, "src/healthy.rs", "pub fn healthy_from_watcher() -> u32 { 2 }\n");
+
+    wait_for("the healthy file to persist through the watcher", || {
+        searchable(&engine, "healthy_from_watcher")
+    });
+    wait_for("the failing file to be recorded stale", || {
+        engine.status().persistence.stale_files == ["src/lib.rs"]
+    });
+    assert!(
+        searchable(&engine, "seed_alpha"),
+        "the failing file keeps its last good facts"
+    );
+    assert!(!searchable(&engine, "seed_alpha_renamed"));
+    drop(handle);
+}
+
 /// FR-SY-06 / UAT-SY-03: dropping the handle stops the watcher cleanly (no
 /// orphaned worker), an out-of-band edit made with NO watcher running is NOT
 /// picked up spontaneously — and the next explicit sync (the reconcile
