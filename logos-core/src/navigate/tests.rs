@@ -152,6 +152,73 @@ fn is_test_path_does_not_mark_production_files() {
     assert!(!is_test_path("src/latests.rs")); // "tests" inside a word, not the stem
 }
 
+/// [S-524] A `test` segment under a production source root is a package name,
+/// not test code; Gradle `*Test` source sets and `src/it` are test code.
+#[test]
+fn is_test_path_respects_production_source_roots() {
+    use super::is_test_path;
+    // koin: `org.koin.test` is a production package under `commonMain` / `src/main`.
+    assert!(!is_test_path(
+        "projects/core/koin-core/src/commonMain/kotlin/org/koin/test/Check.kt"
+    ));
+    assert!(!is_test_path("src/jvmMain/kotlin/org/koin/test/Check.kt"));
+    assert!(!is_test_path("app/src/main/java/org/acme/test/Probe.java"));
+    // ...while a `test` segment ABOVE the root is still a test tree (fixtures).
+    assert!(is_test_path("test/fixtures/proj/src/main/java/Foo.java"));
+    // FR-AN-05: the exemption covers every test-directory segment, not `test` alone.
+    assert!(!is_test_path("src/main/java/org/acme/tests/Probe.java"));
+    assert!(!is_test_path("src/main/js/__tests__/a.js"));
+    assert!(!is_test_path("src/commonMain/kotlin/spec/A.kt"));
+    assert!(!is_test_path("src/main/resources/spec/api.yaml"));
+    // ...and each of the four still marks above the root.
+    assert!(is_test_path("tests/fixtures/p/src/main/java/Foo.java"));
+    assert!(is_test_path("__tests__/p/src/main/java/Foo.java"));
+    assert!(is_test_path("spec/p/src/main/java/Foo.java"));
+    // Near misses of the root names are not roots.
+    assert!(is_test_path("src/mainline/test/Foo.java"));
+    assert!(is_test_path("Main/test/Foo.kt")); // bare `Main` is not a `*Main` source set
+    assert!(is_test_path("src/FooMain/kotlin/test/X.kt")); // PascalCase is not one either
+    // `src/main` needs its `src/` parent: a bare `main` directory is no root.
+    assert!(is_test_path("main/test/Foo.java"));
+    assert!(is_test_path("cmd/main/test/x.go"));
+}
+
+#[test]
+fn is_test_path_marks_gradle_test_source_sets() {
+    use super::is_test_path;
+    assert!(is_test_path("koin-core/src/commonTest/kotlin/org/koin/Util.kt"));
+    assert!(is_test_path("koin-core/src/jvmTest/kotlin/org/koin/Util.kt"));
+    assert!(is_test_path("lib/src/androidInstrumentedTest/kotlin/Util.kt"));
+    assert!(is_test_path("svc/src/it/java/org/acme/Support.java"));
+    // Source sets are direct children of `src/`: a bare `it` locale directory
+    // or a stray `*Test` directory elsewhere is not one.
+    assert!(!is_test_path("locales/it/messages.json"));
+    assert!(!is_test_path("src/it_support/Support.java"));
+    assert!(!is_test_path("pkg/fooTest/Support.java"));
+    assert!(!is_test_path("src/Test/Support.java")); // bare `Test` is no source-set name
+    assert!(!is_test_path("src/FooTest/Support.java")); // PascalCase is not a source-set name
+    assert!(!is_test_path("src/commonMain/kotlin/Util.kt"));
+}
+
+#[test]
+fn is_test_path_tag_needs_a_three_part_filename() {
+    use super::is_test_path;
+    // werkzeug's `test.py` is a production module that merely says `test`.
+    assert!(!is_test_path("src/werkzeug/test.py"));
+    assert!(!is_test_path("src/spec.ts"));
+    assert!(!is_test_path("src/test.rs"));
+    // The three-part `*.test.*` / `*.spec.*` tag still marks.
+    assert!(is_test_path("src/foo.test.ts"));
+    assert!(is_test_path("src/foo.spec.js"));
+    assert!(is_test_path("src/foo.bar.test.ts"));
+    // Existing sibling conventions are untouched.
+    assert!(is_test_path("tests/conftest.py"));
+    assert!(is_test_path("src/test_foo.py"));
+    assert!(is_test_path("pkg/foo_test.go"));
+    assert!(is_test_path("src/foo_tests.rs"));
+    assert!(is_test_path("src/__tests__/foo.ts"));
+}
+
 // ── FR-NV-01 search: raw query → safe FTS5 phrase ───────────────────────────
 
 #[test]
