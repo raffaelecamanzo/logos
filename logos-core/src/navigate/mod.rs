@@ -2619,22 +2619,53 @@ pub(crate) fn affected(
 /// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`,
 /// a bare Rust `tests.rs`, or the snake_case Rust `*_tests.rs` suffix —
 /// [CR-075], the plural counterpart to `*Test(s).java`'s CamelCase plural).
+///
+/// Three exactness rules keep production code out ([S-524], [CR-171]):
+/// - a `test` segment *beneath a production source root* (`src/main`, or a
+///   Gradle/KMP `*Main` source set such as `commonMain`) is a package name —
+///   `org/koin/test/` — not a test tree. Only `test` is exempt; `tests`,
+///   `__tests__` and `spec` keep marking, and a `test` segment *above* the root
+///   (`test/fixtures/p/src/main/…`) still marks;
+/// - a Gradle `*Test` source set (`src/commonTest`, `src/jvmTest`) or the
+///   `src/it` integration source set is test code — only as a direct child of
+///   `src/`, so a locale directory `it/` or a stray `fooTest/` is not one;
+/// - the `*.test.*`/`*.spec.*` filename tag needs a three-part name
+///   (`foo.test.ts`): a bare `test.py` / `spec.ts` is a module called "test".
+///
 /// Deterministic and language-blind; the native test annotation (test-gap
 /// analysis story) will supersede it.
 ///
 /// [CR-075]: ../../../docs/requests/CR-075-is-test-plural-test-file-conventions.md
+/// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [S-524]: ../../../docs/planning/journal.md#s-524-test-path-conventions-respect-production-source-roots-and-gradle-test-source-sets
 pub(crate) fn is_test_path(path: &str) -> bool {
     let p = Path::new(path);
-    if p.components().any(|c| {
-        matches!(c, Component::Normal(seg)
-            if seg == "tests" || seg == "test" || seg == "__tests__" || seg == "spec")
-    }) {
-        return true;
+    let mut under_production_root = false;
+    let mut parent: Option<&str> = None;
+    for component in p.components() {
+        let Component::Normal(seg) = component else {
+            continue;
+        };
+        let Some(seg) = seg.to_str() else {
+            parent = None;
+            continue;
+        };
+        if is_production_source_root(parent, seg) {
+            under_production_root = true;
+        } else if matches!(seg, "tests" | "__tests__" | "spec")
+            || (seg == "test" && !under_production_root)
+            || is_test_source_set(parent, seg)
+        {
+            return true;
+        }
+        parent = Some(seg);
     }
     let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
     let stem = name.split('.').next().unwrap_or(name);
+    let mut parts = name.rsplit('.');
+    let tag = parts.nth(1).filter(|_| parts.next().is_some());
     stem == "tests"
         || stem.ends_with("_test")
         || stem.ends_with("_tests")
@@ -2642,11 +2673,28 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         || stem.ends_with("Test")
         || stem.ends_with("Tests")
         || (stem.starts_with("test_") && name.ends_with(".py"))
-        || name
-            .split('.')
-            .rev()
-            .nth(1)
-            .is_some_and(|tag| tag == "test" || tag == "spec")
+        || tag.is_some_and(|tag| tag == "test" || tag == "spec")
+}
+
+/// A production source root: Maven/Gradle `src/main`, or a Gradle/KMP `*Main`
+/// source set (`commonMain`, `jvmMain`) — a camelCase name, so a bare `Main`
+/// directory is not one.
+fn is_production_source_root(parent: Option<&str>, seg: &str) -> bool {
+    (parent == Some("src") && seg == "main") || is_gradle_source_set(seg, "Main")
+}
+
+/// A Gradle test source set: `src/<name>Test` (`commonTest`, `jvmTest`,
+/// `androidInstrumentedTest`) or the `src/it` integration source set.
+fn is_test_source_set(parent: Option<&str>, seg: &str) -> bool {
+    parent == Some("src") && (seg == "it" || is_gradle_source_set(seg, "Test"))
+}
+
+/// `<camelCaseName><suffix>` — the Gradle source-set name shape: a lowercase
+/// first letter and something before the suffix (`commonMain`, not `Main`).
+fn is_gradle_source_set(seg: &str, suffix: &str) -> bool {
+    seg.len() > suffix.len()
+        && seg.ends_with(suffix)
+        && seg.chars().next().is_some_and(|c| c.is_ascii_lowercase())
 }
 
 // ── Shared plumbing ─────────────────────────────────────────────────────────

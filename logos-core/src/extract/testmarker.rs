@@ -73,7 +73,7 @@ pub(crate) fn test_evidence(
         TestConvention::CSharpAttributes => csharp_attributes(node, source),
         TestConvention::CppTestMacros => cpp_test_macro(name),
         TestConvention::RubyTest => ruby_test(node, name, source),
-        TestConvention::PhpUnit => php_unit(node, name, source),
+        TestConvention::PhpUnit => php_unit(node, name, path, source),
         TestConvention::ScalaTest => scala_test(node, source),
     }
 }
@@ -508,10 +508,19 @@ fn ruby_call_is_rspec(node: Node<'_>, source: &[u8]) -> bool {
 /// (S-060) — a `test`-prefixed name, a PHP 8 `#[Test]` attribute, or a `@test`
 /// tag in the preceding docblock. Positive-evidence-only: a helper with none of
 /// the three carries no evidence ([ADR-18]).
-fn php_unit(node: Node<'_>, name: &str, source: &[u8]) -> bool {
-    // (a) PHPUnit naming: a `test`-prefixed method — the dominant idiom and
-    // exactly what PHPUnit's own auto-discovery matches.
-    if name.starts_with("test") {
+///
+/// The `test` name prefix is the one idiom that is *only* a naming habit, so it
+/// counts solely where PHPUnit would discover it — in a `*TestCase` subclass or
+/// a test file ([`is_test_path`](crate::navigate::is_test_path)); a production
+/// `testSetup()` is a method, not a test (S-524, [FR-AN-05]). `#[Test]` and
+/// `@test` are explicit markers and hold wherever they appear.
+///
+/// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
+fn php_unit(node: Node<'_>, name: &str, path: &str, source: &[u8]) -> bool {
+    // (a) PHPUnit naming: a `test`-prefixed method, in a test context.
+    if name.starts_with("test")
+        && (crate::navigate::is_test_path(path) || php_in_testcase_subclass(node, source))
+    {
         return true;
     }
     // (b) a PHP 8 `#[Test]` attribute (`PHPUnit\Framework\Attributes\Test`).
@@ -520,6 +529,22 @@ fn php_unit(node: Node<'_>, name: &str, source: &[u8]) -> bool {
     }
     // (c) a `@test` tag in the method's preceding docblock comment.
     php_has_test_docblock(node, source)
+}
+
+/// `true` when the method's enclosing class extends a `*TestCase` — a
+/// whole-name suffix on the base class's last segment (`TestCase`,
+/// `\PHPUnit\Framework\TestCase`, `BaseTestCase`), so `TestCaseHelper` is not.
+fn php_in_testcase_subclass(node: Node<'_>, source: &[u8]) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(n) = ancestor {
+        if n.kind() == "class_declaration" {
+            return child_of_kind(n, "base_clause")
+                .and_then(|base| php_first_name_last_segment(base, source))
+                .is_some_and(|base| base.ends_with("TestCase"));
+        }
+        ancestor = n.parent();
+    }
+    false
 }
 
 /// `true` when the method carries a `#[Test]` attribute. tree-sitter-php nests
@@ -532,7 +557,7 @@ fn php_has_test_attribute(node: Node<'_>, source: &[u8]) -> bool {
     };
     let mut stack = vec![attrs];
     while let Some(n) = stack.pop() {
-        if n.kind() == "attribute" && php_attr_last_segment(n, source) == Some("Test") {
+        if n.kind() == "attribute" && php_first_name_last_segment(n, source) == Some("Test") {
             return true;
         }
         let mut cursor = n.walk();
@@ -542,11 +567,12 @@ fn php_has_test_attribute(node: Node<'_>, source: &[u8]) -> bool {
     false
 }
 
-/// The last segment of an `attribute`'s name: the `name`'s text for `#[Test]`,
-/// the final `name` child of a `qualified_name` for a namespaced attribute.
-fn php_attr_last_segment<'s>(attr: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
-    let mut cursor = attr.walk();
-    let children: Vec<Node<'_>> = attr.children(&mut cursor).collect();
+/// The last segment of the first name under `parent` — an `attribute`'s name
+/// (`#[Test]`) or a `base_clause`'s base class: the `name`'s text, or the final
+/// `name` child of a `qualified_name` for a namespaced one.
+fn php_first_name_last_segment<'s>(parent: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let mut cursor = parent.walk();
+    let children: Vec<Node<'_>> = parent.children(&mut cursor).collect();
     let head = children
         .into_iter()
         .find(|c| matches!(c.kind(), "name" | "qualified_name"))?;
@@ -1284,6 +1310,65 @@ class MyTest extends TestCase {
         assert!(
             !probe1("helperNotATest"),
             "an unmarked helper carries no evidence (positive-evidence-only)"
+        );
+    }
+
+    #[cfg(feature = "lang-php")]
+    #[test]
+    fn php_test_prefix_needs_a_testcase_subclass_or_a_test_file() {
+        // S-524: `testSetup()` on a production class is a method, not a test.
+        let lang: Language = tree_sitter_php::LANGUAGE_PHP.into();
+        let prod = "<?php
+class Installer {
+    public function testSetup() {}
+    #[Test]
+    public function viaAttribute() {}
+}
+";
+        let cased = "<?php
+class FooBar extends \\PHPUnit\\Framework\\TestCase {
+    public function testFoo() {}
+    public function helper() {}
+}
+class Sibling extends BaseTestCase {
+    public function testBar() {}
+}
+class NotACase extends TestCaseHelper {
+    public function testBaz() {}
+}
+";
+        let probe_in = |path: &str, src: &str, name: &str| {
+            probe(
+                &lang,
+                path,
+                src,
+                "method_declaration",
+                name,
+                NodeKind::Method,
+                TestConvention::PhpUnit,
+            )
+        };
+        assert!(
+            !probe_in("src/Installer.php", prod, "testSetup"),
+            "a test*-named method in a production class is production"
+        );
+        assert!(
+            probe_in("tests/InstallerTest.php", prod, "testSetup"),
+            "the same method in a test file is a test"
+        );
+        assert!(
+            probe_in("src/Installer.php", prod, "viaAttribute"),
+            "#[Test] is positive evidence whatever the path"
+        );
+        assert!(probe_in("src/FooBar.php", cased, "testFoo"), "TestCase subclass");
+        assert!(probe_in("src/FooBar.php", cased, "testBar"), "*TestCase subclass");
+        assert!(
+            !probe_in("src/FooBar.php", cased, "helper"),
+            "an unprefixed method in a TestCase subclass is still no test"
+        );
+        assert!(
+            !probe_in("src/FooBar.php", cased, "testBaz"),
+            "`TestCaseHelper` is not a `*TestCase` subclass"
         );
     }
 
