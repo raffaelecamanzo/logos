@@ -418,3 +418,43 @@ pub struct InitResult {
     /// FR-IN-01..04).
     pub steps: Vec<InitStep>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PersistenceHealth;
+    use crate::graph_store::PersistFailureRow;
+
+    fn row(path: &str, stale: bool) -> PersistFailureRow {
+        PersistFailureRow {
+            path: path.into(),
+            reason: "boom".into(),
+            stale,
+        }
+    }
+
+    /// S-513: the readout counts every failed file, lists the stale ones by
+    /// path, and its warning splits the count into stale and absent — two
+    /// different states of the graph a reader must not confuse.
+    #[test]
+    fn the_readout_and_its_warning_split_stale_from_absent() {
+        assert_eq!(PersistenceHealth::from_rows(&[]).warning(), None, "clean says nothing");
+        assert!(PersistenceHealth::from_rows(&[]).is_clean());
+
+        let health = PersistenceHealth::from_rows(&[
+            row("src/a.rs", false),
+            row("src/b.rs", true),
+            row("src/c.rs", false),
+        ]);
+        assert_eq!(health.failed_to_persist, 3);
+        assert_eq!(health.stale_files, ["src/b.rs"]);
+        assert!(!health.is_clean());
+        assert_eq!(
+            health.warning().as_deref(),
+            Some(
+                "3 file(s) failed to persist and are not indexed as they stand on disk: \
+                 1 stale (the graph holds their last good facts), 2 absent; a later \
+                 reconcile retries them"
+            )
+        );
+    }
+}
