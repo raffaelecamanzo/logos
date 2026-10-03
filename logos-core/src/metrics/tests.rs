@@ -1598,6 +1598,44 @@ fn uniqueness_offenders_rank_clone_groups_by_mass() {
     assert_eq!(names, ["f40", "f41", "f60"]);
 }
 
+/// The Uniqueness list's mass and member count are **production-scoped**
+/// ([FR-QM-08], review fix): a test function in a clone group is neither listed
+/// nor counted. Group 1 has 2 production members of 10 lines plus a 200-line
+/// test member; group 10 has 2 production members of 20 lines. Production-only,
+/// group 10 (mass 40) outranks group 1 (mass 20); counting the test member would
+/// list it and flip the order (3 × 73.3 = 220).
+///
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+#[test]
+fn uniqueness_offenders_count_production_members_only() {
+    let nodes: Vec<NodeRow> = [1, 2, 3, 10, 11]
+        .into_iter()
+        .map(|id| node(id, &format!("f{id}"), NodeKind::Function, Some("src/a.rs")))
+        .collect();
+    let functions = [
+        func_struct(1, None, Some(10), None, Some(1)),
+        func_struct(2, None, Some(10), None, Some(1)),
+        func_struct(3, None, Some(200), None, Some(1)), // the test-scoped member
+        func_struct(10, None, Some(20), None, Some(10)),
+        func_struct(11, None, Some(20), None, Some(10)),
+    ];
+    let test_ids: HashSet<NodeId> = [NodeId(3)].into_iter().collect();
+    let w = super::worst_offenders(
+        &nodes,
+        &[],
+        &functions,
+        &test_ids,
+        super::Thresholds::default(),
+        10,
+    );
+    let order: Vec<&str> = w.uniqueness.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(order, ["f10", "f11", "f1", "f2"], "the test member is not listed");
+    assert_eq!(
+        w.uniqueness[2].detail, "clone group #1 · 2 members × 10 lines",
+        "the test member enters neither the count nor the mean"
+    );
+}
+
 // ── FR-QM-14 / UAT-QM-13: extended aggregate (floors, drop-out, hash) ─────────
 
 /// A new dimension forced to its floor drags but never zeroes the signal, while
