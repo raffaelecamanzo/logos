@@ -352,8 +352,8 @@ impl Constraints {
 /// near-clone parameters feeding Uniqueness ([FR-QM-13]): `clone_similarity`
 /// ([FR-AN-06]) and `clone_min_tokens` ([FR-EX-09]) — and, since S-501, the
 /// exact-duplicate token floor `duplicate_min_tokens` ([FR-AN-02]).
-/// [`MetricThresholds::effective`] composes these onto the documented defaults to build the effective set whose
-/// hash gates the baseline.
+/// [`MetricThresholds::effective`] composes these onto the documented defaults
+/// to build the effective set whose hash gates the baseline.
 ///
 /// `Eq` is not derived: `clone_similarity` is an `f64` (the same reason
 /// [`Constraints`] and [`Rules`] are `PartialEq`-only).

@@ -162,10 +162,10 @@ impl Thresholds {
     ///
     /// The two near-clone parameters ([CR-013]) and the exact-duplicate floor
     /// (S-501) are appended **only when they differ from their documented
-    /// defaults**. This keeps the default-set hash
-    /// byte-identical to the pre-CR-013 build — an untuned repo never spuriously
-    /// re-baselines on upgrade — while any tuning of either still moves the hash
-    /// (the structural keys and the near-clone keys use disjoint name prefixes,
+    /// defaults**. This keeps the default-set hash byte-identical to the
+    /// pre-CR-013 build — an untuned repo never spuriously re-baselines on
+    /// upgrade — while any tuning of any of them still moves the hash (the
+    /// structural, `clone_`, and `duplicate_` keys use disjoint name prefixes,
     /// so no tuning of one can ever forge another's canonical segment).
     ///
     /// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
