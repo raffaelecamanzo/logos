@@ -5434,6 +5434,10 @@ interface Port {\n    fun send(m: String)\n    fun ping() { send(\"ping\") }\n}\
     assert!(has_body(&facts, "label"), "a block-bodied fun has a body");
     assert!(has_body(&facts, "short"), "an expression-bodied fun has a body");
     assert!(has_body(&facts, "ping"), "an interface fun with a default has a body");
+    // No `body` field: the count is the matched `function_body` (`= "s"` → 4),
+    // never the whole declaration.
+    let short = callable_bodies(&facts).into_iter().find(|(n, _, _)| n == "short").unwrap();
+    assert_eq!(short.2, 4);
 }
 
 #[test]
@@ -5504,6 +5508,10 @@ trait Port { def send(m: String): Unit }\n";
     assert!(!has_body(&facts, "send"), "a trait def with no default has no body");
     assert!(has_body(&facts, "label"), "an expression-bodied def has a body");
     assert!(has_body(&facts, "block"), "a block-bodied def has a body");
+    // The declaration's own kind matched, so the count is its `body` field
+    // alone, never the `def` signature: `"shape"` → 1, `{ 1 + 2 }` → 5.
+    let tokens = |name: &str| callable_bodies(&facts).into_iter().find(|(n, _, _)| n == name).unwrap().2;
+    assert_eq!((tokens("label"), tokens("block")), (1, 5));
 }
 
 #[test]
