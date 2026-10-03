@@ -177,6 +177,9 @@ fn is_test_path_respects_production_source_roots() {
     // Near misses of the root names are not roots.
     assert!(is_test_path("src/mainline/test/Foo.java"));
     assert!(is_test_path("Main/test/Foo.kt")); // bare `Main` is not a `*Main` source set
+    // `src/main` needs its `src/` parent: a bare `main` directory is no root.
+    assert!(is_test_path("main/test/Foo.java"));
+    assert!(is_test_path("cmd/main/test/x.go"));
 }
 
 #[test]
