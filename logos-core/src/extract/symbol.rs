@@ -91,38 +91,45 @@ pub(crate) fn path_segments(rel: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Render one declaration as its SCIP descriptor segment, folding the ordinal
-/// in to disambiguate same-`(kind, name)` siblings.
+/// The SCIP descriptor suffix a [`NodeKind`] renders with — the unit within
+/// which same-name siblings must be numbered apart.
 ///
-/// The mapping from [`NodeKind`] to SCIP descriptor suffix:
+/// Several kinds share one suffix: a Go function and method both render
+/// `name().`, a TS interface and class both `name#`. Two same-name siblings of
+/// different kinds in one family therefore render one symbol unless their
+/// ordinals differ, so [`super::assign_ordinals`] numbers siblings per family,
+/// not per kind (S-512, [ADR-07]). [`descriptor_for`] picks its suffix from this
+/// same function, which is what keeps the numbering and the rendering from
+/// drifting apart.
+///
+/// [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DescriptorFamily {
+    /// `name().` — the method descriptor.
+    Method,
+    /// `name#` — the type descriptor.
+    Type,
+    /// `name.` — the term descriptor.
+    Term,
+    /// `name/` — the namespace descriptor.
+    Namespace,
+    /// `name!` — the macro descriptor.
+    Macro,
+}
+
+/// The [`DescriptorFamily`] a [`NodeKind`] renders into:
 /// - `Module` → namespace (`name/`)
 /// - `Class`/`Interface`/`Trait`/`Struct`/`Enum`/`TypeAlias`/`Route`/`Component`/
 ///   `Topic`/`Producer`/`Consumer` → type (`name#`)
-/// - `Function`/`Method` → method (`name().`, or `name(N).` when `ordinal > 0`)
+/// - `Function`/`Method` → method (`name().`)
 /// - `Field`/`Constant`/`Variable` → term (`name.`)
 /// - `Macro` → macro (`name!`)
 ///
-/// Disambiguation when `ordinal > 0`:
-/// - `Function`/`Method` ride SCIP's native **method disambiguator** slot
-///   (`name(N).`) — the idiomatic encoding for an inherent method and a
-///   trait-impl method that share a name in one module scope.
-/// - Every other kind appends a trailing **meta descriptor** (`…N:`) carrying
-///   the ordinal. This is needed because non-method same-name collisions *do*
-///   occur in valid Rust: e.g. an associated `const ALL` in two different `impl`
-///   blocks both land in the enclosing module scope (the `impl` is not a
-///   captured scope), so a `Constant`/`Type`/… can legitimately collide. Those
-///   kinds are always leaves under `symbols.scm` (no captured children), so the
-///   appended meta never perturbs a descendant's chain.
-pub(crate) fn descriptor_for(kind: NodeKind, name: &str, ordinal: u32) -> String {
-    let n = escape_name(name);
+/// The match is exhaustive, so a new [`NodeKind`] cannot compile without being
+/// assigned a family.
+pub(crate) fn descriptor_family(kind: NodeKind) -> DescriptorFamily {
     match kind {
-        NodeKind::Function | NodeKind::Method => {
-            if ordinal == 0 {
-                format!("{n}().")
-            } else {
-                format!("{n}({ordinal}).")
-            }
-        }
+        NodeKind::Function | NodeKind::Method => DescriptorFamily::Method,
         // `Layer`/`Boundary` are derived policy nodes the annotation engine
         // materialises (S-014); extraction never emits them, but the mapping is
         // total so a future caller gets a sensible namespace/type descriptor.
@@ -131,7 +138,7 @@ pub(crate) fn descriptor_for(kind: NodeKind, name: &str, ordinal: u32) -> String
         // them from the file path with an empty scope chain, so these arms are
         // reached only for completeness.
         NodeKind::Module | NodeKind::Layer | NodeKind::DocFile | NodeKind::ConfigFile => {
-            with_ordinal(format!("{n}/"), ordinal)
+            DescriptorFamily::Namespace
         }
         // `DocSection` and the typed `Requirement`/`Adr`/`Story` doc nodes
         // (S-033/S-039, CR-003), and the config layer's `ConfigSection` plus the
@@ -168,11 +175,43 @@ pub(crate) fn descriptor_for(kind: NodeKind, name: &str, ordinal: u32) -> String
         // here (S-256's concern), but the mapping stays total.
         | NodeKind::Topic
         | NodeKind::Producer
-        | NodeKind::Consumer => with_ordinal(format!("{n}#"), ordinal),
-        NodeKind::Field | NodeKind::Constant | NodeKind::Variable => {
-            with_ordinal(format!("{n}."), ordinal)
+        | NodeKind::Consumer => DescriptorFamily::Type,
+        NodeKind::Field | NodeKind::Constant | NodeKind::Variable => DescriptorFamily::Term,
+        NodeKind::Macro => DescriptorFamily::Macro,
+    }
+}
+
+/// Render one declaration as its SCIP descriptor segment, folding the ordinal
+/// in to disambiguate same-name siblings of one [`DescriptorFamily`].
+///
+/// The suffix comes from [`descriptor_family`].
+///
+/// Disambiguation when `ordinal > 0`:
+/// - The method family rides SCIP's native **method disambiguator** slot
+///   (`name(N).`) — the idiomatic encoding for an inherent method and a
+///   trait-impl method that share a name in one module scope.
+/// - Every other family appends a trailing **meta descriptor** (`…N:`) carrying
+///   the ordinal. This is needed because non-method same-name collisions *do*
+///   occur in valid Rust: e.g. an associated `const ALL` in two different `impl`
+///   blocks both land in the enclosing module scope (the `impl` is not a
+///   captured scope), so a `Constant`/`Type`/… can legitimately collide. In
+///   other languages a disambiguated declaration can have children — a TS
+///   `class X` merged with an earlier `interface X` renders `X#1:`, and its
+///   member `b` renders `X#1:b.` — which is still a valid descriptor chain.
+pub(crate) fn descriptor_for(kind: NodeKind, name: &str, ordinal: u32) -> String {
+    let n = escape_name(name);
+    match descriptor_family(kind) {
+        DescriptorFamily::Method => {
+            if ordinal == 0 {
+                format!("{n}().")
+            } else {
+                format!("{n}({ordinal}).")
+            }
         }
-        NodeKind::Macro => with_ordinal(format!("{n}!"), ordinal),
+        DescriptorFamily::Namespace => with_ordinal(format!("{n}/"), ordinal),
+        DescriptorFamily::Type => with_ordinal(format!("{n}#"), ordinal),
+        DescriptorFamily::Term => with_ordinal(format!("{n}."), ordinal),
+        DescriptorFamily::Macro => with_ordinal(format!("{n}!"), ordinal),
     }
 }
 
@@ -371,6 +410,61 @@ mod tests {
         assert_eq!(descriptor_for(NodeKind::Function, "bar", 0), "bar().");
         assert_eq!(descriptor_for(NodeKind::Function, "bar", 1), "bar(1).");
         assert_eq!(descriptor_for(NodeKind::Method, "bar", 2), "bar(2).");
+    }
+
+    #[test]
+    fn every_kind_renders_with_its_familys_suffix() {
+        // The numbering unit (`descriptor_family`, used by `assign_ordinals`) and
+        // the rendering (`descriptor_for`) must agree for every kind, or two
+        // kinds numbered apart could still render one symbol (S-512).
+        for kind in NodeKind::ALL {
+            let suffix = match descriptor_family(kind) {
+                DescriptorFamily::Method => "().",
+                DescriptorFamily::Type => "#",
+                DescriptorFamily::Term => ".",
+                DescriptorFamily::Namespace => "/",
+                DescriptorFamily::Macro => "!",
+            };
+            assert_eq!(
+                descriptor_for(kind, "n", 0),
+                format!("n{suffix}"),
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn kinds_that_collided_on_one_suffix_share_a_family() {
+        // The S-512 collisions: each group renders one suffix, so each must be
+        // numbered as one family.
+        assert_eq!(
+            descriptor_family(NodeKind::Function),
+            descriptor_family(NodeKind::Method)
+        );
+        for kind in [
+            NodeKind::Class,
+            NodeKind::Interface,
+            NodeKind::Trait,
+            NodeKind::Struct,
+            NodeKind::Enum,
+            NodeKind::TypeAlias,
+        ] {
+            assert_eq!(
+                descriptor_family(kind),
+                DescriptorFamily::Type,
+                "{}",
+                kind.as_str()
+            );
+        }
+        for kind in [NodeKind::Field, NodeKind::Constant, NodeKind::Variable] {
+            assert_eq!(
+                descriptor_family(kind),
+                DescriptorFamily::Term,
+                "{}",
+                kind.as_str()
+            );
+        }
     }
 
     #[test]

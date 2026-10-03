@@ -125,7 +125,7 @@ use refs::{
     flatten_use_tree, import_segments, is_relative_head, macro_call_refs, specifier_segments,
     split_path_text,
 };
-use symbol::{build_symbol, descriptor_for, path_segments};
+use symbol::{build_symbol, descriptor_family, descriptor_for, path_segments, DescriptorFamily};
 
 /// The capture-name group prefix the `symbols` query uses (`@symbol.<kind>`).
 /// The segment after it names a [`NodeKind`] by its [`NodeKind::as_str`] form.
@@ -366,8 +366,8 @@ struct Decl<'tree> {
     /// Index of the nearest enclosing captured declaration, or `None` at file
     /// scope. Resolved in [`assign_parents`].
     parent: Option<usize>,
-    /// Ordinal among same-`(kind, name)` siblings, in canonical sort order.
-    /// Assigned in [`assign_ordinals`].
+    /// Ordinal among same-name siblings of one [`DescriptorFamily`], in
+    /// canonical sort order. Assigned in [`assign_ordinals`].
     ordinal: u32,
 }
 
@@ -587,6 +587,16 @@ fn extract_one(
             // a capture identifies one declaration.
             let name_node = cap.node;
             let decl_node = lift_to_declaration(name_node.parent().unwrap_or(name_node));
+            // A MISSING (error-recovery) or zero-width name names nothing: its
+            // descriptor would be the bare suffix, which is not a valid SCIP
+            // symbol, and storing it aborted the whole index (S-512 — a C++
+            // `enum : uint8_t {}`, a C `typedef struct {…} ;`). The declaration
+            // emits nothing; the file's other declarations still do. Checked
+            // before `seen_decls` so another pattern naming the same declaration
+            // properly is still taken.
+            if name_node.is_missing() || name_node.start_byte() == name_node.end_byte() {
+                continue;
+            }
             if !seen_decls.insert(decl_node.id()) {
                 continue; // already captured by another pattern — keep the first
             }
@@ -825,8 +835,35 @@ fn extract_one(
         &mut facts,
     );
 
+    #[cfg(debug_assertions)]
+    debug_assert_unique_symbols(&facts);
+
     sort_facts(&mut facts);
     facts
+}
+
+/// Debug-only per-file symbol-uniqueness assertion (S-512, [ADR-07]): every node
+/// one file emits must carry its own symbol. Two that share one fail the store's
+/// `UNIQUE(symbol_id)` and abort the whole index, so a debug build (tests, dev)
+/// panics here — naming the file and the symbol — rather than at persistence.
+/// A release build never pays for it, mirroring the pipeline's
+/// `debug_assert_structural_integrity`.
+///
+/// [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
+#[cfg(debug_assertions)]
+fn debug_assert_unique_symbols(facts: &Facts) {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(facts.nodes.len());
+    let duplicates: Vec<&str> = facts
+        .nodes
+        .iter()
+        .map(|n| n.symbol.as_str())
+        .filter(|s| !seen.insert(s))
+        .collect();
+    debug_assert!(
+        duplicates.is_empty(),
+        "{} emitted one symbol for two declarations (S-512, ADR-07): {duplicates:?}",
+        facts.path
+    );
 }
 
 /// HTTP client-call arm (S-252, CR-061, FR-WS-08): capture outbound calls via
@@ -2357,11 +2394,11 @@ fn lift_to_declaration(node: Node<'_>) -> Node<'_> {
 /// mirroring [`lift_to_declaration`]: no other supported grammar produces an
 /// `impl_item`, and every other language already kinds its methods via a
 /// `@symbol.method` capture in its own query. The re-kinding is **emission-only**:
-/// `decl.kind` stays `Function` through the symbol and ordinal machinery, so
-/// `Function`/`Method` share the SCIP method-descriptor slot ([`descriptor_for`])
-/// and the `(kind, name)` ordinal grouping — every pre-existing symbol ID is
-/// byte-identical, only the emitted `nodes.kind` discriminant changes
-/// ([NFR-RA-06]).
+/// `decl.kind` stays `Function` through the symbol and ordinal machinery, and
+/// `Function`/`Method` share one [`DescriptorFamily`] — the method-descriptor
+/// slot ([`descriptor_for`]) and the unit [`assign_ordinals`] numbers by — so
+/// every pre-existing symbol ID is byte-identical, only the emitted `nodes.kind`
+/// discriminant changes ([NFR-RA-06]).
 ///
 /// [FR-EX-05]: ../../../docs/specs/requirements/FR-EX-05.md
 /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
@@ -2970,8 +3007,15 @@ fn assign_parents(decls: &mut [Decl<'_>]) {
     }
 }
 
-/// Assign each declaration its ordinal among same-`(kind, name)` siblings, in
-/// the canonical sort order `(start_byte, kind, name)` ([ADR-07]).
+/// Assign each declaration its ordinal among same-name siblings of one
+/// [`DescriptorFamily`], in the canonical sort order `(start_byte, kind, name)`
+/// ([ADR-07]).
+///
+/// Numbered per family, not per kind (S-512): kinds that share a descriptor
+/// suffix — a Go function and method (`name().`), a TS interface and class
+/// (`name#`) — would otherwise both take ordinal 0 and render one symbol. Where
+/// no scope holds two kinds of one family under one name, per-family numbering
+/// equals per-kind numbering and every ID is unchanged.
 fn assign_ordinals(decls: &mut [Decl<'_>]) {
     // Group declaration indices by parent scope.
     let mut by_parent: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
@@ -2994,9 +3038,9 @@ fn assign_ordinals(decls: &mut [Decl<'_>]) {
         });
         // Owned-String keys so the counter does not borrow `decls` while we
         // write back `ordinal`.
-        let mut seen: HashMap<(i32, String), u32> = HashMap::new();
+        let mut seen: HashMap<(DescriptorFamily, String), u32> = HashMap::new();
         for idx in siblings {
-            let key = (decls[idx].kind.as_i32(), decls[idx].name.clone());
+            let key = (descriptor_family(decls[idx].kind), decls[idx].name.clone());
             let ordinal = *seen.get(&key).unwrap_or(&0);
             decls[idx].ordinal = ordinal;
             seen.insert(key, ordinal + 1);
