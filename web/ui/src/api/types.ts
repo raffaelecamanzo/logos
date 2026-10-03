@@ -518,8 +518,15 @@ export interface Offender {
   detail: string;
 }
 
-/** The per-dimension worst-offender lists (mirrors `WorstOffenders`). */
+/** The per-dimension worst-offender lists (mirrors `WorstOffenders`).
+ *
+ *  `recorded` is the state, never the list lengths: `true` means the lists are the
+ *  ones the snapshot's computation produced — so an empty list is "nothing flagged
+ *  within thresholds" — and `false` means the snapshot never recorded offenders (a
+ *  snapshot written before FR-QM-15, or no scan at all), so every list is `[]` and
+ *  that `[]` means nothing (NFR-CC-04, CR-162). Always present, serialised first. */
 export interface WorstOffenders {
+  recorded: boolean;
   nesting: Offender[];
   conciseness: Offender[];
   cohesion: Offender[];

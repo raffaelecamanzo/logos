@@ -17,6 +17,7 @@ import {
   snapshotStaleness,
   structuralDetails,
 } from "./healthModel.ts";
+import realOffenders from "./fixtures/worst-offenders.real.json";
 import { UNKNOWN_AGE_AHEAD_OF_NOW } from "../dashboard/dashboardModel.ts";
 
 function mv(n: number): MetricValue {
@@ -52,7 +53,7 @@ function scan(over: Partial<ScanResult> = {}): ScanResult {
     signal: 8000,
     freshness: "",
     metrics: snapshot(),
-    worst_offenders: { nesting: [], conciseness: [], cohesion: [], focus: [], uniqueness: [] },
+    worst_offenders: { recorded: true, nesting: [], conciseness: [], cohesion: [], focus: [], uniqueness: [] },
     warnings: [],
     ...over,
   };
@@ -144,6 +145,66 @@ describe("structuralDetails", () => {
   it("keeps an n/a dimension's value null", () => {
     const dims = structuralDetails(scan({ metrics: snapshot({ cohesion: null }) }));
     expect(dims.find((d) => d.name === "Cohesion")?.value).toBeNull();
+  });
+
+  // CR-162 / S-499: the offender state comes from `recorded`, never from `[]`.
+  describe("offender state", () => {
+    const entry = { name: "deep_fn", file: "src/a.rs", line: 42, detail: "nesting depth 6" };
+
+    it("recorded with entries lists the offenders; the other recorded dimensions are none-flagged", () => {
+      const s = scan();
+      s.worst_offenders.nesting = [entry];
+      const dims = structuralDetails(s);
+      expect(dims.map((d) => d.offenderState)).toEqual([
+        "listed",
+        "none-flagged",
+        "none-flagged",
+        "none-flagged",
+        "none-flagged",
+      ]);
+    });
+    it("not recorded is never none-flagged — every dimension, whatever the lists hold", () => {
+      const s = scan();
+      s.worst_offenders.recorded = false;
+      expect(structuralDetails(s).map((d) => d.offenderState)).toEqual(Array(5).fill("not-recorded"));
+      // Even a (contradictory) non-empty list under recorded:false is not presented as recorded.
+      s.worst_offenders.nesting = [entry];
+      expect(structuralDetails(s)[0].offenderState).toBe("not-recorded");
+    });
+    it("a payload without the flag is treated as not recorded, never as a clean result", () => {
+      const s = scan();
+      delete (s.worst_offenders as Partial<typeof s.worst_offenders>).recorded;
+      expect(structuralDetails(s).map((d) => d.offenderState)).toEqual(Array(5).fill("not-recorded"));
+    });
+    it("an n/a dimension keeps its n/a state regardless of the recorded flag", () => {
+      for (const recorded of [true, false]) {
+        const s = scan({ metrics: snapshot({ cohesion: null }) });
+        s.worst_offenders.recorded = recorded;
+        expect(structuralDetails(s).find((d) => d.name === "Cohesion")?.offenderState).toBe("not-applicable");
+      }
+    });
+  });
+
+  // The real `/api/v1/health` payloads, captured by the Rust guard in web/tests/api_v1.rs.
+  describe("over the real /api/v1/health payload", () => {
+    it("a scanned fixture's recorded offenders list in persisted order", () => {
+      const dims = structuralDetails(scan({ worst_offenders: realOffenders.recorded }));
+      expect(dims[0].offenderState).toBe("listed");
+      expect(dims[0].offenders.map((o) => o.name)).toEqual([
+        "beta_depth_six",
+        "gamma_depth_five",
+        "alpha_depth_four",
+      ]);
+      expect(dims.slice(1).map((d) => d.offenderState)).toEqual(Array(4).fill("none-flagged"));
+    });
+    it("a clean scan is recorded-empty and a never-scanned store is not recorded", () => {
+      expect(
+        structuralDetails(scan({ worst_offenders: realOffenders.recordedEmpty })).map((d) => d.offenderState),
+      ).toEqual(Array(5).fill("none-flagged"));
+      expect(
+        structuralDetails(scan({ worst_offenders: realOffenders.notRecorded })).map((d) => d.offenderState),
+      ).toEqual(Array(5).fill("not-recorded"));
+    });
   });
 });
 
