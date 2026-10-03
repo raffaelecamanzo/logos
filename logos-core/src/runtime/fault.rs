@@ -1,9 +1,9 @@
 //! The **test-only persistence fault seam** (S-513, [FR-EH-05]).
 //!
 //! [FR-EH-05] promises that one file whose facts cannot be persisted fails
-//! alone. Every real trigger of that path is a defect — the cross-kind symbol
-//! collision [CR-168] found is being fixed in the same sprint — so the
-//! promise can only be tested by failing a file on purpose. This seam does
+//! alone. Every real trigger of that path is a defect (the cross-kind symbol
+//! collision [CR-168] found is one), so the promise can only be tested by
+//! failing a file on purpose. This seam does
 //! that: a file named here fails **after** its facts were written inside its
 //! own isolation unit, so the rollback that must undo them is exercised, not
 //! skipped.
