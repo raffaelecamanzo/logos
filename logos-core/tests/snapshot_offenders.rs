@@ -427,3 +427,64 @@ fn the_dimension_vocabulary_is_the_serialized_field_set() {
         "a name outside the five has no list"
     );
 }
+
+/// A production function `name` whose body nests `depth` `if`s.
+fn nested_fn(name: &str, depth: usize) -> String {
+    let mut body = String::new();
+    for level in 0..depth {
+        body.push_str(&format!("{}if x > {level} {{\n", "    ".repeat(level + 1)));
+    }
+    body.push_str(&format!("{}return x;\n", "    ".repeat(depth + 1)));
+    for level in (0..depth).rev() {
+        body.push_str(&format!("{}}}\n", "    ".repeat(level + 1)));
+    }
+    format!("pub fn {name}(x: i32) -> i32 {{\n{body}    0\n}}\n")
+}
+
+/// [FR-QM-15]: every persisted list is capped at `WORST_OFFENDER_CAP`, and the
+/// cap keeps the most severe entries. Two more offenders than the cap — the
+/// last two declared the deepest — persist exactly `WORST_OFFENDER_CAP` rows,
+/// led by those two, and the Health bundle projects the same capped list.
+#[test]
+fn persisted_lists_are_capped_at_the_worst_offender_cap_keeping_the_deepest() {
+    let cap = logos_core::metrics::WORST_OFFENDER_CAP;
+    let total = cap + 2;
+    let tmp = TempDir::new().unwrap();
+    let source: String = (0..total)
+        .map(|i| nested_fn(&format!("f{i:02}"), if i >= cap { 5 } else { 4 }))
+        .collect();
+    write(tmp.path(), "src/lib.rs", &source);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+
+    let scanned = engine.scan(true).expect("scan runs").worst_offenders;
+    let persisted: i64 = read_only(tmp.path())
+        .query_row(
+            "SELECT count(*) FROM metric_snapshot_offenders WHERE dimension = 'nesting'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        persisted, cap as i64,
+        "{total} offenders persist exactly the cap's {cap} rows"
+    );
+    let projected = engine
+        .latest_health()
+        .expect("read-only health")
+        .scan
+        .worst_offenders;
+    assert_eq!(
+        projected.nesting.len(),
+        cap,
+        "the projection is the capped list"
+    );
+    assert_eq!(projected, scanned);
+    let mut deepest: Vec<&str> = nesting_names(&projected)[..2].to_vec();
+    deepest.sort_unstable();
+    assert_eq!(
+        deepest,
+        [format!("f{:02}", cap), format!("f{:02}", cap + 1)],
+        "the cap keeps the two depth-5 functions, ahead of every depth-4 one"
+    );
+}
