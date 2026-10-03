@@ -155,6 +155,19 @@ config formats (YAML, JSON, TOML, Dockerfile, Makefile, Shell, Protobuf, GraphQL
 Terraform, SQL, plus OpenAPI) are indexed too, so you can ask which code implements
 a requirement, or which docs a change will make stale.
 
+What each language **binds across files** differs, and `callers`, `impact` and
+`precedent` are only as good as that. Each plugin declares its level, and a test
+checks the declaration (`logos languages` prints it):
+
+<!-- reach:begin (generated from plugins/*/plugin.toml — see logos-core/tests/reach_docs.rs) -->
+- **`resolved`** — calls, imports and type relations bind across files: Java, Rust
+- **`partial`** — some relations bind across files, not all: Go, Kotlin, TSX (incl. JSX), TypeScript (incl. JavaScript)
+- **`same-file`** — references bind only inside the file that wrote them: C#, PHP, Python, Ruby, Scala
+- **`symbols`** — declarations are extracted; nothing binds across files: C, C++
+<!-- reach:end -->
+
+Per-repository figures are in `logos status --json` (`resolution_by_language`).
+
 ## Keep the architecture honest
 
 The same graph scores your codebase on ten structural dimensions (modularity,

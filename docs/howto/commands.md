@@ -866,8 +866,11 @@ logos languages --json
 
 The registered grammar table: name, extensions (and `filenames` for
 basename-claimed formats like `Dockerfile`/`Makefile`), module separator,
-capabilities, tree-sitter ABI version, and an `artifact` flag — plus any
-grammars skipped for ABI mismatch (`skipped` should be empty). A full `lang-all`
+capabilities, tree-sitter ABI version, and an `artifact` flag — plus, for each
+code language, its declared **reach** (`reach.level`: `resolved`, `partial`,
+`same-file` or `symbols`; `reach.cross_file`: the relations it binds across
+files — see [usage.md](usage.md#language-support-what-each-language-binds-across-files))
+and any grammars skipped for ABI mismatch (`skipped` should be empty). A full `lang-all`
 build lists 24 plugins: the twelve code languages (thirteen grammar rows —
 TypeScript and TSX/JSX register separately), `markdown`, and the ten
 `artifact: true` config/infra grammars (yaml, json, toml, dockerfile, makefile,

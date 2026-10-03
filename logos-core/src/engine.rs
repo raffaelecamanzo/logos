@@ -37,8 +37,8 @@ use crate::models::{
     pipeline::{IndexResult, InitResult, SyncResult},
     quality::{
         DocGapsReport, DoctorReport, DsmReport, EvolutionReport, GateResult, HealthInfo,
-        LanguageDescriptor, LanguagesInfo, LatestHealth, MetricSnapshot, QualityReadout,
-        RulesReport, ScanResult, SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
+        LanguageDescriptor, LanguageReach, LanguagesInfo, LatestHealth, MetricSnapshot,
+        QualityReadout, RulesReport, ScanResult, SessionInfo, SkippedLanguage, StatsInfo, VerifyReport,
     },
 };
 use crate::observability::{CallOutcome, Tool};
@@ -1644,6 +1644,14 @@ impl Engine {
                     capabilities: plugin.capabilities().to_vec(),
                     abi_version: semantics.abi_version as u32,
                     overridden_capabilities: plugin.overridden_capabilities().to_vec(),
+                    reach: plugin.reach().map(|r| LanguageReach {
+                        level: r.level.as_str().to_string(),
+                        cross_file: r
+                            .cross_file
+                            .iter()
+                            .map(|c| c.as_str().to_string())
+                            .collect(),
+                    }),
                 }
             })
             .collect();
@@ -3660,6 +3668,11 @@ mod tests {
         // A code grammar carries no filename claims and is not the artifact class.
         assert!(rust.filenames.is_empty());
         assert!(!rust.artifact);
+        // …and declares its cross-file reach (S-570, FR-PL-09), surfaced as the
+        // descriptor spells it.
+        let reach = rust.reach.as_ref().expect("a code grammar declares a reach");
+        assert_eq!(reach.level, "resolved");
+        assert_eq!(reach.cross_file, ["calls", "imports", "type_relations"]);
     }
 
     /// `logos languages` lists an artifact plugin with its **filename** claims and

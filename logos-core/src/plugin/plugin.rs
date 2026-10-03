@@ -19,7 +19,7 @@ use tree_sitter::{Language, Query};
 
 use super::manifest::{
     ConfigDescriptor, ExportConvention, ImportSpecifier, PackageModules, PluginManifest,
-    PropertiesDescriptor, TestConvention,
+    PropertiesDescriptor, Reach, TestConvention,
 };
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
@@ -213,6 +213,16 @@ pub trait LanguagePlugin {
     fn config_extraction(&self) -> Option<&ConfigDescriptor> {
         None
     }
+
+    /// The cross-file reach this code language declares in its `[reach]` table
+    /// ([FR-PL-09], [CR-180]); `None` for documentation and artifact plugins,
+    /// which bind no code reference. Defaults to none.
+    ///
+    /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+    /// [CR-180]: ../../../docs/requests/CR-180-scala-is-declared-as-limited-support-and-every-language-declares-its-reach.md
+    fn reach(&self) -> Option<&Reach> {
+        None
+    }
 }
 
 /// Capability → compiled query, each shared with every other plugin in the
@@ -236,6 +246,10 @@ pub struct CompiledPlugin {
     queries: CompiledQueries,
     /// Capabilities whose query came from an on-disk override (observability).
     overridden: Vec<String>,
+    /// The declared `[reach]` ([FR-PL-09]); `None` for a non-code plugin.
+    ///
+    /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+    reach: Option<Reach>,
 }
 
 impl CompiledPlugin {
@@ -280,6 +294,7 @@ impl CompiledPlugin {
             capabilities: manifest.capabilities,
             queries,
             overridden,
+            reach: manifest.reach,
         }
     }
 }
@@ -331,5 +346,9 @@ impl LanguagePlugin for CompiledPlugin {
 
     fn config_extraction(&self) -> Option<&ConfigDescriptor> {
         self.semantics.config.as_ref()
+    }
+
+    fn reach(&self) -> Option<&Reach> {
+        self.reach.as_ref()
     }
 }
