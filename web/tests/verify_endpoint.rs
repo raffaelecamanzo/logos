@@ -22,6 +22,7 @@
 //! while neither `gate.sh` nor CI passes that feature to `web` itself, so a gated
 //! test would compile out of both.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -75,7 +76,6 @@ fn verify_post(intent: Option<&str>, origin: Option<&str>, host: Option<&str>) -
     builder.body(Body::empty()).unwrap()
 }
 
-#[allow(dead_code)]
 async fn body_string(resp: axum::http::Response<Body>) -> (StatusCode, String, axum::http::HeaderMap) {
     let status = resp.status();
     let headers = resp.headers().clone();
@@ -191,7 +191,10 @@ async fn clean_store_returns_ok_true_json() {
 
     assert_eq!(status, StatusCode::OK, "a guarded verify over a clean store answers 200");
     assert_self_only_csp(&headers);
-    assert!(body.contains("\"ok\":true"), "a clean store reports CONSISTENT: {body}");
+    // Parse rather than `contains("\"ok\":true")`: the nested `structural.ok` also
+    // serializes as `"ok":true`, so a substring cannot pin the top-level verdict.
+    let report: serde_json::Value = serde_json::from_str(&body).expect("the body is JSON");
+    assert_eq!(report["ok"], serde_json::Value::Bool(true), "a clean store reports CONSISTENT: {body}");
     assert!(body.contains("\"node_delta\":0"), "zero node delta on a clean store: {body}");
     assert!(body.contains("\"leaked_total\":0"), "no leaked symbols on a clean store: {body}");
     assert!(body.contains("\"orphaned_total\":0"), "no orphaned symbols on a clean store: {body}");
@@ -227,11 +230,13 @@ async fn drifted_store_returns_deltas_and_leaked_sample() {
 
     assert_eq!(status, StatusCode::OK, "a drifted verify still answers 200 (the drift is in the body)");
     assert_self_only_csp(&headers);
-    assert!(body.contains("\"ok\":false"), "the leak is drift: {body}");
     // The numeric deltas are `live − reindex`: a positive node_delta and a
     // file_delta ≥ 1 are the leak signature. Parse the report and assert on values
     // rather than brittle substring matching of a specific integer or symbol name.
     let report: serde_json::Value = serde_json::from_str(&body).expect("the body is JSON");
+    // The top-level verdict, by value (the nested `structural.ok` also serializes as
+    // `"ok":false`/`true`, so a substring match cannot pin it).
+    assert_eq!(report["ok"], serde_json::Value::Bool(false), "the leak is drift: {body}");
     assert!(report["node_delta"].as_i64().unwrap() > 0, "live surplus nodes: {body}");
     assert!(report["file_delta"].as_i64().unwrap() >= 1, "the live store retains the deleted file: {body}");
     assert!(report["leaked_total"].as_u64().unwrap() >= 1, "at least one leaked symbol: {body}");
@@ -251,8 +256,12 @@ async fn drifted_store_returns_deltas_and_leaked_sample() {
 /// current-thread, mirroring `serve_surfaces`), a verify and a batch of concurrent
 /// reads are `join`ed: all complete with `200`. The live-store census is read-only
 /// and takes no exclusive lock, so the reads are genuinely served *while* the
-/// verify runs — had the handler blocked the executor inline (or held a write
-/// lock) the reads could not be driven to completion beside it.
+/// verify runs — had the handler held a write lock the reads could not be driven
+/// to completion beside it. The `join` alone cannot tell `spawn_blocking` from an
+/// inline call (a blocked current-thread executor only *delays* the reads), so a
+/// `ticker` task spins on `yield_now` and the verify records how many ticks landed
+/// before it completed: the bridge yields while the blocking pool works, so the
+/// ticker runs; an inline call never yields, so the count stays `0`.
 #[tokio::test]
 async fn verify_runs_off_the_serve_loop_concurrent_reads_still_served() {
     let dir = TempDir::new().expect("temp dir");
@@ -276,22 +285,41 @@ async fn verify_runs_off_the_serve_loop_concurrent_reads_still_served() {
             router.oneshot(req).await.unwrap().status()
         }
     };
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let ticker = tokio::spawn({
+        let (ticks, stop) = (ticks.clone(), stop.clone());
+        async move {
+            while !stop.load(Ordering::Relaxed) {
+                ticks.fetch_add(1, Ordering::Relaxed);
+                tokio::task::yield_now().await;
+            }
+        }
+    });
     let verify = {
         let router = router.clone();
         let token = intent.as_str().to_string();
+        let ticks = ticks.clone();
         async move {
             let req = verify_post(Some(&token), Some(SAME_ORIGIN), Some(HOST));
-            router.oneshot(req).await.unwrap().status()
+            let status = router.oneshot(req).await.unwrap().status();
+            (status, ticks.load(Ordering::Relaxed))
         }
     };
 
-    let (v, r1, r2, r3) = tokio::join!(
+    let ((v, ticks_during_verify), r1, r2, r3) = tokio::join!(
         verify,
         read("/api/v1/health"),
         read("/api/v1/overview"),
         read("/api/v1/no-such-read-model"),
     );
+    stop.store(true, Ordering::Relaxed);
+    ticker.await.expect("the ticker task ends cleanly");
     assert_eq!(v, StatusCode::OK, "the verify itself completes");
+    assert!(
+        ticks_during_verify > 0,
+        "the executor kept running other tasks while the verify was in flight (the reindex is off the serve loop)",
+    );
     assert_eq!(r1, StatusCode::OK, "a health read is served during the verify");
     assert_eq!(r2, StatusCode::OK, "an overview read is served during the verify");
     // A deliberately unrouted name (never a real read-model, so it cannot start to
