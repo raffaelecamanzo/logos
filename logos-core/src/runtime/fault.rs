@@ -34,8 +34,8 @@ use std::sync::Mutex;
 #[cfg(debug_assertions)]
 pub const PERSIST_FAULT_ENV: &str = "LOGOS_TEST_FAIL_PERSIST";
 
-/// The reason a faulted file's write is rolled back with — what `files_failed`
-/// callers see as the file's reason.
+/// The reason a faulted file's write is rolled back with — what
+/// `persist_failures` (and the file's warning) carries as the file's reason.
 pub(crate) const INJECTED_FAULT_REASON: &str = "injected persistence fault (test seam)";
 
 /// The set of files whose persistence a runtime fails on purpose.
