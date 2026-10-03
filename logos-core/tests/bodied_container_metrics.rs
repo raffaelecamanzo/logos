@@ -152,6 +152,41 @@ fn java_mapstruct_mapper_is_scored_over_its_bodied_methods() {
     assert_eq!(focus.raw, 0.5, "1 god container of 2");
 }
 
+/// The template-method shape on real Java extraction (review fix): `run` and
+/// `other` both call the `abstract` hook `step()`. The declaration is not
+/// counted but still links its callers, so `Base` scores LCOM4 1 — as v6 did —
+/// and is no Cohesion offender.
+#[test]
+fn java_template_method_hook_links_its_callers() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/main/java/app/Base.java",
+        "\
+package app;
+
+public abstract class Base {
+    protected abstract int step();
+
+    public int run() {
+        return step() + 1;
+    }
+
+    public int other() {
+        return step() * 2;
+    }
+}
+",
+    );
+    let s = scan(tmp.path());
+    assert!(
+        s.worst_offenders.cohesion.iter().all(|o| o.name != "Base"),
+        "the hook links run and other: {:?}",
+        s.worst_offenders.cohesion
+    );
+    assert_eq!(s.metrics.cohesion.expect("Base is scoreable").raw, 1.0);
+}
+
 /// [FR-QM-12]'s 25-method AC on Rust: a struct whose impl carries 25 bodied
 /// methods is god and a 5-method struct is not. Rust declares no body kind, so
 /// every callable is bodied ([FR-EX-11]) and the v7 narrowing moves nothing.

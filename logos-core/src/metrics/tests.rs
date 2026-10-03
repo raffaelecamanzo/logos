@@ -1374,6 +1374,49 @@ fn a_mapstruct_mapper_scores_lcom4_over_its_bodied_methods_and_is_not_god() {
     assert!(w.focus.is_empty(), "the mapper is no Focus offender");
 }
 
+/// The template-method shape ([CR-163] §3.2 C, review fix): bodied `run` and
+/// `other` both call the bodyless hook `step`. The declaration is not counted,
+/// but it still links its callers — LCOM4 stays 1 (v6 also scored 1), never 2.
+/// Dropping a declaration must never make a class look *more* fragmented.
+///
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+#[test]
+fn a_bodyless_hook_still_links_the_bodied_methods_that_call_it() {
+    let nodes = [
+        node(1, "Base", NodeKind::Class, Some("Base.java")),
+        node(2, "step", NodeKind::Method, Some("Base.java")),
+        node(3, "run", NodeKind::Method, Some("Base.java")),
+        node(4, "other", NodeKind::Method, Some("Base.java")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Contains),
+        edge(1, 3, EdgeKind::Contains),
+        edge(1, 4, EdgeKind::Contains),
+        edge(3, 2, EdgeKind::Calls),
+        edge(4, 2, EdgeKind::Calls),
+    ];
+    let functions = [
+        method_body(2, Some(false)),
+        method_body(3, Some(true)),
+        method_body(4, Some(true)),
+    ];
+    let r = run(&nodes, &edges, &functions);
+    assert_eq!(
+        r.cohesion.expect("Base has bodied methods").raw,
+        1.0,
+        "run and other share the hook they both call: one component"
+    );
+    let w = super::worst_offenders(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        10,
+    );
+    assert!(w.cohesion.is_empty(), "Base is no Cohesion offender: {:?}", w.cohesion);
+}
+
 /// A container with 25 **bodied** methods is still god, beside the mapper's
 /// bodyless declarations ([FR-QM-12]'s 25-method AC, held for bodied methods):
 /// narrowing to bodied methods never hides real size. Checked for the `Class`

@@ -106,7 +106,9 @@ Only methods **with a body** count (since metric-semantics version 7): an
 `abstract` declaration, an interface-style method without a default, or a C++
 in-class prototype shares no field and calls nothing by construction, so it
 would otherwise be a component of its own. A MapStruct mapper of 17 abstract
-declarations and 6 helpers is scored over the 6 helpers.
+declarations and 6 helpers is scored over the 6 helpers. A declaration is
+still a link, though: two methods that both call the same abstract hook (the
+template-method pattern) remain one component, as they always were.
 "Sharing state" means two methods read or write a field of their own class
 through an own-field access (`this.x`, `self.x`) that binds to exactly one field
 of that class; an access that binds to nothing connects nothing. In TypeScript

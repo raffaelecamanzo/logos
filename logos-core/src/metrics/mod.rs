@@ -241,9 +241,10 @@ pub const MODULARITY_MIN_EDGES: u64 = 5;
 ///     `duplicate_min_tokens` (default 50) normalized tokens, so Redundancy and
 ///     the `max_duplicates` budget stop counting four-line constant overrides
 ///     and bodyless declarations as copy-paste.
-///   - *Bodied LCOM4* ([FR-QM-11]): Cohesion's LCOM4 is computed over a class's
-///     **bodied** methods; a bodyless declaration is no longer its own
-///     component, and a class with no bodied method is unscoreable.
+///   - *Bodied LCOM4* ([FR-QM-11]): Cohesion's LCOM4 counts the components of a
+///     class's **bodied** methods; a bodyless declaration is no longer its own
+///     component (it still links the bodied methods that call it), and a class
+///     with no bodied method is unscoreable.
 ///   - *Bodied Focus* ([FR-QM-12]): the god predicate counts **bodied**
 ///     methods (`bodied ≥ T_m ∨ span ≥ T_span`), so a MapStruct-style mapper of
 ///     abstract declarations is no longer a god container.

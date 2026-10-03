@@ -19,7 +19,9 @@
 //! container's **bodied** methods (the [FR-EX-11] `has_body` fact): an `abstract`
 //! or interface-style declaration shares no field and calls nothing by
 //! construction, so it would otherwise be its own LCOM4 component and inflate
-//! the god method count of a purely declarative mapper.
+//! the god method count of a purely declarative mapper. A declaration that
+//! bodied methods *call* (a template-method hook) still links those callers —
+//! it is a connector in LCOM4's graph, never a counted component.
 //! - **Uniqueness** ([FR-QM-13]) — `1 − near-clone ratio`, floored.
 //!
 //! # Floors, not short-circuits ([ADR-21])
@@ -297,7 +299,10 @@ pub(super) fn uniqueness(production: &[&FunctionMetricRow]) -> MetricValue {
 /// to a class leaves Cohesion and Focus byte-identical ([FR-QM-08], [UAT-QM-07])
 /// — and so are bodyless declarations (metric-semantics v7, [CR-163]).
 /// `Accesses` (method→field) and intra-class `Calls` edges feed LCOM4
-/// connectivity.
+/// connectivity. A bodyless declaration is never *counted*, but it still
+/// *connects*: two bodied methods that call the same `abstract` hook (the
+/// template-method shape) stay one component, exactly as under v6 — dropping
+/// the declaration must never make a class look more fragmented than it did.
 ///
 /// A container that declares methods but none with a body (a pure `abstract`
 /// class; a C++ class whose members are all defined out of line, which
@@ -334,6 +339,10 @@ struct Container {
     ///
     /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
     methods: Vec<NodeId>,
+    /// Production **bodyless** member methods in id order: LCOM4 connector
+    /// vertices only — a call into one links its callers, but it is never a
+    /// component of its own and never counts toward Focus.
+    declarations: Vec<NodeId>,
     /// 1-based line span `end − start + 1`, or 0 when either line is unrecorded.
     span: i64,
 }
@@ -406,6 +415,7 @@ impl ContainerIndex {
                     id: n.id,
                     kind: n.kind,
                     methods: Vec::new(),
+                    declarations: Vec::new(),
                     span,
                 });
             }
@@ -418,14 +428,19 @@ impl ContainerIndex {
 
         for e in edges {
             match e.kind {
-                // Attach production, bodied member methods to their container.
+                // Attach production member methods to their container: bodied
+                // ones are counted, bodyless ones only connect (CR-163).
                 EdgeKind::Contains => {
                     if let Some(&ci) = by_id.get(&e.source) {
                         if matches!(kind_of.get(&e.target), Some(NodeKind::Method))
                             && !test_ids.contains(&e.target)
-                            && !bodyless.contains(&e.target)
                         {
-                            containers[ci].methods.push(e.target);
+                            let c = &mut containers[ci];
+                            if bodyless.contains(&e.target) {
+                                c.declarations.push(e.target);
+                            } else {
+                                c.methods.push(e.target);
+                            }
                         }
                     }
                 }
@@ -442,6 +457,7 @@ impl ContainerIndex {
         // Deterministic LCOM4 union order within each container (NFR-RA-06).
         for c in &mut containers {
             c.methods.sort_unstable();
+            c.declarations.sort_unstable();
         }
 
         ContainerIndex {
@@ -564,12 +580,19 @@ impl ContainerIndex {
     /// a pure function of the graph, order-independent and reproducible
     /// ([NFR-RA-06]). Returns at least 1 (a non-empty method set).
     fn lcom4(&self, c: &Container) -> u64 {
-        let methods = &c.methods;
-        let n = methods.len();
-        debug_assert!(n > 0, "cohesion() skips method-less classes");
-        let index_of: HashMap<NodeId, usize> =
-            methods.iter().enumerate().map(|(i, &m)| (m, i)).collect();
-        let mut uf = UnionFind::new(n);
+        let n = c.methods.len();
+        debug_assert!(n > 0, "cohesion() skips classes with no bodied method");
+        // Bodied methods take indices 0..n, the class's bodyless declarations
+        // n.. after them: a declaration joins the union-find as a connector (a
+        // call into it links its callers) but only bodied roots are counted.
+        let index_of: HashMap<NodeId, usize> = c
+            .methods
+            .iter()
+            .chain(&c.declarations)
+            .enumerate()
+            .map(|(i, &m)| (m, i))
+            .collect();
+        let mut uf = UnionFind::new(index_of.len());
 
         // Field sharing: methods touching the same field are one component. Group
         // accessing methods by field, then union each group. The component count
@@ -607,7 +630,7 @@ impl ContainerIndex {
             }
         }
 
-        uf.component_count() as u64
+        uf.components_among(n) as u64
     }
 }
 
@@ -649,12 +672,11 @@ impl UnionFind {
         self.size[big] += self.size[small];
     }
 
-    fn component_count(&mut self) -> usize {
-        // A root is its own parent. `find` flattens paths, so after calling it on
-        // every element the distinct roots are exactly the elements that are their
-        // own parent — counted in one pass with no heap allocation.
-        (0..self.parent.len())
-            .filter(|&x| self.find(x) == x)
-            .count()
+    /// The number of distinct components holding at least one of the elements
+    /// `0..counted` — the bodied methods; the connector-only declarations after
+    /// them link components but are never counted on their own.
+    fn components_among(&mut self, counted: usize) -> usize {
+        let roots: BTreeSet<usize> = (0..counted).map(|x| self.find(x)).collect();
+        roots.len()
     }
 }
