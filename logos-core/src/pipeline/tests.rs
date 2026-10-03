@@ -360,8 +360,10 @@ fn relativize_rejects_paths_escaping_the_root() {
 // A full index persists file facts in bounded chunked write batches
 // (`persist_facts_chunked`) rather than one transaction per file. These pin the
 // three invariants the optimization must not break: byte-identical output
-// regardless of chunk size ([NFR-RA-06]), wholesale per-chunk rollback on a
-// mid-chunk fault ([NFR-RA-07]), and exactly one RW connection ([ADR-02]).
+// regardless of chunk size ([NFR-RA-06]), wholesale rollback of a chunk whose
+// transaction itself faults ([NFR-RA-07]), and exactly one RW connection
+// ([ADR-02]). A single file's failure is isolated inside the chunk since S-513
+// — pinned by the FR-EH-05 tests further down.
 // Gated on `lang-rust` — they parse Rust fixtures through the embedded grammar.
 
 /// Open a fresh runtime over a throwaway on-disk store. The `TempDir` guard is
@@ -502,11 +504,13 @@ fn chunked_persist_is_byte_identical_to_the_per_file_baseline() {
 #[cfg(feature = "lang-rust")]
 #[test]
 fn a_mid_chunk_fault_rolls_the_whole_chunk_back() {
-    // NFR-RA-07: a chunk is one transaction. If any file in the chunk fails, the
-    // WHOLE chunk rolls back with no partial rows. Model exactly what
-    // `persist_chunk` does — persist one file against the batch writer, then hit
-    // a fault (a later file in the same chunk failing) before the batch commits —
-    // and assert the store is left empty.
+    // NFR-RA-07: a chunk is one transaction. A fault of the transaction itself —
+    // one raised outside any file's isolation savepoint, which is what
+    // `persist_chunk` propagates when the savepoint machinery fails — rolls the
+    // WHOLE chunk back with no partial rows. Persist one file against the batch
+    // writer, then fault before the batch commits, and assert the store is left
+    // empty. (A single file's own failure is isolated since S-513; see
+    // `one_failing_file_rolls_back_alone_and_its_chunk_mates_persist`.)
     let inputs = sample_inputs(3);
     let facts = extract_sample(&inputs);
     let hashes = hash_pairs(&inputs);
@@ -518,7 +522,7 @@ fn a_mid_chunk_fault_rolls_the_whole_chunk_back() {
     let result: anyhow::Result<()> = rt.submit_write(move |w| {
         // The first file of the chunk persists successfully…
         persist_file(w, &first, &first_hash, false)?;
-        // …then a later file in the SAME chunk fails, aborting the whole batch.
+        // …then the batch itself faults, aborting the whole transaction.
         anyhow::bail!("injected mid-chunk fault")
     });
     assert!(result.is_err(), "the faulted chunk surfaces an error");
@@ -654,6 +658,116 @@ fn chunk_boundaries_persist_every_file_exactly_once() {
         persisted_fingerprint(&rt_1),
         "clamped chunking matches the per-file baseline"
     );
+}
+
+// ── S-513 / FR-EH-05: a file that cannot be persisted fails alone ───────────
+
+/// Persist `facts` at `chunk` files per transaction with `faulted` files failed
+/// through the test seam; returns the outcome's `(files, failed paths)`.
+#[cfg(feature = "lang-rust")]
+fn persist_with_faults(
+    rt: &Runtime,
+    facts: &[Facts],
+    hashes: &[(String, String)],
+    chunk: usize,
+    faulted: &[&str],
+) -> (usize, Vec<String>, Vec<String>) {
+    rt.clear_persist_faults();
+    for f in faulted {
+        rt.inject_persist_fault(f);
+    }
+    let hash_by_rel: HashMap<&str, &str> =
+        hashes.iter().map(|(p, h)| (p.as_str(), h.as_str())).collect();
+    let mut owned = facts.to_vec();
+    let mut warn = Vec::new();
+    let out = persist_facts_chunked(rt, &mut owned, &hash_by_rel, false, chunk, &mut warn)
+        .expect("a file's failure never fails the batch");
+    rt.clear_persist_faults();
+    (
+        out.files,
+        out.failed.iter().map(|f| f.path.clone()).collect(),
+        warn,
+    )
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn one_failing_file_rolls_back_alone_and_its_chunk_mates_persist() {
+    // FR-EH-05: in ONE chunk (3 files at chunk 8) the middle file fails after
+    // writing its rows; only its rows are undone, it is reported with its
+    // reason and named in a warning, and the other two commit. The store must
+    // equal one that only ever persisted the other two — byte for byte, rowids
+    // included, so not a single row of the failed file survives.
+    let inputs = sample_inputs(3);
+    let facts = extract_sample(&inputs);
+    let hashes = hash_pairs(&inputs);
+
+    let (_dir, rt) = open_runtime();
+    let (files, failed, warn) = persist_with_faults(&rt, &facts, &hashes, 8, &["f1.rs"]);
+    assert_eq!(files, 2, "every other file persists");
+    assert_eq!(failed, ["f1.rs"], "the failing file is reported");
+    assert!(
+        warn.iter().any(|w| w.starts_with("f1.rs: could not be persisted")
+            && w.contains("absent from the graph")
+            && w.contains(crate::runtime::INJECTED_FAULT_REASON)),
+        "a warning names the file and its reason: {warn:?}"
+    );
+
+    let (_dir_o, oracle) = open_runtime();
+    let others: Vec<Facts> = facts.iter().filter(|f| f.path != "f1.rs").cloned().collect();
+    let other_hashes: Vec<(String, String)> =
+        hashes.iter().filter(|(p, _)| p != "f1.rs").cloned().collect();
+    let (oracle_files, oracle_failed, _) = persist_with_faults(&oracle, &others, &other_hashes, 8, &[]);
+    assert_eq!((oracle_files, oracle_failed.len()), (2, 0));
+    assert_eq!(
+        persisted_fingerprint(&rt),
+        persisted_fingerprint(&oracle),
+        "the store holds exactly the two healthy files — no row of f1.rs survives"
+    );
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_file_failing_on_a_re_index_is_absent_not_left_at_its_old_version() {
+    // FR-EH-05, full index: the failed file is ABSENT from the graph. Rolling
+    // the savepoint back alone would restore its previous version on a
+    // re-index; the chunk must remove it outright.
+    let inputs = sample_inputs(3);
+    let facts = extract_sample(&inputs);
+    let hashes = hash_pairs(&inputs);
+
+    let (_dir, rt) = open_runtime();
+    let (files, _, _) = persist_with_faults(&rt, &facts, &hashes, 8, &[]);
+    assert_eq!(files, 3, "the first index stores all three");
+    let (files, failed, _) = persist_with_faults(&rt, &facts, &hashes, 8, &["f2.rs"]);
+    assert_eq!((files, failed.as_slice()), (2, ["f2.rs".to_string()].as_slice()));
+
+    let (paths, f2_nodes) = rt
+        .submit_read(|s| {
+            Ok((
+                s.indexed_files()?.into_iter().map(|f| f.path).collect::<Vec<_>>(),
+                s.node_names_for_path("f2.rs")?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(paths, ["f0.rs", "f1.rs"], "the failed file has no file row");
+    assert!(f2_nodes.is_empty(), "nor any node: {f2_nodes:?}");
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn every_file_failing_persists_nothing_and_fails_no_batch() {
+    // The total case is reported, not raised: the run decides it is a
+    // correctness failure (FR-EH-05) from `files == 0` with failures present.
+    let inputs = sample_inputs(4);
+    let facts = extract_sample(&inputs);
+    let hashes = hash_pairs(&inputs);
+    let (_dir, rt) = open_runtime();
+    let (files, failed, _) = persist_with_faults(&rt, &facts, &hashes, 2, &["*"]);
+    assert_eq!(files, 0);
+    assert_eq!(failed, ["f0.rs", "f1.rs", "f2.rs", "f3.rs"], "in persistence order, across chunks");
+    let rows = rt.submit_read(|s| Ok(s.indexed_files()?.len())).unwrap();
+    assert_eq!(rows, 0, "nothing persisted");
 }
 
 // ── Parallel file load (S-228, FR-IX-09) ────────────────────────────────────

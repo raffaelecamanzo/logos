@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        26,
-        "v26 = migration 26 (S-498 CR-162 snapshot offender lists)"
+        27,
+        "v27 = migration 27 (S-513 CR-168 persist-failure record)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 26,
+        recorded, 27,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 26);
+        assert_eq!(store.schema_version().unwrap(), 27);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 26);
+    assert_eq!(store.schema_version().unwrap(), 27);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 26, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 27, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -438,6 +438,60 @@ fn failed_write_batch_rolls_back_wholesale() {
         store.search("should_vanish", None, 10).unwrap().is_empty(),
         "the rolled-back node must not linger in the FTS index either"
     );
+}
+
+/// S-513 / FR-EH-05: an isolated unit that fails rolls back **only its own**
+/// writes; the batch around it stays open, and the writes before and after it
+/// commit. The record of the failure written after the rollback commits too.
+#[test]
+fn an_isolated_failure_rolls_back_alone_and_the_batch_still_commits() {
+    let mut store = mem();
+    let inner = store
+        .write_batch(|w| {
+            let s0 = w.upsert_symbol(&LogosSymbol::parse("local 0").unwrap())?;
+            w.insert_node(&NewNode::plain(s0, NodeKind::Function, "before"))?;
+            let failed: anyhow::Result<()> = w.isolated(|w| {
+                let s1 = w.upsert_symbol(&LogosSymbol::parse("local 1").unwrap())?;
+                w.insert_node(&NewNode::plain(s1, NodeKind::Function, "rolled_back"))?;
+                anyhow::bail!("this unit fails")
+            })?;
+            let s2 = w.upsert_symbol(&LogosSymbol::parse("local 2").unwrap())?;
+            w.insert_node(&NewNode::plain(s2, NodeKind::Function, "after"))?;
+            if let Err(err) = &failed {
+                w.record_persist_failure("src/bad.rs", &format!("{err:#}"), false)?;
+            }
+            Ok(failed)
+        })
+        .expect("the batch commits around the failed unit");
+    assert!(inner.is_err(), "the isolated unit's own error is handed back");
+
+    let names: Vec<String> = ["before", "rolled_back", "after"]
+        .into_iter()
+        .filter(|n| !store.search(n, None, 10).unwrap().is_empty())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(names, ["before", "after"], "only the failed unit's writes are undone");
+    assert_eq!(
+        store.persist_failures().unwrap(),
+        vec![crate::graph_store::PersistFailureRow {
+            path: "src/bad.rs".into(),
+            reason: "this unit fails".into(),
+            stale: false,
+        }],
+        "the failure record written after the rollback commits with the batch"
+    );
+
+    // A succeeding unit releases its savepoint and its writes commit.
+    store
+        .write_batch(|w| {
+            w.isolated(|w| {
+                let s3 = w.upsert_symbol(&LogosSymbol::parse("local 3").unwrap())?;
+                w.insert_node(&NewNode::plain(s3, NodeKind::Function, "kept"))?;
+                Ok(())
+            })?
+        })
+        .expect("a succeeding unit commits");
+    assert_eq!(store.search("kept", None, 10).unwrap().len(), 1);
 }
 
 #[test]
@@ -474,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 26);
+    assert_eq!(reopened.schema_version().unwrap(), 27);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1040,11 +1094,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v26 forward-only).
+    // data (the runner applies v2..v27 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        26,
+        27,
         "v1 store upgrades to the latest version"
     );
     assert!(

@@ -68,8 +68,12 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             // `ConfigError`. Validate up front so the fault propagates — the same
             // loud-failure contract `check`/`gate` honour for `rules.toml`.
             load_config_from_root(root)?;
-            out.print(&engine(root, true)?.index())?;
-            Ok(0)
+            // A run that reached persistence and persisted nothing, or whose
+            // pipeline failed, exits 1 (FR-CL-03, FR-EH-05); a degraded run with
+            // some files failed, or one admitting no file (FR-IX-13), exits 0.
+            let result = engine(root, true)?.index();
+            out.print(&result)?;
+            Ok(crate::violation_code(!result.failed))
         }
         // The hidden bounded-warm supervisor (FR-WS-14). One of the delegating
         // arms (alongside `Serve`, `Init --workspace` and `Xservice`/`Workspace`,
@@ -79,7 +83,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output) -> Result<i
             concurrency,
             members,
         } => Ok(crate::workspace_init::run_supervisor(&members, concurrency)),
-        Commands::Sync { paths } => out.query(root, |e| e.sync(&paths)),
+        Commands::Sync { paths } => out.report_gate(root, |e| Ok(e.sync(&paths)), |r| !r.failed),
         Commands::Status => out.query(root, |e| e.status()),
         Commands::Search { query, kind, limit } => out.query(root, |e| e.search(&query, kind, limit)),
         Commands::Query {

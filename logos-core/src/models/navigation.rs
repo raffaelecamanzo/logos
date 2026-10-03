@@ -26,6 +26,7 @@
 use serde::Serialize;
 
 use crate::model::{EdgeKind, NodeKind};
+use crate::models::pipeline::PersistenceHealth;
 use crate::models::quality::CrossFileAbsence;
 
 /// Result of an FTS5-ranked full-text search over the code graph (FR-NV-01).
@@ -1002,6 +1003,14 @@ pub struct StatusInfo {
     /// [FR-AN-05] test-path conventions. `None` in lock-step with
     /// [`Self::total_line_count`].
     pub test_line_count: Option<u64>,
+    /// The files whose facts could not be persisted — how many, and which
+    /// still serve their last good facts as **stale** ([FR-EH-05], S-513).
+    /// Elided while none remains, so a healthy status is byte-identical to
+    /// before the readout existed; while any does, `warnings` says so too.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    #[serde(skip_serializing_if = "PersistenceHealth::is_clean")]
+    pub persistence: PersistenceHealth,
     /// The freshness/staleness statement (ADR-11 best-effort contract).
     pub freshness: String,
     /// Degradation channel (ADR-14).

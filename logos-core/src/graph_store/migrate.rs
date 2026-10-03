@@ -2994,6 +2994,73 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 26");
     }
 
+    /// Migration 27 ([CR-168], S-513) is purely additive: a populated v26 graph —
+    /// files, nodes, edges, shingles and the ledger — crosses it byte for byte,
+    /// and the persist-failure record arrives **empty**, which is the true
+    /// reading of a pre-migration store (a failed persist then recorded
+    /// nothing). Then the table is exercised: a path is the key, `stale` admits
+    /// only `0`/`1`, and a path needs no `files` row (a file that failed on a
+    /// full index has none).
+    ///
+    /// [CR-168]: ../../../../docs/requests/CR-168-an-index-never-silently-empties.md
+    #[test]
+    fn migration_27_adds_the_persist_failure_record_and_touches_nothing_else() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..26]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/main/java/com/x/Svc.java', 'java', 'h-java'),
+                 (2, 'docs/guide.md', 'markdown', 'h-md');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, line_count, fingerprint,
+                                max_nesting_depth, is_test, body, has_body, body_tokens) VALUES
+                 (10, 1, 7,  'caller',   1, 1, 3,    4,    'fp', 1,    0, NULL, 1, 12),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, NULL, NULL, NULL, 0, 'the body prose', NULL, NULL);
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'helper', 'h', 1, 2, 42, 1, NULL);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let files_before = read_table(&conn, "files", "id");
+        let ledger_before = read_ledger(&conn);
+        assert!(
+            conn.query_row("SELECT count(*) FROM persist_failures", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "the persist-failure record does not exist at v26"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..27]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 27, "26 → 27, exactly one step");
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 27", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 27 is recorded once and never re-applied");
+
+        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are byte-for-byte unchanged");
+        assert_eq!(read_table(&conn, "files", "id"), files_before, "files are byte-for-byte unchanged");
+        assert_eq!(read_ledger(&conn), ledger_before, "the ledger is byte-for-byte unchanged");
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM persist_failures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "no back-fill: a pre-migration store recorded no failure");
+
+        let insert = |path: &str, stale: i64| {
+            conn.execute(
+                "INSERT INTO persist_failures (path, reason, stale) VALUES (?1, 'boom', ?2)",
+                rusqlite::params![path, stale],
+            )
+        };
+        insert("src/never_indexed.go", 0).expect("a path with no files row is admitted");
+        insert("src/main/java/com/x/Svc.java", 1).expect("a stale row is admitted");
+        assert!(insert("src/never_indexed.go", 1).is_err(), "a path is recorded once");
+        assert!(insert("src/other.go", 2).is_err(), "stale admits 0 or 1 only");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 27");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

@@ -432,6 +432,27 @@ pub struct FileRecord {
     pub content_hash: Option<String>,
 }
 
+/// One file whose latest persistence attempt failed — a row of the migration-27
+/// record (S-513, [FR-EH-05]).
+///
+/// `stale` is the distinction [FR-EH-05] draws: `true` when the graph still
+/// holds the file's last successfully persisted facts (a `sync`, the watcher or
+/// a reconcile could not replace them), `false` when the graph holds nothing
+/// for it (a full index, or a file that never persisted). Either way the file
+/// is not indexed as it now stands on disk ([NFR-CC-04]).
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistFailureRow {
+    /// The project-relative path (the `files.path` key).
+    pub path: String,
+    /// The error that rolled the file's write back.
+    pub reason: String,
+    /// The graph still holds the file's last good facts.
+    pub stale: bool,
+}
+
 /// Whole-store row counts — the cheap index-health snapshot behind the
 /// navigation `status` tool ([FR-NV-07]).
 ///
@@ -1828,6 +1849,15 @@ pub trait GraphStore {
     /// [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
     fn indexed_files(&self) -> Result<Vec<FileRecord>>;
 
+    /// Every file whose latest persistence attempt failed, ordered by path
+    /// (S-513, [FR-EH-05]) — the record `status` and `scan` read out.
+    ///
+    /// Empty on a store where nothing failed, and on a store upgraded across
+    /// migration 27, which recorded nothing because nothing could be recorded.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    fn persist_failures(&self) -> Result<Vec<PersistFailureRow>>;
+
     /// Stream the **entire** reference ledger, ordered by `id` (S-011).
     ///
     /// The resolution pass reads this as part of its immutable snapshot: every
@@ -3081,6 +3111,23 @@ impl GraphStore for SqliteGraphStore {
         Ok(rows)
     }
 
+    fn persist_failures(&self) -> Result<Vec<PersistFailureRow>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT path, reason, stale FROM persist_failures ORDER BY path")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PersistFailureRow {
+                    path: row.get(0)?,
+                    reason: row.get(1)?,
+                    stale: row.get::<_, i64>(2)? != 0,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing persist failures")?;
+        Ok(rows)
+    }
+
     fn project_metadata(&self, key: &str) -> Result<Option<String>> {
         self.conn
             .query_row(
@@ -4080,6 +4127,89 @@ impl BatchWriter<'_> {
                 rusqlite::params![key],
             )
             .context("clearing project_metadata value")?;
+        Ok(())
+    }
+
+    /// Run `f` under a **savepoint** nested in the open batch, so its writes
+    /// commit or roll back as one unit **without** ending the batch (S-513,
+    /// [FR-EH-05]).
+    ///
+    /// This is what lets one file of a chunked write batch fail alone: the
+    /// outer `Result` is a fault of the savepoint machinery itself — the batch
+    /// is then unusable and the caller must abort it — while the inner one is
+    /// `f`'s own outcome, its writes already undone when it is an `Err`. The
+    /// surrounding transaction stays open and healthy either way, so the files
+    /// before and after this one still commit with it ([NFR-RA-07]).
+    ///
+    /// # Errors
+    /// The outer `Err` when the savepoint cannot be opened, released or rolled
+    /// back.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
+    pub fn isolated<T>(
+        &self,
+        f: impl FnOnce(&BatchWriter<'_>) -> Result<T>,
+    ) -> Result<Result<T>> {
+        self.conn
+            .execute_batch("SAVEPOINT logos_isolated")
+            .context("opening an isolation savepoint")?;
+        match f(self) {
+            Ok(value) => {
+                self.conn
+                    .execute_batch("RELEASE logos_isolated")
+                    .context("releasing an isolation savepoint")?;
+                Ok(Ok(value))
+            }
+            Err(err) => {
+                self.conn
+                    .execute_batch("ROLLBACK TO logos_isolated; RELEASE logos_isolated")
+                    .context("rolling back an isolation savepoint")?;
+                Ok(Err(err))
+            }
+        }
+    }
+
+    /// Record that `path`'s latest persistence attempt failed (S-513,
+    /// [FR-EH-05]), replacing any earlier record of the same file — see
+    /// [`PersistFailureRow`] for what `stale` means.
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    ///
+    /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+    pub fn record_persist_failure(&self, path: &str, reason: &str, stale: bool) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO persist_failures (path, reason, stale) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(path) DO UPDATE SET reason = excluded.reason, stale = excluded.stale",
+                rusqlite::params![path, reason, i64::from(stale)],
+            )
+            .context("recording a persist failure")?;
+        Ok(())
+    }
+
+    /// Clear `path`'s persist-failure record, if any — the file persisted, or
+    /// left the graph (S-513). Idempotent.
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn clear_persist_failure(&self, path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM persist_failures WHERE path = ?1", [path])
+            .context("clearing a persist failure")?;
+        Ok(())
+    }
+
+    /// Clear every persist-failure record — a full index rewrites the record
+    /// to exactly its own failures (S-513).
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn clear_persist_failures(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM persist_failures", [])
+            .context("clearing the persist-failure record")?;
         Ok(())
     }
 

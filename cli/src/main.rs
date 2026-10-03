@@ -770,7 +770,8 @@ impl Output {
 
     /// Chokepoint for the governance verdict commands (`check`/`gate`/`doctor`/
     /// `verify`): run a fallible engine method, print the report, and map it to an
-    /// exit code (FR-GV-03) — 1 on failure. `passed` reads the report's verdict
+    /// exit code (FR-GV-03) — 1 on failure. `sync` rides it too: its verdict is
+    /// whether the run persisted anything it reached (FR-EH-05, FR-CL-03). `passed` reads the report's verdict
     /// field, which differs by command (`.passed` vs `.ok`), so the caller
     /// supplies it.
     pub(crate) fn report_gate<T: serde::Serialize>(

@@ -316,6 +316,15 @@ wall-clock duration in milliseconds — `discover`, `load`, `extract`, `persist`
 seam as the logs (the durations sum to ≤ `total_ms`, never double-counted). Use
 it to see where a cold index spends its time before optimizing.
 
+Each file is persisted in isolation. A file whose facts cannot be persisted is
+rolled back alone and left **absent** from the graph; every other file persists.
+The file is listed in `files_failed`, its reason in `persist_failures`
+(`[{"path", "reason"}]`, omitted when empty), and a warning names it; the run
+exits `0`. When files reached persistence and **none** persisted — or the
+pipeline itself failed — the result carries `"failed": true` and a
+`nothing was persisted` warning, and `index` exits `1`. An index that admits no
+file at all still exits `0`.
+
 ### `sync [PATHS]...`
 
 ```bash
@@ -334,6 +343,13 @@ files a commit or merge changed. To fold in every change at once, run a
 reconcile-then-score command such as `logos scan` (see
 [usage.md](usage.md)), or rebuild with `logos index`.
 
+A file whose new facts cannot be persisted keeps its **last good** nodes and
+edges and is recorded **stale**; the other paths persist. It appears in
+`files_failed` and `persist_failures`, `status` reports it stale, and the next
+reconcile retries it — the stale mark clears once it persists or is deleted.
+`sync` exits `1` only when every path it reached failed to persist (or the
+pipeline failed), with `"failed": true` in the result.
+
 ### `status`
 
 ```bash
@@ -348,6 +364,12 @@ changes the graph — a no-op `sync` leaves it untouched; consumers can compare
 it across processes to detect a stale cache), and the freshness posture
 (navigation serves the latest committed snapshot; it never reconciles per
 call).
+
+While any file's facts could not be persisted, `status` (and `scan`) carry a
+`persistence` object — `failed_to_persist`, the count, and `stale_files`, those
+whose last good facts the graph still holds (the rest are absent) — plus a
+warning saying so. It is omitted once every such file has persisted or been
+deleted.
 
 `last_full_index_at` is read from a durable `project_metadata` record, not an
 in-process counter — a separate, read-only `status`/`workspace status`
