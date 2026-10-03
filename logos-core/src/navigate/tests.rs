@@ -165,8 +165,15 @@ fn is_test_path_respects_production_source_roots() {
     assert!(!is_test_path("app/src/main/java/org/acme/test/Probe.java"));
     // ...while a `test` segment ABOVE the root is still a test tree (fixtures).
     assert!(is_test_path("test/fixtures/proj/src/main/java/Foo.java"));
-    // The exemption is for the `test` segment only: `tests` / `spec` stay tests.
-    assert!(is_test_path("src/main/java/org/acme/tests/Probe.java"));
+    // FR-AN-05: the exemption covers every test-directory segment, not `test` alone.
+    assert!(!is_test_path("src/main/java/org/acme/tests/Probe.java"));
+    assert!(!is_test_path("src/main/js/__tests__/a.js"));
+    assert!(!is_test_path("src/commonMain/kotlin/spec/A.kt"));
+    assert!(!is_test_path("src/main/resources/spec/api.yaml"));
+    // ...and each of the four still marks above the root.
+    assert!(is_test_path("tests/fixtures/p/src/main/java/Foo.java"));
+    assert!(is_test_path("__tests__/p/src/main/java/Foo.java"));
+    assert!(is_test_path("spec/p/src/main/java/Foo.java"));
     // Near misses of the root names are not roots.
     assert!(is_test_path("src/mainline/test/Foo.java"));
     assert!(is_test_path("Main/test/Foo.kt")); // bare `Main` is not a `*Main` source set
