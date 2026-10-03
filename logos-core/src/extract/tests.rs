@@ -5560,6 +5560,25 @@ fn the_body_token_count_is_the_normalized_body_stream_and_zero_without_one() {
     }
 }
 
+/// A TypeScript arrow or function-expression binding counts its **body**, never
+/// its parameters, type annotations or `=>`: four callables with one body and
+/// one signature record one count, whatever their declaration form.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_typescript_callable_counts_its_body_tokens_whatever_its_declaration_form() {
+    let src = "export function g(a: number, b: number) { return a; }\n\
+export const f = (a: number, b: number) => { return a; };\n\
+export const h = function (a: number, b: number) { return a; };\n\
+export class C { m(a: number, b: number) { return a; } }\n";
+    let bodies = callable_bodies(&extract_lang("ts", "src/forms.ts", src));
+    // `{ return a ; }` → five tokens for every form.
+    let counts: Vec<(&str, u32)> = bodies.iter().map(|(n, _, t)| (n.as_str(), *t)).collect();
+    assert_eq!(counts, [("g", 5), ("f", 5), ("h", 5), ("m", 5)]);
+    // An expression-bodied arrow counts its expression alone: `n * 2` → 3.
+    let twice = callable_bodies(&extract_lang("ts", "src/twice.ts", "export const twice = (n: number) => n * 2;\n"));
+    assert_eq!(twice, [("twice".to_string(), true, 3)]);
+}
+
 /// NFR-RA-06: extracting an unchanged file again yields the identical fact.
 #[test]
 #[cfg(feature = "lang-java")]

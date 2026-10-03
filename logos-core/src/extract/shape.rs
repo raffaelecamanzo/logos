@@ -215,9 +215,11 @@ fn has_child_of_kind(node: Node<'_>, kind: &str) -> bool {
 /// The returned subtree is the declaration's `body` field when the grammar
 /// names one — the very subtree the near-clone shingles read
 /// ([`super::shingle::shingles`]), so a token count over it is comparable to the
-/// `clone_min_tokens` floor — and otherwise the matched node (Kotlin's
-/// `function_body`, a TypeScript declarator's `arrow_function`), or the whole
-/// declaration for an undeclared language whose callable names no `body`.
+/// `clone_min_tokens` floor. Otherwise it is the matched node's own `body` field
+/// (a TypeScript `const f = (…) => …` declarator's arrow body, never its
+/// parameters), else the matched node itself (Kotlin's `function_body`), else
+/// the whole declaration for an undeclared language whose callable names no
+/// `body`.
 ///
 /// Deterministic ([NFR-RA-06]): a pure function of the parse tree.
 ///
@@ -234,7 +236,11 @@ pub(super) fn callable_body<'tree>(node: Node<'tree>, body_kinds: &[String]) -> 
         let child = node.children(&mut cursor).find(|c| declared(c));
         child?
     };
-    Some(node.child_by_field_name("body").unwrap_or(matched))
+    Some(
+        node.child_by_field_name("body")
+            .or_else(|| matched.child_by_field_name("body"))
+            .unwrap_or(matched),
+    )
 }
 
 /// The normalised AST-shape fingerprint of one declaration ([FR-AN-02]).
