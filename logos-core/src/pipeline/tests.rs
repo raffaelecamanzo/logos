@@ -663,7 +663,7 @@ fn chunk_boundaries_persist_every_file_exactly_once() {
 // ── S-513 / FR-EH-05: a file that cannot be persisted fails alone ───────────
 
 /// Persist `facts` at `chunk` files per transaction with `faulted` files failed
-/// through the test seam; returns the outcome's `(files, failed paths)`.
+/// through the test seam; returns `(files persisted, failed paths, warnings)`.
 #[cfg(feature = "lang-rust")]
 fn persist_with_faults(
     rt: &Runtime,
