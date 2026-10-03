@@ -4,7 +4,8 @@
 //! `descriptor_for` renders several node kinds with one SCIP suffix — a Go
 //! function and method are both `name().`, a TS interface and class both
 //! `name#` — so numbering same-name siblings per *kind* gave two declarations
-//! one symbol. The duplicate then failed the store's `UNIQUE` constraint and
+//! one symbol. The store's `symbol_id` upsert folded the two into one node, the
+//! second `Contains` edge to it failed `UNIQUE(source, target, kind)`, and that
 //! aborted the whole index with exit 0 and `files_indexed: 0`. Each fixture here
 //! is one shape the 2026-10-03 language inspection found doing that on a real
 //! repository, and each must now index every admitted file, warn nothing, and

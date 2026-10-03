@@ -838,9 +838,11 @@ fn extract_one(
 }
 
 /// Debug-only per-file symbol-uniqueness assertion (S-512, [ADR-07]): every node
-/// one file emits must carry its own symbol. Two that share one fail the store's
-/// `UNIQUE(symbol_id)` and abort the whole index, so a debug build (tests, dev)
-/// panics here — naming the file and the symbol — rather than at persistence.
+/// one file emits must carry its own symbol. Two that share one are folded into
+/// a single node by the store's `symbol_id` upsert, and the second `Contains`
+/// edge to it then fails `UNIQUE(source, target, kind)` and aborts the whole
+/// index, so a debug build (tests, dev) panics here — naming the file and the
+/// symbol — rather than at persistence.
 /// A release build never pays for it, mirroring the pipeline's
 /// `debug_assert_structural_integrity`.
 ///
