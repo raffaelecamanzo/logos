@@ -565,6 +565,41 @@ fn the_first_full_walk_backfills_an_upgraded_members_declared_types() {
     assert_eq!(dump(root, &["schema_versions"]), before, "once marked, a no-op full walk writes nothing");
 }
 
+/// S-513 / FR-EH-05: a backfill file that fails to persist keeps the backfill
+/// open. The marker is not written, so the next full walk re-extracts the file
+/// — its hash never moved — and only then marks the facts complete. Marking
+/// despite the failure would skip the file as unchanged forever and lose its
+/// declared types.
+#[cfg(debug_assertions)]
+#[test]
+fn a_backfill_file_that_fails_to_persist_keeps_the_backfill_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    member(root);
+    Engine::start(root).expect("engine starts").index();
+    downgrade_to_v23(root);
+
+    let engine = Engine::start(root).expect("the upgraded store opens");
+    let rt = engine.runtime().unwrap();
+    let service = "svc/src/main/java/com/x/mail/MailService.java";
+    rt.inject_persist_fault(service);
+    engine.health(true).expect("a full-walk reconcile runs");
+    assert!(!extracted(rt), "a failed backfill file leaves the facts unmarked");
+    assert!(
+        !types(rt).iter().any(|t| t.path == service),
+        "the failed file contributed no types"
+    );
+
+    rt.clear_persist_faults();
+    engine.health(true).expect("the next full walk retries it");
+    assert!(extracted(rt), "the retried backfill completes and marks the facts");
+    let fresh = tempfile::tempdir().unwrap();
+    copy_tree(root, fresh.path());
+    let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
+    fresh_engine.index();
+    assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "backfilled ≡ freshly indexed");
+}
+
 /// The marker alone: an upgraded member with no Java/Kotlin/Avro file has
 /// nothing to backfill, and its first full walk still records that its facts —
 /// none — are complete, advancing the revision once; a second writes nothing.

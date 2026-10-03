@@ -762,8 +762,9 @@ pub fn sync(
 
     // Member-local facts (S-462 manifests, S-472 Avro schemas) among every path
     // this sync named, reconciled apart from the graph gates above.
+    let types_complete = backfill.complete(&result.persist_failures);
     let facts_changed =
-        sync_member_facts(runtime, &canon_root, &authority, &seen, scope, backfill.active)?;
+        sync_member_facts(runtime, &canon_root, &authority, &seen, scope, types_complete)?;
     // Nothing persisted only if no removal or member fact committed either.
     result.failed = result.files_removed == 0
         && !facts_changed
@@ -2455,12 +2456,21 @@ impl DeclaredTypesBackfill {
     fn wants(&self, rel: &str) -> bool {
         self.active && self.layout.is_package_shaped(rel)
     }
+
+    /// Whether this sync completed the backfill, and so may mark the facts
+    /// extracted: it backfills, and no file it wanted failed to persist (S-513).
+    /// A wanted file that failed keeps its old hash, so an unmarked store retries
+    /// it on the next full walk; marking here would skip it as unchanged and
+    /// lose its declared types for good.
+    fn complete(&self, failed: &[PersistFailure]) -> bool {
+        self.active && !failed.iter().any(|f| self.wants(&f.path))
+    }
 }
 
 /// An incremental sync's member-local fact passes — build manifests (S-462)
 /// and Avro schemas (S-472) — returning whether either moved what a reader of
-/// the member's facts sees. `mark_declared_types` is the backfill's
-/// [`DeclaredTypesBackfill::active`].
+/// the member's facts sees. `mark_declared_types` is
+/// [`DeclaredTypesBackfill::complete`].
 fn sync_member_facts(
     runtime: &Runtime,
     canon_root: &Path,
