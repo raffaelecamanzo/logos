@@ -9,6 +9,7 @@ import {
   navItemsFor,
   scopeForPath,
   WORKSPACE_NAV_ITEMS,
+  workspaceReplacementPath,
   type NavItem,
   type NavScope,
 } from "./nav.ts";
@@ -25,7 +26,11 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
   });
 
   it("appends the workspace-only tabs — and only those — in workspace mode", () => {
-    expect(navItemsFor(true)).toEqual([...NAV_ITEMS, ...WORKSPACE_NAV_ITEMS]);
+    // Less the member Chat, which the Workspace Chat replaces there (S-485).
+    expect(navItemsFor(true)).toEqual([
+      ...NAV_ITEMS.filter((i) => i.id !== "chat"),
+      ...WORKSPACE_NAV_ITEMS,
+    ]);
     const added = navItemsFor(true).filter((i) => !NAV_ITEMS.includes(i));
     // Pinned as the literal roster rather than derived from WORKSPACE_NAV_ITEMS:
     // three sessions across this sprint append to this ONE list, and a parallel
@@ -35,9 +40,42 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
       ["workspace-dashboard", "/workspace-dashboard"],
       ["workspace-health", "/workspace-health"],
       ["workspace", "/workspace"],
+      ["workspace-chat", "/workspace-chat"],
       ["workspace-statistics", "/workspace-statistics"],
       ["workspace-config", "/workspace-config"],
     ]);
+  });
+
+  it("drops the member Chat — and only it — from a workspace's member section (S-485)", () => {
+    // Pinned as the literal id list, for the merge reason the roster above gives.
+    const dropped = NAV_ITEMS.filter((i) => !navItemsFor(true).includes(i));
+    expect(dropped.map((i) => i.id)).toEqual(["chat"]);
+    // Single-root keeps it: the case above pins the whole list by identity.
+    expect(navItemsFor(false).some((i) => i.id === "chat")).toBe(true);
+    expect(navItemsFor(false).some((i) => i.id === "workspace-chat")).toBe(false);
+  });
+});
+
+describe("workspaceReplacementPath (S-485, ADR-71)", () => {
+  it("lands /chat — and its sub-routes — on the Workspace Chat", () => {
+    expect(workspaceReplacementPath("/chat")).toBe("/workspace-chat");
+    expect(workspaceReplacementPath("/chat/anything")).toBe("/workspace-chat");
+  });
+
+  it("leaves every other route where it is, near misses included", () => {
+    for (const path of ["/", "/chatter", "/workspace-chat", "/workspace", "/health", "/wiki/page/x"]) {
+      expect({ path, to: workspaceReplacementPath(path) }).toEqual({ path, to: null });
+    }
+  });
+
+  it("names a registered workspace view for every replacement it declares", () => {
+    const replaced = NAV_ITEMS.filter((i) => i.replacedInWorkspaceBy !== undefined);
+    expect(replaced.map((i) => [i.id, i.replacedInWorkspaceBy])).toEqual([["chat", "workspace-chat"]]);
+    for (const item of replaced) {
+      const target = WORKSPACE_NAV_ITEMS.find((w) => w.id === item.replacedInWorkspaceBy);
+      expect(target).toBeDefined();
+      expect(workspaceReplacementPath(item.path)).toBe(target?.path);
+    }
   });
 });
 
@@ -72,6 +110,7 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
       ["workspace-dashboard", "app"],
       ["workspace-health", "app"],
       ["workspace", "app"],
+      ["workspace-chat", "app"],
       ["workspace-statistics", "app"],
       ["workspace-config", "app"],
     ]);
@@ -289,6 +328,22 @@ function codeOf(source: string): string {
   return out;
 }
 
+/**
+ * The SERVER routes that share an app route's leading segment — removed, as exact
+ * double-quoted literals, before the route-literal probe below reads a module.
+ *
+ * `"/workspace/chat"` is the workspace chat's turn `POST` (S-482, mirrored in
+ * `api/chatClient.ts`): no client view mounts there, so it is not a second spelling
+ * of the `/workspace` tab. Exempting it as one exact literal, rather than exempting
+ * the module, keeps every other spelling in that module under the guard — a
+ * `"/workspace"` or `"/workspace/"` beside it still fails.
+ */
+const SERVER_ROUTE_LITERALS: readonly string[] = ['"/workspace/chat"'];
+
+function withoutServerRoutes(code: string): string {
+  return SERVER_ROUTE_LITERALS.reduce((out, literal) => out.split(literal).join('""'), code);
+}
+
 describe("no second list of app-level paths exists in the tree (ADR-66 §1)", () => {
   // The defect this replaces was a hard-coded path list consulted in one place. The
   // hazard it leaves behind is a SECOND one: a `startsWith("/workspace")` in a view,
@@ -338,7 +393,7 @@ describe("no second list of app-level paths exists in the tree (ADR-66 §1)", ()
       // `"/workspace"`; and `web/ui` configures neither ESLint nor Prettier, so
       // single quotes and template literals are not hypothetical.
       const probe = new RegExp(`["'\`]${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
-      const mentions = modules.filter((m) => probe.test(codeOf(SOURCES[m])));
+      const mentions = modules.filter((m) => probe.test(withoutServerRoutes(codeOf(SOURCES[m]))));
       // `nav.ts` — the navigation registry that DECLARES the scope. `views/index.ts` —
       // the component registry that maps the same path to the React view it mounts;
       // it is keyed by path by construction and holds no scope. Any third file is
@@ -376,5 +431,15 @@ describe("navItemMatches (S-425) — the SPA's one route-ownership rule", () => 
     // `undefined` as a section heading.
     const labelled: Record<NavScope, string> = NAV_SCOPE_LABELS;
     expect(Object.keys(labelled).sort()).toEqual([...NAV_SCOPES].sort());
+  });
+});
+
+describe("the server-route exemption is exact (S-485)", () => {
+  it("removes the exempt literal and nothing one character from it", () => {
+    expect(withoutServerRoutes('x = "/workspace/chat";')).toBe('x = "";');
+    // Near misses stay visible to the probe.
+    for (const code of ['"/workspace/"', '"/workspace"', '"/workspace/chats"', "'/workspace/chat'"]) {
+      expect(withoutServerRoutes(code)).toBe(code);
+    }
   });
 });

@@ -538,13 +538,16 @@ shell chrome, so they never enter the tool-usage figures.
 Each read view's figures trace to a read-model, and an empty store renders an
 honest empty state naming the producing command:
 
-- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat`, Wiki `/wiki`, Architecture / Cycles `/architecture`.
+- **Group A — read & navigate:** Dashboard `/`, Health `/health`, Graph `/graph`, Chat `/chat` (single-root and `--standalone` only — see below), Wiki `/wiki`, Architecture / Cycles `/architecture`.
 - **Group B — analyse:** Files & Risk `/files`, Rule findings `/gaps`, Coverage `/coverage`.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
-- **Workspace scope (workspace mode only):** Workspace `/workspace`, Workspace Dashboard
-  `/workspace-dashboard`, Workspace Health `/workspace-health`, Workspace Statistics
+- **Workspace scope (workspace mode only):** Workspace Dashboard `/workspace-dashboard`,
+  Workspace Health `/workspace-health`, Workspace `/workspace`, Chat `/workspace-chat`
+  (the [Workspace Chat](#the-workspace-chat)), Workspace Statistics
   `/workspace-statistics`, Config `/workspace-config`. These answer for the **whole
   workspace**, not for the selected member, and the member selector does not govern them.
+  In workspace mode the Service section lists **no** Chat: the chat there is the
+  Workspace Chat, and `/chat` (with or without `?repo=`) lands on `/workspace-chat`.
 
 **Workspace mode.** When `logos serve --ui` starts at a workspace parent (a
 `logos.workspace.toml` is discovered up-tree), the app shell renders a **member
@@ -1078,17 +1081,17 @@ back a synthesized answer:
 - **Source-Reader** — sandboxed read/grep/glob over the project source.
 - **Synthesizer** — a tool-less subagent that writes the final answer from what the others found.
 
-This Chat answers for **one codebase** — the repository, or the one workspace member, it
-is opened on — and carries the same tools whether `serve` runs over a single repo or a
-workspace. It has no cross-service tool. The cross-service tools (`xservice_route_providers`,
-`xservice_callers`, `xservice_impact`, `xservice_search`) and the workspace read-models
-belong to a separate **workspace chat** roster, whose Workspace-Analyst answers "which
-services call this endpoint?" across members, every cross-service result qualified by
-the member it belongs to, and an empty cross-service answer over a non-zero
-**unresolved** residue reported as unresolved, never as "none". In a workspace serve
-(`agents` build) the workspace chat is served over the web API — `POST /workspace/chat`
-and `/api/v1/workspace/chat/threads` — and has no in-app view yet; see
-[The workspace chat](configuration.md#the-workspace-chat--its-own-configuration-and-history).
+This Chat answers for **one codebase** — the repository it is opened on. It is offered
+in a single-root serve and in a `--standalone` serve (which focuses one repository even
+under a workspace manifest), and has no cross-service tool. In a **workspace** serve the
+sidebar offers the [Workspace Chat](#the-workspace-chat) instead, in the Workspace
+section: the cross-service tools (`xservice_route_providers`, `xservice_callers`,
+`xservice_impact`, `xservice_search`) and the workspace read-models belong to its
+roster, whose Workspace-Analyst answers "which services call this endpoint?" across
+members, every cross-service result qualified by the member it belongs to, and an empty
+cross-service answer over a non-zero **unresolved** residue reported as unresolved,
+never as "none". To chat with one member on its own, start a `--standalone` serve in
+that member.
 
 A working Chat exists **only** in an `--features agents` build. The default
 `logos` binary ships the dashboard and no networking client — there is no
@@ -1128,7 +1131,10 @@ first turn, gitignored, never in the default binary).
    stating that asking a question sends your message together with **source and
    graph excerpts** from the project to that endpoint. **Nothing is sent until
    you click _Start chatting_** to acknowledge — the acknowledgement persists, so
-   you grant it once.
+   you grant it once **per chat**: the consent (and the remembered open
+   conversation) is kept separately for a single-root chat, for each member, and for
+   the Workspace Chat, so accepting one never accepts another, and a conversation
+   number from one chat is never reopened in another.
 
    After you acknowledge, a **CHAT status band** takes the banner's place at the
    top of the view. The configure state, the consent banner and the band share that
@@ -1226,6 +1232,46 @@ answer the assistant did not give. The ephemeral plan / subagent-activity side-c
 turn shows the answer with **Copy**/**Regenerate**, not the intermediate step chatter.
 This is also why a restored turn grows no empty **Activity** fold: there is no
 side-channel left to show, so none is rendered.
+
+#### The Workspace Chat
+
+In a workspace serve (`logos serve --ui` at the workspace root, `agents` build) the
+chat is the **Workspace Chat**, listed as **Chat** in the sidebar's **Workspace**
+section at `/workspace-chat`. It answers for the whole workspace first and narrows to a
+member when a question names one. It reuses every part of the Chat tab — transcript,
+Activity disclosure, composer, history rail, status band — so everything above applies,
+with these differences:
+
+- **Its heading names what it answers for**: `Workspace chat · <workspace> · N members`.
+  It does not follow the member selector: switching member leaves the open
+  conversation, the rail and the composer exactly as they are.
+- **Its configuration comes from the workspace root alone**
+  (`<workspace-root>/.logos/config.toml` `[chat]` and `.logos/secrets.toml`). A member's
+  own `[chat]` does not configure it. With either half missing, the configure-first
+  state names the workspace root and the missing half and links the workspace
+  **Config** view (`/workspace-config`) — never a member's Config tab. A workspace-root
+  file that does not parse is shown as a fault to repair there, not as "not configured".
+- **Its consent banner names every member's read roots** — the extra read roots a
+  source call on that member reads through: roots declared by the workspace table once,
+  relative to the workspace root, with the members that inherit them, and a member's
+  own roots relative to that member. A member whose chat config cannot be read is named
+  as such. These are read from config alone, so opening the view starts no member
+  engine.
+- **Its history rail lists workspace conversations only.** An empty rail says so, and
+  that a member's conversations are available in a `--standalone` serve of that member.
+
+**Where each chat's history lives:**
+
+| Chat | Serve | History |
+|---|---|---|
+| Chat (`/chat`) | single-root, or `--standalone` in a member | `<repo>/.logos/chat.db` |
+| Workspace Chat (`/workspace-chat`) | at the workspace root | `<workspace-root>/.logos/chat.db` |
+
+A workspace serve never opens or lists a member's `chat.db`; a member's conversations
+from an earlier serve are still in that member's store, and a `--standalone` serve in
+the member shows them. See
+[The workspace chat](configuration.md#the-workspace-chat--its-own-configuration-and-history)
+for its configuration and routes.
 
 #### Mermaid diagrams in chat
 

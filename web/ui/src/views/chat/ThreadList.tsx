@@ -15,7 +15,7 @@
  * conversation switch or outlive the rail.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { Button } from "../../components/index.ts";
 import { IconPlus } from "../../components/icons.tsx";
@@ -36,6 +36,10 @@ export interface ThreadListProps {
   onDelete: (id: number) => void;
   /** An honest note when the list could not be read (or a delete failed), else `null`. */
   error?: string | null;
+  /** What an empty rail says — the member chat's default sentence unless the chat
+   *  has more to say about where else conversations live (the Workspace Chat names
+   *  the member conversations it does not list, S-485). */
+  emptyNote?: ReactNode;
 }
 
 /** The conversation-history rail: a "+ New chat" action over a most-recent-first
@@ -48,6 +52,7 @@ export function ThreadList({
   onNewChat,
   onDelete,
   error,
+  emptyNote = "No conversations yet — your chats will appear here.",
 }: ThreadListProps) {
   // The row awaiting confirmation, or `null` when none is. Exactly one row can be
   // pending at a time, so opening a second confirm closes the first — the user is
@@ -89,7 +94,7 @@ export function ThreadList({
         // Silent when a read failed: "no conversations yet" would be a claim we
         // cannot make — we do not know what is there ([NFR-CC-04]).
         !error && (
-          <p className={styles.railEmpty}>No conversations yet — your chats will appear here.</p>
+          <p className={styles.railEmpty}>{emptyNote}</p>
         )
       ) : (
         <ul className={styles.threadList}>

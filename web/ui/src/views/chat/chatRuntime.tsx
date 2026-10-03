@@ -58,13 +58,15 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 
-import { fetchThreadMessages, streamChatTurn } from "../../api/chatClient.ts";
+import { fetchThreadMessages, streamChatTurn, type ChatRoutes } from "../../api/chatClient.ts";
 import { ApiError } from "../../api/client.ts";
 import {
   applyFrame,
+  chatStorageKey,
   initialTurn,
   readSseStream,
   turnEndedEmpty,
+  type ChatStorageScope,
   type PersistedChatMessage,
   type ThreadSummary,
   type TurnState,
@@ -160,16 +162,20 @@ export function foldPersistedMessages(
   return out;
 }
 
-/** The localStorage key remembering the open conversation so the selection is
- *  restored across a `serve --ui` restart / reload (S-210 AC-1). */
+/** The localStorage key BASE remembering the open conversation so the selection is
+ *  restored across a `serve --ui` restart / reload (S-210 AC-1) — qualified by the
+ *  chat's storage scope (S-485, {@link chatStorageKey}), because a thread id names a
+ *  row in ONE chat's store and the same number in another is a different
+ *  conversation. */
 export const ACTIVE_THREAD_KEY = "logos.chat.activeThread";
 
-/** The last-open conversation id remembered from a prior session, or `null` when
- *  none / storage is blocked. Read once to seed the runtime so the persistence
- *  effect never wipes it before the restore runs (fail SAFE to a fresh composer). */
-function readStoredThreadId(): number | null {
+/** The last-open conversation id remembered under `scope` by a prior session, or
+ *  `null` when none / storage is blocked. Read once to seed the runtime so the
+ *  persistence effect never wipes it before the restore runs (fail SAFE to a fresh
+ *  composer). */
+function readStoredThreadId(scope: ChatStorageScope): number | null {
   try {
-    const raw = window.localStorage.getItem(ACTIVE_THREAD_KEY);
+    const raw = window.localStorage.getItem(chatStorageKey(ACTIVE_THREAD_KEY, scope));
     const id = raw != null && raw !== "" ? Number(raw) : Number.NaN;
     return Number.isFinite(id) ? id : null;
   } catch {
@@ -212,8 +218,10 @@ interface ActiveThread {
  * (never wipes it) on mount; `useChatRuntime`'s restore effect then hydrates its
  * history.
  */
-function useActiveThread(): ActiveThread {
-  const [activeThreadId, setActiveThreadId] = useState<number | null>(readStoredThreadId);
+function useActiveThread(scope: ChatStorageScope): ActiveThread {
+  const [activeThreadId, setActiveThreadId] = useState<number | null>(() =>
+    readStoredThreadId(scope),
+  );
   const activeThreadIdRef = useRef(activeThreadId);
   activeThreadIdRef.current = activeThreadId;
 
@@ -221,13 +229,14 @@ function useActiveThread(): ActiveThread {
   // `serve --ui` restart / reload (S-210 AC-1). Best-effort — storage-blocked is
   // non-fatal (the conversation itself is durable server-side).
   useEffect(() => {
+    const key = chatStorageKey(ACTIVE_THREAD_KEY, scope);
     try {
-      if (activeThreadId == null) window.localStorage.removeItem(ACTIVE_THREAD_KEY);
-      else window.localStorage.setItem(ACTIVE_THREAD_KEY, String(activeThreadId));
+      if (activeThreadId == null) window.localStorage.removeItem(key);
+      else window.localStorage.setItem(key, String(activeThreadId));
     } catch {
       /* non-fatal: the list still restores the conversation on the next load */
     }
-  }, [activeThreadId]);
+  }, [activeThreadId, scope]);
 
   return { activeThreadId, activeThreadIdRef, setActiveThreadId };
 }
@@ -263,7 +272,10 @@ interface TurnStream {
  * its `thread` field, and "+ New chat" resets BOTH halves — the transcript and the
  * open-conversation id — in one action.
  */
-function useTurnStream({ activeThreadIdRef, setActiveThreadId }: ActiveThread): TurnStream {
+function useTurnStream(
+  routes: ChatRoutes,
+  { activeThreadIdRef, setActiveThreadId }: ActiveThread,
+): TurnStream {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
 
@@ -308,7 +320,12 @@ function useTurnStream({ activeThreadIdRef, setActiveThreadId }: ActiveThread): 
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const resp = await streamChatTurn(question, activeThreadIdRef.current, controller.signal);
+        const resp = await streamChatTurn(
+          routes,
+          question,
+          activeThreadIdRef.current,
+          controller.signal,
+        );
         if (!resp.ok || !resp.body) {
           updateTurn(turnId, (t) => ({
             ...t,
@@ -330,7 +347,7 @@ function useTurnStream({ activeThreadIdRef, setActiveThreadId }: ActiveThread): 
       }
       return controller;
     },
-    [updateTurn, activeThreadIdRef],
+    [routes, updateTurn, activeThreadIdRef],
   );
 
   // "+ New chat" (S-210 AC-2): reset the composer to a fresh, not-yet-persisted
@@ -402,14 +419,23 @@ export function findRerunIndex(messages: readonly ChatMessage[], parentId: strin
  * ([`useThreadRail`](./useThreadRail.ts)) each own their own state, and the turn
  * dispatch below is what spans them — a send/regenerate streams into the surface and
  * then reconciles the rail, a select hydrates the surface from the rail's row.
+ *
+ * `routes` names the chat it drives (the member's or the workspace's, S-485) and
+ * `scope` the storage scope its open conversation is remembered under — both
+ * required, so neither chat can fall back onto the other's store or state.
  */
-export function useChatRuntime(consented: boolean): ChatRuntime {
-  const active = useActiveThread();
+export function useChatRuntime(
+  consented: boolean,
+  routes: ChatRoutes,
+  scope: ChatStorageScope,
+): ChatRuntime {
+  const active = useActiveThread(scope);
   const { activeThreadId, activeThreadIdRef, setActiveThreadId } = active;
-  const stream = useTurnStream(active);
+  const stream = useTurnStream(routes, active);
   const { messagesRef, idRef, abortRef, sessionRef } = stream;
   const { setMessages, setIsRunning, runTurn, newChat } = stream;
   const rail = useThreadRail({
+    routes,
     activeThreadIdRef,
     adoptThread: setActiveThreadId,
     resetSurface: newChat,
@@ -527,7 +553,7 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       abortRef.current?.abort();
       setIsRunning(false);
       try {
-        const persisted = await fetchThreadMessages(id);
+        const persisted = await fetchThreadMessages(routes, id);
         setMessages(foldPersistedMessages(persisted, () => ++idRef.current));
         setActiveThreadId(id);
         setThreadsError(null);
@@ -543,6 +569,7 @@ export function useChatRuntime(consented: boolean): ChatRuntime {
       }
     },
     [
+      routes,
       idRef,
       sessionRef,
       abortRef,

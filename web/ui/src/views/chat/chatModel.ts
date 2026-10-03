@@ -102,6 +102,34 @@ export interface ChatConfigReadModel {
   effective_chat: EffectiveChatSlice;
 }
 
+/**
+ * The chat-relevant slice of the workspace root's config tier
+ * (`GET /api/v1/workspace/config`, S-450) — what the Workspace Chat reads its
+ * verdict from (S-485). `effective_chat` is resolved at the workspace root with no
+ * tier above it, exactly as the workspace chat's turn resolves it (S-482), so its
+ * origins are relative to that root: `member` means *declared at the workspace
+ * root*, and `workspace` never appears. It is `null` when either tier file does not
+ * parse, and the fault that explains it is then named by file and position only.
+ */
+export interface WorkspaceChatConfigReadModel {
+  effective_chat: EffectiveChatSlice | null;
+  config: { error: string | null };
+  chat_key_error: string | null;
+}
+
+/** One member's effective chat read roots (mirrors `MemberChatReadRoots`,
+ *  `GET /api/v1/workspace/config/read-roots`, S-485): the roots a repo-addressed
+ *  source call on that member reads through. `policy_origin` and `declared_by` are
+ *  `null` when the member's chat config cannot be read. */
+export interface MemberChatReadRoots {
+  name: string;
+  policy_origin: ChatOrigin | null;
+  /** The root relative entries resolve against: the member's own, or the
+   *  workspace root for an inherited policy. */
+  declared_by: "member" | "workspace" | null;
+  read_roots: string[];
+}
+
 // ── Thread read API (S-209 producer contract; S-210 consumer) ─────────────────
 // The wire shapes the merged S-209 read endpoints serialize. Pure mirrors — no
 // React, no fetch — so the rail's ordering/hydration logic stays testable off a
@@ -633,15 +661,52 @@ export function turnEndedEmpty(state: TurnState): boolean {
   return state.answer === "" && state.halt === null && state.error === null;
 }
 
+// ── Scope-keyed client state (S-485, FR-UI-26, NFR-SE-07) ─────────────────────
+
+/**
+ * The scope a chat's client state is remembered under (S-485): the member chat of
+ * a single-root serve, the member chat of one workspace member, or the workspace
+ * chat. Every chat has its own conversation store — a member's `chat.db`, or
+ * `<workspace root>/.logos/chat.db` — and thread ids are per-store rowids, so thread
+ * 3 of one scope is an unrelated conversation in another. Keying the remembered
+ * thread (and the consent) by scope is what stops one chat from reopening, or
+ * inheriting the consent of, another's.
+ */
+export type ChatStorageScope = "single" | `member:${string}` | "workspace";
+
+/** The workspace chat's storage scope. */
+export const WORKSPACE_CHAT_SCOPE: ChatStorageScope = "workspace";
+
+/** The member chat's storage scope for the shell's {@link ChatScope} — spelled as
+ *  the shell's own cache key (`WorkspaceContext`), so a member's chat state is
+ *  keyed exactly as that member's views are. */
+export function memberChatStorageScope(scope: ChatScope): ChatStorageScope {
+  return scope.mode === "workspace" && scope.member !== null ? `member:${scope.member}` : "single";
+}
+
+/**
+ * `base` qualified by `scope` — the one spelling of a scope-keyed storage key.
+ *
+ * The unqualified keys every chat shared before S-485 are deliberately not read:
+ * their scope is unknown (a workspace serve's member chat wrote them member-blind),
+ * so trusting one would reopen, or skip the consent of, another chat's state. The
+ * cost is one fresh consent prompt per scope after the upgrade — fail safe, never
+ * open.
+ */
+export function chatStorageKey(base: string, scope: ChatStorageScope): string {
+  return `${base}:${scope}`;
+}
+
 // ── Consent gate (NFR-SE-07; mirrors chat.js localStorage gate) ───────────────
 
-/** The localStorage key remembering the first-use consent acknowledgement. */
+/** The localStorage key BASE remembering the first-use consent acknowledgement —
+ *  qualified by scope ({@link chatStorageKey}). */
 export const CONSENT_KEY = "logos.chat.consent";
 
-/** The localStorage key remembering WHICH extra read roots (sprint-79 HF-1) the
- *  consent was given for — their content can reach the endpoint too, so a
+/** The localStorage key BASE remembering WHICH extra read roots (sprint-79 HF-1)
+ *  the consent was given for — their content can reach the endpoint too, so a
  *  consent given before they were declared, or for a different set, does not
- *  cover them. */
+ *  cover them. Qualified by scope like {@link CONSENT_KEY}. */
 export const READ_ROOTS_CONSENT_KEY = "logos.chat.consent.readRoots";
 
 /** The disclosed read-root set as one comparable value: sorted, deduplicated. */
@@ -649,31 +714,254 @@ function readRootsScope(roots: string[]): string {
   return JSON.stringify([...new Set(roots)].sort());
 }
 
-/** Has the user acknowledged the first-use consent — and, when the policy
- *  declares extra read roots, acknowledged exactly this set of them? With none
- *  declared this is the plain first-use gate it always was. Storage-blocked ⇒
+/** Has the user acknowledged this scope's first-use consent — and, when the
+ *  disclosure names extra read roots, acknowledged exactly this set of them? With
+ *  none declared this is the plain first-use gate it always was. Storage-blocked ⇒
  *  re-ask each load (fail SAFE, not open). */
-export function hasConsent(roots: string[] = []): boolean {
+export function hasConsent(scope: ChatStorageScope, roots: string[] = []): boolean {
   try {
-    if (window.localStorage.getItem(CONSENT_KEY) !== "1") return false;
+    if (window.localStorage.getItem(chatStorageKey(CONSENT_KEY, scope)) !== "1") return false;
     return (
       roots.length === 0 ||
-      window.localStorage.getItem(READ_ROOTS_CONSENT_KEY) === readRootsScope(roots)
+      window.localStorage.getItem(chatStorageKey(READ_ROOTS_CONSENT_KEY, scope)) ===
+        readRootsScope(roots)
     );
   } catch {
     return false;
   }
 }
 
-/** Remember the consent acknowledgement, and the read-root set it disclosed
- *  (best-effort; non-fatal if storage is blocked). */
-export function rememberConsent(roots: string[] = []): void {
+/** Remember this scope's consent acknowledgement, and the read-root set it
+ *  disclosed (best-effort; non-fatal if storage is blocked). */
+export function rememberConsent(scope: ChatStorageScope, roots: string[] = []): void {
   try {
-    window.localStorage.setItem(CONSENT_KEY, "1");
+    window.localStorage.setItem(chatStorageKey(CONSENT_KEY, scope), "1");
     if (roots.length > 0) {
-      window.localStorage.setItem(READ_ROOTS_CONSENT_KEY, readRootsScope(roots));
+      window.localStorage.setItem(
+        chatStorageKey(READ_ROOTS_CONSENT_KEY, scope),
+        readRootsScope(roots),
+      );
     }
   } catch {
     /* non-fatal: consent holds for this page even if it cannot persist */
   }
+}
+
+// ── The read-roots disclosure (sprint-79 HF-1, S-485, NFR-SE-07) ──────────────
+
+/** One run of extra read roots that resolve against the same root. */
+export interface ReadRootGroup {
+  roots: string[];
+  /** The root these entries resolve against, in words (`the workspace root`, a
+   *  member's name), or `null` when they need no qualifier: the chat's own root,
+   *  or absolute entries, which resolve as written. */
+  relativeTo: string | null;
+  /** The members whose source calls read through these roots, when the group
+   *  does not already say so — the workspace chat's disclosure only. */
+  readBy: string[];
+}
+
+/** Everything the consent banner and status band say can be read and sent
+ *  besides the project itself: the extra read roots, grouped by the root they
+ *  resolve against, and the members whose roots could not be listed. */
+export interface ReadRootsDisclosure {
+  groups: ReadRootGroup[];
+  /** Members whose chat config could not be read — their roots are unknown. */
+  unreadable: string[];
+  /** Whose symlinks the roots are reached through: `this project's` or
+   *  `each member's`. */
+  through: string;
+}
+
+/** Is `root` absolute — resolved as written, never against the root that
+ *  declared it? A POSIX path, a drive-letter path, or a UNC share. */
+function isAbsoluteRoot(root: string): boolean {
+  return root.startsWith("/") || root.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(root);
+}
+
+/** `roots` as disclosure groups: the relative entries qualified by `relativeTo`,
+ *  the absolute ones unqualified — an absolute entry is not relative to anything,
+ *  and saying so would misstate where its files come from (NFR-SE-07). With no
+ *  qualifier at all the order is kept as declared, in one group. Each entry is
+ *  named once — a repeated declaration is still one directory, and one row key.
+ *  `readers` names who reads through them wherever the qualifier does not already
+ *  say so. */
+function anchoredGroups(
+  declared: string[],
+  relativeTo: string | null,
+  readers: { relative: string[]; absolute: string[] },
+): ReadRootGroup[] {
+  const roots = [...new Set(declared)];
+  if (relativeTo === null) {
+    return roots.length === 0 ? [] : [{ roots, relativeTo: null, readBy: readers.relative }];
+  }
+  const relative = roots.filter((root) => !isAbsoluteRoot(root));
+  const absolute = roots.filter(isAbsoluteRoot);
+  return [
+    ...(relative.length > 0 ? [{ roots: relative, relativeTo, readBy: readers.relative }] : []),
+    ...(absolute.length > 0 ? [{ roots: absolute, relativeTo: null, readBy: readers.absolute }] : []),
+  ];
+}
+
+/** The member chat's disclosure: the effective policy's own read roots, relative
+ *  to the workspace root when the policy is inherited (sprint-79 HF-1). */
+export function memberReadRootsDisclosure(ready: ChatReady): ReadRootsDisclosure {
+  return {
+    groups: anchoredGroups(
+      readRoots(ready.policy),
+      ready.policyOrigin === "workspace" ? "the workspace root" : null,
+      { relative: [], absolute: [] },
+    ),
+    unreadable: [],
+    through: "this project's",
+  };
+}
+
+/**
+ * The workspace chat's disclosure (S-485, FR-WS-34): every member's EFFECTIVE read
+ * roots — the set a repo-addressed source call reads through — from the engine-free
+ * read-roots read-model. Roots declared by the workspace tier are named once,
+ * relative to the workspace root, with the members that inherit them; a member
+ * that owns its policy gets its own group, relative to that member.
+ */
+export function workspaceReadRootsDisclosure(members: MemberChatReadRoots[]): ReadRootsDisclosure {
+  const inherited = { roots: [] as string[], readBy: [] as string[] };
+  const owned: ReadRootGroup[] = [];
+  const unreadable: string[] = [];
+  for (const member of members) {
+    if (member.declared_by === null) {
+      unreadable.push(member.name);
+      continue;
+    }
+    const roots = member.read_roots.filter((root) => root.trim() !== "");
+    if (roots.length === 0) continue;
+    if (member.declared_by === "workspace") {
+      // Every inheriting member carries the workspace tier's one table, so its
+      // roots are the same entries each time — named once, with who reads them.
+      for (const root of roots) if (!inherited.roots.includes(root)) inherited.roots.push(root);
+      inherited.readBy.push(member.name);
+    } else {
+      // Relative to the member says whose roots they are; an absolute entry
+      // names its member as its reader instead.
+      owned.push(...anchoredGroups(roots, member.name, { relative: [], absolute: [member.name] }));
+    }
+  }
+  return {
+    groups: [
+      ...anchoredGroups(inherited.roots, "the workspace root", {
+        relative: inherited.readBy,
+        absolute: inherited.readBy,
+      }),
+      ...owned,
+    ],
+    unreadable,
+    through: "each member's",
+  };
+}
+
+/** The disclosure as the comparable set a consent is remembered for: each root
+ *  qualified by the root it resolves against, and each member whose roots are
+ *  unknown — so a root moving to another declaring root, or a member's roots
+ *  becoming known, asks again. The member chat's own unqualified roots stay the
+ *  bare entries they always were. */
+export function consentEntries(disclosure: ReadRootsDisclosure): string[] {
+  return [
+    ...disclosure.groups.flatMap((group) =>
+      group.roots.map((root) => (group.relativeTo === null ? root : `${group.relativeTo}: ${root}`)),
+    ),
+    ...disclosure.unreadable.map((name) => `unreadable: ${name}`),
+  ];
+}
+
+// ── The Workspace Chat's readiness (S-485, FR-WS-34, NFR-CC-04) ───────────────
+
+/** The workspace chat cannot be configured from what the tier holds, because a
+ *  tier file does not parse: the faults, by file and position only. */
+export interface WorkspaceTierUnreadable {
+  ready: false;
+  unreadable: true;
+  faults: string[];
+}
+
+/** The workspace chat's configure-first state: the absent half at the workspace
+ *  root, the present half if any, and the files that would declare it. */
+export interface WorkspaceConfigureFirst {
+  ready: false;
+  unreadable: false;
+  absent: AbsentHalf;
+  /** The half the workspace root DOES declare, or `null`. */
+  present: PresentHalf["half"] | null;
+  /** The workspace-root files the absent half is declared in. */
+  workspaceFiles: string[];
+}
+
+export type WorkspaceChatReadiness = ChatReady | WorkspaceTierUnreadable | WorkspaceConfigureFirst;
+
+/**
+ * Is the workspace chat usable? A PURE function of the workspace tier's effective
+ * chat slice — the resolution the workspace turn dials (`resolve_chat` at the
+ * workspace root with no tier above it, S-482) — so the view and the turn cannot
+ * disagree. No member's `[chat]` is consulted: none configures this chat.
+ *
+ * Ready iff both halves are declared there. Origins arrive relative to the
+ * workspace root (`member` = declared at it), which is what `ChatReady` carries.
+ */
+export function workspaceChatReadiness(model: WorkspaceChatConfigReadModel): WorkspaceChatReadiness {
+  const effective = model.effective_chat;
+  if (effective === null) {
+    return {
+      ready: false,
+      unreadable: true,
+      faults: [model.config.error, model.chat_key_error].filter(
+        (fault): fault is string => typeof fault === "string" && fault !== "",
+      ),
+    };
+  }
+  const { policy, policy_origin, credential_origin } = effective;
+  if (policy_origin !== "unset" && credential_origin !== "unset") {
+    return { ready: true, policy, policyOrigin: policy_origin, credentialOrigin: credential_origin };
+  }
+  const absent: AbsentHalf =
+    policy_origin === "unset" ? (credential_origin === "unset" ? "both" : "model") : "key";
+  return {
+    ready: false,
+    unreadable: false,
+    absent,
+    present: absent === "both" ? null : absent === "model" ? "key" : "model",
+    workspaceFiles: [
+      ...(absent === "key" ? [] : [WORKSPACE_CONFIG_FILE]),
+      ...(absent === "model" ? [] : [WORKSPACE_SECRETS_FILE]),
+    ],
+  };
+}
+
+/** The Workspace Chat's configure-first sentences, from the verdict and the
+ *  workspace's name — worded as the workspace turn's own refusal is
+ *  (`configure_first_message`, `web/src/chat/workspace.rs`): the workspace root, the
+ *  missing half, the present half, and that a member's `[chat]` does not configure
+ *  this chat. The view links the action to Workspace Config. */
+export interface WorkspaceConfigureFirstCopy {
+  summary: string;
+  present: string | null;
+  memberNote: string;
+  /** What to do — the view links Workspace Config after it. */
+  action: string;
+}
+
+export function workspaceConfigureFirstCopy(
+  state: WorkspaceConfigureFirst,
+  workspace: string,
+): WorkspaceConfigureFirstCopy {
+  const [absentPhrase, action] =
+    state.absent === "both"
+      ? ["neither a provider model nor an API key is declared", "Choose a provider model and add an API key"]
+      : state.absent === "model"
+        ? ["no provider model is declared", "Choose a provider model"]
+        : ["no API key is declared", "Add an API key"];
+  return {
+    summary: `The workspace chat is not configured yet for the workspace root of ${workspace} — ${absentPhrase} there.`,
+    present: state.present === null ? null : `Its ${HALF_LABEL[state.present]} is declared.`,
+    memberNote: "A member's own [chat] does not configure the workspace chat.",
+    action,
+  };
 }

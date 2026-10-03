@@ -40,7 +40,7 @@
 import { useEffect } from "react";
 
 import { AppShell, LoadingState, ToastProvider } from "./components/index.ts";
-import { isAppLevelPath } from "./nav.ts";
+import { isAppLevelPath, workspaceReplacementPath } from "./nav.ts";
 import { usePathname, redirect } from "./router.tsx";
 import { Header } from "./shell/Header.tsx";
 import { Sidebar } from "./shell/Sidebar.tsx";
@@ -66,9 +66,23 @@ function Shell() {
     }
   }, [rawPathname]);
 
-  // Canonical path: resolve the redirect synchronously so the Dashboard view
+  // S-485 (FR-UI-35, ADR-71): in a workspace the member Chat is not offered — the
+  // chat there is the Workspace Chat — so `/chat` (and `/chat?repo=x`) lands on it.
+  // Which routes are replaced, and by what, is READ off `nav.ts`, the same
+  // declaration the sidebar drops the entry by. Workspace mode only, and only once
+  // the probe has said so: single-root and `--standalone` serve `/chat` as always.
+  // The query and fragment ride across verbatim, as for `/overview` above — an
+  // unknown `?repo=` must reach the refusal rather than be dropped on the way.
+  const replacement = mode === "workspace" ? workspaceReplacementPath(rawPathname) : null;
+  useEffect(() => {
+    if (replacement !== null) {
+      redirect(`${replacement}${window.location.search}${window.location.hash}`);
+    }
+  }, [replacement]);
+
+  // Canonical path: resolve the redirects synchronously so the destination view
   // renders on the first frame (no blank-content flash before the effect fires).
-  const pathname = rawPathname === "/overview" ? "/" : rawPathname;
+  const pathname = rawPathname === "/overview" ? "/" : (replacement ?? rawPathname);
   const View = viewForPath(pathname);
 
   // An APP-scoped view reads the unscoped `workspace/*` fan-out, identical for every

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,7 +9,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../api/chatClient.ts", () => ({
   CHAT_ROUTE: "/chat",
   CHAT_THREADS_ROUTE: "/api/v1/chat/threads",
+  // The two route sets are plain data, mirrored so the assertions below can name
+  // which chat a call went to (S-485).
+  MEMBER_CHAT_ROUTES: { turn: "/chat", threads: "/api/v1/chat/threads", memberScoped: true },
+  WORKSPACE_CHAT_ROUTES: {
+    turn: "/workspace/chat",
+    threads: "/api/v1/workspace/chat/threads",
+    memberScoped: false,
+  },
   fetchChatConfig: vi.fn(),
+  fetchWorkspaceChatConfig: vi.fn(),
+  fetchWorkspaceChatReadRoots: vi.fn(),
   streamChatTurn: vi.fn(),
   deleteChatThread: vi.fn(),
   fetchThreads: vi.fn(),
@@ -32,20 +42,27 @@ import {
   fetchChatConfig,
   fetchThreadMessages,
   fetchThreads,
+  fetchWorkspaceChatConfig,
+  fetchWorkspaceChatReadRoots,
+  MEMBER_CHAT_ROUTES,
   streamChatTurn,
+  WORKSPACE_CHAT_ROUTES,
 } from "../../api/chatClient.ts";
 import { ApiError } from "../../api/client.ts";
 import type {
   ChatConfigReadModel,
   ChatOrigin,
+  MemberChatReadRoots,
   PersistedChatMessage,
   ThreadSummary,
+  WorkspaceChatConfigReadModel,
 } from "./chatModel.ts";
 import { ChatView } from "./ChatView.tsx";
+import { WorkspaceChatView } from "./WorkspaceChatView.tsx";
 import chatStyles from "./Chat.module.css";
 import buttonStyles from "../../components/Button.module.css";
 import cardStyles from "../../components/Card.module.css";
-import { WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
+import { useWorkspace, WorkspaceProvider } from "../../workspace/WorkspaceContext.tsx";
 import { setScopedMember } from "../../workspace/scope.ts";
 import { stubApi } from "../../workspace/testFixtures.ts";
 
@@ -54,6 +71,8 @@ const mockStreamTurn = vi.mocked(streamChatTurn);
 const mockDeleteThread = vi.mocked(deleteChatThread);
 const mockFetchThreads = vi.mocked(fetchThreads);
 const mockFetchMessages = vi.mocked(fetchThreadMessages);
+const mockFetchWorkspaceConfig = vi.mocked(fetchWorkspaceChatConfig);
+const mockFetchReadRoots = vi.mocked(fetchWorkspaceChatReadRoots);
 const mockRenderMermaid = vi.mocked(renderMermaidIn);
 
 /** Stand in for the vendored Mermaid bundle: paint an SVG into every unprocessed
@@ -512,7 +531,7 @@ describe("ChatView — a streamed turn", () => {
     expect(container.textContent).toContain("Graph-Navigator");
     // The streamed message is the byte-identical form-encoded body (NFR-SE-06 path);
     // a fresh conversation carries no thread id (null → the server creates it).
-    expect(mockStreamTurn).toHaveBeenCalledWith("what is risky?", null, expect.anything());
+    expect(mockStreamTurn).toHaveBeenCalledWith(MEMBER_CHAT_ROUTES, "what is risky?", null, expect.anything());
   });
 
   it("renders the answer as markdown with a copyable code block", async () => {
@@ -797,7 +816,7 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
     await user.click(await screen.findByRole("button", { name: "Delete" }));
 
     expect(mockDeleteThread).toHaveBeenCalledTimes(1);
-    expect(mockDeleteThread).toHaveBeenCalledWith(3);
+    expect(mockDeleteThread).toHaveBeenCalledWith(MEMBER_CHAT_ROUTES, 3);
     // Only the deleted row leaves the rail; the other conversation stays.
     await waitFor(() => expect(screen.queryByRole("button", { name: "Conv B" })).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Conv A" })).toBeInTheDocument();
@@ -840,7 +859,7 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
     // selection is dropped so a reload does not try to re-open a deleted thread.
     await waitFor(() => expect(screen.queryByText("open answer")).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
-    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread:single")).toBeNull());
   });
 
   it("leaves the open conversation intact when a DIFFERENT one is deleted", async () => {
@@ -863,7 +882,7 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Conv B" })).not.toBeInTheDocument());
     // The open transcript and the remembered selection are untouched.
     expect(screen.getByText("kept answer")).toBeInTheDocument();
-    expect(window.localStorage.getItem("logos.chat.activeThread")).toBe("5");
+    expect(window.localStorage.getItem("logos.chat.activeThread:single")).toBe("5");
   });
 
   it("keeps the row and says so honestly when the delete faults", async () => {
@@ -882,7 +901,7 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
       await screen.findByText(/Could not delete that conversation \(status 500\)/),
     ).toBeInTheDocument();
     expect(mockDeleteThread).toHaveBeenCalledTimes(1);
-    expect(mockDeleteThread).toHaveBeenCalledWith(5);
+    expect(mockDeleteThread).toHaveBeenCalledWith(MEMBER_CHAT_ROUTES, 5);
   });
 
   it("keeps the row and says so honestly when the delete transport fails", async () => {
@@ -952,7 +971,7 @@ describe("ChatView — per-conversation delete (S-211, FR-UI-26, AC-1)", () => {
     // deleted thread: no streamed content survives and the selection is dropped.
     await waitFor(() => expect(screen.queryByText("thinking")).not.toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
-    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread:single")).toBeNull());
   });
 
   it("treats an already-gone conversation (404) as deleted, not as a fault", async () => {
@@ -1104,7 +1123,7 @@ describe("ChatView — runtime adapter unit", () => {
     await acceptConsent(user);
     await ask(user, "the question");
     await screen.findByText("ok");
-    const [question] = mockStreamTurn.mock.calls[0];
+    const [, question] = mockStreamTurn.mock.calls[0];
     expect(question).toBe("the question");
   });
 });
@@ -1139,7 +1158,7 @@ describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
     // The restored transcript renders (user text + the final assistant answer).
     expect(await screen.findByText("a restored question")).toBeInTheDocument();
     expect(screen.getByText("a restored answer")).toBeInTheDocument();
-    expect(mockFetchMessages).toHaveBeenCalledWith(5);
+    expect(mockFetchMessages).toHaveBeenCalledWith(MEMBER_CHAT_ROUTES, 5);
   });
 
   it("+ New chat resets the composer and creates no empty row until first send", async () => {
@@ -1164,7 +1183,7 @@ describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
     expect(mockStreamTurn).not.toHaveBeenCalled();
     expect(screen.getAllByRole("button", { name: "Conv A" })).toHaveLength(1);
     // The stored selection is cleared, so a reload lands on a fresh composer.
-    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread:single")).toBeNull());
   });
 
   it("marks the open conversation with aria-current", async () => {
@@ -1198,14 +1217,14 @@ describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
     await ask(user, "first question");
     expect(await screen.findByText("first answer")).toBeInTheDocument();
     // The first send carried no thread id (a fresh conversation).
-    expect(mockStreamTurn.mock.calls[0][1]).toBeNull();
+    expect(mockStreamTurn.mock.calls[0][2]).toBeNull();
     // The just-created conversation is adopted and appears in the rail.
     expect(await screen.findByRole("button", { name: "first question" })).toBeInTheDocument();
 
     await ask(user, "second turn");
     await screen.findByText("second answer");
     // The follow-up turn continues the SAME server thread (id 9), not a new one.
-    expect(mockStreamTurn.mock.calls[1][1]).toBe(9);
+    expect(mockStreamTurn.mock.calls[1][2]).toBe(9);
   });
 
   it("restores the last-open conversation across a reload (persisted selection)", async () => {
@@ -1216,24 +1235,24 @@ describe("ChatView — conversation-history rail (S-210, FR-UI-26)", () => {
       persisted("assistant", "remembered answer", 2),
     ]);
     // A prior session left thread 7 open.
-    window.localStorage.setItem("logos.chat.activeThread", "7");
+    window.localStorage.setItem("logos.chat.activeThread:single", "7");
     render(<ChatView />);
     // On mount the runtime re-hydrates the stored selection with no user action.
     expect(await screen.findByText("remembered answer")).toBeInTheDocument();
     expect(screen.getByText("remembered question")).toBeInTheDocument();
-    expect(mockFetchMessages).toHaveBeenCalledWith(7);
+    expect(mockFetchMessages).toHaveBeenCalledWith(MEMBER_CHAT_ROUTES, 7);
   });
 
   it("falls back to a fresh composer when the stored selection was deleted (404)", async () => {
     mockFetchConfig.mockResolvedValue(configuredModel());
     mockFetchThreads.mockResolvedValue([]);
     mockFetchMessages.mockRejectedValue(new ApiError("chat/threads/7", 404));
-    window.localStorage.setItem("logos.chat.activeThread", "7");
+    window.localStorage.setItem("logos.chat.activeThread:single", "7");
     render(<ChatView />);
     // No crash, no restored history — an honest empty composer.
     expect(await screen.findByRole("button", { name: "Send" })).toBeInTheDocument();
     // The stale stored selection is cleared.
-    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread")).toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem("logos.chat.activeThread:single")).toBeNull());
   });
 
   it("collapses the rail behind a toggle (responsive disclosure, AC-3)", async () => {
@@ -1270,7 +1289,7 @@ describe("ChatView — rail honest error paths (S-210)", () => {
     const user = userEvent.setup();
     mockFetchConfig.mockResolvedValue(configuredModel());
     mockFetchThreads.mockResolvedValue([thread(5, "Conv A", 300), thread(3, "Conv B", 100)]);
-    mockFetchMessages.mockImplementation((id: number) =>
+    mockFetchMessages.mockImplementation((_routes, id: number) =>
       id === 5
         ? Promise.resolve([persisted("user", "kept question", 1), persisted("assistant", "kept answer", 2)])
         : Promise.reject(new ApiError(`chat/threads/${id}`, 500)),
@@ -1322,8 +1341,8 @@ describe("ChatView — multi-thread integrity (review-fix regressions)", () => {
     // the adopted id — never a null that would create a duplicate thread.
     await ask(user, "second question");
     await screen.findByText("a2");
-    expect(mockStreamTurn.mock.calls[0][1]).toBeNull();
-    expect(mockStreamTurn.mock.calls[1][1]).toBe(9);
+    expect(mockStreamTurn.mock.calls[0][2]).toBeNull();
+    expect(mockStreamTurn.mock.calls[1][2]).toBe(9);
   });
 
   it("+ New chat during a streaming turn is not hijacked back to the old thread", async () => {
@@ -1350,7 +1369,7 @@ describe("ChatView — multi-thread integrity (review-fix regressions)", () => {
     mockStreamTurn.mockResolvedValueOnce(sseResponse(['event: final_answer\ndata: {"answer":"fresh"}\n\n']));
     await ask(user, "brand new");
     await screen.findByText("fresh");
-    expect(mockStreamTurn.mock.calls[mockStreamTurn.mock.calls.length - 1][1]).toBeNull();
+    expect(mockStreamTurn.mock.calls[mockStreamTurn.mock.calls.length - 1][2]).toBeNull();
   });
 });
 
@@ -1364,7 +1383,7 @@ describe("ChatView — single-thread behaviour unchanged (S-200 regression)", ()
     await ask(user, "still works?");
     expect(await screen.findByText("unchanged")).toBeInTheDocument();
     // The S-200 body is byte-identical: `q` only, no thread id (null).
-    expect(mockStreamTurn).toHaveBeenCalledWith("still works?", null, expect.anything());
+    expect(mockStreamTurn).toHaveBeenCalledWith(MEMBER_CHAT_ROUTES, "still works?", null, expect.anything());
   });
 });
 
@@ -2010,7 +2029,7 @@ describe("ChatView — extra read roots (sprint-79 HF-1)", () => {
   it("asks again when read roots appear after an earlier consent, before anything is sent", async () => {
     const user = userEvent.setup();
     // Consented on a policy with no read roots…
-    window.localStorage.setItem("logos.chat.consent", "1");
+    window.localStorage.setItem("logos.chat.consent:single", "1");
     mockFetchConfig.mockResolvedValue(withReadRoots(configuredModel(), ["../logos-docs"]));
     const first = render(<ChatView />);
     // …so the banner naming the new root is back, and the composer is gated.
@@ -2035,5 +2054,343 @@ describe("ChatView — extra read roots (sprint-79 HF-1)", () => {
     await acceptConsent(user);
     const band = (await screen.findByText("CHAT")).closest("section");
     expect(band).toHaveTextContent("Extra read roots: ../logos-docs (relative to the workspace root)");
+  });
+});
+
+// ── S-485: the Workspace Chat, and scope-keyed client state ───────────────────
+
+/** The workspace tier's chat slice: `member` = declared AT the workspace root. */
+function workspaceTier(
+  policy: ChatOrigin = "member",
+  credential: ChatOrigin = "member",
+): WorkspaceChatConfigReadModel {
+  return { ...configuredModel("openai", { policy, credential }), config: { error: null }, chat_key_error: null };
+}
+
+/** A shell-like harness: the real provider over the stubbed two-member roster
+ *  (`shop`: `api` default, `web`), a member switch control, and `children`. */
+function MemberSwitch() {
+  const { selectMember } = useWorkspace();
+  return (
+    <button type="button" onClick={() => selectMember("web")}>
+      switch to web
+    </button>
+  );
+}
+
+/** The member chat mounted exactly as `App.tsx` mounts a member-scoped view: not
+ *  until the probe settles, and keyed on the shell's cache key. */
+function ShellKeyedChat() {
+  const { cacheKey, mode } = useWorkspace();
+  return mode === "loading" ? null : <ChatView key={cacheKey} />;
+}
+
+describe("WorkspaceChatView (S-485, FR-WS-34, frontend-design §4.22)", () => {
+  beforeEach(() => {
+    stubApi();
+    window.history.replaceState({}, "", "/workspace-chat");
+    mockFetchWorkspaceConfig.mockResolvedValue(workspaceTier());
+    mockFetchReadRoots.mockResolvedValue([]);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setScopedMember(null);
+    window.history.replaceState({}, "", "/");
+  });
+
+  function renderWorkspaceChat() {
+    return render(
+      <WorkspaceProvider>
+        <MemberSwitch />
+        <WorkspaceChatView />
+      </WorkspaceProvider>,
+    );
+  }
+
+  it("names the workspace and its member count in its heading", async () => {
+    renderWorkspaceChat();
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Workspace chat · shop · 2 members" }),
+    ).toBeInTheDocument();
+  });
+
+  it("talks to the workspace chat's routes and reads no member's config", async () => {
+    const user = userEvent.setup();
+    mockStreamTurn.mockResolvedValue(sseResponse(['event: final_answer\ndata: {"answer":"ok"}\n\n']));
+    renderWorkspaceChat();
+    await acceptConsent(user);
+    await ask(user, "which services call billing?");
+    await screen.findByText("ok");
+    expect(mockFetchThreads).toHaveBeenCalledWith(WORKSPACE_CHAT_ROUTES);
+    expect(mockStreamTurn).toHaveBeenCalledWith(
+      WORKSPACE_CHAT_ROUTES,
+      "which services call billing?",
+      null,
+      expect.anything(),
+    );
+    // The member chat's config read (`GET /api/v1/config?repo=…`) is never made:
+    // it would start a member engine, and no member's [chat] drives this chat.
+    expect(mockFetchConfig).not.toHaveBeenCalled();
+    expect(mockStreamTurn.mock.calls.some((c) => c[0] === MEMBER_CHAT_ROUTES)).toBe(false);
+  });
+
+  it("does not remount or re-read on a member switch", async () => {
+    const user = userEvent.setup();
+    renderWorkspaceChat();
+    const heading = await screen.findByRole("heading", { level: 1 });
+    await screen.findByRole("button", { name: "Start chatting" });
+    await user.click(screen.getByRole("button", { name: "switch to web" }));
+    await waitFor(() => expect(window.location.search).toBe("?repo=web"));
+    // Same element, same single read of each workspace resource.
+    expect(screen.getByRole("heading", { level: 1 })).toBe(heading);
+    expect(heading).toHaveTextContent("Workspace chat · shop · 2 members");
+    expect(mockFetchWorkspaceConfig).toHaveBeenCalledTimes(1);
+    expect(mockFetchReadRoots).toHaveBeenCalledTimes(1);
+    expect(mockFetchThreads).toHaveBeenCalledTimes(1);
+  });
+
+  it("configure-first names the workspace root and links Workspace Config — never a member's Config", async () => {
+    mockFetchWorkspaceConfig.mockResolvedValue(workspaceTier("member", "unset"));
+    renderWorkspaceChat();
+    const advisory = (await screen.findByText(/The workspace chat is not configured yet/)).closest("section");
+    expect(advisory).toHaveTextContent(
+      "The workspace chat is not configured yet for the workspace root of shop — no API key is declared there.",
+    );
+    expect(advisory).toHaveTextContent("A member's own [chat] does not configure the workspace chat.");
+    expect(advisory).toHaveTextContent("<workspace-root>/.logos/secrets.toml");
+    const link = screen.getByRole("link", { name: "Workspace Config" });
+    expect(link.getAttribute("href")?.split("?")[0]).toBe("/workspace-config");
+    expect(screen.queryByRole("link", { name: "Config" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+  });
+
+  it("names an unparsable tier as a fault, not as an unconfigured chat", async () => {
+    mockFetchWorkspaceConfig.mockResolvedValue({
+      effective_chat: null,
+      config: { error: "config.toml line 2: expected `]`" },
+      chat_key_error: null,
+    });
+    renderWorkspaceChat();
+    expect(await screen.findByText(/could not be read: config\.toml line 2/)).toBeInTheDocument();
+    expect(screen.queryByText(/not configured yet/)).toBeNull();
+    expect(screen.getByRole("link", { name: "Workspace Config" })).toBeInTheDocument();
+  });
+
+  it("names an unreadable workspace secrets.toml on the page", async () => {
+    mockFetchWorkspaceConfig.mockResolvedValue({
+      effective_chat: null,
+      config: { error: null },
+      chat_key_error: "secrets.toml line 1: invalid key",
+    });
+    renderWorkspaceChat();
+    expect(await screen.findByText(/could not be read: secrets\.toml line 1: invalid key/)).toBeInTheDocument();
+    expect(screen.queryByText(/not configured yet/)).toBeNull();
+  });
+
+  it("says, on an empty rail, that member conversations live in a --standalone serve", async () => {
+    renderWorkspaceChat();
+    const rail = await screen.findByRole("navigation", { name: "Conversations" });
+    await waitFor(() =>
+      expect(rail).toHaveTextContent(
+        "No workspace conversations yet. Member conversations are not listed here — each is available in a --standalone serve of that member.",
+      ),
+    );
+    expect(within(rail).getByText("--standalone").tagName).toBe("CODE");
+  });
+
+  it("names every member's effective read roots in the consent banner, from the engine-free read-model", async () => {
+    const roots: MemberChatReadRoots[] = [
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs"] },
+      { name: "web", policy_origin: "workspace", declared_by: "workspace", read_roots: ["shared-docs"] },
+    ];
+    mockFetchReadRoots.mockResolvedValue(roots);
+    renderWorkspaceChat();
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("from this workspace's members");
+    expect(banner).toHaveTextContent("(the openai endpoint declared at the workspace root)");
+    expect(banner).toHaveTextContent(
+      "Extra read roots: shared-docs (relative to the workspace root; read by web); ../api-docs (relative to api) — files under them, reached through each member's symlinks, can be sent too.",
+    );
+  });
+
+  it("asks again when a member's read roots change after the workspace consent (NFR-SE-07)", async () => {
+    const user = userEvent.setup();
+    const shared: MemberChatReadRoots = {
+      name: "web",
+      policy_origin: "workspace",
+      declared_by: "workspace",
+      read_roots: ["shared-docs"],
+    };
+    mockFetchReadRoots.mockResolvedValue([shared]);
+    const first = renderWorkspaceChat();
+    await acceptConsent(user);
+    await screen.findByText("CHAT");
+    first.unmount();
+
+    // The same set: the consent covers it, no banner.
+    const same = renderWorkspaceChat();
+    await screen.findByText("CHAT");
+    expect(screen.queryByRole("button", { name: "Start chatting" })).toBeNull();
+    same.unmount();
+
+    // A new root on a member: the banner is back, naming it, before anything is sent.
+    mockFetchReadRoots.mockResolvedValue([
+      shared,
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs"] },
+    ]);
+    const grown = renderWorkspaceChat();
+    expect(await screen.findByRole("button", { name: "Start chatting" })).toBeInTheDocument();
+    expect(screen.getByText(/source and graph excerpts/).closest("section")).toHaveTextContent(
+      "../api-docs (relative to api)",
+    );
+    grown.unmount();
+
+    // The same entry moving to another declaring root asks again too.
+    mockFetchReadRoots.mockResolvedValue([{ ...shared, policy_origin: "member", declared_by: "member" }]);
+    renderWorkspaceChat();
+    expect(await screen.findByRole("button", { name: "Start chatting" })).toBeInTheDocument();
+  });
+
+  it("deletes a conversation from the workspace's own store, never a member's", async () => {
+    const user = userEvent.setup();
+    mockFetchThreads.mockResolvedValue([thread(4, "Workspace four", 100)]);
+    renderWorkspaceChat();
+    await user.click(await screen.findByRole("button", { name: "Delete conversation “Workspace four”" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(mockDeleteThread).toHaveBeenCalledTimes(1));
+    expect(mockDeleteThread).toHaveBeenCalledWith(WORKSPACE_CHAT_ROUTES, 4);
+  });
+
+  it("names a member whose chat config cannot be read, with or without other roots (NFR-CC-04)", async () => {
+    const broken: MemberChatReadRoots = { name: "broken", policy_origin: null, declared_by: null, read_roots: [] };
+    mockFetchReadRoots.mockResolvedValue([broken]);
+    const alone = renderWorkspaceChat();
+    let banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent(
+      "The chat configuration of broken could not be read, so its read roots are not listed here; a source call on that member fails until it is repaired.",
+    );
+    expect(banner?.textContent).not.toMatch(/Extra read roots/);
+    alone.unmount();
+
+    mockFetchReadRoots.mockResolvedValue([
+      broken,
+      { name: "also-broken", policy_origin: null, declared_by: null, read_roots: [] },
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs"] },
+    ]);
+    renderWorkspaceChat();
+    banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent("Extra read roots: ../api-docs (relative to api)");
+    expect(banner).toHaveTextContent(
+      "The chat configuration of broken, also-broken could not be read, so their read roots are not listed here; a source call on those members fails until it is repaired.",
+    );
+  });
+
+  it("names an absolute read root as written, never as relative to its member", async () => {
+    mockFetchReadRoots.mockResolvedValue([
+      { name: "api", policy_origin: "member", declared_by: "member", read_roots: ["../api-docs", "/abs/docs"] },
+    ]);
+    renderWorkspaceChat();
+    const banner = (await screen.findByText(/source and graph excerpts/)).closest("section");
+    expect(banner).toHaveTextContent(
+      "Extra read roots: ../api-docs (relative to api); /abs/docs (read by api) — files under them",
+    );
+  });
+});
+
+describe("scope-keyed client state (S-485, FR-UI-26, NFR-SE-07)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setScopedMember(null);
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("switching member on the member chat never reopens the other member's same-numbered thread", async () => {
+    // Each member's chat is its own store, so thread 3 of `api` and thread 3 of
+    // `web` are unrelated conversations that happen to share a rowid.
+    const user = userEvent.setup();
+    stubApi();
+    window.history.replaceState({}, "", "/chat?repo=api");
+    mockFetchConfig.mockResolvedValue(configuredModel());
+    mockFetchThreads.mockResolvedValue([thread(3, "Conversation three", 100)]);
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "api's question", 1),
+      persisted("assistant", "api's answer", 2),
+    ]);
+    render(
+      <WorkspaceProvider>
+        <MemberSwitch />
+        <ShellKeyedChat />
+      </WorkspaceProvider>,
+    );
+
+    // On `api`: open thread 3, which is remembered under `api`'s scope alone.
+    await user.click(await screen.findByRole("button", { name: "Conversation three" }));
+    await screen.findByText("api's answer");
+    expect(window.localStorage.getItem("logos.chat.activeThread:member:api")).toBe("3");
+    mockFetchMessages.mockClear();
+
+    // Switch to `web` — the shell's key remounts the member chat for it.
+    await user.click(screen.getByRole("button", { name: "switch to web" }));
+    await waitFor(() => expect(mockFetchThreads).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/No messages yet/)).toBeInTheDocument();
+    // `web` reopened nothing: thread 3 was never fetched for it, nothing is open.
+    expect(mockFetchMessages).not.toHaveBeenCalled();
+    expect(screen.queryByText("api's answer")).toBeNull();
+    expect(window.localStorage.getItem("logos.chat.activeThread:member:web")).toBeNull();
+    // …and `api`'s own remembered thread survives the switch.
+    expect(window.localStorage.getItem("logos.chat.activeThread:member:api")).toBe("3");
+  });
+
+  it("the workspace chat never reopens a member's or a single root's thread 3", async () => {
+    stubApi();
+    window.localStorage.setItem("logos.chat.activeThread:member:api", "3");
+    window.localStorage.setItem("logos.chat.activeThread:single", "3");
+    window.localStorage.setItem("logos.chat.activeThread", "3");
+    mockFetchWorkspaceConfig.mockResolvedValue(workspaceTier());
+    mockFetchReadRoots.mockResolvedValue([]);
+    mockFetchThreads.mockResolvedValue([thread(3, "Workspace three", 100)]);
+    render(
+      <WorkspaceProvider>
+        <WorkspaceChatView />
+      </WorkspaceProvider>,
+    );
+    await screen.findByRole("button", { name: "Workspace three" });
+    await waitFor(() => expect(mockFetchThreads).toHaveBeenCalledTimes(1));
+    expect(mockFetchMessages).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Workspace three" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("…while the workspace chat DOES reopen its own remembered thread (the control)", async () => {
+    stubApi();
+    window.localStorage.setItem("logos.chat.activeThread:workspace", "3");
+    mockFetchWorkspaceConfig.mockResolvedValue(workspaceTier());
+    mockFetchReadRoots.mockResolvedValue([]);
+    mockFetchThreads.mockResolvedValue([thread(3, "Workspace three", 100)]);
+    mockFetchMessages.mockResolvedValue([
+      persisted("user", "workspace question", 1),
+      persisted("assistant", "workspace answer", 2),
+    ]);
+    render(
+      <WorkspaceProvider>
+        <WorkspaceChatView />
+      </WorkspaceProvider>,
+    );
+    expect(await screen.findByText("workspace answer")).toBeInTheDocument();
+    expect(mockFetchMessages).toHaveBeenCalledWith(WORKSPACE_CHAT_ROUTES, 3);
+  });
+
+  it("a member chat's consent does not carry over to the workspace chat", async () => {
+    stubApi();
+    window.localStorage.setItem("logos.chat.consent:member:api", "1");
+    window.localStorage.setItem("logos.chat.consent:single", "1");
+    mockFetchWorkspaceConfig.mockResolvedValue(workspaceTier());
+    mockFetchReadRoots.mockResolvedValue([]);
+    render(
+      <WorkspaceProvider>
+        <WorkspaceChatView />
+      </WorkspaceProvider>,
+    );
+    expect(await screen.findByRole("button", { name: "Start chatting" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Your message" })).toBeDisabled();
   });
 });

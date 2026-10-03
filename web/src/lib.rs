@@ -965,6 +965,12 @@ fn build_router(state: WebState) -> Router {
         // mounted with the other enumerated POSTs below; single-root answers all
         // three with the family's `404`.
         .route("/api/v1/workspace/config", get(api_v1::workspace_config))
+        // ── Every member's effective chat read roots (S-485, [FR-WS-34]): the
+        // Workspace Chat's consent banner names them before any outbound call.
+        // Config reads only — `resolve_chat` per member — so it warms no member
+        // engine (NFR-PE-10), which a fan-out over `GET /api/v1/config?repo=<m>`
+        // would. Mounted with or without `agents`: it reads config, not a chat.
+        .route("/api/v1/workspace/config/read-roots", get(api_v1::workspace_chat_read_roots))
         // ── The workspace manifest as an editable document (S-430, [FR-UI-38]):
         // the read half — the literal manifest, its load fingerprint and the parse
         // verdict, read at the workspace root with no engine. Its save twin is

@@ -979,9 +979,10 @@ workspace root starts no member engine and triggers no reindex.
 
 In a workspace serve (`logos serve --ui` at the workspace root, `agents` build) there
 is a second chat beside each member's: the **workspace chat**, which answers for the
-workspace first and narrows to a member when a question names one. Its in-app view
-lands with the Workspace section's chat page; until then it is reachable over the
-web API. Two things set it apart from a member's chat:
+workspace first and narrows to a member when a question names one. It is the **Chat**
+entry in the app's Workspace section, at `/workspace-chat` (see
+[usage.md](usage.md#the-workspace-chat)); in a workspace serve the member Chat is not
+offered, and `/chat` lands there. Two things set it apart from a member's chat:
 
 - **Its configuration comes from the workspace tier alone** — the
   `<workspace-root>/.logos/config.toml` `[chat]` table and
@@ -994,7 +995,8 @@ web API. Two things set it apart from a member's chat:
   retries, `history_max_turns` / `history_max_chars` — is the workspace table's too.
 - **Its history lives at the workspace root**, in `<workspace-root>/.logos/chat.db`.
   No member's `.logos/chat.db` is created or changed by a workspace turn, and the
-  member chats keep their own histories. At a workspace root that is a git working
+  member chats keep their own histories — reachable in a `--standalone` serve of the
+  member, which is a single-root serve. At a workspace root that is a git working
   tree the managed root `.gitignore` above keeps the store out of git; elsewhere the
   workspace root's own `.logos/.gitignore`, written by the first save through the
   routes above, does.
@@ -1024,10 +1026,12 @@ member engine.
 | `GET /api/v1/workspace/chat/threads` | The workspace chat's conversations, most recent first. |
 | `GET /api/v1/workspace/chat/threads/{id}` | One conversation's messages; `404` for an unknown id. |
 | `POST /api/v1/workspace/chat/threads/{id}/delete` | Deletes one conversation; `404` for an unknown id. |
+| `GET /api/v1/workspace/config/read-roots` | Every member's effective `[chat] read_roots`, with where its policy came from (`policy_origin`) and the root they resolve against (`declared_by`: `member` or `workspace`; `null` when that member's chat config cannot be read). Config reads only — no member engine is started. |
 
-The two POST routes carry the same-origin + intent-token guard, and all four answer
-`404 not a workspace` under a single-root server. A build without `agents` has no
-chat routes at all.
+The two POST routes carry the same-origin + intent-token guard, and every route above
+answers `404 not a workspace` under a single-root server. A build without `agents` has
+no chat routes at all; the read-roots route, which reads config only, is served in
+every `ui` build.
 
 ## `[wiki]` — the source-wiki generation model
 

@@ -19,7 +19,7 @@ use axum::{
     response::Response,
 };
 use http_body_util::BodyExt;
-use logos_core::federation::{discover, Backing, EngineRegistry};
+use logos_core::federation::{discover, Backing, EngineRegistry, RegistryMode};
 use rusqlite::{Connection, OpenFlags};
 use logos_core::Engine;
 use web::{IntentToken, INTENT_HEADER};
@@ -186,6 +186,10 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // must be write-free and engine-free like every GET here; its save twin sits
     // in the write list below.
     "/api/v1/workspace/manifest",
+    // S-485 / [FR-WS-34]: every member's effective chat read roots, the read the
+    // Workspace Chat's consent banner makes. Engine-free by its own contract
+    // (`the_read_roots_read_model_warms_no_member`), and walked by the same loops.
+    "/api/v1/workspace/config/read-roots",
 ];
 
 /// The **mutating** workspace routes — S-450's two config-root writes
@@ -1293,6 +1297,101 @@ async fn the_statistics_aggregate_warms_no_member() {
         (registry.engine_starts(), registry.live_read_connections()),
         before,
         "and must move neither the construction counter nor the connection count"
+    );
+}
+
+/// **The Workspace Chat's read roots, engine-free** ([S-485], [FR-WS-34],
+/// [NFR-PE-10]): per member, the effective `[chat] read_roots` and the root that
+/// declared them — the member for a member-owned policy, the workspace for an
+/// inherited one — read off `resolve_chat` alone. Served on a **lazy** registry,
+/// where building the router is what warms the default member (the shared
+/// single-root surface needs it); the GET itself must leave the resident set and
+/// the engine-start counter exactly where the build left them, as
+/// `the_statistics_aggregate_warms_no_member` holds the statistics aggregate to.
+///
+/// [S-485]: ../../docs/planning/journal.md#s-485-workspace-chat-in-the-workspace-section-and-no-member-chat-in-workspace-mode
+#[tokio::test]
+async fn the_read_roots_read_model_warms_no_member() {
+    let tmp = workspace();
+    let root = tmp.path();
+    // The workspace tier declares a policy with one read root; `api` owns its
+    // own policy and roots; `web` declares only a read root and no model, so it
+    // inherits the workspace table WHOLE — its own entry goes with its table.
+    write(root, ".logos/config.toml", "[chat]\nmodel = \"ws/model\"\nread_roots = [\"shared-docs\"]\n");
+    write(
+        &root.join("api"),
+        ".logos/config.toml",
+        "[chat]\nmodel = \"api/model\"\nread_roots = [\"../api-docs\", \"/abs/docs\"]\n",
+    );
+    write(&root.join("web"), ".logos/config.toml", "[chat]\nread_roots = [\"web-docs\"]\n");
+
+    let federation = discover(root).expect("discovery").expect("a workspace");
+    let backing = Arc::new(Backing::Federated(Box::new(EngineRegistry::<Engine>::new(
+        federation,
+        RegistryMode::Lazy,
+    ))));
+    let router = web::router_for_backing(Arc::clone(&backing)).expect("the router builds");
+    let before = {
+        let registry = backing.as_federated().expect("the federated registry");
+        assert_eq!(registry.resident_members(), ["api"], "only the router's default is warm");
+        (registry.resident_count(), registry.engine_starts())
+    };
+
+    let resp = router
+        .oneshot(get("/api/v1/workspace/config/read-roots"))
+        .await
+        .expect("route responds");
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/config/read-roots");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([
+            {
+                "name": "api",
+                "policy_origin": "member",
+                "declared_by": "member",
+                "read_roots": ["../api-docs", "/abs/docs"],
+            },
+            {
+                "name": "web",
+                "policy_origin": "workspace",
+                "declared_by": "workspace",
+                "read_roots": ["shared-docs"],
+            },
+        ]),
+        "{body}"
+    );
+
+    let registry = backing.as_federated().expect("the federated registry");
+    assert_eq!(registry.resident_members(), ["api"], "the read warmed a member (NFR-PE-10)");
+    assert_eq!(
+        (registry.resident_count(), registry.engine_starts()),
+        before,
+        "the read constructed a member engine (NFR-PE-10)"
+    );
+}
+
+/// A member whose `[chat]` cannot be read is LISTED with a `null` origin — never
+/// dropped, and never the whole read's `500`: one broken member must not hide
+/// the roots every other member discloses ([S-485], [NFR-CC-04]).
+///
+/// [S-485]: ../../docs/planning/journal.md#s-485-workspace-chat-in-the-workspace-section-and-no-member-chat-in-workspace-mode
+#[tokio::test]
+async fn a_member_whose_chat_config_cannot_be_read_is_listed_with_no_origin() {
+    let tmp = workspace();
+    let root = tmp.path();
+    write(&root.join("api"), ".logos/config.toml", "[chat]\nmodel = \"api/model\"\n");
+    write(&root.join("web"), ".logos/config.toml", "[chat\nmodel = \n");
+
+    let v = json_body(&ws_router(&tmp), "/api/v1/workspace/config/read-roots").await;
+    assert_eq!(
+        v,
+        serde_json::json!([
+            { "name": "api", "policy_origin": "member", "declared_by": "member", "read_roots": [] },
+            { "name": "web", "policy_origin": null, "declared_by": null, "read_roots": [] },
+        ])
     );
 }
 
