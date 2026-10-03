@@ -284,6 +284,19 @@ fn a_full_walk_reconcile_clears_the_mark_of_a_file_it_no_longer_finds() {
 }
 
 #[test]
+fn a_clean_full_index_clears_the_record() {
+    let (_tmp, root) = project();
+    let engine = Engine::start(&root).unwrap();
+    runtime(&engine).inject_persist_fault("src/b.rs");
+    engine.index();
+    assert_eq!(engine.status().persistence.failed_to_persist, 1);
+    runtime(&engine).clear_persist_faults();
+    let clean = engine.index();
+    assert_eq!(clean.files_indexed, 3);
+    assert!(engine.status().persistence.is_clean(), "nothing failed this index");
+}
+
+#[test]
 fn a_failed_file_deleted_from_disk_leaves_no_mark() {
     let (_tmp, root) = project();
     let engine = Engine::start(&root).unwrap();
