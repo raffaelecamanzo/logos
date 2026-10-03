@@ -1628,8 +1628,8 @@ fn is_test_marked_covers_evidence_path_and_affix_with_negatives() {
     ));
 }
 
-/// A module node takes its name from its file stem, so the name markers must not
-/// re-judge it: werkzeug's production `src/werkzeug/test.py` module is named
+/// A file's own module node takes its name from the file, so the name markers
+/// must not re-judge it: werkzeug's production `src/werkzeug/test.py` module is named
 /// `test`, and the path rule ([S-524]) says the file is production. The path
 /// rule still marks a module whose file is a test file.
 #[test]
@@ -1660,6 +1660,9 @@ fn is_test_marked_leaves_a_module_to_the_path_rule() {
     assert!(is_test_marked(&module("tests", "src/tests.rs"), &m));
     assert!(is_test_marked(&module("test_a", "tests/test_a.py"), &m));
     assert!(is_test_marked(&module("parser_test", "src/parser_test.go"), &m));
+    // An inline `mod tests` inside a production file is a declaration, not the
+    // file: the name markers still judge it.
+    assert!(is_test_marked(&module("tests", "agent-core/src/provider.rs"), &m));
 }
 
 /// `is_test` is recomputed each run from the persisted inputs, so it is

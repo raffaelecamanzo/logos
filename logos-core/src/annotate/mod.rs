@@ -546,16 +546,31 @@ fn is_test_marked(node: &AnnotationNodeRow, test_markers: &[String]) -> bool {
             .file_path
             .as_deref()
             .is_some_and(crate::navigate::is_test_path)
-        // A module node is named after its file stem, so a marker match on it
-        // would re-judge the file by name and override the path rule: werkzeug's
-        // production `src/werkzeug/test.py` (S-524). A file's test-ness is the
-        // path rule's call; the name markers judge the declarations inside it.
-        || (node.kind != NodeKind::Module
+        // A file's own module node is named after the file, so a marker match on
+        // it would re-judge the file by name and override the path rule:
+        // werkzeug's production `src/werkzeug/test.py` (S-524). A file's
+        // test-ness is the path rule's call. An inline module (Rust `mod tests`)
+        // is a declaration inside the file and stays marker-judged.
+        || (!is_file_module(node)
             && test_markers.iter().any(|marker| {
                 node.name == *marker
                 || node.name.starts_with(&format!("{marker}_"))
                     || node.name.ends_with(&format!("_{marker}"))
             }))
+}
+
+/// `true` for the module node that stands for its whole file: a `Module` whose
+/// name is the file name without its last extension (`test` for `test.py`,
+/// `foo.test` for `foo.test.ts`). An inline module such as Rust's `mod tests`
+/// inside `provider.rs` is not.
+fn is_file_module(node: &AnnotationNodeRow) -> bool {
+    node.kind == NodeKind::Module
+        && node
+            .file_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_stem())
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == node.name)
 }
 
 /// Whether `node` may take part in exact-duplicate grouping ([FR-AN-02], S-501):
