@@ -511,8 +511,12 @@ impl ContainerIndex {
     /// floored; [`None`] (n/a drop-out) when there are no class-like containers.
     ///
     /// A container is **god** when its production **bodied** method count ≥ `T_m`
-    /// **or** its line span ≥ `T_span` ([FR-QM-12], metric-semantics v7). Class-like containers are `Class` and
-    /// `Struct` (Java/Python/TS class, Rust struct+impl, Go type method-set).
+    /// **or** its line span ≥ `T_span` ([FR-QM-12], metric-semantics v7).
+    /// Class-like containers are `Class` and `Struct` (Java/Python/TS class, Rust
+    /// struct, Go type). Extraction makes the module, not the struct, the
+    /// `Contains` parent of a Rust `impl` method or a Go receiver method, so a
+    /// Rust or Go container has no method count today and is god by span alone
+    /// (an S-502 finding, pre-dating CR-163).
     ///
     /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
     pub(super) fn focus(&self, t: &Thresholds) -> Option<MetricValue> {
