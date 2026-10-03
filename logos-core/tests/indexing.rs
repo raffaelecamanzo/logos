@@ -1604,6 +1604,20 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
         ],
         "a fresh index persists the fact for every callable"
     );
+    let non_callables: Vec<_> = engine
+        .runtime()
+        .expect("runtime")
+        .submit_read(|store| store.annotation_nodes())
+        .expect("annotation snapshot")
+        .into_iter()
+        .filter(|n| !matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| (n.name, n.kind, n.has_body, n.body_tokens))
+        .collect();
+    assert!(!non_callables.is_empty(), "the fixture has classes and modules");
+    assert!(
+        non_callables.iter().all(|(_, _, b, t)| b.is_none() && t.is_none()),
+        "a non-callable carries no has-body fact: {non_callables:?}"
+    );
     drop(engine);
 
     // Back to what the release before migration 25 left on disk: the columns
