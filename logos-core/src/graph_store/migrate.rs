@@ -2826,7 +2826,7 @@ mod tests {
 
         apply_migrations_from(&mut conn, &MIGRATIONS[..25]).unwrap();
         assert_eq!(current_version(&conn).unwrap(), 25, "24 → 25, exactly one step");
-        // Forward-only: re-running the full ledger on a v25 store applies nothing.
+        // Forward-only: re-running the full ledger on a v25 store never re-applies migration 25.
         apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
         let recorded: i64 = conn
             .query_row("SELECT count(*) FROM schema_versions WHERE version = 25", [], |r| r.get(0))
