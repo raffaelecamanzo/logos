@@ -234,6 +234,62 @@ impl Foo { fn run(&self, _x: u32) {} }
     );
 }
 
+/// The symbol of the node named `name` with `kind`.
+fn symbol_of_kind<'a>(facts: &'a Facts, name: &str, kind: NodeKind) -> &'a str {
+    facts
+        .nodes
+        .iter()
+        .find(|n| n.name == name && n.kind == kind)
+        .map(|n| n.symbol.as_str())
+        .unwrap_or_else(|| panic!("no {kind:?} named {name}: {:?}", facts.nodes))
+}
+
+#[test]
+fn same_name_siblings_of_one_family_are_numbered_together_across_kinds() {
+    // S-512: a Go method and free function of one name both render the method
+    // descriptor, so they are numbered as one family in canonical (start-byte)
+    // order — the method first — rather than each taking ordinal 0.
+    let go = extract_lang(
+        "go",
+        "p/run.go",
+        "package p\n\ntype T struct{}\n\nfunc (T) F() {}\n\nfunc F() {}\n",
+    );
+    assert!(symbol_of_kind(&go, "F", NodeKind::Method).ends_with("`run.go`/F()."));
+    assert!(symbol_of_kind(&go, "F", NodeKind::Function).ends_with("`run.go`/F(1)."));
+
+    // A TS interface and class of one name share the type descriptor; the class
+    // takes the trailing meta, and its member's chain carries it.
+    let ts = extract_lang(
+        "ts",
+        "src/x.ts",
+        "export interface X { a: number }\nexport class X { b = 1; }\n",
+    );
+    assert!(symbol_of_kind(&ts, "X", NodeKind::Interface).ends_with("`x.ts`/X#"));
+    let class = symbol_of_kind(&ts, "X", NodeKind::Class);
+    assert!(class.ends_with("`x.ts`/X#1:"), "{class}");
+    assert!(
+        ts.nodes.iter().any(|n| n.symbol.as_str() == format!("{class}b.")),
+        "the merged class's member nests under its disambiguated symbol: {:?}",
+        ts.nodes
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "emitted one symbol for two declarations")]
+fn one_symbol_emitted_twice_in_a_file_trips_the_debug_assertion() {
+    // The test-build guard behind every extraction in the suite (S-512).
+    let mut facts = extract_src("src/lib.rs", "fn a() {}\n");
+    let twin = facts
+        .nodes
+        .iter()
+        .find(|n| n.name == "a")
+        .expect("fn a")
+        .clone();
+    facts.nodes.push(twin);
+    debug_assert_unique_symbols(&facts);
+}
+
 #[test]
 fn functions_carry_complexity_and_line_counts_but_types_do_not() {
     // FR-EX-03 / FR-EX-04 / UAT-EX-03.
