@@ -749,7 +749,6 @@ pub fn sync(
     let persist_failures =
         persist_dirty_set(runtime, &facts, &hash_by_rel, &added, &stored, &mut result, &mut warnings);
     files_failed.extend(persist_failures.iter().map(|(f, _)| f.path.clone()));
-    result.failed = flag_nothing_persisted(facts.len(), persist_failures.len(), &mut warnings);
 
     // Removals: a file gone from disk, or a stored/on-disk file the current config
     // no longer admits (FR-SY-07). Both route through the shared removal path.
@@ -765,6 +764,11 @@ pub fn sync(
     // this sync named, reconciled apart from the graph gates above.
     let facts_changed =
         sync_member_facts(runtime, &canon_root, &authority, &seen, scope, backfill.active)?;
+    // Nothing persisted only if no removal or member fact committed either.
+    if result.files_removed == 0 && !facts_changed {
+        result.failed =
+            flag_nothing_persisted(facts.len(), result.persist_failures.len(), &mut warnings);
+    }
 
     // CR-015 incremental resolution change-set (part 2 of 2): union the names that
     // entered the changed files (this sync's freshly extracted facts) with those

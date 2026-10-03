@@ -236,11 +236,27 @@ fn a_run_that_persists_nothing_it_reached_is_failed_on_index_and_sync() {
     assert!(synced.failed, "{synced:?}");
     assert!(synced.warnings.iter().any(|w| w.starts_with("nothing was persisted")));
 
+    // A sync whose one edit fails but whose removal commits persisted
+    // something: degraded, and it never claims "nothing was persisted".
+    runtime(&engine).clear_persist_faults();
+    assert_eq!(engine.index().files_indexed, 3, "a clean re-index");
+    write(&root, "src/b.rs", "pub fn beta_failing_edit() {}\n");
+    fs::remove_file(root.join("src/c.rs")).unwrap();
+    runtime(&engine).inject_persist_fault("src/b.rs");
+    let mixed = engine.sync(&[root.join("src/b.rs"), root.join("src/c.rs")]);
+    assert_eq!((mixed.files_removed, mixed.files_failed.len()), (1, 1), "{mixed:?}");
+    assert!(!mixed.failed, "a committed removal is something persisted: {mixed:?}");
+    assert!(
+        !mixed.warnings.iter().any(|w| w.starts_with("nothing was persisted")),
+        "{:?}",
+        mixed.warnings
+    );
+
     // Some persisted, some failed: degraded, never failed.
     runtime(&engine).clear_persist_faults();
     runtime(&engine).inject_persist_fault("src/a.rs");
     let partial = engine.index();
-    assert_eq!(partial.files_indexed, 2);
+    assert_eq!(partial.files_indexed, 1, "b.rs persists; c.rs was deleted above");
     assert!(!partial.failed, "a partial failure is degraded");
 }
 
