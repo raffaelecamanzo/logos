@@ -1340,8 +1340,8 @@ and it joins the same hashed effective set as the other keys, so editing it
 triggers the announced one-time re-baseline. It is independent of
 `clone_min_tokens`, which gates near-clone shingling only — near-clone groups
 are unchanged by it. A store indexed before the body facts were recorded keeps
-its previous duplicate verdicts until its files are re-extracted, rather than
-reading every function as bodyless.
+its previous duplicate verdicts until its files are re-extracted (the next
+`logos scan` or `logos index`), rather than reading every function as bodyless.
 
 ### `[history]` / `[coverage]` — the evidence tiers
 

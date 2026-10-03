@@ -361,7 +361,8 @@ informationally; the next one compares normally. Nothing needs re-blessing by
 hand. The upgrade also re-extracts every file once to record which callables
 have a body: until a file is re-extracted its callables count as **bodied**
 (never as bodyless), so the scores move only as the fact is recorded — run
-`logos scan` (or `logos sync`) once to score the whole tree under v7.
+`logos scan` (or `logos index`) once to score the whole tree under v7. A bare
+`logos sync` is not enough: with no paths it re-reads no file.
 
 ### Tuning the structural thresholds
 
