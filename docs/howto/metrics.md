@@ -228,9 +228,10 @@ properties follow:
 ### Applicability and the n/a drop-out
 
 Cohesion and Focus only mean something when the repo has the structures they
-measure. A repo with no classes (pure functions only), or whose only classes
-have no production methods, has nothing for LCOM4 or god-container detection to
-score. Rather than fabricate a flattering `1.0`, the engine **drops the
+measure. A repo with no class-like containers (pure functions only) has nothing
+for LCOM4 or god-container detection to score, and a repo whose classes have no
+production method **with a body** (since version 7 — e.g. only `abstract`
+declarations) has nothing for LCOM4. Rather than fabricate a flattering `1.0`, the engine **drops the
 dimension out**: it stores NULL for that metric with an `applicable = 0` flag,
 and the geometric-mean denominator shrinks accordingly — a class-less repo is
 scored on 8 or 9 dimensions, not 10.
