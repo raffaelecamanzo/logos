@@ -210,12 +210,8 @@ pub fn index(
     let persist_failures = std::mem::take(&mut outcome.failed);
     record_index_persist_failures(runtime, &persist_failures)?;
     files_failed.extend(persist_failures.iter().map(|f| f.path.clone()));
-    let failed = outcome.files == 0 && !persist_failures.is_empty();
-    if failed {
-        let warning = nothing_persisted_warning(persist_failures.len());
-        tracing::warn!("{warning}");
-        warnings.push(warning);
-    }
+    let failed =
+        flag_nothing_persisted(outcome.files + persist_failures.len(), persist_failures.len(), &mut warnings);
 
     // CR-004 / FR-SY-07: a full index reconciles the stored set to *exactly* the
     // freshly-discovered candidates — index upserts the discovered files and
@@ -557,13 +553,6 @@ pub fn sync(
         .map(|r| (r.path, r.content_hash))
         .collect();
     let backfill = DeclaredTypesBackfill::for_sync(runtime, registry, scope)?;
-    // The persist-failure record as this sync found it (S-513): what it may
-    // clear once those files persist, or leave the graph. Almost always empty.
-    let prior_failures: Vec<String> = runtime
-        .submit_read(|store| store.persist_failures())?
-        .into_iter()
-        .map(|r| r.path)
-        .collect();
 
     let mut loaded: Vec<LoadedFile> = Vec::new();
     let mut added: HashSet<String> = HashSet::new();
@@ -756,38 +745,11 @@ pub fn sync(
             ));
     crate::extract::doc::enrich::promote_facts(&mut facts, enrich);
 
-    // S-513 / FR-EH-05: each file persists in its own transaction, so one that
-    // cannot be persisted rolls back alone. A file the graph already held keeps
-    // its last good facts — and its old hash, so the next reconcile retries it —
-    // and is recorded stale; a new one stays absent. Every other file persists.
-    let mut persist_failures: Vec<(PersistFailure, bool)> = Vec::new();
-    for f in &facts {
-        let hash = hash_by_rel.get(f.path.as_str()).copied().unwrap_or("");
-        match persist_one(runtime, f, hash, true, &mut warnings) {
-            Ok(_) if added.contains(&f.path) => result.files_added += 1,
-            Ok(_) => result.files_modified += 1,
-            Err(err) => {
-                let failure = PersistFailure {
-                    path: f.path.clone(),
-                    reason: format!("{err:#}"),
-                };
-                let stale = stored.contains_key(&f.path);
-                let warning = persist_failure_warning(&failure, stale);
-                tracing::warn!("{warning}");
-                warnings.push(warning);
-                files_failed.push(failure.path.clone());
-                persist_failures.push((failure, stale));
-            }
-        }
-    }
-    // Files reached persistence and none persisted: a correctness failure
-    // (ADR-14) the CLI exits 1 on.
-    if !facts.is_empty() && persist_failures.len() == facts.len() {
-        let warning = nothing_persisted_warning(facts.len());
-        tracing::warn!("{warning}");
-        warnings.push(warning);
-        result.failed = true;
-    }
+    // S-513 / FR-EH-05: each file persists in its own transaction and fails alone.
+    let persist_failures =
+        persist_dirty_set(runtime, &facts, &hash_by_rel, &added, &stored, &mut result, &mut warnings);
+    files_failed.extend(persist_failures.iter().map(|(f, _)| f.path.clone()));
+    result.failed = flag_nothing_persisted(facts.len(), persist_failures.len(), &mut warnings);
 
     // Removals: a file gone from disk, or a stored/on-disk file the current config
     // no longer admits (FR-SY-07). Both route through the shared removal path.
@@ -796,14 +758,7 @@ pub fn sync(
         result.files_removed += 1;
     }
 
-    record_sync_persist_failures(
-        runtime,
-        &prior_failures,
-        &persist_failures,
-        &files_failed,
-        &seen,
-        scope,
-    )?;
+    record_sync_persist_failures(runtime, &persist_failures, &files_failed, &seen, scope)?;
     result.persist_failures = persist_failures.into_iter().map(|(f, _)| f).collect();
 
     // Member-local facts (S-462 manifests, S-472 Avro schemas) among every path
@@ -1569,18 +1524,21 @@ fn record_index_persist_failures(runtime: &Runtime, failed: &[PersistFailure]) -
 /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
 fn record_sync_persist_failures(
     runtime: &Runtime,
-    prior: &[String],
     failures: &[(PersistFailure, bool)],
     files_failed: &[String],
     seen: &HashSet<String>,
     scope: SyncScope,
 ) -> Result<()> {
+    // The record as this sync found it — nothing but this function writes it
+    // during a sync, so reading it now sees the state before this run. Almost
+    // always empty.
+    let prior = runtime.submit_read(|store| store.persist_failures())?;
     let still_failing: HashSet<&str> = files_failed.iter().map(String::as_str).collect();
     let clear: Vec<String> = prior
-        .iter()
+        .into_iter()
+        .map(|r| r.path)
         .filter(|p| !still_failing.contains(p.as_str()))
-        .filter(|p| seen.contains(*p) || scope == SyncScope::FullWalk)
-        .cloned()
+        .filter(|p| seen.contains(p) || scope == SyncScope::FullWalk)
         .collect();
     if clear.is_empty() && failures.is_empty() {
         return Ok(());
@@ -2041,6 +1999,63 @@ fn persist_failure_warning(failure: &PersistFailure, stale: bool) -> String {
         "{}: could not be persisted and was rolled back alone; {state} ({})",
         failure.path, failure.reason
     )
+}
+
+/// Persist a sync's dirty set one file per transaction (S-513, [FR-EH-05]),
+/// counting each persisted file into `result` as added or modified, and return
+/// the files that failed with whether each is **stale** — the graph already
+/// held it, so its rollback left its last good facts (and its old hash, so the
+/// next reconcile retries it) in place. A file the graph did not hold stays
+/// absent. Every failure is named in a warning.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+fn persist_dirty_set(
+    runtime: &Runtime,
+    facts: &[Facts],
+    hash_by_rel: &HashMap<&str, &str>,
+    added: &HashSet<String>,
+    stored: &HashMap<String, Option<String>>,
+    result: &mut SyncResult,
+    warnings: &mut Vec<String>,
+) -> Vec<(PersistFailure, bool)> {
+    let mut failures = Vec::new();
+    for f in facts {
+        let hash = hash_by_rel.get(f.path.as_str()).copied().unwrap_or("");
+        match persist_one(runtime, f, hash, true, warnings) {
+            Ok(_) if added.contains(&f.path) => result.files_added += 1,
+            Ok(_) => result.files_modified += 1,
+            Err(err) => {
+                let failure = PersistFailure {
+                    path: f.path.clone(),
+                    reason: format!("{err:#}"),
+                };
+                let stale = stored.contains_key(&f.path);
+                let warning = persist_failure_warning(&failure, stale);
+                tracing::warn!("{warning}");
+                warnings.push(warning);
+                failures.push((failure, stale));
+            }
+        }
+    }
+    failures
+}
+
+/// Whether a run is a correctness failure because files reached persistence
+/// and none persisted ([FR-EH-05], [ADR-14]) — `attempted` files reached it and
+/// `failed` of them failed — and, if so, say so in `warnings`. A run that
+/// reached persistence with nothing (zero admission, [FR-IX-13]) is not one.
+///
+/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
+/// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
+/// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
+fn flag_nothing_persisted(attempted: usize, failed: usize, warnings: &mut Vec<String>) -> bool {
+    let nothing = attempted > 0 && failed == attempted;
+    if nothing {
+        let warning = nothing_persisted_warning(attempted);
+        tracing::warn!("{warning}");
+        warnings.push(warning);
+    }
+    nothing
 }
 
 /// The warning a run that persisted none of the `attempted` files it reached
