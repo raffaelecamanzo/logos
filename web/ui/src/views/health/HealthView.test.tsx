@@ -567,6 +567,10 @@ describe("HealthView offender states (S-499, FR-QM-15 / NFR-CC-04)", () => {
         expect(dd[name].textContent).toMatch(/no applicable construct in this codebase/i);
         expect(dd[name].textContent).not.toMatch(NOT_RECORDED);
         expect(dd[name].textContent).not.toMatch(NONE_FLAGGED);
+        // The summary tag too: an n/a dimension must never read "none flagged" (a clean result).
+        const summary = dd[name].querySelector("summary") as HTMLElement;
+        expect(within(summary).getByText("n/a")).toBeInTheDocument();
+        expect(summary.textContent).not.toMatch(/none flagged|not recorded/i);
       }
       for (const name of ["Nesting", "Conciseness", "Uniqueness"]) {
         expect(dd[name].textContent).toMatch(recorded ? NONE_FLAGGED : NOT_RECORDED);
