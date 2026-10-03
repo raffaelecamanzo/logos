@@ -13,6 +13,59 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An index never silently empties.** Same-named declarations of different kinds —
+  a Go function and method `F`, a TypeScript `interface X` and `class X`, a Scala trait
+  and its companion `object`, a C `typedef struct S S` — collided on one symbol and
+  aborted the whole index while `index` exited `0` with 0 files. They now get distinct
+  symbols (siblings are numbered per descriptor family), and a declaration whose name
+  the parser could not recover emits nothing. zap, ollama, preact, gitbucket, ox,
+  ccache, nlohmann/json, redis and libuv now index every admitted file. Symbols of
+  Rust and Java code are unchanged.
+- **One file that cannot be persisted fails alone.** Each file persists under its own
+  savepoint: a failing file is rolled back alone, listed in `files_failed` with its
+  reason (`persist_failures`), and named in a warning, while every other file is
+  stored. On `sync` and in the `serve` watcher a failing file keeps its last good facts
+  and is marked stale until it persists. `status` and `scan` report
+  `persistence: {failed_to_persist, stale_files}` when anything remains. An
+  `index`/`sync` that reached files and persisted none exits `1`; an index that
+  admits no file still exits `0`.
+- **No declaration takes a parse-error region's span.** Error recovery no longer lifts
+  a declaration into an enclosing ERROR node (ccache's `parse_umask` spanned a whole
+  627-line file at complexity 117; it now spans its own declarator), and a C++ class
+  head stranded in an ERROR is recovered (nlohmann/json's `class exception`). The
+  file's partial-extraction warning counts what was affected:
+  `N declaration(s) truncated and M skipped at a parse error`.
+- **Test code is classified by where it lives.** A `test`/`tests`/`spec` directory
+  under a production source root (`src/main/…`, a Gradle `*Main` source set) is
+  production; `src/it/` and Gradle `src/*Test/` source sets are test code; a
+  `*.test.*` tag needs a three-part file name (a bare `test.py` is not a test); a PHP
+  `test*` method is a test only in a `*TestCase` subclass or a test file; and a
+  module node is no longer re-judged by the test-name markers.
+
+### Changed
+
+- **Every language states its cross-file reach.** `logos languages` (and `--json`)
+  carries `reach.level` and `reach.cross_file` for each code language: `resolved`
+  (Rust, Java), `partial` (Go, TypeScript/TSX, Kotlin — imports only), `same-file`
+  (Python, PHP, C#, Ruby, Scala) and `symbols` (C, C++). The manual's table and the
+  README are generated from the same declarations, and a fixture per language fails
+  the build if a declaration over- or under-claims.
+- **A bare-name `node` lookup prefers code.** When a bare name matches several nodes,
+  `node` resolves to a code type, else a callable, else another code declaration, else
+  a module, else a configuration artifact, else a documentation node, and lists what it
+  passed over as `alternatives` (CLI and MCP). Qualified and SCIP lookups are
+  unchanged. `callers`, `callees`, `impact` and `explore` still resolve a bare name by
+  lowest node id.
+
+### Upgrade notes
+
+- **Store migration 27** (forward-only) adds the `persist_failures` table. The first
+  run of this release on an existing project migrates `.logos/logos.db`; Logos 1.9.0
+  cannot open the migrated store afterwards (exit 3). Back up `.logos/` first if you
+  may need to downgrade.
+
 ## [1.9.0] — 2026-10-03
 
 ### Added
