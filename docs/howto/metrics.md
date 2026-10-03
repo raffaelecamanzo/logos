@@ -347,8 +347,12 @@ declarations scored LCOM4 23 and was a god container at 106 lines; 26 four-line
 constant overrides counted as copy-paste. On a codebase with mappers, generated
 interfaces or polymorphic constant overrides, Redundancy, Cohesion and Focus
 typically **rise** under v7 and the top offenders change to genuinely
-duplicated or tangled code. A repo without such code scores as before. The
-Uniqueness value is unchanged; only its offender list is reordered (largest
+duplicated or tangled code. Redundancy moves in any language, not only where
+there is declarative code: every short copy-identical function (fewer than
+`duplicate_min_tokens` normalized tokens — generated accessors, one-line
+delegates, constant returns) stops counting as a duplicate. A repo with no
+bodyless callables and no exact duplicate shorter than the floor scores as
+before. The Uniqueness value is unchanged; only its offender list is reordered (largest
 duplicated mass first).
 
 **What you see on upgrade.** The first `gate` (or `session_start`) after the
