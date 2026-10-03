@@ -5458,13 +5458,15 @@ public interface IPort { void Send(string m); }\n}\n";
 fn cpp_pure_virtuals_and_prototypes_record_no_body_and_definitions_do() {
     let src = "class Shape {\npublic:\n    virtual double area() const = 0;\n    virtual const char* label() const { return \"shape\"; }\n    void declared();\n};\n\
 int proto(int x);\n\
-int helper(int x) { return x + 1; }\n";
+int helper(int x) { return x + 1; }\n\
+int guarded(int x) try { return x; } catch (...) { return 0; }\n";
     let facts = extract_lang("cpp", "src/shape.cpp", src);
     assert!(!has_body(&facts, "area"), "a pure-virtual member has no body");
     assert!(!has_body(&facts, "declared"), "an in-class prototype has no body");
     assert!(!has_body(&facts, "proto"), "a free prototype has no body");
     assert!(has_body(&facts, "label"), "an in-class definition has a body");
     assert!(has_body(&facts, "helper"), "a free definition has a body");
+    assert!(has_body(&facts, "guarded"), "a function-try-block is a body");
 }
 
 /// TypeScript's bodyless callables are separate node kinds — an overload is a
