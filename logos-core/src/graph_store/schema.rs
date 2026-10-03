@@ -2297,8 +2297,10 @@ CREATE INDEX idx_declared_types_schema ON declared_types(schema_id);
 ///    with no default, a C++ pure-virtual or prototype; from the language's
 ///    declared `body_node_kinds`. Read by duplicate eligibility, LCOM4 and the
 ///    Focus method count.
-/// 2. **`nodes.body_tokens`** — that body's normalized token count, the stream
-///    the near-clone shingles k-gram (`0` when there is no body); the input to
+/// 2. **`nodes.body_tokens`** — that body's normalized token count, by the
+///    normalization the near-clone shingles use and over the same subtree
+///    wherever the declaration names a `body` field (`0` when there is no
+///    body); the input to
 ///    the exact-duplicate `duplicate_min_tokens` floor (S-501). The `shingles`
 ///    table holds winnowed hashes, not a count, so nothing persisted before
 ///    could stand in for it.

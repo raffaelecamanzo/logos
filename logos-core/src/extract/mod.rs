@@ -171,9 +171,12 @@ pub struct FunctionMetrics {
     ///
     /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
     pub has_body: bool,
-    /// The normalized token count of that body ([`shingle::token_count`]) — the
-    /// stream the near-clone shingles k-gram, so the exact-duplicate floor
-    /// (`duplicate_min_tokens`, S-501) and `clone_min_tokens` are comparable.
+    /// The normalized token count of that body ([`shingle::token_count`] over
+    /// [`shape::callable_body`]). Where the declaration names a `body` field
+    /// this is the very stream the near-clone shingles k-gram, so the
+    /// exact-duplicate floor (`duplicate_min_tokens`, S-501) and
+    /// `clone_min_tokens` are comparable; a Kotlin `function_body` or a TS
+    /// declarator's arrow body is counted too, though shingles read neither.
     /// `0` when [`has_body`](Self::has_body) is `false`.
     pub body_tokens: u32,
 }
