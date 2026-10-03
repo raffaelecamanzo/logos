@@ -1320,6 +1320,31 @@ mod tests {
             [CrossFileRelation::Calls, CrossFileRelation::TypeRelations]
         );
 
+        // The whole relation vocabulary parses and prints under the spelling the
+        // docs and `logos languages` use — including the two no language declares
+        // yet, which no fixture would otherwise pin.
+        let every = format!(
+            "{GOOD}\n[reach]\nlevel = \"resolved\"\ncross_file = [\"calls\", \"imports\", \
+             \"type_relations\", \"member_access\", \"routes\"]\n"
+        );
+        let reach = PluginManifest::parse("x/plugin.toml", &every)
+            .unwrap()
+            .reach
+            .unwrap();
+        let spelled: Vec<&str> = reach.cross_file.iter().map(|r| r.as_str()).collect();
+        assert_eq!(
+            spelled,
+            ["calls", "imports", "type_relations", "member_access", "routes"]
+        );
+        for (level, spelling) in [
+            (ReachLevel::Resolved, "resolved"),
+            (ReachLevel::Partial, "partial"),
+            (ReachLevel::SameFile, "same-file"),
+            (ReachLevel::Symbols, "symbols"),
+        ] {
+            assert_eq!(level.as_str(), spelling);
+        }
+
         let scala = format!("{GOOD}\n[reach]\nlevel = \"same-file\"\n");
         let reach = PluginManifest::parse("scala/plugin.toml", &scala)
             .unwrap()

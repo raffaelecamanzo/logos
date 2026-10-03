@@ -54,19 +54,26 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use logos_core::model::EdgeKind;
 use logos_core::models::quality::{LanguageDescriptor, LanguageReach};
 use logos_core::Engine;
 use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
-/// Edge-kind discriminants (frozen — `model::kinds::EdgeKind`) per relation of
-/// the `[reach]` vocabulary. `Instantiates` (7) rides with `type_relations`: a
+/// Edge kinds per relation of the `[reach]` vocabulary, spelled through
+/// [`EdgeKind`] so a renumbered or mistyped kind cannot leave a relation
+/// measured against nothing. `Instantiates` rides with `type_relations`: a
 /// construction names the type it builds.
-const CALLS: &[i64] = &[2];
-const IMPORTS: &[i64] = &[3];
-const TYPE_RELATIONS: &[i64] = &[5, 6, 7, 8];
-const MEMBER_ACCESS: &[i64] = &[13];
-const ROUTES: &[i64] = &[9];
+const CALLS: &[i64] = &[EdgeKind::Calls as i64];
+const IMPORTS: &[i64] = &[EdgeKind::Imports as i64];
+const TYPE_RELATIONS: &[i64] = &[
+    EdgeKind::Implements as i64,
+    EdgeKind::Extends as i64,
+    EdgeKind::Instantiates as i64,
+    EdgeKind::TypeUses as i64,
+];
+const MEMBER_ACCESS: &[i64] = &[EdgeKind::Accesses as i64];
+const ROUTES: &[i64] = &[EdgeKind::RoutesTo as i64];
 
 const RELATIONS: &[(&str, &[i64])] = &[
     ("calls", CALLS),
@@ -81,7 +88,16 @@ const RELATIONS: &[(&str, &[i64])] = &[
 /// structure rather than a reference, and calls (2), whose same-file binding C
 /// and C++ do perform — their *cross-file* calls are covered by the declared-set
 /// comparison above.
-const NON_CALL_RELATIONAL_KINDS: &[i64] = &[3, 4, 5, 6, 7, 8, 9, 13];
+const NON_CALL_RELATIONAL_KINDS: &[i64] = &[
+    EdgeKind::Imports as i64,
+    EdgeKind::References as i64,
+    EdgeKind::Implements as i64,
+    EdgeKind::Extends as i64,
+    EdgeKind::Instantiates as i64,
+    EdgeKind::TypeUses as i64,
+    EdgeKind::RoutesTo as i64,
+    EdgeKind::Accesses as i64,
+];
 
 fn write_tree(root: &Path, files: &[(&str, &str)]) {
     for (rel, contents) in files {
@@ -364,16 +380,16 @@ fn a_symbols_declaration_is_refused_when_a_relation_binds() {
         BTreeMap::from([(("c".to_string(), kind), (same, cross))])
     };
     // A same-file import, type relation, member access or route: refused.
-    for kind in [3, 4, 5, 6, 7, 8, 9, 13] {
+    for kind in NON_CALL_RELATIONAL_KINDS.iter().copied() {
         let why = symbols_violation(&locality(kind, 1, 0), "c")
             .unwrap_or_else(|| panic!("a same-file edge of kind {kind} passed as `symbols`"));
         assert!(why.contains("declared `symbols`"), "{why}");
     }
     // Same-file calls and containment are what C and C++ really bind: tolerated.
-    assert_eq!(symbols_violation(&locality(2, 3, 0), "c"), None);
-    assert_eq!(symbols_violation(&locality(1, 9, 0), "c"), None);
+    assert_eq!(symbols_violation(&locality(EdgeKind::Calls as i64, 3, 0), "c"), None);
+    assert_eq!(symbols_violation(&locality(EdgeKind::Contains as i64, 9, 0), "c"), None);
     // Another language's edges are not this language's.
-    assert_eq!(symbols_violation(&locality(3, 1, 0), "cpp"), None);
+    assert_eq!(symbols_violation(&locality(EdgeKind::Imports as i64, 1, 0), "cpp"), None);
 
     // Through the whole check, on a real fixture: Rust binds across files, so a
     // `symbols` declaration is refused (by the cross-file comparison, first).
