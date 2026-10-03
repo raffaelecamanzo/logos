@@ -501,7 +501,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Everything about one symbol: kind, location, signature, annotations, immediate edges (FR-NV-04). A bare name that matches several nodes resolves to a code type, else a callable, else a module, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact."
+        description = "Everything about one symbol: kind, location, signature, annotations, immediate edges (FR-NV-04). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact."
     )]
     async fn node(
         &self,
