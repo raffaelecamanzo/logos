@@ -830,6 +830,23 @@ mod tests {
         );
     }
 
+    /// The two token floors default to the same value (50), so the default
+    /// round-trip above cannot tell them apart: a cross-wired
+    /// `duplicate_min_tokens`/`clone_min_tokens` projection would pass it. Distinct
+    /// values pin each field to its own key.
+    #[test]
+    fn metric_threshold_defaults_keep_the_two_token_floors_apart() {
+        let want = crate::metrics::Thresholds {
+            clone_min_tokens: 80,
+            duplicate_min_tokens: 7,
+            ..crate::metrics::Thresholds::default()
+        };
+        let projection = MetricThresholdDefaults::from_thresholds(want);
+        assert_eq!(projection.clone_min_tokens, 80);
+        assert_eq!(projection.duplicate_min_tokens, 7);
+        assert_eq!(projection.to_thresholds(), want);
+    }
+
     #[test]
     fn read_documents_fails_loud_on_an_invalid_on_disk_file() {
         // A present-but-invalid file fails through the load path (exit 2), exactly
