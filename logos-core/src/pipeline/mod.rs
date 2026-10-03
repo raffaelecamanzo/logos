@@ -2104,9 +2104,10 @@ fn nothing_persisted_warning(attempted: usize) -> String {
 /// This is the **incremental `sync`** persist unit: one transaction per file so
 /// each file's capture-before-delete is atomic ([ADR-10], [NFR-PE-03]) — and so
 /// a file that cannot be persisted rolls back alone, keeping its last good
-/// facts (S-513, [FR-EH-05]). An `Err` is that file's failure: its transaction
-/// rolled back and nothing else was touched, so the caller records it and moves
-/// on. A full index instead batches files into bounded chunks via
+/// facts (S-513, [FR-EH-05]). An `Err` is that file's failure — its transaction
+/// rolled back and nothing else was touched — or a fault of the writer itself,
+/// which then fails every remaining file too, so the run reads as having
+/// persisted nothing. Either way the caller records it and moves on. A full index instead batches files into bounded chunks via
 /// [`persist_facts_chunked`] (CR-057, [FR-IX-08]).
 ///
 /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
