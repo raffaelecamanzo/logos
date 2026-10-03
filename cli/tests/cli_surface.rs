@@ -208,6 +208,45 @@ fn success_exits_zero_with_machine_readable_json() {
     assert!(json.get("languages").is_some(), "read-model shape: {json}");
 }
 
+/// S-570 / FR-PL-09: `logos languages --json` carries `reach` for every code
+/// language — Scala `same-file` with an empty set — and omits it from the
+/// documentation and artifact plugins, which bind no code reference.
+#[test]
+fn languages_json_carries_each_code_languages_declared_reach() {
+    let tmp = TempDir::new().unwrap();
+    let out = logos(tmp.path(), &["languages", "--json"]);
+    assert_eq!(exit_code(&out), 0);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = json["languages"].as_array().expect("languages array");
+
+    let mut code = 0;
+    for row in rows {
+        let is_code = row["capabilities"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|c| c == "symbols"));
+        if is_code {
+            code += 1;
+            let level = row["reach"]["level"].as_str();
+            assert!(
+                matches!(level, Some("resolved" | "partial" | "same-file" | "symbols")),
+                "{} carries a reach level: {row}",
+                row["name"]
+            );
+            assert!(row["reach"]["cross_file"].is_array(), "{row}");
+        } else {
+            assert!(row.get("reach").is_none(), "{} has no reach: {row}", row["name"]);
+        }
+    }
+    assert!(code >= 1, "the default build lists code languages: {json}");
+
+    if let Some(scala) = rows.iter().find(|r| r["name"] == "scala") {
+        assert_eq!(
+            scala["reach"],
+            serde_json::json!({ "level": "same-file", "cross_file": [] })
+        );
+    }
+}
+
 #[test]
 fn zero_admission_index_warns_but_still_exits_zero() {
     // FR-IX-13 AC1 + FR-CL-03: at a parent folder of sibling git repositories

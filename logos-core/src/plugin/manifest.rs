@@ -134,6 +134,100 @@ pub enum ImportSpecifier {
     Path,
 }
 
+/// How far a code language's references bind **across a file boundary** — the
+/// one-word summary of a `[reach]` declaration ([FR-PL-09], [CR-180]).
+///
+/// `references` as a capability says a plugin *captures* references; it says
+/// nothing about whether they bind to a declaration in another file. The level
+/// is the honest answer, declared where the plugin is, so `logos languages`, the
+/// manual and the README never present a same-file language with the capability
+/// of Java ([NFR-CC-04]).
+///
+/// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+/// [CR-180]: ../../../docs/requests/CR-180-scala-is-declared-as-limited-support-and-every-language-declares-its-reach.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReachLevel {
+    /// Calls, imports and type relations bind across files.
+    Resolved,
+    /// Some relations bind across files, not all.
+    Partial,
+    /// References bind only inside the file that wrote them.
+    SameFile,
+    /// Declarations only: nothing binds across files (a call to a function of the
+    /// same file may still bind).
+    Symbols,
+}
+
+impl ReachLevel {
+    /// The wire / manual spelling — the one the descriptor, `logos languages`
+    /// and the generated manual table all print.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReachLevel::Resolved => "resolved",
+            ReachLevel::Partial => "partial",
+            ReachLevel::SameFile => "same-file",
+            ReachLevel::Symbols => "symbols",
+        }
+    }
+}
+
+/// A relation a plugin can bind across a file boundary — the vocabulary of
+/// [`Reach::cross_file`] ([FR-PL-09]). Declared order is the display order.
+///
+/// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossFileRelation {
+    /// A call edge to a callable declared in another file.
+    Calls,
+    /// An import edge to a module or declaration in another file.
+    Imports,
+    /// An `extends`/`implements`/type-use edge to a type declared in another file.
+    TypeRelations,
+    /// A member-access edge (a field read) to a declaration in another file.
+    MemberAccess,
+    /// A route edge from a framework route to a handler in another file.
+    Routes,
+}
+
+impl CrossFileRelation {
+    /// The wire / manual spelling (`type_relations`, …).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CrossFileRelation::Calls => "calls",
+            CrossFileRelation::Imports => "imports",
+            CrossFileRelation::TypeRelations => "type_relations",
+            CrossFileRelation::MemberAccess => "member_access",
+            CrossFileRelation::Routes => "routes",
+        }
+    }
+}
+
+/// The `[reach]` descriptor table: which relations this code language binds
+/// across files, and the level that summarises them ([FR-PL-09], [CR-180]).
+///
+/// Declared, then **verified**: `tests/reach_declared.rs` indexes a fixture per
+/// language and fails when a declared relation binds nothing across files, or an
+/// undeclared one does — so a story that changes a language's reach updates this
+/// table in the same change.
+///
+/// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+/// [CR-180]: ../../../docs/requests/CR-180-scala-is-declared-as-limited-support-and-every-language-declares-its-reach.md
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reach {
+    /// The summary level.
+    pub level: ReachLevel,
+    /// The relations bound across a file boundary. Empty for `same-file` and
+    /// `symbols`, non-empty for `resolved` and `partial`.
+    #[serde(default)]
+    pub cross_file: Vec<CrossFileRelation>,
+}
+
 /// The `[package_modules]` descriptor sub-table: this language's module path is
 /// **package-shaped** under the named source roots ([CR-149], [FR-RS-01]).
 ///
@@ -292,6 +386,13 @@ pub struct PluginManifest {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     #[serde(default)]
     pub package_modules: Option<PackageModules>,
+    /// The cross-file reach this code language declares ([`Reach`], [FR-PL-09]).
+    /// `None` for the documentation and artifact classes, which bind no code
+    /// reference at all.
+    ///
+    /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+    #[serde(default)]
+    pub reach: Option<Reach>,
     /// The tree-sitter ABI version this grammar was generated against. Asserted
     /// against the compiled grammar at load ([FR-PL-02], `abi::assert_abi`).
     pub abi_version: usize,
@@ -876,6 +977,9 @@ impl PluginManifest {
                 return bail(detail);
             }
         }
+        if let Err(detail) = validate_reach(self.reach.as_ref()) {
+            return bail(detail);
+        }
         // Every declared capability must have a query backing it, so a `logos
         // languages` capability claim can never be a query the engine cannot
         // run.
@@ -967,6 +1071,42 @@ impl PluginManifest {
     }
 }
 
+
+/// The `[reach]` table's rules ([FR-PL-09]): the level and the relation set must
+/// agree, so a descriptor cannot declare `same-file` and still list `calls`, or
+/// `resolved` and list nothing — and a relation is named once.
+///
+/// Its own function for the reason [`validate_package_modules`] is, and it takes
+/// the `Option` so the call site is one branch: two at the call site pushed
+/// [`PluginManifest::validate`] to 51, past the `max_cc = 50` rule.
+///
+/// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+fn validate_reach(reach: Option<&Reach>) -> Result<(), String> {
+    let Some(reach) = reach else {
+        return Ok(());
+    };
+    let binds_across_files = matches!(reach.level, ReachLevel::Resolved | ReachLevel::Partial);
+    if binds_across_files && reach.cross_file.is_empty() {
+        return Err(format!(
+            "`[reach]` level '{}' must list at least one `cross_file` relation",
+            reach.level.as_str()
+        ));
+    }
+    if !binds_across_files && !reach.cross_file.is_empty() {
+        return Err(format!(
+            "`[reach]` level '{}' binds nothing across files, so `cross_file` must be empty",
+            reach.level.as_str()
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(dup) = reach.cross_file.iter().find(|r| !seen.insert(**r)) {
+        return Err(format!(
+            "`[reach]` `cross_file` names '{}' twice",
+            dup.as_str()
+        ));
+    }
+    Ok(())
+}
 
 /// The `[package_modules]` table's rules (S-465, CR-149): at least one root to
 /// strip, and each root matchable as whole path segments — so an entry that
@@ -1153,6 +1293,82 @@ mod tests {
         assert!(m.specifier_extensions.is_empty());
         // …and the default module model: no package-shaped path (CR-149).
         assert!(m.package_modules.is_none());
+        // …and no declared reach: only a code language declares one (FR-PL-09).
+        assert!(m.reach.is_none());
+    }
+
+    /// A `[reach]` table parses into its level and relation set, and a level
+    /// that disagrees with its set — or a typo — fails loudly by file
+    /// ([FR-PL-09]).
+    ///
+    /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+    #[test]
+    fn a_reach_declaration_parses_and_its_level_must_agree_with_its_relations() {
+        let none = PluginManifest::parse("x/plugin.toml", GOOD).unwrap();
+        assert!(none.reach.is_none(), "a descriptor with no `[reach]` has none");
+
+        let java = format!(
+            "{GOOD}\n[reach]\nlevel = \"resolved\"\ncross_file = [\"calls\", \"type_relations\"]\n"
+        );
+        let reach = PluginManifest::parse("java/plugin.toml", &java)
+            .unwrap()
+            .reach
+            .unwrap();
+        assert_eq!(reach.level, ReachLevel::Resolved);
+        assert_eq!(
+            reach.cross_file,
+            [CrossFileRelation::Calls, CrossFileRelation::TypeRelations]
+        );
+
+        // The whole relation vocabulary parses and prints under the spelling the
+        // docs and `logos languages` use — including the two no language declares
+        // yet, which no fixture would otherwise pin.
+        let every = format!(
+            "{GOOD}\n[reach]\nlevel = \"resolved\"\ncross_file = [\"calls\", \"imports\", \
+             \"type_relations\", \"member_access\", \"routes\"]\n"
+        );
+        let reach = PluginManifest::parse("x/plugin.toml", &every)
+            .unwrap()
+            .reach
+            .unwrap();
+        let spelled: Vec<&str> = reach.cross_file.iter().map(|r| r.as_str()).collect();
+        assert_eq!(
+            spelled,
+            ["calls", "imports", "type_relations", "member_access", "routes"]
+        );
+        for (level, spelling) in [
+            (ReachLevel::Resolved, "resolved"),
+            (ReachLevel::Partial, "partial"),
+            (ReachLevel::SameFile, "same-file"),
+            (ReachLevel::Symbols, "symbols"),
+        ] {
+            assert_eq!(level.as_str(), spelling);
+        }
+
+        let scala = format!("{GOOD}\n[reach]\nlevel = \"same-file\"\n");
+        let reach = PluginManifest::parse("scala/plugin.toml", &scala)
+            .unwrap()
+            .reach
+            .unwrap();
+        assert_eq!(reach.level, ReachLevel::SameFile);
+        assert!(reach.cross_file.is_empty());
+
+        for bad in [
+            "level = \"same-file\"\ncross_file = [\"calls\"]",
+            "level = \"symbols\"\ncross_file = [\"imports\"]",
+            "level = \"resolved\"",
+            "level = \"partial\"\ncross_file = []",
+            "level = \"partial\"\ncross_file = [\"calls\", \"calls\"]",
+            "level = \"full\"",
+            "level = \"partial\"\ncross_file = [\"call\"]",
+            "level = \"same-file\"\nrelations = []",
+        ] {
+            let toml = format!("{GOOD}\n[reach]\n{bad}\n");
+            let err = PluginManifest::parse("go/plugin.toml", &toml)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("go/plugin.toml"), "{bad}: {err}");
+        }
     }
 
     /// A package-shaped module path is descriptor data (CR-149, NFR-MA-01):

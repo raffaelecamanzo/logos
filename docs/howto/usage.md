@@ -22,6 +22,45 @@ duplicates, export status) — one command, exit 0 on success.
 and never reconcile per call — they are fast point queries. Re-run
 `logos sync` (or let the MCP watcher do it) after editing.
 
+## Language support: what each language binds across files
+
+Every code language extracts symbols, but they do not all **bind references
+across a file boundary**, and the questions that need that — `callers`,
+`impact`, `precedent`, `affected` — are only as good as it is. Each language
+plugin declares its reach in its `plugin.toml` (`[reach]`), a fixture per language
+verifies the declaration, and `logos languages` prints it (`reach.level` and
+`reach.cross_file` under `--json`). The table below is generated from those
+descriptors and a test fails when it drifts.
+
+<!-- reach:begin (generated from plugins/*/plugin.toml — see logos-core/tests/reach_docs.rs) -->
+| Language | Reach | Bound across files |
+|---|---|---|
+| Java | `resolved` | `calls`, `imports`, `type_relations` |
+| Rust | `resolved` | `calls`, `imports`, `type_relations` |
+| Go | `partial` | `calls`, `imports` |
+| Kotlin | `partial` | `imports` |
+| TSX (incl. JSX) | `partial` | `calls`, `imports` |
+| TypeScript (incl. JavaScript) | `partial` | `calls`, `imports` |
+| C# | `same-file` | none |
+| PHP | `same-file` | none |
+| Python | `same-file` | none |
+| Ruby | `same-file` | none |
+| Scala | `same-file` | none |
+| C | `symbols` | none |
+| C++ | `symbols` | none |
+<!-- reach:end -->
+
+- `resolved` — calls, imports and type relations bind across files.
+- `partial` — some relations bind across files, not all (see the last column).
+- `same-file` — references bind only inside the file that wrote them, so a
+  `callers` answer never crosses a file in that language.
+- `symbols` — declarations are extracted; nothing binds across files.
+
+This is what the plugin is built to do. What a given repository actually
+achieves is measured per language, with its denominator, in
+`logos status --json` (`resolution_by_language`) — read that before trusting a
+relational answer.
+
 ## Navigating the graph
 
 ```bash

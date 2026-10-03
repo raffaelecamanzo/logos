@@ -79,6 +79,15 @@ framework_detectors = ["express", "next", "react"]
 # split across two tree-sitter `Language`s (ADR-09).
 http_client_detectors = ["axios", "fetch"]
 
+# Declared cross-file reach (S-570, CR-180, FR-PL-09): some relations bind
+# across files, not all.
+# Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
+# declared relation binds nothing across files or an undeclared one does — a
+# change that alters this language's reach updates this table in the same change.
+[reach]
+level = "partial"
+cross_file = ["calls", "imports"]
+
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"

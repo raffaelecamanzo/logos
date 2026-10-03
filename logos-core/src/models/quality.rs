@@ -2056,6 +2056,29 @@ pub struct LanguageDescriptor {
     /// Capabilities whose active query is sourced from an on-disk override
     /// rather than the embedded default (FR-PL-04). Empty when none.
     pub overridden_capabilities: Vec<String>,
+    /// The cross-file reach the plugin declares ([FR-PL-09], [CR-180]): what its
+    /// references bind **across files**, as opposed to what it captures. `None`
+    /// (and absent from the payload) for the documentation and artifact classes,
+    /// which bind no code reference.
+    ///
+    /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+    /// [CR-180]: ../../../docs/requests/CR-180-scala-is-declared-as-limited-support-and-every-language-declares-its-reach.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<LanguageReach>,
+}
+
+/// A code language's declared cross-file reach, as `logos languages` states it
+/// ([FR-PL-09]).
+///
+/// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct LanguageReach {
+    /// `resolved`, `partial`, `same-file` or `symbols`.
+    pub level: String,
+    /// The relations bound across a file boundary, drawn from `calls`,
+    /// `imports`, `type_relations`, `member_access` and `routes`; empty for
+    /// `same-file` and `symbols`.
+    pub cross_file: Vec<String>,
 }
 
 /// A grammar skipped at load, with the reason (FR-PL-03).
