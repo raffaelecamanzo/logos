@@ -954,8 +954,9 @@ class Split {
             .hydrate(Granularity::ExcludeContains)
             .expect("dependency view hydrates");
         let rt = engine.runtime().unwrap();
-        let (_, model) = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
-            .expect("snapshot runs");
+        let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+            .expect("snapshot runs")
+            .metrics;
 
         let cohesion = model.cohesion.expect("two classes with methods → Cohesion applies");
         assert!(

@@ -54,6 +54,7 @@ use serde::Serialize;
 
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, RefForm};
 use crate::models::navigation::LanguageCount;
+use crate::models::quality::{Offender, WorstOffenders};
 
 /// The `project_metadata` key under which the admission-config fingerprint is
 /// stored (CR-004, [ADR-20], [FR-SY-07]).
@@ -780,6 +781,12 @@ pub struct LatestMetricSnapshot {
     pub focus_applicable: Option<bool>,
     pub uniqueness_raw: Option<f64>,
     pub uniqueness_normalized: Option<f64>,
+    /// The worst-offender lists persisted **with this snapshot** ([FR-QM-15]),
+    /// read by its id. `recorded` is `false` — every list empty — on a snapshot
+    /// written before migration 26, which recorded none.
+    ///
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+    pub worst_offenders: WorstOffenders,
 }
 
 /// The fields needed to insert a `metric_snapshots` row (S-018, [FR-QM-07]).
@@ -1971,8 +1978,12 @@ pub trait GraphStore {
     /// [CR-018], S-082). Distinct from [`metric_snapshots`](Self::metric_snapshots)
     /// (the whole gate/evolution series, original five dimensions only).
     ///
+    /// Carries the worst-offender lists persisted with that row ([FR-QM-15]),
+    /// read by the row's own id so the pair never mixes two snapshots.
+    ///
     /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
     /// [CR-018]: ../../../docs/requests/CR-018-web-dashboard-write-on-read.md
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     fn latest_metric_snapshot(&self) -> Result<Option<LatestMetricSnapshot>>;
 
     /// The singleton `rules_cache` row, or `None` when no `rules.toml` parse
@@ -3532,15 +3543,18 @@ impl GraphStore for SqliteGraphStore {
                     conciseness_raw, conciseness_normalized, \
                     cohesion_raw, cohesion_normalized, cohesion_applicable, \
                     focus_raw, focus_normalized, focus_applicable, \
-                    uniqueness_raw, uniqueness_normalized, modularity_applicable \
+                    uniqueness_raw, uniqueness_normalized, modularity_applicable, \
+                    id, offenders_recorded \
              FROM metric_snapshots ORDER BY id DESC LIMIT 1",
         )?;
-        stmt.query_row([], |row| {
+        let latest = stmt.query_row([], |row| {
             // `*_applicable` is stored as INTEGER 0/1/NULL → Option<bool>.
             let opt_bool = |idx: usize| -> rusqlite::Result<Option<bool>> {
                 Ok(row.get::<_, Option<i64>>(idx)?.map(|n| n != 0))
             };
-            Ok(LatestMetricSnapshot {
+            let id: i64 = row.get(30)?;
+            let recorded = row.get::<_, Option<i64>>(31)?.is_some();
+            let snapshot = LatestMetricSnapshot {
                 node_count: row.get(0)?,
                 edge_count: row.get(1)?,
                 function_count: row.get(2)?,
@@ -3571,10 +3585,28 @@ impl GraphStore for SqliteGraphStore {
                 uniqueness_raw: row.get(27)?,
                 uniqueness_normalized: row.get(28)?,
                 modularity_applicable: opt_bool(29)?,
-            })
-        })
-        .optional()
-        .context("querying the latest metric snapshot")
+                worst_offenders: WorstOffenders {
+                    recorded,
+                    ..WorstOffenders::default()
+                },
+            };
+            Ok((id, snapshot))
+        });
+        let Some((id, mut snapshot)) = latest
+            .optional()
+            .context("querying the latest metric snapshot")?
+        else {
+            return Ok(None);
+        };
+        // The lists are read by the id the row above was read under, never by
+        // "latest" again. A snapshot and its offender rows are written in one
+        // transaction and never mutated, so this pairs the row with exactly its
+        // own lists even when a `scan` commits a newer snapshot in between —
+        // the single-read property the Health bundle relies on (CR-135 §3.2).
+        if snapshot.worst_offenders.recorded {
+            read_snapshot_offenders(&self.conn, id, &mut snapshot.worst_offenders)?;
+        }
+        Ok(Some(snapshot))
     }
 
     fn rules_cache(&self) -> Result<Option<RulesCacheRow>> {
@@ -3788,6 +3820,43 @@ impl SqliteGraphStore {
             })
             .collect()
     }
+}
+
+/// Fill `into` with the offender rows persisted under `snapshot_id`
+/// ([FR-QM-15]), each list in rank order — the order it was computed in. A row
+/// whose dimension is outside
+/// [`WorstOffenders::DIMENSIONS`] is skipped: migration 26 leaves the column
+/// open for further lists ([CR-164]), and none of them belongs to these five.
+///
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+/// [CR-164]: ../../../docs/requests/CR-164-insight-layer-ranks-what-to-fix-first.md
+fn read_snapshot_offenders(
+    conn: &Connection,
+    snapshot_id: i64,
+    into: &mut WorstOffenders,
+) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT dimension, name, file, line, detail FROM metric_snapshot_offenders \
+         WHERE snapshot_id = ?1 ORDER BY dimension, rank",
+    )?;
+    let rows = stmt.query_map([snapshot_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            Offender {
+                name: row.get(1)?,
+                file: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                line: row.get(3)?,
+                detail: row.get(4)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (dimension, offender) = row.context("reading a snapshot offender row")?;
+        if let Some(list) = into.list_mut(&dimension) {
+            list.push(offender);
+        }
+    }
+    Ok(())
 }
 
 /// The first identifier-ish token of a free-text query — the FTS5 prefix-match
@@ -4640,17 +4709,36 @@ impl BatchWriter<'_> {
 
     // ── Metric-snapshot primitives (S-018, [FR-QM-07]) ───────────────────────
 
-    /// Append one `metric_snapshots` row, returning its id.
+    /// Append one `metric_snapshots` row together with the worst-offender lists
+    /// the same computation produced, returning the row's id.
     ///
     /// The single write the metrics engine performs ([FR-QM-07]). The table is
     /// append-only by contract — past snapshots are never mutated, so this is
-    /// deliberately the only snapshot primitive.
+    /// deliberately the only snapshot primitive. The lists are a **required**
+    /// argument ([FR-QM-15]): there is no way to append a snapshot without
+    /// saying what it found, so every caller — `scan`, `gate`, `session_start`,
+    /// `session_end` — persists its lists, and they land in the caller's batch
+    /// transaction with the row (one `submit_write`, [NFR-RA-07]). The row is
+    /// stamped `offenders_recorded = 1`, even when every list is empty: that is
+    /// a recorded-empty result, not an unrecorded one.
     ///
     /// # Errors
-    /// Returns an error if a CHECK constraint fires or I/O fails.
+    /// Returns an error if `offenders` is not a recorded set (the
+    /// [`WorstOffenders::default`] "not recorded" value would otherwise persist
+    /// as a recorded-empty result), if a CHECK constraint fires, or if I/O fails.
     ///
     /// [FR-QM-07]: ../../../docs/specs/requirements/FR-QM-07.md
-    pub fn insert_metric_snapshot(&self, snapshot: &NewMetricSnapshot<'_>) -> Result<i64> {
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+    /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
+    pub fn insert_metric_snapshot(
+        &self,
+        snapshot: &NewMetricSnapshot<'_>,
+        offenders: &WorstOffenders,
+    ) -> Result<i64> {
+        anyhow::ensure!(
+            offenders.recorded,
+            "refusing to persist offender lists that were never computed as a recorded set"
+        );
         self.conn
             .execute(
                 "INSERT INTO metric_snapshots \
@@ -4666,10 +4754,11 @@ impl BatchWriter<'_> {
                   cohesion_raw, cohesion_normalized, cohesion_applicable, \
                   focus_raw, focus_normalized, focus_applicable, \
                   uniqueness_raw, uniqueness_normalized, \
-                  thresholds_hash, aggregate_signal, modularity_applicable) \
+                  thresholds_hash, aggregate_signal, modularity_applicable, \
+                  offenders_recorded) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
                          ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, \
-                         ?30, ?31, ?32, ?33)",
+                         ?30, ?31, ?32, ?33, 1)",
                 rusqlite::params![
                     snapshot.created_at,
                     snapshot.commit_sha,
@@ -4707,7 +4796,29 @@ impl BatchWriter<'_> {
                 ],
             )
             .context("inserting metric snapshot")?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO metric_snapshot_offenders \
+             (snapshot_id, dimension, rank, name, file, line, detail) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for (dimension, list) in offenders.lists() {
+            // Stored in computed order: rank is the 1-based list position, so
+            // the read's `ORDER BY rank` returns the list exactly as computed.
+            for (rank, o) in (1_i64..).zip(list) {
+                stmt.execute(rusqlite::params![
+                    id,
+                    dimension,
+                    rank,
+                    o.name,
+                    (!o.file.is_empty()).then_some(o.file.as_str()),
+                    o.line,
+                    o.detail,
+                ])
+                .context("inserting a snapshot offender row")?;
+            }
+        }
+        Ok(id)
     }
 
     // ── Governance primitives (S-020, [FR-GV-01..05]) ────────────────────────

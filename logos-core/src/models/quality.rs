@@ -825,7 +825,12 @@ pub struct ScanResult {
     /// dimensions (FR-QM-09..13, CR-005): the top-N offending functions/containers
     /// per dimension, deterministically ordered and capped. Empty lists when a
     /// dimension has no offenders (or dropped out); the review-phase visibility
-    /// the `scan` surface gains.
+    /// the `scan` surface gains. Persisted with the snapshot ([FR-QM-15]), so the
+    /// read-only twin carries the same lists — or
+    /// [`recorded: false`](WorstOffenders::recorded) for a snapshot that
+    /// recorded none.
+    ///
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
     pub worst_offenders: WorstOffenders,
     /// The **non-gated temporal tier** (CR-006, [FR-GH-07], [BR-26]): per-file
     /// churn / co-change / defect-heuristic columns, explicitly labeled as
@@ -892,9 +897,29 @@ pub struct TemporalTier {
 /// act on the signal; they never enter the aggregate or the gate (report detail
 /// only, exactly as `doc_gaps` is advisory).
 ///
+/// Every metric snapshot persists the lists it computed ([FR-QM-15]), so the
+/// read-only Health bundle projects them from the snapshot it reads.
+/// [`recorded`](Self::recorded) is what separates the two empties a reader
+/// would otherwise conflate: a list that is empty because nothing crossed a
+/// threshold, and a list that is empty because the snapshot was written before
+/// offenders were persisted ([NFR-CC-04]). The serialized shape is
+/// `{"recorded": bool, "nesting": [..], "conciseness": [..], "cohesion": [..],
+/// "focus": [..], "uniqueness": [..]}`; with `recorded: false` every list is
+/// `[]` and means nothing.
+///
+/// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct WorstOffenders {
+    /// `true` when these lists are the ones the snapshot's computation produced
+    /// — freshly computed by `scan`, or read back from a snapshot that persisted
+    /// them. `false` (the default) is **"offenders not recorded"**: a snapshot
+    /// written before [FR-QM-15], or no snapshot at all. Never inferred from
+    /// the lists being empty.
+    ///
+    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
+    pub recorded: bool,
     /// Deeply-nested production functions (`max_nesting_depth ≥ T_nest`),
     /// deepest first (FR-QM-09).
     pub nesting: Vec<Offender>,
@@ -910,6 +935,40 @@ pub struct WorstOffenders {
     /// Production functions in a near-clone group (`clone_group IS NOT NULL`),
     /// grouped by clone-group id (FR-QM-13).
     pub uniqueness: Vec<Offender>,
+}
+
+impl WorstOffenders {
+    /// The five dimension names, in canonical order — the persisted
+    /// `metric_snapshot_offenders.dimension` values and the serialized field
+    /// names, spelled once.
+    pub const DIMENSIONS: [&'static str; 5] =
+        ["nesting", "conciseness", "cohesion", "focus", "uniqueness"];
+
+    /// Each list paired with its [`DIMENSIONS`](Self::DIMENSIONS) name, in
+    /// canonical order.
+    pub fn lists(&self) -> [(&'static str, &[Offender]); 5] {
+        let [nesting, conciseness, cohesion, focus, uniqueness] = Self::DIMENSIONS;
+        [
+            (nesting, &self.nesting),
+            (conciseness, &self.conciseness),
+            (cohesion, &self.cohesion),
+            (focus, &self.focus),
+            (uniqueness, &self.uniqueness),
+        ]
+    }
+
+    /// The list a persisted dimension name belongs to, or `None` for a name
+    /// outside [`DIMENSIONS`](Self::DIMENSIONS).
+    pub fn list_mut(&mut self, dimension: &str) -> Option<&mut Vec<Offender>> {
+        match dimension {
+            "nesting" => Some(&mut self.nesting),
+            "conciseness" => Some(&mut self.conciseness),
+            "cohesion" => Some(&mut self.cohesion),
+            "focus" => Some(&mut self.focus),
+            "uniqueness" => Some(&mut self.uniqueness),
+            _ => None,
+        }
+    }
 }
 
 /// One worst-offender entry: the offending symbol and a deterministic,

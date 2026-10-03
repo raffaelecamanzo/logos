@@ -1622,9 +1622,13 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
+    // Migration 26 (S-498, the snapshot offender table and its flag column) is
+    // inverted first, since the reopen re-applies it too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
+        "DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
+         DELETE FROM schema_versions WHERE version = 26; \
+         ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
          DELETE FROM schema_versions WHERE version = 25; PRAGMA user_version = 24;",
     )
     .expect("downgrade the store to v24");
