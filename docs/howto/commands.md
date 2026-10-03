@@ -2029,6 +2029,24 @@ deterministically ordered, top-10 list of the specific functions/containers
 dragging each score (report-only; it never gates). Constraints declared in
 `rules.toml` are not evaluated here — use `check` for that.
 
+Since logos 1.9.0 the lists are **persisted with the snapshot** — by `scan`,
+`gate`, `session_start` and `session_end` alike — so the read-only Health page
+(`GET /api/v1/health`) shows exactly what the snapshot computed. `worst_offenders`
+carries a `recorded` boolean, always present:
+
+```json
+"worst_offenders": {
+  "recorded": true,
+  "nesting": [{"name": "beta_depth_six", "file": "src/lib.rs", "line": 14, "detail": "nesting depth 6"}],
+  "conciseness": [], "cohesion": [], "focus": [], "uniqueness": []
+}
+```
+
+`recorded: true` with empty lists is a recorded-empty result (nothing flagged).
+`recorded: false` means the snapshot predates 1.9.0 or the store was never
+scanned: its empty lists carry no meaning. A Uniqueness entry's `detail` reads
+`clone group #G · N members × L lines`, heaviest group (members × mean lines) first.
+
 ### `check [--rules <FILE>] [--allow-no-rules]`
 
 ```bash

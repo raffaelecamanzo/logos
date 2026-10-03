@@ -737,6 +737,23 @@ what the comparison establishes. Where the ordering cannot be established at all
 **neither** `current` nor a stale date. The de-indexed branch is unchanged and
 takes precedence, and no fourth state was added.
 
+**Worst offenders are the ones the snapshot computed (since logos 1.9.0).** Each
+Health drill-down (Nesting, Conciseness, Cohesion, Focus, Uniqueness) lists the
+offenders the last `scan`, `gate` or session snapshot persisted, in the order it
+computed them, read in the same single snapshot read as the signal and gate band.
+The page never recomputes them. A drill-down renders one of three states and never
+infers the state from an empty list:
+
+| State | What the drill-down shows |
+|---|---|
+| Offenders recorded | The offender table, in persisted order |
+| Recorded, none flagged | *No offenders flagged within thresholds.* — the only state that means a clean result |
+| Not recorded | *Offenders were not recorded for this snapshot — run `logos scan`.* — a snapshot written before 1.9.0, or a store never scanned |
+
+A not-applicable dimension (Cohesion or Focus with no classes) keeps its `n/a`
+rendering in every state. After upgrading, the existing snapshot reads "not
+recorded" until the next `logos scan`.
+
 **The same release stops the dashboard inventing an age it cannot establish.**
 Every relative age the SPA renders (`just now`, `5m ago`, `6d ago`) is derived
 from a unix stamp, and one of its inputs — `status.last_sync_at` — is a **file
