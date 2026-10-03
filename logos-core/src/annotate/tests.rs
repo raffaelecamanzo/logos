@@ -884,6 +884,30 @@ fn an_ineligible_function_does_not_pair_with_an_eligible_one() {
     }
 }
 
+/// A floor edit changes `is_duplicate` with no source change, so it must reach
+/// the incremental path a `sync` takes: the whole-graph recompute sees the new
+/// floor and the changed-verdict selector writes the flip on untouched nodes —
+/// and back again when the floor is restored.
+#[test]
+fn an_edited_floor_flips_verdicts_through_an_incremental_run() {
+    let (rt, _dir) = runtime();
+    let a = seed_body_node(&rt, 1, "first", "fp-short", Some(true), Some(12));
+    let b = seed_body_node(&rt, 2, "second", "fp-short", Some(true), Some(12));
+    let dup = |rt: &Runtime| {
+        let snap = snapshot(rt);
+        (row(&snap, a).is_duplicate, row(&snap, b).is_duplicate)
+    };
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    assert_eq!(dup(&rt), (Some(false), Some(false)), "12 tokens < the default 50");
+
+    run(&rt, &rules_with_duplicate_floor(5), &entries(), &markers(), &reach(), true).unwrap();
+    assert_eq!(dup(&rt), (Some(true), Some(true)), "an incremental run honours the lowered floor");
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), true).unwrap();
+    assert_eq!(dup(&rt), (Some(false), Some(false)), "and flips back when the floor is restored");
+}
+
 /// The floor moves `is_duplicate` only: near-clone grouping (FR-AN-06) is
 /// byte-identical under any `duplicate_min_tokens`.
 #[test]
