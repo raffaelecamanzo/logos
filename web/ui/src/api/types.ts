@@ -171,6 +171,11 @@ export interface NodeInfo {
   /** The resolved node, or `null` for an unknown symbol. */
   node: NodeDetail | null;
   suggestions: string[];
+  /**
+   * The other nodes a bare name matched, in preference order (code type,
+   * callable, module, doc). Absent unless a bare name matched more than one node.
+   */
+  alternatives?: SymbolRef[];
   warnings: string[];
 }
 
