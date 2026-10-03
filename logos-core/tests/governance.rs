@@ -1028,6 +1028,47 @@ fn editing_clone_min_tokens_re_baselines_once_then_compares() {
     );
 }
 
+/// S-501 / FR-GV-10: the exact-duplicate floor re-baselines like the near-clone
+/// keys — editing `duplicate_min_tokens` through the engine moves the effective
+/// hash, announces the reset once, and the next gate compares normally.
+#[test]
+fn editing_duplicate_min_tokens_re_baselines_once_then_compares() {
+    let tmp = thresholds_project("[metric_thresholds]\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+
+    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    assert!(saved.saved && saved.passed);
+
+    // Edit `duplicate_min_tokens` away from its default of 50.
+    write(
+        tmp.path(),
+        ".logos/rules.toml",
+        "[metric_thresholds]\nduplicate_min_tokens = 5\n",
+    );
+
+    let first = engine.gate(None, false, true).expect("gate runs");
+    assert!(
+        first.passed && first.saved,
+        "a re-tuned duplicate_min_tokens re-baselines, never fails: {}",
+        first.message
+    );
+    assert!(
+        first
+            .message
+            .contains("baseline reset: metric thresholds changed"),
+        "the duplicate_min_tokens re-baseline is announced (BR-25): {}",
+        first.message
+    );
+
+    let second = engine.gate(None, false, true).expect("gate runs");
+    assert!(
+        second.passed && !second.saved && !second.message.contains("baseline reset"),
+        "no second reset — the hashes now match: {}",
+        second.message
+    );
+}
+
 // ── CR-005 §3.2 / FR-QM-09..13: worst-offender detail in scan output ─────────
 
 /// `scan` carries the per-dimension worst-offender lists, deterministically:

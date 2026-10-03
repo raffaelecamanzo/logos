@@ -267,6 +267,8 @@ pub struct MetricThresholdDefaults {
     pub clone_similarity: f64,
     /// `clone_min_tokens` (same name on both sides).
     pub clone_min_tokens: i64,
+    /// `duplicate_min_tokens` (same name on both sides).
+    pub duplicate_min_tokens: i64,
 }
 
 impl MetricThresholdDefaults {
@@ -290,6 +292,7 @@ impl MetricThresholdDefaults {
             god_span,
             clone_similarity,
             clone_min_tokens,
+            duplicate_min_tokens,
         } = t;
         Self {
             nesting_depth: nest,
@@ -300,6 +303,7 @@ impl MetricThresholdDefaults {
             god_span,
             clone_similarity,
             clone_min_tokens,
+            duplicate_min_tokens,
         }
     }
 
@@ -318,6 +322,7 @@ impl MetricThresholdDefaults {
             god_span: self.god_span,
             clone_similarity: self.clone_similarity,
             clone_min_tokens: self.clone_min_tokens,
+            duplicate_min_tokens: self.duplicate_min_tokens,
         }
     }
 }
@@ -788,6 +793,10 @@ mod tests {
         assert_eq!(
             docs.defaults.rules.metric_thresholds.clone_min_tokens,
             d.clone_min_tokens
+        );
+        assert_eq!(
+            docs.defaults.rules.metric_thresholds.duplicate_min_tokens,
+            d.duplicate_min_tokens
         );
 
         // [constraints] carry the curated recommended baselines, never the live

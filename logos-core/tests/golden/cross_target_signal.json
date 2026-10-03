@@ -1,6 +1,6 @@
 {
   "schema": "logos.golden-signal/v1",
-  "aggregate_signal": 8627,
+  "aggregate_signal": 9833,
   "metrics": [
     {
       "name": "modularity",
@@ -24,8 +24,8 @@
     },
     {
       "name": "redundancy",
-      "raw": "0.600000",
-      "normalized": "0.400000"
+      "raw": "0.000000",
+      "normalized": "1.000000"
     }
   ],
   "counts": {

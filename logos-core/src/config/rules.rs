@@ -350,8 +350,9 @@ impl Constraints {
 /// (`T_nest`), the three brain-method thresholds (`T_cc`/`T_loc`/`T_bn`), the
 /// two god-container thresholds (`T_m`/`T_span`), and — since [CR-013] — the two
 /// near-clone parameters feeding Uniqueness ([FR-QM-13]): `clone_similarity`
-/// ([FR-AN-06]) and `clone_min_tokens` ([FR-EX-09]). [`MetricThresholds::effective`]
-/// composes these onto the documented defaults to build the effective set whose
+/// ([FR-AN-06]) and `clone_min_tokens` ([FR-EX-09]) — and, since S-501, the
+/// exact-duplicate token floor `duplicate_min_tokens` ([FR-AN-02]).
+/// [`MetricThresholds::effective`] composes these onto the documented defaults to build the effective set whose
 /// hash gates the baseline.
 ///
 /// `Eq` is not derived: `clone_similarity` is an `f64` (the same reason
@@ -359,6 +360,7 @@ impl Constraints {
 ///
 /// [`Thresholds::default`]: crate::metrics::Thresholds
 /// [FR-QM-13]: ../../../../docs/specs/requirements/FR-QM-13.md
+/// [FR-AN-02]: ../../../../docs/specs/requirements/FR-AN-02.md
 /// [FR-AN-06]: ../../../../docs/specs/requirements/FR-AN-06.md
 /// [FR-EX-09]: ../../../../docs/specs/requirements/FR-EX-09.md
 /// [FR-QM-14]: ../../../../docs/specs/requirements/FR-QM-14.md
@@ -405,6 +407,17 @@ pub struct MetricThresholds {
     ///
     /// [FR-EX-09]: ../../../../docs/specs/requirements/FR-EX-09.md
     pub clone_min_tokens: Option<i64>,
+    /// The normalized-token floor a function's body needs to be an **exact
+    /// duplicate** ([FR-AN-02], [S-501], [CR-163]); default 50, a positive
+    /// integer. Beside the has-body requirement it keeps a four-line constant
+    /// override, or a bodyless declaration, from counting as copy-paste. A
+    /// non-positive value fails validation (exit 2). Distinct from
+    /// `clone_min_tokens`, which gates near-clone shingling only.
+    ///
+    /// [FR-AN-02]: ../../../../docs/specs/requirements/FR-AN-02.md
+    /// [S-501]: ../../../../docs/planning/journal.md#s-501-exact-duplicates-require-a-body-and-a-token-floor
+    /// [CR-163]: ../../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+    pub duplicate_min_tokens: Option<i64>,
 }
 
 impl MetricThresholds {
@@ -440,6 +453,9 @@ impl MetricThresholds {
             god_span: self.god_span.unwrap_or(d.god_span),
             clone_similarity: self.clone_similarity.unwrap_or(d.clone_similarity),
             clone_min_tokens: self.clone_min_tokens.unwrap_or(d.clone_min_tokens),
+            duplicate_min_tokens: self
+                .duplicate_min_tokens
+                .unwrap_or(d.duplicate_min_tokens),
         }
     }
 }
@@ -808,6 +824,8 @@ impl Rules {
             // CR-013: the near-clone token floor is a positive integer, validated
             // on the same exit-2 path as the structural thresholds.
             ("clone_min_tokens", mt.clone_min_tokens),
+            // S-501: the exact-duplicate token floor, same exit-2 path.
+            ("duplicate_min_tokens", mt.duplicate_min_tokens),
         ] {
             if let Some(v) = value {
                 if v <= 0 {
@@ -1190,6 +1208,54 @@ mod tests {
             ..Default::default()
         };
         assert!(ok.validate().is_ok(), "clone_min_tokens = 1 is positive");
+    }
+
+    /// S-501 / FR-AN-02: `duplicate_min_tokens` must be a positive integer, on
+    /// the same exit-2 path as `clone_min_tokens`.
+    #[test]
+    fn validate_rejects_non_positive_duplicate_min_tokens() {
+        for bad in [0, -1, -50] {
+            let rules = Rules {
+                metric_thresholds: MetricThresholds {
+                    duplicate_min_tokens: Some(bad),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let err = rules.validate().unwrap_err();
+            assert!(
+                matches!(&err, crate::config::ConfigError::InvalidValue { key, .. } if key == "metric_thresholds.duplicate_min_tokens"),
+                "duplicate_min_tokens = {bad} is rejected"
+            );
+            assert_eq!(err.exit_code(), 2);
+        }
+
+        let ok = Rules {
+            metric_thresholds: MetricThresholds {
+                duplicate_min_tokens: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(ok.validate().is_ok(), "duplicate_min_tokens = 1 is positive");
+    }
+
+    /// S-501: `effective` resolves `duplicate_min_tokens` to its default of 50 when
+    /// omitted, honours an override, and keeps it independent of `clone_min_tokens`.
+    #[test]
+    fn effective_resolves_duplicate_min_tokens_default_and_override() {
+        assert_eq!(MetricThresholds::default().effective().duplicate_min_tokens, 50);
+
+        let t = MetricThresholds {
+            duplicate_min_tokens: Some(5),
+            ..Default::default()
+        }
+        .effective();
+        assert_eq!(t.duplicate_min_tokens, 5);
+        assert_eq!(
+            t.clone_min_tokens, 50,
+            "tuning the exact-duplicate floor leaves the near-clone floor alone"
+        );
     }
 
     /// CR-013: `MetricThresholds::effective` resolves the documented defaults for

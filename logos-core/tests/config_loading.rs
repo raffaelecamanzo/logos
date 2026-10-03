@@ -417,6 +417,7 @@ nesting_depth = 5
 god_methods = 30
 clone_similarity = 0.9
 clone_min_tokens = 80
+duplicate_min_tokens = 12
 ",
     );
     let rules = config::load_rules(&path).unwrap();
@@ -429,6 +430,8 @@ clone_min_tokens = 80
     // CR-013: the two near-clone keys parse under [metric_thresholds].
     assert_eq!(rules.metric_thresholds.clone_similarity, Some(0.9));
     assert_eq!(rules.metric_thresholds.clone_min_tokens, Some(80));
+    // S-501: the exact-duplicate floor parses beside them.
+    assert_eq!(rules.metric_thresholds.duplicate_min_tokens, Some(12));
     // An omitted key stays None (the default is applied downstream).
     assert_eq!(rules.metric_thresholds.brain_complexity, None);
 }
@@ -463,6 +466,24 @@ fn non_positive_clone_min_tokens_fails_exit_2() {
     assert!(matches!(err, ConfigError::InvalidValue { .. }));
     assert_eq!(err.exit_code(), 2);
     assert!(err.to_string().contains("metric_thresholds.clone_min_tokens"));
+}
+
+/// S-501 / FR-AN-02: a non-positive `duplicate_min_tokens` fails loud at load
+/// (exit 2), naming the key.
+#[test]
+fn non_positive_duplicate_min_tokens_fails_exit_2() {
+    let dir = tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "rules.toml",
+        "[metric_thresholds]\nduplicate_min_tokens = 0\n",
+    );
+    let err = config::load_rules(&path).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidValue { .. }));
+    assert_eq!(err.exit_code(), 2);
+    assert!(err
+        .to_string()
+        .contains("metric_thresholds.duplicate_min_tokens"));
 }
 
 /// CR-005: a `max_clone_ratio` outside `[0.0, 1.0]` fails loud at load (exit 2),

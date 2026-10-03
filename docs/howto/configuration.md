@@ -1288,6 +1288,7 @@ god_methods      = 20    # Focus: method-count above which a container is "god"
 god_span         = 500   # Focus: line-span above which a container is "god"
 clone_similarity = 0.85  # Uniqueness: Jaccard similarity above which two functions near-clone (0–1]
 clone_min_tokens = 50    # Uniqueness: minimum function token-length to be near-clone-eligible
+duplicate_min_tokens = 50  # Redundancy: minimum body token-length to be an exact duplicate
 ```
 
 A brain method (Conciseness) must trip **all three** of `brain_complexity`,
@@ -1323,6 +1324,24 @@ so tuning either one re-baselines the gate exactly like editing `nesting_depth`
 — no rebuild, never a silent shift. With the defaults (`0.85` / `50`) the
 effective-thresholds hash is unchanged, so an untuned project does not
 re-baseline on upgrade.
+
+`duplicate_min_tokens` tunes the **Redundancy** dimension and the
+`max_duplicates` budget — the *exact*-duplicate detector, not the near-clone one.
+A function is an exact duplicate only if it **has a body** and that body has at
+least `duplicate_min_tokens` normalized tokens (identifiers, literals and
+comments are normalized away, so this counts structure: operators, keywords and
+punctuation). The comparison is inclusive. It exists so that the 26
+four-line `getId() { return 7; }` overrides of one interface method, or a pair
+of abstract/interface declarations, do not read as copy-paste; two renamed
+copies of a real 14-line function still do. Lowering it (say to `5`) makes short
+bodies count again; a bodyless declaration is never a duplicate, whatever the
+value. It must be a positive integer (non-positive fails at load with exit 2),
+and it joins the same hashed effective set as the other keys, so editing it
+triggers the announced one-time re-baseline. It is independent of
+`clone_min_tokens`, which gates near-clone shingling only — near-clone groups
+are unchanged by it. A store indexed before the body facts were recorded keeps
+its previous duplicate verdicts until its files are re-extracted, rather than
+reading every function as bodyless.
 
 ### `[history]` / `[coverage]` — the evidence tiers
 

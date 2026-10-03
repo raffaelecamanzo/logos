@@ -1533,6 +1533,36 @@ fn clone_thresholds_join_the_hash_without_moving_the_default() {
         tuned_tokens.hash(),
         "the two near-clone keys are distinct in the canonical form"
     );
+
+    // S-501: the exact-duplicate floor at its default is a no-op for the hash;
+    // tuning it moves the hash, distinctly from the near-clone floor it is not.
+    let explicit_dup_default = Thresholds {
+        duplicate_min_tokens: 50,
+        ..default
+    };
+    assert_eq!(
+        explicit_dup_default.hash(),
+        expected,
+        "the documented duplicate_min_tokens default does not move the hash"
+    );
+    let tuned_dup = Thresholds {
+        duplicate_min_tokens: 5,
+        ..default
+    };
+    assert_ne!(
+        tuned_dup.hash(),
+        expected,
+        "a duplicate_min_tokens edit moves the effective-thresholds hash (S-501)"
+    );
+    assert_ne!(
+        tuned_dup.hash(),
+        Thresholds {
+            clone_min_tokens: 5,
+            ..default
+        }
+        .hash(),
+        "duplicate_min_tokens and clone_min_tokens are distinct in the canonical form"
+    );
 }
 
 // ── UAT-QM-07: metric-neutrality across the extended set ─────────────────────

@@ -949,6 +949,7 @@ export interface MetricThresholdDefaults {
   god_span: number;
   clone_similarity: number;
   clone_min_tokens: number;
+  duplicate_min_tokens: number;
 }
 
 /** `rules.toml`'s default / recommended-baseline projection (mirrors
