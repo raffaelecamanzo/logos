@@ -152,6 +152,57 @@ fn java_mapstruct_mapper_is_scored_over_its_bodied_methods() {
     assert_eq!(focus.raw, 0.5, "1 god container of 2");
 }
 
+/// The NULL rule through the real store read (review fix): an upgraded store
+/// whose `has_body` is still `NULL` (migration 25 adds the column empty until
+/// re-extraction) reads every declaration as **bodied** — never bodyless — so
+/// `function_metrics()` and the snapshot score the mapper exactly as v6 did:
+/// LCOM4 19 (17 isolated declarations + the 2 helper components) and a god
+/// container by its 23 methods ([NFR-CC-04]).
+///
+/// [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
+#[test]
+fn a_null_has_body_in_the_store_reads_as_bodied() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/main/java/mail/MailboxMapper.java",
+        &mapstruct_mapper(),
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let conn = rusqlite::Connection::open(tmp.path().join(".logos/logos.db"))
+        .expect("open the store directly");
+    conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let nulled = conn
+        .execute("UPDATE nodes SET has_body = NULL WHERE has_body IS NOT NULL", [])
+        .expect("simulate a not-yet-re-extracted store");
+    assert_eq!(nulled, 23, "every mapper method had a recorded fact");
+    drop(conn);
+
+    let rt = engine.runtime().expect("runtime");
+    let facts = rt
+        .submit_read(|store| store.function_metrics())
+        .expect("function rows read");
+    assert!(
+        facts.iter().all(|f| f.has_body.is_none()),
+        "a NULL column decodes to None, never Some(false)"
+    );
+    let view = engine
+        .hydrate(Granularity::ExcludeContains)
+        .expect("dependency view hydrates");
+    let s = metrics::snapshot(rt, &view, None, metrics::Thresholds::default())
+        .expect("snapshot runs");
+    let mapper: Vec<_> = s
+        .worst_offenders
+        .cohesion
+        .iter()
+        .filter(|o| o.name == "MailboxMapper")
+        .map(|o| o.detail.as_str())
+        .collect();
+    assert_eq!(mapper, ["LCOM4 19"], "NULL declarations stay in the method set");
+    assert_eq!(god_names(&s), ["MailboxMapper"], "23 not-yet-extracted methods → god");
+}
+
 /// The template-method shape on real Java extraction (review fix): `run` and
 /// `other` both call the `abstract` hook `step()`. The declaration is not
 /// counted but still links its callers, so `Base` scores LCOM4 1 — as v6 did —
