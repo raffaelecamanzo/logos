@@ -5827,7 +5827,7 @@ fn cpp_a_class_head_stranded_in_a_parse_error_is_a_class_on_its_own_line() {
 #[test]
 #[cfg(all(feature = "lang-cpp", feature = "lang-c"))]
 fn parse_damage_is_counted_into_the_partial_extraction_warning() {
-    // FR-EX-30 + CR-168 §4.1(2): each declaration a parse error cost the file is
+    // FR-EX-30 + CR-168 §3.2(2): each declaration a parse error cost the file is
     // counted in its one partial-extraction warning — truncated to its own node
     // (S-578), or skipped for naming nothing (S-512).
     // `parse_umask` and `trim` (whose declarator sits in a nested ERROR).

@@ -2365,7 +2365,7 @@ fn collect_decls<'t>(
 }
 
 /// The declarations a parse-error region cost one file ([FR-EX-30]), counted
-/// into its partial-extraction warning ([CR-168] §4.1(2)).
+/// into its partial-extraction warning ([CR-168] §3.2(2)).
 ///
 /// [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
 /// [CR-168]: ../../../docs/requests/CR-168-an-index-never-silently-empties.md
