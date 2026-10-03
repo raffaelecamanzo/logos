@@ -515,14 +515,14 @@ pub(crate) fn explore(
 pub(crate) fn node(engine: &Engine, symbol: &str, include_code: bool) -> Result<NodeInfo> {
     let runtime = engine.nav_runtime()?;
     let resolved = runtime.submit_read(|store| {
-        let Some(row) = resolve_symbol(store, symbol)? else {
+        let Some((row, passed_over)) = resolve_preferring_code(store, symbol)? else {
             return Ok(Err(store.suggest(symbol, SUGGEST_LIMIT)?));
         };
         let inbound = store.neighbours_in(row.id)?;
         let outbound = store.neighbours_out(row.id)?;
-        Ok(Ok((row, inbound, outbound)))
+        Ok(Ok((row, passed_over, inbound, outbound)))
     })?;
-    let (row, inbound, outbound) = match resolved {
+    let (row, passed_over, inbound, outbound) = match resolved {
         Ok(found) => found,
         Err(suggestions) => {
             return Ok(NodeInfo {
@@ -569,6 +569,7 @@ pub(crate) fn node(engine: &Engine, symbol: &str, include_code: bool) -> Result<
             code,
         }),
         suggestions: Vec::new(),
+        alternatives: passed_over.iter().map(symbol_ref).collect(),
         warnings: Vec::new(),
     })
 }
@@ -2840,6 +2841,78 @@ fn resolve_symbol(store: &dyn GraphStore, text: &str) -> Result<Option<NodeRow>>
         return Ok(Some(row));
     }
     Ok(store.nodes_by_name(text)?.into_iter().next())
+}
+
+/// How a bare name's matches are preferred — the lower the better ([FR-NV-15]).
+///
+/// The four classes are the requirement's. Two more fill the kinds it does not
+/// name, each placed by what it is:
+/// - `Other` — a code declaration that is neither a type nor a callable (a field,
+///   a constant, a route, …). It sits between callable and module: a declaration
+///   is more specific than the file or package that merely contains it.
+/// - `Artifact` — a config-layer node (a YAML key, a shell function, a proto
+///   message, …; [`NodeKind::is_config`]). It sits after module and before doc: it
+///   is not a code declaration, so a `server` key in `application.yml` must not
+///   beat the code module `server.py`.
+///
+/// A lookup that matches only kinds of one class keeps the order it always had.
+///
+/// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BareNameRank {
+    CodeType,
+    Callable,
+    Other,
+    Module,
+    Artifact,
+    Doc,
+}
+
+impl BareNameRank {
+    fn of(kind: NodeKind) -> Self {
+        match kind {
+            NodeKind::Class
+            | NodeKind::Interface
+            | NodeKind::Trait
+            | NodeKind::Struct
+            | NodeKind::Enum
+            | NodeKind::TypeAlias => Self::CodeType,
+            NodeKind::Function | NodeKind::Method => Self::Callable,
+            NodeKind::Module => Self::Module,
+            kind if kind.is_doc() => Self::Doc,
+            kind if kind.is_config() => Self::Artifact,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Order a bare name's `matches` by [`BareNameRank`] and split off the winner:
+/// the preferred node, then the ones passed over in preference order.
+///
+/// The sort is stable and `matches` arrives in node-id order, so within a class
+/// the lowest id still wins — the rule this replaced, kept for every tie.
+/// `None` for no match.
+fn prefer_code(mut matches: Vec<NodeRow>) -> Option<(NodeRow, Vec<NodeRow>)> {
+    matches.sort_by_key(|row| BareNameRank::of(row.kind));
+    let mut ordered = matches.into_iter();
+    let chosen = ordered.next()?;
+    Some((chosen, ordered.collect()))
+}
+
+/// [`resolve_symbol`] for a lookup whose answer names what it passed over
+/// ([FR-NV-15]): an exact canonical-symbol hit is unchanged and passes over
+/// nothing; a bare name prefers code to a module to a doc node
+/// ([`prefer_code`]) and returns the rest as alternatives.
+///
+/// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
+fn resolve_preferring_code(
+    store: &dyn GraphStore,
+    text: &str,
+) -> Result<Option<(NodeRow, Vec<NodeRow>)>> {
+    if let Some(row) = store.node_by_symbol(text)? {
+        return Ok(Some((row, Vec::new())));
+    }
+    Ok(prefer_code(store.nodes_by_name(text)?))
 }
 
 /// [`resolve_symbol`] that also reports HOW MANY nodes the name matched.

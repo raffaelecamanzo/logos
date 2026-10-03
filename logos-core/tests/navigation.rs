@@ -1822,3 +1822,109 @@ fn impact_is_doc_aware_and_lists_referencing_docs() {
     let idle = engine.impact("idle", None);
     assert!(idle.docs.is_empty() && idle.warnings.is_empty());
 }
+
+// ── FR-NV-15 / S-550: a bare name prefers a code declaration ────────────────
+
+/// A PSR-4-shaped PHP tree — the `monolog` shape — where `Utils` is both the
+/// class and the module the file `src/Monolog/Utils.php` makes.
+fn php_psr4_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/Monolog/Utils.php",
+        "<?php\n\nnamespace Monolog;\n\nfinal class Utils\n{\n    public static function canonicalize(string $path): string\n    {\n        return $path;\n    }\n}\n",
+    );
+    tmp
+}
+
+#[test]
+fn a_bare_name_that_is_a_class_and_the_file_module_returns_the_class_and_names_the_module() {
+    let tmp = php_psr4_fixture();
+    let engine = indexed_engine(&tmp);
+
+    let info = engine.node("Utils", false);
+    assert!(info.warnings.is_empty(), "{:?}", info.warnings);
+    let node = info.node.expect("`Utils` resolves");
+    assert_eq!(node.symbol.kind, NodeKind::Class, "the class, not the module");
+    assert_eq!(
+        info.alternatives.len(),
+        1,
+        "exactly the module is passed over: {:?}",
+        info.alternatives
+    );
+    let module = &info.alternatives[0];
+    assert_eq!(module.kind, NodeKind::Module);
+    assert_eq!(module.name, "Utils");
+    assert_eq!(module.file.as_deref(), Some("src/Monolog/Utils.php"));
+
+    // The alternative round-trips: its symbol reaches the module, which —
+    // asked for by canonical symbol — passes over nothing.
+    let module_info = engine.node(&module.symbol, false);
+    assert_eq!(module_info.node.expect("the module resolves").symbol.kind, NodeKind::Module);
+    assert!(module_info.alternatives.is_empty());
+}
+
+/// A function `Widget` in code and a documentation section titled `Widget`.
+fn code_and_doc_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/lib.rs", "pub fn Widget() {}\n");
+    write(tmp.path(), "docs/guide.md", "# Guide\n\n## Widget\n\nWhat a widget is.\n");
+    tmp
+}
+
+#[test]
+fn a_bare_name_shared_by_code_and_a_doc_section_returns_the_code() {
+    let tmp = code_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+
+    let info = engine.node("Widget", false);
+    let node = info.node.expect("`Widget` resolves");
+    assert_eq!(node.symbol.kind, NodeKind::Function, "the code, not the doc section");
+    assert_eq!(
+        info.alternatives.iter().map(|a| a.kind).collect::<Vec<_>>(),
+        [NodeKind::DocSection],
+        "the doc section is named as the alternative"
+    );
+}
+
+#[test]
+fn qualified_and_scip_lookups_and_unique_names_pass_over_nothing() {
+    let tmp = php_psr4_fixture();
+    let engine = indexed_engine(&tmp);
+
+    // A SCIP symbol is exact: the module's own symbol reaches the module, never
+    // the same-named class, and names no alternative.
+    let module_symbol = engine.node("Utils", false).alternatives[0].symbol.clone();
+    let by_symbol = engine.node(&module_symbol, false);
+    assert_eq!(by_symbol.node.expect("resolves").symbol.symbol, module_symbol);
+    assert!(by_symbol.alternatives.is_empty());
+
+    // A name only one node carries is unchanged, and the wire payload keeps no
+    // `alternatives` key at all — an unambiguous answer is byte-identical to the
+    // one before the field existed.
+    let unique = engine.node("canonicalize", false);
+    assert!(unique.node.is_some() && unique.alternatives.is_empty());
+    let wire = serde_json::to_value(&unique).unwrap();
+    assert!(wire.get("alternatives").is_none(), "{wire}");
+    let ambiguous = serde_json::to_value(engine.node("Utils", false)).unwrap();
+    assert_eq!(ambiguous["alternatives"][0]["kind"], "module", "{ambiguous}");
+}
+
+#[test]
+fn a_bare_name_prefers_a_code_module_to_a_config_key_of_the_same_name() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "app/server.py", "def start():\n    pass\n");
+    write(tmp.path(), "app/__init__.py", "");
+    write(tmp.path(), "application.yml", "server:\n  port: 8080\n");
+    let engine = indexed_engine(&tmp);
+
+    let info = engine.node("server", false);
+    let node = info.node.expect("`server` resolves");
+    assert_eq!(node.symbol.kind, NodeKind::Module, "the code module, not the YAML key");
+    assert_eq!(node.symbol.file.as_deref(), Some("app/server.py"));
+    assert!(
+        info.alternatives.iter().any(|a| a.kind == NodeKind::ConfigSection),
+        "the config key is named as an alternative: {:?}",
+        info.alternatives
+    );
+}
