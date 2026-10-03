@@ -89,6 +89,17 @@ fn named(nodes: &[NodeRow], name: &str) -> Vec<(NodeKind, String)> {
         .collect()
 }
 
+/// Assert every stored node named `name` carries its own symbol.
+fn assert_unique_symbols(nodes: &[NodeRow], name: &str) {
+    let found = named(nodes, name);
+    let symbols: BTreeSet<&str> = found.iter().map(|(_, s)| s.as_str()).collect();
+    assert_eq!(
+        symbols.len(),
+        found.len(),
+        "each declaration of `{name}` has its own symbol: {found:?}"
+    );
+}
+
 /// Assert exactly the `kinds` are stored under `name`, each with its own symbol.
 fn assert_distinct(nodes: &[NodeRow], name: &str, kinds: &[NodeKind]) {
     let found = named(nodes, name);
@@ -100,12 +111,7 @@ fn assert_distinct(nodes: &[NodeRow], name: &str, kinds: &[NodeKind]) {
         got, want,
         "both declarations of `{name}` are stored: {found:?}"
     );
-    let symbols: BTreeSet<&str> = found.iter().map(|(_, s)| s.as_str()).collect();
-    assert_eq!(
-        symbols.len(),
-        found.len(),
-        "each declaration of `{name}` has its own symbol: {found:?}"
-    );
+    assert_unique_symbols(nodes, name);
 }
 
 /// Assert `name` is stored as at least one `a` and one `b` node, every node of
@@ -119,7 +125,7 @@ fn assert_both_distinct(nodes: &[NodeRow], name: &str, a: NodeKind, b: NodeKind)
         kinds.contains(&a) && kinds.contains(&b),
         "both the {a:?} and the {b:?} `{name}` are stored: {found:?}"
     );
-    assert_distinct(nodes, name, &kinds);
+    assert_unique_symbols(nodes, name);
 }
 
 #[cfg(feature = "lang-go")]
@@ -169,7 +175,7 @@ fn scala_trait_and_companion_object_are_distinct_nodes() {
     );
     let kinds: Vec<NodeKind> = named(&nodes, "X").into_iter().map(|(k, _)| k).collect();
     assert_eq!(kinds.len(), 2, "trait and object both stored: {kinds:?}");
-    assert_distinct(&nodes, "X", &kinds);
+    assert_unique_symbols(&nodes, "X");
 }
 
 #[cfg(feature = "lang-cpp")]
@@ -224,8 +230,7 @@ fn cpp_template_and_non_template_overloads_are_distinct_nodes() {
     );
     let found = named(&nodes, "get");
     assert_eq!(found.len(), 2, "both overloads stored: {found:?}");
-    let kinds: Vec<NodeKind> = found.iter().map(|(k, _)| *k).collect();
-    assert_distinct(&nodes, "get", &kinds);
+    assert_unique_symbols(&nodes, "get");
 }
 
 #[cfg(feature = "lang-cpp")]
