@@ -267,6 +267,8 @@ pub struct MetricThresholdDefaults {
     pub clone_similarity: f64,
     /// `clone_min_tokens` (same name on both sides).
     pub clone_min_tokens: i64,
+    /// `duplicate_min_tokens` (same name on both sides).
+    pub duplicate_min_tokens: i64,
 }
 
 impl MetricThresholdDefaults {
@@ -290,6 +292,7 @@ impl MetricThresholdDefaults {
             god_span,
             clone_similarity,
             clone_min_tokens,
+            duplicate_min_tokens,
         } = t;
         Self {
             nesting_depth: nest,
@@ -300,6 +303,7 @@ impl MetricThresholdDefaults {
             god_span,
             clone_similarity,
             clone_min_tokens,
+            duplicate_min_tokens,
         }
     }
 
@@ -318,6 +322,7 @@ impl MetricThresholdDefaults {
             god_span: self.god_span,
             clone_similarity: self.clone_similarity,
             clone_min_tokens: self.clone_min_tokens,
+            duplicate_min_tokens: self.duplicate_min_tokens,
         }
     }
 }
@@ -789,6 +794,10 @@ mod tests {
             docs.defaults.rules.metric_thresholds.clone_min_tokens,
             d.clone_min_tokens
         );
+        assert_eq!(
+            docs.defaults.rules.metric_thresholds.duplicate_min_tokens,
+            d.duplicate_min_tokens
+        );
 
         // [constraints] carry the curated recommended baselines, never the live
         // (departed) value.
@@ -819,6 +828,23 @@ mod tests {
             want,
             "the defaults projection must round-trip Thresholds::default() exactly"
         );
+    }
+
+    /// The two token floors default to the same value (50), so the default
+    /// round-trip above cannot tell them apart: a cross-wired
+    /// `duplicate_min_tokens`/`clone_min_tokens` projection would pass it. Distinct
+    /// values pin each field to its own key.
+    #[test]
+    fn metric_threshold_defaults_keep_the_two_token_floors_apart() {
+        let want = crate::metrics::Thresholds {
+            clone_min_tokens: 80,
+            duplicate_min_tokens: 7,
+            ..crate::metrics::Thresholds::default()
+        };
+        let projection = MetricThresholdDefaults::from_thresholds(want);
+        assert_eq!(projection.clone_min_tokens, 80);
+        assert_eq!(projection.duplicate_min_tokens, 7);
+        assert_eq!(projection.to_thresholds(), want);
     }
 
     #[test]

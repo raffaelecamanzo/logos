@@ -78,6 +78,48 @@ fn seed_node(
         .expect("seed node commits")
 }
 
+/// Seed a fingerprinted function carrying S-500's extraction facts: `has_body`
+/// and the normalized `body_tokens` count (`None, None` is a store not yet
+/// re-extracted since migration 25).
+fn seed_body_node(
+    runtime: &Runtime,
+    n: u32,
+    name: &str,
+    fingerprint: &str,
+    has_body: Option<bool>,
+    body_tokens: Option<i64>,
+) -> NodeId {
+    let name = name.to_string();
+    let fingerprint = fingerprint.to_string();
+    runtime
+        .submit_write(move |w| {
+            let sym = LogosSymbol::parse(&format!("local n{n}"))?;
+            let symbol_id = w.upsert_symbol(&sym)?;
+            let file_id = w
+                .file_id("src/seed.rs")?
+                .map_or_else(|| w.insert_file("src/seed.rs", Some("rust"), None), Ok)?;
+            w.insert_node(&NewNode {
+                fingerprint: Some(&fingerprint),
+                file_id: Some(file_id),
+                has_body,
+                body_tokens,
+                ..NewNode::plain(symbol_id, NodeKind::Function, &name)
+            })
+        })
+        .expect("seed body node commits")
+}
+
+/// `Rules` whose `[metric_thresholds] duplicate_min_tokens` is `floor`.
+fn rules_with_duplicate_floor(floor: i64) -> Rules {
+    Rules {
+        metric_thresholds: crate::config::MetricThresholds {
+            duplicate_min_tokens: Some(floor),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 /// Seed a file row, returning its id.
 fn seed_file(runtime: &Runtime, path: &str) -> i64 {
     let path = path.to_string();
@@ -706,6 +748,198 @@ fn matching_fingerprints_flag_both_duplicates_and_spare_the_distinct_one() {
         "a structurally distinct fn is not flagged (FR-AN-02)"
     );
     assert_eq!(stats.duplicates, 2);
+}
+
+// ── S-501 / FR-AN-02: exact duplicates need a body and a token floor ─────────
+
+/// The CR-163 fixture shape, seeded at graph level: 26 constant-returning
+/// overrides of one shape (12 body tokens each — below the default floor of 50),
+/// two renamed twins of one 80-token shape (above it), and a bodyless pair.
+/// Under the default floor only the twins are duplicates; lowering the floor to 5
+/// makes the overrides duplicates again; the bodyless pair is never one, whatever
+/// the floor.
+#[test]
+fn exact_duplicates_need_a_body_and_the_token_floor() {
+    let (rt, _dir) = runtime();
+    let overrides: Vec<NodeId> = (0..26)
+        .map(|i| {
+            seed_body_node(
+                &rt,
+                100 + i,
+                &format!("getId{i}"),
+                "fp-override",
+                Some(true),
+                Some(12),
+            )
+        })
+        .collect();
+    let twin_a = seed_body_node(&rt, 1, "first", "fp-twin", Some(true), Some(80));
+    let twin_b = seed_body_node(&rt, 2, "second", "fp-twin", Some(true), Some(80));
+    let decl_a = seed_body_node(&rt, 3, "area", "fp-decl", Some(false), Some(0));
+    let decl_b = seed_body_node(&rt, 4, "perimeter", "fp-decl", Some(false), Some(0));
+
+    // Default floor (50): the twins only.
+    let stats = run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let snap = snapshot(&rt);
+    assert_eq!(row(&snap, twin_a).is_duplicate, Some(true));
+    assert_eq!(row(&snap, twin_b).is_duplicate, Some(true));
+    for id in &overrides {
+        assert_eq!(
+            row(&snap, *id).is_duplicate,
+            Some(false),
+            "a 12-token override is below the default floor of 50"
+        );
+    }
+    assert_eq!(stats.duplicates, 2, "only the two twins count");
+
+    // Floor 5: the overrides are duplicates again; the bodyless pair is not.
+    let stats = run(&rt, &rules_with_duplicate_floor(5), &entries(), &markers(), &reach(), false).unwrap();
+    let snap = snapshot(&rt);
+    for id in &overrides {
+        assert_eq!(row(&snap, *id).is_duplicate, Some(true), "duplicate at floor 5");
+    }
+    assert_eq!(stats.duplicates, 28, "26 overrides + 2 twins; the bodyless pair stays out");
+
+    // Floor 1 — the lowest a validated config allows — still spares a bodyless pair.
+    run(&rt, &rules_with_duplicate_floor(1), &entries(), &markers(), &reach(), false).unwrap();
+    let snap = snapshot(&rt);
+    for id in [decl_a, decl_b] {
+        assert_eq!(
+            row(&snap, id).is_duplicate,
+            Some(false),
+            "a bodyless declaration is never is_duplicate, whatever the floor"
+        );
+    }
+}
+
+/// The floor is inclusive: a body of exactly `duplicate_min_tokens` tokens is
+/// eligible, one token fewer is not.
+#[test]
+fn the_duplicate_floor_is_inclusive_and_probed_at_its_near_miss() {
+    let (rt, _dir) = runtime();
+    let at_a = seed_body_node(&rt, 1, "at_a", "fp-at", Some(true), Some(50));
+    let at_b = seed_body_node(&rt, 2, "at_b", "fp-at", Some(true), Some(50));
+    let under_a = seed_body_node(&rt, 3, "under_a", "fp-under", Some(true), Some(49));
+    let under_b = seed_body_node(&rt, 4, "under_b", "fp-under", Some(true), Some(49));
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let snap = snapshot(&rt);
+    assert_eq!(row(&snap, at_a).is_duplicate, Some(true));
+    assert_eq!(row(&snap, at_b).is_duplicate, Some(true));
+    assert_eq!(row(&snap, under_a).is_duplicate, Some(false));
+    assert_eq!(row(&snap, under_b).is_duplicate, Some(false));
+}
+
+/// `has_body = false` excludes on its own, independent of the count: the two
+/// extraction facts agree on real data (`body_tokens == 0` exactly when bodyless),
+/// but the has-body requirement is the rule and the floor the second gate, so a
+/// bodyless row never groups even if a count somehow cleared the floor.
+#[test]
+fn a_recorded_bodyless_declaration_is_excluded_whatever_its_count() {
+    let (rt, _dir) = runtime();
+    let a = seed_body_node(&rt, 1, "area", "fp-decl", Some(false), Some(80));
+    let b = seed_body_node(&rt, 2, "perimeter", "fp-decl", Some(false), Some(80));
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let snap = snapshot(&rt);
+    assert_eq!(row(&snap, a).is_duplicate, Some(false));
+    assert_eq!(row(&snap, b).is_duplicate, Some(false));
+}
+
+/// A `NULL` has-body / token count is an upgraded store **not yet re-extracted**
+/// (migration 25 added the columns empty), never a bodyless declaration: such a
+/// function keeps its pre-floor eligibility, so an upgrade does not silently
+/// erase every duplicate before the re-extraction repopulates the facts.
+#[test]
+fn a_null_body_fact_keeps_pre_floor_eligibility() {
+    let (rt, _dir) = runtime();
+    let a = seed_body_node(&rt, 1, "first", "fp-legacy", None, None);
+    let b = seed_body_node(&rt, 2, "second", "fp-legacy", None, None);
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let snap = snapshot(&rt);
+    assert_eq!(row(&snap, a).has_body, None, "the fixture really is un-extracted");
+    assert_eq!(
+        row(&snap, a).is_duplicate,
+        Some(true),
+        "NULL = not yet extracted: eligible as before the floor"
+    );
+    assert_eq!(row(&snap, b).is_duplicate, Some(true));
+}
+
+/// Eligibility narrows the set **before** grouping: a below-floor function never
+/// pairs with an eligible one that happens to share its fingerprint, so the
+/// eligible one is left alone rather than counted as half of a duplicate pair.
+#[test]
+fn an_ineligible_function_does_not_pair_with_an_eligible_one() {
+    let (rt, _dir) = runtime();
+    let big = seed_body_node(&rt, 1, "big", "fp-shared", Some(true), Some(80));
+    let small = seed_body_node(&rt, 2, "small", "fp-shared", Some(true), Some(8));
+    let declared = seed_body_node(&rt, 3, "declared", "fp-shared", Some(false), Some(0));
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    let snap = snapshot(&rt);
+    for id in [big, small, declared] {
+        assert_eq!(row(&snap, id).is_duplicate, Some(false));
+    }
+}
+
+/// A floor edit changes `is_duplicate` with no source change, so it must reach
+/// the incremental path a `sync` takes: the whole-graph recompute sees the new
+/// floor and the changed-verdict selector writes the flip on untouched nodes —
+/// and back again when the floor is restored.
+#[test]
+fn an_edited_floor_flips_verdicts_through_an_incremental_run() {
+    let (rt, _dir) = runtime();
+    let a = seed_body_node(&rt, 1, "first", "fp-short", Some(true), Some(12));
+    let b = seed_body_node(&rt, 2, "second", "fp-short", Some(true), Some(12));
+    let dup = |rt: &Runtime| {
+        let snap = snapshot(rt);
+        (row(&snap, a).is_duplicate, row(&snap, b).is_duplicate)
+    };
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), false).unwrap();
+    assert_eq!(dup(&rt), (Some(false), Some(false)), "12 tokens < the default 50");
+
+    run(&rt, &rules_with_duplicate_floor(5), &entries(), &markers(), &reach(), true).unwrap();
+    assert_eq!(dup(&rt), (Some(true), Some(true)), "an incremental run honours the lowered floor");
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &reach(), true).unwrap();
+    assert_eq!(dup(&rt), (Some(false), Some(false)), "and flips back when the floor is restored");
+}
+
+/// The floor moves `is_duplicate` only: near-clone grouping (FR-AN-06) is
+/// byte-identical under any `duplicate_min_tokens`.
+#[test]
+fn the_duplicate_floor_leaves_near_clone_groups_byte_identical() {
+    let groups = |floor: i64| {
+        let (rt, _dir) = runtime();
+        let a = seed_body_node(&rt, 1, "compute", "fp-a", Some(true), Some(12));
+        let b = seed_body_node(&rt, 2, "tally", "fp-b", Some(true), Some(12));
+        let c = seed_body_node(&rt, 3, "greet", "fp-c", Some(true), Some(80));
+        // A short pair (5 shingles, below the near-clone floor of 11) beside the
+        // long one: it joins a group only if `duplicate_min_tokens` leaks into
+        // the near-clone eligibility.
+        let d = seed_body_node(&rt, 4, "short_a", "fp-d", Some(true), Some(12));
+        let e = seed_body_node(&rt, 5, "short_b", "fp-e", Some(true), Some(12));
+        seed_shingles(&rt, a, &shingle_set(100, 20));
+        seed_shingles(&rt, b, &shingle_set(100, 20));
+        seed_shingles(&rt, c, &shingle_set(900, 20));
+        seed_shingles(&rt, d, &shingle_set(300, 5));
+        seed_shingles(&rt, e, &shingle_set(300, 5));
+        let stats = run(&rt, &rules_with_duplicate_floor(floor), &entries(), &markers(), &reach(), false).unwrap();
+        let rows: Vec<(NodeId, Option<NodeId>)> = snapshot(&rt)
+            .iter()
+            .map(|n| (n.id, n.clone_group))
+            .collect();
+        (rows, stats.clones, stats.clone_groups)
+    };
+    let default_floor = groups(50);
+    assert_eq!(default_floor, groups(1), "clone groups ignore duplicate_min_tokens");
+    assert_eq!(
+        default_floor.2, 1,
+        "the long pair groups; the short pair stays below the near-clone floor"
+    );
 }
 
 // ── FR-AN-06 / UAT-QM-12: near-clone clustering into persisted groups ────────

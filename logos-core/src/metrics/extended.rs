@@ -125,6 +125,13 @@ pub struct Thresholds {
     ///
     /// [FR-EX-09]: ../../../docs/specs/requirements/FR-EX-09.md
     pub clone_min_tokens: i64,
+    /// The normalized-token floor a function's body needs to be an exact
+    /// duplicate ([FR-AN-02], S-501); default 50, a positive integer. Read by the
+    /// annotation pass's `is_duplicate` eligibility, not by the metric itself —
+    /// it lives in the set so tuning it re-baselines the gate.
+    ///
+    /// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
+    pub duplicate_min_tokens: i64,
 }
 
 impl Default for Thresholds {
@@ -139,6 +146,7 @@ impl Default for Thresholds {
             god_span: 500,
             clone_similarity: 0.85,
             clone_min_tokens: 50,
+            duplicate_min_tokens: 50,
         }
     }
 }
@@ -152,11 +160,12 @@ impl Thresholds {
     /// changed threshold changes the hash, which the gate detects as a baseline
     /// mismatch and auto-re-baselines against ([FR-GV-10]).
     ///
-    /// The two near-clone parameters ([CR-013]) are appended **only when they
-    /// differ from their documented defaults**. This keeps the default-set hash
-    /// byte-identical to the pre-CR-013 build — an untuned repo never spuriously
-    /// re-baselines on upgrade — while any tuning of either still moves the hash
-    /// (the structural keys and the near-clone keys use disjoint name prefixes,
+    /// The two near-clone parameters ([CR-013]) and the exact-duplicate floor
+    /// (S-501) are appended **only when they differ from their documented
+    /// defaults**. This keeps the default-set hash byte-identical to the
+    /// pre-CR-013 build — an untuned repo never spuriously re-baselines on
+    /// upgrade — while any tuning of any of them still moves the hash (the
+    /// structural, `clone_`, and `duplicate_` keys use disjoint name prefixes,
     /// so no tuning of one can ever forge another's canonical segment).
     ///
     /// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
@@ -185,6 +194,15 @@ impl Thresholds {
         }
         if self.clone_min_tokens != d.clone_min_tokens {
             canonical.push_str(&format!(";clone_min_tokens={}", self.clone_min_tokens));
+        }
+        // S-501: the exact-duplicate floor follows the same append-on-divergence
+        // rule, under its own `duplicate_` prefix so it can never forge the
+        // `clone_min_tokens` segment.
+        if self.duplicate_min_tokens != d.duplicate_min_tokens {
+            canonical.push_str(&format!(
+                ";duplicate_min_tokens={}",
+                self.duplicate_min_tokens
+            ));
         }
         blake3::hash(canonical.as_bytes()).to_hex().to_string()
     }

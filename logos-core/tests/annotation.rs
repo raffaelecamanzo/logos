@@ -87,6 +87,8 @@ pub fn unreferenced_export() {}
 
 // ── FR-AN-02 / UAT-AN-02: duplicate detection end-to-end ─────────────────────
 
+/// The twins carry well over the default `duplicate_min_tokens` floor of 50
+/// (S-501): a body too short to clear it would not be an exact duplicate.
 #[test]
 fn index_flags_renamed_identifier_twins_as_duplicates() {
     let tmp = TempDir::new().unwrap();
@@ -94,20 +96,40 @@ fn index_flags_renamed_identifier_twins_as_duplicates() {
         tmp.path(),
         "src/lib.rs",
         "\
-pub fn first(input: u32) -> u32 {
-    let doubled = input * 2;
-    if doubled > 10 {
-        return doubled;
+pub fn first(input: &[u32], limit: u32) -> u32 {
+    let mut total = 0;
+    let mut count = 0;
+    for item in input {
+        let doubled = item * 2;
+        if doubled > limit {
+            total += doubled;
+            count += 1;
+        } else {
+            total += 1;
+        }
     }
-    doubled + 1
+    if count > 0 {
+        total = total / count;
+    }
+    total
 }
 
-pub fn second(value: u32) -> u32 {
-    let scaled = value * 2;
-    if scaled > 10 {
-        return scaled;
+pub fn second(values: &[u32], cap: u32) -> u32 {
+    let mut sum = 0;
+    let mut seen = 0;
+    for value in values {
+        let scaled = value * 2;
+        if scaled > cap {
+            sum += scaled;
+            seen += 1;
+        } else {
+            sum += 1;
+        }
     }
-    scaled + 1
+    if seen > 0 {
+        sum = sum / seen;
+    }
+    sum
 }
 
 pub fn distinct(items: &[u32]) -> u32 {
@@ -141,6 +163,130 @@ pub fn distinct(items: &[u32]) -> u32 {
         "a structurally distinct fn is not flagged"
     );
     assert_eq!(result.annotation.duplicates, 2);
+}
+
+// ── S-501 / FR-AN-02: exact duplicates need a body and a token floor ─────────
+
+/// The CR-163 Java shape, indexed end-to-end: 26 constant-returning four-line
+/// overrides of one shape, two renamed twins above the floor, and a bodyless pair of
+/// interface methods (one shape, `int x();`, three declarations). At the default floor (50) only the twins are duplicates;
+/// with `duplicate_min_tokens = 5` the overrides are duplicates again; the
+/// bodyless pair is never one, even at the lowest floor a config allows.
+#[test]
+fn index_java_exact_duplicates_need_a_body_and_the_token_floor() {
+    let mut java = String::new();
+    for i in 0..26 {
+        java.push_str(&format!(
+            "class Const{i} implements Shape {{\n    @Override\n    public int id() {{\n        return {i};\n    }}\n}}\n\n"
+        ));
+    }
+    java.push_str(
+        "\
+class Totals {
+    int addAll(int[] values, int limit) {
+        int total = 0;
+        int count = 0;
+        for (int value : values) {
+            int doubled = value * 2;
+            if (doubled > limit) {
+                total += doubled;
+                count += 1;
+            } else {
+                total += 1;
+            }
+        }
+        if (count > 0) {
+            total = total / count;
+        }
+        return total;
+    }
+
+    int sumAll(int[] items, int cap) {
+        int sum = 0;
+        int seen = 0;
+        for (int item : items) {
+            int scaled = item * 2;
+            if (scaled > cap) {
+                sum += scaled;
+                seen += 1;
+            } else {
+                sum += 1;
+            }
+        }
+        if (seen > 0) {
+            sum = sum / seen;
+        }
+        return sum;
+    }
+}
+
+interface Shape {
+    int id();
+}
+
+interface Sized {
+    int size();
+}
+
+interface Counted {
+    int count();
+}
+",
+    );
+
+    // The verdicts of `Const0..Const25.id`, `addAll`/`sumAll`, and the bodyless
+    // interface methods, under a given `[metric_thresholds]` body.
+    let verdicts = |thresholds: &str| {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "src/main/java/Fixture.java", &java);
+        write(tmp.path(), ".logos/rules.toml", thresholds);
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let result = engine.index();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let snap = snapshot(engine.runtime().unwrap());
+        let overrides: Vec<Option<bool>> = snap
+            .iter()
+            .filter(|n| !n.derived && n.kind == NodeKind::Method && n.name == "id" && n.has_body == Some(true))
+            .map(|n| n.is_duplicate)
+            .collect();
+        let verdict = |name: &str| named(&snap, name, NodeKind::Method).is_duplicate;
+        let bodyless = [verdict("size"), verdict("count")];
+        // `Shape.id()` is the lone bodyless `id`, so it is excluded above.
+        let shape_id = snap
+            .iter()
+            .find(|n| n.name == "id" && n.has_body == Some(false))
+            .expect("the interface `id` is extracted bodyless")
+            .is_duplicate;
+        (
+            overrides,
+            [verdict("addAll"), verdict("sumAll")],
+            bodyless,
+            shape_id,
+        )
+    };
+
+    let (overrides, twins, bodyless, shape_id) = verdicts("[metric_thresholds]\n");
+    assert_eq!(overrides.len(), 26, "all 26 overrides were extracted bodied");
+    assert!(
+        overrides.iter().all(|d| *d == Some(false)),
+        "four-line constant overrides are below the default floor: {overrides:?}"
+    );
+    assert_eq!(twins, [Some(true), Some(true)], "the renamed twins are duplicates");
+    assert_eq!(bodyless, [Some(false), Some(false)]);
+    assert_eq!(shape_id, Some(false));
+
+    // Floor 5: the overrides are duplicates again.
+    let (overrides, twins, _, _) = verdicts("[metric_thresholds]\nduplicate_min_tokens = 5\n");
+    assert!(
+        overrides.iter().all(|d| *d == Some(true)),
+        "with duplicate_min_tokens = 5 the overrides are duplicates again: {overrides:?}"
+    );
+    assert_eq!(twins, [Some(true), Some(true)]);
+
+    // Floor 1: a bodyless declaration is still never a duplicate.
+    let (_, _, bodyless, shape_id) = verdicts("[metric_thresholds]\nduplicate_min_tokens = 1\n");
+    assert_eq!(bodyless, [Some(false), Some(false)], "bodyless pair, floor 1");
+    assert_eq!(shape_id, Some(false));
 }
 
 // ── FR-AN-03 / UAT-AN-03: layer policy + forbidden edge, end-to-end ──────────

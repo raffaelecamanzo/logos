@@ -94,6 +94,7 @@ const DEFAULTS_FIXTURE: ConfigReadModel["defaults"] = {
       god_span: 500,
       clone_similarity: 0.85,
       clone_min_tokens: 50,
+      duplicate_min_tokens: 50,
     },
     constraints: {},
   },

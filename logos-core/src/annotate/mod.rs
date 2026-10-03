@@ -28,7 +28,10 @@
 //!    byte-identical to before the gate.
 //! 2. **Duplicates** ([FR-AN-02]) — `function`/`method` nodes sharing a
 //!    normalised AST-shape fingerprint (captured by Pass 1, identifiers /
-//!    whitespace / comments stripped) are all `is_duplicate = true`.
+//!    whitespace / comments stripped) are all `is_duplicate = true` — **if**
+//!    eligible: a function needs a body and at least `duplicate_min_tokens`
+//!    normalized body tokens (S-501), so bodyless declarations and tiny
+//!    constant overrides are never copy-paste.
 //! 2b. **Near-clones** ([FR-AN-06], [CR-005]) — a deterministic union-find over
 //!    the id-ordered inverted shingle index ([FR-EX-09]) groups functions whose
 //!    Jaccard shingle similarity meets the clone threshold; each member's
@@ -257,14 +260,16 @@ pub fn run(
         .map(|n| n.id)
         .collect();
     let live = live_set(&nodes, &edges, entry_points, &test_ids);
-    let duplicate_ids = duplicate_set(&nodes);
+    // The effective `[metric_thresholds]` set — the SAME hashed set the gate
+    // scores under — feeds both detectors, so tuning any of its keys re-baselines
+    // the gate exactly like a structural threshold (CR-013, S-501).
+    let clone_thresholds = rules.metric_thresholds.effective();
+    // S-501: exact duplicates need a body and `duplicate_min_tokens` body tokens.
+    let duplicate_ids = duplicate_set(&nodes, clone_thresholds.duplicate_min_tokens);
     // Near-clone clustering (FR-AN-06, CR-005): a pure function of the inverted
     // shingle index, computed beside — never inside — exact-duplicate detection
     // (ADR-21), so the `is_duplicate` set above is unaffected. CR-013: the
-    // similarity threshold and token floor come from the effective
-    // `[metric_thresholds]` set — the SAME hashed set the gate scores under — so
-    // tuning either re-baselines the gate exactly like a structural threshold.
-    let clone_thresholds = rules.metric_thresholds.effective();
+    // similarity threshold and token floor come from the effective set above.
     // Near-clone clustering is the dominant annotation cost on a real repo
     // (S-229): its O(Σ|posting|²) counting fans out across the core-owned shared
     // worker pool. Running it inside `worker_pool().install(…)` pins the rayon
@@ -548,15 +553,40 @@ fn is_test_marked(node: &AnnotationNodeRow, test_markers: &[String]) -> bool {
         })
 }
 
-/// The duplicate set ([FR-AN-02]): every callable whose fingerprint is shared
-/// by at least one other callable. `BTreeMap` keeps group iteration (and so
-/// the run) deterministic ([NFR-RA-06]).
+/// Whether `node` may take part in exact-duplicate grouping ([FR-AN-02], S-501):
+/// it must **have a body** and at least `min_tokens` normalized body tokens
+/// (`[metric_thresholds] duplicate_min_tokens`, compared inclusively). A
+/// bodyless declaration (an abstract or interface method, a prototype) and a
+/// four-line constant override are two signatures of one shape, not copy-paste.
+///
+/// A `NULL` fact is **not** "bodyless": `nodes.has_body`/`body_tokens` are
+/// `NULL` on a store upgraded by migration 25 until its files are re-extracted
+/// (S-500), so `None` reads as "not yet extracted" and the function keeps the
+/// eligibility it had before the floor existed. Only a recorded `has_body =
+/// false`, or a recorded count under the floor, excludes.
+///
+/// The floor is a *proxy* for a body in a language that declares no body kind
+/// (Rust, Go, Python, C): there a callable with no `body` field (a Go
+/// assembly-backed `func nanotime() int64`) records as bodied with its whole
+/// declaration counted, so it is excluded only while that declaration is under
+/// `min_tokens` — true of any ordinary signature at the default of 50.
+///
+/// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
+fn duplicate_eligible(node: &AnnotationNodeRow, min_tokens: i64) -> bool {
+    node.has_body != Some(false) && node.body_tokens.is_none_or(|tokens| tokens >= min_tokens)
+}
+
+/// The duplicate set ([FR-AN-02]): every [eligible](duplicate_eligible) callable
+/// whose fingerprint is shared by at least one other eligible callable.
+/// Eligibility narrows the candidates **before** grouping, so an ineligible
+/// function never pairs with — or props up — an eligible one. `BTreeMap` keeps
+/// group iteration (and so the run) deterministic ([NFR-RA-06]).
 ///
 /// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-fn duplicate_set(nodes: &[&AnnotationNodeRow]) -> HashSet<NodeId> {
+fn duplicate_set(nodes: &[&AnnotationNodeRow], min_tokens: i64) -> HashSet<NodeId> {
     let mut groups: BTreeMap<&str, Vec<NodeId>> = BTreeMap::new();
-    for node in nodes {
+    for node in nodes.iter().filter(|n| duplicate_eligible(n, min_tokens)) {
         if let Some(fp) = node.fingerprint.as_deref() {
             groups.entry(fp).or_default().push(node.id);
         }

@@ -67,7 +67,11 @@ single-function projects score the neutral 1.
 
 `1 − redundant/total`, where a function is redundant if flagged **dead**
 (unreachable from any export, route, or configured entry point) or
-**duplicate** (identical shape fingerprint) — counted once even when both.
+**duplicate** (identical shape fingerprint, and the function has a body of at
+least `duplicate_min_tokens` normalized tokens — default 50, see
+[`[metric_thresholds]`](configuration.md#metric_thresholds--tuning-the-structural-dimensions);
+bodyless declarations and tiny constant overrides never count) — counted once
+even when both.
 
 ### Structural metrics (6–10)
 
