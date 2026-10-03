@@ -267,6 +267,23 @@ fn a_new_file_failing_on_sync_is_absent_not_stale_and_its_reason_is_reported() {
 }
 
 #[test]
+fn a_full_walk_reconcile_clears_the_mark_of_a_file_it_no_longer_finds() {
+    // A file that failed on index has no `files` row, so no removal can clear
+    // it; a full-walk reconcile that no longer finds it must, even though no
+    // path names it.
+    let (_tmp, root) = project();
+    let engine = Engine::start(&root).unwrap();
+    runtime(&engine).inject_persist_fault("src/b.rs");
+    engine.index();
+    runtime(&engine).clear_persist_faults();
+    assert_eq!(engine.status().persistence.failed_to_persist, 1);
+
+    fs::remove_file(root.join("src/b.rs")).unwrap();
+    engine.scan(true).expect("a full-walk reconcile runs");
+    assert!(engine.status().persistence.is_clean(), "{:?}", engine.status().persistence);
+}
+
+#[test]
 fn a_failed_file_deleted_from_disk_leaves_no_mark() {
     let (_tmp, root) = project();
     let engine = Engine::start(&root).unwrap();
