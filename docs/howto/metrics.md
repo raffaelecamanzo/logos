@@ -162,10 +162,22 @@ function Logos classifies as test code (`is_test`, the single annotation that
 the `[[require_tested]]` rule and the dead-code roots also read) is dropped
 before scoring. A
 function is `is_test` from extraction evidence (a `#[test]`/`#[cfg(test)]`
-marker) **or** from its file: Logos recognizes the common Rust test-file
-conventions — a `tests/` integration directory, a bare `tests.rs`, the
-snake_case `*_tests.rs` suffix, and the CamelCase `*Tests` form. The exclusion
-then applies as:
+marker, a JUnit/pytest/PHPUnit test annotation, …) **or** from its file path:
+
+- **Test directories:** a `test/`, `tests/`, `__tests__/` or `spec/` segment —
+  unless it sits under a **production source root** (`src/main/…`, or a Gradle
+  `*Main` source set such as `commonMain/`), so a library package like
+  `src/main/kotlin/org/koin/test/` stays production.
+- **Test source sets:** `src/it/` and any Gradle `src/<name>Test/`
+  (`commonTest`, `jvmTest`, `androidInstrumentedTest`) are test code.
+- **File names:** a bare `tests.rs`; a stem ending `_test`, `_tests`, `_spec`,
+  `Test` or `Tests` (`foo_test.go`, `parser_tests.rs`, `UserServiceTest.java`);
+  `test_*.py`; and a three-part `*.test.*` / `*.spec.*` tag (`foo.test.ts`). A
+  two-part name such as `test.py` is **not** a test by name.
+- **PHP:** a `test*` method counts as a test only inside a `*TestCase` subclass
+  or in a test file; `#[Test]` and `@test` count anywhere.
+
+The exclusion then applies as:
 
 - **Modularity, Acyclicity, Depth** drop each `is_test` vertex and its incident
   edges, so the graph they measure is the production code's shape alone. The
