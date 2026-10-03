@@ -977,10 +977,8 @@ impl PluginManifest {
                 return bail(detail);
             }
         }
-        if let Some(reach) = &self.reach {
-            if let Err(detail) = validate_reach(reach) {
-                return bail(detail);
-            }
+        if let Err(detail) = validate_reach(self.reach.as_ref()) {
+            return bail(detail);
         }
         // Every declared capability must have a query backing it, so a `logos
         // languages` capability claim can never be a query the engine cannot
@@ -1078,11 +1076,15 @@ impl PluginManifest {
 /// agree, so a descriptor cannot declare `same-file` and still list `calls`, or
 /// `resolved` and list nothing — and a relation is named once.
 ///
-/// Its own function for the reason [`validate_package_modules`] is: inline, it
-/// would push [`PluginManifest::validate`] past the `max_cc = 50` rule.
+/// Its own function for the reason [`validate_package_modules`] is, and it takes
+/// the `Option` so the call site is one branch: two at the call site pushed
+/// [`PluginManifest::validate`] to 51, past the `max_cc = 50` rule.
 ///
 /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
-fn validate_reach(reach: &Reach) -> Result<(), String> {
+fn validate_reach(reach: Option<&Reach>) -> Result<(), String> {
+    let Some(reach) = reach else {
+        return Ok(());
+    };
     let binds_across_files = matches!(reach.level, ReachLevel::Resolved | ReachLevel::Partial);
     if binds_across_files && reach.cross_file.is_empty() {
         return Err(format!(
