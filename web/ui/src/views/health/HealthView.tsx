@@ -355,35 +355,52 @@ function MetricsCard({
 }
 
 /** One dimension's drill-down, rendered open for the no-JS reader. Three honest
- *  states: an n/a drop-out (no table), an applicable-but-unflagged note, or the
- *  worst-offender table. */
+ *  offender states, decided by `dim.offenderState` (never by list length) — "not
+ *  recorded" (the snapshot never persisted offenders; never shown as clean,
+ *  S-499/CR-162), a recorded-empty "none flagged" note, or the worst-offender table
+ *  in persisted order — plus the n/a drop-out (no table, no offender concept). */
 function Drilldown({ dim }: { dim: MetricDetail }) {
   let tag;
   let body;
-  if (dim.value === null) {
-    tag = <Badge tone="muted">n/a</Badge>;
-    body = (
-      <>
-        <p className={styles.definition}>{dim.definition}</p>
-        <p className="muted">n/a — no applicable construct in this codebase</p>
-      </>
-    );
-  } else if (dim.offenders.length === 0) {
-    tag = <span className="muted">none flagged</span>;
-    body = (
-      <>
-        <p className={styles.definition}>{dim.definition}</p>
-        <p className="muted">No offenders flagged within thresholds.</p>
-      </>
-    );
-  } else {
-    tag = <span className="muted">{dim.offenders.length} flagged</span>;
-    body = (
-      <>
-        <p className={styles.definition}>{dim.definition}</p>
-        <OffendersTable offenders={dim.offenders} />
-      </>
-    );
+  switch (dim.offenderState) {
+    case "not-applicable":
+      tag = <Badge tone="muted">n/a</Badge>;
+      body = (
+        <>
+          <p className={styles.definition}>{dim.definition}</p>
+          <p className="muted">n/a — no applicable construct in this codebase</p>
+        </>
+      );
+      break;
+    case "not-recorded":
+      tag = <span className="muted">not recorded</span>;
+      body = (
+        <>
+          <p className={styles.definition}>{dim.definition}</p>
+          <p className="muted">
+            Offenders were not recorded for this snapshot — run <code>logos scan</code>
+          </p>
+        </>
+      );
+      break;
+    case "none-flagged":
+      tag = <span className="muted">none flagged</span>;
+      body = (
+        <>
+          <p className={styles.definition}>{dim.definition}</p>
+          <p className="muted">No offenders flagged within thresholds.</p>
+        </>
+      );
+      break;
+    case "listed":
+      tag = <span className="muted">{dim.offenders.length} flagged</span>;
+      body = (
+        <>
+          <p className={styles.definition}>{dim.definition}</p>
+          <OffendersTable offenders={dim.offenders} />
+        </>
+      );
+      break;
   }
   return (
     <details open className={styles.detail}>

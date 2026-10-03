@@ -1536,3 +1536,114 @@ async fn node_code_param_serializes_the_source_excerpt() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"code\":null"), "the excerpt is withheld without code=1: {body}");
 }
+
+// ── Health: the three offender states over the real payload (S-499) ───────────
+
+/// The captured real-payload fixture the SPA's Health tests render (`HealthView`
+/// and `healthModel` Vitest suites import it). This test is its generator **and**
+/// its guard: it serves `GET /api/v1/health` for three real stores and compares the
+/// `scan.worst_offenders` object each returns with the committed file, so the UI's
+/// fixture can never drift from what the route serializes. Regenerate with
+/// `LOGOS_UPDATE_FIXTURES=1 cargo test -p web --features lang-rust --test api_v1`.
+#[cfg(feature = "lang-rust")]
+const OFFENDERS_FIXTURE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/ui/src/views/health/fixtures/worst-offenders.real.json");
+
+/// Three production functions nested 4, 6 and 5 levels deep (all at or over the
+/// default `T_nest = 4`), declared shallowest first so the persisted order
+/// (deepest first) differs from declaration order and from name order.
+#[cfg(feature = "lang-rust")]
+const NESTED_SRC: &str = "\
+pub fn alpha_depth_four(x: i32) -> i32 {
+    if x > 0 { if x > 1 { if x > 2 { if x > 3 { return x; } } } }
+    0
+}
+
+pub fn beta_depth_six(x: i32) -> i32 {
+    if x > 0 { if x > 1 { if x > 2 { if x > 3 { if x > 4 { if x > 5 { return x; } } } } } }
+    0
+}
+
+pub fn gamma_depth_five(x: i32) -> i32 {
+    if x > 0 { if x > 1 { if x > 2 { if x > 3 { if x > 4 { return x; } } } } }
+    0
+}
+";
+
+/// `scan.worst_offenders` of the served `/api/v1/health` for one project, scanned
+/// first when `scan` is set.
+#[cfg(feature = "lang-rust")]
+async fn served_worst_offenders(src: &str, scan: bool) -> serde_json::Value {
+    let dir = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
+    std::fs::write(dir.path().join("src/lib.rs"), src).expect("write fixture");
+    let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
+    engine.index();
+    if scan {
+        engine.scan(false).expect("scan persists a metric snapshot");
+    }
+    let resp = web::router(engine).oneshot(get("/api/v1/health")).await.unwrap();
+    let (status, body, _h) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "health answers 200");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("health is JSON");
+    payload["scan"]["worst_offenders"].clone()
+}
+
+/// A scanned fixture serves `recorded: true` with its three nesting offenders in
+/// persisted order; a scanned clean fixture serves `recorded: true` with every list
+/// empty; a store never scanned serves `recorded: false`. The three are the states
+/// the Health drill-downs render, and the committed fixture holds them verbatim.
+#[cfg(feature = "lang-rust")]
+#[tokio::test]
+async fn health_payload_distinguishes_recorded_recorded_empty_and_not_recorded() {
+    let recorded = served_worst_offenders(NESTED_SRC, true).await;
+    let recorded_empty =
+        served_worst_offenders("pub fn api() {\n    helper();\n}\nfn helper() {}\n", true).await;
+    let not_recorded = served_worst_offenders(NESTED_SRC, false).await;
+
+    // The recorded flag is present in every state (key order is not asserted).
+    assert_eq!(recorded["recorded"], true);
+    let names: Vec<&str> = recorded["nesting"]
+        .as_array()
+        .expect("nesting is an array")
+        .iter()
+        .map(|o| o["name"].as_str().expect("offender name"))
+        .collect();
+    assert_eq!(
+        names,
+        ["beta_depth_six", "gamma_depth_five", "alpha_depth_four"],
+        "the persisted order is deepest first: {recorded}",
+    );
+    let first = &recorded["nesting"][0];
+    assert_eq!(first["file"], "src/lib.rs");
+    assert_eq!(first["detail"], "nesting depth 6");
+
+    assert_eq!(recorded_empty["recorded"], true, "a clean scan is recorded-empty");
+    assert_eq!(not_recorded["recorded"], false, "a never-scanned store is not recorded");
+    for dimension in ["nesting", "conciseness", "cohesion", "focus", "uniqueness"] {
+        assert_eq!(recorded_empty[dimension], serde_json::json!([]), "{dimension} recorded-empty");
+        assert_eq!(not_recorded[dimension], serde_json::json!([]), "{dimension} not recorded");
+    }
+
+    let captured = serde_json::json!({
+        "recorded": recorded,
+        "recordedEmpty": recorded_empty,
+        "notRecorded": not_recorded,
+    });
+    let rendered = format!("{}\n", serde_json::to_string_pretty(&captured).expect("serialize"));
+    if std::env::var_os("LOGOS_UPDATE_FIXTURES").is_some() {
+        std::fs::create_dir_all(Path::new(OFFENDERS_FIXTURE).parent().unwrap()).expect("mkdir");
+        std::fs::write(OFFENDERS_FIXTURE, &rendered).expect("write fixture");
+    }
+    // Compared as parsed values: key order is a `serde_json` feature-unification
+    // detail (`preserve_order`), not part of the contract this guards.
+    let committed: serde_json::Value = std::fs::read_to_string(OFFENDERS_FIXTURE)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        committed, captured,
+        "the SPA's real-payload fixture drifted from /api/v1/health — regenerate with \
+         LOGOS_UPDATE_FIXTURES=1",
+    );
+}

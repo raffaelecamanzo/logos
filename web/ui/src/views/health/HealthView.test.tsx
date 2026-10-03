@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HealthModel, MetricSnapshot, MetricValue } from "../../api/types.ts";
 import { Badge, type BadgeTone, Callout, type CalloutTone } from "../../components/index.ts";
 import { HealthView } from "./HealthView.tsx";
+import realOffenders from "./fixtures/worst-offenders.real.json";
 
 function mv(n: number): MetricValue {
   return { raw: n, normalized: n };
@@ -42,6 +43,7 @@ const HEALTH: HealthModel = {
     freshness: "",
     metrics: metrics(),
     worst_offenders: {
+      recorded: true,
       nesting: [{ name: "deep_fn", file: "src/a.rs", line: 42, detail: "nesting depth 6" }],
       conciseness: [],
       cohesion: [],
@@ -485,5 +487,119 @@ describe("HealthView migration (S-187, FR-UI-04 / FR-UI-21)", () => {
     expect(screen.getAllByText(/nothing indexed yet/i).length).toBe(2);
     expect(screen.getAllByText("logos index").length).toBe(2);
     expect(screen.queryByText(/no scan has been run/i)).not.toBeInTheDocument();
+  });
+});
+
+// S-499 / CR-162: the drill-downs render the persisted offenders in three honest
+// states, decided by the `recorded` flag — a snapshot that recorded nothing is never
+// presented as a clean result.
+describe("HealthView offender states (S-499, FR-QM-15 / NFR-CC-04)", () => {
+  const DIMENSIONS = ["Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness"];
+  const NONE_FLAGGED = /No offenders flagged within thresholds/i;
+  const NOT_RECORDED = /Offenders were not recorded for this snapshot — run logos scan/i;
+
+  /** The five open drill-downs by dimension name. */
+  function drilldowns(): Record<string, HTMLElement> {
+    const out: Record<string, HTMLElement> = {};
+    for (const d of document.querySelectorAll("details")) {
+      const name = d.querySelector("summary")?.textContent?.trim().split(" ")[0] ?? "";
+      out[name] = d as HTMLElement;
+    }
+    return out;
+  }
+
+  it("renders recorded-empty as 'No offenders flagged' in every applicable drill-down — and only then", async () => {
+    const m = clone();
+    m.scan.worst_offenders = realOffenders.recordedEmpty;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("/ 10000");
+    const dd = drilldowns();
+    expect(Object.keys(dd)).toEqual(DIMENSIONS);
+    for (const name of DIMENSIONS) {
+      expect(dd[name].textContent).toMatch(NONE_FLAGGED);
+      expect(dd[name].textContent).not.toMatch(NOT_RECORDED);
+      expect(within(dd[name]).queryByRole("table")).toBeNull();
+    }
+  });
+
+  it("renders a not-recorded snapshot as 'not recorded' in every drill-down, never as a clean result", async () => {
+    const m = clone();
+    m.scan.worst_offenders = realOffenders.notRecorded;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("/ 10000");
+    const dd = drilldowns();
+    for (const name of DIMENSIONS) {
+      expect(dd[name].textContent).toMatch(NOT_RECORDED);
+      expect(dd[name].textContent).not.toMatch(NONE_FLAGGED);
+      expect(dd[name].textContent).not.toMatch(/none flagged/i);
+      expect(within(dd[name]).queryByRole("table")).toBeNull();
+      expect(within(dd[name]).getByText("not recorded")).toBeInTheDocument();
+    }
+    // The remedy is named as the command, not buried in prose.
+    expect(screen.getAllByText("logos scan")).toHaveLength(DIMENSIONS.length);
+  });
+
+  it("treats a payload without the recorded flag as not recorded", async () => {
+    const m = clone();
+    delete (m.scan.worst_offenders as Partial<typeof m.scan.worst_offenders>).recorded;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("/ 10000");
+    for (const name of DIMENSIONS) {
+      expect(drilldowns()[name].textContent).toMatch(NOT_RECORDED);
+    }
+  });
+
+  it("keeps an n/a dimension's n/a rendering whether or not offenders were recorded", async () => {
+    for (const recorded of [true, false]) {
+      cleanup();
+      const m = clone();
+      m.scan.worst_offenders = recorded ? realOffenders.recordedEmpty : realOffenders.notRecorded;
+      m.scan.metrics.cohesion = null;
+      m.scan.metrics.focus = null;
+      stub(m);
+      render(<HealthView />);
+      await screen.findByText("/ 10000");
+      const dd = drilldowns();
+      for (const name of ["Cohesion", "Focus"]) {
+        expect(dd[name].textContent).toMatch(/no applicable construct in this codebase/i);
+        expect(dd[name].textContent).not.toMatch(NOT_RECORDED);
+        expect(dd[name].textContent).not.toMatch(NONE_FLAGGED);
+        // The summary tag too: an n/a dimension must never read "none flagged" (a clean result).
+        const summary = dd[name].querySelector("summary") as HTMLElement;
+        expect(within(summary).getByText("n/a")).toBeInTheDocument();
+        expect(summary.textContent).not.toMatch(/none flagged|not recorded/i);
+      }
+      for (const name of ["Nesting", "Conciseness", "Uniqueness"]) {
+        expect(dd[name].textContent).toMatch(recorded ? NONE_FLAGGED : NOT_RECORDED);
+      }
+    }
+  });
+
+  it("renders the real scanned payload's offenders in persisted order", async () => {
+    const m = clone();
+    m.scan.worst_offenders = realOffenders.recorded;
+    stub(m);
+    render(<HealthView />);
+    await screen.findByText("/ 10000");
+    const dd = drilldowns();
+    const table = within(dd.Nesting).getByRole("table", { name: "Worst offenders" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(3);
+    // Deepest first — persisted order, neither declaration nor name order.
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual([
+      "beta_depth_six",
+      "gamma_depth_five",
+      "alpha_depth_four",
+    ]);
+    expect(within(rows[0]).getByText("src/lib.rs")).toBeInTheDocument();
+    expect(within(rows[0]).getByText("nesting depth 6")).toBeInTheDocument();
+    expect(within(dd.Nesting).getByText("3 flagged")).toBeInTheDocument();
+    // The other four recorded dimensions flagged nothing.
+    for (const name of DIMENSIONS.slice(1)) {
+      expect(dd[name].textContent).toMatch(NONE_FLAGGED);
+    }
   });
 });

@@ -1,0 +1,45 @@
+{
+  "recorded": {
+    "recorded": true,
+    "nesting": [
+      {
+        "name": "beta_depth_six",
+        "file": "src/lib.rs",
+        "line": 6,
+        "detail": "nesting depth 6"
+      },
+      {
+        "name": "gamma_depth_five",
+        "file": "src/lib.rs",
+        "line": 11,
+        "detail": "nesting depth 5"
+      },
+      {
+        "name": "alpha_depth_four",
+        "file": "src/lib.rs",
+        "line": 1,
+        "detail": "nesting depth 4"
+      }
+    ],
+    "conciseness": [],
+    "cohesion": [],
+    "focus": [],
+    "uniqueness": []
+  },
+  "recordedEmpty": {
+    "recorded": true,
+    "nesting": [],
+    "conciseness": [],
+    "cohesion": [],
+    "focus": [],
+    "uniqueness": []
+  },
+  "notRecorded": {
+    "recorded": false,
+    "nesting": [],
+    "conciseness": [],
+    "cohesion": [],
+    "focus": [],
+    "uniqueness": []
+  }
+}

@@ -21,6 +21,7 @@ import type {
   Offender,
   ScanResult,
   StatusInfo,
+  WorstOffenders,
 } from "../../api/types.ts";
 import { UNKNOWN_AGE_AHEAD_OF_NOW, parseSecs } from "../dashboard/dashboardModel.ts";
 
@@ -307,6 +308,33 @@ export function metricRows(m: MetricSnapshot): MetricRow[] {
   }));
 }
 
+/**
+ * What a structural drill-down says about its worst offenders (S-499, CR-162):
+ *  - `not-applicable` — the dimension dropped out (ADR-21); no offender concept;
+ *  - `not-recorded`   — the snapshot never recorded offenders (FR-QM-15), so its
+ *    empty lists mean nothing and are never shown as a clean result (NFR-CC-04);
+ *  - `none-flagged`   — recorded, and nothing crossed a threshold;
+ *  - `listed`         — recorded, with entries to tabulate in persisted order.
+ */
+export type OffenderState = "not-applicable" | "not-recorded" | "none-flagged" | "listed";
+
+/**
+ * Decide a drill-down's offender state. `recorded` is read FIRST and is the only
+ * thing that can make an empty list mean "none flagged": an absent or `false` flag
+ * is "not recorded" whatever the list holds, and a list's length is consulted only
+ * once the snapshot is known to have recorded it. Never infer the state from
+ * `offenders.length` alone.
+ */
+export function offenderState(
+  value: MetricValue | null,
+  worst: Pick<WorstOffenders, "recorded">,
+  offenders: Offender[],
+): OffenderState {
+  if (value === null) return "not-applicable";
+  if (worst.recorded !== true) return "not-recorded";
+  return offenders.length === 0 ? "none-flagged" : "listed";
+}
+
 /** One structural dimension's drill-down source, projected from the scan. */
 export interface MetricDetail {
   name: string;
@@ -314,6 +342,8 @@ export interface MetricDetail {
   /** `null` for an applicability drop-out — rendered muted, never a zero/table. */
   value: MetricValue | null;
   offenders: Offender[];
+  /** Which drill-down state this is: the three offender states or the n/a drop-out (see [`OffenderState`]). */
+  offenderState: OffenderState;
 }
 
 /**
@@ -324,12 +354,18 @@ export interface MetricDetail {
 export function structuralDetails(scan: ScanResult): MetricDetail[] {
   const m = scan.metrics;
   const w = scan.worst_offenders;
+  const detail = (
+    name: string,
+    definition: string,
+    value: MetricValue | null,
+    offenders: Offender[],
+  ): MetricDetail => ({ name, definition, value, offenders, offenderState: offenderState(value, w, offenders) });
   return [
-    { name: "Nesting", definition: "1 − deep-nesting ratio (FR-QM-09)", value: m.nesting, offenders: w.nesting },
-    { name: "Conciseness", definition: "1 − brain-method ratio (FR-QM-10)", value: m.conciseness, offenders: w.conciseness },
-    { name: "Cohesion", definition: "mean 1/LCOM4 over classes (FR-QM-11)", value: m.cohesion, offenders: w.cohesion },
-    { name: "Focus", definition: "1 − god-container ratio (FR-QM-12)", value: m.focus, offenders: w.focus },
-    { name: "Uniqueness", definition: "1 − near-clone ratio (FR-QM-13)", value: m.uniqueness, offenders: w.uniqueness },
+    detail("Nesting", "1 − deep-nesting ratio (FR-QM-09)", m.nesting, w.nesting),
+    detail("Conciseness", "1 − brain-method ratio (FR-QM-10)", m.conciseness, w.conciseness),
+    detail("Cohesion", "mean 1/LCOM4 over classes (FR-QM-11)", m.cohesion, w.cohesion),
+    detail("Focus", "1 − god-container ratio (FR-QM-12)", m.focus, w.focus),
+    detail("Uniqueness", "1 − near-clone ratio (FR-QM-13)", m.uniqueness, w.uniqueness),
   ];
 }
 
