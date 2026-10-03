@@ -1563,6 +1563,17 @@ fn clone_thresholds_join_the_hash_without_moving_the_default() {
         .hash(),
         "duplicate_min_tokens and clone_min_tokens are distinct in the canonical form"
     );
+    // The hash carries the VALUE, not just the divergence: editing 5 → 6 is a
+    // second re-baseline, not a silent no-op.
+    assert_ne!(
+        tuned_dup.hash(),
+        Thresholds {
+            duplicate_min_tokens: 6,
+            ..default
+        }
+        .hash(),
+        "two different duplicate_min_tokens values hash differently"
+    );
 }
 
 // ── UAT-QM-07: metric-neutrality across the extended set ─────────────────────
