@@ -354,11 +354,11 @@ function MetricsCard({
   );
 }
 
-/** One dimension's drill-down, rendered open for the no-JS reader. Four honest
- *  states, decided by `dim.offenderState` (never by list length): an n/a drop-out
- *  (no table), "not recorded" (the snapshot never persisted offenders — never shown
- *  as clean, S-499/CR-162), a recorded-empty "none flagged" note, or the
- *  worst-offender table in persisted order. */
+/** One dimension's drill-down, rendered open for the no-JS reader. Three honest
+ *  offender states, decided by `dim.offenderState` (never by list length) — "not
+ *  recorded" (the snapshot never persisted offenders; never shown as clean,
+ *  S-499/CR-162), a recorded-empty "none flagged" note, or the worst-offender table
+ *  in persisted order — plus the n/a drop-out (no table, no offender concept). */
 function Drilldown({ dim }: { dim: MetricDetail }) {
   let tag;
   let body;

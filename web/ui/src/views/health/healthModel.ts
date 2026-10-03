@@ -342,7 +342,7 @@ export interface MetricDetail {
   /** `null` for an applicability drop-out — rendered muted, never a zero/table. */
   value: MetricValue | null;
   offenders: Offender[];
-  /** Which of the three honest drill-down states this is (see [`OffenderState`]). */
+  /** Which drill-down state this is: the three offender states or the n/a drop-out (see [`OffenderState`]). */
   offenderState: OffenderState;
 }
 
