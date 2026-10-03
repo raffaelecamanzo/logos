@@ -1544,15 +1544,20 @@ async fn node_code_param_serializes_the_source_excerpt() {
 /// its guard: it serves `GET /api/v1/health` for three real stores and compares the
 /// `scan.worst_offenders` object each returns with the committed file, so the UI's
 /// fixture can never drift from what the route serializes. Regenerate with
-/// `LOGOS_UPDATE_FIXTURES=1 cargo test -p web --features lang-rust --test api_v1`.
-#[cfg(feature = "lang-rust")]
+/// `LOGOS_UPDATE_FIXTURES=1 cargo test -p web --test api_v1`.
+///
+/// Deliberately **not** `#[cfg(feature = "lang-rust")]`: the test build always
+/// carries the Rust grammar (the `[dev-dependencies]` logos-core enables it), and
+/// a gated guard compiles out of `gate.sh` and CI, which never pass that
+/// feature to `web`. The offender payload changes whenever a later story changes
+/// an offender list (Sprint 85's S-502 already did), so this guard has to run
+/// everywhere.
 const OFFENDERS_FIXTURE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/ui/src/views/health/fixtures/worst-offenders.real.json");
 
 /// Three production functions nested 4, 6 and 5 levels deep (all at or over the
 /// default `T_nest = 4`), declared shallowest first so the persisted order
 /// (deepest first) differs from declaration order and from name order.
-#[cfg(feature = "lang-rust")]
 const NESTED_SRC: &str = "\
 pub fn alpha_depth_four(x: i32) -> i32 {
     if x > 0 { if x > 1 { if x > 2 { if x > 3 { return x; } } } }
@@ -1572,7 +1577,6 @@ pub fn gamma_depth_five(x: i32) -> i32 {
 
 /// `scan.worst_offenders` of the served `/api/v1/health` for one project, scanned
 /// first when `scan` is set.
-#[cfg(feature = "lang-rust")]
 async fn served_worst_offenders(src: &str, scan: bool) -> serde_json::Value {
     let dir = TempDir::new().expect("temp dir");
     std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
@@ -1593,7 +1597,6 @@ async fn served_worst_offenders(src: &str, scan: bool) -> serde_json::Value {
 /// persisted order; a scanned clean fixture serves `recorded: true` with every list
 /// empty; a store never scanned serves `recorded: false`. The three are the states
 /// the Health drill-downs render, and the committed fixture holds them verbatim.
-#[cfg(feature = "lang-rust")]
 #[tokio::test]
 async fn health_payload_distinguishes_recorded_recorded_empty_and_not_recorded() {
     let recorded = served_worst_offenders(NESTED_SRC, true).await;
