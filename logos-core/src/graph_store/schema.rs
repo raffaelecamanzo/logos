@@ -2418,10 +2418,13 @@ CREATE TABLE metric_snapshot_offenders (
 /// `serve` watcher or a reconcile failed to replace them), `0` when the file is
 /// absent from the graph (a full index, or a file that never persisted).
 ///
-/// Bounded by construction: a row is replaced by the next failure of the same
-/// file, removed by the file's next successful persist or its removal, and a
-/// full index rewrites the table to exactly that run's failures — so it can
-/// never outgrow the admitted file set ([CR-168] §7).
+/// Bounded: a row is replaced by the next failure of the same file and removed
+/// by the file's next successful persist, by an unchanged re-read, or by its
+/// removal from the graph; a full index rewrites the table to that run's
+/// failures plus the rows of files it could not load; and a full-walk reconcile
+/// clears the row of any file it no longer admits — which is how a file that
+/// never persisted, and so has no graph rows to remove, leaves the record once
+/// it leaves admission ([CR-168] §7).
 ///
 /// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
 /// `migration_27_adds_the_persist_failure_record_and_touches_nothing_else` in
