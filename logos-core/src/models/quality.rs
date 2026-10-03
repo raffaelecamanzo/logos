@@ -926,14 +926,15 @@ pub struct WorstOffenders {
     /// Production brain methods (CC ∧ LOC ∧ nesting thresholds all met), highest
     /// complexity first (FR-QM-10).
     pub conciseness: Vec<Offender>,
-    /// Low-cohesion production classes (LCOM4 ≥ 2), most fragmented first
-    /// (FR-QM-11).
+    /// Low-cohesion production classes (LCOM4 ≥ 2 over their bodied methods),
+    /// most fragmented first (FR-QM-11).
     pub cohesion: Vec<Offender>,
-    /// God class-like containers (methods ≥ `T_m` ∨ span ≥ `T_span`), most
-    /// methods first (FR-QM-12).
+    /// God class-like containers (bodied methods ≥ `T_m` ∨ span ≥ `T_span`),
+    /// most methods first (FR-QM-12).
     pub focus: Vec<Offender>,
     /// Production functions in a near-clone group (`clone_group IS NOT NULL`),
-    /// grouped by clone-group id (FR-QM-13).
+    /// grouped by clone group, largest duplicated mass (members × mean line
+    /// count) first, then group id, then member id (FR-QM-13, CR-163).
     pub uniqueness: Vec<Offender>,
 }
 

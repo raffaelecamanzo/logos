@@ -1191,8 +1191,9 @@ fn check_clone_ratio(input: &EvalInput<'_>, test_ids: &HashSet<NodeId>) -> (Vec<
 
 /// `no_god_containers` — no class-like container over the god thresholds
 /// (FR-QM-12). Each god container is one error, in node-id order — the SAME set
-/// Focus counts as god (shared `metrics::god_containers`), so the budget and the
-/// dimension never disagree. Only enforced when explicitly `true`.
+/// Focus counts as god (shared `metrics::god_containers`, over the same bodied
+/// methods since metric-semantics v7), so the budget and the dimension never
+/// disagree. Only enforced when explicitly `true`.
 fn check_god_containers(
     input: &EvalInput<'_>,
     test_ids: &HashSet<NodeId>,
@@ -1202,9 +1203,13 @@ fn check_god_containers(
     if input.compiled.rules.constraints.no_god_containers == Some(true) {
         checked += 1;
         let node_of: HashMap<NodeId, &NodeRow> = input.nodes.iter().map(|n| (n.id, n)).collect();
-        for god in
-            crate::metrics::god_containers(input.nodes, input.edges, test_ids, input.thresholds)
-        {
+        for god in crate::metrics::god_containers(
+            input.nodes,
+            input.edges,
+            input.function_metrics,
+            test_ids,
+            input.thresholds,
+        ) {
             let (name, file) = node_of
                 .get(&god.id)
                 .map(|n| (n.name.as_str(), n.file_path.clone().unwrap_or_default()))

@@ -35,7 +35,7 @@ snapshot keeps Modularity's computed values, stores `modularity_applicable = 0`,
 and the dimension leaves both the geometric mean and the zero short-circuit —
 the same drop-out Cohesion and Focus take (see
 [Applicability and the n/a drop-out](#applicability-and-the-na-drop-out)). The
-threshold is a fixed part of the metric semantics (version 6), not a
+threshold is a fixed part of the metric semantics (since version 6), not a
 `rules.toml` setting. Every graph with 5 or more edges scores exactly as before.
 
 ### 2. Acyclicity — *are there dependency cycles?*
@@ -97,9 +97,18 @@ hard-to-hold-in-your-head functions, not merely long or merely branchy ones.
 
 #### 8. Cohesion (LCOM4) — *do classes hang together?*
 
-`1 − low-cohesion ratio` over classes, using LCOM4: a class is low-cohesion when
-its methods and fields split into more than one connected component (the methods
-don't share state, so the class is really several classes in a trench coat).
+The mean of `1/LCOM4` over production classes. LCOM4 counts the connected
+components a class's methods split into: a class whose methods all share state
+scores 1, and a class whose methods split into two groups that never touch each
+other's state scores LCOM4 2 (its `1/LCOM4` is 0.5) — it is really several
+classes in a trench coat, and it is listed as a Cohesion worst offender.
+Only methods **with a body** count (since metric-semantics version 7): an
+`abstract` declaration, an interface-style method without a default, or a C++
+in-class prototype shares no field and calls nothing by construction, so it
+would otherwise be a component of its own. A MapStruct mapper of 17 abstract
+declarations and 6 helpers is scored over the 6 helpers. A declaration is
+still a link, though: two methods that both call the same abstract hook (the
+template-method pattern) remain one component, as they always were.
 "Sharing state" means two methods read or write a field of their own class
 through an own-field access (`this.x`, `self.x`) that binds to exactly one field
 of that class; an access that binds to nothing connects nothing. In TypeScript
@@ -109,19 +118,31 @@ class. Getters, inherited members, and the fields of an abstract class or a
 class expression are not, so accesses to them stay unbound. A TypeScript class
 whose methods share fields can therefore score higher on Cohesion after a
 re-index with this version than it did before.
-**n/a drop-out:** a repo with no classes that have production methods reports
-Cohesion as `n/a` rather than a fabricated score — see
+**n/a drop-out:** a class with no bodied production method is not scored, and a
+repo with no class that has one reports Cohesion as `n/a` rather than a
+fabricated score — see
 [Applicability and the n/a drop-out](#applicability-and-the-na-drop-out).
 
 #### 9. Focus — *are containers god-objects?*
 
 `1 − god-container ratio`: the fraction of classes/structs that are "god"
-containers — those with more than `god_methods` methods (default **20**) **or** a
-line span wider than `god_span` (default **500**). The `no_god_containers` budget
+containers — those with at least `god_methods` methods **with a body** (default
+**20**) **or** a line span of at least `god_span` lines (default **500**). A
+container of bodyless declarations — a 23-method, 106-line mapper of which 6
+methods have a body — is no longer god by method count (since version 7); a
+container with 25 bodied methods still is. The `no_god_containers` budget
 ([configuration.md](configuration.md#metric_thresholds--tuning-the-structural-dimensions))
 counts the *same* containers, so the gate and the dimension never disagree.
 Carries the same **n/a drop-out** as Cohesion when the repo has no applicable
 containers.
+
+Two limits of the method count, both from what extraction records rather than
+from the formula. A C++ class whose members are all defined out of line in a
+`.cpp` has only bodyless in-class prototypes in the graph (out-of-line
+definitions are not captured), so it counts zero bodied methods: it is never
+god by method count, only by span, and Cohesion does not score it. And a Rust
+`impl` method or a Go receiver method is attached to its module rather than to
+its struct, so Rust and Go containers are god by span alone.
 
 #### 10. Uniqueness — *how much code is near-duplicated?*
 
@@ -207,9 +228,10 @@ properties follow:
 ### Applicability and the n/a drop-out
 
 Cohesion and Focus only mean something when the repo has the structures they
-measure. A repo with no classes (pure functions only), or whose only classes
-have no production methods, has nothing for LCOM4 or god-container detection to
-score. Rather than fabricate a flattering `1.0`, the engine **drops the
+measure. A repo with no class-like containers (pure functions only) has nothing
+for LCOM4 or god-container detection to score, and a repo whose classes have no
+production method **with a body** (since version 7 — e.g. only `abstract`
+declarations) has nothing for LCOM4. Rather than fabricate a flattering `1.0`, the engine **drops the
 dimension out**: it stores NULL for that metric with an `applicable = 0` flag,
 and the geometric-mean denominator shrinks accordingly — a class-less repo is
 scored on 8 or 9 dimensions, not 10.
@@ -288,8 +310,10 @@ semantics** *and* the **same effective thresholds** (the structural detection
 thresholds plus the two near-clone parameters). Two fields guard this:
 
 - **`metric_version`** records which semantics each row used; the current version
-  is **6** (Modularity not applicable below 5 edges). A formula change bumps it,
-  so the first `gate` after an upgrade that bumps it re-baselines once.
+  is **7** (structural metrics count only code with a body — see
+  [Metric semantics version 7](#metric-semantics-version-7--declarative-code-stops-counting)).
+  A formula change bumps it, so the first `gate` after an upgrade that bumps it
+  re-baselines once.
 - **`thresholds_hash`** records the effective `[metric_thresholds]` set the row
   was scored under. Editing any threshold (or a budget that feeds one) changes
   the hash.
@@ -304,6 +328,40 @@ way, the *next* gate finds a matching version/hash and compares normally — so 
 existing project can upgrade across a semantics change, or an operator can re-tune
 a threshold, without a spurious gate failure. (The version guard is checked
 first, so a pre-v3 baseline re-baselines once on the upgrade, not twice.)
+
+### Metric semantics version 7 — declarative code stops counting
+
+Version 7 ([CR-163](../requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md))
+changes three things at once, so a project re-baselines **once** for all of
+them:
+
+| Change | Before (v6) | Since v7 |
+|---|---|---|
+| **Exact duplicates** (Redundancy, `max_duplicates`) | any two functions with the same shape fingerprint | only functions **with a body** and at least `duplicate_min_tokens` normalized tokens (default 50) |
+| **Cohesion** (LCOM4) | every production method of a class | the class's **bodied** methods |
+| **Focus** (god containers, `no_god_containers`) | every production method counted toward `god_methods` | only **bodied** methods counted |
+
+**Why signals move.** Before v7 the structural metrics read declarative code as
+if it were implementation. A MapStruct `@Mapper` abstract class of 17 abstract
+declarations scored LCOM4 23 and was a god container at 106 lines; 26 four-line
+constant overrides counted as copy-paste. On a codebase with mappers, generated
+interfaces or polymorphic constant overrides, Redundancy, Cohesion and Focus
+typically **rise** under v7 and the top offenders change to genuinely
+duplicated or tangled code. Redundancy moves in any language, not only where
+there is declarative code: every short copy-identical function (fewer than
+`duplicate_min_tokens` normalized tokens — generated accessors, one-line
+delegates, constant returns) stops counting as a duplicate. A repo with no
+bodyless callables and no exact duplicate shorter than the floor scores as
+before. The Uniqueness value is unchanged; only its offender list is reordered (largest
+duplicated mass first).
+
+**What you see on upgrade.** The first `gate` (or `session_start`) after the
+upgrade reports `baseline reset: metric semantics changed` and passes
+informationally; the next one compares normally. Nothing needs re-blessing by
+hand. The upgrade also re-extracts every file once to record which callables
+have a body: until a file is re-extracted its callables count as **bodied**
+(never as bodyless), so the scores move only as the fact is recorded — run
+`logos scan` (or `logos sync`) once to score the whole tree under v7.
 
 ### Tuning the structural thresholds
 
@@ -326,7 +384,11 @@ dimensions into hard `logos check` gates — see
 score: a deterministically ordered, top-10-capped list of the specific functions
 or containers responsible (e.g. the deepest-nested functions, the brain methods,
 the god containers, the largest near-clone groups). Each entry names the symbol,
-its file, its line, and a short detail (the offending measurement). The list is
+its file, its line, and a short detail (the offending measurement). Uniqueness
+lists near-clone groups by their duplicated mass — members × mean line count,
+largest first, then group id, then member id — so a pair of 30-line copies
+(`clone group #12 · 2 members × 30 lines`) outranks six 4-line look-alikes, and
+a group's members stay adjacent. The list is
 report-only — it never gates — and is emitted in the `worst_offenders` field of
 `logos scan --json`. It is the "which code do I fix first?" surface that turns a
 dropped dimension into an actionable to-do list.

@@ -159,6 +159,7 @@ fn metric_row(id: i64, is_dead: bool, is_duplicate: bool) -> FunctionMetricRow {
         line_count: None,
         max_nesting_depth: None,
         clone_group: None,
+        has_body: None,
     }
 }
 
@@ -2022,6 +2023,7 @@ fn struct_row(
         line_count: loc,
         max_nesting_depth: nest,
         clone_group: clone.map(NodeId),
+        has_body: None,
     }
 }
 
@@ -2285,6 +2287,56 @@ fn no_god_containers_excludes_test_scoped_methods() {
     );
 }
 
+/// Metric-semantics v7 (CR-163): `no_god_containers` counts **bodied** methods,
+/// the same set Focus counts — a class of 17 bodyless declarations beside 6
+/// bodied methods is not god, while the same class with its declarations
+/// still `NULL` (not yet re-extracted, which reads as bodied) is.
+#[test]
+fn no_god_containers_counts_bodied_methods_only() {
+    let compiled = constraints_only(Constraints {
+        no_god_containers: Some(true),
+        ..Constraints::default()
+    });
+    // Class 1 + 23 methods (2..24): 2..18 are the 17 declarations.
+    let (nodes, edges) = god_container_fixture(1, 23);
+    let facts = |declarations: Option<bool>| -> Vec<FunctionMetricRow> {
+        (2..=24)
+            .map(|id| FunctionMetricRow {
+                has_body: if id <= 18 { declarations } else { Some(true) },
+                ..struct_row(id, None, None, None, None)
+            })
+            .collect()
+    };
+
+    let (violations, _) = run_eval_budgets(
+        &compiled,
+        &nodes,
+        &edges,
+        &facts(Some(false)),
+        &[],
+        Default::default(),
+    );
+    assert!(
+        violations.is_empty(),
+        "6 bodied methods → not god: {violations:?}"
+    );
+
+    let (unextracted, _) = run_eval_budgets(
+        &compiled,
+        &nodes,
+        &edges,
+        &facts(None),
+        &[],
+        Default::default(),
+    );
+    assert_eq!(unextracted.len(), 1, "a NULL fact is bodied → 23 methods → god");
+    assert!(
+        unextracted[0].message.contains("23 methods"),
+        "{}",
+        unextracted[0].message
+    );
+}
+
 #[test]
 fn cr005_budgets_are_production_scoped() {
     // A deep + brain + cloned function that is is_test must not trip any budget.
@@ -2456,6 +2508,7 @@ fn evaluate_concatenates_sections_in_canonical_order() {
             line_count: None,
             max_nesting_depth: Some(1), // > max_nesting_depth 0 → structural
             clone_group: None,
+            has_body: None,
         },
     ];
     let annotations = [annot(5, "exported_api", NodeKind::Function, true, Some("lib/api.rs"))];

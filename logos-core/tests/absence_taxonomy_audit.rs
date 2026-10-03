@@ -70,6 +70,14 @@
 //! occurrences over 42 production rows**, beside **115** in test scope; the
 //! delta is [`S306_ADDITION`].
 //!
+//! **Addendum, 2026-10-03 ([S-502]) — 0 production rows, 0 occurrences; 1
+//! test-scope occurrence, no correction.** Bodied Cohesion (metric-semantics
+//! v7) pins that a repo whose classes have no bodied method reports Cohesion
+//! as `n/a` — the existing applicability drop-out, asserted once more in
+//! `metrics/tests.rs`. The census still reads **87 production occurrences over
+//! 42 production rows**, beside **116** in test scope; the delta is
+//! [`S502_ADDITION`].
+//!
 //! # What is enumerated, and what this cannot catch
 //!
 //! The walk covers [`SURFACES`] in full — every `.rs`, `.ts` and `.tsx` file
@@ -145,6 +153,7 @@
 //! [S-443]: ../../docs/planning/journal.md#s-443-the-absence-audit-gains-a-structural-arm-over-the-relational-result-types
 //! [S-444]: ../../docs/planning/journal.md#s-444-the-shipped-guidance-states-the-language-scope-its-relational-claims-hold-on
 //! [S-445]: ../../docs/planning/journal.md#s-445-a-telemetry-event-records-what-the-call-answered-with-its-denominator
+//! [S-502]: ../../docs/planning/journal.md#s-502-cohesion-and-focus-count-bodied-methods-and-metric-semantics-move-to-v7
 //! [FR-EH-04]: ../../docs/specs/requirements/FR-EH-04.md
 //! [FR-UI-04]: ../../docs/specs/requirements/FR-UI-04.md
 //! [NFR-CC-04]: ../../docs/specs/requirements/NFR-CC-04.md
@@ -525,8 +534,8 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 76] = [
         "logos-core/src/metrics/tests.rs",
         "n/a",
         0,
-        2,
-        "NO PRODUCTION SITE — 2 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
+        3,
+        "NO PRODUCTION SITE — 3 test occurrence(s) asserting sites declared elsewhere in this table; enumerated, never truncated away",
     ),
     (
         "core",
@@ -2204,6 +2213,14 @@ const S445_ADDITION: (usize, usize, usize) = (1, 1, 0);
 /// [S-306]: ../../docs/planning/journal.md#s-306-statistics-tab-attribution-view-with-stated-coverage-limits
 const S306_ADDITION: (usize, usize, usize) = (0, 0, 7);
 
+/// What [S-502] added to the census on 2026-10-03: `(production rows added,
+/// production occurrences added, test occurrences added)` — no production
+/// site, one test-scope assertion that a repo with no class carrying a bodied
+/// method reports Cohesion `n/a` (`metrics/tests.rs`).
+///
+/// [S-502]: ../../docs/planning/journal.md#s-502-cohesion-and-focus-count-bodied-methods-and-metric-semantics-move-to-v7
+const S502_ADDITION: (usize, usize, usize) = (0, 0, 1);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
@@ -2211,20 +2228,28 @@ fn the_audit_reports_its_count_with_its_denominator() {
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
-        (87, 42, 115),
-        "the census as it stands after S-306's addendum, 2026-09-26: 87 production \
-         occurrences over 42 production rows, beside 115 test-scope occurrences"
+        (87, 42, 116),
+        "the census as it stands after S-502's addendum, 2026-10-03: 87 production \
+         occurrences over 42 production rows, beside 116 test-scope occurrences"
     );
     // The 2026-09-20 reading the header and the tuple below state.
-    let production_rows =
-        production_rows_now - S445_ADDITION.0 - S444_ADDITION.0 - S442_ADDITION.0 - S306_ADDITION.0;
+    let production_rows = production_rows_now
+        - S445_ADDITION.0
+        - S444_ADDITION.0
+        - S442_ADDITION.0
+        - S306_ADDITION.0
+        - S502_ADDITION.0;
     let production_occurrences = production_occurrences_now
         - S445_ADDITION.1
         - S444_ADDITION.1
         - S442_ADDITION.1
-        - S306_ADDITION.1;
-    let test_occurrences =
-        test_occurrences - S445_ADDITION.2 - S444_ADDITION.2 - S306_ADDITION.2;
+        - S306_ADDITION.1
+        - S502_ADDITION.1;
+    let test_occurrences = test_occurrences
+        - S445_ADDITION.2
+        - S444_ADDITION.2
+        - S306_ADDITION.2
+        - S502_ADDITION.2;
     let corrected_files: std::collections::BTreeSet<&str> =
         CORRECTIONS.iter().map(|(file, _, _, _)| *file).collect();
 

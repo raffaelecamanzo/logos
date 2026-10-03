@@ -48,6 +48,7 @@ fn func(id: i64, cc: Option<i64>, dead: Option<bool>, dup: Option<bool>) -> Func
         line_count: None,
         max_nesting_depth: None,
         clone_group: None,
+        has_body: None,
     }
 }
 
@@ -69,6 +70,7 @@ fn func_struct(
         line_count,
         max_nesting_depth,
         clone_group: clone_group.map(NodeId),
+        has_body: None,
     }
 }
 
@@ -325,16 +327,17 @@ fn unbound_directory_membership_follows_the_partition() {
     );
 }
 
-/// The metric-semantics version pins at 6 ([CR-156]): Modularity dropping out
-/// of a graph with fewer than five edges changes what the signal measures for
-/// every such graph, so the constant advanced 5 → 6 and the first post-upgrade
-/// gate auto-re-baselines ([FR-GV-10]) exactly as the v2..v5 bumps did (v5 was
-/// [CR-087]'s cross-module Acyclicity, [ADR-61]).
+/// The metric-semantics version pins at 7 ([CR-163]): the exact-duplicate floor
+/// (S-501), bodied LCOM4 and bodied Focus change what the signal measures, so
+/// the constant advanced 6 → 7 **once** for the whole CR and the first
+/// post-upgrade gate auto-re-baselines ([FR-GV-10]) exactly as the v2..v6 bumps
+/// did (v6 was [CR-156]'s small-graph Modularity drop-out).
 ///
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
 #[test]
-fn metric_semantics_version_is_v6() {
-    assert_eq!(super::METRIC_SEMANTICS_VERSION, 6);
+fn metric_semantics_version_is_v7() {
+    assert_eq!(super::METRIC_SEMANTICS_VERSION, 7);
 }
 
 // ── FR-QM-03 / UAT-QM-03: depth over the module-rollup condensation ───────────
@@ -1280,6 +1283,359 @@ fn focus_drops_out_when_no_container_exists() {
     );
 }
 
+// ── CR-163 / S-502: Cohesion and Focus count bodied methods (v7) ──────────────
+
+/// A method row carrying only the `has_body` fact the container dimensions read.
+fn method_body(id: i64, has_body: Option<bool>) -> FunctionMetricRow {
+    FunctionMetricRow {
+        has_body,
+        ..func(id, Some(1), Some(false), Some(false))
+    }
+}
+
+/// The MapStruct-style mapper of [CR-163] §2: an abstract class spanning 106
+/// lines with 17 bodyless `abstract` declarations (ids 100..117) and 6 bodied
+/// helpers (ids 200..206). The bodied helpers split into two field-sharing
+/// trios — 200..203 read field 10, 203..206 read field 11 — so LCOM4 over the
+/// bodied six is 2. `has_body` is the per-method fact the caller chooses.
+fn mapstruct_mapper(
+    bodyless_fact: Option<bool>,
+) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let mut nodes = vec![
+        node_span(1, "MailboxMapper", NodeKind::Class, Some("Mapper.java"), 10, 115),
+        node(10, "clock", NodeKind::Field, Some("Mapper.java")),
+        node(11, "zone", NodeKind::Field, Some("Mapper.java")),
+    ];
+    let mut edges = vec![
+        edge(1, 10, EdgeKind::Contains),
+        edge(1, 11, EdgeKind::Contains),
+    ];
+    let mut functions = Vec::new();
+    for id in 100..117 {
+        nodes.push(node(id, "toDto", NodeKind::Method, Some("Mapper.java")));
+        edges.push(edge(1, id, EdgeKind::Contains));
+        functions.push(method_body(id, bodyless_fact));
+    }
+    for (id, field) in [(200, 10), (201, 10), (202, 10), (203, 11), (204, 11), (205, 11)] {
+        nodes.push(node(id, "helper", NodeKind::Method, Some("Mapper.java")));
+        edges.push(edge(1, id, EdgeKind::Contains));
+        edges.push(edge(id, field, EdgeKind::Accesses));
+        functions.push(method_body(id, Some(true)));
+    }
+    nodes.sort_by_key(|n| n.id);
+    edges.sort_by_key(|e| (e.source, e.target));
+    (nodes, edges, functions)
+}
+
+/// [CR-163] §3.2 C/D on the mapper: LCOM4 runs over the 6 bodied methods only
+/// (2 components → Cohesion 0.5, not 1/19), and with 6 bodied methods over 106
+/// lines the class is not a god container (Focus 1.0) — although it declares
+/// 23 methods ≥ `T_m` = 20 ([FR-QM-11], [FR-QM-12]). The Focus offender list,
+/// the `no_god_containers` set and the Cohesion offender detail agree.
+///
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+#[test]
+fn a_mapstruct_mapper_scores_lcom4_over_its_bodied_methods_and_is_not_god() {
+    let (nodes, edges, functions) = mapstruct_mapper(Some(false));
+    let r = run(&nodes, &edges, &functions);
+
+    let cohesion = r.cohesion.expect("the class has bodied methods → scoreable");
+    assert_eq!(
+        cohesion.raw, 0.5,
+        "LCOM4 over the 6 bodied methods is 2 (1/2); the 17 bodyless declarations \
+         are not components"
+    );
+    let focus = r.focus.expect("a class-like container exists");
+    assert_eq!(
+        focus.raw, 0.0,
+        "6 bodied methods over 106 lines is not a god container"
+    );
+
+    let god = super::god_containers(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+    );
+    assert!(god.is_empty(), "the budget's god set agrees with Focus: {god:?}");
+
+    let w = super::worst_offenders(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        10,
+    );
+    assert_eq!(w.cohesion.len(), 1);
+    assert_eq!(w.cohesion[0].name, "MailboxMapper");
+    assert_eq!(w.cohesion[0].detail, "LCOM4 2", "the offender reports the bodied LCOM4");
+    assert!(w.focus.is_empty(), "the mapper is no Focus offender");
+}
+
+/// The template-method shape ([CR-163] §3.2 C, review fix): bodied `run` and
+/// `other` both call the bodyless hook `step`. The declaration is not counted,
+/// but it still links its callers — LCOM4 stays 1 (v6 also scored 1), never 2.
+/// Dropping a declaration must never make a class look *more* fragmented.
+///
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+#[test]
+fn a_bodyless_hook_still_links_the_bodied_methods_that_call_it() {
+    let nodes = [
+        node(1, "Base", NodeKind::Class, Some("Base.java")),
+        node(2, "step", NodeKind::Method, Some("Base.java")),
+        node(3, "run", NodeKind::Method, Some("Base.java")),
+        node(4, "other", NodeKind::Method, Some("Base.java")),
+    ];
+    let edges = [
+        edge(1, 2, EdgeKind::Contains),
+        edge(1, 3, EdgeKind::Contains),
+        edge(1, 4, EdgeKind::Contains),
+        edge(3, 2, EdgeKind::Calls),
+        edge(4, 2, EdgeKind::Calls),
+    ];
+    let functions = [
+        method_body(2, Some(false)),
+        method_body(3, Some(true)),
+        method_body(4, Some(true)),
+    ];
+    let r = run(&nodes, &edges, &functions);
+    assert_eq!(
+        r.cohesion.expect("Base has bodied methods").raw,
+        1.0,
+        "run and other share the hook they both call: one component"
+    );
+    let w = super::worst_offenders(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        10,
+    );
+    assert!(w.cohesion.is_empty(), "Base is no Cohesion offender: {:?}", w.cohesion);
+}
+
+/// A container with 25 **bodied** methods is still god, beside the mapper's
+/// bodyless declarations ([FR-QM-12]'s 25-method AC, held for bodied methods):
+/// narrowing to bodied methods never hides real size. Checked for the `Class`
+/// containers Java extracts and the `Struct` containers Rust and Go extract.
+#[test]
+fn a_25_bodied_method_container_is_still_god_as_class_or_struct() {
+    for kind in [NodeKind::Class, NodeKind::Struct] {
+        let (mut nodes, mut edges, mut functions) = mapstruct_mapper(Some(false));
+        nodes.push(node_span(2, "Service", kind, Some("service"), 1, 200));
+        for m in 0..25 {
+            let id = 300 + m;
+            nodes.push(node(id, "work", NodeKind::Method, Some("service")));
+            edges.push(edge(2, id, EdgeKind::Contains));
+            functions.push(method_body(id, Some(true)));
+        }
+        let r = run(&nodes, &edges, &functions);
+        let focus = r.focus.expect("containers exist");
+        assert_eq!(
+            focus.raw, 0.5,
+            "{kind:?}: the 25-bodied-method container is god, the mapper is not"
+        );
+
+        let god = super::god_containers(
+            &nodes,
+            &edges,
+            &functions,
+            &HashSet::new(),
+            super::Thresholds::default(),
+        );
+        assert_eq!(god.len(), 1, "{kind:?}");
+        assert_eq!(god[0].id, NodeId(2), "{kind:?}");
+        assert_eq!(god[0].method_count, 25, "{kind:?}: the bodied count is reported");
+    }
+}
+
+/// The coordinator's [NULL rule](crate::graph_store::FunctionMetricRow::has_body):
+/// a `has_body` still `NULL` (an upgraded store before re-extraction) reads as
+/// **bodied**, never bodyless — so the mapper scores exactly as under v6
+/// (LCOM4 = 17 + 2 = 19; 23 methods → god) until the fact is recorded.
+#[test]
+fn a_null_has_body_counts_as_bodied() {
+    let (nodes, edges, functions) = mapstruct_mapper(None);
+    let r = run(&nodes, &edges, &functions);
+    let cohesion = r.cohesion.expect("scoreable");
+    assert!(
+        (cohesion.raw - 1.0 / 19.0).abs() < 1e-12,
+        "NULL declarations stay in the method set: LCOM4 19, got 1/{}",
+        1.0 / cohesion.raw
+    );
+    let focus = r.focus.expect("a container exists");
+    assert_eq!(focus.raw, 1.0, "23 not-yet-extracted methods ≥ T_m → god");
+}
+
+/// A class whose methods are **all** bodyless — a pure `abstract` class, or a
+/// C++ class whose members are all defined out of line (S-500 records each
+/// in-class prototype as bodyless) — scores what remains: zero bodied methods.
+/// Cohesion treats it as unscoreable, exactly like a method-less class (here
+/// the only class, so Cohesion is n/a), and Focus still counts it, god only by
+/// span ([CR-163] §3.2 C/D; the S-502 decision).
+#[test]
+fn a_class_with_no_bodied_method_is_unscoreable_for_cohesion_and_god_only_by_span() {
+    let mut nodes = vec![
+        node_span(1, "Widget", NodeKind::Class, Some("widget.h"), 1, 40),
+        node_span(2, "Facade", NodeKind::Class, Some("facade.h"), 1, 520),
+    ];
+    let mut edges = Vec::new();
+    let mut functions = Vec::new();
+    for (owner, base) in [(1, 100), (2, 200)] {
+        for m in 0..25 {
+            let id = base + m;
+            nodes.push(node(id, "proto", NodeKind::Method, Some("widget.h")));
+            edges.push(edge(owner, id, EdgeKind::Contains));
+            functions.push(method_body(id, Some(false)));
+        }
+    }
+    nodes.sort_by_key(|n| n.id);
+    let r = run(&nodes, &edges, &functions);
+    assert!(
+        r.cohesion.is_none(),
+        "no class has a bodied method → Cohesion is n/a, never a fabricated 1.0"
+    );
+    let focus = r.focus.expect("both classes stay class-like containers");
+    assert_eq!(
+        focus.raw, 0.5,
+        "25 prototypes are not god by count; the 520-line class is god by span"
+    );
+    let god = super::god_containers(
+        &nodes,
+        &edges,
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+    );
+    assert_eq!(god.len(), 1);
+    assert_eq!((god[0].id, god[0].method_count), (NodeId(2), 0));
+}
+
+// ── CR-163 E / FR-QM-13: the Uniqueness offender list is ranked by mass ──────
+
+/// Clone groups rank by `members × mean line count` descending, then group id,
+/// then member id ([FR-QM-13], [CR-163] §3.2 E): a 2 × 30-line group (mass 60)
+/// lists before a 6 × 4-line group (mass 24) although its id is larger and it
+/// has fewer members; two equal-mass groups fall back to group id; a group's
+/// members stay adjacent, id ascending.
+///
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+#[test]
+fn uniqueness_offenders_rank_clone_groups_by_mass() {
+    let mut nodes = Vec::new();
+    let mut functions = Vec::new();
+    let mut add = |id: i64, group: i64, lines: Option<i64>| {
+        nodes.push(node(id, &format!("f{id}"), NodeKind::Function, Some("src/a.rs")));
+        functions.push(func_struct(id, None, lines, None, Some(group)));
+    };
+    // Group 1: 6 × 4 lines (mass 24).
+    for id in 1..=6 {
+        add(id, 1, Some(4));
+    }
+    // Group 40: 2 × 30 lines (mass 60), members out of id order in the slice.
+    add(41, 40, Some(30));
+    add(40, 40, Some(30));
+    // Groups 20 and 30: 3 × 8 = 24, the same mass as group 1 → group id breaks it.
+    for id in [20, 21, 22] {
+        add(id, 20, Some(8));
+    }
+    for id in [30, 31, 32] {
+        add(id, 30, Some(8));
+    }
+    // Group 50: line counts unrecorded → mean over none → mass 0, last.
+    add(50, 50, None);
+    add(51, 50, None);
+    // Group 60: one member unrecorded → mean over the recorded one: 2 × 13 = 26,
+    // ahead of the 24s (a plain line sum, 13, would rank it behind them).
+    add(60, 60, Some(13));
+    add(61, 60, None);
+
+    let w = super::worst_offenders(
+        &nodes,
+        &[],
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        100,
+    );
+    let order: Vec<&str> = w.uniqueness.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(
+        order,
+        [
+            "f40", "f41", // mass 60
+            "f60", "f61", // mass 26
+            "f1", "f2", "f3", "f4", "f5", "f6", // mass 24, group 1
+            "f20", "f21", "f22", // mass 24, group 20
+            "f30", "f31", "f32", // mass 24, group 30
+            "f50", "f51", // mass 0
+        ],
+        "mass desc, then group id, then member id"
+    );
+    assert_eq!(w.uniqueness[0].detail, "clone group #40 · 2 members × 30 lines");
+    assert_eq!(w.uniqueness[4].detail, "clone group #1 · 6 members × 4 lines");
+    assert_eq!(
+        w.uniqueness[2].detail, "clone group #60 · 2 members × 13 lines",
+        "the mean spans the recorded line counts only"
+    );
+    assert_eq!(
+        w.uniqueness[16].detail, "clone group #50 · 2 members",
+        "no recorded line count → no fabricated `0 lines`"
+    );
+
+    // The cap truncates the ranked list, so the heaviest group survives it.
+    let capped = super::worst_offenders(
+        &nodes,
+        &[],
+        &functions,
+        &HashSet::new(),
+        super::Thresholds::default(),
+        3,
+    );
+    let names: Vec<&str> = capped.uniqueness.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, ["f40", "f41", "f60"]);
+}
+
+/// The Uniqueness list's mass and member count are **production-scoped**
+/// ([FR-QM-08], review fix): a test function in a clone group is neither listed
+/// nor counted. Group 1 has 2 production members of 10 lines plus a 200-line
+/// test member; group 10 has 2 production members of 20 lines. Production-only,
+/// group 10 (mass 40) outranks group 1 (mass 20); counting the test member would
+/// list it and flip the order (3 × 73.3 = 220).
+///
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+#[test]
+fn uniqueness_offenders_count_production_members_only() {
+    let nodes: Vec<NodeRow> = [1, 2, 3, 10, 11]
+        .into_iter()
+        .map(|id| node(id, &format!("f{id}"), NodeKind::Function, Some("src/a.rs")))
+        .collect();
+    let functions = [
+        func_struct(1, None, Some(10), None, Some(1)),
+        func_struct(2, None, Some(10), None, Some(1)),
+        func_struct(3, None, Some(200), None, Some(1)), // the test-scoped member
+        func_struct(10, None, Some(20), None, Some(10)),
+        func_struct(11, None, Some(20), None, Some(10)),
+    ];
+    let test_ids: HashSet<NodeId> = [NodeId(3)].into_iter().collect();
+    let w = super::worst_offenders(
+        &nodes,
+        &[],
+        &functions,
+        &test_ids,
+        super::Thresholds::default(),
+        10,
+    );
+    let order: Vec<&str> = w.uniqueness.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(order, ["f10", "f11", "f1", "f2"], "the test member is not listed");
+    assert_eq!(
+        w.uniqueness[2].detail, "clone group #1 · 2 members × 10 lines",
+        "the test member enters neither the count nor the mean"
+    );
+}
+
 // ── FR-QM-14 / UAT-QM-13: extended aggregate (floors, drop-out, hash) ─────────
 
 /// A new dimension forced to its floor drags but never zeroes the signal, while
@@ -1695,8 +2051,8 @@ fn worst_offenders_rank_cap_and_scope_function_dimensions() {
     );
 }
 
-/// Uniqueness offenders cluster by clone-group id then node id; Conciseness
-/// offenders carry the three brain facts.
+/// Uniqueness offenders keep a group's members adjacent, node id ascending;
+/// Conciseness offenders carry the three brain facts.
 #[test]
 fn worst_offenders_group_clones_and_describe_brain_methods() {
     let nodes = [
@@ -1721,9 +2077,9 @@ fn worst_offenders_group_clones_and_describe_brain_methods() {
     assert_eq!(w.uniqueness.len(), 2);
     assert_eq!(
         w.uniqueness[0].name, "clone_b",
-        "group asc, then node id asc"
+        "within a group, node id asc"
     );
-    assert_eq!(w.uniqueness[0].detail, "clone group #1");
+    assert_eq!(w.uniqueness[0].detail, "clone group #1 · 2 members");
     assert_eq!(w.conciseness.len(), 1);
     assert_eq!(w.conciseness[0].name, "brainy");
     assert_eq!(w.conciseness[0].detail, "CC 20 · LOC 150 · nesting 4");

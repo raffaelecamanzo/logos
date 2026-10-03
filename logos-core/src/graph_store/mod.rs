@@ -608,6 +608,19 @@ pub struct FunctionMetricRow {
     /// [FR-AN-06]: ../../../docs/specs/requirements/FR-AN-06.md
     /// [FR-QM-13]: ../../../docs/specs/requirements/FR-QM-13.md
     pub clone_group: Option<NodeId>,
+    /// Whether the callable carries an implementation body (S-500, [FR-EX-11])
+    /// — the `nodes.has_body` column. The Cohesion and Focus method sets read it
+    /// (metric-semantics v7, [FR-QM-11], [FR-QM-12]): only a recorded
+    /// `Some(false)` is bodyless. `None` — a callable indexed before migration 25
+    /// and not re-extracted since — reads as **bodied** (not yet extracted, never
+    /// bodyless), so an upgraded store scores exactly as it did until the
+    /// re-extraction records the fact ([NFR-CC-04]).
+    ///
+    /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub has_body: Option<bool>,
 }
 
 /// One persisted `metric_snapshots` row (S-018, [FR-QM-07]).
@@ -3415,10 +3428,11 @@ impl GraphStore for SqliteGraphStore {
     fn function_metrics(&self) -> Result<Vec<FunctionMetricRow>> {
         // ORDER BY id keeps the metric reduction canonical (ADR-08, NFR-RA-06).
         // The CR-005 dimensions add line_count (Conciseness), max_nesting_depth
-        // (Nesting/Conciseness), and clone_group (Uniqueness) to the slice.
+        // (Nesting/Conciseness), and clone_group (Uniqueness) to the slice;
+        // CR-163 adds has_body (the bodied Cohesion/Focus method sets).
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, cyclomatic_complexity, is_dead, is_duplicate, \
-                    line_count, max_nesting_depth, clone_group \
+                    line_count, max_nesting_depth, clone_group, has_body \
              FROM nodes WHERE kind IN (?1, ?2) AND derived = 0 \
              ORDER BY id",
         )?;
@@ -3434,6 +3448,7 @@ impl GraphStore for SqliteGraphStore {
                         line_count: row.get(4)?,
                         max_nesting_depth: row.get(5)?,
                         clone_group: row.get::<_, Option<i64>>(6)?.map(NodeId),
+                        has_body: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
                     })
                 },
             )?
