@@ -14,6 +14,12 @@
 //!   floored; **n/a drop-out** when no class construct exists.
 //! - **Focus** ([FR-QM-12]) — `1 − god-container ratio` over class-like
 //!   containers, floored; **n/a drop-out** when no class-like container exists.
+//!
+//! Since metric-semantics v7 ([CR-163]) both container dimensions count only a
+//! container's **bodied** methods (the [FR-EX-11] `has_body` fact): an `abstract`
+//! or interface-style declaration shares no field and calls nothing by
+//! construction, so it would otherwise be its own LCOM4 component and inflate
+//! the god method count of a purely declarative mapper.
 //! - **Uniqueness** ([FR-QM-13]) — `1 − near-clone ratio`, floored.
 //!
 //! # Floors, not short-circuits ([ADR-21])
@@ -58,6 +64,8 @@
 //! [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 //! [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+//! [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+//! [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -284,11 +292,22 @@ pub(super) fn uniqueness(production: &[&FunctionMetricRow]) -> MetricValue {
 /// built once from the production node/edge snapshot ([FR-QM-11], [FR-QM-12]).
 ///
 /// Containers are non-test [`NodeKind::Class`]/[`NodeKind::Struct`] nodes; each
-/// carries its **production** member methods and fields (via [`EdgeKind::Contains`]),
+/// carries its **production, bodied** member methods (via [`EdgeKind::Contains`]),
 /// so `is_test` methods are excluded from both dimensions — adding test methods
-/// to a class leaves Cohesion and Focus byte-identical ([FR-QM-08], [UAT-QM-07]).
+/// to a class leaves Cohesion and Focus byte-identical ([FR-QM-08], [UAT-QM-07])
+/// — and so are bodyless declarations (metric-semantics v7, [CR-163]).
 /// `Accesses` (method→field) and intra-class `Calls` edges feed LCOM4
 /// connectivity.
+///
+/// A container that declares methods but none with a body (a pure `abstract`
+/// class; a C++ class whose members are all defined out of line, which
+/// extraction records as bodyless prototypes) keeps its place: it is
+/// unscoreable for Cohesion exactly like a method-less class, and Focus still
+/// counts it, god only by span. The god predicate keeps its shape over the
+/// bodied count ([CR-163] §3.2 D) rather than inventing a per-container
+/// drop-out.
+///
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
 pub(super) struct ContainerIndex {
     /// Class-like containers in id order (deterministic reduction, [ADR-08]).
     containers: Vec<Container>,
@@ -310,14 +329,17 @@ struct Container {
     /// The container node kind (`Class` is cohesion-applicable; `Class`/`Struct`
     /// are both focus-applicable).
     kind: NodeKind,
-    /// Production member methods in id order.
+    /// Production **bodied** member methods in id order ([CR-163]); bodyless
+    /// declarations never enter.
+    ///
+    /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
     methods: Vec<NodeId>,
     /// 1-based line span `end − start + 1`, or 0 when either line is unrecorded.
     span: i64,
 }
 
 /// A class-like container flagged as a **god container** ([FR-QM-12]): its
-/// production method count ≥ `T_m` **or** its line span ≥ `T_span`. Backs both
+/// production bodied method count ≥ `T_m` **or** its line span ≥ `T_span`. Backs both
 /// the `no_god_containers` budget ([FR-GV-11] ext., [UAT-GV-08]) and the Focus
 /// worst-offender list, so the budget, the report, and the Focus dimension agree
 /// by construction. The caller enriches `id` to a name/file via the node set.
@@ -329,7 +351,7 @@ struct Container {
 pub struct GodContainer {
     /// The container node's storage id.
     pub id: NodeId,
-    /// Production member-method count.
+    /// Production **bodied** member-method count (metric-semantics v7).
     pub method_count: u64,
     /// 1-based line span.
     pub span: i64,
@@ -339,12 +361,32 @@ impl ContainerIndex {
     /// Build the container scaffolding from the production node/edge snapshot.
     ///
     /// `nodes`/`edges` are the whole-graph snapshots (id-ordered and
-    /// `(source,target,kind)`-ordered respectively); `test_ids` is the persisted
-    /// `is_test` set excluded from the production scope ([FR-QM-08]). Method↔field
-    /// access and intra-class calls are resolved here so the dimension methods are
-    /// pure arithmetic over the result.
-    pub(super) fn build(nodes: &[NodeRow], edges: &[EdgeRow], test_ids: &HashSet<NodeId>) -> Self {
+    /// `(source,target,kind)`-ordered respectively); `functions` carries each
+    /// callable's `has_body` fact; `test_ids` is the persisted `is_test` set
+    /// excluded from the production scope ([FR-QM-08]). Method↔field access and
+    /// intra-class calls are resolved here so the dimension methods are pure
+    /// arithmetic over the result.
+    ///
+    /// Only a recorded `has_body = Some(false)` excludes a method. A `None` fact
+    /// (an upgraded store not yet re-extracted, or a method absent from
+    /// `functions`) counts as **bodied** — not yet extracted is never bodyless
+    /// ([NFR-CC-04]), so such a store scores exactly as under v6 until its
+    /// re-extraction records the fact.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub(super) fn build(
+        nodes: &[NodeRow],
+        edges: &[EdgeRow],
+        functions: &[FunctionMetricRow],
+        test_ids: &HashSet<NodeId>,
+    ) -> Self {
         let kind_of: HashMap<NodeId, NodeKind> = nodes.iter().map(|n| (n.id, n.kind)).collect();
+        // CR-163: the declarations recorded as bodyless never enter a method set.
+        let bodyless: HashSet<NodeId> = functions
+            .iter()
+            .filter(|f| f.has_body == Some(false))
+            .map(|f| f.id)
+            .collect();
 
         // Class-like containers are enumerated from the node set (not from edges)
         // so a method-less container — e.g. a god-by-span empty struct — is still
@@ -376,11 +418,12 @@ impl ContainerIndex {
 
         for e in edges {
             match e.kind {
-                // Attach production member methods to their container.
+                // Attach production, bodied member methods to their container.
                 EdgeKind::Contains => {
                     if let Some(&ci) = by_id.get(&e.source) {
                         if matches!(kind_of.get(&e.target), Some(NodeKind::Method))
                             && !test_ids.contains(&e.target)
+                            && !bodyless.contains(&e.target)
                         {
                             containers[ci].methods.push(e.target);
                         }
@@ -411,11 +454,12 @@ impl ContainerIndex {
     /// Cohesion ([FR-QM-11]) — mean of `1/LCOM4` over production **classes**,
     /// floored; [`None`] (n/a drop-out) when no class has scoreable methods.
     ///
-    /// LCOM4 is the number of connected components of a class's methods linked by
-    /// shared field access ([`EdgeKind::Accesses`]) or intra-class
-    /// [`EdgeKind::Calls`] ([FR-QM-11]). A class with no production methods is not
-    /// scoreable (LCOM4 undefined) and is excluded; a repo with zero scoreable
-    /// classes drops Cohesion out of the aggregate denominator ([ADR-21]).
+    /// LCOM4 is the number of connected components of a class's **bodied**
+    /// methods linked by shared field access ([`EdgeKind::Accesses`]) or
+    /// intra-class [`EdgeKind::Calls`] ([FR-QM-11], metric-semantics v7). A class
+    /// with no bodied production method is not scoreable (LCOM4 undefined) and is
+    /// excluded; a repo with zero scoreable classes drops Cohesion out of the
+    /// aggregate denominator ([ADR-21]).
     ///
     /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
     /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
@@ -450,8 +494,8 @@ impl ContainerIndex {
     /// Focus ([FR-QM-12]) — `1 − god-container ratio` over class-like containers,
     /// floored; [`None`] (n/a drop-out) when there are no class-like containers.
     ///
-    /// A container is **god** when its production method count ≥ `T_m` **or** its
-    /// line span ≥ `T_span` ([FR-QM-12]). Class-like containers are `Class` and
+    /// A container is **god** when its production **bodied** method count ≥ `T_m`
+    /// **or** its line span ≥ `T_span` ([FR-QM-12], metric-semantics v7). Class-like containers are `Class` and
     /// `Struct` (Java/Python/TS class, Rust struct+impl, Go type method-set).
     ///
     /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
@@ -492,7 +536,7 @@ impl ContainerIndex {
     /// The production **classes** whose LCOM4 ≥ 2 — the low-cohesion offenders the
     /// Cohesion worst-offender list reports ([FR-QM-11], [UAT-QM-13]/[CR-005]
     /// review detail). Same scope as [`cohesion`](Self::cohesion) (Class with
-    /// production methods); returns `(class id, LCOM4)` in node-id order, so the
+    /// bodied production methods); returns `(class id, LCOM4)` in node-id order, so the
     /// report agrees with the dimension and is deterministic ([NFR-RA-06]).
     ///
     /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md

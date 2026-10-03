@@ -773,7 +773,7 @@ fn first_gate_after_a_semantics_change_auto_re_baselines_then_compares() {
     // inherits from a pre-CR-001 `.logos` database (the migration-7 DEFAULT 1).
     let saved = engine.gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed);
-    downgrade_all_snapshots_to_v1(tmp.path());
+    downgrade_all_snapshots_to(tmp.path(), 1);
 
     // First post-upgrade gate: auto-re-baseline, informational pass, the notice.
     let first = engine.gate(None, false, true).expect("gate runs");
@@ -818,17 +818,63 @@ fn first_gate_after_a_semantics_change_auto_re_baselines_then_compares() {
     );
 }
 
-/// Rewrite every persisted `metric_snapshots` row to the v1 (test-inclusive)
-/// semantics version through a side connection to the same `.logos/logos.db` —
+/// Rewrite every persisted `metric_snapshots` row to an older semantics
+/// `version` through a side connection to the same `.logos/logos.db` —
 /// simulating a baseline inherited from a pre-upgrade database without a public
 /// downgrade seam.
-fn downgrade_all_snapshots_to_v1(root: &Path) {
+fn downgrade_all_snapshots_to(root: &Path, version: i64) {
     let db = root.join(".logos/logos.db");
     let conn = rusqlite::Connection::open(&db).expect("open the store directly");
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .unwrap();
-    conn.execute("UPDATE metric_snapshots SET metric_version = 1", [])
-        .expect("downgrade the recorded semantics version");
+    conn.execute(
+        "UPDATE metric_snapshots SET metric_version = ?1",
+        [version],
+    )
+    .expect("downgrade the recorded semantics version");
+}
+
+/// The CR-163 upgrade boundary (S-502, [FR-GV-10]): a baseline saved by a v6
+/// build (before the duplicate floor and bodied LCOM4/Focus) is incomparable
+/// to a v7 run. The first gate after the upgrade passes informationally with
+/// the re-baseline notice; the second compares normally against the snapshot
+/// the first re-based to. One bump, one re-baseline, nothing re-blessed by
+/// hand.
+///
+/// [FR-GV-10]: ../../docs/specs/requirements/FR-GV-10.md
+#[test]
+fn a_v6_baseline_re_baselines_once_under_semantics_v7() {
+    assert_eq!(
+        logos_core::metrics::METRIC_SEMANTICS_VERSION,
+        7,
+        "CR-163 is semantics v7"
+    );
+    let tmp = clean_project();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+    assert!(engine.gate(None, true, true).expect("gate --save runs").saved);
+    downgrade_all_snapshots_to(tmp.path(), 6);
+
+    let first = engine.gate(None, false, true).expect("gate runs");
+    assert!(first.passed, "a v6 baseline never fails a v7 gate: {}", first.message);
+    assert!(first.saved, "the first v7 gate re-baselines");
+    assert!(
+        first
+            .message
+            .contains("baseline reset: metric semantics changed"),
+        "the re-baseline is announced: {}",
+        first.message
+    );
+
+    let second = engine.gate(None, false, true).expect("gate runs");
+    assert!(second.passed, "{}", second.message);
+    assert!(!second.saved, "the second gate compares, it does not re-baseline");
+    assert!(
+        second.message.contains("holds the baseline"),
+        "the second gate is a normal comparison: {}",
+        second.message
+    );
+    assert_eq!(second.baseline_signal, first.signal);
 }
 
 // ── FR-GV-10 / BR-25 / UAT-QM-13 step 3: thresholds-hash auto-re-baseline ────

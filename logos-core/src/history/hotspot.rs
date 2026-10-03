@@ -470,6 +470,7 @@ mod tests {
             line_count: None,
             max_nesting_depth: None,
             clone_group: None,
+            has_body: None,
         }
     }
 

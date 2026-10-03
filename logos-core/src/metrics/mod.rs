@@ -233,6 +233,24 @@ pub const MODULARITY_MIN_EDGES: u64 = 5;
 ///   it too (the neutral 1/3 no longer enters the mean). Every graph with
 ///   m ≥ 5 scores byte-identically to v5; a v5 baseline is still incomparable, so
 ///   the first post-upgrade gate auto-re-baselines ([FR-GV-10]).
+/// - **v7** — the structural metrics stop counting declarative code ([CR-163],
+///   S-501/S-502); a v6 baseline is incomparable, so the first post-upgrade gate
+///   auto-re-baselines ([FR-GV-10]) — one re-baseline for the whole CR:
+///   - *The exact-duplicate floor* ([FR-AN-02], S-501): a function is
+///     `is_duplicate` only when it has a body ([FR-EX-11]) **and** at least
+///     `duplicate_min_tokens` (default 50) normalized tokens, so Redundancy and
+///     the `max_duplicates` budget stop counting four-line constant overrides
+///     and bodyless declarations as copy-paste.
+///   - *Bodied LCOM4* ([FR-QM-11]): Cohesion's LCOM4 is computed over a class's
+///     **bodied** methods; a bodyless declaration is no longer its own
+///     component, and a class with no bodied method is unscoreable.
+///   - *Bodied Focus* ([FR-QM-12]): the god predicate counts **bodied**
+///     methods (`bodied ≥ T_m ∨ span ≥ T_span`), so a MapStruct-style mapper of
+///     abstract declarations is no longer a god container.
+///
+///   A `has_body` fact still `NULL` (an upgraded store not yet re-extracted)
+///   reads as bodied, never bodyless. The Uniqueness offender list's
+///   order-by-mass (CR-163 §3.2 E) is report order only and needs no bump.
 ///
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
@@ -252,7 +270,12 @@ pub const MODULARITY_MIN_EDGES: u64 = 5;
 /// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
 /// [ADR-61]: ../../../docs/specs/architecture/decisions/ADR-61.md
 /// [ADR-62]: ../../../docs/specs/architecture/decisions/ADR-62.md
-pub const METRIC_SEMANTICS_VERSION: i64 = 6;
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+/// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+/// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
+pub const METRIC_SEMANTICS_VERSION: i64 = 7;
 
 /// Compute the five metrics and the aggregate signal over the **production
 /// scope** of a hydrated dependency view — pure, no I/O ([FR-QM-01]..[FR-QM-06],
@@ -333,7 +356,7 @@ pub fn compute(
     let nesting = extended::nesting(&production, &thresholds);
     let conciseness = extended::conciseness(&production, &thresholds);
     let uniqueness = extended::uniqueness(&production);
-    let containers = ContainerIndex::build(nodes, edges, test_ids);
+    let containers = ContainerIndex::build(nodes, edges, functions, test_ids);
     let cohesion = containers.cohesion();
     let focus = containers.focus(&thresholds);
 
@@ -633,10 +656,12 @@ pub fn compute_snapshot(
 ///
 /// Backs the `no_god_containers` budget ([FR-GV-11] ext., [UAT-GV-08]) in the
 /// governance evaluator: it counts the *same* containers Focus counts as god, so
-/// the budget and the dimension can never disagree. The caller enriches each
-/// [`GodContainer::id`] to a name/file via the node set for the violation
-/// message; the list is already deterministic (the container index is built from
-/// the id-ordered node set, [NFR-RA-06]).
+/// the budget and the dimension can never disagree — including over which
+/// methods count: `functions` supplies the `has_body` fact, so the budget counts
+/// bodied methods exactly as Focus does (metric-semantics v7). The caller
+/// enriches each [`GodContainer::id`] to a name/file via the node set for the
+/// violation message; the list is already deterministic (the container index is
+/// built from the id-ordered node set, [NFR-RA-06]).
 ///
 /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
 /// [FR-GV-11]: ../../../docs/specs/requirements/FR-GV-11.md
@@ -645,10 +670,11 @@ pub fn compute_snapshot(
 pub fn god_containers(
     nodes: &[NodeRow],
     edges: &[EdgeRow],
+    functions: &[FunctionMetricRow],
     test_ids: &HashSet<NodeId>,
     thresholds: Thresholds,
 ) -> Vec<GodContainer> {
-    ContainerIndex::build(nodes, edges, test_ids).god_containers(&thresholds)
+    ContainerIndex::build(nodes, edges, functions, test_ids).god_containers(&thresholds)
 }
 
 /// The per-dimension worst-offender lists for the five CR-005 structural
@@ -735,21 +761,23 @@ pub fn worst_offenders(
         })
         .collect();
 
-    // Uniqueness (FR-QM-13): near-clone production functions, grouped by clone
-    // group id then id asc (a stable, group-clustered listing).
-    let mut uniqueness: Vec<(NodeId, i64)> = production
-        .iter()
-        .filter_map(|f| f.clone_group.map(|g| (f.id, g.get())))
-        .collect();
-    uniqueness.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-    let uniqueness = uniqueness
+    // Uniqueness (FR-QM-13, CR-163 E): near-clone production functions, ranked
+    // by their group's duplicated mass — members × mean line count — descending,
+    // then group id, then member id, so the largest copy-paste surfaces first and
+    // a group's members stay adjacent.
+    let uniqueness = clone_groups_by_mass(&production)
         .into_iter()
+        .flat_map(|g| {
+            let detail = g.detail();
+            g.members.into_iter().map(move |id| (id, detail.clone()))
+        })
         .take(cap)
-        .filter_map(|(id, group)| offender(id, format!("clone group #{group}")))
+        .filter_map(|(id, detail)| offender(id, detail))
         .collect();
 
-    // Cohesion/Focus read the class-like container index (FR-QM-11/12).
-    let containers = ContainerIndex::build(nodes, edges, test_ids);
+    // Cohesion/Focus read the class-like container index (FR-QM-11/12) over
+    // bodied methods (metric-semantics v7).
+    let containers = ContainerIndex::build(nodes, edges, functions, test_ids);
 
     // Cohesion (FR-QM-11): low-cohesion classes (LCOM4 ≥ 2), most fragmented
     // first then id asc.
@@ -791,6 +819,94 @@ pub fn worst_offenders(
         focus,
         uniqueness,
     }
+}
+
+/// One near-clone group's production members and its duplicated mass — the unit
+/// the Uniqueness offender list ranks ([FR-QM-13], [CR-163] §3.2 E).
+///
+/// [FR-QM-13]: ../../../docs/specs/requirements/FR-QM-13.md
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+#[derive(Debug)]
+struct CloneGroupMass {
+    /// The stable group id (the component's minimum node id, [FR-AN-06]).
+    ///
+    /// [FR-AN-06]: ../../../docs/specs/requirements/FR-AN-06.md
+    group: i64,
+    /// The group's production members, id ascending.
+    members: Vec<NodeId>,
+    /// The summed line count of the members whose line count is recorded.
+    lines: i64,
+    /// How many members have a recorded line count — the mean's denominator.
+    measured: i64,
+}
+
+impl CloneGroupMass {
+    /// `members × mean line count` as an exact fraction `(numerator,
+    /// denominator)`. The mean spans the members whose line count is recorded,
+    /// never a fabricated zero for the rest ([NFR-CC-04]); a group with none
+    /// recorded has mass 0. Kept rational so the ranking is integer-exact and
+    /// byte-identical across targets ([NFR-RA-06]).
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn mass(&self) -> (i128, i128) {
+        (
+            self.members.len() as i128 * i128::from(self.lines),
+            i128::from(self.measured.max(1)),
+        )
+    }
+
+    /// The offender descriptor: `clone group #G · N members × L lines`, `L` the
+    /// mean recorded line count rounded half up (display only — the ranking
+    /// reads the exact [`mass`](Self::mass)). A group with no recorded line
+    /// count states its members alone rather than a fabricated `0 lines`.
+    fn detail(&self) -> String {
+        let members = self.members.len();
+        if self.measured == 0 {
+            return format!("clone group #{} · {members} members", self.group);
+        }
+        let mean = (2 * self.lines + self.measured) / (2 * self.measured);
+        format!(
+            "clone group #{} · {members} members × {mean} lines",
+            self.group
+        )
+    }
+}
+
+/// The production near-clone groups ordered by duplicated mass (`members × mean
+/// line count`) descending, then group id ascending; each group's members are id
+/// ascending ([FR-QM-13], [CR-163] §3.2 E). A (2 × 30 lines) group therefore
+/// precedes a (6 × 4 lines) group although it has fewer members. Masses compare
+/// by cross-multiplication, exact and deterministic ([NFR-RA-06]).
+///
+/// [FR-QM-13]: ../../../docs/specs/requirements/FR-QM-13.md
+/// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn clone_groups_by_mass(production: &[&FunctionMetricRow]) -> Vec<CloneGroupMass> {
+    let mut by_group: BTreeMap<i64, CloneGroupMass> = BTreeMap::new();
+    for f in production {
+        let Some(group) = f.clone_group else { continue };
+        let g = by_group.entry(group.get()).or_insert_with(|| CloneGroupMass {
+            group: group.get(),
+            members: Vec::new(),
+            lines: 0,
+            measured: 0,
+        });
+        g.members.push(f.id);
+        if let Some(lines) = f.line_count {
+            g.lines += lines;
+            g.measured += 1;
+        }
+    }
+    let mut groups: Vec<CloneGroupMass> = by_group.into_values().collect();
+    for g in &mut groups {
+        g.members.sort_unstable();
+    }
+    groups.sort_by(|a, b| {
+        let ((an, ad), (bn, bd)) = (a.mass(), b.mass());
+        (bn * ad).cmp(&(an * bd)).then(a.group.cmp(&b.group))
+    });
+    groups
 }
 
 /// The `Copy`-able snapshot fields, detached from the read-model so the write
