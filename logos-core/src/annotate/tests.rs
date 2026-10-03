@@ -1628,6 +1628,40 @@ fn is_test_marked_covers_evidence_path_and_affix_with_negatives() {
     ));
 }
 
+/// A module node takes its name from its file stem, so the name markers must not
+/// re-judge it: werkzeug's production `src/werkzeug/test.py` module is named
+/// `test`, and the path rule ([S-524]) says the file is production. The path
+/// rule still marks a module whose file is a test file.
+#[test]
+fn is_test_marked_leaves_a_module_to_the_path_rule() {
+    fn module(name: &str, path: &str) -> AnnotationNodeRow {
+        AnnotationNodeRow {
+            id: NodeId(1),
+            kind: NodeKind::Module,
+            name: name.to_string(),
+            exported: false,
+            derived: false,
+            fingerprint: None,
+            test_evidence: false,
+            file_id: Some(1),
+            file_path: Some(path.to_string()),
+            is_dead: None,
+            is_duplicate: None,
+            is_test: false,
+            layer_membership: None,
+            clone_group: None,
+            has_body: None,
+            body_tokens: None,
+        }
+    }
+    let m = markers();
+    assert!(!is_test_marked(&module("test", "src/werkzeug/test.py"), &m));
+    assert!(!is_test_marked(&module("test_utils", "src/test_utils.rs"), &m));
+    assert!(is_test_marked(&module("tests", "src/tests.rs"), &m));
+    assert!(is_test_marked(&module("test_a", "tests/test_a.py"), &m));
+    assert!(is_test_marked(&module("parser_test", "src/parser_test.go"), &m));
+}
+
 /// `is_test` is recomputed each run from the persisted inputs, so it is
 /// idempotent and deterministic ([NFR-RA-06]).
 #[test]

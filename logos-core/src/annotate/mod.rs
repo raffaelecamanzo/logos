@@ -546,11 +546,16 @@ fn is_test_marked(node: &AnnotationNodeRow, test_markers: &[String]) -> bool {
             .file_path
             .as_deref()
             .is_some_and(crate::navigate::is_test_path)
-        || test_markers.iter().any(|marker| {
-            node.name == *marker
+        // A module node is named after its file stem, so a marker match on it
+        // would re-judge the file by name and override the path rule: werkzeug's
+        // production `src/werkzeug/test.py` (S-524). A file's test-ness is the
+        // path rule's call; the name markers judge the declarations inside it.
+        || (node.kind != NodeKind::Module
+            && test_markers.iter().any(|marker| {
+                node.name == *marker
                 || node.name.starts_with(&format!("{marker}_"))
-                || node.name.ends_with(&format!("_{marker}"))
-        })
+                    || node.name.ends_with(&format!("_{marker}"))
+            }))
 }
 
 /// Whether `node` may take part in exact-duplicate grouping ([FR-AN-02], S-501):
