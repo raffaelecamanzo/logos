@@ -557,6 +557,16 @@ declaration source. For a code symbol referenced from documentation, the
 response also lists the referencing doc sections; for a documentation node, its
 doc→code edges.
 
+A bare name that matches several nodes resolves to a code type (class, struct,
+interface, trait, enum, type alias), else a callable, else a module, else a
+documentation node — so `logos node Utils` on a PHP tree where `Utils` is both a
+class and its file module returns the class. The nodes it passed over are listed
+under `alternatives`, in that order, and each one's `symbol` reaches it when
+passed back to `node`. The key is absent when nothing was passed over: a SCIP
+symbol is exact, and a name only one node carries has no alternative. `callers`,
+`callees`, `impact` and `explore` still resolve a bare name to the lowest node id
+and name no alternatives.
+
 ### `callers` / `callees`
 
 ```bash
