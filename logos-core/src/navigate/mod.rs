@@ -2872,11 +2872,7 @@ impl BareNameRank {
             | NodeKind::TypeAlias => Self::CodeType,
             NodeKind::Function | NodeKind::Method => Self::Callable,
             NodeKind::Module => Self::Module,
-            NodeKind::DocFile
-            | NodeKind::DocSection
-            | NodeKind::Requirement
-            | NodeKind::Adr
-            | NodeKind::Story => Self::Doc,
+            kind if kind.is_doc() => Self::Doc,
             _ => Self::Other,
         }
     }
