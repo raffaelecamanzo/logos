@@ -2430,10 +2430,12 @@ fn names_nothing(name_node: Node<'_>) -> bool {
 /// **It never enters an ERROR node ([FR-EX-30]).** Error recovery can strand a
 /// declarator directly in an ERROR region that swallows the rest of the file
 /// (ccache's `parse_umask`, whose climb used to land on a 627-line ERROR and
-/// report CC 117). The climb stops below the ERROR, so the declaration keeps
-/// its own node's span; a name that sits loose in an ERROR region (a C++ class
-/// head whose body recovery tore apart) is its own node. Either way
-/// [`Lifted::at_error`] is set and the declaration counts as truncated. Only C
+/// report CC 117). A climb that would enter an ERROR is abandoned, and the
+/// declaration keeps the name's own declarator — never an outer declarator
+/// wrapper that recovery stretched over torn body tokens. A name that sits
+/// loose in an ERROR region (a C++ class head whose body recovery tore apart)
+/// is its own node. Either way [`Lifted::at_error`] is set and the declaration
+/// counts as truncated. Only C
 /// and C++ climb declarators, and only the C++ query captures a name loose in
 /// an ERROR region, so the guard is a no-op for every other language.
 ///
@@ -2448,14 +2450,18 @@ fn lift_to_declaration(name: Node<'_>) -> Lifted<'_> {
         "init_declarator",
     ];
     let cut = |node| Lifted { node, at_error: true };
-    let mut decl = match name.parent() {
+    let own = match name.parent() {
         Some(parent) if parent.is_error() => return cut(name),
         Some(parent) => parent,
         None => name,
     };
+    let mut decl = own;
     while CFAMILY_DECLARATORS.contains(&decl.kind()) {
         match decl.parent() {
-            Some(parent) if parent.is_error() => return cut(decl),
+            // Recovery can nest declarators whose ERROR children hold the torn
+            // body, so a cut climb keeps the name's own declarator, never the
+            // outermost wrapper it reached.
+            Some(parent) if parent.is_error() => return cut(own),
             Some(parent) => decl = parent,
             None => break,
         }

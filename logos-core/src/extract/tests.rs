@@ -5870,3 +5870,43 @@ fn a_damaged_rust_or_java_file_that_loses_no_declaration_keeps_its_warning() {
     assert_eq!(java.warnings, vec!["syntax error(s) present; partial extraction"]);
     assert!(java.nodes.iter().any(|n| n.name == "ok"));
 }
+
+#[test]
+#[cfg(feature = "lang-cpp")]
+fn cpp_a_cut_climb_keeps_the_names_own_declarator_not_an_outer_wrapper() {
+    // FR-EX-30 / S-578 review: two `DECORATE(…)` macro statements make recovery
+    // nest `classify`'s declarator (line 6) inside wrappers whose ERROR children
+    // hold the torn `{ if … else if` body (6–8, 6–10), all under an ERROR. The
+    // outermost wrapper reached before the ERROR is not the declaration's own
+    // node: it ends mid-body and its complexity counts the body's branches.
+    let src = "namespace detail {\n\
+\n\
+DECORATE(test_suite, const char*, \"\");\n\
+DECORATE(description, const char*, \"\");\n\
+\n\
+int classify(int x)\n\
+{\n\
+    if (x > 10) {\n\
+        return 2;\n\
+    } else if (x > 5) {\n\
+        return 1;\n\
+    }\n\
+    for (int i = 0; i < x; ++i) {\n\
+        if (i == 3 && x == 4) {\n\
+            return 3;\n\
+        }\n\
+    }\n\
+    return 0;\n\
+}\n\
+\n\
+} // namespace detail\n";
+    let facts = extract_lang("cpp", "include/detail/decorators.hpp", src);
+    assert!(facts.partial, "the fixture parses with an error");
+    let classify = node_of_kind(&facts, "classify", NodeKind::Function);
+    assert_eq!((classify.start_line, classify.end_line), (6, 6), "its own declarator line");
+    assert_eq!(
+        classify.metrics.expect("metrics").cyclomatic_complexity,
+        1,
+        "no branch of the torn body is counted"
+    );
+}
