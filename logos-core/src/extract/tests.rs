@@ -234,14 +234,17 @@ impl Foo { fn run(&self, _x: u32) {} }
     );
 }
 
-/// The symbol of the node named `name` with `kind`.
+/// The symbol of the one node named `name` of `kind`.
 fn symbol_of_kind<'a>(facts: &'a Facts, name: &str, kind: NodeKind) -> &'a str {
-    facts
-        .nodes
-        .iter()
-        .find(|n| n.name == name && n.kind == kind)
-        .map(|n| n.symbol.as_str())
-        .unwrap_or_else(|| panic!("no {kind:?} named {name}: {:?}", facts.nodes))
+    node_of_kind(facts, name, kind).symbol.as_str()
+}
+
+/// The one node named `name` of `kind`.
+fn node_of_kind<'a>(facts: &'a Facts, name: &str, kind: NodeKind) -> &'a NodeFact {
+    let hits: Vec<&NodeFact> =
+        facts.nodes.iter().filter(|n| n.name == name && n.kind == kind).collect();
+    assert_eq!(hits.len(), 1, "exactly one {kind:?} named {name}: {:?}", facts.nodes);
+    hits[0]
 }
 
 #[test]
@@ -5654,4 +5657,268 @@ fn re_extracting_an_unchanged_file_yields_an_identical_has_body_fact() {
     let second = callable_bodies(&extract_lang("java", "src/main/java/com/x/Shape.java", src));
     assert_eq!(first, second);
     assert_eq!(first.len(), 2);
+}
+
+/// FR-EX-30 fixture, shaped on ccache's `util/string.cpp` (written fresh, not
+/// copied): a `TRY_ASSIGN(auto x, …)` macro statement and a later `a < b ? … : …`
+/// make tree-sitter-cpp recover the whole file into one ERROR node, with
+/// `parse_umask`'s `function_declarator` (line 18) a direct child of it and two
+/// whole function definitions beside it; `trim`'s declarator sits in a nested
+/// ERROR. Before S-578 the declarator lift
+/// climbed into that ERROR, so `parse_umask` spanned the file and its complexity
+/// counted every branch in it (ccache: lines 1–627, CC 117).
+#[cfg(feature = "lang-cpp")]
+const STRANDED_DECLARATOR_CPP: &str = "\
+int
+clamp_level(int level, int low, int high)
+{
+  if (level < low || level > high) {
+    return low;
+  } else {
+    return level;
+  }
+}
+
+int
+count_digits(const std::string& text)
+{
+  return text.size();
+}
+
+tl::expected<mode_t, std::string>
+parse_umask(std::string_view value)
+{
+  TRY_ASSIGN(auto mode, parse_unsigned(value, 0, 0777, \"umask\", 8));
+  return static_cast<mode_t>(mode);
+}
+
+std::string_view
+trim(const std::string_view text)
+{
+  const auto first = std::find_if_not(text.begin(), text.end(), is_space);
+  const auto last = std::find_if_not(text.rbegin(), text.rend(), is_space).base();
+  return first < last ? text.substr(first - text.begin(), last - first)
+                      : std::string_view{};
+}
+";
+
+/// FR-EX-30 fixture, shaped on nlohmann/json's `detail/exceptions.hpp` (written
+/// fresh): the namespace-opening macro turns the namespace into a function body,
+/// and the `LIB_NON_NULL(3)` macro before the constructor makes recovery tear
+/// `class exception` apart — `class`, its name and its base clause sit loose in
+/// an ERROR node (lines 10–21), and no `class_specifier` exists to capture.
+#[cfg(feature = "lang-cpp")]
+const STRANDED_CLASS_HEAD_HPP: &str = "\
+#pragma once
+
+#include <exception>
+#include <string>
+
+LIB_NAMESPACE_BEGIN
+namespace detail
+{
+
+class exception : public std::exception
+{
+  public:
+    const char* what() const noexcept override
+    {
+        return m.what();
+    }
+
+    const int id;
+
+  protected:
+    LIB_NON_NULL(3)
+    exception(int id_, const char* what_arg) : id(id_), m(what_arg) {}
+
+  private:
+    std::runtime_error m;
+};
+
+struct position : base_position
+{
+    int line;
+};
+
+}  // namespace detail
+LIB_NAMESPACE_END
+";
+
+/// The file's partial-extraction warning (FR-IX-04).
+fn partial_warning(facts: &Facts) -> &str {
+    facts
+        .warnings
+        .iter()
+        .find(|w| w.contains("partial extraction"))
+        .unwrap_or_else(|| panic!("a partial-extraction warning: {:?}", facts.warnings))
+}
+
+#[test]
+#[cfg(feature = "lang-cpp")]
+fn cpp_a_declarator_stranded_in_a_parse_error_keeps_its_own_span() {
+    // FR-EX-30 / S-578: the lift stops below the ERROR, so `parse_umask` is its
+    // own one-line declarator — not the whole file at the file's complexity.
+    let facts = extract_lang("cpp", "src/util/string.cpp", STRANDED_DECLARATOR_CPP);
+    assert!(facts.partial, "the fixture parses with an error");
+    let umask = node_of_kind(&facts, "parse_umask", NodeKind::Function);
+    assert_eq!(
+        (umask.start_line, umask.end_line),
+        (18, 18),
+        "parse_umask spans its own declarator, not the ERROR region around it"
+    );
+    let m = umask.metrics.expect("a callable carries metrics");
+    assert_eq!(m.cyclomatic_complexity, 1, "no branch of the region is counted");
+    assert!(!m.has_body, "the body error recovery tore off is not claimed");
+
+    // `trim`'s declarator sits in a nested ERROR (lines 20–27) that used to be
+    // its span; now it is the declarator's own lines.
+    let trim = node_of_kind(&facts, "trim", NodeKind::Function);
+    assert_eq!((trim.start_line, trim.end_line), (25, 27));
+
+    // The whole definitions beside it inside the ERROR are untouched.
+    let clamp = node_of_kind(&facts, "clamp_level", NodeKind::Function);
+    assert_eq!((clamp.start_line, clamp.end_line), (1, 9));
+    assert_eq!(clamp.metrics.expect("metrics").cyclomatic_complexity, 4);
+    assert!(clamp.metrics.expect("metrics").has_body);
+}
+
+#[test]
+#[cfg(feature = "lang-cpp")]
+fn cpp_a_class_head_stranded_in_a_parse_error_is_a_class_on_its_own_line() {
+    // FR-EX-30 / S-578: json's `class exception` vanished because recovery left
+    // no `class_specifier`; its head is captured, and the node is the name itself.
+    let facts = extract_lang("cpp", "include/detail/exceptions.hpp", STRANDED_CLASS_HEAD_HPP);
+    assert!(facts.partial, "the fixture parses with an error");
+    let class = node_of_kind(&facts, "exception", NodeKind::Class);
+    assert_eq!((class.start_line, class.end_line), (10, 10), "the head line only");
+
+    // The class claims no body: the member recovery placed inside the ERROR is
+    // not nested under it, because where the class ends is unknown.
+    let what = node_of_kind(&facts, "what", NodeKind::Method);
+    assert!(
+        !what.symbol.as_str().starts_with(class.symbol.as_str()),
+        "{} is not a member of {}",
+        what.symbol.as_str(),
+        class.symbol.as_str()
+    );
+    // A well-formed struct after the damage is extracted as before.
+    let position = node_of_kind(&facts, "position", NodeKind::Struct);
+    assert_eq!((position.start_line, position.end_line), (28, 31));
+
+    // `final` sits between the name and the base clause and still reads as a head.
+    let fin = STRANDED_CLASS_HEAD_HPP.replace("class exception :", "class exception final :");
+    let facts = extract_lang("cpp", "include/detail/exceptions.hpp", &fin);
+    assert_eq!(node_of_kind(&facts, "exception", NodeKind::Class).start_line, 10);
+
+    // With no base clause, the opening brace alone marks the head a definition.
+    let bare = STRANDED_CLASS_HEAD_HPP.replace("class exception : public std::exception", "class exception");
+    let facts = extract_lang("cpp", "include/detail/exceptions.hpp", &bare);
+    let head = node_of_kind(&facts, "exception", NodeKind::Class);
+    assert_eq!((head.start_line, head.end_line), (10, 10));
+
+    // A `struct` head stranded the same way is a Struct on its own line.
+    let st = STRANDED_CLASS_HEAD_HPP.replace("class exception :", "struct exception :");
+    let facts = extract_lang("cpp", "include/detail/exceptions.hpp", &st);
+    let head = node_of_kind(&facts, "exception", NodeKind::Struct);
+    assert_eq!((head.start_line, head.end_line), (10, 10));
+}
+
+#[test]
+#[cfg(all(feature = "lang-cpp", feature = "lang-c"))]
+fn parse_damage_is_counted_into_the_partial_extraction_warning() {
+    // FR-EX-30 + CR-168 §3.2(2): each declaration a parse error cost the file is
+    // counted in its one partial-extraction warning — truncated to its own node
+    // (S-578), or skipped for naming nothing (S-512).
+    // `parse_umask` and `trim` (whose declarator sits in a nested ERROR).
+    let umask = extract_lang("cpp", "src/util/string.cpp", STRANDED_DECLARATOR_CPP);
+    assert_eq!(
+        partial_warning(&umask),
+        "syntax error(s) present; partial extraction; \
+         2 declaration(s) truncated and 0 skipped at a parse error"
+    );
+    let head = extract_lang("cpp", "include/detail/exceptions.hpp", STRANDED_CLASS_HEAD_HPP);
+    assert_eq!(
+        partial_warning(&head),
+        "syntax error(s) present; partial extraction; \
+         1 declaration(s) truncated and 0 skipped at a parse error"
+    );
+    let nameless = extract_lang(
+        "c",
+        "src/anon.c",
+        "typedef struct { int a; } ;\nint after(void) { return 0; }\n",
+    );
+    assert_eq!(
+        partial_warning(&nameless),
+        "syntax error(s) present; partial extraction; \
+         0 declaration(s) truncated and 1 skipped at a parse error"
+    );
+    // A nameless declarator of a declaration another declarator names is not
+    // a skipped declaration: `a` is emitted, so the declaration was taken.
+    let named_too = extract_lang("c", "src/vals.c", "int a = 1, = 2;\n");
+    assert!(named_too.nodes.iter().any(|n| n.name == "a"));
+    assert_eq!(partial_warning(&named_too), "syntax error(s) present; partial extraction");
+    assert_eq!(
+        umask.warnings.iter().filter(|w| w.contains("partial extraction")).count(),
+        1,
+        "the count joins the one warning, never a second one"
+    );
+}
+
+#[test]
+#[cfg(feature = "lang-java")]
+fn a_damaged_rust_or_java_file_that_loses_no_declaration_keeps_its_warning() {
+    // S-578 byte-identity: neither grammar climbs declarators nor captures in an
+    // ERROR region, so a syntax error costs no declaration and the warning text
+    // is the pre-S-578 one, exactly.
+    let rust = extract_src("src/lib.rs", "fn ok() {}\nfn broken( {\n");
+    assert_eq!(rust.warnings, vec!["syntax error(s) present; partial extraction"]);
+    assert!(rust.nodes.iter().any(|n| n.name == "ok"));
+    let java = extract_lang(
+        "java",
+        "src/main/java/com/x/A.java",
+        "package com.x;\nclass A { void ok() {} void broken( { }\n",
+    );
+    assert_eq!(java.warnings, vec!["syntax error(s) present; partial extraction"]);
+    assert!(java.nodes.iter().any(|n| n.name == "ok"));
+}
+
+#[test]
+#[cfg(feature = "lang-cpp")]
+fn cpp_a_cut_climb_keeps_the_names_own_declarator_not_an_outer_wrapper() {
+    // FR-EX-30 / S-578 review: two `DECORATE(…)` macro statements make recovery
+    // nest `classify`'s declarator (line 6) inside wrappers whose ERROR children
+    // hold the torn `{ if … else if` body (6–8, 6–10), all under an ERROR. The
+    // outermost wrapper reached before the ERROR is not the declaration's own
+    // node: it ends mid-body and its complexity counts the body's branches.
+    let src = "namespace detail {\n\
+\n\
+DECORATE(test_suite, const char*, \"\");\n\
+DECORATE(description, const char*, \"\");\n\
+\n\
+int classify(int x)\n\
+{\n\
+    if (x > 10) {\n\
+        return 2;\n\
+    } else if (x > 5) {\n\
+        return 1;\n\
+    }\n\
+    for (int i = 0; i < x; ++i) {\n\
+        if (i == 3 && x == 4) {\n\
+            return 3;\n\
+        }\n\
+    }\n\
+    return 0;\n\
+}\n\
+\n\
+} // namespace detail\n";
+    let facts = extract_lang("cpp", "include/detail/decorators.hpp", src);
+    assert!(facts.partial, "the fixture parses with an error");
+    let classify = node_of_kind(&facts, "classify", NodeKind::Function);
+    assert_eq!((classify.start_line, classify.end_line), (6, 6), "its own declarator line");
+    assert_eq!(
+        classify.metrics.expect("metrics").cyclomatic_complexity,
+        1,
+        "no branch of the torn body is counted"
+    );
 }

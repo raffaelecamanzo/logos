@@ -14,7 +14,10 @@
 //! tree-sitter recovers from syntax errors and still returns a parse tree with
 //! the well-formed declarations around the break intact. A file that does not
 //! parse cleanly is *partially* extracted — its [`Facts::partial`] flag is set
-//! and a warning recorded — and the run is **never** aborted.
+//! and a warning recorded — and the run is **never** aborted. No declaration is
+//! lifted into an ERROR region, so none claims a span or body recovery tore off;
+//! the warning counts the declarations the damage truncated or skipped
+//! ([FR-EX-30]).
 //!
 //! # Determinism ([NFR-RA-06])
 //!
@@ -29,6 +32,7 @@
 //! [AR-05]: ../../../docs/specs/architecture.md
 //! [FR-IX-03]: ../../../docs/specs/requirements/FR-IX-03.md
 //! [FR-IX-04]: ../../../docs/specs/requirements/FR-IX-04.md
+//! [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
 //! [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 
@@ -544,13 +548,15 @@ fn extract_one(
     };
 
     // Error-tolerant: a syntax error localises to ERROR nodes; the well-formed
-    // declarations around it are still extracted (FR-IX-04).
-    if tree.root_node().has_error() {
+    // declarations around it are still extracted (FR-IX-04). Its index is kept
+    // so step 1 can count the declarations the damage cost into it (FR-EX-30).
+    let partial_warning = tree.root_node().has_error().then(|| {
         facts.partial = true;
         facts
             .warnings
             .push("syntax error(s) present; partial extraction".to_string());
-    }
+        facts.warnings.len() - 1
+    });
 
     let Some(query) = plugin.query("symbols") else {
         // No symbols capability → nothing to extract, but not an error.
@@ -558,57 +564,11 @@ fn extract_one(
     };
 
     let source = input.source.as_bytes();
-    let capture_names = query.capture_names();
 
     // 1) Collect declarations from the query matches.
-    let mut decls: Vec<Decl<'_>> = Vec::new();
-    // Guard against a declaration node being captured more than once (a query
-    // with overlapping patterns): a duplicate would corrupt the parent map and
-    // inflate ordinals, churning the symbol ID. The current `symbols.scm` has
-    // one pattern per node kind so this never fires today, but it keeps the
-    // ID-stability invariant (ADR-07) robust against future query authors.
-    let mut seen_decls: HashSet<usize> = HashSet::new();
-    // The file's `package` statement, when its grammar's query names one (S-472).
-    let mut package: Option<String> = None;
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(query, tree.root_node(), source);
-    while let Some(m) = matches.next() {
-        for cap in m.captures {
-            let capture = capture_names[cap.index as usize];
-            if declared_types::note_package(&mut package, capture, cap.node, source) {
-                continue;
-            }
-            let Some(kind) = kind_for_capture(capture) else {
-                continue; // a capture we do not map to a NodeKind
-            };
-            // The query is expected to capture the *name* node; its parent is the
-            // declaration. If a query instead captures the declaration node, the
-            // parent walk simply starts one level higher — the contract is that
-            // a capture identifies one declaration.
-            let name_node = cap.node;
-            let decl_node = lift_to_declaration(name_node.parent().unwrap_or(name_node));
-            // Checked before `seen_decls`, so another pattern naming the same
-            // declaration properly is still taken.
-            if names_nothing(name_node) {
-                continue;
-            }
-            if !seen_decls.insert(decl_node.id()) {
-                continue; // already captured by another pattern — keep the first
-            }
-            let Ok(name) = name_node.utf8_text(source) else {
-                continue; // non-UTF-8 identifier slice — skip defensively
-            };
-            decls.push(Decl {
-                node: decl_node,
-                kind,
-                name: name.to_string(),
-                start_byte: decl_node.start_byte(),
-                start_line: decl_node.start_position().row as u32 + 1,
-                end_line: decl_node.end_position().row as u32 + 1,
-                parent: None,
-                ordinal: 0,
-            });
-        }
+    let (mut decls, package, damage) = collect_decls(query, tree.root_node(), source);
+    if let Some(i) = partial_warning {
+        damage.annotate(&mut facts.warnings[i]);
     }
 
     // 2) Resolve parent scopes and 3) assign canonical-sort ordinals.
@@ -2334,6 +2294,108 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
     }
 }
 
+/// Step 1 of [`extract_one`]: the declarations the `symbols` query captures,
+/// the file's `package` statement when its grammar's query names one (S-472),
+/// and the declarations a parse-error region cost the file ([FR-EX-30]).
+///
+/// [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
+fn collect_decls<'t>(
+    query: &Query,
+    root: Node<'t>,
+    source: &[u8],
+) -> (Vec<Decl<'t>>, Option<String>, ParseDamage) {
+    let capture_names = query.capture_names();
+    let mut decls: Vec<Decl<'t>> = Vec::new();
+    // Guard against a declaration node being captured more than once (a query
+    // with overlapping patterns): a duplicate would corrupt the parent map and
+    // inflate ordinals, churning the symbol ID. The current `symbols.scm` has
+    // one pattern per node kind so this never fires today, but it keeps the
+    // ID-stability invariant (ADR-07) robust against future query authors.
+    let mut seen_decls: HashSet<usize> = HashSet::new();
+    // Declarations a capture named nothing (S-512). One that another pattern
+    // names properly is taken after all, so only the remainder counts as skipped.
+    let mut nameless: HashSet<usize> = HashSet::new();
+    let mut damage = ParseDamage::default();
+    let mut package: Option<String> = None;
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, source);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let capture = capture_names[cap.index as usize];
+            if declared_types::note_package(&mut package, capture, cap.node, source) {
+                continue;
+            }
+            let Some(kind) = kind_for_capture(capture) else {
+                continue; // a capture we do not map to a NodeKind
+            };
+            // The query is expected to capture the *name* node; its parent is the
+            // declaration. If a query instead captures the declaration node, the
+            // parent walk simply starts one level higher — the contract is that
+            // a capture identifies one declaration.
+            let name_node = cap.node;
+            let lifted = lift_to_declaration(name_node);
+            let decl_node = lifted.node;
+            // Checked before `seen_decls`, so another pattern naming the same
+            // declaration properly is still taken.
+            if names_nothing(name_node) {
+                nameless.insert(decl_node.id());
+                continue;
+            }
+            if !seen_decls.insert(decl_node.id()) {
+                continue; // already captured by another pattern — keep the first
+            }
+            let Ok(name) = name_node.utf8_text(source) else {
+                continue; // non-UTF-8 identifier slice — skip defensively
+            };
+            damage.truncated += usize::from(lifted.at_error);
+            decls.push(Decl {
+                node: decl_node,
+                kind,
+                name: name.to_string(),
+                start_byte: decl_node.start_byte(),
+                start_line: decl_node.start_position().row as u32 + 1,
+                end_line: decl_node.end_position().row as u32 + 1,
+                parent: None,
+                ordinal: 0,
+            });
+        }
+    }
+    damage.skipped = nameless.difference(&seen_decls).count();
+    (decls, package, damage)
+}
+
+/// The declarations a parse-error region cost one file ([FR-EX-30]), counted
+/// into its partial-extraction warning ([CR-168] §3.2(2)).
+///
+/// [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
+/// [CR-168]: ../../../docs/requests/CR-168-an-index-never-silently-empties.md
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ParseDamage {
+    /// Declarations kept at their own node because their lift stopped at an
+    /// ERROR region: the body error recovery tore off is not theirs to claim.
+    truncated: usize,
+    /// Declarations that emit nothing because their name is MISSING or
+    /// zero-width ([`names_nothing`]).
+    skipped: usize,
+}
+
+impl ParseDamage {
+    /// Append this damage to the file's partial-extraction warning. A file that
+    /// lost no declaration keeps the warning byte-identical.
+    ///
+    /// Both counts imply the parse has an error, so the warning always exists
+    /// when either is non-zero: an ERROR ancestor and a MISSING name each set
+    /// tree-sitter's `has_error`, and a zero-width name is only ever recovered.
+    fn annotate(self, warning: &mut String) {
+        if self.truncated + self.skipped > 0 {
+            warning.push_str(&format!(
+                "; {} declaration(s) truncated and {} skipped at a parse error",
+                self.truncated, self.skipped
+            ));
+        }
+    }
+}
+
 /// `true` for a captured name node that names nothing: a MISSING
 /// (error-recovery) or zero-width node. Its descriptor would be the bare suffix,
 /// which is not a valid SCIP symbol, and storing it made the graph unreadable
@@ -2345,8 +2407,8 @@ fn names_nothing(name_node: Node<'_>) -> bool {
     name_node.is_missing() || name_node.start_byte() == name_node.end_byte()
 }
 
-/// Lift a captured name's parent past any C-family *declarator* wrapper to the
-/// body-bearing declaration/definition that owns it (S-058).
+/// Lift a captured name to its parent, and past any C-family *declarator*
+/// wrapper to the body-bearing declaration/definition that owns it (S-058).
 ///
 /// Every grammar Logos supported before C++ puts a declaration's name as a
 /// *direct* child of the node that also holds its body (Go/Python/Java
@@ -2364,7 +2426,21 @@ fn names_nothing(name_node: Node<'_>) -> bool {
 /// language (`name.parent()` is never one of these kinds), keeping their decl
 /// nodes byte-identical ([NFR-RA-06]). The captured *name* is unchanged: it is
 /// still read from the original leaf node, never from the lifted declaration.
-fn lift_to_declaration(node: Node<'_>) -> Node<'_> {
+///
+/// **It never enters an ERROR node ([FR-EX-30]).** Error recovery can strand a
+/// declarator directly in an ERROR region that swallows the rest of the file
+/// (ccache's `parse_umask`, whose climb used to land on a 627-line ERROR and
+/// report CC 117). A climb that would enter an ERROR is abandoned, and the
+/// declaration keeps the name's own declarator — never an outer declarator
+/// wrapper that recovery stretched over torn body tokens. A name that sits
+/// loose in an ERROR region (a C++ class head whose body recovery tore apart)
+/// is its own node. Either way [`Lifted::at_error`] is set and the declaration
+/// counts as truncated. Only C
+/// and C++ climb declarators, and only the C++ query captures a name loose in
+/// an ERROR region, so the guard is a no-op for every other language.
+///
+/// [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
+fn lift_to_declaration(name: Node<'_>) -> Lifted<'_> {
     const CFAMILY_DECLARATORS: [&str; 6] = [
         "function_declarator",
         "pointer_declarator",
@@ -2373,14 +2449,38 @@ fn lift_to_declaration(node: Node<'_>) -> Node<'_> {
         "parenthesized_declarator",
         "init_declarator",
     ];
-    let mut decl = node;
+    let cut = |node| Lifted { node, at_error: true };
+    let own = match name.parent() {
+        Some(parent) if parent.is_error() => return cut(name),
+        Some(parent) => parent,
+        None => name,
+    };
+    let mut decl = own;
     while CFAMILY_DECLARATORS.contains(&decl.kind()) {
         match decl.parent() {
+            // Recovery can nest declarators whose ERROR children hold the torn
+            // body, so a cut climb keeps the name's own declarator, never the
+            // outermost wrapper it reached.
+            Some(parent) if parent.is_error() => return cut(own),
             Some(parent) => decl = parent,
             None => break,
         }
     }
-    decl
+    Lifted {
+        node: decl,
+        at_error: false,
+    }
+}
+
+/// The declaration node a captured name lifts to ([`lift_to_declaration`]).
+#[derive(Debug, Clone, Copy)]
+struct Lifted<'tree> {
+    node: Node<'tree>,
+    /// The climb stopped at an ERROR region, so `node` is the declaration's
+    /// own fragment rather than its body-bearing owner ([FR-EX-30]).
+    ///
+    /// [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
+    at_error: bool,
 }
 
 /// `true` for a Rust `impl`-nested associated `function_item` — the declarations
