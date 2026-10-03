@@ -757,40 +757,20 @@ pub fn sync(
         result.files_removed += 1;
     }
 
-    record_sync_persist_failures(runtime, &persist_failures, &files_failed, &seen, scope)?;
-    result.persist_failures = persist_failures.into_iter().map(|(f, _)| f).collect();
+    result.persist_failures =
+        record_sync_persist_failures(runtime, persist_failures, &files_failed, &seen, scope)?;
 
     // Member-local facts (S-462 manifests, S-472 Avro schemas) among every path
     // this sync named, reconciled apart from the graph gates above.
     let facts_changed =
         sync_member_facts(runtime, &canon_root, &authority, &seen, scope, backfill.active)?;
     // Nothing persisted only if no removal or member fact committed either.
-    if result.files_removed == 0 && !facts_changed {
-        result.failed =
-            flag_nothing_persisted(facts.len(), result.persist_failures.len(), &mut warnings);
-    }
+    result.failed = result.files_removed == 0
+        && !facts_changed
+        && flag_nothing_persisted(facts.len(), result.persist_failures.len(), &mut warnings);
 
-    // CR-015 incremental resolution change-set (part 2 of 2): union the names that
-    // entered the changed files (this sync's freshly extracted facts) with those
-    // that left them (`old_names`) and the changed paths, tokenized. The resolve
-    // pass re-binds exactly the rows these can move and skips the rest — the same
-    // result as retrying the whole ledger (FR-RS-03), a fraction of the cost.
-    let mut dirty_tokens: HashSet<String> = HashSet::new();
-    for name in &old_names {
-        dirty_tokens.extend(crate::resolve::tokens(name));
-    }
-    for f in &facts {
-        for n in &f.nodes {
-            dirty_tokens.extend(crate::resolve::tokens(&n.name));
-        }
-    }
-    for path in &changed_paths {
-        dirty_tokens.extend(crate::resolve::tokens(path));
-    }
-    let delta = crate::resolve::Delta {
-        changed_paths,
-        dirty_tokens,
-    };
+    // CR-015 incremental resolution change-set (part 2 of 2) — see `sync_delta`.
+    let delta = sync_delta(changed_paths, &old_names, &facts);
 
     // Pass 2: a deferred reference binds once its target is indexed (UAT-RS-01)
     // and captured cross-file edges rebind (ADR-10) — now over just the
@@ -1523,16 +1503,17 @@ fn record_index_persist_failures(runtime: &Runtime, failed: &[PersistFailure]) -
 /// graph's facts then describe it exactly — or left the graph. A full walk
 /// also clears the mark of every file it no longer admits. A file that failed
 /// to load keeps its mark: the graph still does not hold it as it stands.
-/// Writes nothing when there is nothing to record or clear.
+/// Writes nothing when there is nothing to record or clear. Hands the failures
+/// back, without their stale flags, for the run's result.
 ///
 /// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
 fn record_sync_persist_failures(
     runtime: &Runtime,
-    failures: &[(PersistFailure, bool)],
+    failures: Vec<(PersistFailure, bool)>,
     files_failed: &[String],
     seen: &HashSet<String>,
     scope: SyncScope,
-) -> Result<()> {
+) -> Result<Vec<PersistFailure>> {
     // The record as this sync found it — nothing but this function writes it
     // during a sync, so reading it now sees the state before this run. Almost
     // always empty.
@@ -1544,19 +1525,19 @@ fn record_sync_persist_failures(
         .filter(|p| !still_failing.contains(p.as_str()))
         .filter(|p| seen.contains(p) || scope == SyncScope::FullWalk)
         .collect();
-    if clear.is_empty() && failures.is_empty() {
-        return Ok(());
+    if !clear.is_empty() || !failures.is_empty() {
+        let record = failures.clone();
+        runtime.submit_write(move |w| {
+            for path in &clear {
+                w.clear_persist_failure(path)?;
+            }
+            for (f, stale) in &record {
+                w.record_persist_failure(&f.path, &f.reason, *stale)?;
+            }
+            Ok(())
+        })?;
     }
-    let failures = failures.to_vec();
-    runtime.submit_write(move |w| {
-        for path in &clear {
-            w.clear_persist_failure(path)?;
-        }
-        for (f, stale) in &failures {
-            w.record_persist_failure(&f.path, &f.reason, *stale)?;
-        }
-        Ok(())
-    })
+    Ok(failures.into_iter().map(|(f, _)| f).collect())
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────
@@ -2003,6 +1984,35 @@ fn persist_failure_warning(failure: &PersistFailure, stale: bool) -> String {
         "{}: could not be persisted and was rolled back alone; {state} ({})",
         failure.path, failure.reason
     )
+}
+
+/// A sync's CR-015 incremental resolution change-set (part 2 of 2): union the
+/// names that entered the changed files (this sync's freshly extracted facts)
+/// with those that left them (`old_names`) and the changed paths, tokenized. The
+/// resolve pass re-binds exactly the rows these can move and skips the rest —
+/// the same result as retrying the whole ledger (FR-RS-03), a fraction of the
+/// cost.
+fn sync_delta(
+    changed_paths: HashSet<String>,
+    old_names: &[String],
+    facts: &[Facts],
+) -> crate::resolve::Delta {
+    let mut dirty_tokens: HashSet<String> = HashSet::new();
+    for name in old_names {
+        dirty_tokens.extend(crate::resolve::tokens(name));
+    }
+    for f in facts {
+        for n in &f.nodes {
+            dirty_tokens.extend(crate::resolve::tokens(&n.name));
+        }
+    }
+    for path in &changed_paths {
+        dirty_tokens.extend(crate::resolve::tokens(path));
+    }
+    crate::resolve::Delta {
+        changed_paths,
+        dirty_tokens,
+    }
 }
 
 /// Persist a sync's dirty set one file per transaction (S-513, [FR-EH-05]),
