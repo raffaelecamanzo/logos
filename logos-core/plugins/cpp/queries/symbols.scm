@@ -8,7 +8,9 @@
 ; The C family nests a function's name inside a `function_declarator` whose body
 ; is a sibling, so the engine lifts a captured declarator name to its
 ; body-bearing definition (`extract::lift_to_declaration`) — the captured node is
-; still the leaf identifier, so the symbol name stays correct.
+; still the leaf identifier, so the symbol name stays correct. The lift stops
+; below an ERROR node (FR-EX-30): a declarator stranded in a parse-error region
+; keeps its own span instead of the region's.
 ;
 ; v1 policy: out-of-line member definitions (`void Widget::set() {…}`, a
 ; `qualified_identifier` declarator) are deliberately NOT captured — the member
@@ -29,6 +31,22 @@
 
 (struct_specifier
   name: (type_identifier) @symbol.struct)
+
+; A class/struct head stranded in an ERROR region (FR-EX-30, S-578). A macro the
+; grammar cannot see (json's `JSON_HEDLEY_NON_NULL(3)` before a constructor)
+; makes error recovery tear the `class_specifier` apart, leaving `class`, the
+; name and the base clause loose in an ERROR node, so the class vanished. The
+; head is captured only when the name is followed (past an optional `final`) by
+; a base clause or the opening brace: it is a definition, not a stray keyword.
+; The engine never lifts into the ERROR, so the node is the name itself — its
+; body is not claimed, and its members stay with the enclosing scope.
+(ERROR
+  "class" . (type_identifier) @symbol.class . (virtual_specifier)? .
+  [(base_class_clause) "{"])
+
+(ERROR
+  "struct" . (type_identifier) @symbol.struct . (virtual_specifier)? .
+  [(base_class_clause) "{"])
 
 ; A C++ `union` is a named aggregate — mapped to the struct kind (it has fields,
 ; no method-contract semantics).
