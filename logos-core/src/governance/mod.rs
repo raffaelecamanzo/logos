@@ -1855,7 +1855,8 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     let notes = fresh.notes;
     let temporal = scan_temporal_tier(engine, &mut warnings);
     // The files whose facts could not be persisted (FR-EH-05, S-513), read after
-    // the reconcile above retried them — the readout `status` carries too.
+    // this run's reconcile retried them, when one ran (`--no-reconcile` reads
+    // the record as it stands) — the readout `status` carries too.
     let persistence = crate::models::PersistenceHealth::from_rows(
         &runtime.submit_read(|store| store.persist_failures())?,
     );
