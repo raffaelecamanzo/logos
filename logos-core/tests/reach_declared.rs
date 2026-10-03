@@ -206,13 +206,27 @@ fn violation(
         }
     }
 
-    if declared.level == "symbols" && non_call_relational_edges(&locality, language) != 0 {
-        return Some(format!(
-            "{language} is declared `symbols` (no import, type, member or route relation), yet \
-             binds some: {locality:?}"
-        ));
+    if declared.level == "symbols" {
+        return symbols_violation(&locality, language);
     }
     None
+}
+
+/// The `symbols` clause on its own: a `symbols` language binds no import, type,
+/// member or route relation, in or across files. A function of its own so a
+/// test can reach it with a synthetic locality — through [`violation`] the
+/// cross-file comparison above decides first, and for C and C++ (which bind only
+/// same-file calls) nothing here would ever fire.
+fn symbols_violation(
+    locality: &BTreeMap<(String, i64), (u64, u64)>,
+    language: &str,
+) -> Option<String> {
+    (non_call_relational_edges(locality, language) != 0).then(|| {
+        format!(
+            "{language} is declared `symbols` (no import, type, member or route relation), yet \
+             binds some: {locality:?}"
+        )
+    })
 }
 
 /// Verify one language's declaration against what its fixture binds.
@@ -341,10 +355,28 @@ fn an_under_claimed_declaration_fails_the_suite() {
     assert!(why.contains("under-claim"), "{why}");
 }
 
-/// A `symbols` declaration is refused when the plugin binds a non-call relation.
+/// A `symbols` declaration is refused when the plugin binds a non-call relation
+/// — even a same-file one the cross-file comparison cannot see — and tolerates
+/// the same-file calls C and C++ do bind.
 #[test]
 fn a_symbols_declaration_is_refused_when_a_relation_binds() {
-    // Rust binds imports and implementations: it is not a `symbols` language.
+    let locality = |kind: i64, same: u64, cross: u64| {
+        BTreeMap::from([(("c".to_string(), kind), (same, cross))])
+    };
+    // A same-file import, type relation, member access or route: refused.
+    for kind in [3, 4, 5, 6, 7, 8, 9, 13] {
+        let why = symbols_violation(&locality(kind, 1, 0), "c")
+            .unwrap_or_else(|| panic!("a same-file edge of kind {kind} passed as `symbols`"));
+        assert!(why.contains("declared `symbols`"), "{why}");
+    }
+    // Same-file calls and containment are what C and C++ really bind: tolerated.
+    assert_eq!(symbols_violation(&locality(2, 3, 0), "c"), None);
+    assert_eq!(symbols_violation(&locality(1, 9, 0), "c"), None);
+    // Another language's edges are not this language's.
+    assert_eq!(symbols_violation(&locality(3, 1, 0), "cpp"), None);
+
+    // Through the whole check, on a real fixture: Rust binds across files, so a
+    // `symbols` declaration is refused (by the cross-file comparison, first).
     assert!(violation("rust", &reach("symbols", &[]), fixtures::RUST).is_some());
 }
 
