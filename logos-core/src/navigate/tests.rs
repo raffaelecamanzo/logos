@@ -222,6 +222,9 @@ fn is_test_path_production_root_overrides_filename_conventions() {
     assert!(is_test_path("src/main/AppTest.JAVA"));
     // Near miss: a `.java` that is only a stem part, and no extension at all.
     assert!(is_test_path("src/main/AppTest.javascript"));
+    // ...nor an extension that merely ENDS with a JVM one (`ends_with` mutant).
+    assert!(is_test_path("src/main/AppTest.xjava"));
+    assert!(is_test_path("src/main/FooTest.mkt"));
     assert!(is_test_path("src/main/AppTest"));
     // The directory exemption is language-blind and untouched.
     assert!(!is_test_path("src/main/js/__tests__/a.ts"));
