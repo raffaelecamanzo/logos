@@ -2645,7 +2645,7 @@ pub(crate) fn affected(
 /// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`,
 /// a bare Rust `tests.rs`, or the snake_case Rust `*_tests.rs` suffix —
 /// [CR-075], the plural counterpart to `*Test(s).java`'s CamelCase plural).
-/// Neither marks beneath a production source root (first rule below).
+/// Neither marks a JVM source file beneath a production source root (first rule below).
 ///
 /// Four exactness rules keep production code out ([S-524], [CR-171], [HF-2], [HF-4]):
 /// - a `test`/`tests`/`__tests__`/`spec` segment *beneath a production source
