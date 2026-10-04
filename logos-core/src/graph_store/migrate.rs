@@ -3145,6 +3145,75 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 28");
     }
 
+    /// S-514 / CR-169 / FR-EX-13: a populated v28 store upgrades to v29 forward
+    /// only. The ledger gains `receiver` in place — `NULL` on every existing row
+    /// until re-extraction — while every pre-existing ledger column, and all of
+    /// `nodes`, `edges` and `shingles`, is byte-for-byte unchanged. The identity
+    /// index is widened by the shape: a row with none dedups exactly as before,
+    /// and two rows differing only in shape coexist. Every `files.content_hash`
+    /// is cleared, the migration-25 re-extraction trigger.
+    #[test]
+    fn migration_29_adds_the_receiver_shape_to_the_ledger_identity() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..28]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/a.py', 'python', 'h-py');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local n'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES
+                 (10, 1, 8, 'n', 1), (11, 2, 8, 'm', 1);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 2);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local n', 'm', NULL, 3, 2, 4, 1, NULL),
+                 (1, 'local n', 'topic', NULL, 3, 14, 5, 0, 'broker-publish');",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..29]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 29, "28 → 29, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are untouched");
+        assert_eq!(read_ledger(&conn), ledger_before, "every pre-v29 ledger column is unchanged");
+        let shapes: Vec<Option<i64>> = conn
+            .prepare("SELECT receiver FROM unresolved_refs ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(shapes, vec![None, None], "no row has a shape until re-extraction");
+
+        // The widened identity: a shapeless duplicate is still one row; the same
+        // call with a shape is another, once per shape.
+        let insert = |receiver: Option<i64>| {
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, receiver) \
+                 VALUES (1, 'local n', 'm', 3, 2, 9, ?1) \
+                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
+                             COALESCE(receiver, 0)) DO NOTHING",
+                [receiver],
+            )
+        };
+        assert_eq!(insert(None).unwrap(), 0, "a shapeless duplicate dedups as before");
+        assert_eq!(insert(Some(1)).unwrap(), 1, "`self` is a second row");
+        assert_eq!(insert(Some(3)).unwrap(), 1, "`other` is a third");
+        assert_eq!(insert(Some(1)).unwrap(), 0, "a repeated shape dedups");
+        assert!(insert(Some(4)).is_err(), "the CHECK admits the three shapes only");
+
+        // Forward-only: re-running the full ledger never re-applies migration 29.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 29", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 29 is recorded once and never re-applied");
+        let hash: Option<String> = conn
+            .query_row("SELECT content_hash FROM files WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash, None, "the content hash is cleared, so the next scan re-extracts");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 29");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

@@ -117,7 +117,7 @@ use std::path::Path;
 use rayon::prelude::*;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
-use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, RefForm};
+use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, ReceiverShape, RefForm};
 use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, Semantics};
 use crate::resolve::http_client_call::ClientCallRefusal;
 use crate::resolve::package_key::PackageLayout;
@@ -149,7 +149,8 @@ const SELF_TYPE_CAPTURE: &str = "symbol.self_type";
 /// **exactly the caller's own instance** — Rust's `self.m()` (S-493,
 /// [FR-RS-11]). The captured node is the method name, as for `@ref.method`; a
 /// query declaring it keeps its plain `@ref.method` pattern off such calls, so
-/// one call is captured once.
+/// one call is captured once. It is a `@ref.method` the receiver-shape pass
+/// reads as marked `self` (S-514, `receiver`).
 ///
 /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
 const SELF_RECEIVER_METHOD_CAPTURE: &str = "ref.method.self";
@@ -329,6 +330,14 @@ pub struct RefFact {
     ///
     /// [FR-CG-07]: ../../../docs/specs/requirements/FR-CG-07.md
     pub relation: Option<ArtifactRelation>,
+    /// The receiver shape of a Method-form call (S-514, [FR-EX-13]) — set by
+    /// the receiver pass ([`receiver`]) from the query's `@ref.receiver.*`
+    /// markers; `None` for every other row, and for a call no marker names. Part
+    /// of the ledger identity: `this.m()` and `x.m()` from one caller are two
+    /// rows that bind differently.
+    ///
+    /// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
+    pub receiver: Option<ReceiverShape>,
 }
 
 /// The extraction result for a single file.
@@ -711,6 +720,7 @@ fn extract_one(
                     kind: EdgeKind::Implements,
                     line: decl.start_line,
                     relation: None,
+                    receiver: None,
                 });
             }
         }
@@ -1307,8 +1317,9 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 }
 
 /// Deduplicate references on the ledger's uniqueness key
-/// `(source, target, form, kind, relation)` — the same reference on two lines is
-/// one ref, first wins — then sort into that canonical order ([NFR-RA-06]).
+/// `(source, target, form, kind, relation, receiver)` — the same reference on
+/// two lines is one ref, first wins — then sort into that canonical order
+/// ([NFR-RA-06]).
 ///
 /// The `relation` is part of the identity: two facts that share source, target,
 /// form, and edge kind but carry **different** [`ArtifactRelation`]s are distinct
@@ -1322,6 +1333,10 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 /// files at most one relation per `(source, target, form, kind)`) the extra key
 /// component is a no-op, so the byte-stable output is unchanged.
 ///
+/// The receiver shape (S-514) is part of the identity for the same reason: a
+/// caller's `this.m()` and `x.m()` share every other component and bind
+/// differently. A row with no shape keys exactly as before.
+///
 /// Shared by the code [`collect_refs`] and the documentation extractor
 /// ([`doc`], S-035) so both passes produce byte-identical, order-independent
 /// ledger input.
@@ -1333,7 +1348,9 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
     // ledger identity; a `&'static str` keeps the key allocation-free.
     let relation_token =
         |r: &RefFact| -> Option<&'static str> { r.relation.map(crate::model::ArtifactRelation::as_str) };
-    let mut seen: HashSet<(String, String, i32, i32, Option<&'static str>)> = HashSet::new();
+    // `(source, target, form, kind, relation, receiver)`.
+    type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>);
+    let mut seen: HashSet<LedgerKey> = HashSet::new();
     refs.retain(|r| {
         seen.insert((
             r.source.as_str().to_string(),
@@ -1341,6 +1358,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             r.form.as_i32(),
             r.kind.as_i32(),
             relation_token(r),
+            r.receiver.map(ReceiverShape::as_i32),
         ))
     });
     refs.sort_by(|a, b| {
@@ -1350,6 +1368,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             a.form.as_i32(),
             a.kind.as_i32(),
             relation_token(a),
+            a.receiver.map(ReceiverShape::as_i32),
         )
             .cmp(&(
                 b.source.as_str(),
@@ -1357,6 +1376,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
                 b.form.as_i32(),
                 b.kind.as_i32(),
                 relation_token(b),
+                b.receiver.map(ReceiverShape::as_i32),
             ))
     });
 }
@@ -1399,17 +1419,19 @@ fn file_module_name(path_segments: &[&str]) -> String {
 /// order ([NFR-RA-06]). In such a language a call **through** an import is
 /// recorded qualified by the module it names, `<import target>::<name>`, and a
 /// JSX tag naming a local value records nothing ([`ImportBindings`], S-440). In
-/// a language whose query names its receiver shapes (`@ref.receiver.*`, Java),
-/// a call whose receiver's type the file proves is recorded type-qualified,
-/// `T::<name>` in Path form, in place of its bare row ([`receiver`], S-467).
+/// a language whose query marks its receivers (`@ref.receiver.*`), the receiver
+/// pass ([`receiver`]) then rewrites what the markers prove: a call whose
+/// receiver's type the file proves is recorded type-qualified, `T::<name>` in
+/// Path form, in place of its bare row (S-467, Java), and every Method-form row
+/// left bare records its receiver's shape (S-514, [FR-EX-13]).
 ///
-/// A method call the query captures as [`SELF_RECEIVER_METHOD_CAPTURE`] — its
-/// receiver is exactly the caller's own instance, `self.m()` — is recorded as
-/// the Path-form `Self::m` when its enclosing declaration has a recorded self
-/// type ([`Decl::self_type`], S-493): the same row a written `Self::m()` records,
-/// which the binder resolves through that self type. Inside a declaration with
-/// none — a trait's default method, a free function — it is recorded exactly as
-/// any other method call.
+/// A method call the query captures as [`SELF_RECEIVER_METHOD_CAPTURE`] is a
+/// `self`-marked `@ref.method`: recorded as the Path-form `Self::m` when its
+/// enclosing declaration has a recorded self type ([`Decl::self_type`], S-493)
+/// — the same row a written `Self::m()` records, which the binder resolves
+/// through that self type — and otherwise as a Method-form row of shape `self`.
+///
+/// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
 fn collect_refs(
     query: &Query,
     root: Node<'_>,
@@ -1467,8 +1489,9 @@ fn collect_refs(
         ImportSpecifier::Path => ImportBindings::collect(query, root, source, decls, semantics),
         ImportSpecifier::Name => ImportBindings::default(),
     };
-    // Receiver typing (S-467) — only for a query that names receiver shapes.
-    let mut receivers = receiver::Receivers::for_query(capture_names);
+    // Receiver typing (S-467) and shapes (S-514) — only for a query that marks
+    // receivers.
+    let mut receivers = receiver::Receivers::for_query(capture_names, semantics.implicit_receiver);
     let mut out: Vec<RefFact> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
@@ -1485,7 +1508,7 @@ fn collect_refs(
             // the per-row scope walk below, which it does not need.
             if receiver::is_marker(capture) {
                 if let Some(receivers) = receivers.as_mut() {
-                    receivers.mark(capture, node, source);
+                    receivers.mark(capture, node, source, || enclosing_decl(node));
                 }
                 continue;
             }
@@ -1516,7 +1539,7 @@ fn collect_refs(
                         .named_target(node, &target)
                         .map_or(target.clone(), str::to_string);
                     if let Some(receivers) = receivers.as_mut() {
-                        receivers.site(out.len(), node.parent());
+                        receivers.site(out.len(), node.parent(), enclosing_decl(node));
                     }
                     out.push(RefFact {
                         source: source_symbol,
@@ -1526,16 +1549,12 @@ fn collect_refs(
                         kind: EdgeKind::Calls,
                         line,
                         relation: None,
+                        receiver: None,
                     });
                 }
                 "ref.method" | SELF_RECEIVER_METHOD_CAPTURE => {
                     let name = text.trim();
                     if name.is_empty() {
-                        continue;
-                    }
-                    let caller = enclosing_decl(node).map(|i| &decls[i]);
-                    if let Some(row) = self_receiver_row(capture, caller, &source_symbol, name, line) {
-                        out.push(row);
                         continue;
                     }
                     // A member call whose receiver is an imported module — a Go
@@ -1550,6 +1569,7 @@ fn collect_refs(
                             kind: EdgeKind::Calls,
                             line,
                             relation: None,
+                            receiver: None,
                         });
                         continue;
                     }
@@ -1563,11 +1583,13 @@ fn collect_refs(
                     let target = match rust_dyn_receiver_trait(node, source) {
                         Some(trait_name) => format!("{trait_name}::{name}"),
                         None => {
-                            // A Java receiver whose type the file proves is
-                            // retyped to a Path-form `T::name` after the walk
-                            // (S-467, `receiver`) — never a Method-form `::`.
+                            // Typed or shaped by its receiver after the walk
+                            // (S-467, S-514, `receiver`) — never a Method-form `::`.
                             if let Some(receivers) = receivers.as_mut() {
-                                receivers.site(out.len(), node.parent());
+                                receivers.site(out.len(), node.parent(), enclosing_decl(node));
+                                if capture == SELF_RECEIVER_METHOD_CAPTURE {
+                                    receivers.mark_self(node.parent());
+                                }
                             }
                             name.to_string()
                         }
@@ -1580,6 +1602,7 @@ fn collect_refs(
                         kind: EdgeKind::Calls,
                         line,
                         relation: None,
+                        receiver: None,
                     });
                 }
                 // The language-agnostic import capture (S-015): the captured
@@ -1638,6 +1661,7 @@ fn collect_refs(
                         kind: EdgeKind::Imports,
                         line,
                         relation: None,
+                        receiver: None,
                     });
                 }
                 // A member-access fact (S-042, CR-005, FR-EX-08): a method body
@@ -1662,6 +1686,7 @@ fn collect_refs(
                         kind: EdgeKind::Accesses,
                         line,
                         relation: None,
+                        receiver: None,
                     });
                 }
                 // Calls nested inside a macro invocation's token tree (S-162,
@@ -1674,18 +1699,27 @@ fn collect_refs(
                 // `self.state.chip_class()`) is bound, or stays honestly
                 // unresolved, exactly like any other call ([NFR-RA-05]).
                 "ref.macro" => {
+                    let caller = enclosing_decl(node).map(|i| &decls[i]);
                     for call in macro_call_refs(node, source) {
                         if call.target.is_empty() {
                             continue;
                         }
+                        // `self.f()` in a macro argument: the row the same call
+                        // records outside one (S-493, S-514).
+                        let (target, form, receiver) = if call.self_receiver {
+                            receiver::self_call(caller, &call.target)
+                        } else {
+                            (call.target, call.form, None)
+                        };
                         out.push(RefFact {
                             source: source_symbol.clone(),
-                            target: call.target,
+                            target,
                             alias: None,
-                            form: call.form,
+                            form,
                             kind: EdgeKind::Calls,
                             line: call.line,
                             relation: None,
+                            receiver,
                         });
                     }
                 }
@@ -1695,26 +1729,8 @@ fn collect_refs(
                 // reserves for trait-object dispatch (S-281). Its type
                 // arguments are type uses of the same declaration(s).
                 name @ ("ref.extends" | "ref.implements" | "ref.instantiates" | "ref.type_use") => {
-                    let head = match name {
-                        "ref.extends" => EdgeKind::Extends,
-                        "ref.implements" => EdgeKind::Implements,
-                        "ref.instantiates" => EdgeKind::Instantiates,
-                        _ => EdgeKind::TypeUses,
-                    };
                     let owners = declarator_symbols(node).unwrap_or_else(|| vec![source_symbol]);
-                    for (kind, target) in type_relation_targets(node, source, head) {
-                        for owner in &owners {
-                            out.push(RefFact {
-                                source: owner.clone(),
-                                target: target.clone(),
-                                alias: None,
-                                form: RefForm::Path,
-                                kind,
-                                line,
-                                relation: None,
-                            });
-                        }
-                    }
+                    out.extend(type_relation_rows(name, &owners, node, source, line));
                 }
                 "ref.use" => {
                     let mut items = Vec::new();
@@ -1733,6 +1749,7 @@ fn collect_refs(
                             kind: EdgeKind::Imports,
                             line,
                             relation: None,
+                            receiver: None,
                         });
                     }
                 }
@@ -1749,7 +1766,7 @@ fn collect_refs(
             symbols,
             id_to_idx: &id_to_idx,
         };
-        receivers.retype(&mut out, &file);
+        receivers.finish(&mut out, &file);
     }
 
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
@@ -1757,31 +1774,38 @@ fn collect_refs(
     out
 }
 
-/// The row a [`SELF_RECEIVER_METHOD_CAPTURE`] call `self.name()` records when
-/// its `caller` has a recorded self type (S-493): the Path-form `Self::name` —
-/// the row a written `Self::name()` records — bound through that type. `None`
-/// for any other capture, and for a caller with none (a trait's default
-/// method), whose call stays an ordinary method call.
-fn self_receiver_row(
+/// The Path-form rows a type-relation `capture` (`ref.extends`,
+/// `ref.implements`, `ref.instantiates`, `ref.type_use`) records for its type
+/// `node`, once per declaration in `owners` ([`type_relation_targets`], S-466).
+fn type_relation_rows(
     capture: &str,
-    caller: Option<&Decl<'_>>,
-    source: &LogosSymbol,
-    name: &str,
+    owners: &[LogosSymbol],
+    node: Node<'_>,
+    source: &[u8],
     line: u32,
-) -> Option<RefFact> {
-    if capture != SELF_RECEIVER_METHOD_CAPTURE {
-        return None;
+) -> Vec<RefFact> {
+    let head = match capture {
+        "ref.extends" => EdgeKind::Extends,
+        "ref.implements" => EdgeKind::Implements,
+        "ref.instantiates" => EdgeKind::Instantiates,
+        _ => EdgeKind::TypeUses,
+    };
+    let mut rows = Vec::new();
+    for (kind, target) in type_relation_targets(node, source, head) {
+        for owner in owners {
+            rows.push(RefFact {
+                source: owner.clone(),
+                target: target.clone(),
+                alias: None,
+                form: RefForm::Path,
+                kind,
+                line,
+                relation: None,
+                receiver: None,
+            });
+        }
     }
-    caller.and_then(|d| d.self_type.as_ref())?;
-    Some(RefFact {
-        source: source.clone(),
-        target: format!("{}::{name}", crate::resolve::SELF_TYPE_HEAD),
-        alias: None,
-        form: RefForm::Path,
-        kind: EdgeKind::Calls,
-        line,
-        relation: None,
-    })
+    rows
 }
 
 /// The rows one captured **type** node records (S-466, [CR-149] §3.2 B): its

@@ -132,6 +132,7 @@ fn row(
         line: Some(1),
         resolved: false,
         payload: None,
+        receiver: None,
     }
 }
 

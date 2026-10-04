@@ -134,6 +134,42 @@ pub enum ImportSpecifier {
     Path,
 }
 
+/// What an **unqualified** call inside a class body means in this language —
+/// the implicit-receiver policy of the receiver-shape seam (S-514, [FR-EX-13]).
+///
+/// It decides only for a call the `references` query marks
+/// `@ref.receiver.implicit` (a call written with no receiver at all, `m()`):
+///
+/// | value | an implicit call inside a named class | anywhere else |
+/// |---|---|---|
+/// | `"none"` (default) | a free call | a free call |
+/// | `"self"` | a method-form call on the current instance (`self` shape) | a free call |
+///
+/// "Anywhere else" is a call at file or module scope, in a free function, or
+/// inside an anonymous class body, whose instance the graph has no node for. A
+/// free call is recorded as the Path-form bare name a `@ref.call` records and
+/// is bound by the scope hierarchy, so a language that omits the key, or a call
+/// it does not mark, is recorded exactly as before ([NFR-MA-01]).
+///
+/// `"self"` is for the languages where `m()` inside a class means `this.m()` —
+/// C#, Kotlin, Scala, C++, Ruby. Java does not need it: its bare calls are
+/// `@ref.call` rows that S-467's receiver typing already qualifies by the
+/// enclosing class.
+///
+/// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum ImplicitReceiver {
+    /// An unqualified call is a free call wherever it is written.
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    /// An unqualified call inside a named class body is a call on the current
+    /// instance.
+    #[serde(rename = "self")]
+    SelfInstance,
+}
+
 /// How far a code language's references bind **across a file boundary** — the
 /// one-word summary of a `[reach]` declaration ([FR-PL-09], [CR-180]).
 ///
@@ -379,6 +415,11 @@ pub struct PluginManifest {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     #[serde(default)]
     pub specifier_extensions: Vec<String>,
+    /// What an unqualified call inside a class body means
+    /// ([`ImplicitReceiver`], S-514). Defaults to [`ImplicitReceiver::None`]
+    /// when omitted.
+    #[serde(default)]
+    pub implicit_receiver: ImplicitReceiver,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped ([`PackageModules`], [CR-149]). `None` when the
     /// `[package_modules]` table is omitted — the default module model.
@@ -1406,6 +1447,33 @@ mod tests {
         let unknown =
             format!("{GOOD}\n[package_modules]\nsource_roots = [\"src\"]\nroots = [\"x\"]\n");
         assert!(PluginManifest::parse("java/plugin.toml", &unknown).is_err());
+    }
+
+    /// The implicit-receiver policy (S-514) defaults to `none`, parses `self`,
+    /// and refuses any other word loudly rather than reading it as the default.
+    #[test]
+    fn the_implicit_receiver_policy_defaults_to_none_and_parses_self() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert_eq!(m.implicit_receiver, ImplicitReceiver::None);
+        let declared = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \"::\"\nimplicit_receiver = \"self\"",
+        );
+        let m = PluginManifest::parse("kotlin/plugin.toml", &declared).unwrap();
+        assert_eq!(m.implicit_receiver, ImplicitReceiver::SelfInstance);
+        let explicit_none = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \"::\"\nimplicit_receiver = \"none\"",
+        );
+        let m = PluginManifest::parse("kotlin/plugin.toml", &explicit_none).unwrap();
+        assert_eq!(m.implicit_receiver, ImplicitReceiver::None);
+        for bad in ["\"this\"", "\"Self\"", "\"\"", "true"] {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\nimplicit_receiver = {bad}"),
+            );
+            assert!(PluginManifest::parse("x/plugin.toml", &text).is_err(), "{bad}");
+        }
     }
 
     /// The specifier grammar is declared apart from the member-path separator

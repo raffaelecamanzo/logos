@@ -65,7 +65,7 @@ use std::path::Path;
 use crate::config::BindingPolicy;
 use crate::extract::doc::heading_slug;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
-use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, RefForm};
+use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, ReceiverShape, RefForm};
 
 use super::go_module::GoModule;
 use super::package_key::{module_key_for_file, normalize_crate, ModuleKey, PackageLayout};
@@ -153,7 +153,8 @@ enum Res {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Residue {
     /// The file proves no receiver type: a bare Method-form row, or a bare call
-    /// that names no import.
+    /// that names no import. In every language, a receiver call whose shape is
+    /// `other` or absent (S-514), and a `self` / `super` call made from no class.
     NoReceiverEvidence,
     /// The receiver's type is declared by no file of this graph — the JDK, a
     /// library, a generated type, or another member. `candidates` are the
@@ -1461,9 +1462,10 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
     bind_traced(r, ix, policy).0
 }
 
-/// Why `r` — a `Calls` row from a package-shaped source, or a `Self::m` call
-/// through the caller's own type in any language (S-493) — stays unbound
-/// (S-468, [CR-150] §3.2 C), or `None` when it is no such row, or when it binds
+/// Why `r` — a `Calls` row from a package-shaped source, or in any language a
+/// `Self::m` call through the caller's own type (S-493) or a receiver call
+/// bound by its shape (S-514) — stays unbound (S-468, [CR-150] §3.2 C), or
+/// `None` when it is no such row, or when it binds
 /// now: a capture-before-delete `Symbol` row, or a row the ledger holds unbound
 /// that this binder binds (a graph bound by an older binary, or a sync that did
 /// not re-select it). The readout counts those apart as unclassified.
@@ -1484,7 +1486,8 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
         .and_then(|i| i.file_path.as_deref())?;
     if !ix.layout.is_package_shaped(source_file) {
         // Outside a package-shaped language only a call through the caller's
-        // own type records a reason (S-493, [`Ctx::resolve_self_type_call`]).
+        // own type (S-493, [`Ctx::resolve_self_type_call`]) and a receiver
+        // call (S-514, the `RefForm::Method` arm) record a reason.
         return miss;
     }
     Some(miss.unwrap_or(match r.form {
@@ -1500,8 +1503,9 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
 }
 
 /// [`bind`], and the [`Residue`] the first package-shaped call lookup that gave
-/// up recorded — `None` when none did (every Rust row but a `Self::m` call
-/// through the caller's own type, S-493). Meaningful only for an
+/// up recorded — `None` when none did (outside a package-shaped language, every
+/// row but a `Self::m` call through the caller's own type, S-493, and a
+/// receiver call, S-514). Meaningful only for an
 /// [`Outcome::Unbound`]: a row that binds may still carry the miss of a rung it
 /// tried first (one of two static imports naming an external type).
 fn bind_traced(
@@ -1526,7 +1530,6 @@ fn bind_traced(
         source_package,
         policy,
         in_glob_resolution: Cell::new(false),
-        no_workspace_fallback: Cell::new(false),
         bare_path_call: Cell::new(false),
         package_key_only: relation.is_some(),
         lexical_start: Cell::new(source),
@@ -1718,29 +1721,37 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             if r.kind == EdgeKind::Calls && r.target.contains("::") {
                 return ctx.resolve_dyn_dispatch(source, &r.target);
             }
-            // A receiver-unqualified method call (`x.f()` → `f`): extraction
-            // records only the bare method name and discards the receiver
-            // ([FR-EX-08], `method_calls_record_only_the_name_as_method_form`),
-            // so the receiver *type* is unknown. Resolve it through genuine
-            // **scope evidence** only — the lexical / module / import / glob
-            // hierarchy ([`resolve_name`]) — with the workspace unique-name
-            // fallback **suppressed**. That fallback (`unique_by_name` →
-            // `prefer_crate`) is what fabricated the pathology: a `.map()` in
-            // one module binding to a lone `fn map` in an unrelated module,
-            // funnelling ~29.5% of `Calls` edges into ~15 std-method-named
-            // targets ([CR-066], [FR-RS-06], [NFR-RA-05]). A method call whose
-            // name is not in the caller's own scope therefore stays in
-            // `unresolved_refs` and retries on sync ([FR-RS-03]); a same-scope
-            // call (a sibling/module-level callable) still binds on real scope
-            // evidence, and a typed/path-qualified call is a `RefForm::Path`
-            // bound through `resolve_path` above — no typed-call recall loss.
+            // A receiver call (`x.f()` → `f`): extraction records the bare
+            // method name and its receiver's SHAPE, never its type ([FR-EX-13];
+            // a typed receiver is a `RefForm::Path` row bound above). The shape
+            // decides where `f` may be found ([FR-RS-12]):
             //
-            // [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
+            // - `self` — among the caller's own class's members, then up its
+            //   proven `Extends` chain; for a caller with a recorded self type,
+            //   through that type ([`Ctx::resolve_self_receiver`]);
+            // - `super` — only up that chain, never the caller's own class
+            //   ([`Ctx::resolve_super_receiver`]);
+            // - `other`, or no shape at all — nowhere. The caller's lexical,
+            //   class or module scope says where the CALLER is, not what the
+            //   receiver is: the scope walk this replaces started at the caller
+            //   itself, so `other.m()` inside `m` bound to `m` ([CR-169],
+            //   correcting [CR-066]'s "same-scope evidence"). The row stays in
+            //   `unresolved_refs` as `no-receiver-evidence` and retries on sync
+            //   ([FR-RS-03], [FR-RS-06], [NFR-RA-05]).
+            //
+            // [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
             // [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
+            // [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
             // [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
-            ctx.no_workspace_fallback.set(true);
-            let resolved = ctx.resolve_name(&r.target, Want::Callable, MAX_ALIAS_DEPTH);
-            ctx.no_workspace_fallback.set(false);
+            // [CR-169]: ../../../docs/requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md
+            let resolved = match r.receiver {
+                Some(ReceiverShape::SelfInstance) => ctx.resolve_self_receiver(&r.target),
+                Some(ReceiverShape::Super) => ctx.resolve_super_receiver(&r.target),
+                Some(ReceiverShape::Other) | None => {
+                    ctx.note(Want::Callable, || Residue::NoReceiverEvidence);
+                    Res::NotFound
+                }
+            };
             match resolved {
                 Res::Found(target) => bound(target),
                 _ => Outcome::Unbound,
@@ -1871,28 +1882,14 @@ struct Ctx<'a> {
     /// back out through the file's glob set. Without it, a file with `G` glob
     /// imports drives `O(G^MAX_ALIAS_DEPTH)` work per reference (CR-016).
     in_glob_resolution: Cell<bool>,
-    /// Suppress the policy-gated **workspace unique-name** fallbacks
-    /// ([`unique_by_name`](Ctx::unique_by_name) at the aggressive bare-name step,
-    /// [`suffix_match`](Ctx::suffix_match) at the balanced multi-segment step) for
-    /// the duration of one resolution. Set while resolving a receiver-unqualified
-    /// **method** call: the receiver type is unknown, so a bare workspace
-    /// name-match is not evidence and would fabricate a cross-module `Calls` edge
-    /// ([CR-066], [FR-RS-06], [NFR-RA-05]). Genuine scope levels (lexical, module,
-    /// imports, globs) still resolve — only the name-only workspace tier is off.
-    ///
-    /// [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
-    /// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
-    no_workspace_fallback: Cell<bool>,
     /// Enable the CR-068 Part B free-function/associated-method tie-break in
     /// [`prefer_free_functions`](Ctx::prefer_free_functions) for the duration of
     /// one resolution. Set **only** while resolving a single-segment bare-**path**
     /// call ([`RefForm::Path`] + [`EdgeKind::Calls`]) — precisely the shape that
     /// must bind the one free function over same-named associated methods
-    /// ([FR-RS-07]). Left `false` for a receiver-unqualified **method** call
-    /// ([`RefForm::Method`]), which also resolves through
-    /// [`resolve_name`](Ctx::resolve_name) with [`Want::Callable`] but must stay
-    /// unchanged (the receiver type is unknown; the CR-066 discipline is not
-    /// loosened) — so the tie-break cannot be keyed on `want` alone.
+    /// ([FR-RS-07]). A receiver **method** call ([`RefForm::Method`]) never
+    /// reaches [`resolve_name`](Ctx::resolve_name) at all (S-514): it binds by
+    /// its receiver's shape.
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     bare_path_call: Cell<bool>,
@@ -2029,10 +2026,9 @@ impl Ctx<'_> {
             Res::NotFound => {}
             decided => return decided,
         }
-        // 8) Policy-gated workspace fallback: unique module-path-suffix match —
-        //    off while resolving a receiver-method call (CR-066), so an alias
-        //    expansion cannot reach the workspace name tier either.
-        if self.policy != BindingPolicy::Strict && !self.no_workspace_fallback.get() {
+        // 8) Policy-gated workspace fallback: unique module-path-suffix match. A
+        //    receiver-method call never reaches here (S-514, CR-066).
+        if self.policy != BindingPolicy::Strict {
             return self.suffix_match(segs, want);
         }
         Res::NotFound
@@ -2229,17 +2225,76 @@ impl Ctx<'_> {
     /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn resolve_member_access(&self, field: &str) -> Res {
+        match self.caller_class() {
+            Some(class) => exactly_one(&self.ix.members_named(class, field, Want::Field)),
+            None => Res::NotFound,
+        }
+    }
+
+    /// The caller's own class: the nearest class-bearing container
+    /// ([`is_class_like`]) on the source's `Contains` ancestry, the source
+    /// itself included — `None` when there is none (a free function, a method
+    /// of a language whose methods sit at module level). Bounded by
+    /// [`MAX_CONTAINS_DEPTH`] against a malformed `Contains` cycle.
+    fn caller_class(&self) -> Option<NodeId> {
         let mut cursor = Some(self.source);
         for _ in 0..MAX_CONTAINS_DEPTH {
-            let Some(id) = cursor else {
-                return Res::NotFound;
-            };
+            let id = cursor?;
             if self.ix.info.get(&id).is_some_and(|i| is_class_like(i.kind)) {
-                return exactly_one(&self.ix.members_named(id, field, Want::Field));
+                return Some(id);
             }
             cursor = self.ix.parent.get(&id).copied();
         }
-        Res::NotFound
+        None
+    }
+
+    /// Bind a receiver call `self.name()` — shape `self` (S-514, [FR-RS-12]):
+    /// exactly one callable `name` among the caller's own class's members, else
+    /// the nearest level of its proven `Extends` chain holding exactly one
+    /// ([`type_member`](Ctx::type_member), the [FR-RS-10] walk). A free function
+    /// or a module-level sibling is never a candidate: only the class's own
+    /// `Contains` children are.
+    ///
+    /// A caller with a recorded self type (Rust, Go: a method at module level)
+    /// binds through it instead — the one self-type arm,
+    /// [`resolve_self_type_call`](Ctx::resolve_self_type_call), never a second.
+    /// Extraction records such a call as `Self::name` already, so this reaches
+    /// it only for a row extracted without that rewrite.
+    ///
+    /// A caller in no class records [`Residue::NoReceiverEvidence`]: the
+    /// receiver is its own instance, but nothing says of what.
+    ///
+    /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+    /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+    fn resolve_self_receiver(&self, name: &str) -> Res {
+        if self.ix.self_types.contains_key(&self.source) {
+            if let Some(res) = self.resolve_self_type_call(&format!("{SELF_TYPE_HEAD}::{name}")) {
+                return res;
+            }
+        }
+        match self.caller_class() {
+            Some(class) => self.type_member(class, name),
+            None => {
+                self.note(Want::Callable, || Residue::NoReceiverEvidence);
+                Res::NotFound
+            }
+        }
+    }
+
+    /// Bind a receiver call `super.name()` — shape `super` (S-514,
+    /// [FR-RS-12]): only through a proven `Extends` of the caller's own class,
+    /// to exactly one callable at the nearest supertype level holding one. The
+    /// caller's own class is never a level, so it never binds the caller's own
+    /// method. No proven `Extends` — an external base, or a language whose
+    /// plugin records none — is [`Residue::SupertypeUnreached`].
+    ///
+    /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+    fn resolve_super_receiver(&self, name: &str) -> Res {
+        let Some(class) = self.caller_class() else {
+            self.note(Want::Callable, || Residue::NoReceiverEvidence);
+            return Res::NotFound;
+        };
+        self.supertype_member(self.ix.supertypes_of(class).to_vec(), HashSet::from([class]), name)
     }
 
     /// Fan out a trait-object dynamic-dispatch call `T::f` to the SET of that
@@ -2967,10 +3022,9 @@ impl Ctx<'_> {
             Res::NotFound => {}
             decided => return decided,
         }
-        // 5) Workspace unique-name fallback — aggressive only for bare names,
-        //    and never for a receiver-method call (its receiver type is unknown,
-        //    so a bare workspace name-match is a fabrication, CR-066).
-        if self.policy == BindingPolicy::Aggressive && !self.no_workspace_fallback.get() {
+        // 5) Workspace unique-name fallback — aggressive only for bare names. A
+        //    receiver-method call never reaches here (S-514, CR-066).
+        if self.policy == BindingPolicy::Aggressive {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
@@ -2997,7 +3051,8 @@ impl Ctx<'_> {
     ///
     /// A **receiver**-method call ([`RefForm::Method`]) takes none of these
     /// rungs: its target is its receiver's type's member ([CR-150]), which no
-    /// import names, and the workspace fallback is off for it anyway ([CR-066]).
+    /// import names; it binds by its receiver's shape and never reaches this
+    /// walk (S-514, [CR-066]).
     ///
     /// Each rung is exactly-one; a known ambiguity stops the walk ([NFR-RA-05]).
     ///
@@ -3007,12 +3062,6 @@ impl Ctx<'_> {
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn resolve_package_name(&self, package: &[String], name: &str, want: Want, depth: u8) -> Res {
-        // A receiver call (`x.m()`, `List.of()`) is decided by its receiver's
-        // type, never by what the file imports: a static import of `of` says
-        // nothing about `List.of`. Only the lexical chain above spoke for it.
-        if self.no_workspace_fallback.get() {
-            return Res::NotFound;
-        }
         if let Some(expansions) = self.scope().and_then(|s| s.alias_expansions.get(name)) {
             let mut imported: Vec<NodeId> = Vec::new();
             for alias_path in expansions {
@@ -3243,9 +3292,21 @@ impl Ctx<'_> {
     /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn type_member(&self, ty: NodeId, name: &str) -> Res {
-        let mut level = vec![ty];
-        let mut seen: HashSet<NodeId> = HashSet::from([ty]);
+        self.supertype_member(vec![ty], HashSet::from([ty]), name)
+    }
+
+    /// [`type_member`](Ctx::type_member)'s walk, from the level `level` up —
+    /// `seen` holds the types already visited, which the walk never revisits.
+    /// An empty first level is a chain that never entered the graph:
+    /// [`Residue::SupertypeUnreached`].
+    fn supertype_member(&self, mut level: Vec<NodeId>, mut seen: HashSet<NodeId>, name: &str) -> Res {
+        level.sort_unstable();
+        level.dedup();
+        seen.extend(level.iter().copied());
         for _ in 0..MAX_SUPERTYPE_DEPTH {
+            if level.is_empty() {
+                break;
+            }
             let mut found: Vec<NodeId> = level
                 .iter()
                 .flat_map(|&t| self.ix.members_named(t, name, Want::Callable))

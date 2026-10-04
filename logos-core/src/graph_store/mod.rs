@@ -52,7 +52,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 
-use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, RefForm};
+use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ReceiverShape, RefForm};
 use crate::models::navigation::LanguageCount;
 use crate::models::quality::{Offender, WorstOffenders};
 
@@ -589,6 +589,14 @@ pub struct UnresolvedRefRow {
     /// [FR-CG-07]: ../../../docs/specs/requirements/FR-CG-07.md
     /// [FR-CG-11]: ../../../docs/specs/requirements/FR-CG-11.md
     pub payload: Option<String>,
+    /// The receiver shape of a Method-form call (S-514, [FR-EX-13]; the
+    /// `receiver` column, migration 29) — what the binder dispatches the row
+    /// on ([FR-RS-12]). `None` for every other row, and for a call its plugin
+    /// marks no receiver of, which binds as `other`.
+    ///
+    /// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
+    /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+    pub receiver: Option<ReceiverShape>,
 }
 
 /// One function/method node's metric inputs for the quality metrics engine
@@ -1528,8 +1536,9 @@ pub struct AvroSchemaRow {
 
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
-/// Insertion is idempotent over `(source_symbol, target, form, kind)` — the
-/// ledger's UNIQUE rule absorbs a function calling the same path twice.
+/// Insertion is idempotent over `(source_symbol, target, form, kind, payload,
+/// receiver)` — the ledger's UNIQUE rule absorbs a function calling the same
+/// path twice.
 #[derive(Debug, Clone, Copy)]
 pub struct NewUnresolvedRef<'a> {
     /// FK into `files(id)` — the file whose extraction produced the ref.
@@ -1550,6 +1559,9 @@ pub struct NewUnresolvedRef<'a> {
     /// wire token) for an `ArtifactRef`/`ArtifactBinding` ref (CR-011); `None` for
     /// every code/doc/access ref.
     pub payload: Option<&'a str>,
+    /// The receiver shape of a Method-form call (S-514); `None` for every other
+    /// row.
+    pub receiver: Option<ReceiverShape>,
 }
 
 /// The point-query read interface over the code graph.
@@ -3175,7 +3187,8 @@ impl GraphStore for SqliteGraphStore {
 
     fn unresolved_refs(&self) -> Result<Vec<UnresolvedRefRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload \
+            "SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, \
+                    receiver \
              FROM unresolved_refs ORDER BY id",
         )?;
         let raws = stmt
@@ -3191,19 +3204,26 @@ impl GraphStore for SqliteGraphStore {
                     row.get::<_, Option<i64>>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i32>>(10)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting the reference ledger")?;
         raws.into_iter()
             .map(
-                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload)| {
+                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver)| {
                     let form = RefForm::try_from(form).map_err(|e| {
                         anyhow!("corrupt ref form {form} for ref {id}: {e}; rebuild advised (NFR-RA-08)")
                     })?;
                     let kind = EdgeKind::try_from(kind).map_err(|e| {
                         anyhow!("corrupt ref kind {kind} for ref {id}: {e}; rebuild advised (NFR-RA-08)")
                     })?;
+                    let receiver = receiver
+                        .map(ReceiverShape::try_from)
+                        .transpose()
+                        .map_err(|e| {
+                            anyhow!("corrupt receiver shape for ref {id}: {e}; rebuild advised (NFR-RA-08)")
+                        })?;
                     Ok(UnresolvedRefRow {
                         id,
                         file_id,
@@ -3215,6 +3235,7 @@ impl GraphStore for SqliteGraphStore {
                         line,
                         resolved: resolved != 0,
                         payload,
+                        receiver,
                     })
                 },
             )
@@ -4372,9 +4393,10 @@ impl BatchWriter<'_> {
 
     // ── Reference-ledger primitives (S-011, [ADR-10]) ────────────────────────
 
-    /// Insert a reference-ledger row, idempotently over the relation-aware
-    /// `(source_symbol, target, form, kind, COALESCE(payload, ''))` uniqueness
-    /// rule (migration 18, [CR-080]).
+    /// Insert a reference-ledger row, idempotently over the relation- and
+    /// receiver-aware `(source_symbol, target, form, kind, COALESCE(payload, ''),
+    /// COALESCE(receiver, 0))` uniqueness rule (migration 18, [CR-080]; widened
+    /// by the receiver shape in migration 29, S-514).
     ///
     /// A duplicate (the same function calling the same path twice, or a
     /// captured edge re-captured on a later sync) is a no-op — the first row's
@@ -4393,9 +4415,10 @@ impl BatchWriter<'_> {
         self.conn
             .execute(
                 "INSERT INTO unresolved_refs \
-                 (file_id, source_symbol, target, alias, form, kind, line, payload) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, '')) DO NOTHING",
+                 (file_id, source_symbol, target, alias, form, kind, line, payload, receiver) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
+                             COALESCE(receiver, 0)) DO NOTHING",
                 rusqlite::params![
                     r.file_id,
                     r.source_symbol,
@@ -4405,6 +4428,7 @@ impl BatchWriter<'_> {
                     r.kind.as_i32(),
                     r.line,
                     r.payload,
+                    r.receiver.map(ReceiverShape::as_i32),
                 ],
             )
             .context("inserting unresolved ref")?;

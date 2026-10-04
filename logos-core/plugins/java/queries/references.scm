@@ -42,11 +42,14 @@
   object: (_)
   name: (identifier) @ref.method)
 
-;   Receiver shapes (S-467, CR-150 §3.2 A) — MARKERS, recording nothing on
-;   their own. Each names the receiver of the `method_invocation` whose
-;   `@ref.method` / `@ref.call` row above `collect_refs` may retype to a
-;   type-qualified PATH-form `T::name` (`extract::receiver`), when the file
-;   proves `T`. The captured node's parent is the invocation — for
+;   Receiver markers (S-467, CR-150 §3.2 A; S-514, CR-169) — MARKERS,
+;   recording nothing on their own. Each names the receiver of the
+;   `method_invocation` whose `@ref.method` / `@ref.call` row above
+;   `collect_refs` may retype to a type-qualified PATH-form `T::name`
+;   (`extract::receiver`), when the file proves `T`; a `@ref.method` row left
+;   bare records its receiver's SHAPE instead — `this` is `self`, `super` is
+;   `super`, every other receiver `other` — which the binder dispatches on
+;   (FR-EX-13, FR-RS-12). The captured node's parent is the invocation — for
 ;   `@ref.receiver.field`, its grandparent.
 ;
 ;   @ref.receiver.name     — a simple name (`mailer.send()`, `Clock.now()`): a
@@ -74,9 +77,13 @@
 ;                            simple name the file's imports would re-qualify to
 ;                            another class. The type the file declares for that
 ;                            name elsewhere is not proven to be this one's.
-;
-; Anything else — a chained call, `a.b.send()`, `Outer.this.send()` — carries
-; no marker and keeps its bare row.
+;   @ref.receiver.other    — every receiver (S-514): the shape of a call the
+;                            markers above prove nothing for — a chained call,
+;                            `a.b.send()`, `Outer.this.send()` — is `other`.
+;                            `this` and `super` above outrank it.
+;   @ref.receiver.anonymous — an anonymous class body (`new T() { … }`): typing
+;                            stops there, and a `this` / `super` call inside one
+;                            is `other`, its instance having no class node.
 
 (method_invocation object: (identifier) @ref.receiver.name)
 (method_invocation object: (this) @ref.receiver.this)
@@ -85,6 +92,8 @@
   object: (field_access object: (this) field: (identifier) @ref.receiver.field))
 (method_invocation !object name: (identifier) @ref.receiver.implicit)
 (method_invocation object: (_) (super) @ref.receiver.refused)
+(method_invocation object: (_) @ref.receiver.other)
+(object_creation_expression (class_body) @ref.receiver.anonymous)
 (lambda_expression parameters: (identifier) @ref.receiver.unproven)
 (lambda_expression
   parameters: (inferred_parameters (identifier) @ref.receiver.unproven))

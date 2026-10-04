@@ -55,8 +55,9 @@ pub mod registry;
 pub use abi::AbiRange;
 pub use error::{PluginError, SkipReason, SkippedGrammar};
 pub use manifest::{
-    AnchorDescriptor, ConfigDescriptor, CrossFileRelation, ExportConvention, ImportSpecifier,
-    PackageModules, PluginManifest, PropertiesDescriptor, Reach, ReachLevel, TestConvention,
+    AnchorDescriptor, ConfigDescriptor, CrossFileRelation, ExportConvention, ImplicitReceiver,
+    ImportSpecifier, PackageModules, PluginManifest, PropertiesDescriptor, Reach, ReachLevel,
+    TestConvention,
 };
 pub use plugin::{CompiledPlugin, LanguagePlugin, Semantics};
 pub use registry::LanguageRegistry;

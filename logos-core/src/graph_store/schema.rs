@@ -61,6 +61,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (26, MIGRATION_26),
     (27, MIGRATION_27),
     (28, MIGRATION_28),
+    (29, MIGRATION_29),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2489,15 +2490,66 @@ ALTER TABLE nodes ADD COLUMN self_type TEXT;
 UPDATE files SET content_hash = NULL;
 ";
 
+/// Migration 29 — a method-form call's **receiver shape**, recorded on its
+/// ledger row (S-514, [CR-169], [FR-EX-13]).
+///
+/// **`unresolved_refs.receiver`** — `1` `self`, `2` `super`, `3` `other`
+/// ([`ReceiverShape`](crate::model::ReceiverShape), whose discriminants this
+/// `CHECK` freezes); `NULL` on every row with no shape: a non-method row, and a
+/// call its plugin's query marks no receiver of. The binder dispatches a
+/// Method-form row on it ([FR-RS-12]). One nullable column added **in place**
+/// (the migration-25/28 shape): every existing row and id is untouched.
+///
+/// The shape is part of the ledger identity: a caller's `this.m()` and `x.m()`
+/// are two rows that bind differently, so the identity index of migration 18 is
+/// recreated with `COALESCE(receiver, 0)` appended — the `COALESCE` for the
+/// reason migration 18 gives for `payload` (SQLite treats each bare `NULL` as
+/// distinct in a UNIQUE key). Every existing row has a `NULL` shape, so each is
+/// unique under the wider key exactly as it was under the narrower one. Only an
+/// index is dropped and recreated: no table is rebuilt, so `nodes`, `edges`, the
+/// FTS index and the `annotations` view are byte-for-byte unaffected.
+///
+/// `NULL` on every row until its file is re-extracted, and **re-extraction is
+/// triggered here** as migrations 25 and 28 do it: every `files.content_hash`
+/// is cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one. Until then every method-form row binds as one with no
+/// shape — never through the caller's scope ([FR-RS-12]).
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_29_adds_the_receiver_shape_to_the_ledger_identity` in
+/// [`super::migrate`].
+///
+/// [CR-169]: ../../../../docs/requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md
+/// [FR-EX-13]: ../../../../docs/specs/requirements/FR-EX-13.md
+/// [FR-RS-12]: ../../../../docs/specs/requirements/FR-RS-12.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_29: &str = "\
+-- 1. A method-form call's receiver shape (FR-EX-13): 1 self, 2 super, 3 other.
+-- NULL on every row with none, and on rows extracted before this migration.
+ALTER TABLE unresolved_refs ADD COLUMN receiver INTEGER CHECK (receiver IN (1,2,3));
+
+-- 2. The shape joins the ledger identity (migration 18's index, widened): a
+-- caller's `this.m()` and `x.m()` are two rows. NULL normalised to 0 so a row
+-- with no shape dedups exactly as before.
+DROP INDEX idx_unresolved_refs_identity;
+CREATE UNIQUE INDEX idx_unresolved_refs_identity
+    ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0));
+
+-- 3. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column.
+UPDATE files SET content_hash = NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
-        MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_3, MIGRATION_4,
-        MIGRATION_8,
+        MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_29, MIGRATION_3,
+        MIGRATION_4, MIGRATION_8,
     };
-    use crate::model::{EdgeKind, NodeKind, RefForm};
+    use crate::model::{EdgeKind, NodeKind, ReceiverShape, RefForm};
 
     /// Extract the `<column> IN (…)` discriminant list at the `nth` occurrence
     /// of the marker in the given migration SQL.
@@ -3678,6 +3730,42 @@ mod tests {
                 "UPDATE files SET content_hash = NULL",
             ],
             "exactly the two in-place columns and the re-extraction trigger"
+        );
+    }
+
+    /// Migration 29 (S-514) adds the receiver shape in place, widens the ledger
+    /// identity index by it, and triggers re-extraction — nothing else; its
+    /// `CHECK` is the [`ReceiverShape`] discriminant contract.
+    #[test]
+    fn migration_29_adds_the_receiver_shape_and_widens_the_ledger_identity_only() {
+        let statements: Vec<String> = MIGRATION_29
+            .split(';')
+            .map(|stmt| {
+                stmt.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|stmt| stmt.trim().to_string())
+            .filter(|stmt| !stmt.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "ALTER TABLE unresolved_refs ADD COLUMN receiver INTEGER CHECK (receiver IN (1,2,3))",
+                "DROP INDEX idx_unresolved_refs_identity",
+                "CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, \
+                 target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0))",
+                "UPDATE files SET content_hash = NULL",
+            ],
+            "exactly the in-place column, the widened identity and the re-extraction trigger"
+        );
+        let shapes: Vec<i32> = ReceiverShape::ALL.iter().map(|s| s.as_i32()).collect();
+        assert_eq!(
+            check_discriminants(MIGRATION_29, "receiver IN (", 0),
+            shapes,
+            "unresolved_refs.receiver CHECK must equal ReceiverShape::ALL discriminants"
         );
     }
 }

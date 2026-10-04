@@ -161,19 +161,30 @@ by each relation's payload token), read live from the graph.
 >   large share of references are calls like `.unwrap()`, `.iter()`, `.clone()`,
 >   `Some`, `Ok`, `Vec::new`, or `std::fs::*` — these stay unresolved forever
 >   because their targets live outside the graph. Receiver-method calls
->   (`x.foo()`) are the biggest such bucket: the receiver's type is unknown, so
->   they bind **only on genuine lexical/module scope evidence** and otherwise
->   stay honest misses. The workspace unique-name fallback that used to (mis)bind
->   a bare `x.map()` to a lone same-named `fn map` in another module is gated off
->   for the method form ([CR-066](../requests/CR-066-receiver-method-overbinding.md),
->   [FR-RS-06](../specs/requirements/FR-RS-06.md)), so these calls no longer
->   fabricate cross-module `Calls` edges — they stay in `unresolved_refs`. One
->   receiver *is* known: a Rust call on exactly `self` inside an `impl` method
->   (`self.helper()`, like a written `Self::helper()`) has the impl's own type,
->   so it binds to the one `helper` that type's impls define in the caller's
->   crate — and stays unbound, retried on sync, when that type defines none or
->   two ([FR-RS-11](../specs/requirements/FR-RS-11.md)). `self.field.helper()`,
->   `other.helper()` and calls in a trait's default methods keep the rule above. A
+>   (`x.foo()`) are the biggest such bucket. Logos records each one's
+>   **receiver shape** — `self` (the caller's own instance: `this.foo()`,
+>   `self.foo()`), `super`, or `other` — and binds by it
+>   ([CR-169](../requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md),
+>   [FR-EX-13](../specs/requirements/FR-EX-13.md),
+>   [FR-RS-12](../specs/requirements/FR-RS-12.md)): a `self` call binds to the
+>   one `foo` of the caller's own class (or the nearest proven base class that
+>   has one), a `super` call only through a proven base class, and a call on
+>   any other receiver binds **nowhere** unless the receiver's type is proven
+>   (Java's typed receivers, [FR-RS-10](../specs/requirements/FR-RS-10.md)).
+>   Where the caller sits — its file, class or module — is not evidence of what
+>   `x` is: an `other.foo()` inside a method `foo` never binds to that method
+>   itself, and never to a same-named function beside it
+>   ([FR-RS-06](../specs/requirements/FR-RS-06.md)). Such calls stay in
+>   `unresolved_refs`, counted as `no-receiver-evidence`. A language whose
+>   plugin does not record receiver shapes yet leaves all its method calls
+>   unbound rather than guess. One receiver *is* known for Rust: a call on
+>   exactly `self` inside an `impl` method (`self.helper()`, like a written
+>   `Self::helper()`) has the impl's own type, so it binds to the one `helper`
+>   that type's impls define in the caller's crate — and stays unbound, retried
+>   on sync, when that type defines none or two
+>   ([FR-RS-11](../specs/requirements/FR-RS-11.md)). A `self.helper()` in a
+>   trait's default method binds to the trait's own `helper`; `self.field.helper()`
+>   and `other.helper()` stay unbound. A
 >   bare-path call (`foo()`, single segment) is complementary: when a free
 >   function and same-named associated methods both exist at the call scope, the
 >   free function wins the tie ([CR-068](../requests/CR-068-reachability-binding-precision.md)
