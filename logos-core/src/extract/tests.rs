@@ -6172,3 +6172,29 @@ fn a_scala_given_selector_imports_no_type() {
     assert!(scala_imports("import a.b.given T").is_empty());
     assert!(scala_imports("import a.b.given").is_empty());
 }
+
+/// Every Scala selector shape records its own rows (S-518): a rename imports
+/// the name it renames (its local name is S-520's alias work), a selector
+/// hidden with `=> _` imports nothing, `_` and Scala 3's `*` are wildcards, a
+/// Scala 3 `as` rename after the path imports its name, and comma-separated
+/// paths are separate imports.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn every_scala_selector_shape_records_its_own_rows() {
+    let row = |t: &str, alias: Option<&str>, form| (t.to_string(), alias.map(str::to_string), form);
+    assert_eq!(
+        scala_imports("import a.b.{C => X, D => _, E}"),
+        vec![row("a::b::C", Some("C"), RefForm::Path), row("a::b::E", Some("E"), RefForm::Path)]
+    );
+    assert_eq!(scala_imports("import a.b._"), vec![row("a::b", None, RefForm::Glob)]);
+    assert_eq!(scala_imports("import a.b.*"), vec![row("a::b", None, RefForm::Glob)]);
+    assert_eq!(
+        scala_imports("import a.b.{C, _}"),
+        vec![row("a::b", None, RefForm::Glob), row("a::b::C", Some("C"), RefForm::Path)]
+    );
+    assert_eq!(scala_imports("import a.b.C as K"), vec![row("a::b::C", Some("C"), RefForm::Path)]);
+    assert_eq!(
+        scala_imports("import a.B, c.d.E"),
+        vec![row("a::B", Some("B"), RefForm::Path), row("c::d::E", Some("E"), RefForm::Path)]
+    );
+}
