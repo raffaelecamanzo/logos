@@ -11,9 +11,9 @@
 ;   @ref.call   — a path call (`f()`, `a::b::f()`, with or without turbofish);
 ;                 the captured node's text is the language path to resolve.
 ;   @ref.method — a receiver-method call (`x.f()`); only the method *name* is
-;                 knowable without type inference. It carries no receiver
-;                 marker, so it records no shape and binds nowhere under any
-;                 policy (S-514, FR-RS-12).
+;                 knowable without type inference. The `@ref.receiver.other`
+;                 marker below records its shape `other` (S-517), so it binds
+;                 nowhere under any policy (S-514, FR-RS-12).
 ;   @ref.method.self — a receiver-method call on exactly `self` (`self.f()`),
 ;                 whose receiver type is the enclosing impl's self type (S-493);
 ;                 see its pattern below.
@@ -74,6 +74,18 @@
   function: (field_expression
     value: (self)
     field: (field_identifier) @ref.method.self))
+
+;   @ref.receiver.other — the receiver shape of every method call (S-517, CR-169,
+;                 FR-EX-13; the vocabulary is S-514's): `x.f()`, `other.helper()`
+;                 inside a method `helper`, `self.field.f()`. It shares its
+;                 parent — the `field_expression` — with the call's name node,
+;                 which is how the engine pairs them. `self.f()` carries the
+;                 `self` mark too (`@ref.method.self` above) and `self` outranks
+;                 `other`, so it still reads `self`. An `other` call binds
+;                 nowhere: never a same-named free `fn`, never the caller's own
+;                 method.
+(field_expression
+  value: (_) @ref.receiver.other)
 
 (use_declaration
   argument: (_) @ref.use)
