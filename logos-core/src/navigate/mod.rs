@@ -2641,20 +2641,29 @@ pub(crate) fn affected(
 
 /// Whether a project-relative path is test-marked by naming convention
 /// ([FR-CL-04] `--tests-only`): a `tests`/`test`/`__tests__`/`spec` path
-/// segment (outside a production source root, below), or a filename matching the per-language test idioms (`*_test.*`,
+/// segment, or a filename matching the per-language test idioms (`*_test.*`,
 /// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`,
 /// a bare Rust `tests.rs`, or the snake_case Rust `*_tests.rs` suffix —
 /// [CR-075], the plural counterpart to `*Test(s).java`'s CamelCase plural).
+/// Neither marks beneath a production source root (first rule below).
 ///
-/// Three exactness rules keep production code out ([S-524], [CR-171]):
+/// Four exactness rules keep production code out ([S-524], [CR-171], [HF-2]):
 /// - a `test`/`tests`/`__tests__`/`spec` segment *beneath a production source
 ///   root* (`src/main`, or a Gradle/KMP `*Main` source set such as
 ///   `commonMain`) is a package or resource name — `org/koin/test/` — not a
 ///   test tree ([FR-AN-05]); the same segment *above* the root
 ///   (`test/fixtures/p/src/main/…`) still marks;
+/// - no filename convention marks beneath such a root either:
+///   `commonMain/…/KoinTest.kt` and `src/main/…/AutoCloseKoinTest.kt` are
+///   library classes, since Maven/Gradle test runners collect only from test
+///   source sets. The override is path-only and language-blind, so a non-JVM
+///   tree that keeps `foo.test.ts` under a `src/main/` of its own reads as
+///   production here too. Extraction evidence (`@Test`) is a separate disjunct
+///   of `is_test_marked` and is not affected;
 /// - a Gradle `*Test` source set (`src/commonTest`, `src/jvmTest`) or the
 ///   `src/it` integration source set is test code — only as a direct child of
-///   `src/`, so a locale directory `it/` or a stray `fooTest/` is not one;
+///   `src/`, so a locale directory `it/` or a stray `fooTest/` is not one — and
+///   stays test code even when it sits beneath a production root;
 /// - the `*.test.*`/`*.spec.*` filename tag needs a three-part name
 ///   (`foo.test.ts`): a bare `test.py` / `spec.ts` is a module called "test".
 ///
@@ -2664,6 +2673,7 @@ pub(crate) fn affected(
 /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
 /// [CR-075]: ../../../docs/requests/CR-075-is-test-plural-test-file-conventions.md
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
+/// [HF-2]: ../../../docs/planning/sprints/sprint-86.md
 /// [S-524]: ../../../docs/planning/journal.md#s-524-test-path-conventions-respect-production-source-roots-and-gradle-test-source-sets
 pub(crate) fn is_test_path(path: &str) -> bool {
     let p = Path::new(path);
@@ -2685,6 +2695,12 @@ pub(crate) fn is_test_path(path: &str) -> bool {
             return true;
         }
         parent = Some(seg);
+    }
+    // Beneath a production source root the filename conventions are as silent
+    // as the directory ones: runners collect only from test source sets, so a
+    // `KoinTest.kt` under `commonMain` is a library class ([HF-2]).
+    if under_production_root {
+        return false;
     }
     let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
         return false;
