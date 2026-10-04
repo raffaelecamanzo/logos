@@ -73,6 +73,8 @@
 ;                            block) records nothing. Binds only through a proven
 ;                            `Extends`, which this plugin does not record — so it
 ;                            stays unbound, and never reaches the caller itself.
+;                            In a method of a `module` or a `class << self` body
+;                            (`anonymous`, below) it records `other`: unbound too.
 (call receiver: (self) @ref.receiver.self)
 (module body: (body_statement) @ref.receiver.anonymous)
 (class
