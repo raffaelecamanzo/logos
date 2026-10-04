@@ -185,7 +185,8 @@ by each relation's payload token), read live from the graph.
 >   `$this->foo()`, `self::foo()` and `static::foo()`; and Ruby's `self.foo()`
 >   or a bare `foo()` inside a class — the `super` forms `super.foo()`,
 >   `super().foo()`, `parent::foo()` and Ruby's `super`. None of these plugins
->   proves a base class yet, so their `super` calls stay unbound. One receiver *is* known for Rust: a call on
+>   proves a base class yet, so their `super` calls stay unbound. One receiver
+>   *is* known for Rust: a call on
 >   exactly `self` inside an `impl` method (`self.helper()`, like a written
 >   `Self::helper()`) has the impl's own type, so it binds to the one `helper`
 >   that type's impls define in the caller's crate — and stays unbound, retried
