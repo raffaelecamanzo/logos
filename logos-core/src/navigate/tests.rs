@@ -215,6 +215,11 @@ fn is_test_path_production_root_overrides_filename_conventions() {
     assert!(is_test_path("koin-core/src/commonTest/kotlin/FooTest.kt"));
     assert!(is_test_path("koin-core/src/jvmTest/kotlin/FooTest.kt"));
     assert!(is_test_path("svc/src/it/java/FooIT.java"));
+    // ...also when one sits BENEATH a production root (an embedded fixture
+    // project): the guard is reached only after the segment loop, so a source
+    // set found in the loop wins.
+    assert!(is_test_path("app/src/main/resources/proj/src/it/java/Foo.java"));
+    assert!(is_test_path("app/src/main/resources/proj/src/jvmTest/kotlin/Foo.kt"));
     // Outside any production root the filename conventions are unchanged.
     assert!(is_test_path("pkg/foo_test.go"));
     assert!(is_test_path("web/foo.test.ts"));
@@ -224,7 +229,7 @@ fn is_test_path_production_root_overrides_filename_conventions() {
     assert!(is_test_path("Main/FooTest.kt")); // bare `Main` is not a source set
     assert!(is_test_path("src/FooMain/FooTest.kt")); // PascalCase is not one either
     assert!(is_test_path("main/FooTest.java")); // `main` needs its `src/` parent
-    // A test directory ABOVE the root still marks, whatever the filename.
+    // A test directory ABOVE the root still marks.
     assert!(is_test_path("test/fixtures/p/src/main/java/Bar.java"));
 }
 
