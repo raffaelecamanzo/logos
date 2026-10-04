@@ -320,3 +320,33 @@ fn a_rust_self_call_binds_through_the_impl_and_every_other_receiver_is_unbound()
          is not one, and no method-form call reaches the free `fn helper`"
     );
 }
+
+/// The same call written inside and outside a macro argument.
+const RS_MACRO: &str = "\
+pub struct B;
+
+impl B {
+    fn helper(&self) -> u32 { 0 }
+}
+
+fn free(x: &B) {
+    println!(\"{}\", x.helper());
+    x.helper();
+}
+";
+
+/// The macro token-tree walk and the query record one call between them: a
+/// non-`self` method call inside a macro argument is `other` like the same call
+/// outside it, so the two are one ledger row — not an `other` row beside a
+/// shapeless twin the shape-keyed dedup would no longer merge.
+#[test]
+fn a_method_call_in_a_macro_argument_records_the_same_other_row_as_outside_one() {
+    let tmp = tree(&[(RS_FILE, RS_MACRO)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        call_rows(rt, RS_FILE),
+        vec![row(&format!("{RS_FILE}:free@7"), "helper", RefForm::Method, OTHER, false)]
+    );
+    assert!(call_edges(rt).is_empty());
+}
