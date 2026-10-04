@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.9.2] — 2026-10-04
+
 ### Fixed
 
 - **A production source root overrides the test file-name conventions too — for JVM
