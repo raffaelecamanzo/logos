@@ -257,7 +257,10 @@ fn the_fact_changes_no_node_symbol_or_edge() {
     assert_eq!(methods, 11, "one node per method declaration: {got:?}");
 }
 
-/// Re-extracting an unchanged file yields the identical fact.
+/// Re-extracting a file whose declarations are unchanged yields the identical
+/// fact. A second `index` re-extracts every file; a `sync` of a byte-identical
+/// file is skipped by its content hash (FR-SY-03), so the sync leg appends a
+/// trailing comment — a changed file, the same declarations.
 #[test]
 fn re_extraction_of_an_unchanged_file_yields_the_identical_fact() {
     let tmp = tree(&[("svc/forms.go", FORMS), ("plain/plain.go", PLAIN)]);
@@ -269,8 +272,10 @@ fn re_extraction_of_an_unchanged_file_yields_the_identical_fact() {
     let _ = engine.index();
     assert_eq!(self_types(rt), before, "a second index records the same facts");
     assert_eq!(nodes(rt), nodes_before, "and the same nodes");
-    engine.sync(&[PathBuf::from("svc/forms.go")]);
-    assert_eq!(self_types(rt), before, "a sync of the unchanged file records the same facts");
+    write(tmp.path(), "svc/forms.go", &format!("{FORMS}\n// a comment, no declaration\n"));
+    let synced = engine.sync(&[PathBuf::from("svc/forms.go")]);
+    assert_eq!(synced.files_modified, 1, "the sync really re-extracted the file: {synced:?}");
+    assert_eq!(self_types(rt), before, "a re-extracted file with the same declarations records the same facts");
     assert_eq!(nodes(rt), nodes_before);
 }
 
@@ -295,7 +300,7 @@ fn a_synced_edit_matches_a_fresh_reindex_and_rederives_only_its_file() {
     assert_eq!(synced.get("svc/forms.go:Make@29").map(String::as_str), Some("Fresh"));
     let plain_after: BTreeMap<String, String> =
         synced.iter().filter(|(l, _)| l.starts_with("plain/")).map(|(k, v)| (k.clone(), v.clone())).collect();
-    assert_eq!(plain_after, plain_before, "an untouched file's facts are not re-derived");
+    assert_eq!(plain_after, plain_before, "an untouched file's facts are unchanged");
 
     let fresh_tmp = tree(&[("svc/forms.go", &edited), ("plain/plain.go", PLAIN)]);
     let fresh = index(fresh_tmp.path());
