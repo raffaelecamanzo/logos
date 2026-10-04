@@ -321,6 +321,45 @@ class Outer {
     assert_eq!(call_edges(rt), Vec::<(String, String)>::new());
 }
 
+/// A member extension function's `this` is its extension receiver, not the
+/// enclosing class's instance: `this.m()` inside `fun G.ext()` declared in `W`
+/// must not bind `W.m`. An ordinary member with a declared return type keeps
+/// the `self` shape.
+#[test]
+fn kotlin_a_this_call_inside_an_extension_function_never_binds_the_enclosing_class() {
+    let file = "src/Ext.kt";
+    let src = "\
+class G {
+    fun m() {}
+}
+
+class W {
+    fun m() {}
+    fun G.ext() { this.m() }
+    fun G?.ext2() { this.m() }
+    fun own(): G { this.m(); return G() }
+}
+";
+    let tmp = tree(&[(file, src)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let at = |line: u32, name: &str| format!("{file}:{name}@{line}");
+    let rows = call_rows(rt, file);
+    assert!(
+        rows.contains(&row(&at(7, "ext"), "m", RefForm::Method, OTHER, false)),
+        "{rows:?}"
+    );
+    assert!(
+        rows.contains(&row(&at(8, "ext2"), "m", RefForm::Method, OTHER, false)),
+        "{rows:?}"
+    );
+    assert!(
+        rows.contains(&row(&at(9, "own"), "m", RefForm::Method, SELF, true)),
+        "{rows:?}"
+    );
+    assert_eq!(call_edges(rt), vec![edge(&at(9, "own"), &at(6, "m"))]);
+}
+
 // ── Scala ────────────────────────────────────────────────────────────────────
 
 const SC_FILE: &str = "src/A.scala";

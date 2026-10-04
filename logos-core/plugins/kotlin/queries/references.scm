@@ -28,9 +28,11 @@
 ;                             `implicit_receiver = "self"` a call on the current
 ;                             instance inside a class or object, a free call
 ;                             outside one.
-;   @ref.receiver.anonymous — an `object : T { … }` body: its instance has no
-;                             node, so a `this.` call inside records `other` and
-;                             a bare call is a free call.
+;   @ref.receiver.anonymous — an `object : T { … }` body, and an extension
+;                             function's body (`fun G.ext() { … }`, whose `this`
+;                             is a `G`): its receiver has no node to bind
+;                             through, so a `this.` call inside records `other`
+;                             and a bare call is a free call.
 ;
 ; Droppable on disk at `.logos/plugins/kotlin/queries/references.scm`.
 ;
@@ -69,6 +71,17 @@
 
 (object_literal
   (class_body) @ref.receiver.anonymous)
+
+; An extension function's body: its `this` is the extension receiver (`G` in
+; `fun G.ext()`), not the enclosing class's instance, so a `this.` call inside
+; it must not bind among that class's members. The receiver type sits right
+; before the name; a return type follows the parameters, so the anchor tells
+; the two apart.
+(function_declaration
+  [(user_type) (nullable_type)]
+  .
+  name: (identifier)
+  (function_body) @ref.receiver.anonymous)
 
 ; An import's qualified path — canonicalised (dots → `::`) into the ledger form
 ; that feeds the binder and the Spring candidacy gate.
