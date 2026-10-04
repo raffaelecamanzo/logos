@@ -1533,21 +1533,9 @@ fn collect_refs(
                     if name.is_empty() {
                         continue;
                     }
-                    // `self.m()` inside a method whose self type is recorded
-                    // (S-493): the caller's own type is the receiver's, so the
-                    // row is `Self::m`, bound through that type.
-                    let caller_has_self_type = capture == SELF_RECEIVER_METHOD_CAPTURE
-                        && enclosing_decl(node).is_some_and(|i| decls[i].self_type.is_some());
-                    if caller_has_self_type {
-                        out.push(RefFact {
-                            source: source_symbol,
-                            target: format!("{}::{name}", crate::resolve::SELF_TYPE_HEAD),
-                            alias: None,
-                            form: RefForm::Path,
-                            kind: EdgeKind::Calls,
-                            line,
-                            relation: None,
-                        });
+                    let caller = enclosing_decl(node).map(|i| &decls[i]);
+                    if let Some(row) = self_receiver_row(capture, caller, &source_symbol, name, line) {
+                        out.push(row);
                         continue;
                     }
                     // A member call whose receiver is an imported module — a Go
@@ -1767,6 +1755,33 @@ fn collect_refs(
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
     dedup_sort_refs(&mut out);
     out
+}
+
+/// The row a [`SELF_RECEIVER_METHOD_CAPTURE`] call `self.name()` records when
+/// its `caller` has a recorded self type (S-493): the Path-form `Self::name` —
+/// the row a written `Self::name()` records — bound through that type. `None`
+/// for any other capture, and for a caller with none (a trait's default
+/// method), whose call stays an ordinary method call.
+fn self_receiver_row(
+    capture: &str,
+    caller: Option<&Decl<'_>>,
+    source: &LogosSymbol,
+    name: &str,
+    line: u32,
+) -> Option<RefFact> {
+    if capture != SELF_RECEIVER_METHOD_CAPTURE {
+        return None;
+    }
+    caller.and_then(|d| d.self_type.as_ref())?;
+    Some(RefFact {
+        source: source.clone(),
+        target: format!("{}::{name}", crate::resolve::SELF_TYPE_HEAD),
+        alias: None,
+        form: RefForm::Path,
+        kind: EdgeKind::Calls,
+        line,
+        relation: None,
+    })
 }
 
 /// The rows one captured **type** node records (S-466, [CR-149] §3.2 B): its
