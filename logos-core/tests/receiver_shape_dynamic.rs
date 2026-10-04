@@ -218,11 +218,8 @@ fn javascript_receivers_record_their_shape_and_only_this_binds() {
 /// A `this.m()` inside an anonymous class expression has no class node to
 /// bind through: it is never the enclosing class's `m` — unless the anonymous
 /// class declares `m` itself, when it is the free call that reaches exactly
-/// that member.
-#[cfg(feature = "lang-typescript")]
-#[test]
-fn a_this_call_inside_a_class_expression_never_binds_the_enclosing_class() {
-    let file = "src/anon.ts";
+/// that member. Each TS-family plugin carries its own marker, so each runs it.
+fn assert_class_expression(file: &str) {
     let (rows, edges) = indexed(
         file,
         "\
@@ -261,6 +258,18 @@ class A {
         edges,
         sorted_edges(vec![edge(&at(16, "go"), &at(12, "own"))])
     );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_this_call_inside_a_class_expression_never_binds_the_enclosing_class() {
+    assert_class_expression("src/anon.ts");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_tsx_this_call_inside_a_class_expression_never_binds_the_enclosing_class() {
+    assert_class_expression("src/anon.tsx");
 }
 
 // ── Python: `self.` / `cls.` / `super().` ────────────────────────────────────
