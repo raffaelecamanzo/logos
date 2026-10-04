@@ -363,6 +363,9 @@ class A(Base):
     def k(self):
         return super().m(self)
 
+    def g(self):
+        return get().m(self)
+
 
 class B:
     def m(self, other):
@@ -379,6 +382,9 @@ class B:
             row(&at(17, "k"), "m", METHOD, SUPER, false),
             // The `super()` call itself is a free call, as before.
             row(&at(17, "k"), "super", PATH, None, false),
+            // A call result is any other receiver, never `super`.
+            row(&at(20, "g"), "m", METHOD, OTHER, false),
+            row(&at(20, "g"), "get", PATH, None, false),
         ])
     );
     assert_eq!(
