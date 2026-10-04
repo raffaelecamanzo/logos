@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-10-04
+
 ### Fixed
 
 - **An index never silently empties.** Same-named declarations of different kinds —
