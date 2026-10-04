@@ -399,7 +399,8 @@ const JAVA_BASE: &str = "package com.x.base;\n\npublic class Base {\n    public 
 const JAVA_MAILER: &str =
     "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n    public Mailer next() { return this; }\n}\n";
 /// Every receiver S-467 proves, and three it cannot: a chained call, a `this`
-/// inside an anonymous class body, a `super` call of a class extending nothing.
+/// inside an anonymous class body (to a method that body declares), a `super`
+/// call of a class extending nothing.
 const JAVA_SVC: &str = "package com.x.svc;\n\
 \n\
 import com.x.base.Base;\n\
@@ -442,6 +443,9 @@ fn java_proven_receivers_bind_as_before_and_every_other_receiver_records_its_sha
             edge(&svc(13, "chained"), &mailer(5, "next")),
             edge(&svc(8, "viaField"), &mailer(4, "send")),
             edge(&svc(9, "viaParam"), &mailer(4, "send")),
+            // The anonymous body's own `helper`, reached as a free call through
+            // the lexical scope — as the scope walk bound it before S-514.
+            edge(&svc(14, "run"), &svc(14, "helper")),
         ])
     );
     let shaped: Vec<Row> = call_rows(rt, JAVA_SVC_FILE)
@@ -451,9 +455,6 @@ fn java_proven_receivers_bind_as_before_and_every_other_receiver_records_its_sha
     assert_eq!(
         shaped,
         sorted(vec![
-            // A `this` call in an anonymous class body: its instance has no
-            // class node, so it is `other`.
-            row(&svc(14, "run"), "helper", RefForm::Method, OTHER, false),
             // The chained receiver proves nothing.
             row(&svc(13, "chained"), "send", RefForm::Method, OTHER, false),
             // A class extending nothing: no level for `super` to bind at.

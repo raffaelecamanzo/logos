@@ -83,7 +83,9 @@
 ;                            `this` and `super` above outrank it.
 ;   @ref.receiver.anonymous — an anonymous class body (`new T() { … }`): typing
 ;                            stops there, and a `this` / `super` call inside one
-;                            is `other`, its instance having no class node.
+;                            is `other`, its instance having no class node —
+;                            except a `this.m()` to an `m` the body declares,
+;                            recorded as the free call the lexical scope binds.
 
 (method_invocation object: (identifier) @ref.receiver.name)
 (method_invocation object: (this) @ref.receiver.this)

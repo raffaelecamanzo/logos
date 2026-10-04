@@ -57,7 +57,7 @@
 //! | `other` | the receiver | `other` — or `self` when its text is the `self_name` the caller declares |
 //! | `implicit` | the name of a call written with no receiver, on a `@ref.method` row | per the plugin's `implicit_receiver` policy ([`ImplicitReceiver`]): `self` inside a named class under `"self"`; otherwise the row becomes the Path-form free call `@ref.call` records |
 //! | `self_name` | the identifier a declaration binds its own instance to (Go's receiver parameter) | nothing; read by `other` |
-//! | `anonymous` | an anonymous class body (`new T() { … }`) | nothing; a `self` / `super` / `this` call inside one records `other`, and typing stops there |
+//! | `anonymous` | an anonymous class body (`new T() { … }`) | nothing; typing stops there, and a `self` / `super` / `this` call inside one records `other` — except a `self` call to a callable that body declares itself, which becomes the free call the lexical scope binds to it |
 //!
 //! Java's typing markers map onto the lexicon: `this` is `self`; `name`,
 //! `field` and `refused` are `other`. A `self` call whose caller declares a
@@ -135,8 +135,9 @@ struct Marks {
 enum Enclosing {
     /// Inside the class-like declaration at this index.
     Class(usize),
-    /// Inside an anonymous class body nearer than any named class.
-    Anonymous,
+    /// Inside the anonymous class body with this node id, nearer than any
+    /// named class.
+    Anonymous(usize),
     /// Inside no class at all.
     Outside,
 }
@@ -357,7 +358,7 @@ impl<'tree> Receivers<'tree> {
                 continue;
             };
             let row = &mut refs[site.row];
-            match self.shape(marks, site, file) {
+            match self.shape(marks, site, file, &row.target) {
                 Recorded::Shape(ReceiverShape::SelfInstance) => {
                     let caller = site.caller.map(|c| &file.decls[c]);
                     (row.target, row.form, row.receiver) = self_call(caller, &row.target);
@@ -370,16 +371,24 @@ impl<'tree> Receivers<'tree> {
     }
 
     /// The shape a site's markers give its Method-form row.
-    fn shape(&self, marks: &Marks, site: &Site<'_>, file: &FileDecls<'_, '_>) -> Recorded {
+    fn shape(&self, marks: &Marks, site: &Site<'_>, file: &FileDecls<'_, '_>, name: &str) -> Recorded {
         if marks.refused {
             return Recorded::Shape(ReceiverShape::Other);
         }
         let class = || enclosing_class(site.invocation, file, &self.anonymous);
         match (marks.own, marks.base) {
             (true, true) => return Recorded::Shape(ReceiverShape::Other),
-            // An anonymous class's instance has no node to bind through.
-            (true, false) | (false, true) if class() == Enclosing::Anonymous => {
-                return Recorded::Shape(ReceiverShape::Other);
+            // An anonymous class's instance has no node to bind through. A
+            // `self` call to a callable its body declares itself reaches it as
+            // the free call the lexical scope binds — the body's members sit
+            // under the enclosing callable, nearer than any other class's.
+            (true, false) | (false, true) if matches!(class(), Enclosing::Anonymous(_)) => {
+                return match class() {
+                    Enclosing::Anonymous(body) if marks.own && declares_in(file, body, name) => {
+                        Recorded::FreeCall
+                    }
+                    _ => Recorded::Shape(ReceiverShape::Other),
+                };
             }
             (true, false) => return Recorded::Shape(ReceiverShape::SelfInstance),
             (false, true) => return Recorded::Shape(ReceiverShape::Super),
@@ -546,7 +555,7 @@ fn enclosing_class(
     let mut at = invocation.parent();
     while let Some(node) = at {
         if anonymous.contains(&node.id()) {
-            return Enclosing::Anonymous;
+            return Enclosing::Anonymous(node.id());
         }
         if let Some(&i) = file.id_to_idx.get(&node.id()) {
             if is_class_like(file.decls[i].kind) {
@@ -620,6 +629,18 @@ fn declares_field(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
 fn declares_member(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
     decls.iter().any(|d| {
         d.parent == Some(class) && d.name == name && matches!(d.kind, NodeKind::Method | NodeKind::Function)
+    })
+}
+
+/// Whether the anonymous class body with node id `body` itself declares a
+/// callable named `name` whose symbol built — the one a `self` call inside it
+/// names (S-514).
+fn declares_in(file: &FileDecls<'_, '_>, body: usize, name: &str) -> bool {
+    file.decls.iter().enumerate().any(|(i, d)| {
+        d.node.parent().is_some_and(|p| p.id() == body)
+            && d.name == name
+            && matches!(d.kind, NodeKind::Method | NodeKind::Function)
+            && file.symbols[i].is_some()
     })
 }
 
