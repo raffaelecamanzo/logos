@@ -140,13 +140,15 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// disk: both declared-type tables absent (their indexes go with them),
 /// migration 24 unrecorded, `user_version` 23 — and so no extraction marker. The
 /// exact inverse of migration 24, and of migrations 25 (S-500, two `nodes`
-/// columns), 26 (S-498, the snapshot offender table and its flag column) and
-/// 27 (S-513, the persist-failure record) after it; the next [`Engine::start`]
-/// re-applies all four, as a real upgrade does.
+/// columns), 26 (S-498, the snapshot offender table and its flag column), 27
+/// (S-513, the persist-failure record) and 28 (S-493, the `nodes.self_type`
+/// column) after it; the next [`Engine::start`] re-applies all five, as a real
+/// upgrade does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
+        "ALTER TABLE nodes DROP COLUMN self_type; DELETE FROM schema_versions WHERE version = 28; \
+         DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
          DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
          DELETE FROM schema_versions WHERE version = 26; \
          ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \

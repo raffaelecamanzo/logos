@@ -218,6 +218,7 @@ pub(super) fn emit_anchored_node(
         body,
         max_nesting_depth: None,
         shingles: Vec::new(),
+        self_type: None,
     });
     facts.edges.push(EdgeFact {
         source: parent_symbol.clone(),
@@ -328,6 +329,7 @@ pub(super) fn extract_one_config(
         // Config nodes are not functions — no CR-005 structural facts.
         max_nesting_depth: None,
         shingles: Vec::new(),
+        self_type: None,
     });
 
     // The generic, depth-bounded section walk runs only when the descriptor
@@ -490,6 +492,7 @@ fn walk_sections(
             body: None,
             max_nesting_depth: None,
             shingles: Vec::new(),
+            self_type: None,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),
@@ -629,6 +632,7 @@ fn walk_anchors(
             body: anchor.payload,
             max_nesting_depth: None,
             shingles: Vec::new(),
+            self_type: None,
         });
         facts.edges.push(EdgeFact {
             source: config_file_symbol.clone(),

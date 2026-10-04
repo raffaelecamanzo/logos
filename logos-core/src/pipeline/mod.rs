@@ -2728,6 +2728,9 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             // NULL on every non-callable node.
             has_body: n.metrics.map(|m| m.has_body),
             body_tokens: n.metrics.map(|m| i64::from(m.body_tokens)),
+            // The S-493 self type a plugin query declares for a method (FR-RS-11)
+            // — NULL on every node with none.
+            self_type: n.self_type.as_deref(),
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
         // The CR-005 winnowed near-clone shingle set (FR-EX-09) — persisted into

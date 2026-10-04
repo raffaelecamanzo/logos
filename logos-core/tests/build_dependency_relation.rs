@@ -242,13 +242,14 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// inverse of migrations 22, 23 (S-487, only adds
 /// `metric_snapshots.modularity_applicable`), 24 (S-472, two declared-type
 /// tables and their marker), 25 (S-500, two `nodes` columns), 26 (S-498,
-/// the snapshot offender table and its flag column) and 27 (S-513, the
-/// persist-failure record); the next open re-applies all six, as a real
-/// upgrade does. Duplicated from `build_manifest_facts.rs` (no shared test module).
+/// the snapshot offender table and its flag column), 27 (S-513, the
+/// persist-failure record) and 28 (S-493, the `nodes.self_type` column); the
+/// next open re-applies all seven, as a real upgrade does. Duplicated from `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
+        "ALTER TABLE nodes DROP COLUMN self_type; DELETE FROM schema_versions WHERE version = 28; \
+         DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
          DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
          DELETE FROM schema_versions WHERE version = 26; \
          ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \
@@ -312,7 +313,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 27, "{name} was opened at the latest version (v27)");
+        assert_eq!(user_version(&root.join(name)), 28, "{name} was opened at the latest version (v28)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

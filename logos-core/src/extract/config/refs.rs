@@ -1757,6 +1757,7 @@ mod tests {
             body: None,
             max_nesting_depth: None,
             shingles: Vec::new(),
+            self_type: None,
         }
     }
 

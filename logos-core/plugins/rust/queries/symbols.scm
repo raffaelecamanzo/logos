@@ -12,12 +12,61 @@
 
 ; v1 policy: every `function_item` is captured as `@symbol.function`, including
 ; methods defined inside an `impl` block. The extraction engine maps these to
-; NodeKind::Function (not Method) because a tree-sitter query cannot express
-; "function_item NOT inside impl_item", and associating a method with its
-; receiver type is a resolution-engine concern (S-007 / S-011). NodeKind::Method
-; is reserved for languages/passes that can bind a method to its type.
+; NodeKind::Function because a tree-sitter query cannot express "function_item
+; NOT inside impl_item"; it re-kinds an impl method as Method at emission
+; (CR-068 Part B). The impl's self type rides beside the method's node, never in
+; its symbol — the `@symbol.self_type` patterns after this one (S-493).
 (function_item
   name: (identifier) @symbol.function)
+
+; A method's self type (S-493, FR-RS-11): an `impl` block's directly nested
+; `function_item` is captured once more, with `@symbol.self_type` on the base
+; type name of the block's self type — the last path segment, generics outside
+; the capture: `impl<M> A<M>` → `A`, `impl fmt::Display for crate::x::Y` → `Y`,
+; `impl<T> super::B<T>` → `B`. The extraction engine gives the self type to the
+; declaration the same match captures (and takes the declaration once, whichever
+; pattern names it first), so symbols and kinds are unchanged; it is persisted
+; beside the node (`nodes.self_type`) for the binder's `self.m()` / `Self::m()`
+; binding.
+;
+; A path-qualified header records a self type only when the path is the
+; crate's own — headed `crate`, `self` or `super`. `impl Ext for
+; std::io::Error` is a foreign type's impl, and keeping its base name `Error`
+; would let it pass for a crate type of that name; it records none, and its
+; methods' self calls resolve as before. A self type of any other shape — `&T`,
+; `[T]`, `(A, B)`, `dyn T` — records none either. (A bare name the file imports
+; from outside the crate is refused by the binder, which reads the imports.)
+(impl_item
+  type: (type_identifier) @symbol.self_type
+  body: (declaration_list
+    (function_item
+      name: (identifier) @symbol.function)))
+
+(impl_item
+  type: (generic_type
+    type: (type_identifier) @symbol.self_type)
+  body: (declaration_list
+    (function_item
+      name: (identifier) @symbol.function)))
+
+(impl_item
+  type: (scoped_type_identifier
+    path: (_) @_self_type_path
+    name: (type_identifier) @symbol.self_type)
+  body: (declaration_list
+    (function_item
+      name: (identifier) @symbol.function))
+  (#match? @_self_type_path "^(crate|self|super)($|::)"))
+
+(impl_item
+  type: (generic_type
+    type: (scoped_type_identifier
+      path: (_) @_self_type_path
+      name: (type_identifier) @symbol.self_type))
+  body: (declaration_list
+    (function_item
+      name: (identifier) @symbol.function))
+  (#match? @_self_type_path "^(crate|self|super)($|::)"))
 
 (struct_item
   name: (type_identifier) @symbol.struct)

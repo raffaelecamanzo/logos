@@ -160,17 +160,28 @@ pub(crate) enum Residue {
     /// fully-qualified names the type could be, in the order its scope reads
     /// them; a type nested under an in-graph type that does not declare it has
     /// none.
+    ///
+    /// Also a `Self::m` call whose self type the crate declares no type of, or
+    /// whose caller's file imports it from outside the crate (S-493), with no
+    /// candidates.
     ExternalType { candidates: Vec<Vec<String>> },
     /// The type (or the nearest supertype level holding the name) declares two
     /// or more callables of that name, or two static imports each supply one.
+    /// Also a `Self::m` call whose self type — a name the crate declares for
+    /// one type — records several `m` that the caller's module does not narrow
+    /// to one (S-493).
     OverloadAmbiguous,
     /// The type's name reaches two in-graph declarations (a `src/main` and a
-    /// `src/test` class of one fully-qualified name).
+    /// `src/test` class of one fully-qualified name). Also a `Self::m` call
+    /// whose self type's base name the crate declares for several types, when
+    /// the caller's module does not decide the candidate (S-493).
     TypeAmbiguous,
     /// The type is in the graph, and neither it nor any in-graph supertype
     /// declares the name: the chain leaves the graph (a JDK, library or
     /// other-member superclass, the implicit `Object`), stops at an interface,
-    /// or cycles.
+    /// or cycles. Also a `Self::m` call whose self type records no `m` in its
+    /// crate — a trait default, an external trait or a `Deref` target supplies
+    /// it, none of which the graph records for that type (S-493).
     SupertypeUnreached,
 }
 
@@ -304,6 +315,13 @@ struct FileScope {
 /// language's glob, carries none.
 pub(crate) const STATIC_WILDCARD_ALIAS: &str = "*";
 
+/// The head of a call through the caller's own type, `Self::m` (S-493,
+/// [FR-RS-11]): what a written `Self::m()` records, and what extraction records
+/// for a `self.m()` inside a method with a recorded self type.
+///
+/// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+pub(crate) const SELF_TYPE_HEAD: &str = "Self";
+
 /// One node's binding-relevant facts.
 #[derive(Debug)]
 struct NodeInfo {
@@ -431,6 +449,35 @@ pub(crate) struct Index {
     /// that crosses a type other than its start crosses it as some `Extends`
     /// row's target, and a row starting at a type spells that type's name.
     hierarchy_tokens: HashSet<String>,
+    /// node → the self type its plugin query recorded for it (S-493,
+    /// [FR-RS-11]; the `nodes.self_type` column). Empty unless the run was given
+    /// the store's self types ([`Index::with_self_types`]); empty binds no call
+    /// through a self type, and every `Self::m` row takes the path it took
+    /// before.
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    self_types: HashMap<NodeId, String>,
+    /// `(crate, self type, name)` → the callables recorded with that self type,
+    /// id-sorted — the universe a `Self::m` call binds within
+    /// ([`Ctx::resolve_self_type_call`]). Across a type's inherent and trait
+    /// impls and every file of its crate; a same-named type of another crate is
+    /// another key, never a candidate. Same-named types of two modules of one
+    /// crate share a key, and the call's own module tells them apart.
+    methods_by_self_type: HashMap<(String, String, String), Vec<NodeId>>,
+    /// `(crate, name)` → how many type-like nodes ([`is_type_like`]) the crate
+    /// declares under that name — whether a self type's base name denotes one
+    /// type of the crate, which is what lets a candidate outside the caller's
+    /// module be the caller's type's method.
+    type_names: HashMap<(String, String), usize>,
+    /// project-relative path → file id, for the files whose ledger rows name a
+    /// source node of the snapshot — how a node reaches its file's
+    /// [`FileScope`] (S-493: whether its file imports its self type's name).
+    file_ids: HashMap<String, i64>,
+    /// Every method of an `impl Trait for X` block — the source of an
+    /// `Implements` ledger row outside a package-shaped language (S-281's rows,
+    /// whatever their trait resolves to). Read by the self-type call's module
+    /// rung (S-493): Rust resolves `Self::m` to an inherent `m` before a trait's.
+    trait_impl_methods: HashSet<NodeId>,
 }
 
 impl Index {
@@ -508,10 +555,24 @@ impl Index {
             impls_by_trait_method,
             supertypes: HashMap::new(),
             hierarchy_tokens: HashSet::new(),
+            self_types: HashMap::new(),
+            methods_by_self_type: HashMap::new(),
+            type_names: HashMap::new(),
+            file_ids: HashMap::new(),
+            trait_impl_methods: HashSet::new(),
         };
         let (supertypes, hierarchy_tokens) = build_supertypes(refs, &index);
         index.supertypes = supertypes;
         index.hierarchy_tokens = hierarchy_tokens;
+        index.trait_impl_methods = build_trait_impl_methods(refs, &index);
+        index.file_ids = refs
+            .iter()
+            .filter_map(|r| {
+                let file_id = r.file_id?;
+                let path = index.by_symbol.get(&r.source_symbol).and_then(|id| index.info.get(id))?;
+                Some((path.file_path.clone()?, file_id))
+            })
+            .collect();
         index
     }
 
@@ -524,6 +585,66 @@ impl Index {
     ) -> Index {
         self.specifier_targets = specifier_targets;
         self.go_modules = go_modules;
+        self
+    }
+
+    /// Whether the file of `node` imports `name` from outside its crate — a
+    /// `use` whose path is not headed by `crate`, `self`, `super` or one of the
+    /// crate's own top-level modules (S-493). Such a self type names a foreign
+    /// type, whatever type of that name the crate declares. A name brought in
+    /// by a glob is not seen; the crate's own declarations still decide it.
+    fn imports_foreign(&self, node: &NodeInfo, name: &str) -> bool {
+        let Some(path) = node
+            .file_path
+            .as_deref()
+            .and_then(|p| self.file_ids.get(p))
+            .and_then(|id| self.file_scopes.get(id))
+            .and_then(|scope| scope.aliases.get(name))
+        else {
+            return false;
+        };
+        let Some(head) = path.first() else { return false };
+        let local = matches!(head.as_str(), "crate" | "self" | "super")
+            || self
+                .modules
+                .contains_key(&(node.crate_name.clone(), vec![head.clone()]));
+        !local
+    }
+
+    /// Give the index the self types the store records per node (S-493,
+    /// [FR-RS-11]; [`GraphStore::node_self_types`]) — what a `self.m()` /
+    /// `Self::m()` call binds through. Rows naming a node the snapshot does not
+    /// hold, and non-callables, contribute no candidate.
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    /// [`GraphStore::node_self_types`]: crate::graph_store::GraphStore::node_self_types
+    pub(crate) fn with_self_types(mut self, self_types: Vec<(NodeId, String)>) -> Index {
+        let mut by_type: HashMap<(String, String, String), Vec<NodeId>> = HashMap::new();
+        for (id, self_type) in &self_types {
+            let Some(info) = self.info.get(id) else { continue };
+            // A method of a type its file imports from outside the crate is a
+            // foreign type's: never a candidate for a call on a crate type.
+            if !Want::Callable.admits(info.kind) || self.imports_foreign(info, self_type) {
+                continue;
+            }
+            by_type
+                .entry((info.crate_name.clone(), self_type.clone(), info.name.clone()))
+                .or_default()
+                .push(*id);
+        }
+        for ids in by_type.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        let mut type_names: HashMap<(String, String), usize> = HashMap::new();
+        for info in self.info.values().filter(|i| is_type_like(i.kind)) {
+            *type_names
+                .entry((info.crate_name.clone(), info.name.clone()))
+                .or_default() += 1;
+        }
+        self.self_types = self_types.into_iter().collect();
+        self.methods_by_self_type = by_type;
+        self.type_names = type_names;
         self
     }
 
@@ -706,10 +827,26 @@ impl Index {
     /// row of such a file is also affected when a token of any of its globs is
     /// dirty. Every other language's selection is unchanged.
     ///
+    /// A `Self::m` row (S-493) is also affected when a token of its caller's
+    /// self type is dirty: a second type of that name elsewhere in the crate
+    /// moves its binding to the caller's module ([`Ctx::resolve_self_type_call`])
+    /// without touching `m`.
+    ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub(crate) fn ref_affected(&self, r: &UnresolvedRefRow, dirty: &HashSet<String>) -> bool {
         if super::tokens(&r.target).iter().any(|t| dirty.contains(t)) {
             return true;
+        }
+        // A `Self::m` call (S-493) also reads how many types its caller's self
+        // type names in the crate, a name its target does not spell.
+        if r.target.split_once("::").is_some_and(|(head, _)| head == SELF_TYPE_HEAD) {
+            let self_type = self
+                .by_symbol
+                .get(&r.source_symbol)
+                .and_then(|id| self.self_types.get(id));
+            if self_type.is_some_and(|ty| super::tokens(ty).iter().any(|t| dirty.contains(t))) {
+                return true;
+            }
         }
         let Some(file_id) = r.file_id else {
             return false;
@@ -1181,6 +1318,26 @@ fn build_impls_by_trait_method(
     map
 }
 
+/// The methods of `impl Trait for X` blocks ([`Index::trait_impl_methods`]):
+/// the sources of the `Implements` rows extraction emits per such method
+/// (S-281), outside a package-shaped language, whose `Implements` row is a
+/// class's.
+fn build_trait_impl_methods(refs: &[UnresolvedRefRow], ix: &Index) -> HashSet<NodeId> {
+    refs.iter()
+        .filter(|r| r.kind == EdgeKind::Implements)
+        .filter_map(|r| ix.by_symbol.get(&r.source_symbol).copied())
+        .filter(|id| {
+            ix.info.get(id).is_some_and(|i| {
+                Want::Callable.admits(i.kind)
+                    && !i
+                        .file_path
+                        .as_deref()
+                        .is_some_and(|p| ix.layout.is_package_shaped(p))
+            })
+        })
+        .collect()
+}
+
 /// The package-shaped type hierarchy (S-468, [CR-150] §3.2 B): each type's
 /// in-repository supertypes, and the name tokens a sync must watch to keep a
 /// walk over it fresh ([`Index::supertypes`], [`Index::hierarchy_tokens`]).
@@ -1304,7 +1461,8 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
     bind_traced(r, ix, policy).0
 }
 
-/// Why `r` — a `Calls` row from a package-shaped source — stays unbound
+/// Why `r` — a `Calls` row from a package-shaped source, or a `Self::m` call
+/// through the caller's own type in any language (S-493) — stays unbound
 /// (S-468, [CR-150] §3.2 C), or `None` when it is no such row, or when it binds
 /// now: a capture-before-delete `Symbol` row, or a row the ledger holds unbound
 /// that this binder binds (a graph bound by an older binary, or a sync that did
@@ -1325,7 +1483,9 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
         .and_then(|id| ix.info.get(id))
         .and_then(|i| i.file_path.as_deref())?;
     if !ix.layout.is_package_shaped(source_file) {
-        return None;
+        // Outside a package-shaped language only a call through the caller's
+        // own type records a reason (S-493, [`Ctx::resolve_self_type_call`]).
+        return miss;
     }
     Some(miss.unwrap_or(match r.form {
         // A type-qualified row the walk gave up on without naming why: its
@@ -1340,7 +1500,8 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
 }
 
 /// [`bind`], and the [`Residue`] the first package-shaped call lookup that gave
-/// up recorded — `None` when none did (every Rust row). Meaningful only for an
+/// up recorded — `None` when none did (every Rust row but a `Self::m` call
+/// through the caller's own type, S-493). Meaningful only for an
 /// [`Outcome::Unbound`]: a row that binds may still carry the miss of a rung it
 /// tried first (one of two static imports naming an external type).
 fn bind_traced(
@@ -1483,6 +1644,18 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             if r.kind == EdgeKind::Imports {
                 if let Some(outcome) = ctx.resolve_specifier(&r.target) {
                     return outcome;
+                }
+            }
+            // A call through the caller's own type (S-493, [FR-RS-11]):
+            // `self.m()` / `Self::m()` inside a method with a recorded self
+            // type binds only among that type's methods in the caller's crate,
+            // never through the scope hierarchy.
+            if r.kind == EdgeKind::Calls {
+                if let Some(resolved) = ctx.resolve_self_type_call(&r.target) {
+                    return match resolved {
+                        Res::Found(target) => bound(target),
+                        _ => Outcome::Unbound,
+                    };
                 }
             }
             // A call through an import of a path-grammar file (S-440, [CR-142]
@@ -1931,6 +2104,113 @@ impl Ctx<'_> {
             }
             _ => self.resolve_path(&segs, want, MAX_ALIAS_DEPTH),
         }
+    }
+
+    /// Resolve `Self::m` — a `self.m()` or `Self::m()` call (S-493, [FR-RS-11])
+    /// — among the callables recorded with the **caller's** self type in the
+    /// caller's crate ([`Index::methods_by_self_type`]), or `None` when this is
+    /// no such call: a target of any other shape, or a caller with no recorded
+    /// self type (a trait's default method, a free function), whose row takes
+    /// the path it always took.
+    ///
+    /// The one acceptance rule ([`exactly_one`], [NFR-RA-05]), on two rungs.
+    ///
+    /// 1. **The crate** — when the crate declares exactly one type of the self
+    ///    type's base name, every candidate is a method of the caller's type,
+    ///    wherever in the crate its impl block is: exactly one binds.
+    /// 2. **The caller's module** — where the impl header's name denotes the
+    ///    caller's own type. Taken when the crate declares that name for several
+    ///    types — a lone candidate elsewhere may then be another type's method,
+    ///    so only the module decides — and when rung 1 found several: one type's
+    ///    inherent `m` beside a trait impl's `m` (`Engine::start`), or two
+    ///    impl blocks both defining it. Exactly one module-local candidate
+    ///    binds, unless it is a trait-impl method while an inherent candidate
+    ///    lies outside the module: Rust resolves `Self::m` to the inherent one
+    ///    wherever it is written, so the module cannot decide that pair.
+    ///
+    /// A self type the crate declares no type of (a library type, a generic
+    /// parameter), or one the caller's file imports from outside the crate,
+    /// binds nothing: [`Residue::ExternalType`]. Its inherent methods are not
+    /// in the graph and Rust prefers them to any trait method recorded here, so
+    /// no candidate is evidence — and a same-named crate type is another type.
+    /// Its query records no self type at all for a header path-qualified
+    /// outside the crate (`impl Ext for std::io::Error`).
+    ///
+    /// Zero candidates — the method comes from a trait's default body, an
+    /// external trait or a `Deref` target, none of which records this self type
+    /// — is [`Residue::SupertypeUnreached`]. Candidates the module does not
+    /// narrow to one are [`Residue::OverloadAmbiguous`] under a type name the
+    /// crate declares once, [`Residue::TypeAmbiguous`] otherwise. Either stays
+    /// unbound and never falls through to a wider scope: the receiver's type is
+    /// known, and a same-named callable elsewhere is not its method.
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_self_type_call(&self, target: &str) -> Option<Res> {
+        let (head, name) = target.split_once("::")?;
+        if head != SELF_TYPE_HEAD || name.is_empty() || name.contains("::") {
+            return None;
+        }
+        let self_type = self.ix.self_types.get(&self.source)?;
+        let krate = &self.ix.info.get(&self.source)?.crate_name;
+        let key = (krate.clone(), self_type.clone(), name.to_string());
+        let candidates = self
+            .ix
+            .methods_by_self_type
+            .get(&key)
+            .map_or(&[][..], Vec::as_slice);
+        let declared = self.ix.type_names.get(&(krate.clone(), self_type.clone()));
+        let caller = self.ix.info.get(&self.source)?;
+        if declared.is_none() || self.ix.imports_foreign(caller, self_type) {
+            // A type the crate does not declare — a library type, a generic
+            // parameter — has inherent methods the graph cannot see, which
+            // Rust prefers to any trait method recorded here.
+            self.note(Want::Callable, || Residue::ExternalType {
+                candidates: Vec::new(),
+            });
+            return Some(Res::NotFound);
+        }
+        let one_type = declared == Some(&1);
+        let res = match exactly_one(candidates) {
+            Res::NotFound => {
+                self.note(Want::Callable, || Residue::SupertypeUnreached);
+                Res::NotFound
+            }
+            found @ Res::Found(_) if one_type => found,
+            _ => match self.module_candidate(candidates) {
+                Some(found) => Res::Found(found),
+                None => {
+                    self.note(Want::Callable, || {
+                        if one_type {
+                            Residue::OverloadAmbiguous
+                        } else {
+                            Residue::TypeAmbiguous
+                        }
+                    });
+                    Res::Ambiguous
+                }
+            },
+        };
+        Some(res)
+    }
+
+    /// Rung 2 of [`resolve_self_type_call`](Ctx::resolve_self_type_call): the
+    /// one of `candidates` in the caller's own module, unless it is a trait-impl
+    /// method while an inherent candidate lies outside the module.
+    fn module_candidate(&self, candidates: &[NodeId]) -> Option<NodeId> {
+        let own = self.ix.nearest_module(self.source)?;
+        let local: Vec<NodeId> = candidates
+            .iter()
+            .copied()
+            .filter(|&c| self.ix.nearest_module(c) == Some(own))
+            .collect();
+        let Res::Found(one) = exactly_one(&local) else {
+            return None;
+        };
+        let inherent_elsewhere = candidates
+            .iter()
+            .any(|c| !local.contains(c) && !self.ix.trait_impl_methods.contains(c));
+        (!(self.ix.trait_impl_methods.contains(&one) && inherent_elsewhere)).then_some(one)
     }
 
     /// Resolve a member-access fact to the one `Field` of the source method's

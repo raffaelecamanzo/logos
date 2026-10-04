@@ -12,6 +12,9 @@
 ;                 the captured node's text is the language path to resolve.
 ;   @ref.method — a receiver-method call (`x.f()`); only the method *name* is
 ;                 knowable without type inference, so binding is policy-gated.
+;   @ref.method.self — a receiver-method call on exactly `self` (`self.f()`),
+;                 whose receiver type is the enclosing impl's self type (S-493);
+;                 see its pattern below.
 ;   @ref.use    — a whole `use` declaration argument; extraction walks the use
 ;                 tree (groups, `as` renames, globs) in code, since a query
 ;                 cannot flatten arbitrary nesting.
@@ -49,7 +52,24 @@
 
 (call_expression
   function: (field_expression
-    field: (field_identifier) @ref.method))
+    value: (_) @_receiver
+    field: (field_identifier) @ref.method)
+  (#not-eq? @_receiver "self"))
+
+;   @ref.method.self — a receiver-method call whose receiver is exactly `self`
+;                 (S-493, FR-RS-11). Its type is the enclosing impl's self type
+;                 (`symbols.scm`'s `@symbol.self_type`), so extraction records it
+;                 as the Path-form `Self::f` — the row a written `Self::f()`
+;                 records — and the binder binds it among that type's methods in
+;                 the caller's crate. The `#not-eq?` above keeps `@ref.method` off
+;                 these calls, so each is captured once. `self.field.f()` and
+;                 `other.f()` are `@ref.method` as before; inside a trait's
+;                 default method (no self type) a `self.f()` is recorded as a
+;                 plain method call, exactly as before.
+(call_expression
+  function: (field_expression
+    value: (self)
+    field: (field_identifier) @ref.method.self))
 
 (use_declaration
   argument: (_) @ref.use)

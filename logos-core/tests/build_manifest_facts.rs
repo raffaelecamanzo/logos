@@ -134,13 +134,15 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// migration 23 (S-487), which only adds `metric_snapshots.modularity_applicable`,
 /// of migration 24 (S-472), two declared-type tables with their indexes and
 /// marker, of migration 25 (S-500), two `nodes` columns, of migration 26
-/// (S-498), the snapshot offender table and its flag column, and of migration
-/// 27 (S-513), the persist-failure record; the next [`Engine::start`]
-/// re-applies all six, as it does on a real upgrade.
+/// (S-498), the snapshot offender table and its flag column, of migration 27
+/// (S-513), the persist-failure record, and of migration 28 (S-493), the
+/// `nodes.self_type` column; the next [`Engine::start`] re-applies all seven,
+/// as it does on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
+        "ALTER TABLE nodes DROP COLUMN self_type; DELETE FROM schema_versions WHERE version = 28; \
+         DROP TABLE persist_failures; DELETE FROM schema_versions WHERE version = 27; \
          DROP TABLE metric_snapshot_offenders; ALTER TABLE metric_snapshots DROP COLUMN offenders_recorded; \
          DELETE FROM schema_versions WHERE version = 26; \
          ALTER TABLE nodes DROP COLUMN body_tokens; ALTER TABLE nodes DROP COLUMN has_body; \

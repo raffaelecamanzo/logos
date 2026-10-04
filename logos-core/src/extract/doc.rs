@@ -154,6 +154,7 @@ pub(super) fn extract_one_doc(
         // Documentation nodes are not functions — no CR-005 structural facts.
         max_nesting_depth: None,
         shingles: Vec::new(),
+        self_type: None,
     });
 
     // A parser bound to the markdown *inline* grammar, for the per-`inline`-block
@@ -296,6 +297,7 @@ fn walk_sections(
             // Documentation nodes are not functions — no CR-005 structural facts.
             max_nesting_depth: None,
             shingles: Vec::new(),
+            self_type: None,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),
