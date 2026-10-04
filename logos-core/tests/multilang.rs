@@ -2112,7 +2112,8 @@ public class Store {
 
     // Like Java, C# has no free functions — every callable is a class member, so
     // the parity shape nests one level deeper: module ∋ class ∋ methods, with the
-    // intra-class call bound (Balanced policy: unique method name).
+    // intra-class call bound to the class's own `Callee` (a bare call is a call
+    // on the current instance, the `self` shape, S-516).
     let module_id = node_id(rt, "Store", NodeKind::Module);
     let class_id = node_id(rt, "Store", NodeKind::Class);
     let add_id = node_id(rt, "Add", NodeKind::Method);
