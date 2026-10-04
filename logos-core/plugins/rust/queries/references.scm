@@ -27,7 +27,9 @@
 ;                 path/method RefFacts, so a callee whose only call site is a
 ;                 macro argument (`format!("{x}", x = activity_card(s))`) is no
 ;                 longer mis-bound dead; a `self.f()` there records what
-;                 `@ref.method.self` records (S-514).
+;                 `@ref.method.self` records (S-514), and any other method call
+;                 there records `other`, as `@ref.receiver.other` does outside
+;                 a macro (S-517).
 ;
 ; Like every capability query, this file is droppable-on-disk: a copy at
 ; `.logos/plugins/rust/queries/references.scm` shadows it without a rebuild
