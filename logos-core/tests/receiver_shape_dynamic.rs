@@ -366,6 +366,9 @@ class A(Base):
     def g(self):
         return get().m(self)
 
+    def t(self):
+        return super(A, self).m(self)
+
 
 class B:
     def m(self, other):
@@ -385,6 +388,9 @@ class B:
             // A call result is any other receiver, never `super`.
             row(&at(20, "g"), "m", METHOD, OTHER, false),
             row(&at(20, "g"), "get", PATH, None, false),
+            // The two-argument form is `super` too.
+            row(&at(23, "t"), "m", METHOD, SUPER, false),
+            row(&at(23, "t"), "super", PATH, None, false),
         ])
     );
     assert_eq!(
