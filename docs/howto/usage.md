@@ -41,13 +41,13 @@ descriptors and a test fails when it drifts.
 | Kotlin | `partial` | `imports` |
 | TSX (incl. JSX) | `partial` | `calls`, `imports` |
 | TypeScript (incl. JavaScript) | `partial` | `calls`, `imports` |
+| C | `same-file` | none |
 | C# | `same-file` | none |
+| C++ | `same-file` | none |
 | PHP | `same-file` | none |
 | Python | `same-file` | none |
 | Ruby | `same-file` | none |
 | Scala | `same-file` | none |
-| C | `symbols` | none |
-| C++ | `symbols` | none |
 <!-- reach:end -->
 
 - `resolved` — calls, imports and type relations bind across files.

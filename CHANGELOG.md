@@ -51,7 +51,7 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 - **Every language states its cross-file reach.** `logos languages` (and `--json`)
   carries `reach.level` and `reach.cross_file` for each code language: `resolved`
   (Rust, Java), `partial` (Go, TypeScript/TSX, Kotlin — imports only), `same-file`
-  (Python, PHP, C#, Ruby, Scala) and `symbols` (C, C++). The manual's table and the
+  (Python, PHP, C#, Ruby, Scala, C, C++) and, declared by no shipped language, `symbols`. The manual's table and the
   README are generated from the same declarations, and a fixture per language fails
   the build if a declaration over- or under-claims.
 - **A bare-name `node` lookup prefers code.** When a bare name matches several nodes,

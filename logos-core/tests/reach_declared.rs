@@ -14,10 +14,10 @@
 //!   makes a language resolve more must raise its declaration in the same
 //!   change);
 //! - a `symbols` language binds no import, type, member or route relation, in
-//!   or across files. Its same-file **calls** are tolerated: C and C++ bind a
-//!   call to a function of the same file (7/7 on the 2026-10-03 inspection), and
-//!   a descriptor that claimed otherwise would be the over-claim this suite
-//!   exists to refuse.
+//!   or across files (same-file calls tolerated). No shipped language declares
+//!   `symbols` — C and C++ bind same-file calls (7/7 on the 2026-10-03
+//!   inspection) and read `same-file` — so that clause is proven by a synthetic
+//!   test, not a fixture.
 //!
 //! Each fixture is deliberately the *same set of shapes* in the language's own
 //! idiom — a call into another file, an import, a subclass / implementation of a
@@ -322,12 +322,12 @@ fn scala_declared_same_file_binds_nothing_across_files() {
 }
 
 #[test]
-fn c_declared_symbols_binds_nothing_across_files() {
+fn c_declared_same_file_binds_nothing_across_files() {
     verify("c", fixtures::C);
 }
 
 #[test]
-fn cpp_declared_symbols_binds_nothing_across_files() {
+fn cpp_declared_same_file_binds_nothing_across_files() {
     verify("cpp", fixtures::CPP);
 }
 
@@ -373,7 +373,9 @@ fn an_under_claimed_declaration_fails_the_suite() {
 
 /// A `symbols` declaration is refused when the plugin binds a non-call relation
 /// — even a same-file one the cross-file comparison cannot see — and tolerates
-/// the same-file calls C and C++ do bind.
+/// same-file calls and containment. No shipped language declares `symbols`
+/// (C and C++ read `same-file`), so this synthetic test is what keeps the
+/// level's checker able to fail.
 #[test]
 fn a_symbols_declaration_is_refused_when_a_relation_binds() {
     let locality = |kind: i64, same: u64, cross: u64| {
@@ -385,7 +387,7 @@ fn a_symbols_declaration_is_refused_when_a_relation_binds() {
             .unwrap_or_else(|| panic!("a same-file edge of kind {kind} passed as `symbols`"));
         assert!(why.contains("declared `symbols`"), "{why}");
     }
-    // Same-file calls and containment are what C and C++ really bind: tolerated.
+    // Same-file calls and containment are tolerated.
     assert_eq!(symbols_violation(&locality(EdgeKind::Calls as i64, 3, 0), "c"), None);
     assert_eq!(symbols_violation(&locality(EdgeKind::Contains as i64, 9, 0), "c"), None);
     // Another language's edges are not this language's.
@@ -433,12 +435,13 @@ fn every_code_language_declares_a_reach_and_nothing_else_does() {
     for name in ["go", "typescript", "tsx", "kotlin"] {
         assert_eq!(level(name), "partial", "{name}");
     }
-    for name in ["python", "php", "c-sharp", "ruby"] {
+    for name in ["python", "php", "c-sharp", "ruby", "c", "cpp"] {
         assert_eq!(level(name), "same-file", "{name}");
+        assert!(declared[name].1.is_empty(), "{name} binds nothing across files");
     }
-    for name in ["c", "cpp"] {
-        assert_eq!(level(name), "symbols", "{name}");
-    }
+    // No shipped language declares `symbols` now; the level stays verifiable
+    // through `a_symbols_declaration_is_refused_when_a_relation_binds`.
+    assert!(declared.values().all(|(l, _)| l != "symbols"), "{declared:?}");
     assert_eq!(declared.len(), 13, "thirteen code-language rows: {declared:?}");
 
     // Every one of them has a fixture, and the fixture set names no other.

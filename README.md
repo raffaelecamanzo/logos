@@ -162,8 +162,7 @@ checks the declaration (`logos languages` prints it):
 <!-- reach:begin (generated from plugins/*/plugin.toml — see logos-core/tests/reach_docs.rs) -->
 - **`resolved`** — calls, imports and type relations bind across files: Java, Rust
 - **`partial`** — some relations bind across files, not all: Go, Kotlin, TSX (incl. JSX), TypeScript (incl. JavaScript)
-- **`same-file`** — references bind only inside the file that wrote them: C#, PHP, Python, Ruby, Scala
-- **`symbols`** — declarations are extracted; nothing binds across files: C, C++
+- **`same-file`** — references bind only inside the file that wrote them: C, C#, C++, PHP, Python, Ruby, Scala
 <!-- reach:end -->
 
 Per-repository figures are in `logos status --json` (`resolution_by_language`).
