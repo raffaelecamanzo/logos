@@ -202,8 +202,14 @@ by each relation's payload token), read live from the graph.
 >   on sync, when that type defines none or two
 >   ([FR-RS-11](../specs/requirements/FR-RS-11.md)). A `self.helper()` in a
 >   trait's default method binds to the trait's own `helper`; `self.field.helper()`
->   and `other.helper()` stay unbound. A
->   bare-path call (`foo()`, single segment) is complementary: when a free
+>   and `other.helper()` stay unbound. Go reads the receiver the same way, by
+>   name: inside `func (s *Svc) Run()` a call on `s` (`s.Work()`) is `self` and
+>   binds to the one `Work` declared on `Svc`; `x.Work()`, `s.next.Work()` and a
+>   parameter that merely shares the receiver's name in another function are
+>   `other`, bind nowhere, and never reach a free `func Work` (a name the method
+>   itself rebinds — `for _, s := range …` — is still read as the receiver)
+>   ([CR-169](../requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md)).
+>   A bare-path call (`foo()`, single segment) is complementary: when a free
 >   function and same-named associated methods both exist at the call scope, the
 >   free function wins the tie ([CR-068](../requests/CR-068-reachability-binding-precision.md)
 >   Part B, [FR-RS-07](../specs/requirements/FR-RS-07.md)) — recovering the

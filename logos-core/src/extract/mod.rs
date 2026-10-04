@@ -1707,11 +1707,16 @@ fn collect_refs(
                             continue;
                         }
                         // `self.f()` in a macro argument: the row the same call
-                        // records outside one (S-493, S-514).
+                        // records outside one (S-493, S-514). Any other method
+                        // call is `other`, as outside one (S-517): a shapeless
+                        // row would no longer merge with the query's `other`
+                        // row of the same call, which the shape-keyed dedup
+                        // keeps apart.
                         let (target, form, receiver) = if call.self_receiver {
                             receiver::self_call(caller, &call.target)
                         } else {
-                            (call.target, call.form, None)
+                            let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
+                            (call.target, call.form, shape)
                         };
                         out.push(RefFact {
                             source: source_symbol.clone(),
