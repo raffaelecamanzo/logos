@@ -19,6 +19,10 @@
 ;                 parameter that happens to be called `s` in a free function are
 ;                 `other` and bind nowhere, never to a free `func F`. A bare
 ;                 `F()` is `@ref.call` and still binds through the scope walk.
+;                 Known gap: `self` is the operand's *text* equalling the
+;                 receiver's name, so a name the method rebinds (`for _, s :=
+;                 range …`, `s := …`, a closure parameter) still reads as the
+;                 receiver (pinned in `tests/receiver_shape_go_rust.rs`).
 ;   @ref.import — an import path string (`import "net/http"`); unquoted and
 ;                 canonicalised by the PATH grammar the descriptor declares
 ;                 (only slashes → `::`; a host's dots are kept, S-439) into

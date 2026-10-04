@@ -274,6 +274,46 @@ fn a_go_own_receiver_call_in_a_local_var_initialiser_stays_unbound() {
     assert!(call_edges(rt).is_empty());
 }
 
+/// The receiver's name rebound inside the method: a `for … range` variable, a
+/// `:=`, a closure parameter or a type-switch binding all give `s` another value.
+const GO_SHADOW: &str = "\
+package svc
+
+type Svc struct{}
+type Conn struct{}
+
+func (s *Svc) Close() {}
+
+func (c *Conn) Close() {}
+
+func (s *Svc) CloseAll(conns []*Conn) {
+\tfor _, s := range conns {
+\t\ts.Close()
+\t}
+}
+";
+
+/// A **known gap**, pinned so a change to it is deliberate: `self` is decided by
+/// the operand's *text* equalling the method's receiver name, and nothing checks
+/// that the name still means the receiver. A name rebound inside the method is
+/// still read as `self`, so `s.Close()` — `Conn.Close` in fact — binds to
+/// `Svc.Close`. The same needs a same-named method on the receiver's type; on the
+/// two inspection repositories (zap, ollama; 902 methods that call on their own
+/// receiver) no such pair occurs. Closing it needs a rebinding marker in the
+/// shared seam (S-514's vocabulary), which is a design decision, not a query edit.
+#[test]
+fn a_go_receiver_name_rebound_inside_the_method_is_still_read_as_self_known_gap() {
+    let tmp = tree(&[(GO_FILE, GO_SHADOW)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let a = |line: u32, name: &str| format!("{GO_FILE}:{name}@{line}");
+    assert_eq!(
+        call_rows(rt, GO_FILE),
+        vec![row(&a(10, "CloseAll"), "Self::Close", RefForm::Path, None, true)]
+    );
+    assert_eq!(call_edges(rt), vec![edge(&a(10, "CloseAll"), &a(6, "Close"))]);
+}
+
 // ── Rust ──────────────────────────────────────────────────────────────────────
 
 const RS_FILE: &str = "src/lib.rs";
