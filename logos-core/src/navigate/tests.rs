@@ -207,6 +207,7 @@ fn is_test_path_production_root_overrides_filename_conventions() {
     // [HF-4] JVM file types only: Java, Scala, Groovy and Kotlin script too.
     assert!(!is_test_path("src/main/AppTest.java"));
     assert!(!is_test_path("src/main/scala/FooSpec.scala"));
+    assert!(!is_test_path("src/main/scala/FooTests.scala"));
     assert!(!is_test_path("src/main/scala/foo_spec.scala"));
     assert!(!is_test_path("src/main/groovy/FooTests.groovy"));
     assert!(!is_test_path("build/src/main/kotlin/foo_test.kts"));
