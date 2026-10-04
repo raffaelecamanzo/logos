@@ -1118,6 +1118,9 @@ fn purge_unadmitted(runtime: &Runtime, admitted: &HashSet<&str>) -> Result<Purge
             let mut global_imports = false;
             for p in &paths {
                 names.extend(store.node_names_for_path(p)?);
+                // The namespace it declared (S-518): a wildcard that bound to
+                // the file spells that, not a node name.
+                names.extend(store.file_namespace(p)?);
                 global_imports |= store.declares_global_import(p)?;
             }
             Ok((names, global_imports))

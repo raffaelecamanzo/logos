@@ -481,3 +481,31 @@ fn sync_equals_a_full_reindex_after_adding_and_deleting_a_namespaced_file() {
     engine.sync(&[module.into()]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &koin));
 }
+
+/// A config narrowing that purges the only file declaring a namespace unbinds
+/// the `using` wildcards that bound to it, as a cold index under the narrowed
+/// config would (FR-SY-07, NFR-RA-06): their rows spell the namespace, never a
+/// node name of the purged file.
+#[test]
+fn a_purge_unbinds_a_wildcard_whose_namespace_file_left() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/Other/Impl.cs", "namespace Lib.Core\n{\n    public class Thing { }\n}\n");
+    let user = "src/App/U.cs";
+    write(tmp.path(), user, "using Lib.Core;\n\nnamespace App\n{\n    public class U { }\n}\n");
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(edges_from(rt, user, EdgeKind::Imports), strings(&["src/Other/Impl.cs:Impl:module"]));
+
+    engine
+        .config_write(logos_core::config::PolicyFile::Config, "exclude = [\"src/Other/**\"]\n")
+        .expect("a valid config write succeeds");
+    engine
+        .config_apply(logos_core::config::PolicyFile::Config)
+        .expect("config apply runs");
+    assert!(edges_from(rt, user, EdgeKind::Imports).is_empty());
+    assert_eq!(
+        unbound_imports(rt, user),
+        strings(&["Lib::Core"]),
+        "the wildcard returns to the ledger unresolved, as a cold index leaves it"
+    );
+}
