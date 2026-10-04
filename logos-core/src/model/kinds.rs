@@ -798,8 +798,8 @@ pub enum RefForm {
     /// [ADR-10]: ../../../../docs/specs/architecture/decisions/ADR-10.md
     Symbol = 2,
     /// A receiver-method name (`x.foo()` → `foo`): the receiver type is
-    /// unknown to extraction, so only a policy-gated unique-name match can
-    /// bind it.
+    /// unknown to extraction, so the row binds by its [`ReceiverShape`]
+    /// (S-514), never by a policy-gated name match.
     Method = 3,
     /// A glob import (`use m::*` → target `m`): binds to the module node and
     /// additionally brings that module's members into the importing file's

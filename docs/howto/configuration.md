@@ -544,9 +544,14 @@ The policy widens the search, never the acceptance rule.
 
 | Policy | Behavior | Trade-off |
 |---|---|---|
-| `strict` | Scope-proven bindings only (local → module → imports → explicit paths). Receiver-method calls (`x.f()`) never bind. | Maximum precision, lowest coverage. |
-| `balanced` *(default)* | Strict, plus two exactly-one-candidate workspace fallbacks: unique module-path suffix, and a receiver-method call whose name is workspace-unique. | The sweet spot for most projects. |
+| `strict` | Scope-proven bindings only (local → module → imports → explicit paths). | Maximum precision, lowest coverage. |
+| `balanced` *(default)* | Strict, plus an exactly-one-candidate workspace fallback for path calls: a unique module-path suffix. | The sweet spot for most projects. |
 | `aggressive` | Balanced, plus a bare identifier binds on a workspace-unique name. | Highest coverage; still deterministic. |
+
+No policy changes how a receiver-method call (`x.f()`) binds: it binds by its
+receiver's shape — `this.f()` / `self.f()` to the caller's own class, `super.f()`
+through a proven base class, a call on any other receiver nowhere
+([FR-RS-12](../specs/requirements/FR-RS-12.md)).
 
 Changing the policy needs no migration — resolution re-evaluates the whole
 unresolved-reference ledger on every run, so just `logos index` again.
