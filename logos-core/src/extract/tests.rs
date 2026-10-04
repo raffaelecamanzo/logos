@@ -6116,11 +6116,11 @@ fn conflicting_receiver_markers_resolve_to_other() {
 
 #[test]
 fn a_rust_self_call_without_a_self_type_records_the_self_shape() {
-    use crate::model::ReceiverShape::SelfInstance;
+    use crate::model::ReceiverShape::{Other, SelfInstance};
     // S-493's `@ref.method.self` is a `self`-marked `@ref.method`: inside an
     // impl it is the `Self::` row; in a trait's default body, which records no
     // self type, a Method-form row of shape `self`. A call on any other receiver
-    // records no shape — Rust's plugin marks none yet.
+    // records the `other` shape (S-517).
     let src = "\
 pub struct A;
 impl A {
@@ -6137,7 +6137,7 @@ trait T {
         shape_rows(&facts),
         vec![
             ("go".to_string(), "Self::go2".to_string(), RefForm::Path, None),
-            ("run".to_string(), "go".to_string(), RefForm::Method, None),
+            ("run".to_string(), "go".to_string(), RefForm::Method, Some(Other)),
             ("run".to_string(), "helper".to_string(), RefForm::Method, Some(SelfInstance)),
         ]
     );
