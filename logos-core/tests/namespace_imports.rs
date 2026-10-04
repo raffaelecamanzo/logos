@@ -512,3 +512,25 @@ fn a_purge_unbinds_a_wildcard_whose_namespace_file_left() {
         "the wildcard returns to the ledger unresolved, as a cold index leaves it"
     );
 }
+
+/// A file whose declarations come to sit in two namespaces records none, and
+/// the namespace it recorded before is cleared rather than kept: the wildcard
+/// that bound to it no longer does, exactly as on a cold index.
+#[test]
+fn sync_equals_a_full_reindex_after_a_file_loses_its_one_namespace() {
+    let (tmp, engine) = indexed(fixtures::C_SHARP);
+    let rt = engine.runtime().unwrap();
+    let item = "src/Shared/OrderItem.cs";
+    write(
+        tmp.path(),
+        item,
+        "namespace eShop.Ordering.Domain\n{\n    public class OrderItem { }\n}\n\nnamespace eShop.Catalog\n{\n    public class CatalogItem { }\n}\n",
+    );
+    engine.sync(&[item.into()]);
+    assert_eq!(
+        edges_from(rt, GLOBAL_USINGS, EdgeKind::Imports),
+        strings(&["src/Ordering.Domain/Order.cs:Order:module"]),
+        "a file of two namespaces is keyed by neither"
+    );
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(fixtures::C_SHARP)));
+}
