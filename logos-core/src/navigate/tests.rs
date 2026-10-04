@@ -123,8 +123,9 @@ fn is_test_path_recognises_per_language_test_conventions() {
     assert!(is_test_path("app/test_models.py"));
     assert!(is_test_path("src/Button.test.tsx"));
     assert!(is_test_path("src/api.spec.ts"));
-    assert!(is_test_path("src/main/UserServiceTest.java"));
-    assert!(is_test_path("src/main/UserServiceTests.java"));
+    assert!(is_test_path("src/UserServiceTest.java"));
+    assert!(is_test_path("src/UserServiceTests.java"));
+    assert!(is_test_path("src/test/java/UserServiceTest.java"));
     // Ruby: RSpec `spec/` directory + `*_spec.rb`, minitest `*_test.rb`.
     assert!(is_test_path("spec/models/user_spec.rb"));
     assert!(is_test_path("models/user_spec.rb"));
@@ -181,6 +182,50 @@ fn is_test_path_respects_production_source_roots() {
     // `src/main` needs its `src/` parent: a bare `main` directory is no root.
     assert!(is_test_path("main/test/Foo.java"));
     assert!(is_test_path("cmd/main/test/x.go"));
+}
+
+/// [HF-2] A production source root overrides the FILENAME conventions as well
+/// as the directory ones: a `*Test.kt` under `commonMain` / `src/main` is a
+/// library class (koin's `KoinTest`, `AutoCloseKoinTest`), not test code.
+#[test]
+fn is_test_path_production_root_overrides_filename_conventions() {
+    use super::is_test_path;
+    // koin: the three files that stayed `is_test` after S-524.
+    assert!(!is_test_path(
+        "projects/core/koin-test/src/commonMain/kotlin/org/koin/test/KoinTest.kt"
+    ));
+    assert!(!is_test_path(
+        "projects/core/koin-test-junit4/src/main/kotlin/org/koin/test/AutoCloseKoinTest.kt"
+    ));
+    assert!(!is_test_path(
+        "projects/core/koin-test-junit5/src/main/kotlin/org/koin/test/junit5/AutoCloseKoinTest.kt"
+    ));
+    // Every filename convention is overridden, not `Test` alone.
+    assert!(!is_test_path("src/main/java/FooTests.java"));
+    assert!(!is_test_path("src/jvmMain/kotlin/foo_test.kt"));
+    assert!(!is_test_path("src/main/rs/foo_tests.rs"));
+    assert!(!is_test_path("src/main/rs/foo_spec.rb"));
+    assert!(!is_test_path("src/main/py/test_foo.py"));
+    assert!(!is_test_path("src/main/ts/foo.test.ts"));
+    assert!(!is_test_path("src/main/ts/foo.spec.ts"));
+    assert!(!is_test_path("src/commonMain/kotlin/tests.kt"));
+    // Gradle test source sets and `src/it` keep marking — the same filename
+    // under them is test code by directory AND by name.
+    assert!(is_test_path("koin-core/src/test/kotlin/FooTest.kt"));
+    assert!(is_test_path("koin-core/src/commonTest/kotlin/FooTest.kt"));
+    assert!(is_test_path("koin-core/src/jvmTest/kotlin/FooTest.kt"));
+    assert!(is_test_path("svc/src/it/java/FooIT.java"));
+    // Outside any production root the filename conventions are unchanged.
+    assert!(is_test_path("pkg/foo_test.go"));
+    assert!(is_test_path("web/foo.test.ts"));
+    assert!(is_test_path("lib/FooTest.kt"));
+    // The root must be a real one: near misses keep the filename rule.
+    assert!(is_test_path("src/mainline/FooTest.java"));
+    assert!(is_test_path("Main/FooTest.kt")); // bare `Main` is not a source set
+    assert!(is_test_path("src/FooMain/FooTest.kt")); // PascalCase is not one either
+    assert!(is_test_path("main/FooTest.java")); // `main` needs its `src/` parent
+    // A test directory ABOVE the root still marks, whatever the filename.
+    assert!(is_test_path("test/fixtures/p/src/main/java/Bar.java"));
 }
 
 #[test]

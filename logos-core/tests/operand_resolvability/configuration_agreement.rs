@@ -3401,7 +3401,7 @@ mod fixtures {
         }
         for test in [
             "archive-api/src/test/java/com/x/KafkaProducerIT.java",
-            "archive-api/src/main/java/com/x/FooTest.java",
+            "archive-api/java/com/x/FooTest.java",
             "internal/flow/handler_test.go",
             "tests/e2e/probe.java",
         ] {
