@@ -40,8 +40,9 @@
 
 ; The marker and the call's `@ref.method` node share one parent — the
 ; `selector_expression` — which is how the engine pairs them. An unnamed
-; receiver (`func (*Svc) M()`, `func (_ Svc) M()`) has no usable name to capture,
-; so nothing inside such a method is `self`.
+; receiver (`func (*Svc) M()`) captures nothing, and a blank one (`func (_ Svc)
+; M()`) captures `_`, which no call operand can equal, so nothing inside either
+; is `self`.
 (selector_expression
   operand: (_) @ref.receiver.other)
 
