@@ -2010,3 +2010,52 @@ fn an_unknown_bare_name_names_no_alternatives_and_still_suggests() {
     }
     assert!(!engine.callers("Widg", None).suggestions.is_empty());
 }
+
+/// `Widget` calls `helper` and is called by `use_it`; a doc section is also named
+/// `Widget` and has no call edges. Whichever node a tool resolves to, the edges it
+/// reports must be that node's — so a winner carrying the passed-over node's
+/// (empty) edge set is distinguishable.
+fn code_with_edges_and_doc_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/lib.rs",
+        "pub fn Widget() {\n    helper();\n}\n\nfn helper() {}\n\npub fn use_it() {\n    Widget();\n}\n",
+    );
+    write(tmp.path(), "docs/guide.md", "# Guide\n\n## Widget\n\nWhat a widget is.\n");
+    tmp
+}
+
+#[test]
+fn the_four_tools_report_the_resolved_nodes_own_edges_not_a_passed_over_nodes() {
+    let tmp = code_with_edges_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+    let names = |refs: &[SymbolRef]| refs.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+
+    let callers = engine.callers("Widget", None);
+    assert_eq!(callers.resolved.as_ref().map(|r| r.kind), Some(NodeKind::Function));
+    assert_eq!((callers.total, names(&callers.callers)), (1, vec!["use_it".to_string()]));
+    let callees = engine.callees("Widget", None);
+    assert_eq!((callees.total, names(&callees.callees)), (1, vec!["helper".to_string()]));
+
+    let impact = engine.impact("Widget", None);
+    let upstream: Vec<_> = impact.upstream.iter().map(|e| e.symbol.name.as_str()).collect();
+    let downstream: Vec<_> = impact.downstream.iter().map(|e| e.symbol.name.as_str()).collect();
+    assert!(upstream.contains(&"use_it"), "{upstream:?}");
+    assert!(downstream.contains(&"helper"), "{downstream:?}");
+
+    // `explore` walks the neighbourhood of the node it anchored on.
+    let explore = engine.explore("Widget", None);
+    assert_eq!(explore.anchor.as_ref().map(|a| a.kind), Some(NodeKind::Function));
+    let seen: Vec<_> = explore
+        .files
+        .iter()
+        .flat_map(|f| f.symbols.iter().map(|s| s.symbol.name.as_str()))
+        .collect();
+    assert!(seen.contains(&"use_it") && seen.contains(&"helper"), "{seen:?}");
+
+    // The passed-over doc section, reached by its own symbol, has no call edges.
+    let doc = callers.alternatives[0].symbol.clone();
+    assert_eq!(callers.alternatives[0].kind, NodeKind::DocSection);
+    assert_eq!(engine.callers(&doc, None).total, 0);
+}
