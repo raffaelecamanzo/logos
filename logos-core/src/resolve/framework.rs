@@ -2280,6 +2280,7 @@ fn bind_text(
         line: None,
         resolved: false,
         payload: None,
+        receiver: None,
     };
     match binder::bind(&synthetic, index, policy) {
         binder::Outcome::Bound { target, .. } => Some(target),

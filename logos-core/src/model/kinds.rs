@@ -798,8 +798,8 @@ pub enum RefForm {
     /// [ADR-10]: ../../../../docs/specs/architecture/decisions/ADR-10.md
     Symbol = 2,
     /// A receiver-method name (`x.foo()` → `foo`): the receiver type is
-    /// unknown to extraction, so only a policy-gated unique-name match can
-    /// bind it.
+    /// unknown to extraction, so the row binds by its [`ReceiverShape`]
+    /// (S-514), never by a policy-gated name match.
     Method = 3,
     /// A glob import (`use m::*` → target `m`): binds to the module node and
     /// additionally brings that module's members into the importing file's
@@ -854,6 +854,75 @@ impl TryFrom<i32> for RefForm {
     }
 }
 
+/// The **receiver shape** of a method-form call (S-514, [FR-EX-13]): what the
+/// receiver of `x.m()` is relative to the caller, one value of a closed
+/// lexicon. It is what the binder dispatches a [`RefForm::Method`] row on
+/// ([FR-RS-12]); a row with **no** shape — a plugin that marks none — is bound
+/// exactly as [`ReceiverShape::Other`] is.
+///
+/// Like [`RefForm`], the discriminants are a frozen part of the on-disk
+/// contract: the `unresolved_refs.receiver` column is guarded by
+/// `CHECK (receiver IN (1,2,3))` (migration 29), and `NULL` is "no shape".
+///
+/// [FR-EX-13]: ../../../../docs/specs/requirements/FR-EX-13.md
+/// [FR-RS-12]: ../../../../docs/specs/requirements/FR-RS-12.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum ReceiverShape {
+    /// `self`: the caller's own instance — `this.m()`, `self.m()`, `$this->m()`,
+    /// an unqualified in-class `m()` where the language's implicit receiver is
+    /// the current instance, Go's own receiver identifier.
+    #[serde(rename = "self")]
+    SelfInstance = 1,
+    /// `super`: the caller's base — `super.m()`, `super().m()`, `parent::m()`.
+    #[serde(rename = "super")]
+    Super = 2,
+    /// `other`: any other receiver.
+    #[serde(rename = "other")]
+    Other = 3,
+}
+
+impl ReceiverShape {
+    /// Every shape, in declaration (discriminant) order — the list the
+    /// migration-29 `CHECK (receiver IN (…))` clause must equal.
+    pub const ALL: [ReceiverShape; 3] = [
+        ReceiverShape::SelfInstance,
+        ReceiverShape::Super,
+        ReceiverShape::Other,
+    ];
+
+    /// The stable integer discriminant written to `unresolved_refs.receiver`.
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// The lexicon token (matches the `serde` representation).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReceiverShape::SelfInstance => "self",
+            ReceiverShape::Super => "super",
+            ReceiverShape::Other => "other",
+        }
+    }
+}
+
+impl TryFrom<i32> for ReceiverShape {
+    type Error = UnknownKind;
+
+    /// Recover a [`ReceiverShape`] from its stored discriminant.
+    ///
+    /// # Errors
+    /// Returns [`UnknownKind`] if `value` is not a known shape discriminant.
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(ReceiverShape::SelfInstance),
+            2 => Ok(ReceiverShape::Super),
+            3 => Ok(ReceiverShape::Other),
+            other => Err(UnknownKind(other)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,6 +964,18 @@ mod tests {
             assert_eq!(json, format!("\"{}\"", form.as_str()));
             assert_eq!(serde_json::from_str::<RefForm>(&json).unwrap(), form);
         }
+    }
+
+    #[test]
+    fn receiver_shape_discriminants_are_frozen_and_roundtrip() {
+        for (idx, shape) in ReceiverShape::ALL.iter().enumerate() {
+            assert_eq!(shape.as_i32(), idx as i32 + 1, "{shape:?} discriminant drifted");
+            assert_eq!(ReceiverShape::try_from(shape.as_i32()), Ok(*shape));
+            let json = serde_json::to_string(shape).unwrap();
+            assert_eq!(json, format!("\"{}\"", shape.as_str()));
+        }
+        assert_eq!(ReceiverShape::try_from(0), Err(UnknownKind(0)));
+        assert_eq!(ReceiverShape::try_from(4), Err(UnknownKind(4)));
     }
 
     #[test]

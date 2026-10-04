@@ -2180,6 +2180,7 @@ fn persist_file(
                     // relation payload (if any) is re-derived when the owning file
                     // is re-extracted, so the capture row carries none.
                     payload: None,
+                    receiver: None,
                 })?;
             }
             return Ok(PersistCounts {
@@ -2685,6 +2686,8 @@ fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
             // The cross-artifact relation class rides into the ledger as the
             // payload token (CR-011); `None` for every code/doc/access ref.
             payload: r.relation.map(|rel| rel.as_str()),
+            // A Method-form call's receiver shape (S-514); `None` otherwise.
+            receiver: r.receiver,
         })?;
     }
     Ok(())

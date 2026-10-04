@@ -54,6 +54,7 @@ fn ledger(source: &NodeRow, relation: ArtifactRelation, topic: &str, line: i64) 
         line: Some(line),
         resolved: false,
         payload: Some(relation.as_str().to_string()),
+        receiver: None,
     }
 }
 

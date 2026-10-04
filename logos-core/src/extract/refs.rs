@@ -194,6 +194,10 @@ pub(crate) struct MacroCall {
     /// 1-based line of the call's name token (the enclosing function carries the
     /// attribution; the line records where in the macro the call sits).
     pub line: u32,
+    /// `true` for a receiver-method call whose receiver token is exactly `self`
+    /// (`self.f()`, never `self.x.f()`): the token-tree twin of the
+    /// `@ref.method.self` capture, which cannot reach inside a macro (S-514).
+    pub self_receiver: bool,
 }
 
 /// Walk a Rust `macro_invocation`'s token tree(s) for the call-shaped token
@@ -211,7 +215,9 @@ pub(crate) struct MacroCall {
 /// (`scoped_identifier` never forms inside a token tree, so a path arrives as a
 /// raw `identifier`/`::` token run). Nested token trees — call arguments and
 /// nested macros alike — are scanned recursively, so a call at any depth is
-/// recognised.
+/// recognised. A method call whose receiver is the `self` token itself is
+/// flagged ([`MacroCall::self_receiver`]): its receiver shape is `self`, which
+/// the query's `@ref.method.self` capture records outside a macro (S-514).
 ///
 /// Like the rest of this module it records **what the file points at, verbatim**
 /// — it never binds. A target that resolves to no, or several, candidates stays
@@ -265,10 +271,16 @@ fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
         // Receiver-method call `.name(…)`: the `.` is an anonymous prev token.
         let preceded_by_dot = i > 0 && tt.child(i - 1).is_some_and(|p| p.kind() == ".");
         if preceded_by_dot {
+            // `self.f()`: the receiver token is `self`, and nothing — no `.` —
+            // precedes it (`self.x.f()` reaches `f` through the field `x`).
+            let self_receiver = i >= 2
+                && tt.child(i - 2).is_some_and(|r| r.kind() == "self")
+                && (i < 3 || tt.child(i - 3).is_none_or(|p| p.kind() != "."));
             out.push(MacroCall {
                 target: name.to_string(),
                 form: RefForm::Method,
                 line,
+                self_receiver,
             });
             continue;
         }
@@ -278,6 +290,7 @@ fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
             target: assemble_path(tt, i, source),
             form: RefForm::Path,
             line,
+            self_receiver: false,
         });
     }
 }
@@ -660,10 +673,10 @@ mod tree_tests {
     }
 
     fn path(target: &str) -> MacroCall {
-        MacroCall { target: target.to_string(), form: RefForm::Path, line: 1 }
+        MacroCall { target: target.to_string(), form: RefForm::Path, line: 1, self_receiver: false }
     }
     fn method(target: &str) -> MacroCall {
-        MacroCall { target: target.to_string(), form: RefForm::Method, line: 1 }
+        MacroCall { target: target.to_string(), form: RefForm::Method, line: 1, self_receiver: false }
     }
 
     /// The `(target, form)` pairs, ignoring line (the snippets are one line;
@@ -688,6 +701,22 @@ mod tree_tests {
         // `state` is a field access (not followed by `(`), so it is not a call;
         // only `chip_class()` is, and the leading `.` makes it a method ref.
         assert_eq!(want(&got), want(&[method("chip_class")]));
+    }
+
+    #[test]
+    fn only_a_call_on_self_itself_is_flagged_as_a_self_receiver() {
+        // S-514: `self.label()` is a `self` call; `self.state.chip()` reaches
+        // `chip` through a field, `other.label()` through another value.
+        let got = macro_calls(r#"format!("{}{}{}", self.label(), self.state.chip(), other.label())"#);
+        let flags: Vec<(String, bool)> = got.iter().map(|c| (c.target.clone(), c.self_receiver)).collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("label".to_string(), true),
+                ("chip".to_string(), false),
+                ("label".to_string(), false),
+            ]
+        );
     }
 
     #[test]

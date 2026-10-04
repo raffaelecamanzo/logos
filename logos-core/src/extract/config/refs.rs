@@ -130,6 +130,7 @@ pub(in crate::extract) fn push_artifact_ref(
         kind: relation.edge_kind(),
         line,
         relation: Some(relation),
+        receiver: None,
     });
     true
 }

@@ -10,6 +10,8 @@
 //!   ([FR-EX-05]);
 //! - [`RefForm`] (4) — the frozen target-form discriminants of the
 //!   `unresolved_refs` reference ledger (S-011);
+//! - [`ReceiverShape`] (3) — the frozen receiver-shape discriminants a
+//!   method-form ledger row carries (S-514);
 //! - [`ArtifactRelation`] — the cross-artifact edge **payload** vocabulary and
 //!   its deterministic external-target classifier (CR-011, [FR-CG-07]);
 //! - [`Annotations`] — free-form node metadata;
@@ -42,5 +44,5 @@ pub use annotations::Annotations;
 pub use artifact::{
     ArtifactRelation, BridgeNamespace, BridgeRole, MatchDiscipline, TargetClass,
 };
-pub use kinds::{EdgeKind, NodeKind, RefForm, UnknownKind};
+pub use kinds::{EdgeKind, NodeKind, ReceiverShape, RefForm, UnknownKind};
 pub use symbol::{LogosSymbol, NodeId};

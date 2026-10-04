@@ -38,6 +38,7 @@ impl NoSymbolsPlugin {
                 module_separator: "::".to_string(),
                 import_specifier: crate::plugin::ImportSpecifier::Name,
                 specifier_extensions: Vec::new(),
+                implicit_receiver: crate::plugin::ImplicitReceiver::None,
                 package_modules: None,
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
@@ -5413,8 +5414,15 @@ fn pre_s500_rendering(facts: &Facts) -> String {
     for e in &facts.edges {
         writeln!(out, "E {e:?}").unwrap();
     }
+    // Every `RefFact` field but the receiver shape (S-514), which postdates
+    // this rendering — in the derived `Debug` form the digest was taken over.
     for r in &facts.refs {
-        writeln!(out, "R {r:?}").unwrap();
+        writeln!(
+            out,
+            "R RefFact {{ source: {:?}, target: {:?}, alias: {:?}, form: {:?}, kind: {:?}, line: {:?}, relation: {:?} }}",
+            r.source, r.target, r.alias, r.form, r.kind, r.line, r.relation,
+        )
+        .unwrap();
     }
     for w in &facts.warnings {
         writeln!(out, "W {w}").unwrap();
@@ -5920,5 +5928,217 @@ int classify(int x)\n\
         classify.metrics.expect("metrics").cyclomatic_complexity,
         1,
         "no branch of the torn body is counted"
+    );
+}
+
+// ── S-514 / FR-EX-13: the receiver-shape seam ────────────────────────────────
+
+/// A synthetic plugin over the Java grammar whose `references` query is
+/// `references` and whose implicit-receiver policy is `implicit_receiver` —
+/// the two things a language opting into receiver shapes declares.
+#[cfg(feature = "lang-java")]
+struct ShapePlugin {
+    language: Language,
+    semantics: Semantics,
+    symbols: Query,
+    references: Query,
+}
+
+#[cfg(feature = "lang-java")]
+impl ShapePlugin {
+    fn new(references: &str, implicit_receiver: crate::plugin::ImplicitReceiver) -> Self {
+        let language: Language = tree_sitter_java::LANGUAGE.into();
+        let mut semantics = NoSymbolsPlugin::new().semantics;
+        semantics.module_separator = ".".to_string();
+        semantics.implicit_receiver = implicit_receiver;
+        let symbols = Query::new(
+            &language,
+            "(class_declaration name: (identifier) @symbol.class)\n\
+             (method_declaration name: (identifier) @symbol.method)\n",
+        )
+        .expect("symbols query compiles");
+        let references = Query::new(&language, references).expect("references query compiles");
+        Self { language, semantics, symbols, references }
+    }
+}
+
+#[cfg(feature = "lang-java")]
+impl LanguagePlugin for ShapePlugin {
+    fn name(&self) -> &str {
+        "shape"
+    }
+    fn extensions(&self) -> &[String] {
+        &[]
+    }
+    fn language(&self) -> &Language {
+        &self.language
+    }
+    fn semantics(&self) -> &Semantics {
+        &self.semantics
+    }
+    fn capabilities(&self) -> &[String] {
+        &[]
+    }
+    fn query(&self, capability: &str) -> Option<&Query> {
+        match capability {
+            "symbols" => Some(&self.symbols),
+            "references" => Some(&self.references),
+            _ => None,
+        }
+    }
+}
+
+/// Every `Calls` row of `facts` as `(source name, target, form, receiver)`.
+fn shape_rows(facts: &Facts) -> Vec<(String, String, RefForm, Option<crate::model::ReceiverShape>)> {
+    let name_of: HashMap<&str, &str> = facts
+        .nodes
+        .iter()
+        .map(|n| (n.symbol.as_str(), n.name.as_str()))
+        .collect();
+    let mut rows: Vec<_> = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Calls)
+        .map(|r| {
+            let source = name_of.get(r.source.as_str()).copied().unwrap_or("?");
+            (source.to_string(), r.target.clone(), r.form, r.receiver)
+        })
+        .collect();
+    rows.sort_by(|a, b| (&a.0, &a.1, a.2.as_i32(), a.3.map(|s| s.as_i32())).cmp(&(&b.0, &b.1, b.2.as_i32(), b.3.map(|s| s.as_i32()))));
+    rows
+}
+
+#[cfg(feature = "lang-java")]
+const SHAPE_REFS: &str = "\
+(method_invocation !object name: (identifier) @ref.method @ref.receiver.implicit)
+(method_invocation object: (_) name: (identifier) @ref.method)
+(method_invocation object: (this) @ref.receiver.self)
+(method_invocation object: (_) @ref.receiver.other)
+(object_creation_expression (class_body) @ref.receiver.anonymous)
+";
+
+#[cfg(feature = "lang-java")]
+const SHAPE_SRC: &str = "\
+class A {
+    void m() {}
+    void n() { m(); this.m(); x.m(); }
+    void anon() { new Runnable() { public void run() { m(); this.m(); } }; }
+}
+";
+
+#[cfg(feature = "lang-java")]
+#[test]
+fn the_implicit_receiver_policy_decides_what_an_unqualified_in_class_call_records() {
+    use crate::model::ReceiverShape::{Other, SelfInstance};
+    use crate::plugin::ImplicitReceiver;
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let input = FileInput::new("src/A.java", SHAPE_SRC);
+    let row = |source: &str, form: RefForm, receiver| (source.to_string(), "m".to_string(), form, receiver);
+
+    // `"self"`: `m()` inside `A` is `self.m()` — the same row `this.m()`
+    // records. Inside the anonymous body it is a free call: that instance has
+    // no class node, and `this.m()` there is `other`.
+    let facts = extract(&input, &ShapePlugin::new(SHAPE_REFS, ImplicitReceiver::SelfInstance), &ctx);
+    assert_eq!(
+        shape_rows(&facts),
+        vec![
+            row("n", RefForm::Method, Some(SelfInstance)),
+            row("n", RefForm::Method, Some(Other)),
+            row("run", RefForm::Path, None),
+            row("run", RefForm::Method, Some(Other)),
+        ]
+    );
+    // `"none"` (the default): an unqualified call is a free call everywhere —
+    // the Path-form bare name a `@ref.call` records.
+    let facts = extract(&input, &ShapePlugin::new(SHAPE_REFS, ImplicitReceiver::None), &ctx);
+    assert_eq!(
+        shape_rows(&facts),
+        vec![
+            row("n", RefForm::Path, None),
+            row("n", RefForm::Method, Some(SelfInstance)),
+            row("n", RefForm::Method, Some(Other)),
+            row("run", RefForm::Path, None),
+            row("run", RefForm::Method, Some(Other)),
+        ]
+    );
+    // No marker at all: no shape, and the unqualified call stays the
+    // Method-form row its capture records.
+    let bare = "(method_invocation name: (identifier) @ref.method)\n";
+    let facts = extract(&input, &ShapePlugin::new(bare, ImplicitReceiver::SelfInstance), &ctx);
+    assert!(
+        facts.refs.iter().filter(|r| r.kind == EdgeKind::Calls).all(|r| r.receiver.is_none() && r.form == RefForm::Method),
+        "{:?}",
+        shape_rows(&facts)
+    );
+}
+
+#[cfg(feature = "lang-java")]
+#[test]
+fn conflicting_receiver_markers_resolve_to_other() {
+    use crate::model::ReceiverShape::{Other, SelfInstance, Super};
+    use crate::plugin::ImplicitReceiver;
+    // Deliberately overlapping markers: `super.k()` is marked both `self` and
+    // `super`; `y.j()` both `self` and `refused`; `this.h()` both `self` and
+    // `other`.
+    let refs = "\
+(method_invocation object: (_) name: (identifier) @ref.method)
+(method_invocation object: (super) @ref.receiver.super)
+(method_invocation object: (super) @ref.receiver.self)
+(method_invocation object: (identifier) @ref.receiver.self)
+(method_invocation object: (identifier) @ref.receiver.refused)
+(method_invocation object: (this) @ref.receiver.self)
+(method_invocation object: (_) @ref.receiver.other)
+";
+    let src = "class A { void n() { super.k(); y.j(); this.h(); z.g(); } }\n";
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let facts = extract(&FileInput::new("src/A.java", src), &ShapePlugin::new(refs, ImplicitReceiver::None), &ctx);
+    let row = |target: &str, receiver| ("n".to_string(), target.to_string(), RefForm::Method, receiver);
+    assert_eq!(
+        shape_rows(&facts),
+        vec![
+            // `self` outranks `other`; nothing else does.
+            row("g", Some(Other)),
+            row("h", Some(SelfInstance)),
+            // `refused` overrides every other marker.
+            row("j", Some(Other)),
+            // `self` and `super` together contradict each other.
+            row("k", Some(Other)),
+        ]
+    );
+    // And the one-marker shapes, for contrast.
+    let one = "\
+(method_invocation object: (_) name: (identifier) @ref.method)
+(method_invocation object: (super) @ref.receiver.super)
+";
+    let facts = extract(&FileInput::new("src/A.java", src), &ShapePlugin::new(one, ImplicitReceiver::None), &ctx);
+    assert!(shape_rows(&facts).contains(&row("k", Some(Super))));
+}
+
+#[test]
+fn a_rust_self_call_without_a_self_type_records_the_self_shape() {
+    use crate::model::ReceiverShape::SelfInstance;
+    // S-493's `@ref.method.self` is a `self`-marked `@ref.method`: inside an
+    // impl it is the `Self::` row; in a trait's default body, which records no
+    // self type, a Method-form row of shape `self`. A call on any other receiver
+    // records no shape — Rust's plugin marks none yet.
+    let src = "\
+pub struct A;
+impl A {
+    fn go(&self) { self.go2(); }
+    fn go2(&self) {}
+}
+trait T {
+    fn helper(&self);
+    fn run(&self, x: &A) { self.helper(); x.go(); }
+}
+";
+    let facts = extract_src("src/lib.rs", src);
+    assert_eq!(
+        shape_rows(&facts),
+        vec![
+            ("go".to_string(), "Self::go2".to_string(), RefForm::Path, None),
+            ("run".to_string(), "go".to_string(), RefForm::Method, None),
+            ("run".to_string(), "helper".to_string(), RefForm::Method, Some(SelfInstance)),
+        ]
     );
 }

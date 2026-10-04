@@ -21,7 +21,7 @@
 use super::binder::{bind, Index, Outcome};
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
-use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind, RefForm};
+use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind, ReceiverShape, RefForm};
 
 /// File ids for the ledger rows.
 const LIB_RS: i64 = 10;
@@ -97,6 +97,7 @@ fn make_ref(
         line: Some(1),
         resolved: false,
         payload: None,
+        receiver: None,
     }
 }
 
@@ -462,28 +463,25 @@ fn receiver_method_calls_do_not_use_the_workspace_name_fallback() {
 }
 
 #[test]
-fn receiver_method_call_still_binds_on_genuine_scope_evidence() {
-    // Recall preservation (CR-066 §3.2 "equivalent scope evidence"): gating only
-    // the *workspace name* fallback leaves genuine scope resolution intact. A
-    // `self.helper()` call from `alpha` binds to the sibling module-level
-    // `helper` (id 3, same module lib.rs) through the lexical/module scope — the
-    // common self-/sibling-method case keeps its edge, at every policy tier
-    // (it is scope-proven, so even `strict` binds it).
-    let r = make_ref(
-        100,
-        LIB_RS,
-        2,
-        "helper",
-        None,
-        RefForm::Method,
-        EdgeKind::Calls,
-    );
-    for policy in [
-        BindingPolicy::Strict,
-        BindingPolicy::Balanced,
-        BindingPolicy::Aggressive,
-    ] {
-        bound_to(bind_with(&[], &r, policy), 2, 3, EdgeKind::Calls);
+fn a_receiver_call_never_binds_through_the_callers_scope_whatever_its_shape() {
+    use super::binder::{residue, Residue};
+    // CR-169 corrects CR-066's "same-scope evidence": the module `alpha` sits
+    // in says where the CALLER is, not what the receiver is. `x.helper()` from
+    // `alpha` once bound the sibling module-level `helper` (id 3); under S-514
+    // no shape binds it — not `other`, not none, and not `self` / `super`
+    // either, `alpha` being in no class — at any policy tier.
+    for receiver in [None, Some(ReceiverShape::Other), Some(ReceiverShape::SelfInstance), Some(ReceiverShape::Super)] {
+        let r = shaped(100, LIB_RS, 2, "helper", receiver);
+        for policy in [BindingPolicy::Strict, BindingPolicy::Balanced, BindingPolicy::Aggressive] {
+            assert_eq!(bind_with(&[], &r, policy), Outcome::Unbound, "{receiver:?} at {policy:?}");
+        }
+        let (nodes, edges) = fixture();
+        let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r));
+        assert_eq!(
+            residue(&r, &ix, BindingPolicy::Aggressive),
+            Some(Residue::NoReceiverEvidence),
+            "{receiver:?}: the readout reason, in a language that is not package-shaped"
+        );
     }
 }
 
@@ -523,11 +521,12 @@ fn method_form_workspace_gate_is_deterministic_across_repeated_binds() {
     assert_eq!(first, Outcome::Unbound);
     assert_eq!(first, second, "the gate is a pure function of the snapshot");
 
-    let bound = make_ref(101, LIB_RS, 2, "helper", None, RefForm::Method, EdgeKind::Calls);
-    let b1 = bind_with(&[], &bound, BindingPolicy::Balanced);
-    let b2 = bind_with(&[], &bound, BindingPolicy::Balanced);
-    bound_to(b1.clone(), 2, 3, EdgeKind::Calls);
-    assert_eq!(b1, b2, "a scope-evidence method bind is also deterministic");
+    // The bound branch: a `self` call binding its own class's member (S-514).
+    let bound = shaped(101, PY_FILE, 204, "m", Some(ReceiverShape::SelfInstance));
+    let b1 = bind_shapes(&bound, BindingPolicy::Balanced);
+    let b2 = bind_shapes(&bound, BindingPolicy::Balanced);
+    bound_to(b1.clone(), 204, 203, EdgeKind::Calls);
+    assert_eq!(b1, b2, "a shape-dispatched method bind is also deterministic");
 }
 
 #[test]
@@ -829,6 +828,7 @@ fn artifact_ref(target: &str, form: RefForm, relation: ArtifactRelation) -> Unre
         line: Some(1),
         resolved: false,
         payload: Some(relation.as_str().to_string()),
+        receiver: None,
     }
 }
 
@@ -1254,6 +1254,7 @@ fn infra_ref(
         line: Some(1),
         resolved: false,
         payload: Some(relation.as_str().to_string()),
+        receiver: None,
     }
 }
 
@@ -1551,13 +1552,12 @@ fn path_qualified_call_still_binds_an_associated_method() {
 }
 
 #[test]
-fn receiver_method_call_still_binds_a_method() {
-    // Unchanged: a receiver-unqualified method call (`x.only_m()`, RefForm::Method)
-    // resolves through scope evidence and still admits `Method` candidates — the
-    // exclusion applies only to single-segment *bare-path* calls, not receiver
-    // calls. A uniquely-named in-scope method binds.
+fn a_receiver_call_no_longer_binds_an_in_scope_method_by_name() {
+    // CR-169 (S-514): `x.only_m()` once bound the uniquely-named in-scope method
+    // through the scope walk. Its receiver is not proven to be anything, so it
+    // stays unbound — the `bare_path_call` tie-break below never even runs for it.
     let r = method_call(100, LIB_RS, 6, "only_m");
-    bound_to(bind_cluster(&r, BindingPolicy::Strict), 6, 10, EdgeKind::Calls);
+    assert_eq!(bind_cluster(&r, BindingPolicy::Strict), Outcome::Unbound);
 }
 
 #[test]
@@ -2222,4 +2222,256 @@ fn a_self_type_the_crate_does_not_declare_or_imports_from_outside_binds_nothing(
     let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
     assert_eq!(bind(&from_util, &ix, BindingPolicy::Strict), Outcome::Unbound);
     assert_eq!(residue(&from_util, &ix, BindingPolicy::Strict), external());
+}
+
+// ── S-514 / FR-RS-12: a receiver call binds by its receiver's shape ─────────
+//
+// Extraction records each Method-form call's receiver shape (`self`, `super`,
+// `other`, or none); the binder dispatches on it. `self` binds among the
+// caller's own class's members, then up its proven `Extends`; `super` only up
+// that chain; `other` and none never bind through the caller's scope.
+
+/// The ledger file of the class-nested fixture.
+const PY_FILE: i64 = 20;
+
+/// A Method-form `Calls` row carrying `receiver`.
+fn shaped(
+    id: i64,
+    file_id: i64,
+    source_node: i64,
+    target: &str,
+    receiver: Option<ReceiverShape>,
+) -> UnresolvedRefRow {
+    UnresolvedRefRow {
+        receiver,
+        ..make_ref(id, file_id, source_node, target, None, RefForm::Method, EdgeKind::Calls)
+    }
+}
+
+/// A class-nested language's module, as a Python or TypeScript file indexes:
+///
+/// ```text
+/// src/a.py (module 200)
+/// ├── fn m          (201)   a module-level function named like the methods
+/// ├── class A (202) ─ m (203), n (204)
+/// ├── class B (206) ─ m (207)
+/// ├── class C (208) ─ n (209)            no `m` of its own
+/// ├── class D (210) ─ o (211), o (212), n (213)
+/// └── fn free_caller (214)                in no class
+/// ```
+fn shape_fixture() -> (Vec<NodeRow>, Vec<EdgeRow>) {
+    let file = "src/a.py";
+    let mut nodes = vec![node(200, "a", NodeKind::Module, file)];
+    let mut edges = Vec::new();
+    for (id, name, kind, parent) in [
+        (201, "m", NodeKind::Function, 200),
+        (202, "A", NodeKind::Class, 200),
+        (203, "m", NodeKind::Method, 202),
+        (204, "n", NodeKind::Method, 202),
+        (206, "B", NodeKind::Class, 200),
+        (207, "m", NodeKind::Method, 206),
+        (208, "C", NodeKind::Class, 200),
+        (209, "n", NodeKind::Method, 208),
+        (210, "D", NodeKind::Class, 200),
+        (211, "o", NodeKind::Method, 210),
+        (212, "o", NodeKind::Method, 210),
+        (213, "n", NodeKind::Method, 210),
+        (214, "free_caller", NodeKind::Function, 200),
+    ] {
+        nodes.push(node(id, name, kind, file));
+        edges.push(contains(parent, id));
+    }
+    (nodes, edges)
+}
+
+fn bind_shapes(r: &UnresolvedRefRow, policy: BindingPolicy) -> Outcome {
+    let (nodes, edges) = shape_fixture();
+    bind(r, &Index::build(&nodes, &edges, std::slice::from_ref(r)), policy)
+}
+
+fn shape_residue(r: &UnresolvedRefRow) -> Option<super::binder::Residue> {
+    let (nodes, edges) = shape_fixture();
+    let ix = Index::build(&nodes, &edges, std::slice::from_ref(r));
+    super::binder::residue(r, &ix, BindingPolicy::Aggressive)
+}
+
+const POLICIES: [BindingPolicy; 3] = [BindingPolicy::Strict, BindingPolicy::Balanced, BindingPolicy::Aggressive];
+
+#[test]
+fn a_self_call_binds_only_to_a_member_of_the_callers_own_class() {
+    use super::binder::Residue;
+    let own = Some(ReceiverShape::SelfInstance);
+    for policy in POLICIES {
+        // `self.m()` in `A.n` binds `A.m` — never the module-level `m` (201)
+        // nor `B.m` (207).
+        bound_to(bind_shapes(&shaped(100, PY_FILE, 204, "m", own), policy), 204, 203, EdgeKind::Calls);
+        // `self.m()` in `A.m` is genuine recursion.
+        bound_to(bind_shapes(&shaped(101, PY_FILE, 203, "m", own), policy), 203, 203, EdgeKind::Calls);
+        // `C` has no `m`: the module-level `m` and the other classes' are no
+        // members of it, and no proven base supplies one.
+        let from_c = shaped(102, PY_FILE, 209, "m", own);
+        assert_eq!(bind_shapes(&from_c, policy), Outcome::Unbound, "{policy:?}");
+        assert_eq!(shape_residue(&from_c), Some(Residue::SupertypeUnreached));
+        // Two `o` in `D`: an ambiguity, never a pick.
+        let two = shaped(103, PY_FILE, 213, "o", own);
+        assert_eq!(bind_shapes(&two, policy), Outcome::Unbound, "{policy:?}");
+        assert_eq!(shape_residue(&two), Some(Residue::OverloadAmbiguous));
+        // A call made in the class body itself (Scala, a Kotlin `init`): the
+        // caller is the class, and its own `m` is the member.
+        bound_to(bind_shapes(&shaped(105, PY_FILE, 202, "m", own), policy), 202, 203, EdgeKind::Calls);
+        // A caller in no class has no class to bind through.
+        let free = shaped(104, PY_FILE, 214, "m", own);
+        assert_eq!(bind_shapes(&free, policy), Outcome::Unbound, "{policy:?}");
+        assert_eq!(shape_residue(&free), Some(Residue::NoReceiverEvidence));
+    }
+}
+
+#[test]
+fn an_other_or_unshaped_call_never_binds_the_callers_own_method() {
+    use super::binder::Residue;
+    // `other.m()` inside `A.m`: the scope walk this replaces bound it to `A.m`
+    // itself — a fabricated self-loop. A row with no shape is read as `other`.
+    for receiver in [Some(ReceiverShape::Other), None] {
+        let r = shaped(100, PY_FILE, 203, "m", receiver);
+        for policy in POLICIES {
+            assert_eq!(bind_shapes(&r, policy), Outcome::Unbound, "{receiver:?} at {policy:?}");
+        }
+        assert_eq!(shape_residue(&r), Some(Residue::NoReceiverEvidence), "{receiver:?}");
+    }
+}
+
+#[test]
+fn a_super_call_without_a_proven_extends_stays_unbound() {
+    use super::binder::Residue;
+    // `super().m()` inside `A.n`: `A` records no `Extends`, so there is no level
+    // to bind at — and `A.m` itself is never one.
+    let r = shaped(100, PY_FILE, 204, "m", Some(ReceiverShape::Super));
+    for policy in POLICIES {
+        assert_eq!(bind_shapes(&r, policy), Outcome::Unbound, "{policy:?}");
+    }
+    assert_eq!(shape_residue(&r), Some(Residue::SupertypeUnreached));
+}
+
+/// The file ids of the package-shaped hierarchy fixture.
+const BASE_JAVA: i64 = 30;
+const A_JAVA: i64 = 31;
+
+/// A package-shaped hierarchy, whose `Extends` rows bind (S-468):
+///
+/// ```text
+/// com.x  Base.java (module 300) ─ class Base (301) ─ m (302), only_base (303)
+///        A.java    (module 310) ─ class A (311) extends Base ─ m (312), n (313)
+///        Lone.java (module 320) ─ class Lone (321) ─ n (322)        no extends
+/// ```
+fn hierarchy_index(r: &UnresolvedRefRow) -> Index {
+    hierarchy_index_with(r, &[])
+}
+
+/// [`hierarchy_index`] with the `(row id, file, source node, target)` `Extends`
+/// rows of `extra` added.
+fn hierarchy_index_with(r: &UnresolvedRefRow, extra: &[(i64, i64, i64, &str)]) -> Index {
+    let dir = "src/main/java/com/x";
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for (id, name, kind, file, parent) in [
+        (300, "Base", NodeKind::Module, "Base", None),
+        (301, "Base", NodeKind::Class, "Base", Some(300)),
+        (302, "m", NodeKind::Method, "Base", Some(301)),
+        (303, "only_base", NodeKind::Method, "Base", Some(301)),
+        (310, "A", NodeKind::Module, "A", None),
+        (311, "A", NodeKind::Class, "A", Some(310)),
+        (312, "m", NodeKind::Method, "A", Some(311)),
+        (313, "n", NodeKind::Method, "A", Some(311)),
+        (320, "Lone", NodeKind::Module, "Lone", None),
+        (321, "Lone", NodeKind::Class, "Lone", Some(320)),
+        (322, "n", NodeKind::Method, "Lone", Some(321)),
+    ] {
+        nodes.push(node(id, name, kind, &format!("{dir}/{file}.java")));
+        edges.extend(parent.map(|p| contains(p, id)));
+    }
+    let mut refs = vec![make_ref(1, A_JAVA, 311, "Base", None, RefForm::Path, EdgeKind::Extends)];
+    for &(id, file, source, target) in extra {
+        refs.push(make_ref(id, file, source, target, None, RefForm::Path, EdgeKind::Extends));
+    }
+    refs.push(r.clone());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = crate::plugin::LanguageRegistry::load(tmp.path()).expect("registry loads");
+    let layout = super::package_key::PackageLayout::from_registry(&registry);
+    Index::build_with_layout(&nodes, &edges, &refs, layout)
+}
+
+#[test]
+fn a_self_call_climbs_the_nearest_proven_extends_level_after_its_own_class() {
+    let own = Some(ReceiverShape::SelfInstance);
+    for policy in POLICIES {
+        // `A` declares `m`: its own, never `Base.m`.
+        let r = shaped(100, A_JAVA, 313, "m", own);
+        bound_to(bind(&r, &hierarchy_index(&r), policy), 313, 312, EdgeKind::Calls);
+        // `A` declares no `only_base`: the proven base's.
+        let r = shaped(101, A_JAVA, 313, "only_base", own);
+        bound_to(bind(&r, &hierarchy_index(&r), policy), 313, 303, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn a_super_call_binds_only_through_a_proven_extends() {
+    use super::binder::{residue, Residue};
+    let base = Some(ReceiverShape::Super);
+    for policy in POLICIES {
+        // `super.m()` in `A.n` binds `Base.m` — never `A.m`.
+        let r = shaped(100, A_JAVA, 313, "m", base);
+        bound_to(bind(&r, &hierarchy_index(&r), policy), 313, 302, EdgeKind::Calls);
+        // No level of the chain declares it.
+        let none = shaped(101, A_JAVA, 313, "nowhere", base);
+        let ix = hierarchy_index(&none);
+        assert_eq!(bind(&none, &ix, policy), Outcome::Unbound);
+        assert_eq!(residue(&none, &ix, policy), Some(Residue::SupertypeUnreached));
+        // `Lone` extends nothing: its own `n` is never a `super` target.
+        let lone = shaped(102, BASE_JAVA, 322, "n", base);
+        let ix = hierarchy_index(&lone);
+        assert_eq!(bind(&lone, &ix, policy), Outcome::Unbound);
+        assert_eq!(residue(&lone, &ix, policy), Some(Residue::SupertypeUnreached));
+    }
+}
+
+#[test]
+fn a_super_call_never_reaches_the_callers_own_class_through_a_cyclic_hierarchy() {
+    use super::binder::{residue, Residue};
+    // `A.n`'s `super.n()`: no base level declares `n`, and `A`'s own `n` is never
+    // a candidate — not when `A` extends itself (it parses), and not when the
+    // chain cycles back to `A` through `Base`.
+    let r = shaped(100, A_JAVA, 313, "n", Some(ReceiverShape::Super));
+    for extra in [vec![(2, A_JAVA, 311, "A")], vec![(2, BASE_JAVA, 301, "A")]] {
+        let ix = hierarchy_index_with(&r, &extra);
+        for policy in POLICIES {
+            assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{extra:?} at {policy:?}");
+        }
+        assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::SupertypeUnreached), "{extra:?}");
+    }
+}
+
+#[test]
+fn a_self_call_from_a_module_level_method_binds_through_its_recorded_self_type() {
+    use super::binder::{residue, Residue};
+    // Rust and Go methods sit at module level: their class is the self type the
+    // plugin recorded (S-493's column), bound through the one self-type arm.
+    // Extraction records such a call as `Self::m`; a Method-form `self` row
+    // reaches the same arm.
+    let own = Some(ReceiverShape::SelfInstance);
+    let drop = [75, 78, 84];
+    for policy in POLICIES {
+        let r = shaped(100, LIB_RS, 70, "helper", own);
+        bound_to(bind(&r, &self_type_index(&r, &drop), policy), 70, 71, EdgeKind::Calls);
+        // `B` records no `lone`: the free `lone` (74) in the same module is no
+        // method of it.
+        let r = shaped(101, LIB_RS, 72, "lone", own);
+        let ix = self_type_index(&r, &drop);
+        assert_eq!(bind(&r, &ix, policy), Outcome::Unbound);
+        assert_eq!(residue(&r, &ix, policy), Some(Residue::SupertypeUnreached));
+        // `other.helper()` beside the caller's own `helper` binds nothing.
+        let r = shaped(102, LIB_RS, 70, "helper", Some(ReceiverShape::Other));
+        let ix = self_type_index(&r, &drop);
+        assert_eq!(bind(&r, &ix, policy), Outcome::Unbound);
+        assert_eq!(residue(&r, &ix, policy), Some(Residue::NoReceiverEvidence));
+    }
 }

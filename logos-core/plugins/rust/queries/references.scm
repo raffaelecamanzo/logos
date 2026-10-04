@@ -11,7 +11,9 @@
 ;   @ref.call   — a path call (`f()`, `a::b::f()`, with or without turbofish);
 ;                 the captured node's text is the language path to resolve.
 ;   @ref.method — a receiver-method call (`x.f()`); only the method *name* is
-;                 knowable without type inference, so binding is policy-gated.
+;                 knowable without type inference. It carries no receiver
+;                 marker, so it records no shape and binds nowhere under any
+;                 policy (S-514, FR-RS-12).
 ;   @ref.method.self — a receiver-method call on exactly `self` (`self.f()`),
 ;                 whose receiver type is the enclosing impl's self type (S-493);
 ;                 see its pattern below.
@@ -23,8 +25,9 @@
 ;                 call/method calls nested inside it. Extraction walks the token
 ;                 tree in code (S-162, CR-043) and emits the same Calls
 ;                 path/method RefFacts, so a callee whose only call site is a
-;                 macro argument (`format!("{x}", x = activity_card(s))`,
-;                 `self.state.chip_class()`) is no longer mis-bound dead.
+;                 macro argument (`format!("{x}", x = activity_card(s))`) is no
+;                 longer mis-bound dead; a `self.f()` there records what
+;                 `@ref.method.self` records (S-514).
 ;
 ; Like every capability query, this file is droppable-on-disk: a copy at
 ; `.logos/plugins/rust/queries/references.scm` shadows it without a rebuild
@@ -63,9 +66,10 @@
 ;                 records — and the binder binds it among that type's methods in
 ;                 the caller's crate. The `#not-eq?` above keeps `@ref.method` off
 ;                 these calls, so each is captured once. `self.field.f()` and
-;                 `other.f()` are `@ref.method` as before; inside a trait's
-;                 default method (no self type) a `self.f()` is recorded as a
-;                 plain method call, exactly as before.
+;                 `other.f()` are `@ref.method`. It is a `self`-marked
+;                 `@ref.method` (S-514): inside a trait's default method (no
+;                 self type) a `self.f()` is a Method-form call of shape `self`,
+;                 bound among the trait's own members.
 (call_expression
   function: (field_expression
     value: (self)

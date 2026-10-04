@@ -581,6 +581,7 @@ fn emit_link_ref(dest: &str, source_symbol: &LogosSymbol, line: u32, facts: &mut
         kind: EdgeKind::DocReference,
         line,
         relation: None,
+        receiver: None,
     });
 }
 
@@ -629,6 +630,7 @@ fn emit_code_token_ref(raw: &str, source_symbol: &LogosSymbol, line: u32, facts:
             kind: EdgeKind::DocReference,
             line,
             relation: None,
+            receiver: None,
         });
         return;
     }
@@ -650,6 +652,7 @@ fn emit_code_token_ref(raw: &str, source_symbol: &LogosSymbol, line: u32, facts:
             kind: EdgeKind::DocReference,
             line,
             relation: None,
+            receiver: None,
         });
     }
 }

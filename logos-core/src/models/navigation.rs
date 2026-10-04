@@ -1112,7 +1112,7 @@ pub struct LanguageResolution {
 ///
 /// | reason | the row stays unbound because |
 /// |---|---|
-/// | `no-receiver-evidence` | the file proves no receiver type (a bare Method-form row, or a bare call naming no import) |
+/// | `no-receiver-evidence` | the file proves no receiver type (a bare Method-form row, or a bare call naming no import) — every receiver call whose shape is `other` or absent (S-514, [FR-RS-12]) |
 /// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member |
 /// | `type-in-another-member` | the receiver's type is declared by another workspace member (workspace scope only) |
 /// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name — or two static imports each supply one |
@@ -1126,6 +1126,7 @@ pub struct LanguageResolution {
 /// rows to `type-in-another-member`, with `scope: "workspace"`.
 ///
 /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+/// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CallResidue {
@@ -1162,7 +1163,8 @@ pub struct CallResidue {
 pub enum CallResidueReason {
     /// The receiver's type is declared by no file of this repository.
     ExternalType,
-    /// The file proves no receiver type.
+    /// The file proves no receiver type — a receiver call whose shape is
+    /// `other` or absent (S-514), or a bare call naming no import.
     NoReceiverEvidence,
     /// The deciding level declares two or more callables of that name, or two
     /// imports each supply one.

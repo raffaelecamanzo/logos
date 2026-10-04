@@ -18,8 +18,8 @@ use std::sync::Arc;
 use tree_sitter::{Language, Query};
 
 use super::manifest::{
-    ConfigDescriptor, ExportConvention, ImportSpecifier, PackageModules, PluginManifest,
-    PropertiesDescriptor, Reach, TestConvention,
+    ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier, PackageModules,
+    PluginManifest, PropertiesDescriptor, Reach, TestConvention,
 };
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
@@ -37,6 +37,10 @@ pub struct Semantics {
     /// Extensions a relative path specifier may spell for the imported file
     /// itself (S-439; see [`PluginManifest::specifier_extensions`]).
     pub specifier_extensions: Vec<String>,
+    /// What an unqualified call inside a class body means (S-514; see
+    /// [`PluginManifest::implicit_receiver`]) — consumed by reference
+    /// extraction's receiver-shape pass.
+    pub implicit_receiver: ImplicitReceiver,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped (CR-149; see [`PluginManifest::package_modules`]) —
     /// consumed by the binder's module key through
@@ -268,6 +272,7 @@ impl CompiledPlugin {
             module_separator: manifest.module_separator,
             import_specifier: manifest.import_specifier,
             specifier_extensions: manifest.specifier_extensions,
+            implicit_receiver: manifest.implicit_receiver,
             package_modules: manifest.package_modules,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,

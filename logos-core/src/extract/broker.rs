@@ -1295,8 +1295,9 @@ fn declaring_scope<'t>(node: Node<'t>, name: &str, src: &[u8]) -> Option<Node<'t
     None
 }
 
-/// `true` for the body of an anonymous class — `new Foo() { … }`. Shared with
-/// receiver typing (S-467), whose `this` stops at the same body.
+/// `true` for the body of an anonymous class — `new Foo() { … }`. Receiver
+/// typing stops at the same body, which the Java `references` query names with
+/// its `@ref.receiver.anonymous` marker (S-514).
 pub(super) fn anonymous_class_body(node: Node<'_>) -> bool {
     node.kind() == "class_body"
         && node

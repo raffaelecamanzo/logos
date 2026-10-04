@@ -437,23 +437,23 @@ pub struct Resolution {
 pub enum BindingPolicy {
     /// Scope-proven bindings only: function-local → enclosing scopes → module
     /// → `use`-aliases/globs → explicit `crate`/`self`/`super` paths. A
-    /// receiver-method call (`x.f()`) binds only when its name resolves within
-    /// that scope hierarchy (a sibling or module-level callable) — never through
-    /// the workspace name-match, whose receiver type is unknown ([CR-066]).
-    /// Maximum precision, lowest recall.
+    /// receiver-method call (`x.f()`) binds by its receiver's shape under every
+    /// policy — `self` among the caller's own class's members, `super` through a
+    /// proven base, any other receiver nowhere ([FR-RS-12]); the policy never
+    /// widens it. Maximum precision, lowest recall.
+    ///
+    /// [FR-RS-12]: ../../../../docs/specs/requirements/FR-RS-12.md
     Strict,
     /// `strict`, plus one exactly-one-candidate workspace fallback for **path**
     /// calls: a multi-segment path binds on a unique module-path suffix match
-    /// (crate-first, then workspace). The workspace name fallback is **disabled
-    /// for receiver-unqualified method calls** (`x.f()`) — extraction discards
-    /// the receiver, so a bare workspace name-match is not evidence and would
-    /// fabricate a `Calls` edge ([FR-RS-06], [NFR-RA-05], [CR-066]); such a call
-    /// binds only on genuine scope evidence (as under `strict`), else stays
-    /// unresolved and retries on sync. The default.
+    /// (crate-first, then workspace). A receiver-method call (`x.f()`) never
+    /// takes it: it binds by its receiver's shape exactly as under `strict`
+    /// ([FR-RS-12], [FR-RS-06], [NFR-RA-05]), else stays unresolved and retries
+    /// on sync. The default.
     ///
     /// [FR-RS-06]: ../../../../docs/specs/requirements/FR-RS-06.md
+    /// [FR-RS-12]: ../../../../docs/specs/requirements/FR-RS-12.md
     /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
-    /// [CR-066]: ../../../../docs/requests/CR-066-receiver-method-overbinding.md
     #[default]
     Balanced,
     /// `balanced`, plus a bare single identifier binds on a workspace-unique

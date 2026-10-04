@@ -98,10 +98,14 @@ fn a_kotlin_import_of_an_in_repository_type_binds_to_the_class_and_an_external_o
         vec!["org::springframework::stereotype::Component".to_string()],
         "a library import stays unbound"
     );
-    // A call inside the class still binds on its lexical scope.
+    // INTERIM(S-516): the bare in-class call `helper()` is a method-form row
+    // with no receiver shape until the Kotlin plugin declares its implicit
+    // receiver — unbound, never bound through the lexical scope (S-514,
+    // FR-RS-12). With S-516's marker and `implicit_receiver = "self"` it binds
+    // `Svc.helper` again: restore the one-edge expectation.
     assert_eq!(
         edges_from(rt, "svc/src/main/kotlin/com/x/svc/Svc.kt", EdgeKind::Calls),
-        vec!["svc/src/main/kotlin/com/x/svc/Svc.kt:helper:function".to_string()]
+        Vec::<String>::new()
     );
 }
 
