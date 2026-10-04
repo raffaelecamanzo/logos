@@ -1676,21 +1676,7 @@ fn collect_refs(
                             .iter()
                             .any(|c| capture_names[c.index as usize] == name)
                     };
-                    // A static wildcard brings in every static member of its
-                    // type, a plain one only types: the `*` alias
-                    // (`STATIC_WILDCARD_ALIAS`) carries the difference into
-                    // the ledger, which has no other column for it.
-                    let (form, alias) = if marked("ref.import.asterisk") {
-                        let scope = if marked("ref.import.global") {
-                            Some(crate::resolve::GLOBAL_WILDCARD_ALIAS.to_string())
-                        } else {
-                            marked("ref.import.static")
-                                .then(|| crate::resolve::STATIC_WILDCARD_ALIAS.to_string())
-                        };
-                        (RefForm::Glob, scope)
-                    } else {
-                        (RefForm::Path, segments.last().cloned())
-                    };
+                    let (form, alias) = import_form(&marked, &segments);
                     if let (Some(receivers), RefForm::Path, Some(name)) =
                         (receivers.as_mut(), form, alias.as_deref())
                     {
@@ -1786,29 +1772,7 @@ fn collect_refs(
                 // `import_declaration`): the declaration is walked like a Rust
                 // use-tree, one row per imported path.
                 name @ ("ref.use" | "ref.import.dotted") => {
-                    let mut items = Vec::new();
-                    if name == "ref.use" {
-                        flatten_use_tree(node, source, &mut items);
-                    } else {
-                        flatten_dotted_import(node, source, &mut items);
-                    }
-                    for item in items {
-                        let (form, alias) = if item.glob {
-                            (RefForm::Glob, None)
-                        } else {
-                            (RefForm::Path, item.alias)
-                        };
-                        out.push(RefFact {
-                            source: source_symbol.clone(),
-                            target: item.path.join("::"),
-                            alias,
-                            form,
-                            kind: EdgeKind::Imports,
-                            line,
-                            relation: None,
-                            receiver: None,
-                        });
-                    }
+                    out.extend(tree_import_rows(name, node, source, &source_symbol, line));
                 }
                 _ => {} // a capture this pass does not consume
             }
@@ -1829,6 +1793,64 @@ fn collect_refs(
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
     dedup_sort_refs(&mut out);
     out
+}
+
+/// The form and alias of one `@ref.import` row, from the markers its match
+/// carries (`marked`) and its canonical `segments`: a wildcard
+/// (`ref.import.asterisk`) is a `Glob` row whose alias says what it brings in
+/// — every static member (`ref.import.static`, the `*` alias
+/// `STATIC_WILDCARD_ALIAS`) or, for a global one (`ref.import.global`, S-518),
+/// the global marker — since the ledger has no other column for it; any other
+/// import is a `Path` row aliased by its last segment.
+fn import_form(marked: &impl Fn(&str) -> bool, segments: &[String]) -> (RefForm, Option<String>) {
+    if !marked("ref.import.asterisk") {
+        return (RefForm::Path, segments.last().cloned());
+    }
+    let scope = if marked("ref.import.global") {
+        Some(crate::resolve::GLOBAL_WILDCARD_ALIAS.to_string())
+    } else {
+        marked("ref.import.static").then(|| crate::resolve::STATIC_WILDCARD_ALIAS.to_string())
+    };
+    (RefForm::Glob, scope)
+}
+
+/// The `Imports` rows of an import whose paths a structural walk recovers —
+/// Rust's use-tree (`capture` = `ref.use`) or Scala's `import_declaration`
+/// (`ref.import.dotted`, S-518): one row per imported path, a glob a `Glob`
+/// row with no alias.
+fn tree_import_rows(
+    capture: &str,
+    node: Node<'_>,
+    source: &[u8],
+    source_symbol: &LogosSymbol,
+    line: u32,
+) -> Vec<RefFact> {
+    let mut items = Vec::new();
+    if capture == "ref.use" {
+        flatten_use_tree(node, source, &mut items);
+    } else {
+        flatten_dotted_import(node, source, &mut items);
+    }
+    items
+        .into_iter()
+        .map(|item| {
+            let (form, alias) = if item.glob {
+                (RefForm::Glob, None)
+            } else {
+                (RefForm::Path, item.alias)
+            };
+            RefFact {
+                source: source_symbol.clone(),
+                target: item.path.join("::"),
+                alias,
+                form,
+                kind: EdgeKind::Imports,
+                line,
+                relation: None,
+                receiver: None,
+            }
+        })
+        .collect()
 }
 
 /// The Path-form rows a type-relation `capture` (`ref.extends`,
