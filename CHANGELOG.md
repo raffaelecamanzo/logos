@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-04
+
 ### Changed
 
 - **A call on another object never binds to the caller's own method (CR-169).** Every
