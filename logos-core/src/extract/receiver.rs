@@ -55,7 +55,7 @@
 //! | `self` | the receiver: `this`, `self`, `$this`, … | `self` |
 //! | `super` | the receiver: `super`, `super()`, `parent`, … | `super` |
 //! | `other` | the receiver | `other` — or `self` when its text is the `self_name` the caller declares |
-//! | `implicit` | the name of a call written with no receiver, on a `@ref.method` row | per the plugin's `implicit_receiver` policy ([`ImplicitReceiver`]): `self` inside a named class under `"self"`; otherwise the row becomes the Path-form free call `@ref.call` records |
+//! | `implicit` | the name of a call written with no receiver, on a `@ref.method` row | per the plugin's `implicit_receiver` policy ([`ImplicitReceiver`]): `self` inside a named class under `"self"` — unless a callable between the call and that class declares the name (a nested `def`, a local function), which shadows the member; otherwise the row becomes the Path-form free call `@ref.call` records, which the lexical scope binds |
 //! | `self_name` | the identifier a declaration binds its own instance to (Go's receiver parameter) | nothing; read by `other` |
 //! | `anonymous` | an anonymous class body (`new T() { … }`) | nothing; typing stops there, and a `self` / `super` / `this` call inside one records `other` — except a `self` call to a callable that body declares itself, which becomes the free call the lexical scope binds to it |
 //!
@@ -410,7 +410,12 @@ impl<'tree> Receivers<'tree> {
         }
         if marks.implicit {
             return match (self.implicit_receiver, class()) {
-                (ImplicitReceiver::SelfInstance, Enclosing::Class(_)) => {
+                // A callable an enclosing callable declares shadows the
+                // class's member, as an anonymous body's own member does: the
+                // free call the lexical scope binds reaches it.
+                (ImplicitReceiver::SelfInstance, Enclosing::Class(class))
+                    if !declared_locally(file, site.caller, class, name) =>
+                {
                     Recorded::Shape(ReceiverShape::SelfInstance)
                 }
                 _ => Recorded::FreeCall,
@@ -627,6 +632,27 @@ fn declares_member(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
     decls.iter().any(|d| {
         d.parent == Some(class) && d.name == name && matches!(d.kind, NodeKind::Method | NodeKind::Function)
     })
+}
+
+/// Whether a callable between the call and its enclosing class — the caller
+/// itself, or a callable enclosing it inside that class — declares a callable
+/// named `name` whose symbol built: a Scala nested `def`, a Kotlin or C# local
+/// function. A bare call names that local callable, never the class's member.
+fn declared_locally(file: &FileDecls<'_, '_>, caller: Option<usize>, class: usize, name: &str) -> bool {
+    let mut scope = caller;
+    while let Some(s) = scope.filter(|&s| s != class) {
+        let declares = file.decls.iter().enumerate().any(|(i, d)| {
+            d.parent == Some(s)
+                && d.name == name
+                && matches!(d.kind, NodeKind::Method | NodeKind::Function)
+                && file.symbols[i].is_some()
+        });
+        if declares {
+            return true;
+        }
+        scope = file.decls[s].parent;
+    }
+    false
 }
 
 /// Whether the anonymous class body with node id `body` itself declares a
