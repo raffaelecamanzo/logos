@@ -328,20 +328,15 @@ int run() {
     let run = node_id(rt, "run", NodeKind::Function);
     let helper = node_id(rt, "helper", NodeKind::Function);
     let calls = edges_of(rt, EdgeKind::Calls);
-    // INTERIM(S-516): the C++ query records a bare call `helper()` as a
-    // method-form row, and with no receiver marker it has no shape — unbound,
-    // never bound through the scope walk (S-514, FR-RS-12). S-516's
-    // `@ref.receiver.implicit` marker makes a bare call outside a class a free
-    // call again: then restore `calls.contains(&(run, helper))` and a count of 1.
     assert!(
-        !calls.contains(&(run, helper)),
-        "a shapeless method-form call binds nothing until C++ marks its receivers: {calls:?}"
+        calls.contains(&(run, helper)),
+        "the in-file call binds: {calls:?}"
     );
-    // The unbound call fabricated no edge.
+    // The unbound call fabricated no edge: run() has exactly one outgoing call.
     assert_eq!(
         calls.iter().filter(|(s, _)| *s == run).count(),
-        0,
-        "no Calls edge from run() — the external call is not invented"
+        1,
+        "exactly one Calls edge from run() — the external call is not invented"
     );
     // Honest coverage signal (recorded in the impl notes per NFR-RA-05).
     assert!(

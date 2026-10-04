@@ -24,6 +24,13 @@ abi_version = 14
 # (FR-FW-03). `symbols` + `references` drive nodes/edges.
 capabilities = ["symbols", "references"]
 
+# How an unqualified call is read (S-516, CR-169, FR-RS-12): a bare `m()` inside
+# a class or struct body is a call on the current instance — recorded with the
+# `self` receiver shape and bound among that type's own members only, never
+# to a same-named top-level function. Outside one it is a free call, bound by
+# the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
+implicit_receiver = "self"
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03) —
 # the C-family control-flow set, matching the Java/C# keyword vocabulary plus the
 # C++ `goto`.

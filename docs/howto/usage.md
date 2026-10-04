@@ -180,7 +180,16 @@ by each relation's payload token), read live from the graph.
 >   [commands](commands.md)), and every other language's row counts them among
 >   its unbound calls without a reason. A language whose
 >   plugin does not record receiver shapes yet leaves all its method calls
->   unbound rather than guess. One receiver *is* known for Rust: a call on
+>   unbound rather than guess. In C#, Kotlin, Scala and C++ a bare call
+>   `foo()` written inside a class (or Kotlin/Scala `object`, Scala `trait`)
+>   is a call on the current instance, exactly like `this.foo()` /
+>   `this->foo()`: it binds to that type's own `foo` and never to a same-named
+>   top-level function; outside any type — a free function, a Scala 3
+>   top-level `def`, an out-of-line C++ `Type::foo` definition — it is a plain
+>   call, bound by the file's scope. `base.foo()` / `super.foo()` stay unbound
+>   (these plugins record no proven base class), and so does C++'s
+>   `Base::foo()`, which reads like any other qualified call. In a Kotlin chain
+>   `a.b.c()` only `c` is a call. One receiver *is* known for Rust: a call on
 >   exactly `self` inside an `impl` method (`self.helper()`, like a written
 >   `Self::helper()`) has the impl's own type, so it binds to the one `helper`
 >   that type's impls define in the caller's crate — and stays unbound, retried

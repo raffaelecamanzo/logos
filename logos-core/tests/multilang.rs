@@ -101,29 +101,6 @@ fn route_names(rt: &Runtime) -> Vec<String> {
     names
 }
 
-/// [`assert_parity_shape`]'s containment half alone — for a language whose
-/// intra-file call is not bound yet (an `INTERIM(S-516)` pin).
-#[allow(clippy::too_many_arguments)]
-fn assert_parity_containment(
-    rt: &Runtime,
-    module: &str,
-    container: &str,
-    container_kind: NodeKind,
-    member: &str,
-    member_kind: NodeKind,
-    caller: &str,
-    callable_kind: NodeKind,
-) {
-    let module_id = node_id(rt, module, NodeKind::Module);
-    let container_id = node_id(rt, container, container_kind);
-    let member_id = node_id(rt, member, member_kind);
-    let caller_id = node_id(rt, caller, callable_kind);
-    let contains = edges_of(rt, EdgeKind::Contains);
-    assert!(contains.contains(&(module_id, container_id)));
-    assert!(contains.contains(&(container_id, member_id)));
-    assert!(contains.contains(&(module_id, caller_id)));
-}
-
 /// Assert the language-agnostic parity contract (FR-EX-05, UAT-EX-04) that
 /// every per-language fixture below is shaped to satisfy — the same graph
 /// shape the Rust baseline produces:
@@ -1604,14 +1581,9 @@ fun callee(): List<String> {
 
     // Kotlin models member and free functions with one node, so v1 policy maps
     // every `fun` to Function (as Rust collapses its impl methods): the member
-    // half nests one level deeper — module ∋ class ∋ member fn.
-    //
-    // INTERIM(S-516): the free intra-file call `callee()` is a method-form row
-    // with no receiver shape until the Kotlin plugin marks
-    // `@ref.receiver.implicit` — unbound (S-514, FR-RS-12). With the marker, a
-    // bare call outside a class is a free call again: restore
-    // `assert_parity_shape(…, "caller", "callee", …)`.
-    assert_parity_containment(
+    // half nests one level deeper — module ∋ class ∋ member fn — with the free
+    // intra-file call bound.
+    assert_parity_shape(
         rt,
         "store",
         "Store",
@@ -1619,11 +1591,9 @@ fun callee(): List<String> {
         "add",
         NodeKind::Function,
         "caller",
+        "callee",
         NodeKind::Function,
     );
-    let caller = node_id(rt, "caller", NodeKind::Function);
-    let callee = node_id(rt, "callee", NodeKind::Function);
-    assert!(!edges_of(rt, EdgeKind::Calls).contains(&(caller, callee)));
 }
 
 #[cfg(feature = "lang-kotlin")]
@@ -2086,16 +2056,13 @@ fun helper(): Int {
     let rt = engine.runtime().unwrap();
     engine.index();
 
-    // INTERIM(S-516): the two receiver-less intra-file calls (`helper()`,
-    // `compute()`) are method-form rows with no receiver shape until the Kotlin
-    // plugin marks `@ref.receiver.implicit` — unbound (S-514, FR-RS-12). With
-    // the marker they are free calls again and bind their unique same-file
-    // definitions: restore the two `contains` assertions.
+    // The two receiver-less intra-file calls (`helper()`, `compute()`) bind to
+    // their unique same-file definitions.
     let calls = edges_of(rt, EdgeKind::Calls);
     let compute = node_id(rt, "compute", NodeKind::Function);
     let helper = node_id(rt, "helper", NodeKind::Function);
-    assert!(!calls.contains(&(compute, helper)));
-    assert!(!calls.contains(&(helper, compute)));
+    assert!(calls.contains(&(compute, helper)));
+    assert!(calls.contains(&(helper, compute)));
 
     // `value.toLong()` / `.toInt()` are member calls on an untyped local the
     // resolver cannot bind: no `toLong`/`toInt` symbol exists in the file, so no
@@ -2144,12 +2111,8 @@ public class Store {
     engine.index();
 
     // Like Java, C# has no free functions — every callable is a class member, so
-    // the parity shape nests one level deeper: module ∋ class ∋ methods.
-    //
-    // INTERIM(S-516): the intra-class call `Callee()` is a method-form row with
-    // no receiver shape until the C# plugin declares its implicit receiver —
-    // unbound (S-514, FR-RS-12). With S-516's marker and
-    // `implicit_receiver = "self"` it binds `Callee` again: restore `contains`.
+    // the parity shape nests one level deeper: module ∋ class ∋ methods, with the
+    // intra-class call bound (Balanced policy: unique method name).
     let module_id = node_id(rt, "Store", NodeKind::Module);
     let class_id = node_id(rt, "Store", NodeKind::Class);
     let add_id = node_id(rt, "Add", NodeKind::Method);
@@ -2160,7 +2123,7 @@ public class Store {
     assert!(contains.contains(&(class_id, add_id)));
     assert!(contains.contains(&(class_id, caller_id)));
     assert!(contains.contains(&(class_id, callee_id)));
-    assert!(!edges_of(rt, EdgeKind::Calls).contains(&(caller_id, callee_id)));
+    assert!(edges_of(rt, EdgeKind::Calls).contains(&(caller_id, callee_id)));
 }
 
 #[cfg(feature = "lang-c-sharp")]
