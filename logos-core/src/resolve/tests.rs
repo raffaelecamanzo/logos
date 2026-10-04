@@ -2316,6 +2316,9 @@ fn a_self_call_binds_only_to_a_member_of_the_callers_own_class() {
         let two = shaped(103, PY_FILE, 213, "o", own);
         assert_eq!(bind_shapes(&two, policy), Outcome::Unbound, "{policy:?}");
         assert_eq!(shape_residue(&two), Some(Residue::OverloadAmbiguous));
+        // A call made in the class body itself (Scala, a Kotlin `init`): the
+        // caller is the class, and its own `m` is the member.
+        bound_to(bind_shapes(&shaped(105, PY_FILE, 202, "m", own), policy), 202, 203, EdgeKind::Calls);
         // A caller in no class has no class to bind through.
         let free = shaped(104, PY_FILE, 214, "m", own);
         assert_eq!(bind_shapes(&free, policy), Outcome::Unbound, "{policy:?}");
