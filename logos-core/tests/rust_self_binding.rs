@@ -572,3 +572,32 @@ impl Total for Vec<u8> {
         .collect();
     assert!(into_kind.is_empty(), "no fabricated caller: {into_kind:?}");
 }
+
+/// The generic crate-scoped header shape (`impl<T> crate::m::G<T>`) records the
+/// base name `G` and binds its self call — the one `symbols.scm` pattern no other
+/// fixture here reaches.
+#[test]
+fn a_generic_crate_scoped_impl_records_its_base_name_and_binds() {
+    let src = "\
+pub mod m {
+    pub struct G<T>(pub T);
+}
+impl<T> crate::m::G<T> {
+    pub fn run(&self) {
+        self.h();
+    }
+    fn h(&self) {}
+}
+";
+    let tmp = tree(&[("src/lib.rs", src)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        self_types(rt),
+        BTreeMap::from([
+            ("src/lib.rs:run@5".to_string(), "G".to_string()),
+            ("src/lib.rs:h@8".to_string(), "G".to_string()),
+        ])
+    );
+    assert_eq!(call_edges(rt), vec![edge("src/lib.rs:run@5", "src/lib.rs:h@8")]);
+}
