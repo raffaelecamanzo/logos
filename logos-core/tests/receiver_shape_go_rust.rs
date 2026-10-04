@@ -181,6 +181,20 @@ func Free(s *Svc) {
 func (s *Svc) Bare() {
 \tF()
 }
+
+func (o Other) Value() {
+\to.F()
+}
+
+func (a *Svc) SwapA(b *Svc) {
+\tb.F()
+\ta.F()
+}
+
+func (b *Svc) SwapB(a *Svc) {
+\ta.F()
+\tb.F()
+}
 ";
 
 #[test]
@@ -204,6 +218,14 @@ fn a_go_call_on_the_methods_own_receiver_binds_its_types_method_and_no_other_doe
             row(&a(22, "Free"), "F", RefForm::Method, OTHER, false),
             // A bare `F()` is a free call: the scope walk, the free `func F`.
             row(&a(26, "Bare"), "F", RefForm::Path, None, true),
+            // A value receiver is a receiver like any other: `Other.F`.
+            row(&a(30, "Value"), "Self::F", RefForm::Path, None, true),
+            // Names are per method: `a` is the receiver of `SwapA` and a plain
+            // parameter of `SwapB`, and the other way round for `b`.
+            row(&a(34, "SwapA"), "F", RefForm::Method, OTHER, false),
+            row(&a(34, "SwapA"), "Self::F", RefForm::Path, None, true),
+            row(&a(39, "SwapB"), "F", RefForm::Method, OTHER, false),
+            row(&a(39, "SwapB"), "Self::F", RefForm::Path, None, true),
         ])
     );
     assert_eq!(
@@ -212,6 +234,9 @@ fn a_go_call_on_the_methods_own_receiver_binds_its_types_method_and_no_other_doe
             edge(&a(8, "Run"), &a(6, "F")),
             edge(&a(13, "Again"), &a(13, "Again")),
             edge(&a(26, "Bare"), &a(20, "F")),
+            edge(&a(30, "Value"), &a(18, "F")),
+            edge(&a(34, "SwapA"), &a(6, "F")),
+            edge(&a(39, "SwapB"), &a(6, "F")),
         ]),
         "own-receiver calls bind to the receiver type's methods; `x.F()`, `s.next.Again()` and \
          the free function's `s.F()` bind to nothing, and no method-form call reaches `func F`"
