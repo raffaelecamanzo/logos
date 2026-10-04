@@ -16,6 +16,12 @@ module_separator = "\\"
 # symbols still extract (see plugin::grammars::php_entry).
 abi_version = 15
 
+# An unqualified call (`m()`) is never a call on the current instance in
+# PHP: it is a free call, bound by scope (S-515, CR-169). Declared, not
+# defaulted, so the choice is visible beside the receiver markers in
+# `references.scm`.
+implicit_receiver = "none"
+
 capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).

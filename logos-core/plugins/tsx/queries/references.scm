@@ -1,9 +1,10 @@
 ; TSX reference-extraction query (S-015, capability = "references").
 ;
 ;   @ref.call   — a plain-identifier call (`f()`).
-;   @ref.method — a member call (`obj.m()`, `app.get(...)`); name-only,
-;                 policy-gated binding (the Rust `x.f()` posture) — except a
-;                 member call on a namespace import (S-440, below).
+;   @ref.method — a member call (`obj.m()`, `app.get(...)`): the name alone,
+;                 bound by its receiver's SHAPE (the markers below) — except a
+;                 member call on a namespace import (S-440, below), recorded
+;                 as the module-qualified path instead.
 ;   @ref.import — an import source string (`import x from "express"`) or a
 ;                 CommonJS `require("...")` argument; the quoted text is
 ;                 unquoted and canonicalised by the PATH grammar the
@@ -24,6 +25,35 @@
 (call_expression
   function: (member_expression
     property: (property_identifier) @ref.method))
+
+;   Receiver markers (S-515, CR-169, FR-EX-13) — MARKERS, recording nothing on
+;   their own. Each names the receiver of the member call above: its captured
+;   node shares the `member_expression` the `@ref.method` name sits in, and
+;   the call records that SHAPE, which the binder dispatches on (FR-RS-12).
+;   `.js` sources parse with this grammar, so JavaScript is covered too.
+;
+;   @ref.receiver.self      — `this.m()`: binds among the enclosing class's own
+;                             members only.
+;   @ref.receiver.super     — `super.m()`: binds only through a proven
+;                             `Extends`, which this plugin does not record — so
+;                             it stays unbound, and never reaches the caller's
+;                             own class.
+;   @ref.receiver.other     — every receiver (`obj.m()`, `this.x.m()`, a chained
+;                             call): never binds. `self`/`super` outrank it.
+;   @ref.receiver.anonymous — a class EXPRESSION's body (`return class { … }`):
+;                             it has no class node, so a `this.m()` inside is
+;                             never the enclosing class's `m` — `other`, unless
+;                             the body declares `m` itself.
+;
+;   An unqualified call (`m()`) is never a call on the instance in TS/JS: it is
+;   the free `@ref.call` above (`implicit_receiver` stays "none").
+(call_expression
+  function: (member_expression object: (this) @ref.receiver.self))
+(call_expression
+  function: (member_expression object: (super) @ref.receiver.super))
+(call_expression
+  function: (member_expression object: (_) @ref.receiver.other))
+(class body: (class_body) @ref.receiver.anonymous)
 
 (import_statement
   source: (string) @ref.import)
