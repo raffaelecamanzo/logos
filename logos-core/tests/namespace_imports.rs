@@ -162,6 +162,7 @@ fn a_csharp_using_static_and_an_alias_bind_the_type_they_name() {
     assert_eq!(
         edges_from(rt, ORDERS_API, EdgeKind::Imports),
         strings(&[
+            "src/Ordering.Domain/Order.cs:Order:class",
             "src/Shared/Guard.cs:Guard:class",
             "src/Shared/OrderItem.cs:OrderItem:class",
         ])
@@ -195,6 +196,8 @@ fn each_csharp_using_form_records_its_own_ledger_shape() {
             ("Microsoft::AspNetCore::Mvc".to_string(), None, RefForm::Glob),
             ("System".to_string(), Some("global".to_string()), RefForm::Glob),
             ("eShop::Ordering::Domain".to_string(), Some("global".to_string()), RefForm::Glob),
+            // `global using static`: one static row, never a second, global one.
+            ("eShop::Ordering::Domain::Order".to_string(), Some("*".to_string()), RefForm::Glob),
             (
                 "eShop::Ordering::Domain::OrderItem".to_string(),
                 Some("OrderItem".to_string()),

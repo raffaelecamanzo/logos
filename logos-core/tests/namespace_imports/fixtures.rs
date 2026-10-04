@@ -30,7 +30,8 @@ pub const PHP: Fixture = &[
     ),
 ];
 
-/// A C# tree mixing both namespace forms, a `global using`, a `using static`,
+/// A C# tree mixing both namespace forms, a `global using`, a `using static`
+/// (and a `global using static`, read as a file-local one),
 /// an alias, and a namespace that differs from its directory.
 pub const C_SHARP: Fixture = &[
     // File-scoped, under a directory that matches.
@@ -53,7 +54,7 @@ pub const C_SHARP: Fixture = &[
     ),
     (
         "src/Ordering.API/Api/OrdersApi.cs",
-        "using Microsoft.AspNetCore.Mvc;\nusing static eShop.Shared.Guard;\nusing Item = eShop.Ordering.Domain.OrderItem;\n\nnamespace eShop.Ordering.API;\n\npublic class OrdersApi\n{\n    public void Get() { }\n}\n",
+        "using Microsoft.AspNetCore.Mvc;\nusing static eShop.Shared.Guard;\nglobal using static eShop.Ordering.Domain.Order;\nusing Item = eShop.Ordering.Domain.OrderItem;\n\nnamespace eShop.Ordering.API;\n\npublic class OrdersApi\n{\n    public void Get() { }\n}\n",
     ),
 ];
 
