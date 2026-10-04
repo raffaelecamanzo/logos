@@ -175,7 +175,10 @@ by each relation's payload token), read live from the graph.
 >   `x` is: an `other.foo()` inside a method `foo` never binds to that method
 >   itself, and never to a same-named function beside it
 >   ([FR-RS-06](../specs/requirements/FR-RS-06.md)). Such calls stay in
->   `unresolved_refs`, counted as `no-receiver-evidence`. A language whose
+>   `unresolved_refs`; `logos status` counts them under `no-receiver-evidence`
+>   in the `call_residue` of the languages that carry one (Java's row, see
+>   [commands](commands.md)), and every other language's row counts them among
+>   its unbound calls without a reason. A language whose
 >   plugin does not record receiver shapes yet leaves all its method calls
 >   unbound rather than guess. One receiver *is* known for Rust: a call on
 >   exactly `self` inside an `impl` method (`self.helper()`, like a written
