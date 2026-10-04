@@ -2291,7 +2291,16 @@ impl Ctx<'_> {
             self.note(Want::Callable, || Residue::NoReceiverEvidence);
             return Res::NotFound;
         };
-        self.supertype_member(self.ix.supertypes_of(class).to_vec(), HashSet::from([class]), name)
+        // A class whose own `Extends` binds to itself (`interface I extends I`,
+        // which parses) is never its own base level.
+        let bases: Vec<NodeId> = self
+            .ix
+            .supertypes_of(class)
+            .iter()
+            .copied()
+            .filter(|&base| base != class)
+            .collect();
+        self.supertype_member(bases, HashSet::from([class]), name)
     }
 
     /// Fan out a trait-object dynamic-dispatch call `T::f` to the SET of that

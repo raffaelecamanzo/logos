@@ -2361,6 +2361,12 @@ const A_JAVA: i64 = 31;
 ///        Lone.java (module 320) ─ class Lone (321) ─ n (322)        no extends
 /// ```
 fn hierarchy_index(r: &UnresolvedRefRow) -> Index {
+    hierarchy_index_with(r, &[])
+}
+
+/// [`hierarchy_index`] with the `(row id, file, source node, target)` `Extends`
+/// rows of `extra` added.
+fn hierarchy_index_with(r: &UnresolvedRefRow, extra: &[(i64, i64, i64, &str)]) -> Index {
     let dir = "src/main/java/com/x";
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -2380,11 +2386,15 @@ fn hierarchy_index(r: &UnresolvedRefRow) -> Index {
         nodes.push(node(id, name, kind, &format!("{dir}/{file}.java")));
         edges.extend(parent.map(|p| contains(p, id)));
     }
-    let extends = make_ref(1, A_JAVA, 311, "Base", None, RefForm::Path, EdgeKind::Extends);
+    let mut refs = vec![make_ref(1, A_JAVA, 311, "Base", None, RefForm::Path, EdgeKind::Extends)];
+    for &(id, file, source, target) in extra {
+        refs.push(make_ref(id, file, source, target, None, RefForm::Path, EdgeKind::Extends));
+    }
+    refs.push(r.clone());
     let tmp = tempfile::tempdir().expect("tempdir");
     let registry = crate::plugin::LanguageRegistry::load(tmp.path()).expect("registry loads");
     let layout = super::package_key::PackageLayout::from_registry(&registry);
-    Index::build_with_layout(&nodes, &edges, &[extends, r.clone()], layout)
+    Index::build_with_layout(&nodes, &edges, &refs, layout)
 }
 
 #[test]
@@ -2418,6 +2428,22 @@ fn a_super_call_binds_only_through_a_proven_extends() {
         let ix = hierarchy_index(&lone);
         assert_eq!(bind(&lone, &ix, policy), Outcome::Unbound);
         assert_eq!(residue(&lone, &ix, policy), Some(Residue::SupertypeUnreached));
+    }
+}
+
+#[test]
+fn a_super_call_never_reaches_the_callers_own_class_through_a_cyclic_hierarchy() {
+    use super::binder::{residue, Residue};
+    // `A.n`'s `super.n()`: no base level declares `n`, and `A`'s own `n` is never
+    // a candidate — not when `A` extends itself (it parses), and not when the
+    // chain cycles back to `A` through `Base`.
+    let r = shaped(100, A_JAVA, 313, "n", Some(ReceiverShape::Super));
+    for extra in [vec![(2, A_JAVA, 311, "A")], vec![(2, BASE_JAVA, 301, "A")]] {
+        let ix = hierarchy_index_with(&r, &extra);
+        for policy in POLICIES {
+            assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{extra:?} at {policy:?}");
+        }
+        assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::SupertypeUnreached), "{extra:?}");
     }
 }
 
