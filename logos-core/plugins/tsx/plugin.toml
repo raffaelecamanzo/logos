@@ -22,6 +22,12 @@ specifier_extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"]
 # tree-sitter-typescript 0.23 (TSX Language) is generated against ABI 14.
 abi_version = 14
 
+# An unqualified call (`m()`) is never a call on the current instance in
+# TS/JS: it is a free call, bound by scope (S-515, CR-169). Declared, not
+# defaulted, so the choice is visible beside the receiver markers in
+# `references.scm`.
+implicit_receiver = "none"
+
 capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]

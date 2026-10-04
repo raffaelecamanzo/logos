@@ -3,8 +3,8 @@
 ; The capture name carries the reference shape (see extract::collect_refs):
 ;   @ref.call   — a plain-identifier call (`f()`); the text is the path.
 ;   @ref.method — an attribute call (`obj.m()`, `module.f()`); only the
-;                 attribute name is knowable without type inference, so
-;                 binding is policy-gated (same posture as Rust `x.f()`).
+;                 attribute name is knowable without type inference, so it
+;                 binds by its receiver's SHAPE (the markers below).
 ;   @ref.import — an import path; the captured node's *text* is canonicalised
 ;                 (dots → `::`) into the ledger form that feeds both the
 ;                 binder and the framework candidacy gate (FR-FW-04).
@@ -24,6 +24,33 @@
 (call
   function: (attribute
     attribute: (identifier) @ref.method))
+
+;   Receiver markers (S-515, CR-169, FR-EX-13) — MARKERS, recording nothing on
+;   their own. Each names the receiver of the attribute call above: its
+;   captured node shares the `attribute` the `@ref.method` name sits in, and the
+;   call records that SHAPE, which the binder dispatches on (FR-RS-12).
+;
+;   @ref.receiver.self  — `self.m()`, `cls.m()`: the conventional instance and
+;                         class parameters; binds among the enclosing class's
+;                         own members only.
+;   @ref.receiver.super — `super().m()`, `super(A, self).m()`: the inner `super`
+;                         call is the receiver. Binds only through a proven
+;                         `Extends`, which this plugin does not record — so it
+;                         stays unbound, and never reaches the caller's class.
+;   @ref.receiver.other — every receiver (`obj.m()`, `module.f()`,
+;                         `self.x.m()`): never binds. `self`/`super` outrank it.
+;
+;   An unqualified call (`m()`) is never a call on the instance in Python: it
+;   is the free `@ref.call` above (`implicit_receiver` stays "none").
+((call
+  function: (attribute object: (identifier) @ref.receiver.self))
+  (#any-of? @ref.receiver.self "self" "cls"))
+((call
+  function: (attribute
+    object: (call function: (identifier) @_super) @ref.receiver.super))
+  (#eq? @_super "super"))
+(call
+  function: (attribute object: (_) @ref.receiver.other))
 
 (import_statement
   name: (dotted_name) @ref.import)

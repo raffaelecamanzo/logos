@@ -3,7 +3,8 @@
 ;   @ref.call   — a free function call's name (`callee()`); name-only,
 ;                 policy-gated binding.
 ;   @ref.method — an instance (`$svc->list()`) or static (`Foo::bar()`) method
-;                 call name; name-only (receiver typing is a resolution concern).
+;                 call name; name-only, bound by its receiver's SHAPE (the
+;                 markers below).
 ;   @ref.import — a `use` clause's namespace path (`Illuminate\Support\…\Route`);
 ;                 canonicalised (backslash → `::`) into the ledger form feeding
 ;                 the binder and the framework candidacy gate (FR-FW-04).
@@ -25,6 +26,38 @@
 
 (scoped_call_expression
   name: (name) @ref.method)
+
+;   Receiver markers (S-515, CR-169, FR-EX-13) — MARKERS, recording nothing on
+;   their own. Each names the receiver (`object`) or scope (`scope`) of the
+;   method call above: its captured node shares the call expression the
+;   `@ref.method` name sits in, and the call records that SHAPE, which the
+;   binder dispatches on (FR-RS-12).
+;
+;   @ref.receiver.self      — `$this->m()`, `self::m()`, `static::m()`: binds
+;                             among the enclosing class's own members only.
+;   @ref.receiver.super     — `parent::m()`: binds only through a proven
+;                             `Extends`, which this plugin does not record — so
+;                             it stays unbound, and never reaches the caller's
+;                             own class.
+;   @ref.receiver.other     — every receiver or scope (`$svc->m()`, `Foo::m()`,
+;                             `$this->repo->m()`): never binds. `self`/`super`
+;                             outrank it.
+;   @ref.receiver.anonymous — an anonymous class's body (`new class { … }`): it
+;                             has no class node, so a `$this->m()` inside is
+;                             never the enclosing class's `m` — `other`, unless
+;                             the body declares `m` itself.
+;
+;   An unqualified call (`m()`) is never a call on the instance in PHP: it is
+;   the free `@ref.call` above (`implicit_receiver` stays "none").
+((member_call_expression object: (variable_name) @ref.receiver.self)
+  (#eq? @ref.receiver.self "$this"))
+((scoped_call_expression scope: (relative_scope) @ref.receiver.self)
+  (#any-of? @ref.receiver.self "self" "static"))
+((scoped_call_expression scope: (relative_scope) @ref.receiver.super)
+  (#eq? @ref.receiver.super "parent"))
+(member_call_expression object: (_) @ref.receiver.other)
+(scoped_call_expression scope: (_) @ref.receiver.other)
+(anonymous_class body: (declaration_list) @ref.receiver.anonymous)
 
 (namespace_use_clause
   (qualified_name) @ref.import)

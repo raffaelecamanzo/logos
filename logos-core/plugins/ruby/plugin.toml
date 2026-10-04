@@ -29,6 +29,12 @@ complexity_keywords = ["if", "elsif", "unless", "while", "until", "for", "when",
 # rather than a `for` statement. Depth 0 is a flat body; each nested node adds one.
 nesting_block_kinds = ["if", "unless", "while", "until", "for", "case", "case_match", "begin", "do_block", "block"]
 
+# An unqualified call inside a class body is a call on the current instance
+# (S-515, CR-169): Ruby's implicit receiver is `self`. `references.scm` marks
+# every receiver-less call `@ref.receiver.implicit`; inside a named class it
+# records the `self` shape, anywhere else the free call it always was.
+implicit_receiver = "self"
+
 # Ruby methods are public by default; `private`/`protected` are dynamic
 # visibility calls whose effect on subsequent definitions a structural pass
 # cannot read reliably (best-effort per CR-009). `all` is the safe,
