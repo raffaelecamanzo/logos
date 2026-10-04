@@ -2667,7 +2667,7 @@ pub(crate) fn affected(
 /// - the `*.test.*`/`*.spec.*` filename tag needs a three-part name
 ///   (`foo.test.ts`): a bare `test.py` / `spec.ts` is a module called "test".
 ///
-/// Deterministic and language-blind; the native test annotation (test-gap
+/// Deterministic and path-only; the native test annotation (test-gap
 /// analysis story) will supersede it.
 ///
 /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
