@@ -346,7 +346,8 @@ fn a_rust_self_call_binds_through_the_impl_and_every_other_receiver_is_unbound()
     );
 }
 
-/// The same call written inside and outside a macro argument.
+/// The same method call written inside and outside a macro argument, and a free
+/// call written in a macro argument and outside one.
 const RS_MACRO: &str = "\
 pub struct B;
 
@@ -357,21 +358,31 @@ impl B {
 fn free(x: &B) {
     println!(\"{}\", x.helper());
     x.helper();
+    println!(\"{}\", double());
+    double();
 }
+
+fn double() -> u32 { 0 }
 ";
 
 /// The macro token-tree walk and the query record one call between them: a
 /// non-`self` method call inside a macro argument is `other` like the same call
 /// outside it, so the two are one ledger row — not an `other` row beside a
-/// shapeless twin the shape-keyed dedup would no longer merge.
+/// shapeless twin the shape-keyed dedup would no longer merge. Only a **method**
+/// call takes a shape: a free call in a macro argument stays shapeless, as the
+/// same call outside one is.
 #[test]
 fn a_method_call_in_a_macro_argument_records_the_same_other_row_as_outside_one() {
     let tmp = tree(&[(RS_FILE, RS_MACRO)]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
+    let free = format!("{RS_FILE}:free@7");
     assert_eq!(
         call_rows(rt, RS_FILE),
-        vec![row(&format!("{RS_FILE}:free@7"), "helper", RefForm::Method, OTHER, false)]
+        sorted(vec![
+            row(&free, "double", RefForm::Path, None, true),
+            row(&free, "helper", RefForm::Method, OTHER, false),
+        ])
     );
-    assert!(call_edges(rt).is_empty());
+    assert_eq!(call_edges(rt), vec![edge(&free, &format!("{RS_FILE}:double@14"))]);
 }
