@@ -174,11 +174,11 @@ marker, a JUnit/pytest/PHPUnit test annotation, …) **or** from its file path:
   `Test` or `Tests` (`foo_test.go`, `parser_tests.rs`, `UserServiceTest.java`);
   `test_*.py`; and a three-part `*.test.*` / `*.spec.*` tag (`foo.test.ts`). A
   two-part name such as `test.py` is **not** a test by name. Beneath a
-  **production source root** (`src/main/…`, a Gradle `*Main` source set) no file
-  name marks test — `commonMain/…/KoinTest.kt` and `src/main/…/AutoCloseKoinTest.kt`
-  are library classes, since runners collect only from test source sets. The rule is
-  by path alone and language-blind: a non-JVM tree that keeps `foo.test.ts` under a
-  `src/main/` of its own reads as production too. Test source sets (`src/it/`,
+  **production source root** (`src/main/…`, a Gradle `*Main` source set) no
+  **JVM** file name (`.java`, `.kt`, `.kts`, `.scala`, `.groovy`) marks test — `commonMain/…/KoinTest.kt` and `src/main/…/AutoCloseKoinTest.kt`
+  are library classes, since runners collect only from test source sets. Other
+  extensions keep their filename rule under a root: a non-JVM tree's
+  `src/main/foo.test.ts` is still test. Test source sets (`src/it/`,
   `src/*Test/`) still mark beneath a root, and extraction evidence (`@Test`,
   `#[test]`, PHPUnit markers) is unaffected by the root.
 - **PHP:** a `test*` method counts as a test only inside a `*TestCase` subclass

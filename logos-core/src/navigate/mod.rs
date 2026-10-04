@@ -2645,20 +2645,20 @@ pub(crate) fn affected(
 /// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`,
 /// a bare Rust `tests.rs`, or the snake_case Rust `*_tests.rs` suffix —
 /// [CR-075], the plural counterpart to `*Test(s).java`'s CamelCase plural).
-/// Neither marks beneath a production source root (first rule below).
+/// Neither marks a JVM source file beneath a production source root (first rule below).
 ///
-/// Four exactness rules keep production code out ([S-524], [CR-171], [HF-2]):
+/// Four exactness rules keep production code out ([S-524], [CR-171], [HF-2], [HF-4]):
 /// - a `test`/`tests`/`__tests__`/`spec` segment *beneath a production source
 ///   root* (`src/main`, or a Gradle/KMP `*Main` source set such as
 ///   `commonMain`) is a package or resource name — `org/koin/test/` — not a
 ///   test tree ([FR-AN-05]); the same segment *above* the root
 ///   (`test/fixtures/p/src/main/…`) still marks;
-/// - no filename convention marks beneath such a root either:
+/// - no filename convention marks a JVM file (`.java`, `.kt`, `.kts`, `.scala`,
+///   `.groovy`) beneath such a root either:
 ///   `commonMain/…/KoinTest.kt` and `src/main/…/AutoCloseKoinTest.kt` are
 ///   library classes, since Maven/Gradle test runners collect only from test
-///   source sets. The override is path-only and language-blind, so a non-JVM
-///   tree that keeps `foo.test.ts` under a `src/main/` of its own reads as
-///   production here too. Extraction evidence (`@Test`) is a separate disjunct
+///   source sets. Every other extension keeps its filename rule, so a non-JVM
+///   tree's `src/main/foo.test.ts` still marks ([HF-4]). Extraction evidence (`@Test`) is a separate disjunct
 ///   of `is_test_marked` and is not affected;
 /// - a Gradle `*Test` source set (`src/commonTest`, `src/jvmTest`) or the
 ///   `src/it` integration source set is test code — only as a direct child of
@@ -2667,13 +2667,14 @@ pub(crate) fn affected(
 /// - the `*.test.*`/`*.spec.*` filename tag needs a three-part name
 ///   (`foo.test.ts`): a bare `test.py` / `spec.ts` is a module called "test".
 ///
-/// Deterministic and language-blind; the native test annotation (test-gap
+/// Deterministic and path-only; the native test annotation (test-gap
 /// analysis story) will supersede it.
 ///
 /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
 /// [CR-075]: ../../../docs/requests/CR-075-is-test-plural-test-file-conventions.md
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 /// [HF-2]: ../../../docs/planning/sprints/sprint-86.md
+/// [HF-4]: ../../../docs/planning/sprints/sprint-86.md
 /// [S-524]: ../../../docs/planning/journal.md#s-524-test-path-conventions-respect-production-source-roots-and-gradle-test-source-sets
 pub(crate) fn is_test_path(path: &str) -> bool {
     let p = Path::new(path);
@@ -2696,15 +2697,16 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         }
         parent = Some(seg);
     }
-    // Beneath a production source root the filename conventions are as silent
-    // as the directory ones: runners collect only from test source sets, so a
-    // `KoinTest.kt` under `commonMain` is a library class ([HF-2]).
-    if under_production_root {
-        return false;
-    }
     let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
+    // Beneath a production source root the filename conventions are as silent
+    // as the directory ones for JVM file types: runners collect only from test
+    // source sets, so a `KoinTest.kt` under `commonMain` is a library class
+    // ([HF-2]). Any other extension keeps its filename rule ([HF-4]).
+    if under_production_root && is_jvm_source_file(name) {
+        return false;
+    }
     let stem = name.split('.').next().unwrap_or(name);
     let mut parts = name.rsplit('.');
     let tag = parts.nth(1).filter(|_| parts.next().is_some());
@@ -2716,6 +2718,16 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         || stem.ends_with("Tests")
         || (stem.starts_with("test_") && name.ends_with(".py"))
         || tag.is_some_and(|tag| tag == "test" || tag == "spec")
+}
+
+/// A JVM source file by extension (`.java`, `.kt`, `.kts`, `.scala`,
+/// `.groovy`; case-sensitive like the filename rules): the only file types the
+/// production-root filename override covers ([HF-4]).
+fn is_jvm_source_file(name: &str) -> bool {
+    matches!(
+        name.rsplit_once('.').map(|(_, ext)| ext),
+        Some("java" | "kt" | "kts" | "scala" | "groovy")
+    )
 }
 
 /// A production source root: Maven/Gradle `src/main`, or a Gradle/KMP `*Main`

@@ -15,9 +15,11 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Fixed
 
-- **A production source root overrides the test file-name conventions too.** A
-  `*Test.kt` / `*Tests` / `*_test` / `test_*.py` / `*.test.*` file beneath `src/main/…`
-  or a Gradle `*Main` source set is production: koin's `KoinTest.kt` (`commonMain`) and
+- **A production source root overrides the test file-name conventions too — for JVM
+  file types only.** A `*Test` / `*Tests` / `*_test` / `*_spec` / `*.test.*` file with a
+  `.java`, `.kt`, `.kts`, `.scala` or `.groovy` extension beneath `src/main/…`
+  or a Gradle `*Main` source set is production (any other extension, e.g. `foo.test.ts`,
+  keeps its filename rule): koin's `KoinTest.kt` (`commonMain`) and
   `AutoCloseKoinTest.kt` (`src/main`) were still `is_test`, so all 128 nodes under
   `org/koin/test/` are now production (114 before). Files outside a production root,
   and `src/it/` / Gradle `src/*Test/` source sets, classify as before.
