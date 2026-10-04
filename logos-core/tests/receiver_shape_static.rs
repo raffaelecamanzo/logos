@@ -478,6 +478,82 @@ class J(a: Int, b: Int) {
     assert_eq!(call_edges(rt), vec![edge(&format!("{file}:n@4"), &format!("{file}:m@3"))]);
 }
 
+/// A bare call to a callable declared in an enclosing callable is the local
+/// one, not a member: lexical scope wins over the implicit receiver. The
+/// nested `@tailrec def tsort` that shadows its enclosing `tsort` is the shape
+/// the sprint-time check measured on gitbucket (`JDBCUtil.tsort`), where the
+/// `self` rule had bound both calls to the outer `tsort`.
+#[test]
+fn scala_a_bare_call_to_a_nested_def_binds_the_nested_def_not_the_member() {
+    let file = "src/Nested.scala";
+    let src = "\
+object U {
+  def tsort(edges: Int): Int = {
+    def tsort(a: Int, b: Int): Int = if (a == 0) b else tsort(a - 1, b)
+    tsort(edges, 0)
+  }
+  def m(): Int = 0
+  def n(): Int = m()
+}
+";
+    let tmp = tree(&[(file, src)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let at = |line: u32, name: &str| format!("{file}:{name}@{line}");
+    assert_eq!(
+        call_rows(rt, file),
+        sorted(vec![
+            row(&at(2, "tsort"), "tsort", RefForm::Path, None, true),
+            row(&at(3, "tsort"), "tsort", RefForm::Path, None, true),
+            row(&at(7, "n"), "m", RefForm::Method, SELF, true),
+        ])
+    );
+    assert_eq!(
+        call_edges(rt),
+        sorted_edges(vec![
+            edge(&at(2, "tsort"), &at(3, "tsort")),
+            edge(&at(3, "tsort"), &at(3, "tsort")),
+            edge(&at(7, "n"), &at(6, "m")),
+        ])
+    );
+}
+
+/// The same rule in Kotlin: a local `fun m()` shadows the class's `m` for a
+/// bare call in the function that declares it, while a local function of
+/// another name leaves the bare call a call on the current instance.
+#[test]
+fn kotlin_a_bare_call_to_a_local_function_binds_the_local_function_not_the_member() {
+    let file = "src/Local.kt";
+    let src = "\
+class K {
+    fun m() {}
+    fun run() {
+        fun m() {}
+        m()
+    }
+    fun j() {
+        fun helper() {}
+        m()
+    }
+}
+";
+    let tmp = tree(&[(file, src)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let at = |line: u32, name: &str| format!("{file}:{name}@{line}");
+    assert_eq!(
+        call_rows(rt, file),
+        sorted(vec![
+            row(&at(3, "run"), "m", RefForm::Path, None, true),
+            row(&at(7, "j"), "m", RefForm::Method, SELF, true),
+        ])
+    );
+    assert_eq!(
+        call_edges(rt),
+        sorted_edges(vec![edge(&at(3, "run"), &at(4, "m")), edge(&at(7, "j"), &at(2, "m"))])
+    );
+}
+
 // ── C++ ──────────────────────────────────────────────────────────────────────
 
 const CPP_FILE: &str = "src/a.cpp";

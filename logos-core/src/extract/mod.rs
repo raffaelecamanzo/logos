@@ -138,7 +138,7 @@ const SYMBOL_CAPTURE_GROUP: &str = "symbol";
 /// The `symbols`-query capture naming the **self type** of the declaration the
 /// same match captures (S-493, [FR-RS-11]): the captured node's text is the base
 /// type name, generics and path already left outside the capture by the query's
-/// own pattern (`impl<M> crate::a::A<M>` → `A`). A plugin opts in by adding the capture
+/// own pattern (`impl<M> crate::a::A<M>` → `A`; Go's `(s *A[T])` → `A`, S-509). A plugin opts in by adding the capture
 /// to its query; no language is named here. Not a [`NodeKind`], so
 /// [`kind_for_capture`] never mistakes it for a declaration.
 ///
@@ -270,7 +270,8 @@ pub struct NodeFact {
     /// The base type name of the type this declaration is a method of, when its
     /// plugin's `symbols` query declares one with a `@symbol.self_type` capture
     /// in the same match (S-493, [FR-RS-11]) — a Rust impl method's
-    /// `impl<..> T<..>` / `impl Trait for T` → `T`. `None` for every other node.
+    /// `impl<..> T<..>` / `impl Trait for T` → `T`, a Go method's receiver
+    /// `func (s *T[K]) M()` → `T` (S-509). `None` for every other node.
     /// Recorded beside the symbol, never in it ([ADR-07]): the binder reads it
     /// to bind a `self.m()` / `Self::m()` call through the caller's own type.
     ///
