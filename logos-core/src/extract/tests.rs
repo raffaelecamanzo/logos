@@ -6143,3 +6143,32 @@ trait T {
         ]
     );
 }
+
+/// The `Imports` rows a Scala file records, as `(target, alias, form)`, sorted
+/// (S-518, `refs::flatten_dotted_import`).
+#[cfg(feature = "lang-scala")]
+fn scala_imports(imports: &str) -> Vec<(String, Option<String>, RefForm)> {
+    let facts = extract_lang("scala", "src/App.scala", &format!("package app\n\n{imports}\nobject App\n"));
+    let mut rows: Vec<(String, Option<String>, RefForm)> = facts
+        .refs
+        .into_iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target, r.alias, r.form))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// A `given` selector imports given instances, never the type it names: no
+/// row for `T` in a group (S-518). After the path, the grammar reads `given`
+/// itself as the wildcard, which imports nothing either.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn a_scala_given_selector_imports_no_type() {
+    assert_eq!(
+        scala_imports("import a.b.{given T, C}"),
+        vec![("a::b::C".to_string(), Some("C".to_string()), RefForm::Path)]
+    );
+    assert!(scala_imports("import a.b.given T").is_empty());
+    assert!(scala_imports("import a.b.given").is_empty());
+}

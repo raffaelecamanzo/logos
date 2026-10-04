@@ -428,7 +428,8 @@ fn flatten_with_prefix(node: Node<'_>, source: &[u8], prefix: &[String], out: &m
 ///   its `name` under the path.
 ///
 /// Every non-glob item's alias is its last segment, as for every other
-/// language's import. A `given` selector imports no declaration and is skipped,
+/// language's import. A `given` selector — bare, or `given T`, which imports
+/// given instances of `T` and not `T` — imports no declaration and is skipped,
 /// as is anything else no rule above reads — never a path made of other text.
 pub(crate) fn flatten_dotted_import(node: Node<'_>, source: &[u8], out: &mut Vec<UseItem>) {
     let mut path: Vec<String> = Vec::new();
@@ -515,9 +516,18 @@ fn dotted_selector(
     }
     let braced = node.child(0).is_some_and(|c| c.kind() == "{");
     if group_allowed && braced {
+        // A `given T` selector imports given instances of `T`, never the type
+        // `T` itself: the type after a `given` token is skipped.
+        let mut after_given = false;
         let mut cursor = node.walk();
-        for selector in node.named_children(&mut cursor) {
-            dotted_selector(selector, source, path, false, out);
+        for selector in node.children(&mut cursor) {
+            if !selector.is_named() {
+                after_given = selector.kind() == "given";
+                continue;
+            }
+            if !std::mem::take(&mut after_given) {
+                dotted_selector(selector, source, path, false, out);
+            }
         }
     }
 }
