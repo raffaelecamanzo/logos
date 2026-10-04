@@ -2059,3 +2059,17 @@ fn the_four_tools_report_the_resolved_nodes_own_edges_not_a_passed_over_nodes() 
     assert_eq!(callers.alternatives[0].kind, NodeKind::DocSection);
     assert_eq!(engine.callers(&doc, None).total, 0);
 }
+
+#[test]
+fn an_explore_query_that_matches_no_name_exactly_anchors_by_full_text_and_names_no_alternatives() {
+    let tmp = code_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+
+    // Not a node name, so the exact lookup passes over nothing; the full-text
+    // fallback still finds an anchor — and names no alternatives for it.
+    let explore = engine.explore("Widg*", None);
+    assert!(explore.anchor.is_some(), "the full-text fallback anchors: {explore:?}");
+    assert!(explore.alternatives.is_empty(), "{:?}", explore.alternatives);
+    let wire = serde_json::to_value(&explore).unwrap();
+    assert!(wire.get("alternatives").is_none(), "{wire}");
+}
