@@ -537,7 +537,7 @@ fn check_namespace_capture(
     manifest: &PluginManifest,
     compiled: &CompiledQueries,
 ) -> Result<(), PluginError> {
-    use crate::extract::declared_types::NAMESPACE_CAPTURE;
+    use super::manifest::NAMESPACE_CAPTURE;
     if manifest.module_model_kind() != super::ModuleModelKind::Namespace {
         return Ok(());
     }

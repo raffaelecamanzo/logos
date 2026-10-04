@@ -345,6 +345,23 @@ pub enum ModuleModelKind {
     Namespace,
 }
 
+/// The capture a declared-namespace language's `symbols` query names a
+/// namespace or package declaration's **name** with (S-518, [FR-RS-13]):
+/// PHP's `namespace`, C#'s file-scoped or block `namespace`, Kotlin's and
+/// Scala's `package`. Its group is `module`, not the declaration group
+/// `symbol`, so extraction's declaration walk never reads it as a node; a
+/// namespace-model plugin whose `symbols` query lacks it fails to load
+/// (`registry::check_namespace_capture`).
+///
+/// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
+
+/// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the
+/// language's bodiless namespace declarations **compose** rather than replace
+/// one another — Scala's chained `package a` / `package b` is `a.b`, where
+/// PHP's `namespace A;` … `namespace B;` puts what follows in `B` alone (S-518).
+pub(crate) const NAMESPACE_CHAINED_CAPTURE: &str = "module.namespace.chained";
+
 impl ModuleModelKind {
     /// The descriptor token.
     pub fn as_str(self) -> &'static str {
