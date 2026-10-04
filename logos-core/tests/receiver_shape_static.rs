@@ -410,6 +410,29 @@ class Outer {
     assert_eq!(call_edges(rt), Vec::<(String, String)>::new());
 }
 
+/// An auxiliary constructor's `this(…)` delegates to the primary constructor,
+/// which has no node: it is no call, so it never binds the auxiliary
+/// constructor (a `def this`) to itself.
+#[test]
+fn scala_an_auxiliary_constructor_delegation_is_no_call() {
+    let file = "src/Ctor.scala";
+    let src = "\
+class J(a: Int, b: Int) {
+  def this(a: Int) = this(a, 0)
+  def m(): Int = 0
+  def n(): Int = m()
+}
+";
+    let tmp = tree(&[(file, src)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        call_rows(rt, file),
+        vec![row(&format!("{file}:n@4"), "m", RefForm::Method, SELF, true)]
+    );
+    assert_eq!(call_edges(rt), vec![edge(&format!("{file}:n@4"), &format!("{file}:m@3"))]);
+}
+
 // ── C++ ──────────────────────────────────────────────────────────────────────
 
 const CPP_FILE: &str = "src/a.cpp";

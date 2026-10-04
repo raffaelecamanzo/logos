@@ -45,8 +45,12 @@
 ; resolution coverage but never produces a wrong edge.
 
 ; A call by simple name: `compute()`, `assert(...)`, the `test`/`it` markers.
-(call_expression
+; An auxiliary constructor's `def this(a: Int) = this(a, 0)` delegates to the
+; primary constructor, which has no node: read as a call named `this`, it would
+; bind the auxiliary constructor to itself, so it is not captured.
+((call_expression
   function: (identifier) @ref.method @ref.receiver.implicit)
+  (#not-eq? @ref.method "this"))
 
 ; A call selecting a member of a receiver: `helper.doThing()` — the method name.
 (call_expression
