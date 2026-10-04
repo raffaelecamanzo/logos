@@ -186,35 +186,44 @@ by each relation's payload token), read live from the graph.
 >   or a bare `foo()` inside a class — the `super` forms `super.foo()`,
 >   `super().foo()`, `parent::foo()` and Ruby's `super`. None of these plugins
 >   proves a base class yet, so their `super` calls stay unbound.
->   In C#, Kotlin, Scala and C++ a bare call
->   `foo()` written inside a class (or Kotlin/Scala `object`, Scala `trait`)
->   is a call on the current instance, exactly like `this.foo()` /
->   `this->foo()`: it binds to that type's own `foo` and never to a same-named
->   top-level function; outside any type — a free function, a Scala 3
->   top-level `def`, an out-of-line C++ `Type::foo` definition — it is a plain
->   call, bound by the file's scope. `base.foo()` / `super.foo()` stay unbound
->   (these plugins record no proven base class), and so does C++'s
->   `Base::foo()`, which reads like any other qualified call. In a Kotlin chain
->   `a.b.c()` only `c` is a call. One receiver *is* known for Rust: a call on
->   exactly `self` inside an `impl` method (`self.helper()`, like a written
->   `Self::helper()`) has the impl's own type, so it binds to the one `helper`
->   that type's impls define in the caller's crate — and stays unbound, retried
->   on sync, when that type defines none or two
->   ([FR-RS-11](../specs/requirements/FR-RS-11.md)). A `self.helper()` in a
->   trait's default method binds to the trait's own `helper`; `self.field.helper()`
->   and `other.helper()` stay unbound. Go reads the receiver the same way, by
->   name: inside `func (s *Svc) Run()` a call on `s` (`s.Work()`) is `self` and
->   binds to the one `Work` declared on `Svc`; `x.Work()`, `s.next.Work()` and a
->   parameter that merely shares the receiver's name in another function are
->   `other`, bind nowhere, and never reach a free `func Work` (a name the method
->   itself rebinds — `for _, s := range …` — is still read as the receiver)
+>   In C#, Kotlin, Scala and C++ a bare call `foo()` written inside a class (or
+>   Kotlin/Scala `object`, Scala `trait`) is a call on the current instance,
+>   exactly like `this.foo()` / `this->foo()`: it binds to that type's own `foo`
+>   and never to a same-named top-level function — unless the calling function
+>   itself (or one enclosing it) declares a local function or nested `def foo`,
+>   which the call then names, as the language's own scoping does; outside any
+>   type — a free function, a Scala 3 top-level `def`, an out-of-line C++
+>   `Type::foo` definition — it is a plain call, bound by the file's scope.
+>   `base.foo()` / `super.foo()` stay unbound (these plugins record no proven
+>   base class), and so does C++'s `Base::foo()`, which reads like any other
+>   qualified call. In a Kotlin chain `a.b.c()` only `c` is a call. One receiver
+>   *is* known for Rust: a call on exactly `self` inside an `impl` method
+>   (`self.helper()`, like a written `Self::helper()`) has the impl's own type,
+>   so it binds to the one `helper` that type's impls define in the caller's
+>   crate — and stays unbound, retried on sync, when that type defines none or
+>   two ([FR-RS-11](../specs/requirements/FR-RS-11.md)). A `self.helper()` in a
+>   trait's default method binds to a `helper` the trait itself provides (a
+>   required, bodiless one has no node, so the call stays unbound);
+>   `self.field.helper()` and `other.helper()` stay unbound. Go reads the
+>   receiver the same way, by name: inside `func (s *Svc) Run()` a call on `s`
+>   (`s.Work()`) is `self` and binds to the one `Work` declared on `Svc`;
+>   `x.Work()`, `s.next.Work()` and a parameter that merely shares the
+>   receiver's name in another function are `other`, bind nowhere, and never
+>   reach a free `func Work` (a name the method itself rebinds —
+>   `for _, s := range …` — is still read as the receiver)
 >   ([CR-169](../requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md)).
 >   A bare-path call (`foo()`, single segment) is complementary: when a free
 >   function and same-named associated methods both exist at the call scope, the
->   free function wins the tie ([CR-068](../requests/CR-068-reachability-binding-precision.md)
->   Part B, [FR-RS-07](../specs/requirements/FR-RS-07.md)) — recovering the
->   correct target instead of leaving it ambiguous — while a scope with only the
+>   free function wins the tie
+>   ([CR-068](../requests/CR-068-reachability-binding-precision.md) Part B,
+>   [FR-RS-07](../specs/requirements/FR-RS-07.md)) — recovering the correct
+>   target instead of leaving it ambiguous — while a scope with only the
 >   method(s) still binds them (a strictly additive tie-break, never a drop).
+>   That last case is a known over-binding in the languages whose bare call can
+>   never reach a method — Go, Rust, Python, PHP, JavaScript and TypeScript: a
+>   bare `fwrite()` inside a PHP method `fwrite`, or a bare `performWebSearch()`
+>   beside a Go method of that name, binds the method (often itself) instead of
+>   the builtin or package function it calls.
 > - **Ambiguous doc/prose tokens.** Doc→code links bind only on *exactly one*
 >   candidate. Common words that appear in prose but match zero or many code
 >   symbols (`index`, `sync`, `node`, `context`, …) correctly bind to nothing.
