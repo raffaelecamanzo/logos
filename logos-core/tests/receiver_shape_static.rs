@@ -4,14 +4,15 @@
 //! SHIPPED `references.scm` and `plugin.toml` (no query override).
 //!
 //! Each language is checked on the same four cases over methods `A.m` / `B.m`:
-//! its self form inside `A.n` (and the bare `m()` the plugin declares a call
-//! on the current instance, `implicit_receiver = "self"`) records `self` and
-//! binds `A.m`; `other.m()` inside `A.m` records `other` and stays unbound
+//! its self form inside `A.n`, and the bare `m()` inside `A.j` that the plugin
+//! declares a call on the current instance (`implicit_receiver = "self"`),
+//! record `self` and bind `A.m`; `other.m()` inside `A.m` records `other` and stays unbound
 //! (`no-receiver-evidence`, a fixed function of the shape pinned by the binder
 //! unit tests); the super form stays unbound, because no plugin of these four
 //! records a proven `Extends`; and no `Calls` edge is a self-loop. A bare call
 //! outside any type is a free call again, bound by the lexical scope, and a
-//! bare call inside a type never reaches a same-named top-level function.
+//! bare call inside a type without `m` never reaches a same-named top-level
+//! function (Kotlin, Scala and C++ declare one; C# has no top-level functions).
 //!
 //! Fixtures are written inline into temp directories, like every sibling
 //! binding suite (`receiver_shape.rs`): a fixture tree checked into this
@@ -391,6 +392,8 @@ object C {
 def helper(): Int = 0
 
 def free(): Int = helper()
+
+def m(): Int = 0
 ";
 
 #[test]
@@ -411,7 +414,7 @@ fn scala_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_d
             row(&a(9, "k"), "m", RefForm::Method, SUPER, false),
             // A qualified `A.this` is a receiver expression, not `this`.
             row(&a(10, "q"), "m", RefForm::Method, OTHER, false),
-            // A bare `m()` in `object C`, which has no `m`.
+            // A bare `m()` in `object C`, which has no `m`: never the top-level `m`.
             row(&a(18, "n"), "m", RefForm::Method, SELF, false),
             // A bare call in a top-level `def` is a free call.
             row(&a(23, "free"), "helper", RefForm::Path, None, true),
@@ -507,6 +510,13 @@ public:
 int helper() { return 0; }
 
 int free_fn() { return helper(); }
+
+int m() { return 0; }
+
+class C {
+public:
+    int n() { return m(); }
+};
 ";
 
 #[test]
@@ -531,6 +541,8 @@ fn cpp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_doe
             row(&a(14, "r"), "m", RefForm::Method, OTHER, false),
             // A bare call in a free function is a free call.
             row(&a(24, "free_fn"), "helper", RefForm::Path, None, true),
+            // A bare `m()` in `C`, which has no `m`: never the top-level `m`.
+            row(&a(30, "n"), "m", RefForm::Method, SELF, false),
         ])
     );
     let edges = call_edges(rt);
