@@ -698,3 +698,46 @@ end
     );
     assert_eq!(edges, Vec::<(String, String)>::new());
 }
+
+/// Ruby's `super` from a singleton method (`def self.k`), and as a statement
+/// `super(x)` one level into the body: both record the enclosing method's name
+/// as a `super` call, unbound, and never the caller itself.
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn ruby_super_from_a_singleton_method_and_as_a_statement_records_super() {
+    let file = "lib/a.rb";
+    let (rows, edges) = indexed(
+        file,
+        "\
+class Base
+  def self.k
+    0
+  end
+
+  def j(x)
+    x
+  end
+end
+
+class A < Base
+  def self.k
+    super
+  end
+
+  def j(x)
+    super(x)
+  end
+end
+",
+    );
+    let at = |line: u32, name: &str| format!("{file}:{name}@{line}");
+    assert_eq!(
+        rows,
+        sorted(vec![
+            row(&at(11, "A"), "Base", PATH, None, false),
+            row(&at(12, "k"), "k", METHOD, SUPER, false),
+            row(&at(16, "j"), "j", METHOD, SUPER, false),
+        ])
+    );
+    assert_eq!(edges, Vec::<(String, String)>::new());
+}
