@@ -2386,7 +2386,8 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
 ///
 /// A [`SELF_TYPE_CAPTURE`] gives its text to every declaration captured in the
 /// **same match** (S-493). It is gathered by declaration node and applied after
-/// the walk, so it holds whichever pattern captured the declaration first — a
+/// the walk, so it holds regardless of which pattern captured the declaration
+/// first — a
 /// declaration another, self-type-less pattern also names (Rust's plain
 /// `function_item` pattern) is still taken once, by the first-wins rule, and
 /// still carries its self type.
