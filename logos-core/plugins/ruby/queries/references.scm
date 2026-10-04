@@ -51,7 +51,14 @@
 ;                            the free call, bound by scope, it always was, and
 ;                            `self.m()` binds only to an `m` the module itself
 ;                            declares (`def self.escape … self.unescape`);
-;                            otherwise it is `other`.
+;                            otherwise it is `other` (a `super` too).
+;                            Also the bodies where a class's `self` is not one
+;                            of its instances — `def self.x` and `class << self`
+;                            in a class (the class object), a `Struct.new` /
+;                            `Class.new` block (another class): there `self.m()`
+;                            is `other`, since the graph cannot tell a singleton
+;                            method from an instance one, and a bare call stays
+;                            the free call it was.
 ;   @ref.receiver.other    — every other receiver (`obj.m()`, `User.find`,
 ;                            `super.foo` — `foo` is called on what `super`
 ;                            RETURNED): never binds. `self` outranks it.
@@ -68,6 +75,16 @@
 ;                            stays unbound, and never reaches the caller itself.
 (call receiver: (self) @ref.receiver.self)
 (module body: (body_statement) @ref.receiver.anonymous)
+(class
+  body: (body_statement
+    (singleton_method body: (body_statement) @ref.receiver.anonymous)))
+(singleton_class body: (body_statement) @ref.receiver.anonymous)
+((call
+  receiver: (constant) @_new_on
+  method: (identifier) @_new
+  block: [(do_block) (block)] @ref.receiver.anonymous)
+  (#any-of? @_new_on "Struct" "Class")
+  (#eq? @_new "new"))
 (call receiver: (_) @ref.receiver.other)
 (method
   name: (identifier) @ref.method

@@ -632,3 +632,57 @@ end
         ])
     );
 }
+
+/// Where a Ruby class's `self` is not one of its instances — inside `def
+/// self.x`, `class << self`, or a `Struct.new` / `Class.new` block — a
+/// `self.m()` is never the class's instance method `m`. The graph cannot tell a
+/// singleton method from an instance one, so such a call binds nothing.
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn a_ruby_self_call_on_the_class_object_never_binds_an_instance_method() {
+    let file = "lib/widget.rb";
+    let (rows, edges) = indexed(
+        file,
+        "\
+class Widget
+  def name
+    1
+  end
+
+  def self.key
+    self.name
+  end
+
+  def self.label
+    self.key
+  end
+
+  class << self
+    def table
+      self.name
+    end
+  end
+
+  Point = Struct.new(:a) do
+    def len
+      self.name
+    end
+  end
+end
+",
+    );
+    let at = |line: u32, name: &str| format!("{file}:{name}@{line}");
+    assert_eq!(
+        rows,
+        sorted(vec![
+            row(&at(1, "Widget"), "Struct", PATH, None, false),
+            row(&at(1, "Widget"), "new", METHOD, OTHER, false),
+            row(&at(6, "key"), "name", METHOD, OTHER, false),
+            // A singleton calling a singleton: unbound too, not wrong.
+            row(&at(10, "label"), "key", METHOD, OTHER, false),
+            row(&at(15, "table"), "name", METHOD, OTHER, false),
+            row(&at(21, "len"), "name", METHOD, OTHER, false),
+        ])
+    );
+    assert_eq!(edges, Vec::<(String, String)>::new());
+}
