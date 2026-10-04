@@ -2628,25 +2628,29 @@ pub(crate) fn affected(
 
 /// Whether a project-relative path is test-marked by naming convention
 /// ([FR-CL-04] `--tests-only`): a `tests`/`test`/`__tests__`/`spec` path
-/// segment, or a filename matching the per-language test idioms (both only
-/// outside a production source root, below) (`*_test.*`,
+/// segment, or a filename matching the per-language test idioms (`*_test.*`,
 /// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`,
 /// a bare Rust `tests.rs`, or the snake_case Rust `*_tests.rs` suffix —
 /// [CR-075], the plural counterpart to `*Test(s).java`'s CamelCase plural).
+/// Neither marks beneath a production source root (first rule below).
 ///
-/// Three exactness rules keep production code out ([S-524], [CR-171]):
+/// Four exactness rules keep production code out ([S-524], [CR-171], [HF-2]):
 /// - a `test`/`tests`/`__tests__`/`spec` segment *beneath a production source
 ///   root* (`src/main`, or a Gradle/KMP `*Main` source set such as
 ///   `commonMain`) is a package or resource name — `org/koin/test/` — not a
 ///   test tree ([FR-AN-05]); the same segment *above* the root
-///   (`test/fixtures/p/src/main/…`) still marks. The root overrides the
-///   filename conventions too ([HF-2]): `commonMain/…/KoinTest.kt` and
-///   `src/main/…/AutoCloseKoinTest.kt` are library classes, since test runners
-///   collect only from test source sets. Extraction evidence (`@Test`) is a
-///   separate disjunct and is not affected;
+///   (`test/fixtures/p/src/main/…`) still marks;
+/// - no filename convention marks beneath such a root either:
+///   `commonMain/…/KoinTest.kt` and `src/main/…/AutoCloseKoinTest.kt` are
+///   library classes, since Maven/Gradle test runners collect only from test
+///   source sets. The override is path-only and language-blind, so a non-JVM
+///   tree that keeps `foo.test.ts` under a `src/main/` of its own reads as
+///   production here too. Extraction evidence (`@Test`) is a separate disjunct
+///   of `is_test_marked` and is not affected;
 /// - a Gradle `*Test` source set (`src/commonTest`, `src/jvmTest`) or the
 ///   `src/it` integration source set is test code — only as a direct child of
-///   `src/`, so a locale directory `it/` or a stray `fooTest/` is not one;
+///   `src/`, so a locale directory `it/` or a stray `fooTest/` is not one — and
+///   stays test code even when it sits beneath a production root;
 /// - the `*.test.*`/`*.spec.*` filename tag needs a three-part name
 ///   (`foo.test.ts`): a bare `test.py` / `spec.ts` is a module called "test".
 ///
