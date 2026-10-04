@@ -272,6 +272,69 @@ fn a_tsx_this_call_inside_a_class_expression_never_binds_the_enclosing_class() {
     assert_class_expression("src/anon.tsx");
 }
 
+/// JavaScript rebinds `this` in an object-literal method and in a non-arrow
+/// `function`: there `this.m()` is never the enclosing class's `m`. An arrow
+/// function keeps the method's `this`, so its `this.m()` still binds.
+fn assert_rebound_this(file: &str) {
+    let (rows, edges) = indexed(
+        file,
+        "\
+class A {
+  m() {
+    return 0;
+  }
+
+  literal() {
+    return {
+      m() {
+        return 1;
+      },
+      run() {
+        return this.m();
+      },
+      cb: () => this.m(),
+    };
+  }
+
+  nested() {
+    function inner() {
+      return this.m();
+    }
+    const f = function () {
+      return this.m();
+    };
+    return [inner, f];
+  }
+}
+",
+    );
+    let at = |line: u32, name: &str| format!("{file}:{name}@{line}");
+    assert_eq!(
+        rows,
+        sorted(vec![
+            // The arrow callback: the class instance, `A.m`.
+            row(&at(6, "literal"), "m", METHOD, SELF, true),
+            // The literal's own method: its `this` is the literal.
+            row(&at(11, "run"), "m", METHOD, OTHER, false),
+            row(&at(19, "inner"), "m", METHOD, OTHER, false),
+            row(&at(22, "f"), "m", METHOD, OTHER, false),
+        ])
+    );
+    assert_eq!(edges, sorted_edges(vec![edge(&at(6, "literal"), &at(2, "m"))]));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_this_call_where_javascript_rebinds_this_never_binds_the_class() {
+    assert_rebound_this("src/rebound.ts");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_tsx_this_call_where_javascript_rebinds_this_never_binds_the_class() {
+    assert_rebound_this("src/rebound.tsx");
+}
+
 // ── Python: `self.` / `cls.` / `super().` ────────────────────────────────────
 
 #[cfg(feature = "lang-python")]

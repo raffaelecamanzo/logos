@@ -40,10 +40,14 @@
 ;                             own class.
 ;   @ref.receiver.other     — every receiver (`obj.m()`, `this.x.m()`, a chained
 ;                             call): never binds. `self`/`super` outrank it.
-;   @ref.receiver.anonymous — a class EXPRESSION's body (`return class { … }`):
-;                             it has no class node, so a `this.m()` inside is
-;                             never the enclosing class's `m` — `other`, unless
-;                             the body declares `m` itself.
+;   @ref.receiver.anonymous — a body whose `this` is not the enclosing class's
+;                             instance, so a `this.m()` inside is never that
+;                             class's `m`: a class EXPRESSION's body (`return
+;                             class { … }`, no class node — `other`, unless the
+;                             body declares `m` itself), and the bodies that
+;                             REBIND `this` — an object-literal method and a
+;                             non-arrow `function` (`other`). An arrow function
+;                             keeps the method's `this`, so it is not marked.
 ;
 ;   An unqualified call (`m()`) is never a call on the instance in TS/JS: it is
 ;   the free `@ref.call` above (`implicit_receiver` stays "none").
@@ -54,6 +58,9 @@
 (call_expression
   function: (member_expression object: (_) @ref.receiver.other))
 (class body: (class_body) @ref.receiver.anonymous)
+(object (method_definition) @ref.receiver.anonymous)
+[(function_expression) (function_declaration) (generator_function)
+ (generator_function_declaration)] @ref.receiver.anonymous
 
 (import_statement
   source: (string) @ref.import)
