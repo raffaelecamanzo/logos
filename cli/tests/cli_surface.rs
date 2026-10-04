@@ -2681,3 +2681,39 @@ fn node_on_a_bare_name_prints_the_class_and_names_the_module_alternative() {
     assert_eq!(by_symbol["node"]["kind"], "module", "{by_symbol}");
     assert!(by_symbol.get("alternatives").is_none(), "{by_symbol}");
 }
+
+/// HF-1 / FR-NV-15: `callers`, `callees`, `impact` and `explore` resolve a bare
+/// name as `node` does — to the class — and print the module they passed over;
+/// that module's SCIP symbol reaches it with no `alternatives` key.
+#[test]
+fn the_other_navigation_tools_on_a_bare_name_resolve_the_class_and_name_the_module() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/Monolog/Utils.php",
+        "<?php\n\nnamespace Monolog;\n\nfinal class Utils\n{\n    public static function canonicalize(string $path): string\n    {\n        return $path;\n    }\n}\n",
+    );
+    logos(tmp.path(), &["index"]);
+
+    for (tool, anchor) in [
+        ("callers", "resolved"),
+        ("callees", "resolved"),
+        ("impact", "resolved"),
+        ("explore", "anchor"),
+    ] {
+        let out = logos(tmp.path(), &[tool, "Utils", "--json"]);
+        assert_eq!(exit_code(&out), 0, "{tool}: {}", String::from_utf8_lossy(&out.stderr));
+        let payload: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{tool}: --json emits one machine-readable object: {e}"));
+        assert_eq!(payload[anchor]["kind"], "class", "{tool}: {payload}");
+        assert_eq!(payload["alternatives"].as_array().map(Vec::len), Some(1), "{tool}: {payload}");
+        assert_eq!(payload["alternatives"][0]["kind"], "module", "{tool}: {payload}");
+
+        let module = payload["alternatives"][0]["symbol"].as_str().expect("a symbol");
+        let out = logos(tmp.path(), &[tool, module, "--json"]);
+        assert_eq!(exit_code(&out), 0, "{tool}: {}", String::from_utf8_lossy(&out.stderr));
+        let by_symbol: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(by_symbol[anchor]["kind"], "module", "{tool}: {by_symbol}");
+        assert!(by_symbol.get("alternatives").is_none(), "{tool}: {by_symbol}");
+    }
+}

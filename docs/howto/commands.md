@@ -543,7 +543,11 @@ logos explore <QUERY> [--max-files <N>]                 # default 10 files
 ```
 
 Anchors on the best-matching symbol and walks its neighbourhood, returning
-source grouped by file — the "show me around this area" tool.
+source grouped by file — the "show me around this area" tool. When the query is
+a bare name that matches several nodes, the anchor is chosen as for `node` (code
+before module before doc) and the nodes passed over are listed under
+`alternatives` (absent when none). A query that matches no name exactly falls back
+to the best full-text match, which passes over nothing.
 
 ### `node`
 
@@ -567,8 +571,8 @@ the class. The nodes it passed over are listed
 under `alternatives`, in that order, and each one's `symbol` reaches it when
 passed back to `node`. The key is absent when nothing was passed over: a SCIP
 symbol is exact, and a name only one node carries has no alternative. `callers`,
-`callees`, `impact` and `explore` still resolve a bare name to the lowest node id
-and name no alternatives.
+`callees`, `impact` and `explore` resolve a bare name by the same rule and name
+what they passed over in the same `alternatives` key (see below).
 
 ### `callers` / `callees`
 
@@ -579,6 +583,14 @@ logos callees <SYMBOL> [--limit <N>]
 
 Direct call-graph neighbours, one hop each way.
 
+A bare name resolves as it does for `node` (code type > callable > other code
+declaration > module > config node > doc node, lowest node id within a class), and
+the answer lists the nodes it passed over under `alternatives`. So `logos callers
+Utils` on a PHP tree where `Utils` is both a class and its file module reports the
+callers of the class and names the module. Each alternative's `symbol` reaches it
+when passed back; a SCIP symbol or a name only one node carries has no
+`alternatives` key.
+
 ### `impact`
 
 ```bash
@@ -586,7 +598,9 @@ logos impact <SYMBOL> [--depth <N>]                     # default depth 3
 ```
 
 Transitive closure in both directions, labeled: *upstream* (what breaks if
-this changes) and *downstream* (what this depends on).
+this changes) and *downstream* (what this depends on). A bare name resolves as
+for `node` and the nodes it passed over are listed under `alternatives`
+(absent when none).
 
 ### `impact-intersection`
 

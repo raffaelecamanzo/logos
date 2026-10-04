@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use logos_core::model::{EdgeKind, NodeKind};
-use logos_core::models::navigation::EdgeDirection;
+use logos_core::models::navigation::{EdgeDirection, SymbolRef};
 use logos_core::Engine;
 use tempfile::TempDir;
 
@@ -1927,4 +1927,86 @@ fn a_bare_name_prefers_a_code_module_to_a_config_key_of_the_same_name() {
         "the config key is named as an alternative: {:?}",
         info.alternatives
     );
+}
+
+// ── FR-NV-15 / HF-1: callers, callees, impact and explore resolve the same way ─
+
+/// What each of the four tools resolved a bare name to, and what it passed over.
+/// One row per tool, so a fixture asserts the same contract across all of them.
+fn resolutions(engine: &Engine, name: &str) -> [(&'static str, Option<NodeKind>, Vec<NodeKind>); 4] {
+    let kinds = |alts: &[SymbolRef]| alts.iter().map(|a| a.kind).collect::<Vec<_>>();
+    let callers = engine.callers(name, None);
+    let callees = engine.callees(name, None);
+    let impact = engine.impact(name, None);
+    let explore = engine.explore(name, None);
+    [
+        ("callers", callers.resolved.as_ref().map(|r| r.kind), kinds(&callers.alternatives)),
+        ("callees", callees.resolved.as_ref().map(|r| r.kind), kinds(&callees.alternatives)),
+        ("impact", impact.resolved.as_ref().map(|r| r.kind), kinds(&impact.alternatives)),
+        ("explore", explore.anchor.as_ref().map(|r| r.kind), kinds(&explore.alternatives)),
+    ]
+}
+
+#[test]
+fn the_four_tools_resolve_a_class_and_module_bare_name_to_the_class_and_list_the_module() {
+    let tmp = php_psr4_fixture();
+    let engine = indexed_engine(&tmp);
+
+    for (tool, resolved, alternatives) in resolutions(&engine, "Utils") {
+        assert_eq!(resolved, Some(NodeKind::Class), "{tool}: the class, not the module");
+        assert_eq!(alternatives, [NodeKind::Module], "{tool}: the module is passed over");
+    }
+}
+
+#[test]
+fn the_four_tools_resolve_a_code_and_doc_bare_name_to_the_code_and_list_the_doc() {
+    let tmp = code_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+
+    for (tool, resolved, alternatives) in resolutions(&engine, "Widget") {
+        assert_eq!(resolved, Some(NodeKind::Function), "{tool}: the code, not the doc section");
+        assert_eq!(alternatives, [NodeKind::DocSection], "{tool}: the doc section is passed over");
+    }
+}
+
+#[test]
+fn the_four_tools_leave_scip_symbols_and_unique_names_exact_with_no_alternatives_key() {
+    let tmp = php_psr4_fixture();
+    let engine = indexed_engine(&tmp);
+    let module_symbol = engine.node("Utils", false).alternatives[0].symbol.clone();
+
+    // A SCIP symbol is exact: the module's own symbol reaches the module, never the
+    // same-named class, and names nothing it passed over.
+    for (tool, resolved, alternatives) in resolutions(&engine, &module_symbol) {
+        assert_eq!(resolved, Some(NodeKind::Module), "{tool}: exact symbol reaches the module");
+        assert!(alternatives.is_empty(), "{tool}: {alternatives:?}");
+    }
+
+    // A name only one node carries is unchanged, and none of the four payloads
+    // carries an `alternatives` key at all.
+    let wires = [
+        serde_json::to_value(engine.callers("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.callees("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.impact("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.explore("canonicalize", None)).unwrap(),
+    ];
+    for wire in wires {
+        assert!(wire.get("alternatives").is_none(), "{wire}");
+    }
+    let ambiguous = serde_json::to_value(engine.callers("Utils", None)).unwrap();
+    assert_eq!(ambiguous["alternatives"][0]["kind"], "module", "{ambiguous}");
+}
+
+#[test]
+fn an_unknown_bare_name_names_no_alternatives_and_still_suggests() {
+    let tmp = code_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+
+    // A prefix of a real name matches nothing exactly, so it is "unknown" — and the
+    // miss still carries "did you mean" names rather than alternatives.
+    for (tool, resolved, alternatives) in resolutions(&engine, "Widg") {
+        assert_eq!(resolved, None, "{tool}");
+        assert!(alternatives.is_empty(), "{tool}");
+    }
+    assert!(!engine.callers("Widg", None).suggestions.is_empty());
 }
