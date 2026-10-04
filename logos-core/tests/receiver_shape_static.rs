@@ -157,6 +157,7 @@ class A : Base {
     public int J() { return M(); }
     public int K() { return base.M(); }
     public int L() { return Helpers.Run(); }
+    public int P() { return this.f.M(); }
 }
 
 class B {
@@ -186,8 +187,10 @@ fn csharp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
             row(&a(9, "K"), "M", RefForm::Method, SUPER, false),
             // A static call on a type name is a receiver like any other.
             row(&a(10, "L"), "Run", RefForm::Method, OTHER, false),
+            // A chain rooted at `this` is a receiver expression, not `this`.
+            row(&a(11, "P"), "M", RefForm::Method, OTHER, false),
             // A bare `M()` in `C`, which has no `M`: never `A.M`, `B.M`, `Base.M`.
-            row(&a(18, "N"), "M", RefForm::Method, SELF, false),
+            row(&a(19, "N"), "M", RefForm::Method, SELF, false),
         ])
     );
     let edges = call_edges(rt);
