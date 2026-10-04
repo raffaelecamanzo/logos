@@ -884,13 +884,13 @@ pub(crate) fn impact_intersection(
             });
             continue;
         };
-        // A bare name matching several symbols resolves to one of them
-        // arbitrarily (`resolve_counting_candidates`' lowest-id rule — FR-NV-15's
-        // code-first preference covers `impact` and not this tool). Where `impact`
-        // names what it passed over, the answer here is
-        // a *scheduling verdict*, and silently picking the wrong `new` would
-        // manufacture the false `safe_parallel` this query exists to prevent, so
-        // the ambiguity is said out loud ([NFR-CC-04]).
+        // A bare name matching several symbols resolves to the lowest id
+        // (`resolve_counting_candidates`); FR-NV-15's code-first preference covers
+        // `impact`, not this tool. `impact` names what it passed over and the
+        // caller reads the resolved node back. Here the answer is a *scheduling
+        // verdict*, and silently picking the wrong `new` would manufacture the
+        // false `safe_parallel` this query exists to prevent, so the ambiguity is
+        // said out loud ([NFR-CC-04]).
         warnings.extend(ambiguity_warning(&text, candidates, row.symbol.as_str()));
         rows[index].resolved.push(symbol_ref(&row));
         match view.index_of(row.symbol.as_str()) {
@@ -1596,11 +1596,15 @@ fn precedent_shell(query: &str) -> PrecedentResult {
 
 /// Resolve a precedent target: a symbol first, then a project-relative file.
 ///
-/// Symbol-first keeps the resolution rule identical to every other navigation
-/// tool ([FR-NV-04], [FR-NV-05]); the file fallback runs only when nothing
-/// answers to the text as a symbol, and the two vocabularies do not overlap in
-/// practice (a canonical symbol is not a path). `./` prefixes normalise to the
-/// stored project-relative form, as in [`affected`].
+/// A bare name resolves by lowest node id, as it does for `impact_intersection`
+/// — not code-first as in the five tools of [FR-NV-15] — and `precedent` says so
+/// through the [NFR-CC-04] ambiguity warning. The file fallback runs only when
+/// nothing answers to the text as a symbol, and the two vocabularies do not
+/// overlap in practice (a canonical symbol is not a path). `./` prefixes
+/// normalise to the stored project-relative form, as in [`affected`].
+///
+/// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn resolve_precedent_target(store: &dyn GraphStore, target: &str) -> Result<PrecedentTarget> {
     if let Some((row, candidates)) = resolve_counting_candidates(store, target)? {
         return Ok(PrecedentTarget::Symbol { row, candidates });
