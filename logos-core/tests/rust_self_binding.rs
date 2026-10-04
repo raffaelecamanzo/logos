@@ -476,3 +476,99 @@ fn known_gap_sync_keeps_the_edge_of_a_self_call_whose_type_name_gains_a_twin() {
         "the gap is closed — replace this pin with a sync ≡ reindex edge assertion"
     );
 }
+
+/// A foreign type's impl never binds a self call to a crate type of the same
+/// name (NFR-RA-05) — the shapes the S-493 review reproduced. `impl Ext for
+/// std::io::Error` records no self type, so its `self.kind()` stays the plain
+/// method call it always was; `use std::io::Error; impl Ext2 for Error` records
+/// `Error` but the binder sees the foreign import; `impl Total for Vec<u8>`
+/// names a type the crate does not declare, whose inherent `len` the graph
+/// cannot see. The crate's own `Error::kind` gains no caller from any of them.
+#[test]
+fn a_foreign_self_type_never_binds_to_a_crate_type_of_its_name() {
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod error;\npub mod ext;\npub mod ext2;\npub mod vecs;\n"),
+        (
+            "src/error.rs",
+            "pub struct Error {\n    k: u8,\n}\nimpl Error {\n    pub fn kind(&self) -> u8 {\n        self.k\n    }\n}\n",
+        ),
+        (
+            "src/ext.rs",
+            "\
+pub trait IoErrorExt {
+    fn is_timeout(&self) -> bool;
+}
+impl IoErrorExt for std::io::Error {
+    fn is_timeout(&self) -> bool {
+        self.kind() == std::io::ErrorKind::TimedOut
+    }
+}
+",
+        ),
+        (
+            "src/ext2.rs",
+            "\
+use std::io::Error;
+pub trait Ext2 {
+    fn timed(&self) -> bool;
+}
+impl Ext2 for Error {
+    fn timed(&self) -> bool {
+        self.kind() == std::io::ErrorKind::TimedOut
+    }
+}
+",
+        ),
+        (
+            "src/vecs.rs",
+            "\
+pub trait Size {
+    fn len(&self) -> usize;
+}
+pub trait Total {
+    fn total(&self) -> usize;
+}
+impl Size for Vec<String> {
+    fn len(&self) -> usize {
+        0
+    }
+}
+impl Total for Vec<u8> {
+    fn total(&self) -> usize {
+        self.len()
+    }
+}
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+
+    let types = self_types(rt);
+    assert!(
+        !types.keys().any(|k| k.starts_with("src/ext.rs:")),
+        "a header path-qualified outside the crate records no self type: {types:?}"
+    );
+    assert_eq!(types.get("src/ext2.rs:timed@6").map(String::as_str), Some("Error"));
+    assert_eq!(types.get("src/vecs.rs:total@13").map(String::as_str), Some("Vec"));
+
+    let rows: Vec<(String, String, RefForm, bool)> = ["src/ext.rs", "src/ext2.rs", "src/vecs.rs"]
+        .iter()
+        .flat_map(|f| call_rows(rt, f))
+        .filter(|(_, target, _, _)| target.ends_with("kind") || target.ends_with("len"))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("src/ext.rs:is_timeout@5".to_string(), "kind".to_string(), RefForm::Method, false),
+            ("src/ext2.rs:timed@6".to_string(), "Self::kind".to_string(), RefForm::Path, false),
+            ("src/vecs.rs:total@13".to_string(), "Self::len".to_string(), RefForm::Path, false),
+        ],
+        "none of the three binds"
+    );
+    let into_kind: Vec<(String, String)> = call_edges(rt)
+        .into_iter()
+        .filter(|(_, to)| to.starts_with("src/error.rs:kind") || to.starts_with("src/vecs.rs:len"))
+        .collect();
+    assert!(into_kind.is_empty(), "no fabricated caller: {into_kind:?}");
+}

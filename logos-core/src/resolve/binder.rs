@@ -160,6 +160,10 @@ pub(crate) enum Residue {
     /// fully-qualified names the type could be, in the order its scope reads
     /// them; a type nested under an in-graph type that does not declare it has
     /// none.
+    ///
+    /// Also a `Self::m` call whose self type the crate declares no type of, or
+    /// whose caller's file imports it from outside the crate (S-493), with no
+    /// candidates.
     ExternalType { candidates: Vec<Vec<String>> },
     /// The type (or the nearest supertype level holding the name) declares two
     /// or more callables of that name, or two static imports each supply one.
@@ -169,8 +173,8 @@ pub(crate) enum Residue {
     OverloadAmbiguous,
     /// The type's name reaches two in-graph declarations (a `src/main` and a
     /// `src/test` class of one fully-qualified name). Also a `Self::m` call
-    /// whose self type's base name the crate declares for several types, or
-    /// for none, when the caller's module does not decide the candidate (S-493).
+    /// whose self type's base name the crate declares for several types, when
+    /// the caller's module does not decide the candidate (S-493).
     TypeAmbiguous,
     /// The type is in the graph, and neither it nor any in-graph supertype
     /// declares the name: the chain leaves the graph (a JDK, library or
@@ -465,6 +469,10 @@ pub(crate) struct Index {
     /// type of the crate, which is what lets a candidate outside the caller's
     /// module be the caller's type's method.
     type_names: HashMap<(String, String), usize>,
+    /// project-relative path → file id, for the files whose ledger rows name a
+    /// source node of the snapshot — how a node reaches its file's
+    /// [`FileScope`] (S-493: whether its file imports its self type's name).
+    file_ids: HashMap<String, i64>,
     /// Every method of an `impl Trait for X` block — the source of an
     /// `Implements` ledger row outside a package-shaped language (S-281's rows,
     /// whatever their trait resolves to). Read by the self-type call's module
@@ -550,12 +558,21 @@ impl Index {
             self_types: HashMap::new(),
             methods_by_self_type: HashMap::new(),
             type_names: HashMap::new(),
+            file_ids: HashMap::new(),
             trait_impl_methods: HashSet::new(),
         };
         let (supertypes, hierarchy_tokens) = build_supertypes(refs, &index);
         index.supertypes = supertypes;
         index.hierarchy_tokens = hierarchy_tokens;
         index.trait_impl_methods = build_trait_impl_methods(refs, &index);
+        index.file_ids = refs
+            .iter()
+            .filter_map(|r| {
+                let file_id = r.file_id?;
+                let path = index.by_symbol.get(&r.source_symbol).and_then(|id| index.info.get(id))?;
+                Some((path.file_path.clone()?, file_id))
+            })
+            .collect();
         index
     }
 
@@ -571,6 +588,29 @@ impl Index {
         self
     }
 
+    /// Whether the file of `node` imports `name` from outside its crate — a
+    /// `use` whose path is not headed by `crate`, `self`, `super` or one of the
+    /// crate's own top-level modules (S-493). Such a self type names a foreign
+    /// type, whatever type of that name the crate declares. A name brought in
+    /// by a glob is not seen; the crate's own declarations still decide it.
+    fn imports_foreign(&self, node: &NodeInfo, name: &str) -> bool {
+        let Some(path) = node
+            .file_path
+            .as_deref()
+            .and_then(|p| self.file_ids.get(p))
+            .and_then(|id| self.file_scopes.get(id))
+            .and_then(|scope| scope.aliases.get(name))
+        else {
+            return false;
+        };
+        let Some(head) = path.first() else { return false };
+        let local = matches!(head.as_str(), "crate" | "self" | "super")
+            || self
+                .modules
+                .contains_key(&(node.crate_name.clone(), vec![head.clone()]));
+        !local
+    }
+
     /// Give the index the self types the store records per node (S-493,
     /// [FR-RS-11]; [`GraphStore::node_self_types`]) — what a `self.m()` /
     /// `Self::m()` call binds through. Rows naming a node the snapshot does not
@@ -582,7 +622,9 @@ impl Index {
         let mut by_type: HashMap<(String, String, String), Vec<NodeId>> = HashMap::new();
         for (id, self_type) in &self_types {
             let Some(info) = self.info.get(id) else { continue };
-            if !Want::Callable.admits(info.kind) {
+            // A method of a type its file imports from outside the crate is a
+            // foreign type's: never a candidate for a call on a crate type.
+            if !Want::Callable.admits(info.kind) || self.imports_foreign(info, self_type) {
                 continue;
             }
             by_type
@@ -2078,14 +2120,21 @@ impl Ctx<'_> {
     ///    wherever in the crate its impl block is: exactly one binds.
     /// 2. **The caller's module** — where the impl header's name denotes the
     ///    caller's own type. Taken when the crate declares that name for several
-    ///    types or for none (an external type, a `Deref` newtype's target) —
-    ///    a lone candidate elsewhere may then be another type's method, so only
-    ///    the module decides — and when rung 1 found several: one type's
+    ///    types — a lone candidate elsewhere may then be another type's method,
+    ///    so only the module decides — and when rung 1 found several: one type's
     ///    inherent `m` beside a trait impl's `m` (`Engine::start`), or two
     ///    impl blocks both defining it. Exactly one module-local candidate
     ///    binds, unless it is a trait-impl method while an inherent candidate
     ///    lies outside the module: Rust resolves `Self::m` to the inherent one
     ///    wherever it is written, so the module cannot decide that pair.
+    ///
+    /// A self type the crate declares no type of (a library type, a generic
+    /// parameter), or one the caller's file imports from outside the crate,
+    /// binds nothing: [`Residue::ExternalType`]. Its inherent methods are not
+    /// in the graph and Rust prefers them to any trait method recorded here, so
+    /// no candidate is evidence — and a same-named crate type is another type.
+    /// Its query records no self type at all for a header path-qualified
+    /// outside the crate (`impl Ext for std::io::Error`).
     ///
     /// Zero candidates — the method comes from a trait's default body, an
     /// external trait or a `Deref` target, none of which records this self type
@@ -2110,7 +2159,18 @@ impl Ctx<'_> {
             .methods_by_self_type
             .get(&key)
             .map_or(&[][..], Vec::as_slice);
-        let one_type = self.ix.type_names.get(&(krate.clone(), self_type.clone())) == Some(&1);
+        let declared = self.ix.type_names.get(&(krate.clone(), self_type.clone()));
+        let caller = self.ix.info.get(&self.source)?;
+        if declared.is_none() || self.ix.imports_foreign(caller, self_type) {
+            // A type the crate does not declare — a library type, a generic
+            // parameter — has inherent methods the graph cannot see, which
+            // Rust prefers to any trait method recorded here.
+            self.note(Want::Callable, || Residue::ExternalType {
+                candidates: Vec::new(),
+            });
+            return Some(Res::NotFound);
+        }
+        let one_type = declared == Some(&1);
         let res = match exactly_one(candidates) {
             Res::NotFound => {
                 self.note(Want::Callable, || Residue::SupertypeUnreached);

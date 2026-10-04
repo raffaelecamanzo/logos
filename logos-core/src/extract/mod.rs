@@ -138,7 +138,7 @@ const SYMBOL_CAPTURE_GROUP: &str = "symbol";
 /// The `symbols`-query capture naming the **self type** of the declaration the
 /// same match captures (S-493, [FR-RS-11]): the captured node's text is the base
 /// type name, generics and path already left outside the capture by the query's
-/// own pattern (`impl<M> a::A<M>` → `A`). A plugin opts in by adding the capture
+/// own pattern (`impl<M> crate::a::A<M>` → `A`). A plugin opts in by adding the capture
 /// to its query; no language is named here. Not a [`NodeKind`], so
 /// [`kind_for_capture`] never mistakes it for a declaration.
 ///

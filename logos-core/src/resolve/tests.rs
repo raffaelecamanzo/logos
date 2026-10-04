@@ -2189,3 +2189,37 @@ fn a_lone_candidate_outside_the_module_binds_only_under_a_type_name_declared_onc
     let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types);
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
 }
+
+#[test]
+fn a_self_type_the_crate_does_not_declare_or_imports_from_outside_binds_nothing() {
+    use super::binder::{residue, Residue};
+    let external = || Some(Residue::ExternalType { candidates: Vec::new() });
+    // No type `A` declared in crate `crate` (a library type, a generic
+    // parameter): the lone module-local `helper` may be shadowed by an inherent
+    // method the graph cannot see.
+    let r = call(100, LIB_RS, 70, "Self::helper");
+    let (mut nodes, edges, self_types) = self_type_fixture();
+    nodes.retain(|n| ![61, 62, 63, 75, 78].contains(&n.id.0));
+    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), external());
+
+    // `util.rs` imports a foreign `B` (`use std::x::B`): its `B::helper` (84) is
+    // that type's, never a candidate for the crate's `B`, so the call from
+    // `inner` binds the crate's one `B::helper` (73) through the crate rung —
+    // where with 84 counted the module would decide, and find none.
+    let import = make_ref(90, UTIL_RS, 4, "std::x::B", Some("B"), RefForm::Path, EdgeKind::Imports);
+    let from_inner = call(101, LIB_RS, 86, "Self::helper");
+    let (nodes, edges, self_types) = self_type_fixture();
+    let refs = [import.clone(), from_inner.clone()];
+    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone());
+    bound_to(bind(&from_inner, &ix, BindingPolicy::Strict), 86, 73, EdgeKind::Calls);
+    // And a caller in a file importing its self type's name from outside the
+    // crate binds nothing.
+    let from_util = call(102, UTIL_RS, 79, "Self::helper");
+    let lib_import = make_ref(91, UTIL_RS, 4, "std::x::A", Some("A"), RefForm::Path, EdgeKind::Imports);
+    let refs = [lib_import, from_util.clone()];
+    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    assert_eq!(bind(&from_util, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    assert_eq!(residue(&from_util, &ix, BindingPolicy::Strict), external());
+}
