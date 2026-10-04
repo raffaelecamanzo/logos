@@ -13,6 +13,39 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **A call on another object never binds to the caller's own method (CR-169).** Every
+  method-form call now records its receiver's shape — `self`, `super` or `other` — and
+  binds by it instead of walking scope outward from the caller. `this.m()` / `self.m()`
+  binds to the caller's own class; `super.m()` only through a proven base class; a call
+  on any other receiver (`x.m()`) binds nowhere and is reported `no-receiver-evidence`.
+  All twelve code languages declare their receiver forms (TS/TSX/JS, Python, PHP, Ruby,
+  C#, Kotlin, Scala, C++, Go, Rust; Java maps its existing receiver typing onto the
+  same shape, byte-identically). No binding policy widens a receiver call any more.
+- **This trades recall for never fabricating, most visibly on Rust.** On this
+  repository the release removes 2,105 `Calls` edges and adds 88 (self-loops 202 → 60),
+  and 191 callables reached only through `x.m()` chains now read dead (11 the other
+  way); the quality signal moves 8446 → 8397. A sample of removed Rust edges was 15/19
+  correct, 4/19 fabricated — Rust receiver typing is what would restore the correct ones.
+  On Go (zap, ollama) the re-bound own-receiver calls judged 40/40 correct.
+- **Rust `self.helper()` and `Self::helper()` bind through the enclosing impl (CR-159).**
+  Each impl method records its self type, so a self call binds to its own impl's
+  method, never a sibling impl's or another crate's same-named type.
+- **Go methods record their receiver's base type** (`func (s *Svc[T]) Work()` → `Svc`),
+  and a call on the method's own receiver binds to that type's method — never to a free
+  `func` of the same name.
+- **A bare call to a nested `def` or local function binds the local callable**, never the
+  class member it shadows (Scala, Kotlin, C#). In a Kotlin chain `a.b.c()` only `c` is a
+  call, and a Scala auxiliary-constructor delegation `this(…)` is no call.
+
+### Upgrade
+
+- Two forward-only store migrations: **28** (`nodes.self_type`) and **29**
+  (`unresolved_refs.receiver`, plus the ledger identity index). Both clear every file's
+  content hash, so run **one `logos scan` or `logos index`** after upgrading — a bare
+  `logos sync` re-reads nothing and the new bindings would not appear.
+
 ## [1.9.2] — 2026-10-04
 
 ### Fixed
