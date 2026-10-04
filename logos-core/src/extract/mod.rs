@@ -331,7 +331,7 @@ pub struct RefFact {
     /// [FR-CG-07]: ../../../docs/specs/requirements/FR-CG-07.md
     pub relation: Option<ArtifactRelation>,
     /// The receiver shape of a Method-form call (S-514, [FR-EX-13]) — set by
-    /// the receiver pass ([`receiver`]) from the query's `@ref.receiver.*`
+    /// the receiver pass (`extract::receiver`) from the query's `@ref.receiver.*`
     /// markers; `None` for every other row, and for a call no marker names. Part
     /// of the ledger identity: `this.m()` and `x.m()` from one caller are two
     /// rows that bind differently.
@@ -1505,7 +1505,8 @@ fn collect_refs(
                 continue;
             }
             // A receiver marker records no row of its own: it is read before
-            // the per-row scope walk below, which it does not need.
+            // the per-row source lookup below (`self_name` asks only for its
+            // enclosing declaration).
             if receiver::is_marker(capture) {
                 if let Some(receivers) = receivers.as_mut() {
                     receivers.mark(capture, node, source, || enclosing_decl(node));
@@ -1582,9 +1583,8 @@ fn collect_refs(
                     // the receiver is a *provable* `&dyn T` (an explicit parameter
                     // or `let` type in the enclosing fn), qualify the target as
                     // `T::f` so the binder fans out to the trait method's impls. A
-                    // receiver of unknown type stays the bare `f`, taking the
-                    // ordinary receiver-method path — the CR-066 guard (FR-RS-06)
-                    // is not loosened.
+                    // receiver of unknown type stays the bare `f`, bound by its
+                    // receiver's shape (S-514, FR-RS-12).
                     let target = match rust_dyn_receiver_trait(node, source) {
                         Some(trait_name) => format!("{trait_name}::{name}"),
                         None => {

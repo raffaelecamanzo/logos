@@ -172,7 +172,8 @@ struct Site<'tree> {
 }
 
 /// What `collect_refs` knows about a file's receivers while it walks the query
-/// matches — built only for a query that declares a receiver marker.
+/// matches — built only for a query that declares a receiver marker or the
+/// `@ref.method.self` capture.
 pub(super) struct Receivers<'tree> {
     /// invocation node id → what its markers say.
     marks: HashMap<usize, Marks>,

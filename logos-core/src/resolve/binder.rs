@@ -1683,9 +1683,8 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // (free function over same-named associated methods, [FR-RS-07]). Gated
             // on `segs.len() == 1` so the flag is provably inert for a
             // path-qualified call (`Type::f`, routed through `descend`) and for an
-            // import (`Want::Any`); scoped to this resolution, so the
-            // receiver-method branch below — which also uses `Want::Callable` — is
-            // unaffected.
+            // import (`Want::Any`); scoped to this resolution. A receiver-method
+            // call never reaches it: it binds by its receiver's shape (S-514).
             ctx.bare_path_call
                 .set(r.kind == EdgeKind::Calls && segs.len() == 1);
             let resolved = ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
@@ -1708,9 +1707,9 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             }
             // A trait-object dynamic-dispatch call (S-281, CR-073, FR-RS-08):
             // extraction encodes a *provable* `&dyn T` receiver on `p.f()` as a
-            // trait-qualified `T::f` target (a bare `.f()` stays a single segment
-            // and never reaches here — the CR-066 receiver-method guard,
-            // [FR-RS-06], is untouched). Fan out to the SET of that trait method's
+            // trait-qualified `T::f` target (a bare `.f()` stays a single segment,
+            // never reaches here, and binds by its receiver's shape below,
+            // [FR-RS-12]). Fan out to the SET of that trait method's
             // targets: the trait's own default body (a member of the trait node)
             // ∪ every concrete workspace impl of it. Every target is a real
             // indexed node reached through the *proven* trait `T` — never a
@@ -2212,15 +2211,13 @@ impl Ctx<'_> {
     /// Resolve a member-access fact to the one `Field` of the source method's
     /// own class-like container named `field` (CR-005, [FR-EX-08]).
     ///
-    /// Walks the source's `Contains` ancestry to its nearest enclosing
-    /// class-bearing container ([`is_class_like`]) and accepts the field iff that
-    /// container directly contains **exactly one** `Field` of that name — the
-    /// same single acceptance rule every binder level shares ([NFR-RA-05]). A
-    /// language whose methods are not lexically nested under their type (so no
-    /// class-like ancestor is found) or whose fields are not extracted as nodes
-    /// yields no candidate, so the access stays honestly unresolved and retries
-    /// on sync — never fabricated. Bounded by [`MAX_CONTAINS_DEPTH`] against a
-    /// malformed `Contains` cycle, mirroring [`typed_owner`](Ctx::typed_owner).
+    /// The container is the caller's own class ([`caller_class`](Ctx::caller_class));
+    /// the field binds iff that container directly contains **exactly one**
+    /// `Field` of that name — the same single acceptance rule every binder level
+    /// shares ([NFR-RA-05]). A language whose methods are not lexically nested
+    /// under their type (so no class-like ancestor is found) or whose fields are
+    /// not extracted as nodes yields no candidate, so the access stays honestly
+    /// unresolved and retries on sync — never fabricated.
     ///
     /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -2939,14 +2936,12 @@ impl Ctx<'_> {
     ///   stands, so no previously-resolved edge is lost.
     ///
     /// Path-qualified (`Type::f` via [`descend`](Ctx::descend)) and typed calls
-    /// never reach this step; a receiver-unqualified method call
-    /// ([`RefForm::Method`]) does reach it but leaves [`bare_path_call`](Ctx::bare_path_call)
-    /// `false`, so it is a no-op there — receiver calls and the [CR-066]
-    /// workspace unique-name fallback are untouched.
+    /// never reach this step, and a receiver-method call ([`RefForm::Method`])
+    /// never reaches the scope walk at all — it binds by its receiver's shape
+    /// (S-514). The step is gated on [`bare_path_call`](Ctx::bare_path_call).
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    /// [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
     fn prefer_free_functions(&self, mut candidates: Vec<NodeId>) -> Vec<NodeId> {
         if !self.bare_path_call.get() {
             return candidates;
@@ -2966,10 +2961,10 @@ impl Ctx<'_> {
     /// Resolve a bare name by the scope hierarchy (function-local outward).
     ///
     /// Reached only for a **single-segment** name (multi-segment paths route
-    /// through [`descend`](Ctx::descend)). Both a bare-path call and a
-    /// receiver-unqualified method call arrive here with [`Want::Callable`]; the
-    /// CR-068 Part B free-function tie-break ([`prefer_free_functions`]) fires
-    /// only for the former, gated on [`bare_path_call`](Ctx::bare_path_call).
+    /// through [`descend`](Ctx::descend)). A receiver-method call never arrives
+    /// here (it binds by its receiver's shape, S-514); the CR-068 Part B
+    /// free-function tie-break ([`prefer_free_functions`]) fires only for a
+    /// bare-path call, gated on [`bare_path_call`](Ctx::bare_path_call).
     fn resolve_name(&self, name: &str, want: Want, depth: u8) -> Res {
         // 1) Lexical Contains chain, innermost first: nested decls of the
         //    source itself (or of its enclosing scope, for a declaration's
