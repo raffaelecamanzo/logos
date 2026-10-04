@@ -405,7 +405,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 
 /// Whether the incremental run must re-bind row `r` given `delta`.
 ///
-/// Four reasons force a re-bind; any one suffices:
+/// Six reasons force a re-bind; any one suffices:
 /// 1. **A** — `r` belongs to a file re-extracted or removed this sync. Its source
 ///    may have moved, and capture-before-delete lands inbound cross-file edges
 ///    here as `Symbol` rows ([ADR-10]); both need rebinding.
@@ -431,6 +431,10 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    crosses the moved type while spelling none of its names — `Leaf::start`
 ///    reaching `Base.start` through a `Mid` that just gained `extends Base`.
 ///    Every other language's selection is unchanged.
+/// 6. **Global wildcard** (S-518) — `delta.global_imports_moved`: a changed file
+///    declared a C# `global using` before or after the sync, and `r` is from a
+///    package-shaped file. The wildcard brings names into view in files the sync
+///    never touched, under names no dirty token spells.
 ///
 /// Every other row provably keeps its binding (its source is in an untouched file
 /// and no key it reads changed), so it is skipped — that is where the work goes.

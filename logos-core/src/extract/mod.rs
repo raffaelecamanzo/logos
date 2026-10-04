@@ -61,9 +61,11 @@ pub mod config;
 // PUBLIC so the reference-workspace census reads the product's own reader.
 pub mod build_manifest;
 // Declared types → member-local facts (S-472, CR-152, ADR-70 point 1): each
-// top-level Java/Kotlin type under its package-aware name, and each `.avsc`
-// record/enum under its namespace. The source half rides extraction (it needs
-// the file's nodes and its `package` statement); the schema half, like a build
+// top-level Java type under its package-aware name and each top-level type of a
+// declared-namespace language (PHP, C#, Kotlin, Scala; S-518) under its declared
+// namespace, and each `.avsc` record/enum under its namespace. The source half
+// rides extraction (it needs the file's nodes and its `package` or namespace
+// declaration); the schema half, like a build
 // manifest, yields no node and is driven by the pipeline beside extraction.
 // PUBLIC so the reference-workspace report reads the product's own reader.
 pub mod declared_types;
