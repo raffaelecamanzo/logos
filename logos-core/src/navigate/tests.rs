@@ -203,12 +203,31 @@ fn is_test_path_production_root_overrides_filename_conventions() {
     // Every filename convention is overridden, not `Test` alone.
     assert!(!is_test_path("src/main/java/FooTests.java"));
     assert!(!is_test_path("src/jvmMain/kotlin/foo_test.kt"));
-    assert!(!is_test_path("src/main/rs/foo_tests.rs"));
-    assert!(!is_test_path("src/main/rs/foo_spec.rb"));
-    assert!(!is_test_path("src/main/py/test_foo.py"));
-    assert!(!is_test_path("src/main/ts/foo.test.ts"));
-    assert!(!is_test_path("src/main/ts/foo.spec.ts"));
     assert!(!is_test_path("src/commonMain/kotlin/tests.kt"));
+    // [HF-4] JVM file types only: Java, Scala, Groovy and Kotlin script too.
+    assert!(!is_test_path("src/main/AppTest.java"));
+    assert!(!is_test_path("src/main/scala/FooSpec.scala"));
+    assert!(!is_test_path("src/main/scala/foo_spec.scala"));
+    assert!(!is_test_path("src/main/groovy/FooTests.groovy"));
+    assert!(!is_test_path("build/src/main/kotlin/foo_test.kts"));
+    // ...while every other extension keeps its filename rule under the root.
+    assert!(is_test_path("src/main/foo.test.ts"));
+    assert!(is_test_path("src/main/ts/foo.spec.ts"));
+    assert!(is_test_path("src/main/app_test.go"));
+    assert!(is_test_path("src/main/test_x.py"));
+    assert!(is_test_path("src/main/rs/foo_tests.rs"));
+    assert!(is_test_path("src/main/rs/foo_spec.rb"));
+    assert!(is_test_path("src/jvmMain/rs/foo_test.rs"));
+    // The extension match is case-sensitive, like the filename rules.
+    assert!(is_test_path("src/main/AppTest.JAVA"));
+    // Near miss: a `.java` that is only a stem part, and no extension at all.
+    assert!(is_test_path("src/main/AppTest.javascript"));
+    assert!(is_test_path("src/main/AppTest"));
+    // The directory exemption is language-blind and untouched.
+    assert!(!is_test_path("src/main/js/__tests__/a.ts"));
+    // (the directory segment never marks; the non-JVM filename rule still does).
+    assert!(is_test_path("src/main/test/foo.test.ts"));
+    assert!(!is_test_path("src/main/test/foo.ts"));
     // Gradle test source sets and `src/it` keep marking — the same filename
     // under them is test code by directory AND by name.
     assert!(is_test_path("koin-core/src/test/kotlin/FooTest.kt"));
