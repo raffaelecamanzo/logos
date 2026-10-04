@@ -2705,3 +2705,37 @@ fn a_moved_global_wildcard_reselects_every_namespaced_row() {
     assert!(super::is_affected(&r, &delta(true), &file_paths, &ix, false));
     assert!(!super::is_affected(&r, &delta(false), &file_paths, &ix, false));
 }
+
+/// A `global using` applies to its own language's files only (S-518): a PHP
+/// file beside `GlobalUsings.cs`, itself keyed by a declared namespace, never
+/// sees the C# wildcard — the `.cs` file beside it does.
+#[test]
+fn a_global_wildcard_never_crosses_into_another_language() {
+    use super::binder::GLOBAL_WILDCARD_ALIAS;
+    let (mut nodes, mut edges, mut declared) = namespace_graph();
+    nodes.push(node(470, "Helper", NodeKind::Module, "src/Api/Helper.php"));
+    nodes.push(node(471, "Helper", NodeKind::Class, "src/Api/Helper.php"));
+    edges.push(contains(470, 471));
+    declared.push(("src/Api/Helper.php".to_string(), "Shop.Api".to_string()));
+    let layout = super::package_key::PackageLayout::default()
+        .with_namespace_extensions(["cs".to_string(), "php".to_string()])
+        .with_declared_namespaces(declared);
+    const HELPER_PHP: i64 = 47;
+    let global = make_ref(
+        1,
+        GLOBALS_CS,
+        450,
+        "Shop::Domain",
+        Some(GLOBAL_WILDCARD_ALIAS),
+        RefForm::Glob,
+        EdgeKind::Imports,
+    );
+    let php = type_use(2, HELPER_PHP, 471, "Item");
+    let cs = type_use(3, SVC_CS, 421, "Item");
+    let refs = [global, php.clone(), cs.clone()];
+    let ix = Index::build_with_layout(&nodes, &edges, &refs, layout);
+    for policy in POLICIES {
+        assert_eq!(bind(&php, &ix, policy), Outcome::Unbound, "{policy:?}");
+        bound_to(bind(&cs, &ix, policy), 421, 411, EdgeKind::TypeUses);
+    }
+}
