@@ -345,6 +345,10 @@ fn a_file_whose_declarations_sit_in_two_namespaces_records_none() {
     // PHP's statement form: a second statement starts a second namespace.
     let php = "<?php\nnamespace Acme;\nclass Tester {}\nnamespace Monolog\\Processor;\nclass ProcessorTest {}\n";
     assert_eq!(namespace("tests/ProcessorTest.php", php), None);
+    // A second statement replaces the first rather than nesting in it: the
+    // file's one class is `B`'s, never `A.B`'s.
+    let replaced = "<?php\nnamespace A;\nconst X = 1;\nnamespace B;\nclass Y {}\n";
+    assert_eq!(namespace("src/Y.php", replaced).as_deref(), Some("B"));
     // A declaration outside the only namespace block is in the global one.
     let mixed = "namespace A { class X { } }\nclass Y { }\n";
     assert_eq!(namespace("src/Mixed.cs", mixed), None);

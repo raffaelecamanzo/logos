@@ -2533,10 +2533,14 @@ fn collect_decls<'t>(
             .and_then(|c| c.node.utf8_text(source).ok())
             .map(str::trim)
             .filter(|t| !t.is_empty());
+        let chained = m
+            .captures
+            .iter()
+            .any(|c| capture_names[c.index as usize] == declared_types::NAMESPACE_CHAINED_CAPTURE);
         for cap in m.captures {
             let capture = capture_names[cap.index as usize];
             if declared_types::note_package(&mut package, capture, cap.node, source)
-                || declared_types::note_namespace(&mut namespaces, capture, cap.node, source)
+                || declared_types::note_namespace(&mut namespaces, capture, cap.node, source, chained)
             {
                 continue;
             }

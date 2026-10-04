@@ -261,6 +261,12 @@ pub(crate) fn note_package(
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
 
+/// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the
+/// language's bodiless namespace declarations **compose** rather than replace
+/// one another — Scala's chained `package a` / `package b` is `a.b`, where
+/// PHP's `namespace A;` … `namespace B;` puts what follows in `B` alone (S-518).
+pub(crate) const NAMESPACE_CHAINED_CAPTURE: &str = "module.namespace.chained";
+
 /// One namespace declaration of a file: the name it declares, as segments, and
 /// the byte range it scopes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +274,12 @@ pub(crate) struct NamespaceScope {
     segments: Vec<String>,
     start: usize,
     end: usize,
+    /// A bodiless declaration (`namespace X;`, `package x`), which scopes the
+    /// rest of the node enclosing it.
+    statement: bool,
+    /// A bodiless declaration that composes with a later one rather than
+    /// ending where it starts ([`NAMESPACE_CHAINED_CAPTURE`]).
+    chained: bool,
 }
 
 /// Record a namespace declaration from a `symbols` capture: `true` when
@@ -277,13 +289,16 @@ pub(crate) struct NamespaceScope {
 /// A declaration with a `body` field (C#'s `namespace X { … }`, PHP's
 /// `namespace X { … }`, Scala's `package x { … }`) scopes its own range; one
 /// without (C#'s `namespace X;`, PHP's `namespace X;`, Kotlin's and Scala's
-/// `package x`) scopes the rest of the node that encloses it. A name that
-/// spells nothing is skipped.
+/// `package x`) scopes the rest of the node that encloses it — up to the next
+/// such declaration there, unless its match carries the `chained` marker
+/// ([`NAMESPACE_CHAINED_CAPTURE`]), in which case the two compose
+/// ([`file_namespace`]). A name that spells nothing is skipped.
 pub(crate) fn note_namespace(
     scopes: &mut Vec<NamespaceScope>,
     capture: &str,
     node: Node<'_>,
     source: &[u8],
+    chained: bool,
 ) -> bool {
     if capture != NAMESPACE_CAPTURE {
         return false;
@@ -292,16 +307,44 @@ pub(crate) fn note_namespace(
         return true;
     };
     let declaration = node.parent().unwrap_or(node);
-    let end = match declaration.child_by_field_name("body") {
-        Some(_) => declaration.end_byte(),
-        None => declaration.parent().unwrap_or(declaration).end_byte(),
+    let statement = declaration.child_by_field_name("body").is_none();
+    let end = if statement {
+        declaration.parent().unwrap_or(declaration).end_byte()
+    } else {
+        declaration.end_byte()
     };
     scopes.push(NamespaceScope {
         segments: crate::resolve::package_key::namespace_segments(&name),
         start: declaration.start_byte(),
         end,
+        statement,
+        chained,
     });
     true
+}
+
+/// `scopes` with every bodiless, unchained declaration ended where the next
+/// bodiless declaration of the same enclosing node starts — PHP's second
+/// `namespace B;` replaces the first rather than nesting in it. Two such
+/// declarations share an enclosing node exactly when they share its end.
+fn replaced_statements(scopes: &[NamespaceScope]) -> Vec<NamespaceScope> {
+    scopes
+        .iter()
+        .map(|s| {
+            if !s.statement || s.chained {
+                return s.clone();
+            }
+            let next = scopes
+                .iter()
+                .filter(|t| t.statement && t.end == s.end && t.start > s.start)
+                .map(|t| t.start)
+                .min();
+            NamespaceScope {
+                end: next.map_or(s.end, |n| n.saturating_sub(1)),
+                ..s.clone()
+            }
+        })
+        .collect()
 }
 
 /// The namespace a file declares, in
@@ -310,8 +353,10 @@ pub(crate) fn note_namespace(
 /// their start bytes) sits in — the names of the namespace declarations
 /// enclosing it, outermost first, so `namespace A { namespace B { … } }` and
 /// `namespace A.B;` and `package a\npackage b` (Scala's chained clauses) each
-/// declare `A.B`. A file of no top-level declaration takes the namespace in
-/// force at its end (`source_len`).
+/// declare `A.B` — while PHP's `namespace A;` … `namespace B;` puts what
+/// follows the second in `B` alone ([`replaced_statements`]). A file of no
+/// top-level declaration takes the namespace in force at its end
+/// (`source_len`).
 ///
 /// `None` when two top-level declarations sit in different namespaces: the file
 /// has no one namespace, and keying it by either would name the other's types
@@ -327,8 +372,9 @@ pub(crate) fn file_namespace(
     top_level: &[usize],
     source_len: usize,
 ) -> Option<String> {
+    let scoped = replaced_statements(scopes);
     let at = |pos: usize| -> Vec<String> {
-        let mut enclosing: Vec<&NamespaceScope> = scopes
+        let mut enclosing: Vec<&NamespaceScope> = scoped
             .iter()
             .filter(|s| s.start <= pos && pos <= s.end)
             .collect();
