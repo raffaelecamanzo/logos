@@ -8,8 +8,8 @@
 //! one derivation (`resolve::package_key::PackageLayout`). The Java shapes are
 //! pinned in `java_imports.rs`; this file pins the Kotlin consequences the
 //! change has: an import reaches the class it names, a type declared in both
-//! trees binds neither, an external import stays unbound, and a call inside a
-//! class still binds on its lexical scope.
+//! trees binds neither, an external import stays unbound, and a bare call
+//! inside a class binds the class's own member (the `self` shape, S-516).
 #![cfg(feature = "lang-kotlin")]
 
 use std::collections::HashMap;
@@ -98,7 +98,8 @@ fn a_kotlin_import_of_an_in_repository_type_binds_to_the_class_and_an_external_o
         vec!["org::springframework::stereotype::Component".to_string()],
         "a library import stays unbound"
     );
-    // A call inside the class still binds on its lexical scope.
+    // A bare call inside the class is a call on the current instance (the
+    // `self` shape, S-516): it binds the class's own `helper`.
     assert_eq!(
         edges_from(rt, "svc/src/main/kotlin/com/x/svc/Svc.kt", EdgeKind::Calls),
         vec!["svc/src/main/kotlin/com/x/svc/Svc.kt:helper:function".to_string()]
