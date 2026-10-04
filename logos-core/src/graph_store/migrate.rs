@@ -2826,6 +2826,15 @@ mod tests {
 
         apply_migrations_from(&mut conn, &MIGRATIONS[..25]).unwrap();
         assert_eq!(current_version(&conn).unwrap(), 25, "24 → 25, exactly one step");
+        // Read at v25, so a later migration's column is never counted as this one's.
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        let tail: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 2")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
         // Forward-only: re-running the full ledger on a v25 store never re-applies migration 25.
         apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
         let recorded: i64 = conn
@@ -2834,7 +2843,6 @@ mod tests {
         assert_eq!(recorded, 1, "migration 25 is recorded once and never re-applied");
 
         // The two columns are appended NULL; every other column is untouched.
-        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
         let (old_columns, new_columns): (Vec<Vec<String>>, Vec<Vec<String>>) = nodes_after
             .iter()
             .map(|row| {
@@ -2850,13 +2858,6 @@ mod tests {
         );
         assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
         assert_eq!(read_ledger(&conn), ledger_before, "the reference ledger is unchanged");
-        let tail: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 2")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
         assert_eq!(tail, ["body_tokens", "has_body"], "the appended columns are the two S-500 adds");
 
         // The re-extraction trigger: every file's hash is cleared, nothing else.
@@ -3034,14 +3035,15 @@ mod tests {
 
         apply_migrations_from(&mut conn, &MIGRATIONS[..27]).unwrap();
         assert_eq!(current_version(&conn).unwrap(), 27, "26 → 27, exactly one step");
+        // Read at v27, so a later migration's column or hash reset is never counted as this one's.
+        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are byte-for-byte unchanged");
+        assert_eq!(read_table(&conn, "files", "id"), files_before, "files are byte-for-byte unchanged");
         apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
         let recorded: i64 = conn
             .query_row("SELECT count(*) FROM schema_versions WHERE version = 27", [], |r| r.get(0))
             .unwrap();
         assert_eq!(recorded, 1, "migration 27 is recorded once and never re-applied");
 
-        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are byte-for-byte unchanged");
-        assert_eq!(read_table(&conn, "files", "id"), files_before, "files are byte-for-byte unchanged");
         assert_eq!(read_ledger(&conn), ledger_before, "the ledger is byte-for-byte unchanged");
         let rows: i64 = conn
             .query_row("SELECT count(*) FROM persist_failures", [], |r| r.get(0))
@@ -3059,6 +3061,88 @@ mod tests {
         assert!(insert("src/never_indexed.go", 1).is_err(), "a path is recorded once");
         assert!(insert("src/other.go", 2).is_err(), "stale admits 0 or 1 only");
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 27");
+    }
+
+    /// S-493 / CR-159 / FR-RS-11: a populated v27 store upgrades to v28 forward
+    /// only. `nodes` gains `self_type` in place — `NULL` on every existing row
+    /// until re-extraction — while every pre-existing column of `nodes`, and all
+    /// of `edges`, `shingles` and the ledger, is byte-for-byte unchanged. Every
+    /// `files.content_hash` is cleared, the migration-25 re-extraction trigger.
+    #[test]
+    fn migration_28_adds_the_self_type_column_and_triggers_reextraction() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..27]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/roster.rs', 'rust', 'h-rs'),
+                 (2, 'docs/guide.md', 'markdown', 'h-md');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local a'), (2, 'local b');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, exported,
+                                cyclomatic_complexity, line_count, fingerprint,
+                                max_nesting_depth, is_test, body, has_body, body_tokens) VALUES
+                 (10, 1, 8,  'helper',   1, 0, 3,    4,    'fp', 1,    0, NULL, 1, 12),
+                 (20, 2, 19, 'Overview', 2, 0, NULL, NULL, NULL, NULL, 0, 'the body prose', NULL, NULL);
+             INSERT INTO edges (source, target, kind, payload) VALUES (20, 10, 11, 'doc-ref');
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111), (10, 222);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local a', 'Self::helper', NULL, 1, 2, 42, 0, NULL);",
+        )
+        .unwrap();
+        let (nodes_before, edges_before, shingles_before) = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+        assert!(
+            conn.query_row("SELECT self_type FROM nodes WHERE id = 10", [], |r| r.get::<_, Option<String>>(0))
+                .is_err(),
+            "self_type does not exist at v27"
+        );
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..28]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 28, "27 → 28, exactly one step");
+        // Read at v28, so a later migration's column is never counted as this one's.
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        let tail: String = conn
+            .query_row("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        // Forward-only: re-running the full ledger on a v28 store never re-applies migration 28.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 28", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 28 is recorded once and never re-applied");
+
+        // The one column is appended NULL; every other column is untouched.
+        for (old, new) in nodes_before.iter().zip(&nodes_after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one nodes column added");
+            assert_eq!(&new[..old.len()], &old[..], "every pre-v28 nodes column is byte-for-byte unchanged");
+            assert_eq!(new[old.len()], "NULL", "self_type is NULL on every existing row until re-extraction");
+        }
+        assert_eq!(nodes_after.len(), nodes_before.len());
+        assert_eq!(tail, "self_type", "the appended column is the S-493 add");
+        assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
+        assert_eq!(read_ledger(&conn), ledger_before, "the reference ledger is unchanged");
+
+        // The re-extraction trigger: every file's hash is cleared, nothing else.
+        let files: Vec<(i64, String, Option<String>, Option<String>)> = conn
+            .prepare("SELECT id, path, language, content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                (1, "src/roster.rs".to_string(), Some("rust".to_string()), None),
+                (2, "docs/guide.md".to_string(), Some("markdown".to_string()), None),
+            ],
+            "every content_hash is cleared, so the next scan re-extracts the file; ids, \
+             paths and languages stay"
+        );
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (an in-place ADD COLUMN, NFR-RA-09)");
+        conn.execute("UPDATE nodes SET self_type = 'WorkspaceRoster' WHERE id = 10", [])
+            .expect("a self type is admitted");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 28");
     }
 
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —

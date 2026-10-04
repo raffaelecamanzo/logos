@@ -60,6 +60,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (25, MIGRATION_25),
     (26, MIGRATION_26),
     (27, MIGRATION_27),
+    (28, MIGRATION_28),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2443,6 +2444,49 @@ CREATE TABLE persist_failures (
     reason TEXT NOT NULL,
     stale  INTEGER NOT NULL CHECK (stale IN (0,1))
 ) STRICT;
+";
+
+/// Migration 28 — a method's **self type**, recorded beside its node (S-493,
+/// [CR-159], [FR-RS-11]).
+///
+/// One nullable column added **in place** on `nodes` (the migration-25 shape —
+/// no rebuild, every existing row and id untouched, the FTS index, its triggers
+/// and the `annotations` view unaffected):
+///
+/// **`nodes.self_type`** — the base type name of the type a method belongs to,
+/// as its plugin's `symbols` query declares it with a `@symbol.self_type`
+/// capture: a Rust impl method's enclosing `impl<..> T<..>` / `impl Trait for T`
+/// → `T`. `NULL` on every node no query gives a self type — a free function, a
+/// trait's default method, every node of a language whose query declares none.
+/// **Plugin-agnostic by construction**: the column names no language, and a
+/// second language fills it by adding the capture to its own query (Go's
+/// receiver base type, S-509) with no further migration. The binder reads it to
+/// bind a `self.m()` / `Self::m()` call through the caller's own type; method
+/// symbols are unchanged ([ADR-07]).
+///
+/// `NULL` on every row until its file is re-extracted, and **re-extraction is
+/// triggered here** exactly as migration 25 does it: every `files.content_hash`
+/// is cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one and records the fresh hash. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_28_adds_the_self_type_column_and_triggers_reextraction` in
+/// [`super::migrate`].
+///
+/// [CR-159]: ../../../../docs/requests/CR-159-rust-self-calls-bind-through-the-enclosing-impl.md
+/// [FR-RS-11]: ../../../../docs/specs/requirements/FR-RS-11.md
+/// [ADR-07]: ../../../../docs/specs/architecture/decisions/ADR-07.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_28: &str = "\
+-- 1. A method's self type (FR-RS-11): the base type name its plugin query
+-- declares. NULL on every node with none, and on rows indexed before this
+-- migration.
+ALTER TABLE nodes ADD COLUMN self_type TEXT;
+
+-- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column.
+UPDATE files SET content_hash = NULL;
 ";
 
 #[cfg(test)]

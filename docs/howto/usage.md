@@ -167,7 +167,13 @@ by each relation's payload token), read live from the graph.
 >   a bare `x.map()` to a lone same-named `fn map` in another module is gated off
 >   for the method form ([CR-066](../requests/CR-066-receiver-method-overbinding.md),
 >   [FR-RS-06](../specs/requirements/FR-RS-06.md)), so these calls no longer
->   fabricate cross-module `Calls` edges — they stay in `unresolved_refs`. A
+>   fabricate cross-module `Calls` edges — they stay in `unresolved_refs`. One
+>   receiver *is* known: a Rust call on exactly `self` inside an `impl` method
+>   (`self.helper()`, like a written `Self::helper()`) has the impl's own type,
+>   so it binds to the one `helper` that type's impls define in the caller's
+>   crate — and stays unbound, retried on sync, when that type defines none or
+>   two ([FR-RS-11](../specs/requirements/FR-RS-11.md)). `self.field.helper()`,
+>   `other.helper()` and calls in a trait's default methods keep the rule above. A
 >   bare-path call (`foo()`, single segment) is complementary: when a free
 >   function and same-named associated methods both exist at the call scope, the
 >   free function wins the tie ([CR-068](../requests/CR-068-reachability-binding-precision.md)

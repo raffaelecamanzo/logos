@@ -12,12 +12,33 @@
 
 ; v1 policy: every `function_item` is captured as `@symbol.function`, including
 ; methods defined inside an `impl` block. The extraction engine maps these to
-; NodeKind::Function (not Method) because a tree-sitter query cannot express
-; "function_item NOT inside impl_item", and associating a method with its
-; receiver type is a resolution-engine concern (S-007 / S-011). NodeKind::Method
-; is reserved for languages/passes that can bind a method to its type.
+; NodeKind::Function because a tree-sitter query cannot express "function_item
+; NOT inside impl_item"; it re-kinds an impl method as Method at emission
+; (CR-068 Part B). The impl's self type rides beside the method's node, never in
+; its symbol — the `@symbol.self_type` pattern after this one (S-493).
 (function_item
   name: (identifier) @symbol.function)
+
+; A method's self type (S-493, FR-RS-11): an `impl` block's directly nested
+; `function_item` is captured once more, with `@symbol.self_type` on the base
+; type name of the block's self type — the last path segment, generics outside
+; the capture: `impl<M> A<M>` → `A`, `impl fmt::Display for crate::x::Y` → `Y`,
+; `impl<T> a::B<T>` → `B`. The extraction engine gives the self type to the
+; declaration the same match captures (and takes the declaration once, whichever
+; pattern names it first), so symbols and kinds are unchanged; it is persisted
+; beside the node (`nodes.self_type`) for the binder's `self.m()` / `Self::m()`
+; binding. A self type of any other shape — `&T`, `[T]`, `(A, B)`, `dyn T` —
+; records none, and its methods' self calls resolve as before.
+(impl_item
+  type: [
+    (type_identifier) @symbol.self_type
+    (scoped_type_identifier name: (type_identifier) @symbol.self_type)
+    (generic_type type: (type_identifier) @symbol.self_type)
+    (generic_type type: (scoped_type_identifier name: (type_identifier) @symbol.self_type))
+  ]
+  body: (declaration_list
+    (function_item
+      name: (identifier) @symbol.function)))
 
 (struct_item
   name: (type_identifier) @symbol.struct)

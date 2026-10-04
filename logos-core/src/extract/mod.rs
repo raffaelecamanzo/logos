@@ -135,6 +135,25 @@ use symbol::{build_symbol, descriptor_family, descriptor_for, path_segments, Des
 /// The segment after it names a [`NodeKind`] by its [`NodeKind::as_str`] form.
 const SYMBOL_CAPTURE_GROUP: &str = "symbol";
 
+/// The `symbols`-query capture naming the **self type** of the declaration the
+/// same match captures (S-493, [FR-RS-11]): the captured node's text is the base
+/// type name, generics and path already left outside the capture by the query's
+/// own pattern (`impl<M> a::A<M>` → `A`). A plugin opts in by adding the capture
+/// to its query; no language is named here. Not a [`NodeKind`], so
+/// [`kind_for_capture`] never mistakes it for a declaration.
+///
+/// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+const SELF_TYPE_CAPTURE: &str = "symbol.self_type";
+
+/// The `references`-query capture naming a method call whose receiver is
+/// **exactly the caller's own instance** — Rust's `self.m()` (S-493,
+/// [FR-RS-11]). The captured node is the method name, as for `@ref.method`; a
+/// query declaring it keeps its plain `@ref.method` pattern off such calls, so
+/// one call is captured once.
+///
+/// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+const SELF_RECEIVER_METHOD_CAPTURE: &str = "ref.method.self";
+
 /// One source file handed to the extractor.
 #[derive(Debug, Clone)]
 pub struct FileInput {
@@ -247,6 +266,16 @@ pub struct NodeFact {
     ///
     /// [FR-EX-09]: ../../../docs/specs/requirements/FR-EX-09.md
     pub shingles: Vec<u64>,
+    /// The base type name of the type this declaration is a method of, when its
+    /// plugin's `symbols` query declares one with a `@symbol.self_type` capture
+    /// in the same match (S-493, [FR-RS-11]) — a Rust impl method's
+    /// `impl<..> T<..>` / `impl Trait for T` → `T`. `None` for every other node.
+    /// Recorded beside the symbol, never in it ([ADR-07]): the binder reads it
+    /// to bind a `self.m()` / `Self::m()` call through the caller's own type.
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    /// [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
+    pub self_type: Option<String>,
 }
 
 /// A graph relationship produced by extraction.
@@ -373,6 +402,9 @@ struct Decl<'tree> {
     /// Ordinal among same-name siblings of one [`DescriptorFamily`], in
     /// canonical sort order. Assigned in [`assign_ordinals`].
     ordinal: u32,
+    /// The self type a `@symbol.self_type` capture in a match naming this
+    /// declaration gives it (S-493). Never part of the symbol or the ordinal.
+    self_type: Option<String>,
 }
 
 /// Extract one file with an explicit plugin, allocating a fresh parser.
@@ -628,6 +660,7 @@ fn extract_one(
                 // no shingles (CR-005).
                 max_nesting_depth: None,
                 shingles: Vec::new(),
+                self_type: None,
             });
             Some(sym)
         }
@@ -718,6 +751,7 @@ fn extract_one(
             } else {
                 Vec::new()
             },
+            self_type: decl.self_type.clone(),
         });
 
         // A Contains edge links the enclosing scope to this declaration; both
@@ -1368,6 +1402,14 @@ fn file_module_name(path_segments: &[&str]) -> String {
 /// a language whose query names its receiver shapes (`@ref.receiver.*`, Java),
 /// a call whose receiver's type the file proves is recorded type-qualified,
 /// `T::<name>` in Path form, in place of its bare row ([`receiver`], S-467).
+///
+/// A method call the query captures as [`SELF_RECEIVER_METHOD_CAPTURE`] — its
+/// receiver is exactly the caller's own instance, `self.m()` — is recorded as
+/// the Path-form `Self::m` when its enclosing declaration has a recorded self
+/// type ([`Decl::self_type`], S-493): the same row a written `Self::m()` records,
+/// which the binder resolves through that self type. Inside a declaration with
+/// none — a trait's default method, a free function — it is recorded exactly as
+/// any other method call.
 fn collect_refs(
     query: &Query,
     root: Node<'_>,
@@ -1382,20 +1424,27 @@ fn collect_refs(
         .enumerate()
         .map(|(i, d)| (d.node.id(), i))
         .collect();
-    // The symbol of the innermost enclosing captured declaration, or the file
-    // module at file scope. A declaration whose own symbol failed to build
-    // defers to the next enclosing scope.
-    let enclosing_symbol = |node: Node<'_>| -> Option<LogosSymbol> {
+    // The innermost enclosing captured declaration whose symbol built, if any.
+    // A declaration whose own symbol failed to build defers to the next
+    // enclosing scope.
+    let enclosing_decl = |node: Node<'_>| -> Option<usize> {
         let mut ancestor = node.parent();
         while let Some(n) = ancestor {
             if let Some(&idx) = id_to_idx.get(&n.id()) {
-                if let Some(sym) = &symbols[idx] {
-                    return Some(sym.clone());
+                if symbols[idx].is_some() {
+                    return Some(idx);
                 }
             }
             ancestor = n.parent();
         }
-        file_module.cloned()
+        None
+    };
+    // The symbol of that declaration, or the file module at file scope.
+    let enclosing_symbol = |node: Node<'_>| -> Option<LogosSymbol> {
+        match enclosing_decl(node) {
+            Some(idx) => symbols[idx].clone(),
+            None => file_module.cloned(),
+        }
     };
     // The declarations a declared type belongs to, when its node sits beside
     // captured declarators rather than inside one — a Java field's type is a
@@ -1427,6 +1476,11 @@ fn collect_refs(
         for cap in m.captures {
             let node = cap.node;
             let capture = capture_names[cap.index as usize];
+            // A `_`-prefixed capture is a predicate operand (`@_receiver`),
+            // never a reference.
+            if capture.starts_with('_') {
+                continue;
+            }
             // A receiver marker records no row of its own: it is read before
             // the per-row scope walk below, which it does not need.
             if receiver::is_marker(capture) {
@@ -1474,9 +1528,26 @@ fn collect_refs(
                         relation: None,
                     });
                 }
-                "ref.method" => {
+                "ref.method" | SELF_RECEIVER_METHOD_CAPTURE => {
                     let name = text.trim();
                     if name.is_empty() {
+                        continue;
+                    }
+                    // `self.m()` inside a method whose self type is recorded
+                    // (S-493): the caller's own type is the receiver's, so the
+                    // row is `Self::m`, bound through that type.
+                    let caller_has_self_type = capture == SELF_RECEIVER_METHOD_CAPTURE
+                        && enclosing_decl(node).is_some_and(|i| decls[i].self_type.is_some());
+                    if caller_has_self_type {
+                        out.push(RefFact {
+                            source: source_symbol,
+                            target: format!("{}::{name}", crate::resolve::SELF_TYPE_HEAD),
+                            alias: None,
+                            form: RefForm::Path,
+                            kind: EdgeKind::Calls,
+                            line,
+                            relation: None,
+                        });
                         continue;
                     }
                     // A member call whose receiver is an imported module — a Go
@@ -2298,6 +2369,13 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
 /// the file's `package` statement when its grammar's query names one (S-472),
 /// and the declarations a parse-error region cost the file ([FR-EX-30]).
 ///
+/// A [`SELF_TYPE_CAPTURE`] gives its text to every declaration captured in the
+/// **same match** (S-493). It is gathered by declaration node and applied after
+/// the walk, so it holds whichever pattern captured the declaration first — a
+/// declaration another, self-type-less pattern also names (Rust's plain
+/// `function_item` pattern) is still taken once, by the first-wins rule, and
+/// still carries its self type.
+///
 /// [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
 fn collect_decls<'t>(
     query: &Query,
@@ -2317,9 +2395,18 @@ fn collect_decls<'t>(
     let mut nameless: HashSet<usize> = HashSet::new();
     let mut damage = ParseDamage::default();
     let mut package: Option<String> = None;
+    // declaration node id → the self type its match declares (S-493).
+    let mut self_types: HashMap<usize, String> = HashMap::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
+        let self_type = m
+            .captures
+            .iter()
+            .find(|c| capture_names[c.index as usize] == SELF_TYPE_CAPTURE)
+            .and_then(|c| c.node.utf8_text(source).ok())
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
         for cap in m.captures {
             let capture = capture_names[cap.index as usize];
             if declared_types::note_package(&mut package, capture, cap.node, source) {
@@ -2341,6 +2428,11 @@ fn collect_decls<'t>(
                 nameless.insert(decl_node.id());
                 continue;
             }
+            if let Some(self_type) = self_type {
+                self_types
+                    .entry(decl_node.id())
+                    .or_insert_with(|| self_type.to_string());
+            }
             if !seen_decls.insert(decl_node.id()) {
                 continue; // already captured by another pattern — keep the first
             }
@@ -2357,8 +2449,12 @@ fn collect_decls<'t>(
                 end_line: decl_node.end_position().row as u32 + 1,
                 parent: None,
                 ordinal: 0,
+                self_type: None,
             });
         }
+    }
+    for decl in &mut decls {
+        decl.self_type = self_types.remove(&decl.node.id());
     }
     damage.skipped = nameless.difference(&seen_decls).count();
     (decls, package, damage)

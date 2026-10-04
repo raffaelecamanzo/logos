@@ -304,6 +304,12 @@ pub struct NewNode<'a> {
     /// The normalized token count of that body (S-500) — the input to the
     /// exact-duplicate token floor (S-501); `Function`/`Method` nodes only.
     pub body_tokens: Option<i64>,
+    /// The base type name of the type this method belongs to, as its plugin
+    /// query declares it (S-493, [FR-RS-11]) — the `nodes.self_type` column. `None`
+    /// for every node no query gives a self type.
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    pub self_type: Option<&'a str>,
 }
 
 impl<'a> NewNode<'a> {
@@ -328,6 +334,7 @@ impl<'a> NewNode<'a> {
             max_nesting_depth: None,
             has_body: None,
             body_tokens: None,
+            self_type: None,
         }
     }
 }
@@ -1751,6 +1758,21 @@ pub trait GraphStore {
         Ok(Vec::new())
     }
 
+    /// The `(node, self type)` of every node carrying a recorded self type
+    /// (S-493, [FR-RS-11]) — the `nodes.self_type` column, ordered by node id.
+    ///
+    /// The binder's companion read beside [`all_nodes`](GraphStore::all_nodes),
+    /// whose [`NodeRow`] does not carry the column — the
+    /// [`proto_service_bodies`](GraphStore::proto_service_bodies) shape. The
+    /// default is empty — only the SQLite store implements it — so a non-SQLite
+    /// or test store binds no `self.m()` call through a self type rather than
+    /// failing to compile.
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    fn node_self_types(&self) -> Result<Vec<(NodeId, String)>> {
+        Ok(Vec::new())
+    }
+
     /// Stream **every** edge in the graph, ordered by `(source, target, kind)`.
     ///
     /// The relationship half of the hydration read: combined with
@@ -2923,6 +2945,18 @@ impl GraphStore for SqliteGraphStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting all nodes for hydration")?;
         raws.into_iter().map(raw_to_node).collect()
+    }
+
+    fn node_self_types(&self) -> Result<Vec<(NodeId, String)>> {
+        // ORDER BY id keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, self_type FROM nodes WHERE self_type IS NOT NULL ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((NodeId(row.get(0)?), row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting node self types for the binder")?;
+        Ok(rows)
     }
 
     fn proto_service_bodies(&self) -> Result<Vec<(LogosSymbol, String)>> {
@@ -5181,8 +5215,9 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
     conn.execute(
         "INSERT INTO nodes (symbol_id, kind, name, file_id, start_line, end_line, \
                             derived, exported, cyclomatic_complexity, line_count, fingerprint, \
-                            test_evidence, body, max_nesting_depth, has_body, body_tokens) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+                            test_evidence, body, max_nesting_depth, has_body, body_tokens, \
+                            self_type) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
          ON CONFLICT(symbol_id) DO UPDATE SET \
              kind = excluded.kind, \
              name = excluded.name, \
@@ -5198,7 +5233,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
              body = excluded.body, \
              max_nesting_depth = excluded.max_nesting_depth, \
              has_body = excluded.has_body, \
-             body_tokens = excluded.body_tokens",
+             body_tokens = excluded.body_tokens, \
+             self_type = excluded.self_type",
         rusqlite::params![
             node.symbol_id,
             node.kind.as_i32(),
@@ -5216,6 +5252,7 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
             node.max_nesting_depth,
             node.has_body.map(i64::from),
             node.body_tokens,
+            node.self_type,
         ],
     )
     .context("upserting node")?;
