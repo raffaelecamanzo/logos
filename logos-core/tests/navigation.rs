@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use logos_core::model::{EdgeKind, NodeKind};
-use logos_core::models::navigation::EdgeDirection;
+use logos_core::models::navigation::{EdgeDirection, SymbolRef};
 use logos_core::Engine;
 use tempfile::TempDir;
 
@@ -1927,4 +1927,149 @@ fn a_bare_name_prefers_a_code_module_to_a_config_key_of_the_same_name() {
         "the config key is named as an alternative: {:?}",
         info.alternatives
     );
+}
+
+// ── FR-NV-15 / HF-1: callers, callees, impact and explore resolve the same way ─
+
+/// What each of the four tools resolved a bare name to, and what it passed over.
+/// One row per tool, so a fixture asserts the same contract across all of them.
+fn resolutions(engine: &Engine, name: &str) -> [(&'static str, Option<NodeKind>, Vec<NodeKind>); 4] {
+    let kinds = |alts: &[SymbolRef]| alts.iter().map(|a| a.kind).collect::<Vec<_>>();
+    let callers = engine.callers(name, None);
+    let callees = engine.callees(name, None);
+    let impact = engine.impact(name, None);
+    let explore = engine.explore(name, None);
+    [
+        ("callers", callers.resolved.as_ref().map(|r| r.kind), kinds(&callers.alternatives)),
+        ("callees", callees.resolved.as_ref().map(|r| r.kind), kinds(&callees.alternatives)),
+        ("impact", impact.resolved.as_ref().map(|r| r.kind), kinds(&impact.alternatives)),
+        ("explore", explore.anchor.as_ref().map(|r| r.kind), kinds(&explore.alternatives)),
+    ]
+}
+
+#[test]
+fn the_four_tools_resolve_a_class_and_module_bare_name_to_the_class_and_list_the_module() {
+    let tmp = php_psr4_fixture();
+    let engine = indexed_engine(&tmp);
+
+    for (tool, resolved, alternatives) in resolutions(&engine, "Utils") {
+        assert_eq!(resolved, Some(NodeKind::Class), "{tool}: the class, not the module");
+        assert_eq!(alternatives, [NodeKind::Module], "{tool}: the module is passed over");
+    }
+}
+
+#[test]
+fn the_four_tools_resolve_a_code_and_doc_bare_name_to_the_code_and_list_the_doc() {
+    let tmp = code_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+
+    for (tool, resolved, alternatives) in resolutions(&engine, "Widget") {
+        assert_eq!(resolved, Some(NodeKind::Function), "{tool}: the code, not the doc section");
+        assert_eq!(alternatives, [NodeKind::DocSection], "{tool}: the doc section is passed over");
+    }
+}
+
+#[test]
+fn the_four_tools_leave_scip_symbols_and_unique_names_exact_with_no_alternatives_key() {
+    let tmp = php_psr4_fixture();
+    let engine = indexed_engine(&tmp);
+    let module_symbol = engine.node("Utils", false).alternatives[0].symbol.clone();
+
+    // A SCIP symbol is exact: the module's own symbol reaches the module, never the
+    // same-named class, and names nothing it passed over.
+    for (tool, resolved, alternatives) in resolutions(&engine, &module_symbol) {
+        assert_eq!(resolved, Some(NodeKind::Module), "{tool}: exact symbol reaches the module");
+        assert!(alternatives.is_empty(), "{tool}: {alternatives:?}");
+    }
+
+    // A name only one node carries is unchanged, and none of the four payloads
+    // carries an `alternatives` key at all.
+    let wires = [
+        serde_json::to_value(engine.callers("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.callees("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.impact("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.explore("canonicalize", None)).unwrap(),
+    ];
+    for wire in wires {
+        assert!(wire.get("alternatives").is_none(), "{wire}");
+    }
+    let ambiguous = serde_json::to_value(engine.callers("Utils", None)).unwrap();
+    assert_eq!(ambiguous["alternatives"][0]["kind"], "module", "{ambiguous}");
+}
+
+#[test]
+fn an_unknown_bare_name_names_no_alternatives_and_still_suggests() {
+    let tmp = code_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+
+    // A prefix of a real name matches nothing exactly, so it is "unknown" — and the
+    // miss still carries "did you mean" names rather than alternatives.
+    for (tool, resolved, alternatives) in resolutions(&engine, "Widg") {
+        assert_eq!(resolved, None, "{tool}");
+        assert!(alternatives.is_empty(), "{tool}");
+    }
+    assert!(!engine.callers("Widg", None).suggestions.is_empty());
+}
+
+/// `Widget` calls `helper` and is called by `use_it`; a doc section is also named
+/// `Widget` and has no call edges. Whichever node a tool resolves to, the edges it
+/// reports must be that node's — so a winner carrying the passed-over node's
+/// (empty) edge set is distinguishable.
+fn code_with_edges_and_doc_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/lib.rs",
+        "pub fn Widget() {\n    helper();\n}\n\nfn helper() {}\n\npub fn use_it() {\n    Widget();\n}\n",
+    );
+    write(tmp.path(), "docs/guide.md", "# Guide\n\n## Widget\n\nWhat a widget is.\n");
+    tmp
+}
+
+#[test]
+fn the_four_tools_report_the_resolved_nodes_own_edges_not_a_passed_over_nodes() {
+    let tmp = code_with_edges_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+    let names = |refs: &[SymbolRef]| refs.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+
+    let callers = engine.callers("Widget", None);
+    assert_eq!(callers.resolved.as_ref().map(|r| r.kind), Some(NodeKind::Function));
+    assert_eq!((callers.total, names(&callers.callers)), (1, vec!["use_it".to_string()]));
+    let callees = engine.callees("Widget", None);
+    assert_eq!((callees.total, names(&callees.callees)), (1, vec!["helper".to_string()]));
+
+    let impact = engine.impact("Widget", None);
+    let upstream: Vec<_> = impact.upstream.iter().map(|e| e.symbol.name.as_str()).collect();
+    let downstream: Vec<_> = impact.downstream.iter().map(|e| e.symbol.name.as_str()).collect();
+    assert!(upstream.contains(&"use_it"), "{upstream:?}");
+    assert!(downstream.contains(&"helper"), "{downstream:?}");
+
+    // `explore` walks the neighbourhood of the node it anchored on.
+    let explore = engine.explore("Widget", None);
+    assert_eq!(explore.anchor.as_ref().map(|a| a.kind), Some(NodeKind::Function));
+    let seen: Vec<_> = explore
+        .files
+        .iter()
+        .flat_map(|f| f.symbols.iter().map(|s| s.symbol.name.as_str()))
+        .collect();
+    assert!(seen.contains(&"use_it") && seen.contains(&"helper"), "{seen:?}");
+
+    // The passed-over doc section, reached by its own symbol, has no call edges.
+    let doc = callers.alternatives[0].symbol.clone();
+    assert_eq!(callers.alternatives[0].kind, NodeKind::DocSection);
+    assert_eq!(engine.callers(&doc, None).total, 0);
+}
+
+#[test]
+fn an_explore_query_that_matches_no_name_exactly_anchors_by_full_text_and_names_no_alternatives() {
+    let tmp = code_and_doc_fixture();
+    let engine = indexed_engine(&tmp);
+
+    // Not a node name, so the exact lookup passes over nothing; the full-text
+    // fallback still finds an anchor — and names no alternatives for it.
+    let explore = engine.explore("Widg*", None);
+    assert!(explore.anchor.is_some(), "the full-text fallback anchors: {explore:?}");
+    assert!(explore.alternatives.is_empty(), "{:?}", explore.alternatives);
+    let wire = serde_json::to_value(&explore).unwrap();
+    assert!(wire.get("alternatives").is_none(), "{wire}");
 }

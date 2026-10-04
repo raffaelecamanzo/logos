@@ -423,16 +423,17 @@ pub(crate) fn explore(
     let max_files = max_files.unwrap_or(DEFAULT_MAX_FILES);
 
     // Anchor resolution is forgiving (explore is the fuzzy tool): exact
-    // symbol/name first, else the best FTS match.
-    let (anchor, suggestions) = runtime.submit_read(|store| {
-        if let Some(row) = resolve_symbol(store, query)? {
-            return Ok((Some(row), Vec::new()));
+    // symbol/name first — a bare name preferring code, and naming what it passed
+    // over ([FR-NV-15]) — else the best FTS match, which passes over nothing.
+    let (anchor, passed_over, suggestions) = runtime.submit_read(|store| {
+        if let Some((row, passed_over)) = resolve_preferring_code(store, query)? {
+            return Ok((Some(row), passed_over, Vec::new()));
         }
         let mut hits = store.search(query, None, 1)?;
         if let Some(row) = hits.pop() {
-            return Ok((Some(row), Vec::new()));
+            return Ok((Some(row), Vec::new(), Vec::new()));
         }
-        Ok((None, store.suggest(query, SUGGEST_LIMIT)?))
+        Ok((None, Vec::new(), store.suggest(query, SUGGEST_LIMIT)?))
     })?;
     let Some(anchor) = anchor else {
         return Ok(ExploreResult {
@@ -506,6 +507,7 @@ pub(crate) fn explore(
         files,
         total_files,
         suggestions: Vec::new(),
+        alternatives: passed_over.iter().map(symbol_ref).collect(),
         warnings: Vec::new(),
     })
 }
@@ -642,17 +644,17 @@ pub(crate) fn callers(
     symbol: &str,
     limit: Option<usize>,
 ) -> Result<CallersResult> {
-    let (resolved, total, rows, suggestions) =
-        adjacency(engine, symbol, limit, AdjacencyKind::Callers)?;
+    let page = adjacency(engine, symbol, limit, AdjacencyKind::Callers)?;
     let mut warnings = Vec::new();
     let resolution_denominator =
-        symbol_denominator(engine.nav_runtime()?, resolved.as_ref(), &mut warnings);
+        symbol_denominator(engine.nav_runtime()?, page.resolved.as_ref(), &mut warnings);
     Ok(CallersResult {
         query: symbol.to_string(),
-        resolved,
-        total,
-        callers: rows,
-        suggestions,
+        resolved: page.resolved,
+        total: page.total,
+        callers: page.rows,
+        suggestions: page.suggestions,
+        alternatives: page.alternatives,
         resolution_denominator,
         warnings,
     })
@@ -664,17 +666,17 @@ pub(crate) fn callees(
     symbol: &str,
     limit: Option<usize>,
 ) -> Result<CalleesResult> {
-    let (resolved, total, rows, suggestions) =
-        adjacency(engine, symbol, limit, AdjacencyKind::Callees)?;
+    let page = adjacency(engine, symbol, limit, AdjacencyKind::Callees)?;
     let mut warnings = Vec::new();
     let resolution_denominator =
-        symbol_denominator(engine.nav_runtime()?, resolved.as_ref(), &mut warnings);
+        symbol_denominator(engine.nav_runtime()?, page.resolved.as_ref(), &mut warnings);
     Ok(CalleesResult {
         query: symbol.to_string(),
-        resolved,
-        total,
-        callees: rows,
-        suggestions,
+        resolved: page.resolved,
+        total: page.total,
+        callees: page.rows,
+        suggestions: page.suggestions,
+        alternatives: page.alternatives,
         resolution_denominator,
         warnings,
     })
@@ -691,13 +693,18 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
     // The same pooled read resolves the symbol AND collects the doc sections
     // referencing it — the doc-aware dimension of impact (FR-NV-10): which docs
     // a change to the symbol may oblige updating. Empty when none point at it.
-    let (resolved, docs, suggestions) =
-        runtime.submit_read(|store| match resolve_symbol(store, symbol)? {
-            Some(row) => {
+    let (resolved, passed_over, docs, suggestions) =
+        runtime.submit_read(|store| match resolve_preferring_code(store, symbol)? {
+            Some((row, passed_over)) => {
                 let docs = doc_links(store.neighbours_in(row.id)?, Endpoint::DocSource);
-                Ok((Some(row), docs, Vec::new()))
+                Ok((Some(row), passed_over, docs, Vec::new()))
             }
-            None => Ok((None, Vec::new(), store.suggest(symbol, SUGGEST_LIMIT)?)),
+            None => Ok((
+                None,
+                Vec::new(),
+                Vec::new(),
+                store.suggest(symbol, SUGGEST_LIMIT)?,
+            )),
         })?;
     let mut warnings = Vec::new();
     let Some(row) = resolved else {
@@ -737,6 +744,7 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
         docs_label: DOCS_LABEL.to_string(),
         docs,
         suggestions: Vec::new(),
+        alternatives: passed_over.iter().map(symbol_ref).collect(),
         resolution_denominator,
         warnings,
     })
@@ -876,12 +884,13 @@ pub(crate) fn impact_intersection(
             });
             continue;
         };
-        // A bare name matching several symbols resolves to one of them
-        // arbitrarily (`resolve_symbol`'s lowest-id rule). For `impact` that is
-        // harmless — the caller reads the resolved node back. Here the answer is
-        // a *scheduling verdict*, and silently picking the wrong `new` would
-        // manufacture the false `safe_parallel` this query exists to prevent, so
-        // the ambiguity is said out loud ([NFR-CC-04]).
+        // A bare name matching several symbols resolves to the lowest id
+        // (`resolve_counting_candidates`); FR-NV-15's code-first preference covers
+        // `impact`, not this tool. `impact` names what it passed over and the
+        // caller reads the resolved node back. Here the answer is a *scheduling
+        // verdict*, and silently picking the wrong `new` would manufacture the
+        // false `safe_parallel` this query exists to prevent, so the ambiguity is
+        // said out loud ([NFR-CC-04]).
         warnings.extend(ambiguity_warning(&text, candidates, row.symbol.as_str()));
         rows[index].resolved.push(symbol_ref(&row));
         match view.index_of(row.symbol.as_str()) {
@@ -1587,11 +1596,15 @@ fn precedent_shell(query: &str) -> PrecedentResult {
 
 /// Resolve a precedent target: a symbol first, then a project-relative file.
 ///
-/// Symbol-first keeps the resolution rule identical to every other navigation
-/// tool ([FR-NV-04], [FR-NV-05]); the file fallback runs only when nothing
-/// answers to the text as a symbol, and the two vocabularies do not overlap in
-/// practice (a canonical symbol is not a path). `./` prefixes normalise to the
-/// stored project-relative form, as in [`affected`].
+/// A bare name resolves by lowest node id, as it does for `impact_intersection`
+/// — not code-first as in the five tools of [FR-NV-15] — and `precedent` says so
+/// through the [NFR-CC-04] ambiguity warning. The file fallback runs only when
+/// nothing answers to the text as a symbol, and the two vocabularies do not
+/// overlap in practice (a canonical symbol is not a path). `./` prefixes
+/// normalise to the stored project-relative form, as in [`affected`].
+///
+/// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn resolve_precedent_target(store: &dyn GraphStore, target: &str) -> Result<PrecedentTarget> {
     if let Some((row, candidates)) = resolve_counting_candidates(store, target)? {
         return Ok(PrecedentTarget::Symbol { row, candidates });
@@ -2764,9 +2777,22 @@ fn doc_links(neighbours: Vec<(EdgeKind, NodeRow)>, keep: Endpoint) -> Vec<TraceL
     links
 }
 
-/// The shared payload of an adjacency query:
-/// `(resolved node, pre-limit total, page, suggestions)`.
-type AdjacencyPage = (Option<SymbolRef>, u32, Vec<SymbolRef>, Vec<String>);
+/// The shared payload of an adjacency query.
+#[derive(Default)]
+struct AdjacencyPage {
+    /// The node the query resolved to.
+    resolved: Option<SymbolRef>,
+    /// The other nodes a bare name matched and the lookup passed over ([FR-NV-15]).
+    ///
+    /// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
+    alternatives: Vec<SymbolRef>,
+    /// The pre-limit total of direct neighbours.
+    total: u32,
+    /// The neighbours, at most `limit`.
+    rows: Vec<SymbolRef>,
+    /// "Did you mean" names when nothing resolved.
+    suggestions: Vec<String>,
+}
 
 /// Shared body of [`callers`]/[`callees`]: resolve, fetch the full direct
 /// set, report the pre-limit total, truncate to `limit` ([FR-NV-05]).
@@ -2779,8 +2805,11 @@ fn adjacency(
     let runtime = engine.nav_runtime()?;
     let limit = limit.unwrap_or(DEFAULT_ADJACENCY_LIMIT);
     runtime.submit_read(|store| {
-        let Some(row) = resolve_symbol(store, symbol)? else {
-            return Ok((None, 0, Vec::new(), store.suggest(symbol, SUGGEST_LIMIT)?));
+        let Some((row, passed_over)) = resolve_preferring_code(store, symbol)? else {
+            return Ok(AdjacencyPage {
+                suggestions: store.suggest(symbol, SUGGEST_LIMIT)?,
+                ..AdjacencyPage::default()
+            });
         };
         let mut adjacent = match kind {
             AdjacencyKind::Callers => store.callers(row.id)?,
@@ -2788,12 +2817,13 @@ fn adjacency(
         };
         let total = adjacent.len() as u32;
         adjacent.truncate(limit);
-        Ok((
-            Some(symbol_ref(&row)),
+        Ok(AdjacencyPage {
+            resolved: Some(symbol_ref(&row)),
+            alternatives: passed_over.iter().map(symbol_ref).collect(),
             total,
-            adjacent.iter().map(symbol_ref).collect(),
-            Vec::new(),
-        ))
+            rows: adjacent.iter().map(symbol_ref).collect(),
+            suggestions: Vec::new(),
+        })
     })
 }
 
@@ -2836,6 +2866,12 @@ fn seed_query(task: &str) -> Option<String> {
 /// Resolve a navigation `symbol` argument to a node: exact canonical-symbol
 /// match first, then exact name match (lowest id wins — deterministic).
 /// `None` means unknown → the caller assembles the graceful empty result.
+///
+/// The documentation lookups (`implements`, `referencing_docs`) keep this rule;
+/// every code-navigation tool of [FR-NV-15] resolves through
+/// [`resolve_preferring_code`] instead.
+///
+/// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
 fn resolve_symbol(store: &dyn GraphStore, text: &str) -> Result<Option<NodeRow>> {
     if let Some(row) = store.node_by_symbol(text)? {
         return Ok(Some(row));

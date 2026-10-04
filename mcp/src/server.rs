@@ -490,7 +490,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Neighbourhood exploration around a query, source grouped by file (FR-NV-03)."
+        description = "Neighbourhood exploration around a query, source grouped by file (FR-NV-03). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact."
     )]
     async fn explore(
         &self,
@@ -513,7 +513,7 @@ impl LogosMcp {
         .await
     }
 
-    #[tool(description = "Direct callers of a symbol (FR-NV-05). Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).")]
+    #[tool(description = "Direct callers of a symbol (FR-NV-05). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).")]
     async fn callers(
         &self,
         Parameters(p): Parameters<EdgeParams>,
@@ -522,7 +522,7 @@ impl LogosMcp {
             .await
     }
 
-    #[tool(description = "Direct callees of a symbol (FR-NV-05). Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).")]
+    #[tool(description = "Direct callees of a symbol (FR-NV-05). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14).")]
     async fn callees(
         &self,
         Parameters(p): Parameters<EdgeParams>,
@@ -532,7 +532,7 @@ impl LogosMcp {
     }
 
     #[tool(
-        description = "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on (FR-NV-06). Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14)."
+        description = "Transitive impact of changing a symbol, both directions labeled: upstream breaks-if-changed, downstream depends-on (FR-NV-06). A bare name that matches several nodes resolves to a code type, else a callable, else another code declaration, else a module, else a config node, else a doc node, and the answer lists the ones it passed over as `alternatives` (FR-NV-15); a qualified name or SCIP symbol is exact. Every answer carries `resolution_denominator`: the per-language resolved edge set it was computed over, so an empty set in a language whose cross-file calls are not resolved reads as unresolved, not as nothing (FR-NV-14)."
     )]
     async fn impact(
         &self,

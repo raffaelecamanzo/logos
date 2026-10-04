@@ -54,12 +54,15 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   (Python, PHP, C#, Ruby, Scala) and `symbols` (C, C++). The manual's table and the
   README are generated from the same declarations, and a fixture per language fails
   the build if a declaration over- or under-claims.
-- **A bare-name `node` lookup prefers code.** When a bare name matches several nodes,
-  `node` resolves to a code type, else a callable, else another code declaration, else
-  a module, else a configuration artifact, else a documentation node, and lists what it
-  passed over as `alternatives` (CLI and MCP). Qualified and SCIP lookups are
-  unchanged. `callers`, `callees`, `impact` and `explore` still resolve a bare name by
-  lowest node id.
+- **A bare-name lookup prefers code — in `node`, `callers`, `callees`, `impact` and
+  `explore`.** When a bare name matches several nodes, each of the five resolves to a
+  code type, else a callable, else another code declaration, else a module, else a
+  configuration artifact, else a documentation node, and lists what it passed over as
+  `alternatives` (CLI and MCP). Qualified and SCIP lookups are unchanged, and an answer
+  that passed over nothing carries no `alternatives` key. `callers Utils` on a PSR-4 PHP
+  tree now reports the callers of the `Utils` class rather than of its `Utils.md` doc
+  section or file module. `impact-intersection` keeps its lowest-id resolution and its
+  ambiguity warning.
 
 ### Upgrade notes
 
