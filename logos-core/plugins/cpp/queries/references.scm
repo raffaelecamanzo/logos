@@ -1,8 +1,9 @@
 ; C++ reference-extraction query (S-058, capability = "references").
 ;
 ;   @ref.method — a call's name (`free()`, `obj.method()`, `obj->method()`,
-;                 `ns::func()`); name-only, policy-gated binding (receiver/scope
-;                 typing is a resolution concern, deliberately not resolved here).
+;                 `ns::func()`); a Method-form row that binds by its receiver's
+;                 SHAPE, recorded by the `@ref.receiver.*` markers below (S-514,
+;                 S-516, CR-169).
 ;   @ref.access — an own-field access (`this->x`): a method reading a field of
 ;                 its own class (CR-005, FR-EX-08). The receiver-anchored pattern
 ;                 restricts it to `this->`, so it never double-captures a call;
@@ -12,6 +13,27 @@
 ;                 identifier (a plain `x`, indistinguishable from a local) is
 ;                 deliberately NOT captured: it would need type resolution C++
 ;                 cannot give here, so it stays an honest non-edge (NFR-RA-05).
+;
+; Receiver-shape markers (S-516, FR-EX-13, FR-RS-12) — they record no row of
+; their own; each names the receiver of the `@ref.method` that shares its parent
+; node (the `field_expression` / `qualified_identifier`, or for a bare call the
+; `call_expression`):
+;
+;   @ref.receiver.self     — `this->method()`, `(*this).method()`: binds among
+;                            the enclosing class's own members only.
+;   @ref.receiver.other    — every other receiver (`obj.method()`,
+;                            `ptr->method()`), and every qualifying scope
+;                            (`ns::func()`, `Type::method()`, `Base::method()`):
+;                            never bound through the caller's scope
+;                            (`no-receiver-evidence`). C++ has no `super`
+;                            keyword, and a base-class qualifier is the same
+;                            syntax as a namespace one, so nothing is `super`.
+;   @ref.receiver.implicit — `method()`, no receiver: under this plugin's
+;                            `implicit_receiver = "self"` a call on the current
+;                            instance inside a class or struct body, a free call
+;                            outside one (a free function, or an out-of-line
+;                            `Type::method` definition, which no declaration
+;                            here encloses).
 ;
 ; Droppable on disk at `.logos/plugins/cpp/queries/references.scm`.
 ;
@@ -24,7 +46,7 @@
 
 ; A free / unqualified call: `free_call()`.
 (call_expression
-  function: (identifier) @ref.method)
+  function: (identifier) @ref.method @ref.receiver.implicit)
 
 ; A member call: `obj.method()` / `obj->method()` (both are `field_expression`).
 (call_expression
@@ -36,6 +58,21 @@
 (call_expression
   function: (qualified_identifier
     name: (identifier) @ref.method))
+
+; The receiver of a member call, and the scope of a qualified one.
+(field_expression
+  argument: (this) @ref.receiver.self)
+
+(field_expression
+  argument: (parenthesized_expression
+    (pointer_expression
+      argument: (this))) @ref.receiver.self)
+
+(field_expression
+  argument: (_) @ref.receiver.other)
+
+(qualified_identifier
+  scope: (_) @ref.receiver.other)
 
 ; An own-field access through `this->` — the bound LCOM4 / Accesses input.
 (field_expression

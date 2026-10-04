@@ -25,6 +25,13 @@ abi_version = 15
 # Spring) — an honest absence, not a stub (CR-009).
 capabilities = ["symbols", "references"]
 
+# How an unqualified call is read (S-516, CR-169, FR-RS-12): a bare `m()` inside
+# a class, object or trait is a call on the current instance — recorded with the
+# `self` receiver shape and bound among that type's own members only, never
+# to a same-named top-level function. Outside one it is a free call, bound by
+# the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
+implicit_receiver = "self"
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Each `case` (match arms, `catch` arms, partial functions) is a branch; the
 # boolean operators and the loop/conditional keywords mirror the Java set.
