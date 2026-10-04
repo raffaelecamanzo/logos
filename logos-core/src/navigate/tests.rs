@@ -210,6 +210,9 @@ fn is_test_path_production_root_overrides_filename_conventions() {
     assert!(!is_test_path("src/main/scala/FooTests.scala"));
     assert!(!is_test_path("src/main/scala/foo_spec.scala"));
     assert!(!is_test_path("src/main/groovy/FooTests.groovy"));
+    // Multi-dot JVM names: the LAST dot is the extension.
+    assert!(!is_test_path("src/main/kotlin/foo.test.kt"));
+    assert!(!is_test_path("src/main/Foo.spec.scala"));
     assert!(!is_test_path("build/src/main/kotlin/foo_test.kts"));
     // ...while every other extension keeps its filename rule under the root.
     assert!(is_test_path("src/main/foo.test.ts"));
