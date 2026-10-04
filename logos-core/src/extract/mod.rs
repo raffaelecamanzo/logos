@@ -1557,6 +1557,11 @@ fn collect_refs(
                     if name.is_empty() {
                         continue;
                     }
+                    // `@ref.method.self` is a `self`-marked `@ref.method` (S-514).
+                    let self_marked = capture == SELF_RECEIVER_METHOD_CAPTURE;
+                    if let (Some(receivers), true) = (receivers.as_mut(), self_marked) {
+                        receivers.mark_self(node.parent());
+                    }
                     // A member call whose receiver is an imported module — a Go
                     // package, a TS namespace import — is a qualified path, not a
                     // receiver-method call (S-440, `ImportBindings`).
@@ -1587,9 +1592,6 @@ fn collect_refs(
                             // (S-467, S-514, `receiver`) — never a Method-form `::`.
                             if let Some(receivers) = receivers.as_mut() {
                                 receivers.site(out.len(), node.parent(), enclosing_decl(node));
-                                if capture == SELF_RECEIVER_METHOD_CAPTURE {
-                                    receivers.mark_self(node.parent());
-                                }
                             }
                             name.to_string()
                         }
