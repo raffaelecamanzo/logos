@@ -350,9 +350,10 @@ impl<'tree> Receivers<'tree> {
         if self.sites.is_empty() {
             return;
         }
-        let typed = self.retype(refs, file);
+        // A row typing retyped is Path form now: only bare Method rows remain.
+        self.retype(refs, file);
         for site in &self.sites {
-            if typed.contains(&site.row) || refs[site.row].form != RefForm::Method {
+            if refs[site.row].form != RefForm::Method {
                 continue;
             }
             let Some(marks) = self.marks.get(&site.invocation.id()) else {
@@ -418,9 +419,8 @@ impl<'tree> Receivers<'tree> {
         Recorded::Nothing
     }
 
-    /// Retype every site whose receiver the file proves, in place (S-467),
-    /// returning the rows it retyped.
-    fn retype(&self, refs: &mut [RefFact], file: &FileDecls<'_, 'tree>) -> HashSet<usize> {
+    /// Retype every site whose receiver the file proves, in place (S-467).
+    fn retype(&self, refs: &mut [RefFact], file: &FileDecls<'_, 'tree>) {
         // The one per-file walk this costs, paid only by a file with a site
         // that asks it (a simple-name or `this.x` receiver) — NFR-PE-02.
         let declared: OnceCell<DeclaredTypes> = OnceCell::new();
@@ -501,14 +501,10 @@ impl<'tree> Receivers<'tree> {
                 typed.push((row, format!("{head}::{name}")));
             }
         }
-        typed
-            .into_iter()
-            .map(|(row, target)| {
-                refs[row].target = target;
-                refs[row].form = RefForm::Path;
-                row
-            })
-            .collect()
+        for (row, target) in typed {
+            refs[row].target = target;
+            refs[row].form = RefForm::Path;
+        }
     }
 }
 
