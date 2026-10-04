@@ -129,7 +129,9 @@ func (o Other) Rest() {}
 func Free() {}
 ";
 
-/// The plain, non-generic pointer and value forms the task text names verbatim.
+/// The plain, non-generic pointer and value forms the task text names verbatim,
+/// beside every other declaration kind the Go query captures (const, var,
+/// interface), which must record no self type.
 const PLAIN: &str = "\
 package plain
 
@@ -140,6 +142,12 @@ func (s *Svc) Work() {}
 func (s Svc) Rest() {}
 
 func Helper() {}
+
+const K = 1
+
+var V = 2
+
+type I interface{ Foo() }
 ";
 
 #[test]
@@ -166,8 +174,9 @@ fn pointer_value_generic_and_unnamed_receivers_record_their_base_type() {
     );
 }
 
-/// A free `func`, a type declaration and a constant record no self type, even in
-/// a file whose methods do.
+/// A free `func` and every non-method declaration kind the Go query captures
+/// (struct, interface, const, var) record no self type, even in a file whose
+/// methods do.
 #[test]
 fn a_free_function_and_the_type_declarations_record_none() {
     let tmp = tree(&[("svc/forms.go", FORMS), ("plain/plain.go", PLAIN)]);
@@ -181,10 +190,17 @@ fn a_free_function_and_the_type_declarations_record_none() {
         "svc/forms.go:Other@7",
         "plain/plain.go:Helper@9",
         "plain/plain.go:Svc@3",
+        "plain/plain.go:K@11",
+        "plain/plain.go:V@13",
+        "plain/plain.go:I@15",
     ] {
         assert!(!recorded.contains_key(label), "{label} must record no self type: {recorded:?}");
     }
-    assert!(labels(rt).values().any(|l| l == "svc/forms.go:Free@27"), "Free is indexed at that label");
+    // Each label names a node that exists, so the absence above is not a typo.
+    let indexed: BTreeSet<String> = labels(rt).into_values().collect();
+    for label in ["svc/forms.go:Free@27", "plain/plain.go:K@11", "plain/plain.go:V@13", "plain/plain.go:I@15"] {
+        assert!(indexed.contains(label), "{label} is indexed at that label: {indexed:?}");
+    }
 }
 
 /// The Go `symbols` query as it stood before S-509: the same declarations, no
