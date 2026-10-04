@@ -463,6 +463,37 @@ fn java_proven_receivers_bind_as_before_and_every_other_receiver_records_its_sha
     );
 }
 
+/// `super` inside an anonymous body names the anonymous class's base — `Object`
+/// for a `Runnable`, the instantiated `Base` for `new Base() { … }` — never the
+/// enclosing class's: neither the outer `Base.start` nor the overriding
+/// `start` itself may be bound.
+const JAVA_ANON_SUPER: &str = "package com.x.svc;\n\
+\n\
+import com.x.base.Base;\n\
+\n\
+public class Svc extends Base {\n\
+    public void anon() {\n\
+        new Runnable() { public void run() { super.start(); } };\n\
+        new Base() { public void start() { super.start(); } };\n\
+    }\n\
+}\n";
+
+#[test]
+fn a_super_call_inside_an_anonymous_body_binds_nothing() {
+    let tmp = tree(&[(JAVA_BASE_FILE, JAVA_BASE), (JAVA_SVC_FILE, JAVA_ANON_SUPER)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let svc = |line: u32, name: &str| format!("{JAVA_SVC_FILE}:{name}@{line}");
+    assert_eq!(
+        call_rows(rt, JAVA_SVC_FILE),
+        sorted(vec![
+            row(&svc(7, "run"), "start", RefForm::Method, OTHER, false),
+            row(&svc(8, "start"), "start", RefForm::Method, OTHER, false),
+        ])
+    );
+    assert_eq!(call_edges(rt), Vec::<(String, String)>::new(), "no fabricated edge, no self-loop");
+}
+
 // ── Determinism: index twice, sync ≡ reindex ──────────────────────────────────
 
 #[test]
