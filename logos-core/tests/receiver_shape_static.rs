@@ -496,6 +496,7 @@ public:
     int k() { return Base::m(); }
     int p() { return (*this).m(); }
     int q() { return ptr->m(); }
+    int r() { return this->f.m(); }
 };
 
 class B {
@@ -526,8 +527,10 @@ fn cpp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_doe
             // `Base::m()`: not even the in-file `Base::m`.
             row(&a(11, "k"), "m", RefForm::Method, OTHER, false),
             row(&a(13, "q"), "m", RefForm::Method, OTHER, false),
+            // A field reached through `this->` is another object.
+            row(&a(14, "r"), "m", RefForm::Method, OTHER, false),
             // A bare call in a free function is a free call.
-            row(&a(23, "free_fn"), "helper", RefForm::Path, None, true),
+            row(&a(24, "free_fn"), "helper", RefForm::Path, None, true),
         ])
     );
     let edges = call_edges(rt);
@@ -537,7 +540,7 @@ fn cpp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_doe
             edge(&a(9, "n"), &a(8, "m")),
             edge(&a(10, "j"), &a(8, "m")),
             edge(&a(12, "p"), &a(8, "m")),
-            edge(&a(23, "free_fn"), &a(21, "helper")),
+            edge(&a(24, "free_fn"), &a(22, "helper")),
         ])
     );
     assert_no_self_loop(&edges);
