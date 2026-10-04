@@ -53,3 +53,11 @@
 (template_body
   (var_definition
     pattern: (identifier) @symbol.field))
+
+; The file's package (S-518, CR-170, FR-RS-13). Not a declaration — its capture
+; group is `module`, not `symbol`, so the declaration walk skips it. Chained
+; clauses (`package a` then `package b`) compose to `a.b`, as Scala reads them;
+; a `package a { … }` block scopes its body. Each top-level type is named that
+; package plus its own name, whatever directory the file sits in.
+(package_clause
+  name: (package_identifier) @module.namespace)

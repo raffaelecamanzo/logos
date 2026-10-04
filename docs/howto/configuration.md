@@ -1416,30 +1416,67 @@ without rebuilding. The embedded queries under `logos-core/plugins/` serve as
 reference starting points — each header documents the captures and the known
 v1 limitations.
 
-### Package-shaped module paths (`[package_modules]`)
+### Module models (`[module_model]`)
 
-By default Logos keys a file's module by its path, so `src/main/java/com/x/Svc.java`
-would be `main::java::com::x::Svc` and `import com.x.Svc` could never reach it. A
-plugin can declare instead that its files live under **source roots** and are
-named by their package:
+By default Logos keys a file's module by its path, Rust's way: the directory before
+the last `src/` names the crate and every later directory is a module. So
+`src/main/java/com/x/Svc.java` would be `main::java::com::x::Svc`, and
+`import com.x.Svc` could never reach it. A plugin names the model its language
+uses instead:
 
 ```toml
+[module_model]
+kind = "namespace"   # or "package", or "path" (the default)
+```
+
+| `kind` | Keyed by | Shipped for |
+|---|---|---|
+| `path` | the file's path (the default when the table is omitted) | Rust, Go, Python, TypeScript, … |
+| `package` | the path after a **source root** named in `[package_modules]` | Java |
+| `namespace` | the namespace or package the file **declares** | PHP, C#, Kotlin, Scala |
+
+**`package`.** The source roots live in their own table:
+
+```toml
+[module_model]
+kind = "package"
+
 [package_modules]
 source_roots = ["src/main/java", "src/test/java"]
 ```
 
 A file under one of these roots is keyed by the path after the root, so the file
-above is `com.x.Svc`, the name its imports spell. Java ships with the table, and
-Kotlin with the same shape under `src/main/kotlin` and `src/test/kotlin`; every other
-plugin leaves it out and keeps its module keys unchanged. With it:
+above is `com.x.Svc`, the name its imports spell. A descriptor that declares
+`[package_modules]` without `[module_model]` is read as `package`, as it was
+before the table existed; declaring the roots under any other kind is refused.
 
-- a single-type import binds to the **class** it names, a static import to the
-  member, and a wildcard import (`a.b.*`, `static a.b.C.*`) brings the package's or
-  type's members into scope;
-- a type in the file's own package binds without an import;
-- a type declared under the same fully-qualified name in both `src/main` and
-  `src/test` stays unbound rather than being guessed;
-- JDK, Spring, Lombok and other library imports stay unbound.
+**`namespace`.** The plugin's `symbols` query captures each namespace or package
+declaration's name with `@module.namespace`. A file's identity is the namespace
+its top-level declarations sit in — PHP's `namespace App\Models;`, C#'s
+file-scoped `namespace App.Models;` or block `namespace App.Models { … }` (nested
+blocks compose), Kotlin's and Scala's `package` (Scala's chained clauses
+compose). The directory plays no part, so a PSR-4 tree, a C# project whose
+namespaces differ from its folders, and a Kotlin Multiplatform `commonMain`
+source set all bind the same way. Composer maps and `.csproj` files are not read.
+A file declaring no namespace is in the global one; a file whose top-level
+declarations sit in two different namespaces keeps its path key, rather than
+naming one set of its types wrongly.
+
+With either model:
+
+- a single-type import binds to the **type** it names (a Java static import to
+  the member), and is final for that name — it shadows a same-named type a
+  wildcard would bring in;
+- a type in the file's own package or namespace binds without an import;
+- a wildcard brings the package's or type's members into scope: Java's `a.b.*`
+  and `static a.b.C.*`, Kotlin's `a.b.*`, Scala's `a.b._`, and C#'s plain
+  `using A.B;`. Under the `namespace` model the wildcard itself binds to every
+  other file declaring that namespace; a Java package wildcard binds nothing;
+- C#'s `global using A.B;` applies to every C# file under the directory of the
+  file that declares it — by .NET convention the project root;
+- a type declared under one fully-qualified name twice (`src/main` and
+  `src/test`, or a Scala class and its companion object) stays unbound rather
+  than being guessed, and so do library imports (JDK, Spring, PSR, `System`).
 
 ### Outbound HTTP client calls (`invocations`)
 

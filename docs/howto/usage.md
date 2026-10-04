@@ -37,17 +37,17 @@ descriptors and a test fails when it drifts.
 |---|---|---|
 | Java | `resolved` | `calls`, `imports`, `type_relations` |
 | Rust | `resolved` | `calls`, `imports`, `type_relations` |
+| C# | `partial` | `imports` |
 | Go | `partial` | `calls`, `imports` |
 | Kotlin | `partial` | `imports` |
+| PHP | `partial` | `imports` |
+| Scala | `partial` | `imports` |
 | TSX (incl. JSX) | `partial` | `calls`, `imports` |
 | TypeScript (incl. JavaScript) | `partial` | `calls`, `imports` |
 | C | `same-file` | none |
-| C# | `same-file` | none |
 | C++ | `same-file` | none |
-| PHP | `same-file` | none |
 | Python | `same-file` | none |
 | Ruby | `same-file` | none |
-| Scala | `same-file` | none |
 <!-- reach:end -->
 
 - `resolved` — calls, imports and type relations bind across files.

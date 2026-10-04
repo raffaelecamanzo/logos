@@ -294,6 +294,22 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose loaded plugin
+    /// declares the **declared-namespace** module model
+    /// ([`ModuleModelKind::Namespace`](super::ModuleModelKind::Namespace),
+    /// S-518, [FR-RS-13]) — consumed through
+    /// [`crate::resolve::package_key::PackageLayout`] beside the package roots.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    pub fn namespace_extensions(&self) -> std::collections::HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| p.semantics().module_model == super::ModuleModelKind::Namespace)
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
     /// Grammars skipped at load due to an ABI mismatch ([FR-PL-03]).
     pub fn skipped(&self) -> &[SkippedGrammar] {
         &self.skipped
@@ -501,8 +517,43 @@ fn compile_capabilities(
         let query = queries::compile_shared(language, &manifest.name, &resolved)?;
         compiled.insert(key.to_string(), query);
     }
+    check_namespace_capture(entry, manifest, &compiled)?;
 
     Ok((compiled, overridden))
+}
+
+/// A declared-namespace language (S-518, [FR-RS-13]) must name its namespace
+/// declarations: its compiled `symbols` query — embedded or an on-disk override
+/// — carries the `@module.namespace` capture. Without it every file of the
+/// language would read as the global namespace, and every type of the
+/// repository would be visible to every other without an import — honest
+/// absence at the query becoming a fabricated binding ([NFR-RA-05]). Refused at
+/// load instead, naming the descriptor.
+///
+/// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn check_namespace_capture(
+    entry: &GrammarEntry,
+    manifest: &PluginManifest,
+    compiled: &CompiledQueries,
+) -> Result<(), PluginError> {
+    use crate::extract::declared_types::NAMESPACE_CAPTURE;
+    if manifest.module_model_kind() != super::ModuleModelKind::Namespace {
+        return Ok(());
+    }
+    let captures = compiled
+        .get("symbols")
+        .is_some_and(|q| q.capture_names().contains(&NAMESPACE_CAPTURE));
+    if captures {
+        return Ok(());
+    }
+    Err(PluginError::Manifest {
+        file: entry.manifest_label.to_string(),
+        detail: format!(
+            "`[module_model]` kind 'namespace' requires the `symbols` query to capture \
+             `@{NAMESPACE_CAPTURE}`, or every file would read as the global namespace"
+        ),
+    })
 }
 
 /// The override directory for a language: `<root>/.logos/plugins/<name>/`.
@@ -620,6 +671,59 @@ mod tests {
             semantics.export_convention,
             crate::plugin::ExportConvention::UnderscorePrivate
         );
+    }
+
+    /// S-518 / FR-RS-13: a declared-namespace grammar whose `symbols` query
+    /// names no `@module.namespace` would read every file as the global
+    /// namespace, so the load fails naming the descriptor; the same grammar
+    /// capturing it loads with the model in its semantics.
+    #[test]
+    fn a_namespace_model_without_the_namespace_capture_fails_the_load() {
+        fn entry(source: &'static str) -> GrammarEntry {
+            GrammarEntry {
+                manifest_label: "toyns/plugin.toml",
+                manifest_toml: r#"
+                    name = "toyns"
+                    extensions = ["toyns"]
+                    module_separator = "."
+                    abi_version = 15
+                    capabilities = ["symbols"]
+                    [module_model]
+                    kind = "namespace"
+                    [queries]
+                    symbols = "queries/symbols.scm"
+                "#,
+                language: tree_sitter_rust::LANGUAGE,
+                embedded_queries: vec![grammars::EmbeddedQuery {
+                    relative_path: "queries/symbols.scm",
+                    label: "toyns/queries/symbols.scm",
+                    source,
+                }]
+                .leak(),
+            }
+        }
+        let load = |source: &'static str| {
+            let mut entries = grammars::compiled();
+            entries.push(entry(source));
+            LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+        };
+
+        let Err(err) = load("(function_item name: (identifier) @symbol.function)") else {
+            panic!("no namespace capture fails the load");
+        };
+        let err = err.to_string();
+        assert!(err.contains("toyns/plugin.toml") && err.contains("@module.namespace"), "{err}");
+
+        let reg = load(
+            "(function_item name: (identifier) @symbol.function)\n\
+             (mod_item name: (identifier) @module.namespace)",
+        )
+        .expect("the captured namespace loads");
+        assert_eq!(
+            reg.for_extension("toyns").unwrap().semantics().module_model,
+            crate::plugin::ModuleModelKind::Namespace
+        );
+        assert!(reg.namespace_extensions().contains("toyns"));
     }
 
     /// S-500 / FR-EX-11 / FR-PL-02: a `body_node_kinds` entry must name a node
@@ -774,10 +878,10 @@ mod tests {
         }
     }
 
-    /// Only Java (CR-149) and Kotlin (S-472, CR-152 — the "data change later"
-    /// CR-149 named) declare a package-shaped module path, each under its two
-    /// source roots; every other grammar — Rust above all, and Scala, which is
-    /// package-shaped too but not opted in — keeps the default module model.
+    /// Only Java (CR-149) declares source roots, under its two Maven roots.
+    /// Kotlin's S-472 roots gave way to its declared package (S-518), the model
+    /// PHP, C# and Scala declare too; every other grammar — Rust above all —
+    /// keeps the default module model.
     #[test]
     fn package_source_roots_collects_only_the_opted_in_jvm_grammars() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -788,16 +892,29 @@ mod tests {
             roots.get("java").map(Vec::as_slice),
             Some(["src/main/java".to_string(), "src/test/java".to_string()].as_slice())
         );
-        #[cfg(feature = "lang-kotlin")]
-        for ext in ["kt", "kts"] {
-            assert_eq!(
-                roots.get(ext).map(Vec::as_slice),
-                Some(["src/main/kotlin".to_string(), "src/test/kotlin".to_string()].as_slice()),
-                "`{ext}` is keyed by its package"
-            );
+        for ext in ["rs", "py", "ts", "go", "cs", "php", "rb", "scala", "kt", "kts"] {
+            assert!(!roots.contains_key(ext), "`{ext}` declares no source roots");
         }
-        for ext in ["rs", "py", "ts", "go", "cs", "php", "rb", "scala"] {
-            assert!(!roots.contains_key(ext), "`{ext}` keeps the default module model");
+    }
+
+    /// The declared-namespace model (S-518, FR-RS-13) is opted into by PHP, C#,
+    /// Kotlin and Scala — every extension of each — and by nothing else.
+    #[test]
+    fn namespace_extensions_collects_only_the_declared_namespace_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let exts = reg.namespace_extensions();
+        #[cfg(all(
+            feature = "lang-php",
+            feature = "lang-c-sharp",
+            feature = "lang-kotlin",
+            feature = "lang-scala"
+        ))]
+        for ext in ["php", "cs", "kt", "kts", "scala", "sc"] {
+            assert!(exts.contains(ext), "`{ext}` is keyed by its declared namespace");
+        }
+        for ext in ["rs", "py", "ts", "go", "rb", "java", "c", "cpp"] {
+            assert!(!exts.contains(ext), "`{ext}` keeps its own module model");
         }
     }
 

@@ -260,14 +260,111 @@ fn a_kotlin_class_interface_enum_and_object_are_named_by_their_package_in_both_t
     assert_eq!(summary(&types), vec![(Ok("com.x.core.SvcTest"), "class", "test")]);
 }
 
+/// Kotlin is keyed by the package it declares (S-518, FR-RS-13), not by its
+/// source root: a package that differs from the directory names the type, and
+/// a Multiplatform source set outside `src/main/kotlin` is named the same way.
 #[test]
-fn a_kotlin_package_that_disagrees_with_the_directory_is_refused() {
+fn a_kotlin_type_is_named_by_its_declared_package_whatever_its_directory() {
     let types = declared("src/main/kotlin/com/x/Svc.kt", "package com.y\nclass Svc\n");
-    let reason = types[0].fqn.as_ref().expect_err("never resolved to the path");
-    assert!(reason.contains("package `com.y`"), "{reason}");
+    assert_eq!(summary(&types), vec![(Ok("com.y.Svc"), "class", "main")]);
+    let types = declared(
+        "core/src/commonMain/kotlin/org/koin/core/Koin.kt",
+        "package org.koin.core\nclass Koin\n",
+    );
+    assert_eq!(summary(&types), vec![(Ok("org.koin.core.Koin"), "class", "main")]);
     // Backtick escapes are the compiler's, not the name's.
     let types = declared("src/main/kotlin/com/x/Svc.kt", "package com.`x`\nclass Svc\n");
     assert_eq!(summary(&types), vec![(Ok("com.x.Svc"), "class", "main")]);
+    // No package header: the default package.
+    let types = declared("src/main/kotlin/Top.kt", "class Top\n");
+    assert_eq!(summary(&types), vec![(Ok("Top"), "class", "main")]);
+}
+
+// ── Declared namespaces (S-518) ──────────────────────────────────────────────
+
+/// The namespace one file declares, as extraction records it.
+fn namespace(path: &str, source: &str) -> Option<String> {
+    let facts = extract_files(
+        &[FileInput::new(path, source)],
+        registry(),
+        &SymbolContext::default(),
+    );
+    assert_eq!(facts.len(), 1, "{path} is extracted");
+    facts.into_iter().next().unwrap().namespace
+}
+
+/// FR-RS-13 AC: a C# file-scoped `namespace X;` and a block `namespace X { }`
+/// give the same identity, and nested blocks compose.
+#[test]
+fn a_csharp_file_scoped_and_a_block_namespace_give_the_same_identity() {
+    let file_scoped = "using System;\nnamespace Shop.Domain;\npublic class Order { }\n";
+    let block = "using System;\nnamespace Shop.Domain\n{\n    public class Order { }\n}\n";
+    let nested = "namespace Shop\n{\n    namespace Domain\n    {\n        public class Order { }\n    }\n}\n";
+    for source in [file_scoped, block, nested] {
+        assert_eq!(namespace("src/Order.cs", source).as_deref(), Some("Shop.Domain"), "{source}");
+        assert_eq!(
+            summary(&declared("src/Order.cs", source)),
+            vec![(Ok("Shop.Domain.Order"), "class", "main")],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn a_php_kotlin_and_scala_file_declare_their_namespace_or_package() {
+    let php = "<?php\nnamespace Monolog\\Handler;\n\nuse Monolog\\Logger;\n\nclass StreamHandler {}\n";
+    assert_eq!(namespace("src/Monolog/Handler/StreamHandler.php", php).as_deref(), Some("Monolog.Handler"));
+    let braced = "<?php\nnamespace App\\Models {\n    class Song {}\n}\n";
+    assert_eq!(namespace("app/Song.php", braced).as_deref(), Some("App.Models"));
+    let kotlin = "package org.koin.core\n\nimport org.koin.core.module.Module\n\nclass Koin\n";
+    assert_eq!(namespace("core/src/commonMain/kotlin/Koin.kt", kotlin).as_deref(), Some("org.koin.core"));
+    // Scala's chained clauses compose; a package block scopes its body.
+    let chained = "package com.x\npackage core\n\nclass Svc\n";
+    assert_eq!(namespace("src/main/scala/Svc.scala", chained).as_deref(), Some("com.x.core"));
+    let block = "package com.x {\n  class Svc\n}\n";
+    assert_eq!(namespace("src/main/scala/Svc.scala", block).as_deref(), Some("com.x"));
+    // A file of no declaration still takes the namespace in force at its end.
+    let empty = "<?php\nnamespace App\\Support;\n\nfunction helper() {}\n";
+    assert_eq!(namespace("app/helpers.php", empty).as_deref(), Some("App.Support"));
+}
+
+#[test]
+fn a_file_that_declares_no_namespace_is_in_the_global_one() {
+    assert_eq!(namespace("lib/util.php", "<?php\nclass Util {}\n").as_deref(), Some(""));
+    assert_eq!(namespace("Program.cs", "public class Program { }\n").as_deref(), Some(""));
+    assert_eq!(namespace("src/Top.kt", "class Top\n").as_deref(), Some(""));
+}
+
+/// A file whose top-level declarations sit in two namespaces has no one
+/// namespace, and records none rather than naming one set of its types wrongly
+/// (NFR-RA-05) — the near miss beside every agreeing case above.
+#[test]
+fn a_file_whose_declarations_sit_in_two_namespaces_records_none() {
+    let siblings = "namespace A { class X { } }\nnamespace B { class Y { } }\n";
+    assert_eq!(namespace("src/Two.cs", siblings), None);
+    // PHP's statement form: a second statement starts a second namespace.
+    let php = "<?php\nnamespace Acme;\nclass Tester {}\nnamespace Monolog\\Processor;\nclass ProcessorTest {}\n";
+    assert_eq!(namespace("tests/ProcessorTest.php", php), None);
+    // A declaration outside the only namespace block is in the global one.
+    let mixed = "namespace A { class X { } }\nclass Y { }\n";
+    assert_eq!(namespace("src/Mixed.cs", mixed), None);
+    // …and so the file names no type at all.
+    assert!(declared("src/Two.cs", siblings).is_empty());
+}
+
+/// A namespace declared but enclosing none of the file's declarations — what a
+/// parse damaged around preprocessor branches leaves — is not read as the
+/// global namespace.
+#[test]
+fn a_declared_namespace_that_encloses_no_declaration_records_none() {
+    let stranded = "namespace A { }\nclass X { }\n";
+    assert_eq!(namespace("src/X.cs", stranded), None);
+}
+
+#[test]
+fn a_language_of_another_module_model_records_no_namespace() {
+    assert_eq!(namespace("src/lib.rs", "pub mod a { pub struct S; }\n"), None);
+    assert_eq!(namespace("src/main/java/com/x/Svc.java", "package com.x;\nclass Svc {}\n"), None);
 }
 
 /// The single-file interface names types exactly as the multi-file driver
@@ -277,6 +374,7 @@ fn the_single_file_entry_point_names_types_as_the_driver_does() {
     for (path, source) in [
         ("src/main/java/com/x/Svc.java", "package com.x;\npublic class Svc {}\n"),
         ("src/main/kotlin/com/x/Svc.kt", "package com.x\nclass Svc\n"),
+        ("src/Shop/Order.cs", "namespace Shop.Domain;\npublic class Order { }\n"),
     ] {
         let ext = path.rsplit('.').next().unwrap();
         let plugin = registry().for_extension(ext).expect("plugin");

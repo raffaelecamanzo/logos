@@ -1436,6 +1436,7 @@ mod tests {
             config_source: None,
             forwarding: Vec::new(),
             declared_types: Vec::new(),
+            namespace: None,
         }
     }
 
@@ -1871,6 +1872,7 @@ mod infra_tests {
             config_source: None,
             forwarding: Vec::new(),
             declared_types: Vec::new(),
+            namespace: None,
         }
     }
 

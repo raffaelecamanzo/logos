@@ -217,19 +217,19 @@ fn the_readme_names_each_languages_level() {
     }
 }
 
-/// The check has teeth: a table whose Scala row claims more, or that omits a
+/// The check has teeth: a table whose Ruby row claims more, or that omits a
 /// language, is not the generated one.
 #[test]
 fn a_stale_table_is_detected() {
     let rows = declared();
     let generated = render_table(&rows);
 
-    let scala_raised = generated.replace("| Scala | `same-file` | none |", "| Scala | `partial` | `calls` |");
+    let ruby_raised = generated.replace("| Ruby | `same-file` | none |", "| Ruby | `partial` | `calls` |");
     assert_ne!(
-        scala_raised, generated,
+        ruby_raised, generated,
         "the fixture edit must change the table, or this test proves nothing"
     );
-    let doc = format!("{BEGIN}\n{scala_raised}{END}\n");
+    let doc = format!("{BEGIN}\n{ruby_raised}{END}\n");
     assert_ne!(committed_block(&doc), generated.trim_matches('\n'));
 
     let dropped: String = generated

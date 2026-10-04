@@ -2475,3 +2475,233 @@ fn a_self_call_from_a_module_level_method_binds_through_its_recorded_self_type()
         assert_eq!(residue(&r, &ix, policy), Some(Residue::NoReceiverEvidence));
     }
 }
+
+// ── The declared-namespace module model (S-518, [FR-RS-13]) ──────────────────
+//
+// A synthetic C#-shaped graph keyed by the namespaces its files declare —
+// deliberately not by their directories:
+//
+// ```text
+// src/Domain/Order.cs      Shop.Domain   class Order (401)
+// src/Domain/Item.cs       Shop.Domain   class Item  (411)
+// legacy/Odd.cs            Shop.Domain   class Odd   (431)  ← not its directory
+// src/Other/Order.cs       Shop.Other    class Order (441)
+// src/Api/Svc.cs           Shop.Api      class Svc   (421)
+// src/Api/GlobalUsings.cs  (global)      — its rows only
+// tools/Tool.cs            Tools         class Tool  (461)
+// ```
+//
+// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+
+const ORDER_CS: i64 = 40;
+const SVC_CS: i64 = 42;
+const GLOBALS_CS: i64 = 45;
+const TOOL_CS: i64 = 46;
+
+/// The namespace fixture's nodes, `Contains` edges and declared namespaces.
+fn namespace_graph() -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<(String, String)>) {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut declared = Vec::new();
+    for (module, file, namespace, ty, name) in [
+        (400, "src/Domain/Order.cs", "Shop.Domain", 401, "Order"),
+        (410, "src/Domain/Item.cs", "Shop.Domain", 411, "Item"),
+        (430, "legacy/Odd.cs", "Shop.Domain", 431, "Odd"),
+        (440, "src/Other/Order.cs", "Shop.Other", 441, "Order"),
+        (420, "src/Api/Svc.cs", "Shop.Api", 421, "Svc"),
+        (460, "tools/Tool.cs", "Tools", 461, "Tool"),
+    ] {
+        let stem = file.rsplit('/').next().unwrap().trim_end_matches(".cs");
+        nodes.push(node(module, stem, NodeKind::Module, file));
+        nodes.push(node(ty, name, NodeKind::Class, file));
+        edges.push(contains(module, ty));
+        declared.push((file.to_string(), namespace.to_string()));
+    }
+    nodes.push(node(450, "GlobalUsings", NodeKind::Module, "src/Api/GlobalUsings.cs"));
+    declared.push(("src/Api/GlobalUsings.cs".to_string(), String::new()));
+    (nodes, edges, declared)
+}
+
+/// The namespace fixture's index, with `refs` as its ledger.
+fn namespace_index(refs: &[UnresolvedRefRow]) -> Index {
+    let (nodes, edges, declared) = namespace_graph();
+    let layout = super::package_key::PackageLayout::default()
+        .with_namespace_extensions(["cs".to_string()])
+        .with_declared_namespaces(declared);
+    Index::build_with_layout(&nodes, &edges, refs, layout)
+}
+
+fn import(id: i64, file: i64, source: i64, target: &str, form: RefForm) -> UnresolvedRefRow {
+    let alias = (form == RefForm::Path).then(|| target.rsplit("::").next().unwrap());
+    make_ref(id, file, source, target, alias, form, EdgeKind::Imports)
+}
+
+fn type_use(id: i64, file: i64, source: i64, target: &str) -> UnresolvedRefRow {
+    make_ref(id, file, source, target, None, RefForm::Path, EdgeKind::TypeUses)
+}
+
+/// Bind the last of `refs` against [`namespace_index`] over all of them.
+fn bind_namespaced(refs: &[UnresolvedRefRow], policy: BindingPolicy) -> Outcome {
+    let r = refs.last().expect("a row to bind");
+    bind(r, &namespace_index(refs), policy)
+}
+
+#[test]
+fn a_single_type_import_binds_through_the_declared_namespace_not_the_directory() {
+    for policy in POLICIES {
+        let r = import(1, SVC_CS, 420, "Shop::Domain::Item", RefForm::Path);
+        bound_to(bind_namespaced(&[r], policy), 420, 411, EdgeKind::Imports);
+        // `Odd` lives under `legacy/`, but declares `Shop.Domain`.
+        let r = import(2, SVC_CS, 420, "Shop::Domain::Odd", RefForm::Path);
+        bound_to(bind_namespaced(&[r], policy), 420, 431, EdgeKind::Imports);
+        // A namespace no file declares — a framework, PSR — stays unbound, and
+        // so does the directory spelling of an in-repository type.
+        for external in ["Psr::Log::LoggerInterface", "src::Domain::Item", "Legacy::Odd"] {
+            let r = import(3, SVC_CS, 420, external, RefForm::Path);
+            assert_eq!(bind_namespaced(&[r], policy), Outcome::Unbound, "{external}");
+        }
+    }
+}
+
+#[test]
+fn a_namespace_wildcard_binds_to_every_other_file_declaring_the_namespace() {
+    for policy in POLICIES {
+        let r = import(1, SVC_CS, 420, "Shop::Domain", RefForm::Glob);
+        assert_eq!(
+            bind_namespaced(&[r], policy),
+            Outcome::BoundMany {
+                source: NodeId(420),
+                targets: vec![NodeId(400), NodeId(410), NodeId(430)],
+                kind: EdgeKind::Imports,
+                payload: None,
+            },
+            "every file declaring `Shop.Domain`, whatever its directory"
+        );
+        // A file's wildcard of its own namespace never names itself.
+        let own = import(2, ORDER_CS, 400, "Shop::Domain", RefForm::Glob);
+        assert_eq!(
+            bind_namespaced(&[own], policy),
+            Outcome::BoundMany {
+                source: NodeId(400),
+                targets: vec![NodeId(410), NodeId(430)],
+                kind: EdgeKind::Imports,
+                payload: None,
+            }
+        );
+        // `using System.Text.Json;` names no in-repository namespace.
+        let r = import(3, SVC_CS, 420, "System::Text::Json", RefForm::Glob);
+        assert_eq!(bind_namespaced(&[r], policy), Outcome::Unbound);
+    }
+}
+
+#[test]
+fn a_namespace_wildcard_brings_its_types_into_view() {
+    for policy in POLICIES {
+        let using = import(1, SVC_CS, 420, "Shop::Domain", RefForm::Glob);
+        let r = type_use(2, SVC_CS, 421, "Item");
+        bound_to(bind_namespaced(&[using.clone(), r], policy), 421, 411, EdgeKind::TypeUses);
+        // Without it, `Item` is not in view from `Shop.Api`.
+        let r = type_use(2, SVC_CS, 421, "Item");
+        assert_eq!(bind_namespaced(&[r], policy), Outcome::Unbound);
+        // Two wildcards each supplying an `Order` are an ambiguity, never a pick.
+        let other = import(3, SVC_CS, 420, "Shop::Other", RefForm::Glob);
+        let r = type_use(4, SVC_CS, 421, "Order");
+        assert_eq!(bind_namespaced(&[using, other, r], policy), Outcome::Unbound);
+    }
+}
+
+/// FR-RS-13 rule 1: a single-type import is final for the name it imports —
+/// it shadows what a wildcard brings into view. Read as a wildcard itself, it
+/// would make `Order` ambiguous between the two namespaces.
+#[test]
+fn a_single_type_import_is_final_over_a_namespace_wildcard() {
+    for policy in POLICIES {
+        let using = import(1, SVC_CS, 420, "Shop::Domain", RefForm::Glob);
+        let single = import(2, SVC_CS, 420, "Shop::Other::Order", RefForm::Path);
+        let r = type_use(3, SVC_CS, 421, "Order");
+        bound_to(bind_namespaced(&[using, single, r], policy), 421, 441, EdgeKind::TypeUses);
+    }
+}
+
+/// FR-RS-13 rule 2: a type of the source's own namespace is visible without an
+/// import — including one declared in a file whose directory names another.
+#[test]
+fn a_type_of_the_same_namespace_is_visible_without_an_import() {
+    for policy in POLICIES {
+        let r = type_use(1, ORDER_CS, 401, "Item");
+        bound_to(bind_namespaced(&[r], policy), 401, 411, EdgeKind::TypeUses);
+        let r = type_use(2, ORDER_CS, 401, "Odd");
+        bound_to(bind_namespaced(&[r], policy), 401, 431, EdgeKind::TypeUses);
+        // `Shop.Other.Order` is another namespace's: not in view from `Svc`.
+        let r = type_use(3, SVC_CS, 421, "Order");
+        assert_eq!(bind_namespaced(&[r], policy), Outcome::Unbound);
+    }
+}
+
+/// FR-RS-13 rule 4: a `global using` brings its namespace into view in every
+/// file of the language under the declaring file's directory — the project
+/// root, by convention — and nowhere else.
+#[test]
+fn a_global_wildcard_applies_to_every_file_under_its_directory() {
+    use super::binder::GLOBAL_WILDCARD_ALIAS;
+    let global = make_ref(
+        1,
+        GLOBALS_CS,
+        450,
+        "Shop::Domain",
+        Some(GLOBAL_WILDCARD_ALIAS),
+        RefForm::Glob,
+        EdgeKind::Imports,
+    );
+    for policy in POLICIES {
+        // `Svc.cs` sits beside `GlobalUsings.cs`: `Item` is in view there.
+        let r = type_use(2, SVC_CS, 421, "Item");
+        bound_to(bind_namespaced(&[global.clone(), r], policy), 421, 411, EdgeKind::TypeUses);
+        // `tools/Tool.cs` is outside `src/Api/`: it is not.
+        let r = type_use(3, TOOL_CS, 461, "Item");
+        assert_eq!(bind_namespaced(&[global.clone(), r], policy), Outcome::Unbound);
+        // The global row itself binds like the wildcard it is.
+        assert!(matches!(
+            bind_namespaced(std::slice::from_ref(&global), policy),
+            Outcome::BoundMany { .. }
+        ));
+    }
+}
+
+/// A file whose namespace is not recorded keeps the default model, and a
+/// layout without namespaces binds the namespace fixture's imports not at all —
+/// the model is what makes them bind.
+#[test]
+fn without_a_recorded_namespace_a_file_keeps_the_default_model() {
+    let (nodes, edges, _) = namespace_graph();
+    let r = import(1, SVC_CS, 420, "Shop::Domain::Item", RefForm::Path);
+    let layout = super::package_key::PackageLayout::default()
+        .with_namespace_extensions(["cs".to_string()]);
+    let ix = Index::build_with_layout(&nodes, &edges, std::slice::from_ref(&r), layout);
+    assert!(!ix.is_package_shaped("src/Api/Svc.cs"));
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+}
+
+/// A sync that adds or removes a `global using` re-binds every row of a
+/// declared-namespace file (S-518): the wildcard moves a bare name in a file
+/// the sync never touched, under a name no dirty token spells. Without the
+/// flag the same change-set selects nothing outside the changed file.
+#[test]
+fn a_moved_global_wildcard_reselects_every_namespaced_row() {
+    let r = type_use(2, SVC_CS, 421, "Item");
+    // The global row is already gone from the ledger: the sync removed it.
+    let ix = namespace_index(std::slice::from_ref(&r));
+    let file_paths: std::collections::HashMap<i64, String> = [
+        (SVC_CS, "src/Api/Svc.cs".to_string()),
+        (GLOBALS_CS, "src/Api/GlobalUsings.cs".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let delta = |moved: bool| super::Delta {
+        changed_paths: ["src/Api/GlobalUsings.cs".to_string()].into_iter().collect(),
+        dirty_tokens: ["globalusings", "src", "api", "cs"].iter().map(|t| t.to_string()).collect(),
+        global_imports_moved: moved,
+    };
+    assert!(super::is_affected(&r, &delta(true), &file_paths, &ix, false));
+    assert!(!super::is_affected(&r, &delta(false), &file_paths, &ix, false));
+}

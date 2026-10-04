@@ -260,6 +260,7 @@ pub(super) fn extract_one_config(
         config_source: None,
         forwarding: Vec::new(),
         declared_types: Vec::new(),
+        namespace: None,
     };
 
     // The committed-configuration corpus (S-380, [CR-121], [FR-WS-19]): flatten

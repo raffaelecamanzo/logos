@@ -43,7 +43,7 @@
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
-pub(crate) use binder::{is_class_like, SELF_TYPE_HEAD, STATIC_WILDCARD_ALIAS};
+pub(crate) use binder::{is_class_like, GLOBAL_WILDCARD_ALIAS, SELF_TYPE_HEAD, STATIC_WILDCARD_ALIAS};
 /// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
 /// function the intra-repo promotion pass, the federation bridge and the
 /// coverage read-model all resolve a broker topic operand through, so a `Topic`
@@ -76,7 +76,9 @@ pub(crate) mod go_module;
 pub(crate) mod grpc_key;
 /// The package-shaped module key (S-465, CR-149, FR-RS-01): the ONE derivation
 /// of the package a file declares — and so of a type's fully-qualified name —
-/// from its path, for a language whose descriptor declares `[package_modules]`.
+/// from its path, for a language whose descriptor declares `[package_modules]`,
+/// and from the namespace each file declares, for one whose `[module_model]` is
+/// `namespace` (S-518, FR-RS-13).
 /// The binder keys such files by it; any later consumer asks it rather than
 /// splitting a path a second way. See its module docs.
 pub mod package_key;
@@ -150,6 +152,8 @@ struct Snapshot {
     refs: Vec<UnresolvedRefRow>,
     /// Every node's recorded self type (S-493, `nodes.self_type`).
     self_types: Vec<(NodeId, String)>,
+    /// Every file's recorded declared namespace (S-518, `files.namespace`).
+    namespaces: Vec<(String, String)>,
     /// file_id → project-relative path, for an incremental run to test a row's
     /// owning file against the change-set. Empty on a full index.
     file_paths: HashMap<i64, String>,
@@ -175,6 +179,11 @@ pub struct Delta {
     pub changed_paths: HashSet<String>,
     /// Tokenized names this sync added or removed (see [`tokens`]).
     pub dirty_tokens: HashSet<String>,
+    /// Whether a changed file declared a global namespace wildcard before or
+    /// after the sync (S-518; a C# `global using`). Such a wildcard brings
+    /// names into view in untouched files under names no dirty token spells,
+    /// so every package-shaped row is re-bound.
+    pub global_imports_moved: bool,
 }
 
 /// Split `s` into lowercased identifier tokens — maximal runs of ASCII
@@ -230,6 +239,7 @@ pub fn run(
             edges: store.all_edges()?,
             refs: store.unresolved_refs()?,
             self_types: store.node_self_types()?,
+            namespaces: store.file_namespaces()?,
             // The file_id → path map only an incremental run needs (to test a
             // row's owning file against the change-set); a full index skips it.
             file_paths: if want_file_paths {
@@ -257,11 +267,13 @@ pub fn run(
                 go_module::discover(root, go_files),
             )
         });
-    // A package-shaped language (CR-149) keys its files by their package, as
+    // A package-shaped language (CR-149) keys its files by their package, and a
+    // declared-namespace one (S-518) by the namespace each file declares, as
     // its plugin declares; a synthetic graph with no registry keeps the default
     // module model for every file.
     let layout = tree.map_or_else(Default::default, |(registry, _)| {
         package_key::PackageLayout::from_registry(registry)
+            .with_declared_namespaces(snap.namespaces.iter().cloned())
     });
     let index = binder::Index::build_with_layout(&snap.nodes, &snap.edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
@@ -441,6 +453,9 @@ fn is_affected(
         if hierarchy_moved && r.kind == EdgeKind::Calls && index.is_package_shaped(path) {
             return true;
         }
+        if delta.global_imports_moved && index.is_package_shaped(path) {
+            return true;
+        }
     }
     if r.kind.is_config_reference() {
         return true;
@@ -616,7 +631,8 @@ pub(crate) fn call_residue_by_language(
     registry: &LanguageRegistry,
     policy: BindingPolicy,
 ) -> Result<BTreeMap<String, CallResidue>> {
-    let layout = package_key::PackageLayout::from_registry(registry);
+    let layout = package_key::PackageLayout::from_registry(registry)
+        .with_declared_namespaces(store.file_namespaces()?);
     let files: HashMap<i64, String> = store
         .indexed_files()?
         .into_iter()

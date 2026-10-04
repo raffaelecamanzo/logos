@@ -118,7 +118,7 @@ use rayon::prelude::*;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, ReceiverShape, RefForm};
-use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, Semantics};
+use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, ModuleModelKind, Semantics};
 use crate::resolve::http_client_call::ClientCallRefusal;
 use crate::resolve::package_key::PackageLayout;
 
@@ -126,8 +126,8 @@ use config::accessor::{BindingView, DeclaredTypes};
 use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 
 use refs::{
-    flatten_use_tree, import_segments, is_relative_head, macro_call_refs, specifier_segments,
-    split_path_text,
+    flatten_dotted_import, flatten_use_tree, import_segments, is_relative_head, macro_call_refs,
+    specifier_segments, split_path_text,
 };
 use symbol::{build_symbol, descriptor_family, descriptor_for, path_segments, DescriptorFamily};
 
@@ -387,13 +387,24 @@ pub struct Facts {
     /// The top-level types this file declares under their package-aware
     /// fully-qualified names, or refused (S-472, [CR-152] §3.2 B).
     ///
-    /// Empty for every file whose language is not package-shaped — which is
-    /// every file of a member with no Java/Kotlin source, so such a member
-    /// writes no declared-type row and is byte-for-byte unaffected. Produced by
+    /// Empty for every file whose language is neither package-shaped nor keyed
+    /// by its declared namespace (S-518) — which is every file of a member with
+    /// no Java, Kotlin, PHP, C# or Scala source, so such a member writes no
+    /// declared-type row and is byte-for-byte unaffected. Produced by
     /// [`declared_types::source_types`] on the code-extraction path only.
     ///
     /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
     pub declared_types: Vec<declared_types::SourceType>,
+    /// The namespace or package this file declares, for a language keyed by it
+    /// (S-518, [FR-RS-13]): in
+    /// [`namespace_text`](crate::resolve::package_key::namespace_text) form,
+    /// `Some("")` for the global namespace. `None` for every file of any other
+    /// module model, and for one whose top-level declarations sit in two
+    /// different namespaces ([`declared_types::file_namespace`]) — such a file
+    /// keeps the default module key.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    pub namespace: Option<String>,
 }
 
 /// One captured declaration, retained with its tree-sitter node for the metrics
@@ -571,6 +582,7 @@ fn extract_one(
         config_source: None,
         forwarding: Vec::new(),
         declared_types: Vec::new(),
+        namespace: None,
     };
 
     // A grammar that fails to bind (ABI skew) is skipped-and-warned, never fatal.
@@ -608,7 +620,7 @@ fn extract_one(
     let source = input.source.as_bytes();
 
     // 1) Collect declarations from the query matches.
-    let (mut decls, package, damage) = collect_decls(query, tree.root_node(), source);
+    let (mut decls, package_statement, namespaces, damage) = collect_decls(query, tree.root_node(), source);
     if let Some(i) = partial_warning {
         damage.annotate(&mut facts.warnings[i]);
     }
@@ -616,6 +628,29 @@ fn extract_one(
     // 2) Resolve parent scopes and 3) assign canonical-sort ordinals.
     assign_parents(&mut decls);
     assign_ordinals(&mut decls);
+
+    // The namespace the file declares (S-518, FR-RS-13), for a language keyed by
+    // it: the one its top-level declarations share. That namespace IS such a
+    // file's package, so its declared types are named by it and never refused
+    // as disagreeing with the directory.
+    let package: Option<String>;
+    let file_layout: PackageLayout;
+    let layout = if plugin.semantics().module_model == ModuleModelKind::Namespace {
+        let top_level: Vec<usize> = decls
+            .iter()
+            .filter(|d| d.parent.is_none())
+            .map(|d| d.start_byte)
+            .collect();
+        facts.namespace = declared_types::file_namespace(&namespaces, &top_level, source.len());
+        package = facts.namespace.clone();
+        file_layout = layout
+            .clone()
+            .with_declared_namespaces(facts.namespace.clone().map(|ns| (input.path.clone(), ns)));
+        &file_layout
+    } else {
+        package = package_statement;
+        layout
+    };
 
     // 4) Build a symbol per declaration; a build failure skips that node only.
     // Empty and `.` components (a `./`-prefixed or doubled-slash path) are
@@ -1619,10 +1654,13 @@ fn collect_refs(
                 // structural walk no text split can express.
                 //
                 // A match that also carries `ref.import.asterisk` wrote the
-                // specifier before a wildcard (a Java `import a.b.*`, CR-149):
-                // it names a scope whose members come into view, not one
-                // declaration, so it is a `Glob` row and introduces no alias —
-                // `b` is not a name the file can now use.
+                // specifier before a wildcard (a Java `import a.b.*`, CR-149),
+                // or names a namespace whose types all come into view (a C#
+                // `using A.B;`, S-518): it names a scope whose members come
+                // into view, not one declaration, so it is a `Glob` row and
+                // introduces no alias — `b` is not a name the file can now use.
+                // `ref.import.global` marks one whose scope is every file of
+                // the declaring file's directory (a C# `global using`).
                 "ref.import" => {
                     let segments = match semantics.import_specifier {
                         ImportSpecifier::Path => {
@@ -1643,9 +1681,13 @@ fn collect_refs(
                     // (`STATIC_WILDCARD_ALIAS`) carries the difference into
                     // the ledger, which has no other column for it.
                     let (form, alias) = if marked("ref.import.asterisk") {
-                        let every_static_member = marked("ref.import.static")
-                            .then(|| crate::resolve::STATIC_WILDCARD_ALIAS.to_string());
-                        (RefForm::Glob, every_static_member)
+                        let scope = if marked("ref.import.global") {
+                            Some(crate::resolve::GLOBAL_WILDCARD_ALIAS.to_string())
+                        } else {
+                            marked("ref.import.static")
+                                .then(|| crate::resolve::STATIC_WILDCARD_ALIAS.to_string())
+                        };
+                        (RefForm::Glob, scope)
                     } else {
                         (RefForm::Path, segments.last().cloned())
                     };
@@ -1740,9 +1782,16 @@ fn collect_refs(
                     let owners = declarator_symbols(node).unwrap_or_else(|| vec![source_symbol]);
                     out.extend(type_relation_rows(name, &owners, node, source, line));
                 }
-                "ref.use" => {
+                // An import whose paths no single node spans (S-518; Scala's
+                // `import_declaration`): the declaration is walked like a Rust
+                // use-tree, one row per imported path.
+                name @ ("ref.use" | "ref.import.dotted") => {
                     let mut items = Vec::new();
-                    flatten_use_tree(node, source, &mut items);
+                    if name == "ref.use" {
+                        flatten_use_tree(node, source, &mut items);
+                    } else {
+                        flatten_dotted_import(node, source, &mut items);
+                    }
                     for item in items {
                         let (form, alias) = if item.glob {
                             (RefForm::Glob, None)
@@ -2414,6 +2463,7 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
 
 /// Step 1 of [`extract_one`]: the declarations the `symbols` query captures,
 /// the file's `package` statement when its grammar's query names one (S-472),
+/// the namespace declarations it names (S-518, [`declared_types::NAMESPACE_CAPTURE`]),
 /// and the declarations a parse-error region cost the file ([FR-EX-30]).
 ///
 /// A [`SELF_TYPE_CAPTURE`] gives its text to every declaration captured in the
@@ -2429,7 +2479,12 @@ fn collect_decls<'t>(
     query: &Query,
     root: Node<'t>,
     source: &[u8],
-) -> (Vec<Decl<'t>>, Option<String>, ParseDamage) {
+) -> (
+    Vec<Decl<'t>>,
+    Option<String>,
+    Vec<declared_types::NamespaceScope>,
+    ParseDamage,
+) {
     let capture_names = query.capture_names();
     let mut decls: Vec<Decl<'t>> = Vec::new();
     // Guard against a declaration node being captured more than once (a query
@@ -2443,6 +2498,7 @@ fn collect_decls<'t>(
     let mut nameless: HashSet<usize> = HashSet::new();
     let mut damage = ParseDamage::default();
     let mut package: Option<String> = None;
+    let mut namespaces: Vec<declared_types::NamespaceScope> = Vec::new();
     // declaration node id → the self type its match declares (S-493).
     let mut self_types: HashMap<usize, String> = HashMap::new();
     let mut cursor = QueryCursor::new();
@@ -2457,7 +2513,9 @@ fn collect_decls<'t>(
             .filter(|t| !t.is_empty());
         for cap in m.captures {
             let capture = capture_names[cap.index as usize];
-            if declared_types::note_package(&mut package, capture, cap.node, source) {
+            if declared_types::note_package(&mut package, capture, cap.node, source)
+                || declared_types::note_namespace(&mut namespaces, capture, cap.node, source)
+            {
                 continue;
             }
             let Some(kind) = kind_for_capture(capture) else {
@@ -2505,7 +2563,7 @@ fn collect_decls<'t>(
         decl.self_type = self_types.remove(&decl.node.id());
     }
     damage.skipped = nameless.difference(&seen_decls).count();
-    (decls, package, damage)
+    (decls, package, namespaces, damage)
 }
 
 /// The declarations a parse-error region cost one file ([FR-EX-30]), counted

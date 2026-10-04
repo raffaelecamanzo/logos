@@ -9,25 +9,39 @@
 //! is `("mailbox_core", [com, x, Svc])` — the fully-qualified name its imports
 //! spell — where the default model made it `[main, java, com, x, Svc]`.
 //!
+//! A language whose plugin declares the **declared-namespace** model
+//! (`[module_model] kind = "namespace"`, S-518, [FR-RS-13]) is keyed by the
+//! namespace or package each file *declares* instead — PHP's `namespace`, C#'s
+//! file-scoped or block `namespace`, Kotlin's and Scala's `package` — so a
+//! namespace that differs from its directory still names the file. Extraction
+//! records that name ([`namespace_text`]); the layout is handed it per file
+//! ([`PackageLayout::with_declared_namespaces`]) and keys the file
+//! `(crate, namespace ++ [stem])`, its package being the namespace itself. A
+//! file of such a language whose namespace is not known — its top-level
+//! declarations sit in two different namespaces, or it was indexed before the
+//! namespace was recorded — keeps the default model's key, as it had before.
+//!
 //! **This is the single source of FQN derivation.** Anything that needs the
 //! package a file declares, or the fully-qualified name of a type it declares,
 //! asks [`PackageLayout::package_of`] / [`PackageLayout::type_fqn`] — never a
 //! second split of the path (the sprint-81 risk register names the divergence a
-//! re-derivation would cause).
+//! re-derivation would cause), and never a second reading of a namespace.
 //!
 //! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 //! [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
+//! [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::plugin::{LanguagePlugin, LanguageRegistry};
+use crate::plugin::{LanguagePlugin, LanguageRegistry, ModuleModelKind};
 
 /// A module identity: `(crate name, module path segments)` — the binder's
 /// `ModKey`.
 pub type ModuleKey = (String, Vec<String>);
 
-/// Which file extensions are package-shaped, and under which source roots.
+/// Which file extensions are package-shaped, and under which source roots;
+/// which take the namespace they declare, and what each such file declares.
 ///
 /// Empty ([`Default`]) is the default module model for every file, which is
 /// what a synthetic graph with no registry behind it is resolved with.
@@ -36,6 +50,14 @@ pub struct PackageLayout {
     /// Normalised extension → its language's source roots, each split into path
     /// segments, in declaration order.
     roots_by_ext: HashMap<String, Vec<Vec<String>>>,
+    /// Normalised extensions whose language declares the declared-namespace
+    /// model (S-518).
+    namespace_exts: HashSet<String>,
+    /// Project-relative path → the namespace that file declares, as segments
+    /// (empty for the global namespace) — only for a file of a
+    /// [`namespace_exts`](Self::namespace_exts) language whose namespace was
+    /// recorded.
+    namespaces: HashMap<String, Vec<String>>,
 }
 
 impl PackageLayout {
@@ -57,12 +79,44 @@ impl PackageLayout {
                 (ext.to_ascii_lowercase(), split)
             })
             .collect();
-        Self { roots_by_ext }
+        Self {
+            roots_by_ext,
+            ..Self::default()
+        }
     }
 
-    /// The layout the loaded plugins declare.
+    /// The layout the loaded plugins declare: their package roots and their
+    /// declared-namespace languages. It knows no file's namespace until it is
+    /// given them ([`with_declared_namespaces`](Self::with_declared_namespaces)).
     pub fn from_registry(registry: &LanguageRegistry) -> Self {
         Self::new(registry.package_source_roots())
+            .with_namespace_extensions(registry.namespace_extensions())
+    }
+
+    /// This layout, with the files of `exts` (extensions, with or without a
+    /// leading dot) keyed by the namespace they declare.
+    pub fn with_namespace_extensions(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        self.namespace_exts.extend(
+            exts.into_iter()
+                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
+        );
+        self
+    }
+
+    /// This layout, given the namespace each file declares — `(path, name)`
+    /// pairs, the name in [`namespace_text`] form (`""` for the global
+    /// namespace). A pair whose file is not of a declared-namespace language is
+    /// ignored, so a stray row can never re-key a Rust or Java file.
+    pub fn with_declared_namespaces(
+        mut self,
+        declared: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        for (path, name) in declared {
+            if self.declares_namespaces(&path) {
+                self.namespaces.insert(path, namespace_segments(&name));
+            }
+        }
+        self
     }
 
     /// The layout one plugin declares — [`from_registry`](Self::from_registry)
@@ -71,21 +125,33 @@ impl PackageLayout {
     /// plugin and no registry. For every extension of that plugin it is the
     /// registry's layout exactly.
     pub fn from_plugin(plugin: &dyn LanguagePlugin) -> Self {
-        let Some(pm) = plugin.semantics().package_modules.as_ref() else {
-            return Self::default();
-        };
-        Self::new(
+        let semantics = plugin.semantics();
+        let exts = || {
             plugin
                 .extensions()
                 .iter()
-                .map(|ext| (ext.trim_start_matches('.').to_string(), pm.source_roots.clone()))
-                .collect(),
-        )
+                .map(|ext| ext.trim_start_matches('.').to_string())
+        };
+        match (semantics.module_model, semantics.package_modules.as_ref()) {
+            (ModuleModelKind::Package, Some(pm)) => {
+                Self::new(exts().map(|ext| (ext, pm.source_roots.clone())).collect())
+            }
+            (ModuleModelKind::Namespace, _) => Self::default().with_namespace_extensions(exts()),
+            _ => Self::default(),
+        }
     }
 
-    /// `true` when `path`'s language declares a package-shaped module path.
+    /// `true` when the file at `path` takes the package rungs: its language
+    /// declares a package-shaped module path, or it is a declared-namespace
+    /// file whose namespace is known.
     pub fn is_package_shaped(&self, path: &str) -> bool {
-        self.roots_of(path).is_some()
+        self.roots_of(path).is_some() || self.namespaces.contains_key(path)
+    }
+
+    /// `true` when `path`'s language declares the declared-namespace model,
+    /// whether or not this layout knows the namespace the file declares.
+    pub fn declares_namespaces(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.namespace_exts.contains(&ext))
     }
 
     /// The module key of the file at the project-relative `path`.
@@ -100,7 +166,20 @@ impl PackageLayout {
     ///
     /// The **rightmost** match of any root wins, as the default model takes the
     /// last `src/`, so a nested module's own root is the one that counts.
+    ///
+    /// A declared-namespace file whose namespace is known is keyed by it: the
+    /// default model's crate, then the namespace, then the file stem —
+    /// `src/Ordering/Order.cs` declaring `namespace Shop.Domain;` is
+    /// `("crate", [Shop, Domain, Order])`.
     pub fn module_key(&self, path: &str) -> ModuleKey {
+        if let Some(namespace) = self.namespaces.get(path) {
+            let (crate_name, _, _) = default_layout(path);
+            let mut mods = namespace.clone();
+            if let Some(file) = path.rsplit('/').find(|s| !s.is_empty()) {
+                mods.push(file_stem(file));
+            }
+            return (crate_name, mods);
+        }
         let (crate_name, mut mods, stem) = match self.roots_of(path) {
             Some(roots) => rooted(path, roots).unwrap_or_else(|| default_layout(path)),
             None => return module_key_for_file(path),
@@ -113,8 +192,13 @@ impl PackageLayout {
 
     /// The package the file at `path` declares by its location — its module key
     /// without the file stem — or `None` when its language is not
-    /// package-shaped. `src/main/java/com/x/Svc.java` → `[com, x]`.
+    /// package-shaped. `src/main/java/com/x/Svc.java` → `[com, x]`. For a
+    /// declared-namespace file it is the namespace the file declares, whatever
+    /// its directory, and `None` when that is not known.
     pub fn package_of(&self, path: &str) -> Option<Vec<String>> {
+        if let Some(namespace) = self.namespaces.get(path) {
+            return Some(namespace.clone());
+        }
         self.roots_of(path)?;
         let (_, mut mods) = self.module_key(path);
         mods.pop();
@@ -141,9 +225,31 @@ impl PackageLayout {
     }
 
     fn roots_of(&self, path: &str) -> Option<&[Vec<String>]> {
-        let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
-        self.roots_by_ext.get(&ext).map(Vec::as_slice)
+        self.roots_by_ext.get(&extension(path)?).map(Vec::as_slice)
     }
+}
+
+/// `path`'s extension, lower-cased — the key both models are declared under.
+fn extension(path: &str) -> Option<String> {
+    Some(Path::new(path).extension()?.to_str()?.to_ascii_lowercase())
+}
+
+/// A declared namespace's segments from its recorded text (`"Shop.Domain"` →
+/// `[Shop, Domain]`; `""`, the global namespace, → none) — the inverse of
+/// [`namespace_text`].
+pub fn namespace_segments(text: &str) -> Vec<String> {
+    text.split('.')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The recorded text of a declared namespace: its segments joined by `.`,
+/// `""` for the global namespace. Every language's namespace is recorded in
+/// this one form, whatever separator it is written with (PHP's `\`), so the
+/// layout reads it back with one split ([`namespace_segments`]).
+pub fn namespace_text(segments: &[String]) -> String {
+    segments.join(".")
 }
 
 /// `(crate, package directories, stem)` of `path` under the rightmost match of
@@ -355,5 +461,93 @@ mod tests {
             Some(vec!["com".into(), "x".into(), "Extra".into()])
         );
         assert_eq!(l.type_fqn("src/lib.rs", "Extra"), None);
+    }
+}
+
+// The declared-namespace model (S-518) needs no grammar: a layout is told which
+// extensions declare it and what each file declares. The extensions are spelt
+// here without a JVM language id (the `jvm_parity` guard reads this file).
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+
+    fn segs(path: &str) -> Vec<String> {
+        namespace_segments(&path.replace('/', "."))
+    }
+
+    /// A layout keying `.cs` and `.php` files by their declared namespace, with
+    /// `declared` recorded.
+    fn layout(declared: &[(&str, &str)]) -> PackageLayout {
+        PackageLayout::default()
+            .with_namespace_extensions(["cs".to_string(), ".PHP".to_string()])
+            .with_declared_namespaces(
+                declared
+                    .iter()
+                    .map(|(p, n)| ((*p).to_string(), (*n).to_string())),
+            )
+    }
+
+    #[test]
+    fn a_declared_namespace_keys_the_file_whatever_its_directory() {
+        let l = layout(&[("src/Ordering/Order.cs", "Shop.Domain")]);
+        assert!(l.is_package_shaped("src/Ordering/Order.cs"));
+        assert_eq!(
+            l.module_key("src/Ordering/Order.cs"),
+            ("crate".to_string(), segs("Shop/Domain/Order"))
+        );
+        assert_eq!(l.package_of("src/Ordering/Order.cs"), Some(segs("Shop/Domain")));
+        assert_eq!(
+            l.type_fqn("src/Ordering/Order.cs", "OrderItem"),
+            Some(segs("Shop/Domain/OrderItem")),
+            "a type is its file's namespace plus its own name"
+        );
+        assert_eq!(l.source_root("src/Ordering/Order.cs"), None);
+        // The crate is the default model's: the directory before the last `src/`.
+        let nested = layout(&[("Basket.API/src/Grpc/Svc.cs", "Basket")]);
+        assert_eq!(
+            nested.module_key("Basket.API/src/Grpc/Svc.cs"),
+            ("Basket.API".to_string(), segs("Basket/Svc"))
+        );
+    }
+
+    #[test]
+    fn the_global_namespace_is_an_empty_package() {
+        let l = layout(&[("lib/helpers.php", "")]);
+        assert!(l.is_package_shaped("lib/helpers.php"));
+        assert_eq!(l.package_of("lib/helpers.php"), Some(Vec::new()));
+        assert_eq!(l.type_fqn("lib/helpers.php", "Util"), Some(segs("Util")));
+    }
+
+    #[test]
+    fn a_namespace_file_whose_namespace_is_unknown_keeps_the_default_key() {
+        let l = layout(&[]);
+        assert!(l.declares_namespaces("src/Ordering/Order.cs"));
+        assert!(!l.is_package_shaped("src/Ordering/Order.cs"));
+        assert_eq!(
+            l.module_key("src/Ordering/Order.cs"),
+            module_key_for_file("src/Ordering/Order.cs")
+        );
+        assert_eq!(l.package_of("src/Ordering/Order.cs"), None);
+    }
+
+    #[test]
+    fn a_recorded_namespace_never_rekeys_another_languages_file() {
+        // A stray row for a file of another model is ignored, so a Rust or a
+        // package-model file keeps its key byte for byte.
+        let l = layout(&[("logos-core/src/extract/mod.rs", "Shop"), ("src/lib.rs", "")]);
+        for path in ["logos-core/src/extract/mod.rs", "src/lib.rs"] {
+            assert!(!l.declares_namespaces(path), "{path}");
+            assert!(!l.is_package_shaped(path), "{path}");
+            assert_eq!(l.module_key(path), module_key_for_file(path), "{path}");
+            assert_eq!(l.package_of(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_namespace_reads_back_from_the_one_recorded_form() {
+        assert_eq!(namespace_text(&segs("Monolog/Handler")), "Monolog.Handler");
+        assert_eq!(namespace_segments("Monolog.Handler"), segs("Monolog/Handler"));
+        assert_eq!(namespace_text(&[]), "");
+        assert!(namespace_segments("").is_empty());
     }
 }

@@ -5,7 +5,10 @@
 ;                 by the `@ref.receiver.*` markers below (S-514, S-516, CR-169).
 ;   @ref.import — a `using` directive's namespace path (`Microsoft.AspNetCore.Mvc`);
 ;                 canonicalised (dots → `::`) into the ledger form feeding the
-;                 binder and the framework candidacy gate (FR-FW-04).
+;                 binder and the framework candidacy gate (FR-FW-04). A plain
+;                 `using N;` brings every type of `N` into view, so it is marked
+;                 a wildcard (`@ref.import.asterisk`, S-518, FR-RS-13); see the
+;                 `using` section below for `global`, `static` and aliases.
 ;   @ref.access — an own-field access (`this.X`): a method reading a field of its
 ;                 own type (CR-005, FR-EX-08); the bound LCOM4 input.
 ;
@@ -52,13 +55,43 @@
 (member_access_expression
   expression: (_) @ref.receiver.other)
 
-; `using System.Collections.Generic;` / `using Microsoft.AspNetCore.Mvc;` — the
-; namespace path (qualified) or a single-segment namespace.
-(using_directive
-  (qualified_name) @ref.import)
+; `using` directives (S-518, CR-170, FR-RS-13). The four forms are told apart by
+; the directive's leading keywords, read off its text, so exactly one pattern
+; matches each directive and it records one row:
+;
+;   `using A.B;`             — a namespace wildcard: every type of `A.B` comes
+;                              into view in this file (`@ref.import.asterisk`).
+;   `global using A.B;`      — the same wildcard for every file of the project
+;                              (`@ref.import.global`), which the binder reads as
+;                              every C# file under this file's directory: the
+;                              `.csproj` is not read, and global usings sit at
+;                              the project root by convention.
+;   `using static A.B.C;`    — every static member of the type `A.B.C`
+;                              (`@ref.import.static`, Java's `import static
+;                              a.b.C.*`). A `global using static` is read as a
+;                              plain one: this file only.
+;   `using X = A.B.C;`       — an alias: one single-type row naming `A.B.C`.
+;
+; The namespace path is qualified or a single segment.
+((using_directive
+  !name
+  [(qualified_name) (identifier)] @ref.import @ref.import.asterisk) @_using
+  (#not-match? @_using "^(global\\s|using\\s+static\\s)"))
+
+((using_directive
+  !name
+  [(qualified_name) (identifier)] @ref.import @ref.import.asterisk @ref.import.global) @_using
+  (#match? @_using "^global\\s")
+  (#not-match? @_using "^global\\s+using\\s+static\\s"))
+
+((using_directive
+  !name
+  [(qualified_name) (identifier)] @ref.import @ref.import.static @ref.import.asterisk) @_using
+  (#match? @_using "^(global\\s+)?using\\s+static\\s"))
 
 (using_directive
-  (identifier) @ref.import)
+  name: (identifier)
+  [(qualified_name) (identifier)] @ref.import)
 
 ; Own-field access (`this.Count`): the binder proves an exactly-one Field
 ; candidate in the enclosing type for an `Accesses` edge (Method → Field); an

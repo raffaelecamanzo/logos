@@ -30,17 +30,21 @@
 //! 5. **workspace** — policy-gated unique-candidate fallbacks
 //!    ([`BindingPolicy`]).
 //!
-//! A file of a **package-shaped** language (Java, [CR-149]; Kotlin, S-472) is keyed by its
-//! package ([`PackageLayout`]) and, after the lexical chain, takes its own
-//! rungs instead of 2–5: its single-type/static imports, the top-level types of
-//! its own package, what its wildcards bring into view, then a path read as a
-//! fully-qualified name ([`Ctx::resolve_package_name`],
-//! [`Ctx::resolve_package_path`]). An import binds to the type or member it
-//! names, never to a file module, and the workspace suffix match is never
-//! consulted — the aggressive bare-name fallback alone stays policy-gated as
+//! A file of a **package-shaped** language (Java, [CR-149]) is keyed by its
+//! package, and one of a **declared-namespace** language (PHP, C#, Kotlin,
+//! Scala; S-518, [FR-RS-13]) by the namespace it declares ([`PackageLayout`]).
+//! Either, after the lexical chain, takes its own rungs instead of 2–5: its
+//! single-type/static imports, the top-level types of its own package, what its
+//! wildcards bring into view, then a path read as a fully-qualified name
+//! ([`Ctx::resolve_package_name`], [`Ctx::resolve_package_path`]). An import
+//! binds to the type or member it names — a declared-namespace wildcard, which
+//! names no type, to the files declaring the namespace
+//! ([`Ctx::namespace_files`]) — and the workspace suffix match is never
+//! consulted; the aggressive bare-name fallback alone stays policy-gated as
 //! everywhere else.
 //!
 //! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+//! [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 //!
 //! # Never fabricate ([NFR-RA-05])
 //!
@@ -303,7 +307,9 @@ struct FileScope {
     alias_expansions: HashMap<String, Vec<Vec<String>>>,
     /// Glob-imported module paths (`use m::*` → `["m"]`), unresolved form. For a
     /// package-shaped file (CR-149) these are the non-static wildcards
-    /// (`import a.b.*`, `import a.b.C.*`), which bring **types** into scope only.
+    /// (`import a.b.*`, `import a.b.C.*`, C#'s `using A.B;`), which bring
+    /// **types** into scope only — the file's own, then the global ones in force
+    /// over it ([`Index::apply_global_globs`], S-518).
     globs: Vec<Vec<String>>,
     /// A package-shaped file's **static** wildcards (`import static a.b.C.*`,
     /// recorded with the alias `*`, [`STATIC_WILDCARD_ALIAS`]): every static
@@ -312,9 +318,21 @@ struct FileScope {
 }
 
 /// The alias a static wildcard import's `Glob` row carries — "every static
-/// member name of the type" (CR-149). A non-static wildcard, and every other
-/// language's glob, carries none.
+/// member name of the type" (CR-149; C#'s `using static`, S-518). A non-static
+/// wildcard carries none, and a global one [`GLOBAL_WILDCARD_ALIAS`].
 pub(crate) const STATIC_WILDCARD_ALIAS: &str = "*";
+
+/// The alias a **global** namespace wildcard's `Glob` row carries — C#'s
+/// `global using N;` (S-518, [FR-RS-13]): the namespace comes into view in every
+/// file of the declaring file's language under the declaring file's directory,
+/// not in that file alone. The directory stands in for the project, which the
+/// `.csproj` would name and is not read; by .NET convention global usings sit
+/// at the project root, and one declared deeper reaches fewer files, never more
+/// ([NFR-RA-05]).
+///
+/// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+pub(crate) const GLOBAL_WILDCARD_ALIAS: &str = "global";
 
 /// The head of a call through the caller's own type, `Self::m` (S-493,
 /// [FR-RS-11]): what a written `Self::m()` records, and what extraction records
@@ -408,9 +426,10 @@ pub(crate) struct Index {
     imported: HashMap<i64, HashMap<String, Vec<NodeId>>>,
     /// Normalised crate names present in the graph.
     crates: HashSet<String>,
-    /// Which files are keyed by their package ([CR-149]); empty — the default
-    /// model for every file — unless the run was built with the registry's
-    /// layout ([`Index::build_with_layout`]).
+    /// Which files are keyed by their package ([CR-149]) or by the namespace
+    /// they declare (S-518); empty — the default model for every file — unless
+    /// the run was built with the registry's layout
+    /// ([`Index::build_with_layout`]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     layout: PackageLayout,
@@ -423,6 +442,15 @@ pub(crate) struct Index {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     types_by_fqn: HashMap<Vec<String>, Vec<NodeId>>,
+    /// Declared namespace → the file-root module nodes of the declared-namespace
+    /// files declaring it, id-sorted (S-518, [FR-RS-13]) — what a namespace
+    /// wildcard (C#'s `using N;`, Kotlin's `import n.*`) binds to: a namespace
+    /// has no node of its own, and the files declaring it are the code it names,
+    /// as a Go import path names its directory's files (S-439). Empty for every
+    /// file of any other module model.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    files_by_namespace: HashMap<Vec<String>, Vec<NodeId>>,
     /// `(trait node, method name)` → the concrete workspace impl method nodes of
     /// that trait method, id-sorted and deduplicated — the fan-out universe for a
     /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]). Built from the
@@ -525,6 +553,7 @@ impl Index {
 
         let info = build_node_info(nodes, &parent, &module_key, &layout);
         let types_by_fqn = build_package_types(nodes, &parent, &members, &node_by_id, &layout);
+        let files_by_namespace = build_namespace_files(nodes, &parent, &layout);
         let by_symbol = build_by_symbol(nodes);
         let by_name = build_by_name(nodes);
         let by_file_path = build_by_file_path(nodes);
@@ -553,6 +582,7 @@ impl Index {
             crates,
             layout,
             types_by_fqn,
+            files_by_namespace,
             impls_by_trait_method,
             supertypes: HashMap::new(),
             hierarchy_tokens: HashSet::new(),
@@ -574,7 +604,57 @@ impl Index {
                 Some((path.file_path.clone()?, file_id))
             })
             .collect();
+        index.apply_global_globs(refs);
         index
+    }
+
+    /// Bring each global namespace wildcard ([`GLOBAL_WILDCARD_ALIAS`], S-518)
+    /// into view in every package-shaped file of its declaring file's extension
+    /// under the declaring file's directory — appended to that file's
+    /// [`FileScope::globs`] after its own, in ledger order, so the scope a row
+    /// reads is deterministic ([NFR-RA-06]). A file with no ledger row has no
+    /// row to bind and is not visited; one with rows but no import of its own
+    /// gains a scope here.
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn apply_global_globs(&mut self, refs: &[UnresolvedRefRow]) {
+        let declared: Vec<(String, String, Vec<String>)> = refs
+            .iter()
+            .filter(|r| {
+                r.kind == EdgeKind::Imports
+                    && r.form == RefForm::Glob
+                    && r.alias.as_deref() == Some(GLOBAL_WILDCARD_ALIAS)
+            })
+            .filter_map(|r| {
+                let path = self
+                    .by_symbol
+                    .get(&r.source_symbol)
+                    .and_then(|id| self.info.get(id))
+                    .and_then(|i| i.file_path.as_deref())?;
+                let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir).to_string();
+                Some((dir, extension_of(path), split(&r.target)))
+            })
+            .collect();
+        if declared.is_empty() {
+            return;
+        }
+        for (path, file_id) in &self.file_ids {
+            if !self.layout.is_package_shaped(path) {
+                continue;
+            }
+            let ext = extension_of(path);
+            for (dir, glob_ext, glob) in &declared {
+                let under = dir.is_empty() || path.starts_with(&format!("{dir}/"));
+                if !under || *glob_ext != ext {
+                    continue;
+                }
+                // A file importing nothing of its own has no scope yet.
+                let scope = self.file_scopes.entry(*file_id).or_default();
+                if !scope.globs.contains(glob) {
+                    scope.globs.push(glob.clone());
+                }
+            }
+        }
     }
 
     /// Declare which files write their import specifiers as paths, and the Go
@@ -1117,6 +1197,38 @@ fn build_package_types(
     by_fqn
 }
 
+/// Declared namespace → the file-root modules of the declared-namespace files
+/// declaring it (S-518, [`Index::files_by_namespace`]): every parentless
+/// `Module` node whose file the layout knows a declared namespace for
+/// ([`PackageLayout::package_of`], the one reading of it), id-sorted
+/// ([NFR-RA-06]). Empty under a layout that knows no namespace.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_namespace_files(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    layout: &PackageLayout,
+) -> HashMap<Vec<String>, Vec<NodeId>> {
+    let mut by_namespace: HashMap<Vec<String>, Vec<NodeId>> = HashMap::new();
+    for root in nodes {
+        if root.kind != NodeKind::Module || parent.contains_key(&root.id) {
+            continue;
+        }
+        let Some(path) = root.file_path.as_deref() else { continue };
+        if !layout.declares_namespaces(path) {
+            continue;
+        }
+        if let Some(namespace) = layout.package_of(path) {
+            by_namespace.entry(namespace).or_default().push(root.id);
+        }
+    }
+    for list in by_namespace.values_mut() {
+        list.sort();
+        list.dedup();
+    }
+    by_namespace
+}
+
 /// Canonical symbol → node. First-wins on a (model-prohibited) duplicate
 /// symbol: `nodes` arrives id-ordered from `all_nodes()`, so this matches the
 /// store's `node_id_for_symbol` min-id pick (a no-op in practice, ADR-07).
@@ -1617,11 +1729,17 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // a package has no node, so `import a.b.*` binds nothing — its
             // members still come into scope through the file's globs
             // ([`Ctx::glob_members`]), which is what the row is for.
+            //
+            // A declared-namespace file's wildcard naming no type names a
+            // namespace (S-518): it binds to every other file declaring it
+            // ([`Ctx::namespace_files`]), as a Go import path binds to its
+            // directory's files. Java's package wildcard binds nothing still.
             if ctx.source_package.is_some() {
                 return match ctx.resolve_fqn(&segs, Want::Any) {
                     Res::Found(t) if ix.info.get(&t).is_some_and(|i| is_type_like(i.kind)) => {
                         bound(t)
                     }
+                    Res::NotFound => ctx.namespace_files(&segs).unwrap_or(Outcome::Unbound),
                     _ => Outcome::Unbound,
                 };
             }
@@ -3223,6 +3341,41 @@ impl Ctx<'_> {
             }
         }
         Res::NotFound
+    }
+
+    /// The files a declared-namespace source's namespace wildcard names (S-518,
+    /// [FR-RS-13]): every **other** file declaring the namespace `segs`
+    /// ([`Index::files_by_namespace`]), as one [`Outcome::BoundMany`] — `None`
+    /// when the source is not a declared-namespace file, or no other file
+    /// declares it (a framework namespace, `System`, stays unbound,
+    /// [NFR-RA-05]).
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn namespace_files(&self, segs: &[String]) -> Option<Outcome> {
+        let source_file = self
+            .ix
+            .info
+            .get(&self.source)
+            .and_then(|i| i.file_path.as_deref())?;
+        if !self.ix.layout.declares_namespaces(source_file) {
+            return None;
+        }
+        let own_file = self.ix.by_file_path.get(source_file);
+        let targets: Vec<NodeId> = self
+            .ix
+            .files_by_namespace
+            .get(segs)?
+            .iter()
+            .copied()
+            .filter(|id| !own_file.is_some_and(|own| own.contains(id)))
+            .collect();
+        (!targets.is_empty()).then_some(Outcome::BoundMany {
+            source: self.source,
+            targets,
+            kind: EdgeKind::Imports,
+            payload: None,
+        })
     }
 
     /// The top-level types named `name` in `package`, id-sorted.

@@ -84,9 +84,18 @@
   (function_body) @ref.receiver.anonymous)
 
 ; An import's qualified path — canonicalised (dots → `::`) into the ledger form
-; that feeds the binder and the Spring candidacy gate.
+; that feeds the binder and the Spring candidacy gate. `import a.b.C` (and its
+; aliased form) names one declaration; `import a.b.*` brings every type of the
+; package `a.b` into view, so it is marked a wildcard (`@ref.import.asterisk`,
+; S-518) and records no alias. The two are told apart by the trailing `*`, so
+; exactly one pattern matches each import.
+((import
+  (qualified_identifier) @ref.import) @_import
+  (#not-match? @_import "\\*\\s*;?\\s*$"))
+
 (import
-  (qualified_identifier) @ref.import)
+  (qualified_identifier) @ref.import
+  "*" @ref.import.asterisk)
 
 ; An own-property access `this.x`: a method reading a property of its own class.
 ; The class lexically Contains both the method and its `property` declarations

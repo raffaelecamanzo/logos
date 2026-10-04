@@ -136,14 +136,15 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// marker, of migration 25 (S-500), two `nodes` columns, of migration 26
 /// (S-498), the snapshot offender table and its flag column, of migration 27
 /// (S-513), the persist-failure record, of migration 28 (S-493), the
-/// `nodes.self_type` column, and of migration 29 (S-514), the ledger's
-/// `receiver` column and its identity index; the next [`Engine::start`]
-/// re-applies all eight,
+/// `nodes.self_type` column, of migration 29 (S-514), the ledger's
+/// `receiver` column and its identity index, and of migration 30 (S-518), the
+/// `files.namespace` column; the next [`Engine::start`] re-applies all nine,
 /// as it does on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN receiver; \
+        "ALTER TABLE files DROP COLUMN namespace; DELETE FROM schema_versions WHERE version = 30; \
+         DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN receiver; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, '')); \
          DELETE FROM schema_versions WHERE version = 29; \
          ALTER TABLE nodes DROP COLUMN self_type; DELETE FROM schema_versions WHERE version = 28; \
