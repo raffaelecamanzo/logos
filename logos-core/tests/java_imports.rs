@@ -681,14 +681,9 @@ fn sync_re_decides_a_wildcard_call_when_its_imported_type_becomes_ambiguous() {
         "package com.x.svc;\n\npublic class Svc {}\n",
     );
     engine.sync(&[dup.into()]);
-    // The ledger is re-decided exactly as a cold index decides it. (A row that
-    // flips to unbound keeps the edge it committed — the resolution pass's
-    // commit semantics for every edge kind, recorded at S-439/S-440 review — so
-    // the comparison is over the ledger, not the edge set.)
-    assert_eq!(
-        binding_facts(rt).1,
-        cold_facts(&tmp, &[SVC_FILE, CTL_FILE, dup]).1
-    );
+    // The ledger and the edges are re-decided exactly as a cold index decides
+    // them: the row that turns ambiguous takes its edge with it (S-596).
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &[SVC_FILE, CTL_FILE, dup]));
 }
 
 #[test]
