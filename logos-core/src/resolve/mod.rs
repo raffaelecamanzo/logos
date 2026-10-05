@@ -11,8 +11,9 @@
 //!    no store access, deterministic regardless of thread count.
 //! 3. **Serial commit** (one writer-actor batch, [ADR-02]): bound rows become
 //!    edges (idempotently) and are flagged `resolved`; rows that no longer
-//!    bind flip back to retry state. One transaction, atomic rollback
-//!    ([NFR-RA-07]).
+//!    bind flip back to retry state, and on an incremental run the edges a
+//!    re-bound source no longer produces are deleted ([FR-SY-12]). One
+//!    transaction, atomic rollback ([NFR-RA-07]).
 //!
 //! Re-evaluating everything — not just the unresolved tail — is what makes
 //! the pass self-healing: a deferred reference binds on the sync that indexes
@@ -40,6 +41,7 @@
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
 //! [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+//! [FR-SY-12]: ../../../docs/specs/requirements/FR-SY-12.md
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
@@ -120,7 +122,7 @@ use rayon::prelude::*;
 
 use crate::config::{BindingPolicy, Resolution};
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
-use crate::model::{EdgeKind, NodeId};
+use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::navigation::{
     CallResidue, CallResidueReason, LanguageResolution, RelationResolution, ResidueScope,
 };
@@ -312,20 +314,42 @@ pub fn run(
         }
     };
 
-    // An import-root file whose binding can move while neither endpoint's file
-    // changes (S-519): every row of it is re-bound, so the edges it no longer
-    // produces can be retracted below (`stale_import_root_edges`).
-    let swept =
-        swept_import_root_files(&mut selected, &snap.refs, &snap.file_paths, &index, delta, roots_moved);
+    // A re-selected row that was bound may come back unbound, ambiguous or
+    // bound elsewhere, and edges carry no provenance: every row of the source
+    // its edge left from is re-bound, so the edges that source no longer
+    // produces can be retracted below (`retract_unproduced`; S-519, S-596).
+    let swept = swept_sources(
+        &mut selected,
+        &snap.refs,
+        &snap.nodes,
+        &snap.file_paths,
+        &index,
+        delta,
+        roots_moved,
+    );
 
     // Parallel compute on the shared worker pool (AQ-04): pure binding against
     // the immutable index; `collect` preserves input order (NFR-RA-06).
-    let outcomes: Vec<(i64, bool, binder::Outcome)> = runtime.worker_pool().install(|| {
+    let mut outcomes: Vec<(i64, bool, binder::Outcome)> = runtime.worker_pool().install(|| {
         selected
             .par_iter()
             .map(|&r| (r.id, r.resolved, binder::bind(r, &index, policy)))
             .collect()
     });
+
+    // A binding can move although neither endpoint's file changed — a rival
+    // arriving, a supertype dropped, a submodule taking over a re-exported
+    // name — and the edge its row no longer binds would outlive it. Every row
+    // of the swept sources was re-bound above, so the edges they no longer
+    // produce are exactly the stale ones, and a capture row may not restore
+    // one (FR-SY-12, NFR-RA-06). Before the stats, which read the amended
+    // outcomes.
+    let captures: HashSet<i64> = selected
+        .iter()
+        .filter(|r| r.form == RefForm::Symbol)
+        .map(|r| r.id)
+        .collect();
+    let stale = retract_unproduced(&snap.nodes, &snap.edges, &swept, &captures, &mut outcomes);
 
     // Stats are over the WHOLE ledger, not just the re-bound subset: a row this
     // run touched uses its fresh outcome, an untouched row reads through to its
@@ -345,14 +369,6 @@ pub fn run(
     // the write batch below.
     let by_relation =
         relation_coverage(snap.refs.iter().map(|r| (r.payload.as_deref(), final_bound(r))));
-
-    // A binding of an import-root file can move although neither endpoint's
-    // file changed — a moved import root re-keys the language; a submodule
-    // arriving takes over a name its package's `__init__.py` re-exported — and
-    // the edge its row no longer binds there would outlive it. Every row of the
-    // swept files was re-bound above, so the edges they no longer produce are
-    // exactly the stale ones (S-519, NFR-RA-06).
-    let stale = stale_import_root_edges(&snap.nodes, &snap.edges, &swept, &outcomes);
 
     // Serial commit: one transaction through the writer actor (ADR-02).
     let edges_created = runtime.submit_write(move |w| {
@@ -424,34 +440,66 @@ pub fn run(
     Ok(stats(refs_total, refs_resolved, edges_created, by_relation))
 }
 
-/// The import-root files an incremental run re-binds **whole** (S-519), with
-/// every row of them added to `selected`: each file a selected row that was
-/// bound comes from (its binding may move, and its old edge must not outlive
-/// it), and every import-root file when the run moved the detected roots
-/// (`is_affected` reason 7 selected their rows already). Empty for a full
+/// The sources an incremental run re-binds **whole** (S-519, S-596), with every
+/// row of each added to `selected`: the source of each selected row that was
+/// bound (its binding may move, and its old edge must not outlive it); of each
+/// selected capture-before-delete row whose source lies in a file this sync
+/// re-extracted (the source's fresh rows, all selected and none bound yet,
+/// decide its edges, so the capture must not restore one they dropped); and of
+/// every row of an import-root file when the run moved the detected roots
+/// (`is_affected` reason 7 selected those rows already). Empty for a full
 /// index, which re-binds the whole ledger over a graph whose files were all
 /// re-extracted.
-fn swept_import_root_files<'s>(
+///
+/// The unit is the source symbol, not its file. An edge is keyed by the node
+/// it leaves from, and every row that can produce one names that node as its
+/// `source_symbol` — a capture-before-delete row ([ADR-10]) too, although it
+/// lives in its target's file — so re-binding a source's rows is all a
+/// retraction needs. The file's other sources keep their snapshot bindings:
+/// sweeping whole files re-bound about 40% of this repository's ledger on
+/// every one-file sync (S-596 implementation notes).
+///
+/// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
+fn swept_sources<'s>(
     selected: &mut Vec<&'s UnresolvedRefRow>,
     refs: &'s [UnresolvedRefRow],
+    nodes: &[NodeRow],
     file_paths: &HashMap<i64, String>,
     index: &binder::Index,
     delta: Option<&Delta>,
     roots_moved: bool,
-) -> HashSet<String> {
-    if delta.is_none() {
+) -> HashSet<&'s str> {
+    let Some(delta) = delta else {
         return HashSet::new();
-    }
-    let path_of = |r: &UnresolvedRefRow| r.file_id.and_then(|id| file_paths.get(&id));
-    let mut swept: HashSet<String> = selected
+    };
+    let mut swept: HashSet<&'s str> = selected
         .iter()
         .filter(|r| r.resolved)
-        .filter_map(|r| path_of(r))
-        .filter(|p| index.has_import_roots(p))
-        .cloned()
+        .map(|r| r.source_symbol.as_str())
         .collect();
+    let captured: HashSet<&'s str> = selected
+        .iter()
+        .filter(|r| r.form == RefForm::Symbol)
+        .map(|r| r.source_symbol.as_str())
+        .collect();
+    if !captured.is_empty() {
+        swept.extend(
+            nodes
+                .iter()
+                .filter(|n| n.file_path.as_ref().is_some_and(|p| delta.changed_paths.contains(p)))
+                .filter_map(|n| captured.get(n.symbol.as_str()).copied()),
+        );
+    }
     if roots_moved {
-        swept.extend(file_paths.values().filter(|p| index.has_import_roots(p)).cloned());
+        swept.extend(
+            refs.iter()
+                .filter(|r| {
+                    r.file_id
+                        .and_then(|id| file_paths.get(&id))
+                        .is_some_and(|p| index.has_import_roots(p))
+                })
+                .map(|r| r.source_symbol.as_str()),
+        );
     }
     if swept.is_empty() {
         return swept;
@@ -459,53 +507,58 @@ fn swept_import_root_files<'s>(
     let chosen: HashSet<i64> = selected.iter().map(|r| r.id).collect();
     selected.extend(
         refs.iter()
-            .filter(|r| !chosen.contains(&r.id) && path_of(r).is_some_and(|p| swept.contains(p))),
+            .filter(|r| !chosen.contains(&r.id) && swept.contains(r.source_symbol.as_str())),
     );
     swept
 }
 
-/// The reference-bound edges out of the `swept` files (S-519) that this run's
-/// outcomes no longer produce — what a moved binding leaves stale. Every row of
-/// those files was re-bound ([`swept_import_root_files`]), so an edge no
-/// outcome names has lost the row that bound it. Only the kinds a ledger row
-/// binds are considered: containment and the framework pass's edges are other
-/// passes'.
-fn stale_import_root_edges(
+/// The reference-bound edges out of the `swept` sources (S-519, S-596,
+/// [FR-SY-12]) that no re-bound row of theirs produces any more — what a moved
+/// binding leaves stale — with `outcomes` amended so that a capture row
+/// (`captures`) never restores one.
+///
+/// Every row of those sources was re-bound ([`swept_sources`]), so an edge none
+/// of them names has lost the row that bound it. A capture row stands in for
+/// its source's own row only while that row keeps its snapshot binding; once
+/// the row is re-bound it decides alone, as on a cold index, which holds no
+/// capture rows. Only the kinds a ledger row binds are considered: containment
+/// and the framework pass's edges are other passes'.
+///
+/// [FR-SY-12]: ../../../docs/specs/requirements/FR-SY-12.md
+fn retract_unproduced(
     nodes: &[NodeRow],
     edges: &[EdgeRow],
-    swept: &HashSet<String>,
-    outcomes: &[(i64, bool, binder::Outcome)],
+    swept: &HashSet<&str>,
+    captures: &HashSet<i64>,
+    outcomes: &mut [(i64, bool, binder::Outcome)],
 ) -> Vec<(NodeId, NodeId, EdgeKind)> {
     if swept.is_empty() {
         return Vec::new();
     }
-    let mut produced: HashSet<(NodeId, NodeId, EdgeKind)> = HashSet::new();
-    for (_, _, outcome) in outcomes {
-        match outcome {
-            binder::Outcome::Bound {
-                source, target, kind, ..
-            } => {
-                produced.insert((*source, *target, *kind));
-            }
-            binder::Outcome::BoundMany {
-                source,
-                targets,
-                kind,
-                ..
-            } => produced.extend(targets.iter().map(|t| (*source, *t, *kind))),
-            binder::Outcome::Unbound => {}
-        }
-    }
-    let in_import_root_file: HashSet<NodeId> = nodes
+    let produced: HashSet<(NodeId, NodeId, EdgeKind)> = outcomes
         .iter()
-        .filter(|n| n.file_path.as_ref().is_some_and(|p| swept.contains(p)))
+        .filter(|(id, _, _)| !captures.contains(id))
+        .flat_map(|(_, _, outcome)| bound_edges(outcome))
+        .collect();
+    let swept_node: HashSet<NodeId> = nodes
+        .iter()
+        .filter(|n| swept.contains(n.symbol.as_str()))
         .map(|n| n.id)
         .collect();
+    let stale = |edge: &(NodeId, NodeId, EdgeKind)| {
+        swept_node.contains(&edge.0) && !produced.contains(edge)
+    };
+    for (id, _, outcome) in outcomes.iter_mut() {
+        if captures.contains(id) && bound_edges(outcome).iter().any(stale) {
+            *outcome = binder::Outcome::Unbound;
+        }
+    }
     edges
         .iter()
-        .filter(|e| {
+        .map(|e| (e.source, e.target, e.kind))
+        .filter(|edge| {
             matches!(
-                e.kind,
+                edge.2,
                 EdgeKind::Calls
                     | EdgeKind::Imports
                     | EdgeKind::Accesses
@@ -513,11 +566,26 @@ fn stale_import_root_edges(
                     | EdgeKind::Implements
                     | EdgeKind::Instantiates
                     | EdgeKind::TypeUses
-            ) && in_import_root_file.contains(&e.source)
-                && !produced.contains(&(e.source, e.target, e.kind))
+            ) && stale(edge)
         })
-        .map(|e| (e.source, e.target, e.kind))
         .collect()
+}
+
+/// The edges a bind [`Outcome`](binder::Outcome) produces: none, one, or one
+/// per target of a set.
+fn bound_edges(o: &binder::Outcome) -> Vec<(NodeId, NodeId, EdgeKind)> {
+    match o {
+        binder::Outcome::Bound {
+            source, target, kind, ..
+        } => vec![(*source, *target, *kind)],
+        binder::Outcome::BoundMany {
+            source,
+            targets,
+            kind,
+            ..
+        } => targets.iter().map(|t| (*source, *t, *kind)).collect(),
+        binder::Outcome::Unbound => Vec::new(),
+    }
 }
 
 /// `true` when a bind [`Outcome`](binder::Outcome) produced at least one edge.

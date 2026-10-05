@@ -502,22 +502,13 @@ fn sync_equals_a_full_reindex_when_a_python_class_changes_its_base() {
 
 /// Sync ≡ reindex when a C# supertype changes kind: the interface a class's
 /// `base_list` names becomes a class (its edge turns `Extends`), and back.
-///
-/// The two files whose calls climb to a base are left out: the converters'
-/// `base.HasLineInfo()` binds while the interface is a class, and
-/// `JsonTextReader`'s `base.Close()` stops binding while the class is its
-/// second base (two bases, no walk). Either way a sync keeps the edge a cold
-/// index has not — the deferred incremental-retraction gap, reproduced on
-/// Java's own implicit call before this change, not this capture.
+/// The converters' `base.HasLineInfo()` binds while the interface is a class,
+/// and `JsonTextReader`'s `base.Close()` stops binding while the class is its
+/// second base (two bases, no walk): each such climb comes and goes with the
+/// edit, and its edge with it (S-596).
 #[test]
 fn sync_equals_a_full_reindex_when_a_csharp_supertype_changes_kind() {
-    let fixture: Vec<(&str, &str)> = fixtures::NEWTONSOFT
-        .iter()
-        .copied()
-        .filter(|(rel, _)| !rel.ends_with("IntConverter.cs") && !rel.ends_with("JsonTextReader.cs"))
-        .collect();
-    assert_eq!(fixture.len(), fixtures::NEWTONSOFT.len() - 2);
-    let fixture: fixtures::Fixture = Box::leak(fixture.into_boxed_slice());
+    let fixture = fixtures::NEWTONSOFT;
     let (tmp, engine) = indexed(fixture);
     let rt = engine.runtime().unwrap();
     let file = "Src/Newtonsoft.Json/IJsonLineInfo.cs";

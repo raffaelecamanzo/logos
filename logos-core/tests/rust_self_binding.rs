@@ -434,14 +434,11 @@ pub fn run() {
 /// once, and the method lives in another module's impl — is re-selected on sync
 /// when a second type of that name appears, though the edit spells no name the
 /// call's row does, and its row reads unbound exactly as a cold index's does.
-///
-/// **Known pre-existing gap, pinned — not an S-493 regression**: the commit
-/// only flips the re-selected row's `resolved` flag, and the edge it bound
-/// before stays (commit semantics since S-439; `java_receiver_binding.rs`'s
-/// `known_gap_*` tests pin the same). When the gap is fixed this test fails and
-/// becomes the plain sync ≡ reindex edge assertion.
+/// The edge it bound before is retracted (S-596, FR-SY-12), so the synced call
+/// edges equal a cold index's; until S-596 the commit only flipped the row's
+/// `resolved` flag and kept the edge.
 #[test]
-fn known_gap_sync_keeps_the_edge_of_a_self_call_whose_type_name_gains_a_twin() {
+fn sync_equals_a_full_reindex_when_a_self_call_type_name_gains_a_twin() {
     let files = [
         ("src/lib.rs", "pub mod a;\npub mod c;\n"),
         ("src/a.rs", "pub struct X;\nimpl X {\n    pub fn m(&self) {}\n}\n"),
@@ -470,11 +467,7 @@ fn known_gap_sync_keeps_the_edge_of_a_self_call_whose_type_name_gains_a_twin() {
     assert_eq!(call_rows(fresh_rt, "src/c.rs"), unbound, "two `X`s: the caller's module decides, and it holds no `m`");
     assert_eq!(call_rows(rt, "src/c.rs"), unbound, "sync re-selects the row and re-binds it to nothing");
     assert!(!call_edges(fresh_rt).contains(&bound), "a cold index binds no edge");
-    // The gap: the synced store still holds the edge the row bound before.
-    assert!(
-        call_edges(rt).contains(&bound),
-        "the gap is closed — replace this pin with a sync ≡ reindex edge assertion"
-    );
+    assert_eq!(call_edges(rt), call_edges(fresh_rt));
 }
 
 /// A foreign type's impl never binds a self call to a crate type of the same

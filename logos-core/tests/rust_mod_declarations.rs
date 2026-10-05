@@ -278,12 +278,8 @@ fn sync_equals_a_full_reindex_as_a_declaration_and_its_file_come_and_go() {
 /// file at `a::b` in either layout — and once the rival leaves, a sync binds
 /// exactly what a cold index does ([NFR-RA-06]).
 ///
-/// The rival *arriving* by sync is not pinned here: the row it makes ambiguous
-/// flips unresolved but keeps its edge, because a re-bound row that turns
-/// unbound retracts its edge only in an import-root file (S-519). That gap
-/// predates this story and reaches any binding a new rival makes ambiguous (a
-/// second glob supplying a called name, on the base binary too); it is recorded
-/// in the implementation notes.
+/// The rival *arriving* by sync is pinned in `tests/indexing.rs` (S-596):
+/// the row it makes ambiguous retracts the edge it bound before.
 ///
 /// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
 #[test]

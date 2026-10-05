@@ -2747,3 +2747,174 @@ fn a_global_wildcard_never_crosses_into_another_language() {
         bound_to(bind(&cs, &ix, policy), 421, 411, EdgeKind::TypeUses);
     }
 }
+
+// ── S-596 / FR-SY-12: the incremental sweep and its retraction ─────────────
+
+fn edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
+    EdgeRow {
+        source: NodeId(source),
+        target: NodeId(target),
+        kind,
+    }
+}
+
+fn bound(source: i64, target: i64, kind: EdgeKind) -> Outcome {
+    Outcome::Bound {
+        source: NodeId(source),
+        target: NodeId(target),
+        kind,
+        payload: None,
+    }
+}
+
+fn some_delta() -> super::Delta {
+    super::Delta {
+        changed_paths: ["src/util.rs".to_string()].into_iter().collect(),
+        dirty_tokens: ["run".to_string()].into_iter().collect(),
+        global_imports_moved: false,
+    }
+}
+
+/// [`super::swept_sources`] over a tree with no file paths and no moved roots.
+fn sweep<'s>(
+    selected: &mut Vec<&'s UnresolvedRefRow>,
+    refs: &'s [UnresolvedRefRow],
+    ix: &Index,
+    delta: Option<&super::Delta>,
+) -> std::collections::HashSet<&'s str> {
+    let (nodes, _) = fixture();
+    super::swept_sources(selected, refs, &nodes, &std::collections::HashMap::new(), ix, delta, false)
+}
+
+/// A selected row that was bound sweeps its source: every other row of that
+/// source joins the re-bind — a capture row living in another file too — and
+/// no row of another source does. A full index sweeps nothing.
+#[test]
+fn a_bound_selected_row_sweeps_every_row_of_its_source() {
+    let (nodes, edges) = fixture();
+    let moved = UnresolvedRefRow {
+        resolved: true,
+        ..call(1, LIB_RS, 2, "run")
+    };
+    let sibling = call(2, LIB_RS, 2, "helper");
+    let captured = make_ref(3, UTIL_RS, 2, "local sym5", None, RefForm::Symbol, EdgeKind::Calls);
+    let other_source = call(4, LIB_RS, 3, "run");
+    let refs = vec![moved.clone(), sibling, captured, other_source];
+    let ix = Index::build(&nodes, &edges, &refs);
+    let delta = some_delta();
+
+    let mut selected = vec![&refs[0]];
+    let swept = sweep(&mut selected, &refs, &ix, Some(&delta));
+    assert_eq!(swept, ["local sym2"].into_iter().collect());
+    let mut ids: Vec<i64> = selected.iter().map(|r| r.id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3]);
+
+    // An unbound selected row has no edge to retract: nothing is swept.
+    let unbound = call(5, LIB_RS, 2, "run");
+    let mut selected = vec![&unbound];
+    assert!(sweep(&mut selected, &refs, &ix, Some(&delta)).is_empty());
+    assert_eq!(selected.len(), 1);
+
+    let mut selected = vec![&refs[0]];
+    assert!(sweep(&mut selected, &refs, &ix, None).is_empty());
+    assert_eq!(selected.len(), 1);
+}
+
+/// A selected capture row whose source lies in a file this sync re-extracted
+/// sweeps that source, although none of the source's fresh rows was bound
+/// before: they, not the capture, decide its edges. A capture row whose source
+/// file the sync left alone sweeps nothing — it still stands in for its
+/// source's unchanged row.
+#[test]
+fn a_capture_row_from_a_re_extracted_source_sweeps_its_source() {
+    let (nodes, edges) = fixture();
+    // Captured under `src/util.rs`, out of `alpha` in `src/lib.rs`.
+    let captured = make_ref(1, UTIL_RS, 2, "local sym5", None, RefForm::Symbol, EdgeKind::Calls);
+    let fresh = call(2, LIB_RS, 2, "helper");
+    let refs = vec![captured, fresh];
+    let ix = Index::build(&nodes, &edges, &refs);
+    let both = super::Delta {
+        changed_paths: ["src/util.rs".to_string(), "src/lib.rs".to_string()].into_iter().collect(),
+        ..some_delta()
+    };
+    let mut selected = vec![&refs[0]];
+    assert_eq!(sweep(&mut selected, &refs, &ix, Some(&both)), ["local sym2"].into_iter().collect());
+    assert_eq!(selected.len(), 2, "the source's fresh row joins the re-bind");
+
+    let mut selected = vec![&refs[0]];
+    assert!(sweep(&mut selected, &refs, &ix, Some(&some_delta())).is_empty());
+}
+
+/// Out of a swept source, the reference-bound edges no re-bound row produces
+/// are retracted — every one of FR-SY-12's seven kinds; one a row still
+/// produces, a containment edge, and an edge out of a source that was not
+/// swept are kept.
+#[test]
+fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
+    let (nodes, mut edges) = fixture();
+    edges.extend([
+        // alpha -> helper: still produced.
+        edge(2, 3, EdgeKind::Calls),
+        // alpha -> run: the moved row's old edge.
+        edge(2, 5, EdgeKind::Calls),
+        // alpha -> beta: no row produces it.
+        edge(2, 21, EdgeKind::Imports),
+        // Containment is another pass's.
+        edge(2, 7, EdgeKind::Contains),
+        // helper -> run: helper was not swept.
+        edge(3, 5, EdgeKind::Calls),
+    ]);
+    // alpha -> other: one unproduced edge of each remaining reference kind.
+    let other_kinds = [
+        EdgeKind::Accesses,
+        EdgeKind::Extends,
+        EdgeKind::Implements,
+        EdgeKind::Instantiates,
+        EdgeKind::TypeUses,
+    ];
+    edges.extend(other_kinds.iter().map(|&kind| edge(2, 20, kind)));
+    let swept = ["local sym2"].into_iter().collect();
+    let mut outcomes = vec![
+        (1, true, Outcome::Unbound),
+        (2, true, bound(2, 3, EdgeKind::Calls)),
+    ];
+    let no_captures = Default::default();
+    let mut stale = super::retract_unproduced(&nodes, &edges, &swept, &no_captures, &mut outcomes);
+    let mut expected = vec![
+        (NodeId(2), NodeId(5), EdgeKind::Calls),
+        (NodeId(2), NodeId(21), EdgeKind::Imports),
+    ];
+    expected.extend(other_kinds.iter().map(|&kind| (NodeId(2), NodeId(20), kind)));
+    for list in [&mut stale, &mut expected] {
+        list.sort_by_key(|(s, t, k)| (s.0, t.0, k.as_i32()));
+    }
+    assert_eq!(stale, expected);
+    // Nothing swept, nothing retracted.
+    let unswept = Default::default();
+    let none = super::retract_unproduced(&nodes, &edges, &unswept, &no_captures, &mut outcomes);
+    assert!(none.is_empty());
+}
+
+/// A capture row out of a swept source restores its edge only when one of the
+/// source's own re-bound rows produces it too; otherwise it comes back unbound
+/// and its edge is retracted. A capture row out of an unswept source keeps its
+/// binding: it still stands in for its source's row.
+#[test]
+fn a_capture_row_never_restores_an_edge_its_source_no_longer_produces() {
+    let (nodes, mut edges) = fixture();
+    edges.extend([edge(2, 3, EdgeKind::Calls), edge(2, 5, EdgeKind::Calls)]);
+    let swept = ["local sym2"].into_iter().collect();
+    let captures = [10, 11, 12].into_iter().collect();
+    let mut outcomes = vec![
+        (1, true, bound(2, 3, EdgeKind::Calls)),
+        (10, false, bound(2, 5, EdgeKind::Calls)),
+        (11, false, bound(2, 3, EdgeKind::Calls)),
+        (12, false, bound(3, 5, EdgeKind::Calls)),
+    ];
+    let stale = super::retract_unproduced(&nodes, &edges, &swept, &captures, &mut outcomes);
+    assert_eq!(stale, [(NodeId(2), NodeId(5), EdgeKind::Calls)]);
+    assert_eq!(outcomes[1].2, Outcome::Unbound);
+    assert_eq!(outcomes[2].2, bound(2, 3, EdgeKind::Calls));
+    assert_eq!(outcomes[3].2, bound(3, 5, EdgeKind::Calls));
+}

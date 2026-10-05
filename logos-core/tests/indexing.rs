@@ -910,6 +910,280 @@ fn sync_equiv_glob_import_satisfies_a_deferred_call() {
     );
 }
 
+// ── S-596 / FR-SY-12: an incremental re-bind retracts what it no longer binds ─
+//
+// One fixture per recorded reproduction (CR-193 §2). In each, a row the sync
+// re-selects was bound before and comes back unbound, ambiguous or bound to a
+// different target, in a file the sync never touched — so the edge it produced
+// before must not outlive it. A capture-before-delete row whose source's own
+// rows no longer bind its edge must not restore it either.
+
+/// R2: under `aggressive`, a unique `helper()` binds by name across the
+/// workspace; a second `helper` arriving makes it ambiguous.
+#[test]
+fn sync_equiv_an_aggressive_unique_name_gaining_a_rival_unbinds() {
+    assert_sync_matches_reindex(
+        &[
+            (".logos/config.toml", "[resolution]\npolicy = \"aggressive\"\n"),
+            ("a.rs", "fn a() { helper(); }\n"),
+            ("b.rs", "pub fn helper() {}\n"),
+        ],
+        &[Edit::Put("c.rs", "pub fn helper() {}\n")],
+    );
+}
+
+/// R3: two glob imports, one supplying the called name; the other gaining it
+/// makes the call ambiguous. The old edge's target (`a.rs`) is not re-extracted,
+/// so nothing cascades it away.
+#[test]
+fn sync_equiv_a_second_glob_gaining_the_called_name_unbinds() {
+    assert_sync_matches_reindex(
+        &[
+            ("c.rs", "use crate::a::*;\nuse crate::b::*;\nfn run() { helper(); }\n"),
+            ("a.rs", "pub fn helper() {}\n"),
+            ("b.rs", "pub fn other() {}\n"),
+        ],
+        &[Edit::Put("b.rs", "pub fn other() {}\npub fn helper() {}\n")],
+    );
+}
+
+/// R4: `a.rs` arriving beside `a/mod.rs` (rustc's E0761) gives `a` two files,
+/// so `b.rs`'s `super::helper()` names two candidates.
+#[test]
+fn sync_equiv_a_second_module_file_arriving_unbinds() {
+    let cargo = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    assert_sync_matches_reindex(
+        &[
+            ("Cargo.toml", cargo),
+            ("src/lib.rs", "mod a;\n\nuse crate::a::b::c;\n\npub fn alpha() {\n    c();\n}\n"),
+            ("src/a/mod.rs", "pub mod b;\n\npub fn helper() {\n    self::b::c();\n}\n"),
+            ("src/a/b.rs", "pub fn c() {}\n\npub fn up() {\n    super::helper();\n}\n"),
+        ],
+        &[Edit::Put("src/a.rs", "pub fn helper() {}\n")],
+    );
+}
+
+/// The Java hierarchy every R1/R8 fixture starts from: `Leaf extends Mid
+/// extends Base`, and `Leaf.run()`'s bare `start()` climbs to `Base.start`.
+#[cfg(feature = "lang-java")]
+const JAVA_LEAF: (&str, &str) = (
+    "src/main/java/app/Leaf.java",
+    concat!(
+        "package app;\n\npublic class Leaf extends Mid {\n",
+        "    public void run() {\n        start();\n    }\n}\n",
+    ),
+);
+#[cfg(feature = "lang-java")]
+const JAVA_BASE: (&str, &str) = (
+    "src/main/java/app/Base.java",
+    "package app;\n\npublic class Base {\n    public void start() {}\n}\n",
+);
+
+/// R1: `Mid` drops `extends Base`, so `Leaf.run()`'s climbed call has no
+/// supertype to reach `Base.start` through.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_equiv_a_dropped_supertype_unbinds_a_climbed_call() {
+    assert_sync_matches_reindex(
+        &[
+            JAVA_LEAF,
+            JAVA_BASE,
+            ("src/main/java/app/Mid.java", "package app;\n\npublic class Mid extends Base {}\n"),
+        ],
+        &[Edit::Put("src/main/java/app/Mid.java", "package app;\n\npublic class Mid {}\n")],
+    );
+}
+
+/// A re-selected row bound **elsewhere**: `Mid` gains its own `start()`, so the
+/// climb stops there and `Leaf.run()` now calls `Mid.start`. The edge to
+/// `Base.start` is no longer produced by any row.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_equiv_a_climbed_call_rebinding_to_a_nearer_override_moves_its_edge() {
+    assert_sync_matches_reindex(
+        &[
+            JAVA_LEAF,
+            JAVA_BASE,
+            ("src/main/java/app/Mid.java", "package app;\n\npublic class Mid extends Base {}\n"),
+        ],
+        &[Edit::Put(
+            "src/main/java/app/Mid.java",
+            "package app;\n\npublic class Mid extends Base {\n    public void start() {}\n}\n",
+        )],
+    );
+}
+
+/// R8: `Mid` and `Base` share one file, and the edit drops `Mid`'s `extends
+/// Base`. Re-extracting that file captures `Leaf.run() -> Base.start` as a
+/// capture-before-delete row, which re-binds by exact symbol although `Leaf`'s
+/// own call row no longer reaches `Base`.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_equiv_a_capture_row_never_restores_an_edge_its_hierarchy_lost() {
+    let path = "src/main/java/app/Base.java";
+    assert_sync_matches_reindex(
+        &[
+            JAVA_LEAF,
+            (
+                path,
+                concat!(
+                    "package app;\n\npublic class Base {\n    public void start() {}\n}\n",
+                    "\nclass Mid extends Base {}\n",
+                ),
+            ),
+        ],
+        &[Edit::Put(
+            path,
+            "package app;\n\npublic class Base {\n    public void start() {}\n}\n\nclass Mid {}\n",
+        )],
+    );
+}
+
+/// R5 (Kotlin): `Bar()` binds to the one `com.z.Bar` until a second source set
+/// declares another.
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn sync_equiv_a_rival_kotlin_class_arriving_unbinds() {
+    assert_sync_matches_reindex(
+        &[
+            ("src/main/kotlin/com/z/Bar.kt", "package com.z\n\nclass Bar\n"),
+            ("src/main/kotlin/com/z/Mk.kt", "package com.z\n\nfun mk() = Bar()\n"),
+        ],
+        &[Edit::Put("src/test/kotlin/com/z/Bar.kt", "package com.z\n\nclass Bar\n")],
+    );
+}
+
+/// R5 (Python): a `class Thing` arriving beside the imported `def Thing`. The
+/// module is re-extracted, so `use()`'s edge comes back as a capture row too.
+#[cfg(feature = "lang-python")]
+#[test]
+fn sync_equiv_a_rival_python_class_arriving_unbinds() {
+    let module = "pkg/m.py";
+    assert_sync_matches_reindex(
+        &[
+            ("pkg/__init__.py", ""),
+            (module, "def Thing():\n    pass\n"),
+            ("app.py", "from pkg.m import Thing\n\n\ndef use():\n    return Thing()\n"),
+        ],
+        &[Edit::Put(module, "def Thing():\n    pass\n\n\nclass Thing:\n    pass\n")],
+    );
+}
+
+/// A capture row whose source file the same sync re-extracted: `run()` drops
+/// its call while `b.rs` is touched, so `run -> helper` is captured under
+/// `b.rs` and would come back by exact symbol. The source's fresh rows, none
+/// bound yet, decide its edges.
+#[test]
+fn sync_equiv_a_capture_row_never_restores_an_edge_its_re_extracted_source_dropped() {
+    assert_sync_matches_reindex(
+        &[
+            ("c.rs", "use crate::b::*;\nfn run() { helper(); }\n"),
+            ("b.rs", "pub fn helper() {}\n"),
+        ],
+        &[
+            Edit::Put("b.rs", "pub fn helper() {}\n// touched\n"),
+            Edit::Put("c.rs", "use crate::b::*;\nfn run() {}\n"),
+        ],
+    );
+}
+
+/// R6 (PHP, monolog's shape): `AmqpHandler::handleBatch`'s `parent::` call
+/// climbs `AbstractHandler` to `Handler::handleBatch`; `AbstractHandler` drops
+/// `extends Handler`.
+#[cfg(feature = "lang-php")]
+#[test]
+fn sync_equiv_a_php_parent_call_losing_its_climb_unbinds() {
+    let abstract_handler = "src/Handler/AbstractHandler.php";
+    assert_sync_matches_reindex(
+        &[
+            (
+                "src/Handler/Handler.php",
+                "<?php\n\nnamespace Monolog\\Handler;\n\nabstract class Handler\n{\n    public function handleBatch(array $records): void {}\n}\n",
+            ),
+            (
+                abstract_handler,
+                "<?php\n\nnamespace Monolog\\Handler;\n\nabstract class AbstractHandler extends Handler\n{\n}\n",
+            ),
+            (
+                "src/Handler/AmqpHandler.php",
+                concat!(
+                    "<?php\n\nnamespace Monolog\\Handler;\n\nclass AmqpHandler extends AbstractHandler\n{\n",
+                    "    public function handleBatch(array $records): void\n    {\n",
+                    "        parent::handleBatch($records);\n    }\n}\n",
+                ),
+            ),
+        ],
+        &[Edit::Put(
+            abstract_handler,
+            "<?php\n\nnamespace Monolog\\Handler;\n\nabstract class AbstractHandler\n{\n}\n",
+        )],
+    );
+}
+
+/// An `Extends` edge: `Leaf extends Bar` binds the one `com.z.Bar` until a
+/// second source set declares another.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_equiv_a_rival_supertype_arriving_unbinds_an_extends() {
+    assert_sync_matches_reindex(
+        &[
+            ("src/main/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n"),
+            ("src/main/java/com/z/Leaf.java", "package com.z;\n\npublic class Leaf extends Bar {}\n"),
+        ],
+        &[Edit::Put("src/test/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n")],
+    );
+}
+
+/// `TypeUses` edges: a field and a parameter of type `Bar` bind the one
+/// `com.z.Bar` until a second source set declares another.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_equiv_a_rival_type_arriving_unbinds_a_type_use() {
+    assert_sync_matches_reindex(
+        &[
+            ("src/main/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n"),
+            (
+                "src/main/java/com/z/Holder.java",
+                "package com.z;\n\npublic class Holder {\n    Bar b;\n    void take(Bar x) {}\n}\n",
+            ),
+        ],
+        &[Edit::Put("src/test/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n")],
+    );
+}
+
+/// The resolution figures a sync reports read the ledger it commits: a
+/// capture row the retraction turns unbound (R8) is not counted resolved.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_stats_never_count_a_suppressed_capture_row() {
+    let path = "src/main/java/app/Base.java";
+    let tmp = TempDir::new().expect("temp");
+    write(tmp.path(), JAVA_LEAF.0, JAVA_LEAF.1);
+    write(
+        tmp.path(),
+        path,
+        "package app;\n\npublic class Base {\n    public void start() {}\n}\n\nclass Mid extends Base {}\n",
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    write(
+        tmp.path(),
+        path,
+        "package app;\n\npublic class Base {\n    public void start() {}\n}\n\nclass Mid {}\n",
+    );
+    let root = tmp.path().canonicalize().expect("canonicalize root");
+    let synced = engine.sync(&[root.join(path)]);
+    let ledger = engine
+        .runtime()
+        .expect("runtime")
+        .submit_read(|store| logos_core::resolve::coverage(store))
+        .expect("coverage read runs");
+    assert_eq!(
+        (synced.resolution.refs_total, synced.resolution.refs_resolved),
+        (ledger.refs_total, ledger.refs_resolved)
+    );
+}
+
 /// Bench (run with `--ignored --nocapture`): the CR-015 win in isolation. Times
 /// the resolve pass over the WHOLE ledger (`None` — what every sync re-bound
 /// before) vs over only a one-file change-set (`Some(delta)`) on the same large

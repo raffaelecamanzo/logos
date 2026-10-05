@@ -546,7 +546,8 @@ fn sync_equals_a_full_reindex_when_a_submodule_takes_over_a_reexported_name() {
         ("pkg/core.py", "def go():\n    pass\n"),
         ("app.py", "from pkg import helper\n"),
         // Bound beforehand through the same package, and kept: the sweep
-        // re-binds every row of a swept file, not only the moved one.
+        // re-binds every row of the moved row's source (here the module),
+        // not only the moved one.
         ("tool.py", "from pkg import core\nfrom pkg import helper\n"),
     ];
     let (tmp, engine) = indexed(files);
