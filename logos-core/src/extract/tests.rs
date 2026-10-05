@@ -6183,18 +6183,17 @@ fn a_scala_given_selector_imports_no_type() {
 }
 
 /// Every Scala selector shape records its own rows (S-518): a rename imports
-/// the name it renames (Scala's local name is not recorded: S-520 covers
-/// Python, PHP, C# and Go), a selector
+/// the name it renames, aliased by the local name it binds (S-520), a selector
 /// hidden with `=> _` imports nothing, `_` and Scala 3's `*` are wildcards, a
-/// Scala 3 `as` rename after the path imports its name, and comma-separated
-/// paths are separate imports.
+/// Scala 3 `as` rename after the path imports its name under its local name,
+/// and comma-separated paths are separate imports.
 #[cfg(feature = "lang-scala")]
 #[test]
 fn every_scala_selector_shape_records_its_own_rows() {
     let row = |t: &str, alias: Option<&str>, form| (t.to_string(), alias.map(str::to_string), form);
     assert_eq!(
         scala_imports("import a.b.{C => X, D => _, E}"),
-        vec![row("a::b::C", Some("C"), RefForm::Path), row("a::b::E", Some("E"), RefForm::Path)]
+        vec![row("a::b::C", Some("X"), RefForm::Path), row("a::b::E", Some("E"), RefForm::Path)]
     );
     assert_eq!(scala_imports("import a.b._"), vec![row("a::b", None, RefForm::Glob)]);
     assert_eq!(scala_imports("import a.b.*"), vec![row("a::b", None, RefForm::Glob)]);
@@ -6202,10 +6201,39 @@ fn every_scala_selector_shape_records_its_own_rows() {
         scala_imports("import a.b.{C, _}"),
         vec![row("a::b", None, RefForm::Glob), row("a::b::C", Some("C"), RefForm::Path)]
     );
-    assert_eq!(scala_imports("import a.b.C as K"), vec![row("a::b::C", Some("C"), RefForm::Path)]);
+    assert_eq!(scala_imports("import a.b.C as K"), vec![row("a::b::C", Some("K"), RefForm::Path)]);
     assert_eq!(
         scala_imports("import a.B, c.d.E"),
         vec![row("a::B", Some("B"), RefForm::Path), row("c::d::E", Some("E"), RefForm::Path)]
+    );
+}
+
+/// S-520 / FR-EX-14: a Kotlin `import a.b.C as D` records `D`, the name it
+/// binds, not `C` — which it does not bring into view; a plain import keeps
+/// its last segment and a wildcard no alias.
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn a_kotlin_import_alias_is_the_name_it_binds() {
+    let facts = extract_lang(
+        "kt",
+        "src/main/kotlin/app/App.kt",
+        "package app\n\nimport other.Base as OtherBase\nimport other.Thing\nimport other.util.*\n\nclass App\n",
+    );
+    let mut rows: Vec<(String, Option<String>, RefForm)> = facts
+        .refs
+        .into_iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target, r.alias, r.form))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let row = |t: &str, alias: Option<&str>, form| (t.to_string(), alias.map(str::to_string), form);
+    assert_eq!(
+        rows,
+        vec![
+            row("other::Base", Some("OtherBase"), RefForm::Path),
+            row("other::Thing", Some("Thing"), RefForm::Path),
+            row("other::util", None, RefForm::Glob),
+        ]
     );
 }
 

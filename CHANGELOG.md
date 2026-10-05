@@ -43,7 +43,10 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   switch it on: `import typing as t` records `t`, `use A\B as C` records `C`,
   `using Test = Xunit.FactAttribute` records `Test` (one row naming the type; the
   alias is not an import row of its own) and Go's `internalcloud "…/internal/cloud"`
-  records `internalcloud`. A Python `as` import used to record no alias at all; a call
+  records `internalcloud`. Kotlin's `import a.b.C as D` records `D`, and Scala's
+  `import a.b.{C => D}` and `import a.b.C as D` record `D`: beside `import other.C as
+  D`, a `class X : C()` or a `C()` reaches the same-package `C`, never the imported
+  one. A Python `as` import used to record no alias at all; a call
   through the alias (`from .helpers import open as open_resource`, then
   `open_resource(p)`) now binds, and a call to the original name still does not. Rust's
   import rows are unchanged (3,459 rows byte-identical on this repository).

@@ -442,14 +442,15 @@ fn flatten_with_prefix(node: Node<'_>, source: &[u8], prefix: &[String], out: &m
 /// - an expression with nothing after its path imports its last segment;
 /// - a wildcard after it (`_` or `*`) is a [`UseItem::glob`] of the path;
 /// - a braced group imports each selector under the path — a name, the `name`
-///   of a rename (`D => E`, `D as E`; the rename's local name is not recorded —
-///   S-520 covers Python, PHP, C# and Go), or a wildcard — and a selector renamed to `_` hides its name, so
-///   it imports nothing;
+///   of a rename (`D => E`, `D as E`), or a wildcard — and a selector renamed
+///   to `_` hides its name, so it imports nothing;
 /// - a rename directly after the path (Scala 3's `import a.b as c`) imports
 ///   its `name` under the path.
 ///
 /// Every non-glob item's alias is its last segment, as for every other
-/// language's import. A `given` selector — bare, or `given T`, which imports
+/// language's import — except a rename's, which is the local name it binds
+/// (`E`, S-520): the renamed `D` is not in view, so an unqualified `D` still
+/// names a same-package `D`. A `given` selector — bare, or `given T`, which imports
 /// given instances of `T` and not `T` — imports no declaration and is skipped,
 /// as is anything else no rule above reads — never a path made of other text.
 pub(crate) fn flatten_dotted_import(node: Node<'_>, source: &[u8], out: &mut Vec<UseItem>) {
@@ -527,11 +528,14 @@ fn dotted_selector(
         return;
     }
     if let Some(name) = node.child_by_field_name("name") {
-        let hidden = node
-            .child_by_field_name("alias")
-            .is_some_and(|alias| node_text(alias, source) == "_");
-        if !hidden {
-            out.push(item(node_text(name, source)));
+        let local = node.child_by_field_name("alias").map(|alias| node_text(alias, source));
+        match local.as_deref() {
+            Some("_") => {} // `D => _` hides `D`: it imports nothing
+            Some(local) if !local.is_empty() => out.push(UseItem {
+                alias: Some(local.to_string()),
+                ..item(node_text(name, source))
+            }),
+            _ => out.push(item(node_text(name, source))),
         }
         return;
     }
