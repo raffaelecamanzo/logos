@@ -98,7 +98,8 @@ pub const MONOLOG: Fixture = &[
 /// Newtonsoft's shape: one `base_list` names the base class and an interface
 /// alike, so each entry's edge kind follows what it binds. A struct implements
 /// an interface, an interface extends one, a generic base binds by its name,
-/// an alias and a `global::` name reach the reader, and a class whose one
+/// a record's primary-constructor base is its base, an alias and a `global::`
+/// name reach the reader, and a class whose one
 /// supertype is an interface has no base for `base.` to reach.
 pub const NEWTONSOFT: Fixture = &[
     (
@@ -123,7 +124,7 @@ pub const NEWTONSOFT: Fixture = &[
     ),
     (
         "Src/Newtonsoft.Json/JsonConverter.cs",
-        "namespace Newtonsoft.Json\n{\n    public abstract class JsonConverter<T>\n    {\n    }\n\n    public struct LinePosition : IJsonLineInfo\n    {\n        public bool HasLineInfo()\n        {\n            return true;\n        }\n    }\n}\n",
+        "namespace Newtonsoft.Json\n{\n    public abstract class JsonConverter<T>\n    {\n    }\n\n    public struct LinePosition : IJsonLineInfo\n    {\n        public bool HasLineInfo()\n        {\n            return true;\n        }\n    }\n\n    public record JsonToken(int Depth);\n\n    public record JsonStartToken(int Depth) : JsonToken(Depth);\n}\n",
     ),
     (
         "Src/Newtonsoft.Json/Converters/IntConverter.cs",

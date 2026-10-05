@@ -277,8 +277,9 @@ fn php_handlers_implement_the_interface_and_extend_the_abstract_handler() {
 /// FR-RS-15 AC (Newtonsoft): one `base_list` holds the base class and an
 /// interface, and each entry's edge kind follows what it binds — `Extends` to
 /// `JsonReader`, `Implements` to `IJsonLineInfo`. A struct implements, an
-/// interface extends, a generic base binds by its name, and an alias and a
-/// `global::` name reach the reader. `IDisposable` stays unbound.
+/// interface extends, a generic base binds by its name, a record extends its
+/// primary-constructor base, and an alias and a `global::` name reach the
+/// reader. `IDisposable` stays unbound.
 #[test]
 fn csharp_supertypes_take_the_kind_of_what_they_bind() {
     let (_tmp, engine) = indexed(fixtures::NEWTONSOFT);
@@ -290,6 +291,7 @@ fn csharp_supertypes_take_the_kind_of_what_they_bind() {
             "IJsonPositionInfo -> Src/Newtonsoft.Json/IJsonLineInfo.cs:IJsonLineInfo:interface",
             "IntConverter -> Src/Newtonsoft.Json/JsonConverter.cs:JsonConverter:class",
             "JTokenReader -> Src/Newtonsoft.Json/JsonReader.cs:JsonReader:class",
+            "JsonStartToken -> Src/Newtonsoft.Json/JsonConverter.cs:JsonToken:class",
             "JsonTextReader -> Src/Newtonsoft.Json/JsonReader.cs:JsonReader:class",
             "RootedReader -> Src/Newtonsoft.Json/JsonReader.cs:JsonReader:class",
         ])
