@@ -12,7 +12,6 @@
 //! [extraction-engine]: ../../../docs/specs/architecture/components/extraction-engine.md
 //! [ADR-09]: ../../../docs/specs/architecture/decisions/ADR-09.md
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tree_sitter::{Language, Query};
@@ -22,7 +21,7 @@ use super::manifest::{
     CallTargets, ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier,
     ModuleModelKind, PackageModules, PluginManifest, PropertiesDescriptor, Reach, TestConvention,
 };
-use super::queries::LanguageQueries;
+use super::queries::{CompiledQueries, LanguageQueries};
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
 ///
@@ -267,11 +266,6 @@ pub trait LanguagePlugin {
         None
     }
 }
-
-/// Capability → compiled query, each shared with every other plugin in the
-/// process whose resolved source for it is byte-identical (HF-3; see
-/// [`crate::plugin::queries::compile_shared`]).
-pub(crate) type CompiledQueries = BTreeMap<String, Arc<Query>>;
 
 /// A grammar compiled in via a cargo feature, fully loaded and ready to parse.
 ///

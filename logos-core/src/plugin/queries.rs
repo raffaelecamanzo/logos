@@ -46,7 +46,6 @@ use tree_sitter::{Language, Query};
 
 use super::error::PluginError;
 use super::manifest::NAMESPACE_CAPTURE;
-use super::plugin::CompiledQueries;
 
 /// A query whose source has been resolved (override-or-embedded), ready to
 /// compile.
@@ -116,6 +115,11 @@ pub fn compile(language: &Language, resolved: &ResolvedQuery) -> Result<Query, P
         detail: e.to_string(),
     })
 }
+
+/// Capability → compiled query, each shared with every other plugin in the
+/// process whose resolved source for it is byte-identical (HF-3; see
+/// [`compile_shared`]).
+pub(crate) type CompiledQueries = BTreeMap<String, Arc<Query>>;
 
 /// A compiled query's identity: the `Language` it is bound to (its node-kind
 /// ids are that grammar's), the grammar and capability it backs, and the
