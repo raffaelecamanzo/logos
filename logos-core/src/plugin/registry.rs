@@ -1702,6 +1702,7 @@ mod tests {
             .collect();
         assert_eq!(reports.len(), 1, "one first-use report per process: {reports:?}");
         assert_eq!(reports[0].compiled, 1, "the one query compiled once: {reports:?}");
+        assert!(reports[0].elapsed > Duration::ZERO, "the compile time is reported: {reports:?}");
     }
 
     /// [`load_with_timings`](LanguageRegistry::load_with_timings) is a

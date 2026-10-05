@@ -381,10 +381,12 @@ fn index_the_fixture(eager: bool) -> String {
 fn queries_compiled_on_first_use_extract_the_same_graph_as_compiling_them_up_front() {
     let eager = index_the_fixture(true);
     let lazy = index_the_fixture(false);
-    let reported: Vec<String> = logos_core::plugin::queries::first_use_compiles()
-        .into_iter()
-        .map(|r| r.language)
-        .collect();
+    let reports = logos_core::plugin::queries::first_use_compiles();
+    assert!(
+        reports.iter().all(|r| r.elapsed > Duration::ZERO),
+        "every first-use report carries its compile time: {reports:?}"
+    );
+    let reported: Vec<String> = reports.into_iter().map(|r| r.language).collect();
 
     assert!(
         eager.lines().filter(|l| l.starts_with("E ")).count() > 0,
