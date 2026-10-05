@@ -13,6 +13,18 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two imports of one simple name are ambiguous in the package rungs (CR-196,
+  S-599).** `import a.Helper; import b.Helper;` then `Helper.util()` bound whichever
+  import the file listed first, because the qualified-head rung read a first-wins alias
+  map. It now resolves the rest of the path under every distinct import of the head's
+  name, binds only where they reach one declaration, and records `type-ambiguous`
+  where they reach two — the same rival rule Python imports already followed. A single
+  import, a verbatim repeat and an import of a name no in-repository type carries bind
+  as before, and a member type in lexical scope still wins. The same head in an
+  `extends` clause (`Helper.Inner`) binds nothing under rival imports.
+
 ## [1.11.0] — 2026-10-05
 
 ### Changed

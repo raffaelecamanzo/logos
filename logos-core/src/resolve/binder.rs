@@ -3963,9 +3963,13 @@ impl Ctx<'_> {
     /// A multi-segment path from a package-shaped source ([CR-149]), its head
     /// read in the language's order for a simple type name (JLS §6.5.5): a
     /// member type in lexical scope (`Inner.Deep` inside `Outer`); else the
-    /// file's single-type import of it — **final**, as in
+    /// file's single-type imports of it — **final**, as in
     /// [`resolve_package_name`](Ctx::resolve_package_name), so `Map.Entry`
-    /// under `import java.util.Map` never reaches a same-package `Map`; else a
+    /// under `import java.util.Map` never reaches a same-package `Map`. Every
+    /// distinct import of the head's name is read
+    /// ([`resolve_expansions`](Ctx::resolve_expansions), S-599): they bind where
+    /// they reach one declaration and are [`Res::Ambiguous`] where they reach
+    /// two, never the first import's alone; else a
     /// type of the source's own package; else one a wildcard brings into view;
     /// else the whole path read as a fully-qualified name
     /// ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung whose head names a
@@ -3986,10 +3990,14 @@ impl Ctx<'_> {
             }
             cursor = self.ix.parent.get(&scope).copied();
         }
-        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
-            let mut expanded = alias_path.clone();
-            expanded.extend(rest.iter().cloned());
-            return self.resolve_path(&expanded, want, depth - 1);
+        if let Some(expansions) = self.scope().and_then(|s| s.alias_expansions.get(head)) {
+            let decided = self.resolve_expansions(expansions, rest, want, depth);
+            if decided == Res::Ambiguous {
+                // Two imports of the head's name reach two declarations; a
+                // reason an inner walk already recorded is kept.
+                self.note(want, || Residue::TypeAmbiguous);
+            }
+            return decided;
         }
         if let Some(decided) = self.walk_from(self.package_type(package, head), rest, want) {
             return decided;

@@ -14,7 +14,7 @@
 //!            src/main/java/com/y/Only.java        (module 13) ─ class Only (14) ─ go (15)
 //! ```
 
-use super::binder::{bind, Index, Outcome};
+use super::binder::{bind, bind_counting_path_visits, residue, Index, Outcome, Residue};
 use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
@@ -431,4 +431,149 @@ fn a_captured_extends_row_adds_no_hierarchy_token() {
     let base: std::collections::HashSet<String> = super::tokens("Base").into_iter().collect();
     let ix = Index::build_with_layout(&nodes, &edges, &[path_row], java());
     assert!(ix.hierarchy_touched(&base), "the Path row's own target still counts");
+}
+
+/// A single-type import row of `Svc`'s file.
+fn import_of(id: i64, target: &str) -> UnresolvedRefRow {
+    row(id, SVC_FILE, 7, target, RefForm::Path, EdgeKind::Imports)
+}
+
+/// A nested `Inner` class under each `Helper` (nodes 40 and 41) and a lexical
+/// member type `Helper` of `Svc` itself, with its own `util` (nodes 50, 51).
+fn nested_and_lexical() -> Vec<(NodeRow, i64)> {
+    let web = "src/main/java/com/x/web/Helper.java";
+    let y = "src/main/java/com/y/Helper.java";
+    let svc = "src/main/java/com/x/svc/Svc.java";
+    vec![
+        (node(40, "Inner", NodeKind::Class, web), 5),
+        (node(41, "Inner", NodeKind::Class, y), 11),
+        (node(50, "Helper", NodeKind::Class, svc), 8),
+        (node(51, "util", NodeKind::Method, svc), 50),
+    ]
+}
+
+/// The two rival imports of one simple name (`import com.x.web.Helper; import
+/// com.y.Helper;`) and a call through the head.
+fn rival_imports() -> [UnresolvedRefRow; 2] {
+    [import_of(100, "com::x::web::Helper"), import_of(101, "com::y::Helper")]
+}
+
+/// The reason the call `r` from `Svc` stays unbound, under the fixture and
+/// `extra` nodes.
+fn residue_from_svc(extra: &[(NodeRow, i64)], imports: &[UnresolvedRefRow], r: &UnresolvedRefRow) -> Option<Residue> {
+    let (mut nodes, mut edges) = fixture();
+    for (n, parent) in extra {
+        edges.push(contains(*parent, n.id.0));
+        nodes.push(n.clone());
+    }
+    let mut refs = imports.to_vec();
+    refs.push(r.clone());
+    let ix = Index::build_with_layout(&nodes, &edges, &refs, java());
+    residue(r, &ix, BindingPolicy::Balanced)
+}
+
+/// Two imports of one simple name name two declarations (S-599): the head
+/// `Helper` is read under both, never the first import's alone. `Helper.util()`
+/// binds nothing and records why.
+#[test]
+fn a_qualified_call_through_two_rival_imports_binds_nothing_and_is_type_ambiguous() {
+    let call = row(1, SVC_FILE, 8, "Helper::util", RefForm::Path, EdgeKind::Calls);
+    for policy in [BindingPolicy::Strict, BindingPolicy::Balanced, BindingPolicy::Aggressive] {
+        let mut imports = rival_imports().to_vec();
+        imports.push(call.clone());
+        let (nodes, edges) = fixture();
+        let ix = Index::build_with_layout(&nodes, &edges, &imports, java());
+        assert_eq!(bind(&call, &ix, policy), Outcome::Unbound, "{policy:?}");
+    }
+    assert_eq!(residue_from_svc(&[], &rival_imports(), &call), Some(Residue::TypeAmbiguous));
+    // The order the imports are written in never decides.
+    let mut reversed = rival_imports();
+    reversed.reverse();
+    assert_eq!(
+        bind_from_svc_under(BindingPolicy::Balanced, &[], &reversed, &call),
+        Outcome::Unbound
+    );
+}
+
+/// The same head in an `extends` clause: `Helper.Inner` names two nested types.
+#[test]
+fn a_qualified_supertype_through_two_rival_imports_binds_nothing() {
+    let extra = &nested_and_lexical()[..2];
+    let r = row(1, SVC_FILE, 8, "Helper::Inner", RefForm::Path, EdgeKind::Extends);
+    assert_eq!(
+        bind_from_svc_under(BindingPolicy::Balanced, extra, &rival_imports(), &r),
+        Outcome::Unbound
+    );
+    // One import of either alone binds its own `Inner`.
+    let [web, y] = rival_imports();
+    bound(bind_from_svc_under(BindingPolicy::Balanced, extra, &[web], &r), 8, 40);
+    bound(bind_from_svc_under(BindingPolicy::Balanced, extra, &[y], &r), 8, 41);
+}
+
+/// Imports that reach one declaration are not rivals: a single import and the
+/// same import repeated verbatim bind the one declaration, as before.
+#[test]
+fn imports_that_reach_one_declaration_bind_as_before() {
+    let call = row(1, SVC_FILE, 8, "Helper::util", RefForm::Path, EdgeKind::Calls);
+    let y = || import_of(100, "com::y::Helper");
+    bound(bind_from_svc_under(BindingPolicy::Balanced, &[], &[y()], &call), 8, 12);
+    let repeated = [y(), import_of(101, "com::y::Helper"), import_of(102, "com::y::Helper")];
+    bound(bind_from_svc_under(BindingPolicy::Balanced, &[], &repeated, &call), 8, 12);
+}
+
+/// A rival that names no in-repository type (a library `Helper`) is no second
+/// declaration: the rungs skip it as S-519's rival rule does, so the one
+/// in-repository `Helper` binds whichever import comes first — the first-wins
+/// map bound it only when it came first.
+#[test]
+fn a_rival_import_naming_no_repository_type_never_hides_the_one_that_does() {
+    let call = row(1, SVC_FILE, 8, "Helper::util", RefForm::Path, EdgeKind::Calls);
+    let library = import_of(100, "org::lib::Helper");
+    let y = import_of(101, "com::y::Helper");
+    for imports in [[library.clone(), y.clone()], [y, library]] {
+        bound(bind_from_svc_under(BindingPolicy::Balanced, &[], &imports, &call), 8, 12);
+    }
+}
+
+/// A member type in lexical scope is read before any import (JLS §6.5.5), so
+/// rival imports of its name never reach the rung.
+#[test]
+fn a_lexical_member_type_still_wins_over_rival_imports() {
+    let extra = nested_and_lexical();
+    let call = row(1, SVC_FILE, 8, "Helper::util", RefForm::Path, EdgeKind::Calls);
+    bound(bind_from_svc_under(BindingPolicy::Balanced, &extra, &rival_imports(), &call), 8, 51);
+}
+
+/// Repeating the rival pair costs what one pair costs: every distinct import is
+/// read once, a copy never again, wherever it sits in the file.
+#[test]
+fn rival_imports_repeated_cost_what_one_pair_costs() {
+    let call = row(1, SVC_FILE, 8, "Helper::util", RefForm::Path, EdgeKind::Calls);
+    let with = |pairs: i64| {
+        let mut refs: Vec<UnresolvedRefRow> = (0..pairs)
+            .flat_map(|n| {
+                [
+                    import_of(100 + 2 * n, "com::x::web::Helper"),
+                    import_of(101 + 2 * n, "com::y::Helper"),
+                ]
+            })
+            .collect();
+        refs.push(call.clone());
+        let (nodes, edges) = fixture();
+        let ix = Index::build_with_layout(&nodes, &edges, &refs, java());
+        bind_counting_path_visits(&call, &ix, BindingPolicy::Balanced)
+    };
+    let (once, once_visits) = with(1);
+    let (repeated, repeated_visits) = with(8);
+    assert_eq!(once, Outcome::Unbound);
+    assert_eq!(repeated, once);
+    assert_eq!(repeated_visits, once_visits, "repeated rival imports did more work");
+    // …and it is the rivals that cost: a pair visits more than a lone import.
+    let lone = {
+        let imports = [import_of(100, "com::y::Helper"), call.clone()];
+        let (nodes, edges) = fixture();
+        let ix = Index::build_with_layout(&nodes, &edges, &imports, java());
+        bind_counting_path_visits(&call, &ix, BindingPolicy::Balanced).1
+    };
+    assert!(once_visits > lone, "a pair ({once_visits}) must read both imports, a lone import ({lone}) one");
 }
