@@ -392,7 +392,9 @@ pub(crate) struct Index {
     /// `Contains`: scope → name → members, each list sorted by `NodeId`.
     members: Members,
     /// Module tree: `(crate, path)` → module node (file modules from their
-    /// paths, inline `mod`s appended beneath them).
+    /// paths, inline `mod`s appended beneath them). A key a bodyless `mod x;`
+    /// claims is answered by the one file module it declares (S-585,
+    /// [`hand_declarations_to_their_files`]).
     modules: HashMap<ModKey, NodeId>,
     /// The **directory modules** of the import-root languages (S-519,
     /// [FR-RS-14]): every directory between a file's import root and the file
@@ -1116,7 +1118,8 @@ fn build_containment(
 /// `(crate, path)`→node map and its reverse. A parentless `Module` node is a
 /// *file module* keyed by its file path; inline `mod`s hang beneath it. File
 /// roots are visited id-sorted so the first id wins a (rare) path tie, exactly
-/// as the monolith did.
+/// as the monolith did — except at a key a bodyless `mod x;` claims, which goes
+/// to the file it declares ([`hand_declarations_to_their_files`], S-585).
 fn build_module_tree(
     nodes: &[NodeRow],
     parent: &HashMap<NodeId, NodeId>,
@@ -1142,6 +1145,7 @@ fn build_module_tree(
             .filter(|p| layout.has_import_roots(p));
         (import_root_path, n.id)
     });
+    let mut files_at: HashMap<ModKey, Vec<NodeId>> = HashMap::new();
     for root in file_roots {
         let Some(path) = &root.file_path else {
             continue; // an orphaned module node cannot anchor a tree
@@ -1149,6 +1153,7 @@ fn build_module_tree(
         let key = layout.module_key(path);
         modules.entry(key.clone()).or_insert(root.id);
         module_key.insert(root.id, key.clone());
+        files_at.entry(key.clone()).or_default().push(root.id);
         append_inline_modules(
             root.id,
             key,
@@ -1158,7 +1163,59 @@ fn build_module_tree(
             &mut module_key,
         );
     }
+    hand_declarations_to_their_files(nodes, parent, members, &files_at, &mut modules, &module_key);
     (modules, module_key)
+}
+
+/// Give each key a bodyless `mod x;` declaration claims to the file module it
+/// declares (S-585, [FR-RS-41]). The declaration is a node of the declaring
+/// file, appended beneath it like an inline `mod`, so its key is exactly the
+/// key of `x.rs` or `x/mod.rs` under the declaring module's directory — and
+/// the first-by-id tie-break used to hand the key to whichever came first,
+/// usually the empty declaration, so every path through it found nothing.
+///
+/// The key goes to the **one** file module at it. With none (a `#[path]`
+/// attribute, which is not read, or a missing file) the declaration keeps it
+/// and binds nothing beneath; with two (`x.rs` beside `x/mod.rs`, which rustc
+/// refuses) the declaration takes it back from whichever file won, so neither
+/// is guessed ([NFR-RA-05]). The outcome reads no node id: a sync and a cold
+/// index agree ([NFR-RA-06]). No node, symbol or edge changes — only which
+/// node answers the key.
+///
+/// A declaration is a nested `Module` with no `Contains` child on a single
+/// line. An inline `mod x { … }` with contents, or with braces over several
+/// lines, is not one, and keeps the key exactly as before.
+///
+/// [FR-RS-41]: ../../../docs/specs/requirements/FR-RS-41.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn hand_declarations_to_their_files(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    members: &Members,
+    files_at: &HashMap<ModKey, Vec<NodeId>>,
+    modules: &mut HashMap<ModKey, NodeId>,
+    module_key: &HashMap<NodeId, ModKey>,
+) {
+    let is_declaration = |n: &NodeRow| {
+        n.kind == NodeKind::Module
+            && parent.contains_key(&n.id)
+            && !members.contains_key(&n.id)
+            && n.start_line == n.end_line
+    };
+    for declaration in nodes.iter().filter(|n| is_declaration(n)) {
+        let Some(key) = module_key.get(&declaration.id) else { continue };
+        let Some(files) = files_at.get(key) else { continue };
+        match files.as_slice() {
+            [file] => {
+                modules.insert(key.clone(), *file);
+            }
+            _ if modules.get(key).is_some_and(|holder| files.contains(holder)) => {
+                modules.insert(key.clone(), declaration.id);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Append every inline `mod` beneath `root` to the module maps, depth-first

@@ -19,7 +19,7 @@ pub const RUST: Fixture = &[
     ),
     (
         "src/lib.rs",
-        "use crate::util::run;\n\npub fn alpha() {\n    run();\n}\n",
+        "pub mod circle;\npub mod shapes;\npub mod util;\n\nuse crate::util::run;\n\npub fn alpha() {\n    run();\n}\n",
     ),
     ("src/util.rs", "pub fn run() {}\n"),
     (

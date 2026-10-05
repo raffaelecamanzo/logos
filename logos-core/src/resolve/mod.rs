@@ -889,3 +889,5 @@ mod tests;
 mod package_rung_tests;
 #[cfg(test)]
 mod path_module_tests;
+#[cfg(test)]
+mod mod_declaration_tests;

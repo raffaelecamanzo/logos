@@ -15,6 +15,20 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Changed
 
+- **A Rust `mod x;` declaration no longer blocks binding through it (CR-186, S-585).**
+  The declaration is a node of the declaring file keyed exactly where `x.rs` /
+  `x/mod.rs` is, and whichever node was numbered first answered that key — usually
+  the empty declaration, so `crate::x::…`, `self::…` and `super::…` paths through it
+  bound nothing. The key now answers with the one file the declaration names; a
+  `#[path]` declaration, a missing file, or two files (`x.rs` beside `x/mod.rs`) stay
+  unresolved. No node or symbol changes. On this repository `crate::` imports bound
+  rise from 359 to 616 of 1,050 and `crate::` calls from 97 to 288 of 386 (all Rust
+  imports 1,655 → 2,312 of 6,359; calls 18,761 → 19,535 of 85,827); 42 imports of a
+  declared module now name its file instead of the declaration. Nearly all remaining
+  `crate::` misses go through a `pub use` re-export. The scan signal moves 8402 →
+  8319 on a full index, from the newly bound cross-directory edges (modularity
+  0.874 → 0.833, depth 9 → 10; redundancy improves as 18 functions stop reading
+  dead). The Rust reach fixture regains its `mod` lines.
 - **Python imports bind: packages, import roots and relative levels (CR-170, S-519).**
   The path module model gains plugin-declared data on `[module_model]`:
   `package_stems` (a package file names its directory — Python `__init__`, Rust
