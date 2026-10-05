@@ -19,6 +19,7 @@
 //! lib/thing.js                  (module 170 "thing")    ─ thing (171)     [JavaScript]
 //! manage.py                     (module 180 "manage")   [a top-level script]
 //! mylib/src/lib.rs, util.rs     (modules 190, 191)      ─ g (192)          [a Rust crate]
+//! app/src/lib.rs, a/mod.rs      (modules 300, 310)                         [a Rust crate]
 //! ```
 //!
 //! [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
@@ -37,6 +38,7 @@ const MAP_PY: i64 = 30;
 const ROUTING_INIT_PY: i64 = 31;
 const TEST_MAP_PY: i64 = 32;
 const TOP_PY: i64 = 34;
+const APP_LIB_RS: i64 = 35;
 
 const POLICIES: [BindingPolicy; 3] = [
     BindingPolicy::Strict,
@@ -88,6 +90,8 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         node(190, "mylib", NodeKind::Module, "mylib/src/lib.rs"),
         node(191, "util", NodeKind::Module, "mylib/src/util.rs"),
         node(192, "g", NodeKind::Function, "mylib/src/util.rs"),
+        node(300, "app", NodeKind::Module, "app/src/lib.rs"),
+        node(310, "a", NodeKind::Module, "app/src/a/mod.rs"),
     ];
     let edges = vec![
         contains(100, 101),
@@ -247,6 +251,16 @@ fn an_import_through_a_package_file_binds_to_its_package() {
         assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
         // A package never imports itself through its own `__init__.py`.
         let r = import(5, ROUTING_INIT_PY, 110, ".::Map");
+        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// Only an **import** goes through a package: a call path naming a package's
+/// re-export is a call, and a package module is never its target.
+#[test]
+fn a_call_never_binds_to_a_package_through_its_reexport() {
+    for policy in POLICIES {
+        let r = row(1, TEST_MAP_PY, 161, "pkg::routing::Map", EdgeKind::Calls);
         assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
     }
 }
