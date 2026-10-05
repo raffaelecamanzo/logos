@@ -57,6 +57,24 @@ pub struct PathModelDecl {
     pub import_roots: Option<Vec<String>>,
 }
 
+impl PathModelDecl {
+    /// The path-model declaration `plugin` makes — `None` unless it declares
+    /// the `path` model with package stems or import roots. The one reading of
+    /// a plugin's path model, shared by [`LanguageRegistry::path_models`] and
+    /// [`PackageLayout::from_plugin`](crate::resolve::package_key::PackageLayout::from_plugin),
+    /// so a single-plugin layout is the registry's exactly.
+    pub fn of(plugin: &dyn LanguagePlugin) -> Option<Self> {
+        let s = plugin.semantics();
+        let declares = !s.package_stems.is_empty() || s.import_roots.is_some();
+        (s.module_model == super::ModuleModelKind::Path && declares).then(|| Self {
+            language: plugin.name().to_string(),
+            family: s.family.clone(),
+            package_stems: s.package_stems.clone(),
+            import_roots: s.import_roots.clone(),
+        })
+    }
+}
+
 /// The in-memory registry of loaded language grammars.
 #[derive(Debug)]
 pub struct LanguageRegistry {
@@ -340,19 +358,8 @@ impl LanguageRegistry {
     pub fn path_models(&self) -> HashMap<String, PathModelDecl> {
         self.plugins
             .iter()
-            .filter(|p| p.semantics().module_model == super::ModuleModelKind::Path)
-            .filter(|p| {
-                let s = p.semantics();
-                !s.package_stems.is_empty() || s.import_roots.is_some()
-            })
-            .flat_map(|p| {
-                let s = p.semantics();
-                let decl = PathModelDecl {
-                    language: p.name().to_string(),
-                    family: s.family.clone(),
-                    package_stems: s.package_stems.clone(),
-                    import_roots: s.import_roots.clone(),
-                };
+            .filter_map(|p| Some((p, PathModelDecl::of(p)?)))
+            .flat_map(|(p, decl)| {
                 p.extensions()
                     .iter()
                     .map(move |e| (normalize_ext(e), decl.clone()))

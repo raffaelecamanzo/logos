@@ -406,17 +406,9 @@ impl PackageLayout {
             (ModuleModelKind::Namespace, _) => Self::default().with_namespace_extensions(exts()),
             _ => Self::default(),
         };
-        let path_model = (semantics.module_model == ModuleModelKind::Path
-            && (!semantics.package_stems.is_empty() || semantics.import_roots.is_some()))
-        .then(|| PathModelDecl {
-            language: plugin.name().to_string(),
-            family: semantics.family.clone(),
-            package_stems: semantics.package_stems.clone(),
-            import_roots: semantics.import_roots.clone(),
-        });
         layout
             .with_path_models(
-                path_model
+                PathModelDecl::of(plugin)
                     .into_iter()
                     .flat_map(|decl| exts().map(move |ext| (ext, decl.clone())))
                     .collect(),
