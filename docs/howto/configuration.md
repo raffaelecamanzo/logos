@@ -1469,11 +1469,13 @@ import_roots = ["src"]         # candidate roots; the repository root is the fal
   — declare such roots in `.logos/config.toml` instead (below).
 
 Python records one import row per imported name (`from a import b, c` is two
-rows), and its imports reach only Python modules: a fallback never crosses into
-another language's files.
+rows), and its imports reach only Python modules: neither a module path nor a
+fallback crosses into another language's files. An `as` import (`from m import a
+as b`) binds the import but gives the file no name `a`, and a name imported twice
+(a `try`/`except` compat import) binds a call only where both imports agree.
 
 **`family`.** Languages that can name each other's types declare one **interop
-family** (any kind), and binding never crosses it:
+family** (any kind), and the type and namespace lookups never cross it:
 
 ```toml
 [module_model]
@@ -1483,8 +1485,11 @@ family = "jvm"   # Java, Kotlin and Scala share it
 
 The fully-qualified type index and the namespace index are partitioned by
 family, so a Java import still reaches a Kotlin class while a C# `using
-App.Models;` never binds a PHP file declaring `namespace App\Models;`. A plugin
-that declares no family is its own.
+App.Models;` never binds a PHP file declaring `namespace App\Models;`. An
+import-root language (Python) is keyed under its family's own crate, so its whole
+module tree stays inside the family too. A plugin that declares no family is its
+own. The policy-gated workspace fallbacks of the other models (`balanced` suffix
+match, `aggressive` unique name) are not partitioned.
 
 **`package`.** The source roots live in their own table:
 
