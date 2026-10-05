@@ -16,9 +16,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 ### Changed
 
 - **Plugin queries compile on first use of their language (CR-197, S-600).** Engine
-  start no longer compiles every compiled-in language's tree-sitter queries — the
-  ~600 ms that made up most of a cold start and failed the NFR-PE-05 budget tests in
-  `scripts/gate.sh full`. Each language compiles all its queries, once per process,
+  start no longer compiles every compiled-in language's tree-sitter queries — most of
+  a cold start (~620 of ~710 ms in a debug build), and what failed the NFR-PE-05
+  budget tests in `scripts/gate.sh full`. Each language compiles all its queries, once per process,
   on the first extraction that needs it, so a cold start pays only for the languages
   a repository uses; concurrent first uses of one language compile it once. An
   on-disk override under `.logos/plugins/<lang>/` still compiles its whole language
