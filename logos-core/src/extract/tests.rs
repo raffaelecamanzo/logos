@@ -40,6 +40,7 @@ impl NoSymbolsPlugin {
                 specifier_extensions: Vec::new(),
                 implicit_receiver: crate::plugin::ImplicitReceiver::None,
                 call_targets: crate::plugin::CallTargets::default(),
+                supertype_kind_follows_target: false,
                 package_modules: None,
                 module_model: crate::plugin::ModuleModelKind::Path,
                 package_stems: Vec::new(),
@@ -5422,7 +5423,10 @@ fn pre_s500_rendering(facts: &Facts) -> String {
     }
     // Every `RefFact` field but the receiver shape (S-514), which postdates
     // this rendering — in the derived `Debug` form the digest was taken over.
-    for r in &facts.refs {
+    // An `Extends` row postdates it too: no Rust, Go, Python or C query
+    // captured a supertype before S-522, which records the Python fixture's
+    // two bases.
+    for r in facts.refs.iter().filter(|r| r.kind != EdgeKind::Extends) {
         writeln!(
             out,
             "R RefFact {{ source: {:?}, target: {:?}, alias: {:?}, form: {:?}, kind: {:?}, line: {:?}, relation: {:?} }}",

@@ -43,7 +43,9 @@
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
 mod binder;
-pub(crate) use binder::{is_class_like, GLOBAL_WILDCARD_ALIAS, SELF_TYPE_HEAD, STATIC_WILDCARD_ALIAS};
+pub(crate) use binder::{
+    is_class_like, FULLY_QUALIFIED_HEAD, GLOBAL_WILDCARD_ALIAS, SELF_TYPE_HEAD, STATIC_WILDCARD_ALIAS,
+};
 /// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
 /// function the intra-repo promotion pass, the federation bridge and the
 /// coverage read-model all resolve a broker topic operand through, so a `Topic`
@@ -296,8 +298,8 @@ pub fn run(
         None => snap.refs.iter().collect(),
         Some(d) if d.changed_paths.is_empty() && d.dirty_tokens.is_empty() => Vec::new(),
         Some(d) => {
-            // …and whether it moved a type of the package-shaped hierarchy a
-            // supertype walk climbs.
+            // …and whether it moved a type of the hierarchy a supertype walk
+            // climbs.
             let moved = Moved {
                 hierarchy: index.hierarchy_touched(&d.dirty_tokens),
                 import_roots: roots_moved,
@@ -547,12 +549,15 @@ fn is_bound(o: &binder::Outcome) -> bool {
 /// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
-/// 5. **Hierarchy** (S-468) — `moved.hierarchy`: the sync dirtied a type of the
-///    package-shaped `Extends` hierarchy, and `r` is a call from a
-///    package-shaped file. Such a call may bind through a supertype walk that
-///    crosses the moved type while spelling none of its names — `Leaf::start`
-///    reaching `Base.start` through a `Mid` that just gained `extends Base`.
-///    Every other language's selection is unchanged.
+/// 5. **Hierarchy** (S-468; S-522) — `moved.hierarchy`: the sync dirtied a type
+///    of the `Extends` hierarchy, and `r` is a call from a file that can walk
+///    it — package-shaped, or of a language whose types record a hierarchy
+///    row ([`binder::Index::walks_hierarchy`]). Such a call may bind through a
+///    supertype walk that crosses the moved type while spelling none of its
+///    names — `Leaf::start` reaching `Base.start` through a `Mid` that just
+///    gained `extends Base`, or a Python `self.start()` through a base that
+///    just gained `(Base)`. A language that records no supertype — Rust —
+///    keeps its selection.
 /// 6. **Global wildcard** (S-518) — `delta.global_imports_moved`: a changed file
 ///    declared a C# `global using` before or after the sync, and `r` is from a
 ///    package-shaped file. The wildcard brings names into view in files the sync
@@ -580,7 +585,7 @@ fn is_affected(
         if is_import_scoped(r) && index.is_path_specifier_file(path) {
             return true;
         }
-        if moved.hierarchy && r.kind == EdgeKind::Calls && index.is_package_shaped(path) {
+        if moved.hierarchy && r.kind == EdgeKind::Calls && index.walks_hierarchy(path) {
             return true;
         }
         if delta.global_imports_moved && index.is_package_shaped(path) {
@@ -893,3 +898,5 @@ mod path_module_tests;
 mod call_target_tests;
 #[cfg(test)]
 mod mod_declaration_tests;
+#[cfg(test)]
+mod type_relation_tests;

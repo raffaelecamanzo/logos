@@ -25,7 +25,7 @@
 //! [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 //! [NFR-PC-03]: ../../../docs/specs/requirements/NFR-PC-03.md
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -407,6 +407,23 @@ impl LanguageRegistry {
                     .iter()
                     .map(move |e| (normalize_ext(e), targets))
             })
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a supertype's edge kind follows its target (S-522,
+    /// [FR-RS-15]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds each supertype as the kind its clause spells.
+    ///
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+    pub fn supertype_kind_follows_target(&self) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| p.semantics().supertype_kind_follows_target)
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
             .collect()
     }
 
@@ -1045,6 +1062,24 @@ mod tests {
         );
         for ext in ["rs", "java", "ts", "tsx", "go", "cs", "php", "rb", "cpp", "h", "md"] {
             assert!(!targets.contains_key(ext), "`{ext}` binds a callable only");
+        }
+    }
+
+    /// The supertype key (S-522, FR-RS-15): C# and Kotlin write a base class
+    /// and an interface in one list, so their every extension declares it.
+    /// Every other grammar — Java, PHP and Python above all, whose clauses say
+    /// which is which — is absent.
+    #[test]
+    fn supertype_kind_follows_target_collects_only_the_declaring_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.supertype_kind_follows_target();
+        #[cfg(all(feature = "lang-c-sharp", feature = "lang-kotlin"))]
+        for ext in ["cs", "kt", "kts"] {
+            assert!(declaring.contains(ext), "`{ext}` follows the bound supertype's kind");
+        }
+        for ext in ["rs", "java", "php", "py", "scala", "ts", "go", "rb", "c", "cpp", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` spells each supertype's kind");
         }
     }
 

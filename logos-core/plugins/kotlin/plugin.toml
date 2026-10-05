@@ -38,6 +38,13 @@ implicit_receiver = "self"
 # binds among that type's members and never reaches the class.
 class_call_instantiates = true
 
+# A supertype's kind follows the type it binds (S-522, CR-170, FR-RS-15): the
+# list after `:` holds the base class and the interfaces alike (`class A :
+# Base(), Iface`), so each entry is captured once and its edge is `Extends` to
+# the class it binds, `Implements` to an interface. An interface's own
+# supertypes are interfaces, and are `Extends`.
+supertype_kind_follows_target = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Kotlin's anonymous control-flow/operator tokens: `when` replaces `switch`
 # (counted once per expression, the keyword-walk approximation), `?:` is the

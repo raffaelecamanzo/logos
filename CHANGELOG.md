@@ -15,6 +15,21 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Changed
 
+- **Inheritance binds for Python, PHP, C# and Kotlin (CR-170, S-522).** Their
+  `references` queries capture supertypes — Python `class A(B)`, PHP `extends`,
+  `implements` and trait `use`, C#'s `base_list`, Kotlin's supertype list — and an
+  `Extends` or `Implements` from a type binds through the module model its language
+  declares, not only from a package-shaped source. It binds the one in-repository
+  type the file's scope names, never a workspace name guess under any policy; a
+  library base stays unbound. `Implements` may target an interface or a trait (a PHP
+  class's `use`d trait). C# and Kotlin declare the new `plugin.toml` key
+  `supertype_kind_follows_target`: their supertype list does not say which entry is
+  the base class, so each entry's edge is `Extends` to a class and `Implements` to an
+  interface. PHP's leading `\` and C#'s `global::` read a name from the global
+  namespace only. A proven `Extends` is what `super().m()`, `parent::m()`,
+  `base.M()` and `super.m()` climb, so those calls bind the nearest base that
+  declares the method; Python's `super(A, self)` and Kotlin's `super<T>` stay
+  unbound. Rust's `Implements` and Java's type relations are unchanged.
 - **An import's alias is the name it binds locally (CR-170, S-520).** A `references`
   query can now mark that name with `@ref.import.alias`, and the extractor records it
   as the import row's alias instead of the path's last segment. Python, PHP, C# and Go

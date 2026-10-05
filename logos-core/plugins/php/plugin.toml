@@ -86,14 +86,14 @@ http_client_detectors = ["GuzzleHttp"]
 kind = "namespace"
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
-# files through the declared namespace (S-518); calls bind only inside the file
-# that wrote them.
+# files through the declared namespace (S-518), and so do a type's supertypes
+# (S-522); calls bind only inside the file that wrote them.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
 level = "partial"
-cross_file = ["imports"]
+cross_file = ["imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"

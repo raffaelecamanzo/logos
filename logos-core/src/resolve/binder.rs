@@ -237,16 +237,28 @@ enum Want {
     ///
     /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
     Field,
-    /// A Java `Extends` from a class, or `Instantiates`: a `Class` only
-    /// (S-466, [CR-149]).
+    /// An `Extends` from a class, or a Java `Instantiates`: a `Class` only
+    /// (S-466, [CR-149]; S-522 for every language).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     Class,
-    /// A Java `Implements`, or an `Extends` from an interface: an `Interface`
-    /// only (S-466, [CR-149]).
+    /// An `Extends` from an interface: an `Interface` only (S-466, [CR-149]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     Interface,
+    /// An `Implements` from a type: an `Interface` or a `Trait` (S-522,
+    /// [FR-RS-15]) — a Java or PHP class's interface, a PHP class's `use`d
+    /// trait.
+    ///
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+    Implemented,
+    /// An `Extends` from a class whose language leaves the supertype's kind
+    /// unsaid (S-522, [FR-RS-15]; C#'s `: B, IC`, Kotlin's `: Base(), Iface`):
+    /// a `Class`, an `Interface` or a `Trait`, under one exactly-one rule. The
+    /// edge kind then follows the target ([`relation_edge_kind`]).
+    ///
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+    Supertype,
     /// A Java `TypeUses`: any type-like node ([`is_type_like`]) (S-466,
     /// [CR-149]).
     ///
@@ -268,6 +280,10 @@ impl Want {
             Want::Field => kind == NodeKind::Field,
             Want::Class => kind == NodeKind::Class,
             Want::Interface => kind == NodeKind::Interface,
+            Want::Implemented => matches!(kind, NodeKind::Interface | NodeKind::Trait),
+            Want::Supertype => {
+                matches!(kind, NodeKind::Class | NodeKind::Interface | NodeKind::Trait)
+            }
             Want::Type => is_type_like(kind),
         }
     }
@@ -398,6 +414,17 @@ pub(crate) const GLOBAL_WILDCARD_ALIAS: &str = "global";
 ///
 /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
 pub(crate) const SELF_TYPE_HEAD: &str = "Self";
+
+/// The head of a **fully-qualified** type-relation target (S-522,
+/// [FR-RS-15]): PHP's `extends \Exception`, C#'s `: global::System.Exception`.
+/// Such a name is read from the global namespace and nowhere else, so it is
+/// bound by the fully-qualified index alone — never by the source's own
+/// namespace first, where `namespace Foo; class Exception extends \Exception`
+/// would name the class itself. No language spells a name `\`, so the head can
+/// never be a type's or a package's.
+///
+/// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+pub(crate) const FULLY_QUALIFIED_HEAD: &str = "\\";
 
 /// One node's binding-relevant facts.
 #[derive(Debug)]
@@ -538,9 +565,12 @@ pub(crate) struct Index {
     /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
     /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
     impls_by_trait_method: HashMap<(NodeId, String), Vec<NodeId>>,
-    /// A package-shaped type → the in-repository types its `Extends` rows bind
-    /// to, id-sorted (S-468, [CR-150] §3.2 B): one superclass for a class, the
-    /// super-interfaces for an interface. Bound from the `Extends` ledger rows
+    /// A type → the in-repository types its `Extends` rows bind to as
+    /// `Extends`, id-sorted (S-468, [CR-150] §3.2 B; S-522 for every language
+    /// whose types record one): one superclass for a class (each base of a
+    /// Python class), the super-interfaces for an interface. A supertype bound
+    /// as `Implements` — a C# or Kotlin class's interface — is not one, as a
+    /// Java class's `implements` is not. Bound from the `Extends` ledger rows
     /// by S-466's own rule ([`bind`]) while the index is built, so it is
     /// available on the very first index pass, before any `Extends` edge is
     /// committed — the [`impls_by_trait_method`](Index::impls_by_trait_method)
@@ -549,13 +579,17 @@ pub(crate) struct Index {
     ///
     /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
     supertypes: HashMap<NodeId, Vec<NodeId>>,
-    /// The name tokens of the package-shaped type hierarchy: every `Extends`
-    /// row's target, bound or not (S-468). A sync dirtying one of them may move
+    /// The name tokens of the type hierarchy: every hierarchy `Extends` row's
+    /// target, bound or not (S-468). A sync dirtying one of them may move
     /// a supertype walk whose row spells none of them
     /// ([`Index::hierarchy_touched`]). A type's own name is not needed: a walk
     /// that crosses a type other than its start crosses it as some `Extends`
     /// row's target, and a row starting at a type spells that type's name.
     hierarchy_tokens: HashSet<String>,
+    /// The file extensions of those rows' sources (S-522): the languages whose
+    /// calls a supertype walk can bind, so whose calls a moved hierarchy
+    /// re-selects ([`Index::walks_hierarchy`]).
+    hierarchy_extensions: HashSet<String>,
     /// node → the self type its plugin query recorded for it (S-493,
     /// [FR-RS-11]; the `nodes.self_type` column). Empty unless the run was given
     /// the store's self types ([`Index::with_self_types`]); empty binds no call
@@ -676,15 +710,17 @@ impl Index {
             impls_by_trait_method,
             supertypes: HashMap::new(),
             hierarchy_tokens: HashSet::new(),
+            hierarchy_extensions: HashSet::new(),
             self_types: HashMap::new(),
             methods_by_self_type: HashMap::new(),
             type_names: HashMap::new(),
             file_ids: HashMap::new(),
             trait_impl_methods: HashSet::new(),
         };
-        let (supertypes, hierarchy_tokens) = build_supertypes(refs, &index);
-        index.supertypes = supertypes;
-        index.hierarchy_tokens = hierarchy_tokens;
+        let hierarchy = build_supertypes(refs, &index);
+        index.supertypes = hierarchy.supertypes;
+        index.hierarchy_tokens = hierarchy.tokens;
+        index.hierarchy_extensions = hierarchy.extensions;
         index.trait_impl_methods = build_trait_impl_methods(refs, &index);
         index.file_ids = refs
             .iter()
@@ -920,12 +956,22 @@ impl Index {
     }
 
     /// Whether `dirty` — the tokens a sync added or removed — names a type an
-    /// `Extends` row of the package-shaped hierarchy names (S-468). A supertype walk that crosses
+    /// `Extends` row of the type hierarchy names (S-468). A supertype walk that crosses
     /// such a type can change its answer although the calling row spells none
-    /// of its names, so the incremental run re-binds every package-shaped call
-    /// when this holds (`resolve::is_affected`).
+    /// of its names, so the incremental run re-binds every call that can walk
+    /// it ([`walks_hierarchy`](Index::walks_hierarchy)) when this holds
+    /// (`resolve::is_affected`).
     pub(crate) fn hierarchy_touched(&self, dirty: &HashSet<String>) -> bool {
         self.hierarchy_tokens.iter().any(|t| dirty.contains(t))
+    }
+
+    /// Whether a call written in the file at `path` can bind through the type
+    /// hierarchy (S-468; S-522): a package-shaped file, or one of a language
+    /// whose types record an `Extends` the hierarchy holds. A language that
+    /// records none — Rust — has no call a moved hierarchy can move.
+    pub(crate) fn walks_hierarchy(&self, path: &str) -> bool {
+        self.layout.is_package_shaped(path)
+            || file_extension(path).is_some_and(|ext| self.hierarchy_extensions.contains(&ext))
     }
 
     /// Whether adding or removing the file at `path` can move the detected
@@ -949,6 +995,12 @@ impl Index {
     /// The in-repository supertypes of `ty` its `Extends` rows bind to.
     fn supertypes_of(&self, ty: NodeId) -> &[NodeId] {
         self.supertypes.get(&ty).map_or(&[], Vec::as_slice)
+    }
+
+    /// [`supertypes_of`](Index::supertypes_of), for the binder's own tests.
+    #[cfg(test)]
+    pub(crate) fn supertypes_for_tests(&self, ty: NodeId) -> &[NodeId] {
+        self.supertypes_of(ty)
     }
 
     /// The project-relative file of node `id`, when it has one — how the
@@ -1649,14 +1701,10 @@ fn build_impls_by_trait_method(
         let Some(&impl_method) = by_symbol.get(&r.source_symbol) else {
             continue; // the impl method's own node is not indexed — skip
         };
-        // A Java class's `Implements` (S-466) names an interface, never a
-        // trait, and its source is a class rather than an impl method: it has
-        // no place in the `dyn T` fan-out universe.
-        let package_shaped = info
-            .get(&impl_method)
-            .and_then(|i| i.file_path.as_deref())
-            .is_some_and(|p| layout.is_package_shaped(p));
-        if package_shaped {
+        // A type's `Implements` (S-466 for Java, S-522 for every language)
+        // is the type-relation arm's: its source is a class rather than an
+        // impl method, and it has no place in the `dyn T` fan-out universe.
+        if relation_want_of(r, info.get(&impl_method), layout).is_some() {
             continue;
         }
         let last = r.target.rsplit("::").next().unwrap_or(&r.target);
@@ -1699,15 +1747,28 @@ fn build_trait_impl_methods(refs: &[UnresolvedRefRow], ix: &Index) -> HashSet<No
         .collect()
 }
 
-/// The package-shaped type hierarchy (S-468, [CR-150] §3.2 B): each type's
-/// in-repository supertypes, and the name tokens a sync must watch to keep a
-/// walk over it fresh ([`Index::supertypes`], [`Index::hierarchy_tokens`]).
+/// The type hierarchy (S-468, [CR-150] §3.2 B; S-522): each type's
+/// in-repository supertypes, the name tokens a sync must watch to keep a walk
+/// over it fresh, and the languages whose rows it holds ([`Index::supertypes`],
+/// [`Index::hierarchy_tokens`], [`Index::hierarchy_extensions`]).
+struct Hierarchy {
+    supertypes: HashMap<NodeId, Vec<NodeId>>,
+    tokens: HashSet<String>,
+    extensions: HashSet<String>,
+}
+
+/// Build the [`Hierarchy`] from the `Extends` rows the type-relation arm binds
+/// ([`type_relation_want`]): a package-shaped source's, and in every language a
+/// type's.
 ///
-/// Each `Extends` row is bound by [`bind`] itself — S-466's type-relation arm,
-/// which reads the source's scope and package key and never the policy-gated
-/// name fallback (`package_key_only`), so the policy passed here moves nothing.
-/// A row of any other language is skipped: its source is not package-shaped,
-/// and the map stays empty for a graph without one, exactly as before.
+/// Each row is bound by [`bind`] itself — S-466's type-relation arm, which
+/// reads the source's scope and module model and never the policy-gated
+/// fallbacks (`scope_only`), so the policy passed here moves nothing. Only a
+/// row that binds as `Extends` is a supertype: a silent-syntax supertype that
+/// binds an interface records `Implements` ([`relation_edge_kind`]) and stays
+/// out, as a Java class's `implements` does. A row of any other arm is
+/// skipped, and the map stays empty for a graph without one — a Rust graph —
+/// exactly as before.
 ///
 /// Only the subtype's own rows count. A capture-before-delete `Symbol` row
 /// ([ADR-10]) is filed under the **supertype's** file and outlives the
@@ -1720,36 +1781,41 @@ fn build_trait_impl_methods(refs: &[UnresolvedRefRow], ix: &Index) -> HashSet<No
 ///
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
-fn build_supertypes(
-    refs: &[UnresolvedRefRow],
-    ix: &Index,
-) -> (HashMap<NodeId, Vec<NodeId>>, HashSet<String>) {
-    let mut supertypes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let mut tokens: HashSet<String> = HashSet::new();
+fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
+    let mut hierarchy = Hierarchy {
+        supertypes: HashMap::new(),
+        tokens: HashSet::new(),
+        extensions: HashSet::new(),
+    };
     for r in refs {
         if r.kind != EdgeKind::Extends || r.form == RefForm::Symbol {
             continue;
         }
-        let Some(source) = ix.by_symbol.get(&r.source_symbol).and_then(|id| ix.info.get(id)) else {
-            continue;
-        };
-        if !source
-            .file_path
-            .as_deref()
-            .is_some_and(|p| ix.layout.is_package_shaped(p))
-        {
+        let source = ix.by_symbol.get(&r.source_symbol).and_then(|id| ix.info.get(id));
+        if relation_want_of(r, source, &ix.layout).is_none() {
             continue;
         }
-        tokens.extend(super::tokens(&r.target));
-        if let Outcome::Bound { source, target, .. } = bind(r, ix, BindingPolicy::Strict) {
-            supertypes.entry(source).or_default().push(target);
+        hierarchy.tokens.extend(super::tokens(&r.target));
+        hierarchy.extensions.extend(
+            source
+                .and_then(|i| i.file_path.as_deref())
+                .and_then(file_extension),
+        );
+        if let Outcome::Bound {
+            source,
+            target,
+            kind: EdgeKind::Extends,
+            ..
+        } = bind(r, ix, BindingPolicy::Strict)
+        {
+            hierarchy.supertypes.entry(source).or_default().push(target);
         }
     }
-    for ids in supertypes.values_mut() {
+    for ids in hierarchy.supertypes.values_mut() {
         ids.sort_unstable();
         ids.dedup();
     }
-    (supertypes, tokens)
+    hierarchy
 }
 
 /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when zero
@@ -1777,32 +1843,93 @@ fn unique_trait(
     }
 }
 
-/// The kind of type a Java type-relation row may bind to (S-466, [CR-149]
-/// §3.2 B), or `None` when `r` is not one: only a `Path` (or its
-/// capture-before-delete `Symbol`) row of `Extends`, `Implements`,
-/// `Instantiates` or `TypeUses` from a package-shaped source is. `Extends`
-/// relates like to like — class → class, interface → interface — so it reads
-/// the source's own kind (the grammar gives no other declaration a superclass).
+/// The kind of type a type-relation row may bind to (S-466, [CR-149] §3.2 B;
+/// S-522, [FR-RS-15]), or `None` when `r` is not one. Only a `Path` (or its
+/// capture-before-delete `Symbol`) row is, and of two shapes:
 ///
-/// Every other row — Rust's `Implements` included — gets `None` and keeps the
-/// arm it had, so the S-281 trait bind and its `dyn` fan-out are untouched.
+/// - an `Extends`, `Implements`, `Instantiates` or `TypeUses` from a
+///   package-shaped source — Java, and a declared-namespace file whose
+///   namespace is known (S-518);
+/// - in any language, an `Extends` or `Implements` whose source is a
+///   class-like declaration ([`is_class_like`]): a Python, PHP, C# or Kotlin
+///   type's supertype (S-522), bound through whichever module model its
+///   language declares — the package rungs, a declared namespace, or the path
+///   modules of [FR-RS-14].
+///
+/// `Extends` relates like to like, so it reads the source's own kind: an
+/// interface's binds an interface, a class's a class — or, where its language
+/// leaves the kind unsaid (`kind_follows_target`, C# and Kotlin), a class, an
+/// interface or a trait, its edge kind following the target
+/// ([`relation_edge_kind`]). `Implements` binds an interface or a trait.
+///
+/// Every other row gets `None` and keeps the arm it had. That includes Rust's
+/// `Implements`, which is sourced at an impl **method**, so the S-281 trait bind
+/// and its `dyn` fan-out are untouched.
 ///
 /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+/// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+/// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
 fn type_relation_want(
     r: &UnresolvedRefRow,
     source_kind: Option<NodeKind>,
     package_shaped: bool,
+    kind_follows_target: bool,
 ) -> Option<Want> {
-    if !package_shaped || !matches!(r.form, RefForm::Path | RefForm::Symbol) {
+    if !matches!(r.form, RefForm::Path | RefForm::Symbol) {
+        return None;
+    }
+    let from_type = source_kind.is_some_and(is_class_like);
+    let supertype = from_type && matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements);
+    if !package_shaped && !supertype {
         return None;
     }
     match r.kind {
         EdgeKind::Extends if source_kind == Some(NodeKind::Interface) => Some(Want::Interface),
+        EdgeKind::Extends if from_type && kind_follows_target => Some(Want::Supertype),
         EdgeKind::Extends | EdgeKind::Instantiates => Some(Want::Class),
-        EdgeKind::Implements => Some(Want::Interface),
+        EdgeKind::Implements => Some(Want::Implemented),
         EdgeKind::TypeUses => Some(Want::Type),
         _ => None,
     }
+}
+
+/// [`type_relation_want`] for `r`, read off its source node `source` and its
+/// file's module model in `layout` — the one reading every caller shares: the
+/// bind itself, the hierarchy build and the trait fan-out's exclusion.
+fn relation_want_of(
+    r: &UnresolvedRefRow,
+    source: Option<&NodeInfo>,
+    layout: &PackageLayout,
+) -> Option<Want> {
+    let path = source.and_then(|i| i.file_path.as_deref());
+    type_relation_want(
+        r,
+        source.map(|i| i.kind),
+        path.is_some_and(|p| layout.is_package_shaped(p)),
+        path.is_some_and(|p| layout.supertype_kind_follows_target(p)),
+    )
+}
+
+/// The edge a type relation looked up with `want` records once it binds a node
+/// of `target` kind (S-522, [FR-RS-15]): the row's own kind, except that a
+/// supertype whose syntax was silent ([`Want::Supertype`]) records
+/// `Implements` to an interface or a trait — as a call that binds a class
+/// records `Instantiates` ([`Ctx::constructs`]).
+///
+/// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+fn relation_edge_kind(row_kind: EdgeKind, want: Want, target: Option<NodeKind>) -> EdgeKind {
+    match (want, target) {
+        (Want::Supertype, Some(NodeKind::Interface | NodeKind::Trait)) => EdgeKind::Implements,
+        _ => row_kind,
+    }
+}
+
+/// The file extension of `path`, normalised as the layout's are.
+fn file_extension(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
 }
 
 /// Reduce a candidate list to a [`Res`] — the single acceptance rule every
@@ -1882,7 +2009,7 @@ fn bind_traced(
     let source_file = source_info.and_then(|i| i.file_path.as_deref());
     let source_package = source_file.and_then(|p| ix.layout.package_of(p));
     let source_family = source_file.and_then(|p| ix.layout.family(p));
-    let relation = type_relation_want(r, source_info.map(|i| i.kind), source_package.is_some());
+    let relation = relation_want_of(r, source_info, &ix.layout);
     let ctx = Ctx {
         source,
         file_id: r.file_id,
@@ -1892,7 +2019,7 @@ fn bind_traced(
         policy,
         in_glob_resolution: Cell::new(false),
         bare_path_call: Cell::new(false),
-        package_key_only: relation.is_some(),
+        scope_only: relation.is_some(),
         lexical_start: Cell::new(source),
         miss: RefCell::new(None),
     };
@@ -1934,16 +2061,23 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
         };
     }
 
-    // A Java type relation (S-466, CR-149 §3.2 B, FR-EX-10): `Extends`,
-    // `Implements`, `Instantiates` or `TypeUses` from a package-shaped source.
-    // Bound only to the one in-repository type of the kind the relation names,
-    // reached through the source's scope and its package key (S-465) — see
+    // A type relation (S-466, CR-149 §3.2 B, FR-EX-10; S-522, FR-RS-15): any
+    // relation from a package-shaped source, and in every language a type's
+    // `Extends` or `Implements` ([`type_relation_want`]). Bound only to the one
+    // in-repository type of a kind the relation admits, reached through the
+    // source's scope and its module model — never a workspace guess — see
     // [`Ctx::resolve_type_relation`]. This is where the `Implements` bind is
-    // widened beyond Rust `Trait` targets: a Java `Implements` binds an
-    // `Interface`, and never reaches the trait rule below.
+    // widened beyond Rust `Trait` targets: a type's `Implements` binds an
+    // `Interface` or a `Trait`, and never reaches the trait rule below. A
+    // supertype whose syntax was silent takes its edge kind from the target.
     if let Some(want) = relation {
         return match ctx.resolve_type_relation(r, want) {
-            Res::Found(target) => bound(target),
+            Res::Found(target) => Outcome::Bound {
+                source,
+                target,
+                kind: relation_edge_kind(r.kind, want, ix.info.get(&target).map(|i| i.kind)),
+                payload: r.payload.clone(),
+            },
             _ => Outcome::Unbound,
         };
     }
@@ -1955,7 +2089,8 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
     // is the structural link the `dyn T` fan-out below enumerates impls from; it
     // is a structural fact, not a code coupling, so hydration fences it out of
     // the dependency subgraph the gated metrics run on (mirroring `Accesses`).
-    // A package-shaped source's `Implements` took the type-relation arm above.
+    // A type's `Implements`, and a package-shaped source's, took the
+    // type-relation arm above: only an impl method's reaches here.
     if r.kind == EdgeKind::Implements {
         let last = r.target.rsplit("::").next().unwrap_or(&r.target);
         return match ix.trait_by_name(last) {
@@ -2280,16 +2415,21 @@ struct Ctx<'a> {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     bare_path_call: Cell<bool>,
-    /// Bind by scope and package key only: set for a Java type relation
-    /// (S-466, [CR-149]), whose target must be the one in-repository type its
-    /// source's imports, package or wildcards name. The aggressive policy's
-    /// workspace **name** fallback is off for it — a same-named type in a
-    /// package the file never imports is not the type it wrote
-    /// ([NFR-RA-05]); an import of a JDK `List` must not bind an in-house one.
+    /// Bind by scope and module model only: set for a type relation (S-466,
+    /// [CR-149]; S-522 for every language), whose target must be the one
+    /// in-repository type its source's lexical scope, imports, package,
+    /// namespace, modules or wildcards name. The policy-gated workspace
+    /// fallbacks are off for it — the aggressive policy's **name** match and
+    /// the balanced one's module-path **suffix** match — because a same-named
+    /// type in a module the file never imports is not the type it wrote
+    /// ([NFR-RA-05]): an import of a JDK `List` must not bind an in-house one,
+    /// nor a Django `models.Model` base a repository's own `Model`. The
+    /// hierarchy is built under the strict policy ([`build_supertypes`]), so the
+    /// edge and the supertype walk agree under every policy.
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    package_key_only: bool,
+    scope_only: bool,
     /// Where [`resolve_name`](Ctx::resolve_name)'s lexical chain — and a
     /// package-shaped path's lexical head — starts: the source itself, except
     /// while a Java type relation is read in its declaration's **header** (S-466),
@@ -2537,9 +2677,10 @@ impl Ctx<'_> {
             Res::NotFound => {}
             decided => return decided,
         }
-        // 8) Policy-gated workspace fallback: unique module-path-suffix match. A
+        // 8) Policy-gated workspace fallback: unique module-path-suffix match —
+        //    never for a type relation ([`scope_only`](Ctx::scope_only)). A
         //    receiver-method call never reaches here (S-514, CR-066).
-        if self.policy != BindingPolicy::Strict {
+        if self.policy != BindingPolicy::Strict && !self.scope_only {
             return self.suffix_match(segs, want);
         }
         Res::NotFound
@@ -2614,14 +2755,20 @@ impl Ctx<'_> {
         (self.ix.layout.is_package_file(file) && !own).then_some(module)
     }
 
-    /// Resolve a Java type relation (S-466, [CR-149] §3.2 B, [FR-EX-10]) to the
-    /// one type of the kind `want` admits.
+    /// Resolve a type relation (S-466, [CR-149] §3.2 B, [FR-EX-10]; S-522,
+    /// [FR-RS-15]) to the one type of a kind `want` admits.
     ///
     /// A `Path` row takes the source's own scope order — the lexical chain (a
-    /// nested or same-file type), then S-465's package rungs: single-type
-    /// imports (final for the name they import), the source's package, its
+    /// nested or same-file type), then its module model's rungs. A
+    /// package-shaped source takes S-465's package rungs: single-type imports
+    /// (final for the name they import), the source's package or namespace, its
     /// wildcards, and for a qualified name the fully-qualified index
-    /// ([`resolve_package_path`](Ctx::resolve_package_path)). `want` filters
+    /// ([`resolve_package_path`](Ctx::resolve_package_path)). Any other source
+    /// — a Python class, a namespace file whose namespace is unknown — takes the
+    /// module tree: its imports, its modules, its globs. Neither ever takes a
+    /// policy-gated workspace guess ([`scope_only`](Ctx::scope_only)). A target
+    /// headed [`FULLY_QUALIFIED_HEAD`] is read by the fully-qualified index
+    /// alone. `want` filters
     /// the candidates of every rung, so a same-named type of the wrong kind is
     /// no candidate at all (on the fully-qualified rung it is applied after
     /// the exactly-one test, so a `src/main`/`src/test` pair stays ambiguous).
@@ -2646,6 +2793,7 @@ impl Ctx<'_> {
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [FR-EX-10]: ../../../docs/specs/requirements/FR-EX-10.md
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
@@ -2659,6 +2807,9 @@ impl Ctx<'_> {
             };
         }
         let segs = split(&r.target);
+        if let Some((FULLY_QUALIFIED_HEAD, name)) = segs.split_first().map(|(h, rest)| (h.as_str(), rest)) {
+            return self.resolve_fqn(name, want);
+        }
         let header = || -> Res {
             let Some(&enclosing) = self.ix.parent.get(&self.source) else {
                 return Res::NotFound;
@@ -3584,8 +3735,9 @@ impl Ctx<'_> {
         // 2) A child module of the source module, a crate-root module
         //    (sibling files are linked via the path-derived module tree, not
         //    via Contains), or an extern crate's root (`use other::*` /
-        //    `use other;` name the crate itself).
-        if !want.is_call() {
+        //    `use other;` name the crate itself) — for a lookup that admits a
+        //    module: never a call's, nor a type relation's (S-522).
+        if want.admits(NodeKind::Module) {
             if let Some((krate, mods)) = self.source_module() {
                 let mut child = mods.clone();
                 child.push(name.to_string());
@@ -3625,9 +3777,10 @@ impl Ctx<'_> {
             Res::NotFound => {}
             decided => return decided,
         }
-        // 5) Workspace unique-name fallback — aggressive only for bare names. A
+        // 5) Workspace unique-name fallback — aggressive only for bare names,
+        //    never for a type relation ([`scope_only`](Ctx::scope_only)). A
         //    receiver-method call never reaches here (S-514, CR-066).
-        if self.policy == BindingPolicy::Aggressive {
+        if self.policy == BindingPolicy::Aggressive && !self.scope_only {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
@@ -3649,8 +3802,8 @@ impl Ctx<'_> {
     /// 3. **on-demand** — a member of a type, or a type of a package, the file
     ///    imports with a wildcard ([`glob_members`](Ctx::glob_members));
     /// 4. the policy-gated workspace name fallback, as for every other
-    ///    language — except for a Java type relation, which binds by scope and
-    ///    package key only ([`package_key_only`](Ctx::package_key_only)).
+    ///    language — except for a type relation, which binds by scope and
+    ///    package key only ([`scope_only`](Ctx::scope_only)).
     ///
     /// A **receiver**-method call ([`RefForm::Method`]) takes none of these
     /// rungs: its target is its receiver's type's member ([CR-150]), which no
@@ -3710,7 +3863,7 @@ impl Ctx<'_> {
                 return Res::Ambiguous;
             }
         }
-        if self.policy == BindingPolicy::Aggressive && !self.package_key_only {
+        if self.policy == BindingPolicy::Aggressive && !self.scope_only {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
@@ -4162,8 +4315,9 @@ impl Ctx<'_> {
             }
 
             // Final segment: a child module (preferred for imports) or a
-            // member item of the current module.
-            if !want.is_call() {
+            // member item of the current module. Only a lookup that admits a
+            // module takes the child — never a call's, nor a type relation's.
+            if want.admits(NodeKind::Module) {
                 let mut child = key.1.clone();
                 child.push(seg.clone());
                 if let Some(&m) = self.ix.modules.get(&(key.0.clone(), child)) {

@@ -81,6 +81,11 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
     call_targets: HashMap<String, CallTargets>,
+    /// Normalised extensions whose language leaves a supertype's kind unsaid,
+    /// so its edge kind follows the type it binds (S-522, [FR-RS-15]).
+    ///
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+    kind_following_supertypes: HashSet<String>,
 }
 
 /// One language's path-model data in a layout (S-519).
@@ -158,6 +163,7 @@ impl PackageLayout {
             .with_path_models(registry.path_models())
             .with_families(registry.families())
             .with_call_targets(registry.call_targets())
+            .with_kind_following_supertypes(registry.supertype_kind_follows_target())
     }
 
     /// This layout, with each extension's path-model data (S-519; the shape
@@ -207,6 +213,17 @@ impl PackageLayout {
             targets
                 .into_iter()
                 .map(|(ext, t)| (ext.trim_start_matches('.').to_ascii_lowercase(), t)),
+        );
+        self
+    }
+
+    /// This layout, with the extensions whose supertype's edge kind follows
+    /// its target (S-522; the set
+    /// [`LanguageRegistry::supertype_kind_follows_target`] returns).
+    pub fn with_kind_following_supertypes(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        self.kind_following_supertypes.extend(
+            exts.into_iter()
+                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
         );
         self
     }
@@ -364,6 +381,15 @@ impl PackageLayout {
             .unwrap_or_default()
     }
 
+    /// Whether a supertype written in the file at `path` binds whichever of a
+    /// class, an interface or a trait it names, its edge kind following the
+    /// target (S-522, [FR-RS-15]): its language's clause does not say.
+    ///
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+    pub fn supertype_kind_follows_target(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.kind_following_supertypes.contains(&ext))
+    }
+
     fn path_model(&self, path: &str) -> Option<&PathModel> {
         self.path_models.get(&extension(path)?)
     }
@@ -442,6 +468,9 @@ impl PackageLayout {
             )
             .with_families(exts().map(|ext| (ext, semantics.family.clone())).collect())
             .with_call_targets(exts().map(|ext| (ext, semantics.call_targets)).collect())
+            .with_kind_following_supertypes(
+                exts().filter(|_| semantics.supertype_kind_follows_target),
+            )
     }
 
     /// `true` when the file at `path` takes the package rungs: its language
@@ -1163,5 +1192,26 @@ mod call_target_tests {
             }
         }
         assert!(declaring > 0, "some shipped plugin declares a call target");
+    }
+
+    /// The same parity for the supertype key (S-522): the single-plugin layout
+    /// answers every extension as the registry's does, over a set some shipped
+    /// plugin is in.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_supertype_kind_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let mut declaring = 0;
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                let follows = own.supertype_kind_follows_target(&path);
+                assert_eq!(follows, full.supertype_kind_follows_target(&path), "{path}");
+                declaring += usize::from(follows);
+            }
+        }
+        assert!(declaring > 0, "some shipped plugin declares the supertype key");
     }
 }

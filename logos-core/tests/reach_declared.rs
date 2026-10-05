@@ -297,12 +297,12 @@ fn python_declared_partial_binds_calls_imports_and_instantiation() {
 }
 
 #[test]
-fn php_declared_partial_binds_imports_only() {
+fn php_declared_partial_binds_imports_and_type_relations() {
     verify("php", fixtures::PHP);
 }
 
 #[test]
-fn csharp_declared_partial_binds_imports_only() {
+fn csharp_declared_partial_binds_imports_and_type_relations() {
     verify("c-sharp", fixtures::C_SHARP);
 }
 
@@ -444,13 +444,10 @@ fn every_code_language_declares_a_reach_and_nothing_else_does() {
     for name in ["go", "typescript", "tsx", "kotlin", "php", "c-sharp", "scala", "python"] {
         assert_eq!(level(name), "partial", "{name}");
     }
-    // The declared-namespace languages (S-518) bind imports, and only imports —
-    // but for Kotlin and Scala, whose top-level `Foo()` also constructs the
-    // class it names, a type relation (S-521).
-    for name in ["php", "c-sharp"] {
-        assert_eq!(declared[name].1, ["imports"], "{name}");
-    }
-    for name in ["kotlin", "scala"] {
+    // The declared-namespace languages (S-518) bind imports and type relations:
+    // PHP's, C#'s and Kotlin's supertypes (S-522), and the class a Kotlin or
+    // Scala top-level `Foo()` constructs (S-521).
+    for name in ["php", "c-sharp", "kotlin", "scala"] {
         assert_eq!(declared[name].1, ["imports", "type_relations"], "{name}");
     }
     // Python's import-root path modules (S-519) bind imports, and the bare

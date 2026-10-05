@@ -1550,7 +1550,11 @@ fn collect_refs(
     };
     // Receiver typing (S-467) and shapes (S-514) — only for a query that marks
     // receivers.
-    let mut receivers = receiver::Receivers::for_query(capture_names, semantics.implicit_receiver);
+    let mut receivers = receiver::Receivers::for_query(
+        capture_names,
+        semantics.implicit_receiver,
+        semantics.module_model == ModuleModelKind::Package,
+    );
     let mut out: Vec<RefFact> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
@@ -1964,9 +1968,12 @@ fn type_relation_rows(
 /// single name the enclosing declarations declare as a **type parameter** — `T`
 /// in `class Box<T>` is a type variable, and binding it to a same-package class
 /// `T` would fabricate the edge [NFR-RA-05] forbids. Java's `var` is not a type
-/// name either. Every shape is read from the grammar's node kinds, which only
-/// the Java query captures today; another grammar's type nodes that are not
-/// among them record nothing rather than a guess.
+/// name either. Every shape is read from the grammar's node kinds
+/// ([`type_path`]): Java's, and since S-522 the supertype shapes of Python, PHP,
+/// C# and Kotlin. A type node that is none of them records nothing rather than
+/// a guess. Only a Java `type_arguments` holds type nodes, so only Java's type
+/// arguments record a `TypeUses`; C#'s `type_argument_list` and Kotlin's type
+/// projections record none.
 ///
 /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -2008,18 +2015,35 @@ fn type_relation_targets(node: Node<'_>, source: &[u8], head: EdgeKind) -> Vec<(
     out
 }
 
-/// The `::`-joined path a Java type node names, generics and array dimensions
+/// The `::`-joined path a type node names, generics and array dimensions
 /// stripped, or `None` for a node that names no class-like type (a primitive,
-/// `void`, an annotation). See [`type_relation_targets`].
+/// `void`, an annotation, a call). See [`type_relation_targets`].
+///
+/// Java's type nodes, and the supertype shapes S-522 captures ([FR-RS-15]):
+///
+/// - a single name — Python's and C#'s `identifier`, PHP's `name`;
+/// - a dotted one — Python's `attribute` (`models.Model`), C#'s
+///   `qualified_name` (`System.Exception`), Kotlin's `user_type` (`a.b.C<T>`);
+/// - a PHP `qualified_name` (`Monolog\Handler\HandlerInterface`) or
+///   `relative_name` (`namespace\Handler`, read from the source's namespace);
+/// - a C# `generic_name` (`JsonConverter<T>`) — its name.
+///
+/// A name written **fully qualified** — PHP's leading `\`, C#'s `global::` —
+/// is headed [`FULLY_QUALIFIED_HEAD`], so the binder reads it from the global
+/// namespace alone ([NFR-RA-05]).
+///
+/// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn type_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
     let is_annotation = |n: &Node<'_>| matches!(n.kind(), "annotation" | "marker_annotation");
+    let text = |n: Node<'_>| n.utf8_text(source).ok().map(|t| t.trim().to_string());
     let mut cursor = node.walk();
     let named: Vec<Node<'_>> = node
         .named_children(&mut cursor)
         .filter(|n| !is_annotation(n))
         .collect();
     match node.kind() {
-        "type_identifier" => Some(vec![node.utf8_text(source).ok()?.trim().to_string()]),
+        "type_identifier" | "identifier" | "name" => Some(vec![text(node)?]),
         // `a.b.C`, `Outer<A>.Inner`: the qualifier, then the last identifier.
         "scoped_type_identifier" => {
             let (last, qualifier) = named.split_last()?;
@@ -2027,7 +2051,7 @@ fn type_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
                 return None;
             }
             let mut path = type_path(*qualifier.first()?, source)?;
-            path.push(last.utf8_text(source).ok()?.trim().to_string());
+            path.push(text(*last)?);
             Some(path)
         }
         "generic_type" | "annotated_type" => named
@@ -2035,6 +2059,61 @@ fn type_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
             .find(|n| n.kind() != "type_arguments")
             .and_then(|n| type_path(*n, source)),
         "array_type" => type_path(node.child_by_field_name("element")?, source),
+        // Python `a.b.C`: the object's path, then the attribute.
+        "attribute" => {
+            let mut path = type_path(node.child_by_field_name("object")?, source)?;
+            path.push(text(node.child_by_field_name("attribute")?)?);
+            Some(path)
+        }
+        // C# `A.B<T>`: the qualifier's path, then the name.
+        "qualified_name" if node.child_by_field_name("qualifier").is_some() => {
+            let mut path = type_path(node.child_by_field_name("qualifier")?, source)?;
+            path.extend(type_path(node.child_by_field_name("name")?, source)?);
+            Some(path)
+        }
+        // PHP `\A\B\C`, `A\B\C`, `namespace\A\C`: the namespace's names,
+        // then the name; a leading `\` makes it fully qualified.
+        "qualified_name" | "relative_name" => {
+            let rooted = node.child(0).is_some_and(|c| c.kind() == "\\");
+            let mut path: Vec<String> = rooted
+                .then(|| crate::resolve::FULLY_QUALIFIED_HEAD.to_string())
+                .into_iter()
+                .collect();
+            for part in &named {
+                match part.kind() {
+                    "namespace_name" => {
+                        let mut c = part.walk();
+                        for seg in part.named_children(&mut c) {
+                            path.push(text(seg)?);
+                        }
+                    }
+                    "name" => path.push(text(*part)?),
+                    _ => return None,
+                }
+            }
+            Some(path)
+        }
+        // C# `global::A.B`: the global namespace, then the name.
+        "alias_qualified_name" => {
+            let alias = text(node.child_by_field_name("alias")?)?;
+            let mut path = (alias == "global")
+                .then(|| vec![crate::resolve::FULLY_QUALIFIED_HEAD.to_string()])?;
+            path.extend(type_path(node.child_by_field_name("name")?, source)?);
+            Some(path)
+        }
+        "generic_name" => named
+            .iter()
+            .find(|n| n.kind() == "identifier")
+            .and_then(|n| type_path(*n, source)),
+        // Kotlin `a.b.C<T>`: its identifiers, in order.
+        "user_type" => {
+            let path: Vec<String> = named
+                .iter()
+                .filter(|n| n.kind() == "identifier")
+                .map(|n| text(*n))
+                .collect::<Option<_>>()?;
+            (!path.is_empty()).then_some(path)
+        }
         _ => None,
     }
 }

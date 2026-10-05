@@ -10,6 +10,16 @@
 ;   @ref.access — an own-property access (`this.x`): the bound LCOM4 input
 ;                 (Method → Field), the same structural pattern as Java's
 ;                 `this.<field>` access (CR-005, FR-EX-08).
+;   @ref.extends — each supertype a class, interface or object lists after `:`
+;                 (`class A : Base(), Iface` → `Base`, `Iface`; S-522,
+;                 FR-RS-15), whether invoked as the base class's constructor,
+;                 delegated (`Iface by impl`) or bare. The list does not say
+;                 which entry is the class, so the plugin declares
+;                 `supertype_kind_follows_target`: a class's entry binds the one
+;                 in-repository class or interface it names, through the
+;                 package rungs, and its edge is `Extends` to a class,
+;                 `Implements` to an interface. An interface's entries are its
+;                 super-interfaces (`Extends`).
 ;
 ; Receiver-shape markers (S-516, FR-EX-13, FR-RS-12) — they record no row of
 ; their own; each names the receiver of the `@ref.method` that shares its parent
@@ -18,9 +28,13 @@
 ;   @ref.receiver.self      — `this.list()`: binds among the enclosing class's
 ;                             own members only. A labelled `this@Outer` names
 ;                             another instance, so it is `other`.
-;   @ref.receiver.super     — `super.list()`, `super<T>.list()`: binds only
-;                             through a proven `Extends`; Kotlin records none,
-;                             so it stays unbound.
+;   @ref.receiver.super     — `super.list()`: binds only through a proven
+;                             `Extends` of the caller's class — its base class,
+;                             never an interface (`@ref.extends` below).
+;                             `super<T>.list()` names the supertype `T` and
+;                             `super@Outer.list()` an outer class's, neither of
+;                             which the caller's own hierarchy decides: both are
+;                             `other`.
 ;   @ref.receiver.other     — every other receiver (`service.list()`,
 ;                             `a.b.list()`): never bound through the caller's
 ;                             scope (`no-receiver-evidence`).
@@ -61,9 +75,10 @@
   (this_expression) @ref.receiver.self)
   (#eq? @ref.receiver.self "this"))
 
-(navigation_expression
+((navigation_expression
   .
   (super_expression) @ref.receiver.super)
+  (#eq? @ref.receiver.super "super"))
 
 (navigation_expression
   .
@@ -105,3 +120,19 @@
 (navigation_expression
   (this_expression)
   (identifier) @ref.access)
+
+;   @ref.extends — anchored to the declarations that own a supertype list. A
+;   companion object's and an object expression's (`object : T { … }`) have no
+;   node of their own, so they are never read as the enclosing declaration's.
+(class_declaration
+  (delegation_specifiers
+    (delegation_specifier
+      [(user_type) @ref.extends
+       (constructor_invocation (user_type) @ref.extends)
+       (explicit_delegation (user_type) @ref.extends)])))
+(object_declaration
+  (delegation_specifiers
+    (delegation_specifier
+      [(user_type) @ref.extends
+       (constructor_invocation (user_type) @ref.extends)
+       (explicit_delegation (user_type) @ref.extends)])))

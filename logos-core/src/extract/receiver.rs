@@ -22,7 +22,7 @@
 //! | `name` | `x.send()` | [`DeclaredTypes::get`]: the one type the file declares `x` with, where `x` is declared in scope at the call (a field of the enclosing class, or in the callable around it); a name the file never declares as a variable is a static type name when its single-type import or its own declaration names that type |
 //! | `field` | `this.x.send()` | [`DeclaredTypes::field`] (S-398), where the enclosing class declares the field `x` itself |
 //! | `this` | `this.send()` | the enclosing class |
-//! | `super` | `super.send()` | the enclosing class's `extends`, as S-466's row records it ([`declared_superclass`]) |
+//! | `super` | `super.send()` | the enclosing class's `extends`, as S-466's row records it ([`declared_superclass`]) — in a package-model language only; every other language's `super` call keeps its shape and binds through the proven hierarchy (S-522) |
 //! | `implicit` | `send()`, on a `@ref.call` row | the enclosing class, when it declares `send` itself, or when nothing else in scope — an outer class, a static import — could supply `send` |
 //!
 //! Everything else keeps its bare row: a chained call; a name the file also
@@ -199,6 +199,14 @@ pub(super) struct Receivers<'tree> {
     sites: Vec<Site<'tree>>,
     /// What an unqualified call inside a class body means here.
     implicit_receiver: ImplicitReceiver,
+    /// Whether a `super` call is typed by its class's one `Extends` row
+    /// ([`declared_superclass`]): only in a package-model language (Java,
+    /// S-467), whose package rungs walk the typed row into that type's members.
+    /// Every other language's `super` call keeps its shape and binds through
+    /// the proven hierarchy (S-522): a path-model module walk never reaches a
+    /// class's members, and a C# or Kotlin class's one supertype may be an
+    /// interface.
+    types_super: bool,
 }
 
 /// What a file's declarations say, for the receiver passes.
@@ -222,6 +230,7 @@ impl<'tree> Receivers<'tree> {
     pub(super) fn for_query(
         capture_names: &[&str],
         implicit_receiver: ImplicitReceiver,
+        types_super: bool,
     ) -> Option<Self> {
         capture_names
             .iter()
@@ -234,6 +243,7 @@ impl<'tree> Receivers<'tree> {
                 self_names: HashMap::new(),
                 sites: Vec::new(),
                 implicit_receiver,
+                types_super,
             })
     }
 
@@ -488,6 +498,10 @@ impl<'tree> Receivers<'tree> {
                     .filter(|t| provable(t))
                     .map(str::to_string),
                 Typed::This => class().map(|i| file.decls[i].name.clone()),
+                // Typed in a package-model language only ([`types_super`]):
+                // everywhere else the shape pass's `super` binds through the
+                // proven hierarchy (S-522).
+                Typed::Super if !self.types_super => None,
                 Typed::Super => class()
                     .and_then(|i| file.symbols[i].as_ref())
                     .and_then(|class| declared_superclass(refs, class))
