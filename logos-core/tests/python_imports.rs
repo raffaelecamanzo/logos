@@ -357,28 +357,32 @@ fn sync_equals_a_full_reindex_after_a_relative_target_changes() {
 
 /// A package file arriving under `src/` makes `src/` the import root, which
 /// re-keys every Python file — including the ones the sync never touched, under
-/// names no dirty token spells — and removing it moves the root back.
+/// names no dirty token spells — and removing it moves the root back. The
+/// package that arrives (`src/zed/`) shares no token with the untouched row
+/// (`app.core.go`), so only the import-root re-selection can move it; the strict
+/// policy keeps the suffix fallback from answering in either layout.
 #[test]
 fn sync_equals_a_full_reindex_when_a_package_file_moves_the_import_root() {
     let files: &[(&str, &str)] = &[
+        (".logos/config.toml", "[resolution]\npolicy = \"strict\"\n"),
         ("src/app/core.py", "def go():\n    pass\n"),
-        ("src/app/cli.py", "from app.core import go\nfrom src.app.core import go as again\n"),
+        ("src/app/cli.py", "from app.core import go\n"),
     ];
     let (tmp, engine) = indexed(files);
     let rt = engine.runtime().unwrap();
-    // No package under `src/` yet: the repository root is the import root, so
-    // `src.app.core` descends (and `app.core` reaches it by suffix).
-    assert!(unbound_imports(rt, "src/app/cli.py").is_empty());
-    let init = "src/app/__init__.py";
+    // No package under `src/` yet: the repository root is the import root, and
+    // `app` is no module there.
+    assert_eq!(unbound_imports(rt, "src/app/cli.py"), strings(&["app::core::go"]));
+    let init = "src/zed/__init__.py";
     write(tmp.path(), init, "");
     engine.sync(&[init.into()]);
-    // `src/` holds a package now: `src` is no module any more.
-    assert_eq!(unbound_imports(rt, "src/app/cli.py"), strings(&["src::app::core::go"]));
+    // `src/` holds a package now: `app.core` is a module under it.
+    assert!(unbound_imports(rt, "src/app/cli.py").is_empty());
     let mut all = paths(files);
     all.push(init);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &all));
     fs::remove_file(tmp.path().join(init)).unwrap();
     engine.sync(&[init.into()]);
-    assert!(unbound_imports(rt, "src/app/cli.py").is_empty());
+    assert_eq!(unbound_imports(rt, "src/app/cli.py"), strings(&["app::core::go"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(files)));
 }

@@ -288,18 +288,18 @@ pub fn run(
     // so the committed graph is byte-identical to a full re-bind (the CR-015
     // equivalence invariant, guarded by `tests/indexing.rs`). Binding a handful
     // of rows instead of the entire ~40k ledger on every core is the melt fix.
+    // Decided once per run, not per row: whether the change added or removed a
+    // package file that can move the detected import roots (S-519), which
+    // re-keys a whole language.
+    let roots_moved = delta.is_some_and(|d| d.changed_paths.iter().any(|p| index.moves_import_roots(p)));
     let selected: Vec<&UnresolvedRefRow> = match delta {
         None => snap.refs.iter().collect(),
         Some(d) if d.changed_paths.is_empty() && d.dirty_tokens.is_empty() => Vec::new(),
         Some(d) => {
-            // Decided once per run, not per row: whether the change moved a
-            // type of the package-shaped hierarchy a supertype walk climbs.
-            let hierarchy_moved = index.hierarchy_touched(&d.dirty_tokens);
-            // …and whether it added or removed a package file that can move the
-            // detected import roots (S-519), which re-keys a whole language.
-            let roots_moved = d.changed_paths.iter().any(|p| index.moves_import_roots(p));
+            // …and whether it moved a type of the package-shaped hierarchy a
+            // supertype walk climbs.
             let moved = Moved {
-                hierarchy: hierarchy_moved,
+                hierarchy: index.hierarchy_touched(&d.dirty_tokens),
                 import_roots: roots_moved,
             };
             snap.refs
@@ -337,8 +337,22 @@ pub fn run(
     let by_relation =
         relation_coverage(snap.refs.iter().map(|r| (r.payload.as_deref(), final_bound(r))));
 
+    // A moved import root re-keys every file of the language, so a binding can
+    // move although neither endpoint's file changed — and an edge whose row no
+    // longer binds there would outlive it. Every row of those files was re-bound
+    // above (`is_affected` reason 7), so the edges they no longer produce are
+    // exactly the stale ones (S-519, NFR-RA-06).
+    let stale = if roots_moved {
+        stale_import_root_edges(&snap.nodes, &snap.edges, &index, &outcomes)
+    } else {
+        Vec::new()
+    };
+
     // Serial commit: one transaction through the writer actor (ADR-02).
     let edges_created = runtime.submit_write(move |w| {
+        for (source, target, kind) in &stale {
+            w.delete_edge(*source, *target, *kind)?;
+        }
         let mut created = 0u64;
         for (ref_id, was_resolved, outcome) in &outcomes {
             match outcome {
@@ -402,6 +416,58 @@ pub fn run(
     })?;
 
     Ok(stats(refs_total, refs_resolved, edges_created, by_relation))
+}
+
+/// The reference-bound edges out of import-root files (S-519) that this run's
+/// outcomes no longer produce — what a moved import root leaves stale. Called
+/// only when every row of those files was re-bound, so an edge no outcome
+/// names has lost the row that bound it. Only the kinds a ledger row binds are
+/// considered: containment and the framework pass's edges are other passes'.
+fn stale_import_root_edges(
+    nodes: &[NodeRow],
+    edges: &[EdgeRow],
+    index: &binder::Index,
+    outcomes: &[(i64, bool, binder::Outcome)],
+) -> Vec<(NodeId, NodeId, EdgeKind)> {
+    let mut produced: HashSet<(NodeId, NodeId, EdgeKind)> = HashSet::new();
+    for (_, _, outcome) in outcomes {
+        match outcome {
+            binder::Outcome::Bound {
+                source, target, kind, ..
+            } => {
+                produced.insert((*source, *target, *kind));
+            }
+            binder::Outcome::BoundMany {
+                source,
+                targets,
+                kind,
+                ..
+            } => produced.extend(targets.iter().map(|t| (*source, *t, *kind))),
+            binder::Outcome::Unbound => {}
+        }
+    }
+    let in_import_root_file: HashSet<NodeId> = nodes
+        .iter()
+        .filter(|n| n.file_path.as_deref().is_some_and(|p| index.has_import_roots(p)))
+        .map(|n| n.id)
+        .collect();
+    edges
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                EdgeKind::Calls
+                    | EdgeKind::Imports
+                    | EdgeKind::Accesses
+                    | EdgeKind::Extends
+                    | EdgeKind::Implements
+                    | EdgeKind::Instantiates
+                    | EdgeKind::TypeUses
+            ) && in_import_root_file.contains(&e.source)
+                && !produced.contains(&(e.source, e.target, e.kind))
+        })
+        .map(|e| (e.source, e.target, e.kind))
+        .collect()
 }
 
 /// `true` when a bind [`Outcome`](binder::Outcome) produced at least one edge.
