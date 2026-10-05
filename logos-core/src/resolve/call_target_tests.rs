@@ -19,7 +19,8 @@
 //!                                                macro Expand (155) [synthetic]
 //! src/fs-poll.c         (module 200 "fs-poll") ─ macro uv__make_close_pending (201),
 //!                                                poll_cb (202), macro dual (203), dual (204),
-//!                                                class Box (205) [synthetic]
+//!                                                class Box (205) [synthetic], variable hook (206),
+//!                                                struct Stat (207) [synthetic]
 //! src/core.c            (module 210 "core")   ─ uv__make_close_pending (211), uv__close (212)
 //! lib/thing.ts          (module 300 "thing")  ─ class Thing (301), use_thing (302)
 //! mylib/src/lib.rs      (module 310 "mylib")  ─ macro my_macro (311), f (312), g (313)
@@ -100,6 +101,8 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         node(203, "dual", NodeKind::Macro, "src/fs-poll.c"),
         node(204, "dual", NodeKind::Function, "src/fs-poll.c"),
         node(205, "Box", NodeKind::Class, "src/fs-poll.c"),
+        node(206, "hook", NodeKind::Variable, "src/fs-poll.c"),
+        node(207, "Stat", NodeKind::Struct, "src/fs-poll.c"),
         node(210, "core", NodeKind::Module, "src/core.c"),
         node(211, "uv__make_close_pending", NodeKind::Function, "src/core.c"),
         node(212, "uv__close", NodeKind::Function, "src/core.c"),
@@ -127,6 +130,8 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         contains(200, 203),
         contains(200, 204),
         contains(200, 205),
+        contains(200, 206),
+        contains(200, 207),
         contains(210, 211),
         contains(210, 212),
         contains(300, 301),
@@ -314,14 +319,22 @@ fn a_language_without_either_key_binds_a_callable_only() {
 
 /// `class_call_instantiates` admits no macro and `macros_callable` no class:
 /// each key widens the call by its own kind only, even where the other kind
-/// sits in the caller's own file.
+/// sits in the caller's own file. Nor does either admit any other kind: a C
+/// call through a function-pointer variable, or to a struct, and a call naming
+/// an interface or an enum, stay unbound.
 #[test]
 fn each_key_admits_its_own_kind_only() {
     for policy in POLICIES {
         let r = call(1, TWIN_PY, 153, "Expand");
         assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
-        let r = call(2, FS_POLL_C, 202, "Box");
-        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
+        for name in ["Box", "hook", "Stat"] {
+            let r = call(2, FS_POLL_C, 202, name);
+            assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{name}, {policy:?}");
+        }
+        for name in ["Only", "Mode"] {
+            let r = call(3, RUN_KT, 581, name);
+            assert_eq!(bind_kotlin(&[r], policy), Outcome::Unbound, "{name}, {policy:?}");
+        }
     }
 }
 
@@ -350,6 +363,8 @@ fn a_declared_call_never_binds_a_module() {
 // src/main/kotlin/com/w/Base.pkt  com.w   class Base (561) ─ m (562)
 // src/main/kotlin/com/w/Sub.pkt   com.w   class Sub (571), extends Base
 // src/main/kotlin/com/w/Run.pkt   com.w   run (581)
+// src/main/kotlin/com/w/Only.pkt  com.w   interface Only (591)
+// src/main/kotlin/com/w/Mode.pkt  com.w   enum Mode (601)
 // src/main/kotlin/com/v/Job.pkt   com.v   class Job (611)
 // src/main/kotlin/com/v/Jobs.pkt  com.v   Job (621)       ← a factory function
 // src/main/kotlin/com/v/Start.pkt com.v   start (631)
@@ -379,6 +394,8 @@ fn bind_kotlin(refs: &[UnresolvedRefRow], policy: BindingPolicy) -> Outcome {
         (560, "src/main/kotlin/com/w/Base.pkt", "com.w", 561, "Base", NodeKind::Class),
         (570, "src/main/kotlin/com/w/Sub.pkt", "com.w", 571, "Sub", NodeKind::Class),
         (580, "src/main/kotlin/com/w/Run.pkt", "com.w", 581, "run", NodeKind::Function),
+        (590, "src/main/kotlin/com/w/Only.pkt", "com.w", 591, "Only", NodeKind::Interface),
+        (600, "src/main/kotlin/com/w/Mode.pkt", "com.w", 601, "Mode", NodeKind::Enum),
         (610, "src/main/kotlin/com/v/Job.pkt", "com.v", 611, "Job", NodeKind::Class),
         (620, "src/main/kotlin/com/v/Jobs.pkt", "com.v", 621, "Job", NodeKind::Function),
         (630, "src/main/kotlin/com/v/Start.pkt", "com.v", 631, "start", NodeKind::Function),
