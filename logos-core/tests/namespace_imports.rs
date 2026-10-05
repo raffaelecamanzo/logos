@@ -329,6 +329,8 @@ fn java_edges_are_identical_with_the_namespace_languages_beside_them() {
         "svc/src/main/kotlin/com/x/svc/Extra.kt",
         "package com.x.svc\n\nclass Extra\n",
     ));
+    let kt_user = "kt/src/main/kotlin/com/x/kt/KtUser.kt";
+    mixed.push((kt_user, "package com.x.kt\n\nimport com.x.svc.*\n\nclass KtUser\n"));
     let mixed: &'static [(&'static str, &'static str)] = Box::leak(mixed.into_boxed_slice());
     let (_tmp, together) = indexed(mixed);
     let rt = together.runtime().unwrap();
@@ -337,6 +339,12 @@ fn java_edges_are_identical_with_the_namespace_languages_beside_them() {
         edges_under(rt, "svc/src/main/java/"),
         java_alone,
         "Java's edges are byte-identical"
+    );
+    // A Kotlin wildcard of `com.x.svc` names the Kotlin file declaring it —
+    // never the Java files of that package, which declare no namespace.
+    assert_eq!(
+        edges_from(rt, kt_user, EdgeKind::Imports),
+        strings(&["svc/src/main/kotlin/com/x/svc/Extra.kt:Extra:module"])
     );
 }
 
