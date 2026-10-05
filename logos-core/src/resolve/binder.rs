@@ -238,7 +238,8 @@ enum Want {
     /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
     Field,
     /// An `Extends` from a class, or a Java `Instantiates`: a `Class` only
-    /// (S-466, [CR-149]; S-522 for every language).
+    /// (S-466, [CR-149]; S-522 for every language) — except where the language
+    /// leaves a supertype's kind unsaid ([`Want::Supertype`]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     Class,
@@ -2432,11 +2433,12 @@ struct Ctx<'a> {
     scope_only: bool,
     /// Where [`resolve_name`](Ctx::resolve_name)'s lexical chain — and a
     /// package-shaped path's lexical head — starts: the source itself, except
-    /// while a Java type relation is read in its declaration's **header** (S-466),
-    /// where it is the declaration's enclosing scope. A class's member types are
-    /// in scope in its body, not in its `extends`/`implements` clause (JLS §6.3,
-    /// §8.1.4), so `class Svc implements Callback { interface Callback {} }`
-    /// never names its own nested type.
+    /// while a type relation is read in its declaration's **header** (S-466;
+    /// S-522 for every language), where it is the declaration's enclosing
+    /// scope. A class's member types are in scope in its body, not in its
+    /// `extends`/`implements` clause (JLS §6.3, §8.1.4), so `class Svc
+    /// implements Callback { interface Callback {} }` never names its own
+    /// nested type.
     lexical_start: Cell<NodeId>,
     /// Why a package-shaped call lookup gave up, when one did (S-468,
     /// [`Residue`]) — the first reason recorded wins: it is the rung that
@@ -2818,8 +2820,8 @@ impl Ctx<'_> {
             };
         }
         let segs = split(&r.target);
-        if let Some((FULLY_QUALIFIED_HEAD, name)) = segs.split_first().map(|(h, rest)| (h.as_str(), rest)) {
-            return self.resolve_fqn(name, want);
+        if segs.first().map(String::as_str) == Some(FULLY_QUALIFIED_HEAD) {
+            return self.resolve_fqn(&segs[1..], want);
         }
         let header = || -> Res {
             let Some(&enclosing) = self.ix.parent.get(&self.source) else {
