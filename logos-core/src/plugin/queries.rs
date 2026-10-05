@@ -136,6 +136,18 @@ type CompiledSlot = Arc<Mutex<Option<Arc<Query>>>>;
 static COMPILED: LazyLock<Mutex<HashMap<CompiledKey, CompiledSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// A language's compile unit's identity: its `Language`, its grammar, and one
+/// blake3 hash over every capability and source it resolved.
+type UnitKey = (Language, String, [u8; 32]);
+
+/// One lock per distinct compile unit, held across a first-use compile so that
+/// registries racing on one language's first use run it one at a time: the
+/// first compiles every query and reports, and the rest find them all cached,
+/// compile nothing and report nothing. Without it, two registries could split a
+/// language's queries between them and each report a share (CR-197).
+static UNITS: LazyLock<Mutex<HashMap<UnitKey, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Each language whose queries compiled on first use, in the order they did
 /// (CR-197). Read by [`first_use_compiles`].
 static FIRST_USES: LazyLock<Mutex<Vec<FirstUseCompile>>> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -184,6 +196,7 @@ pub fn compile_shared(
 pub fn clear_compiled_cache() {
     compiled_cache().clear();
     first_uses().clear();
+    UNITS.lock().unwrap_or_else(PoisonError::into_inner).clear();
 }
 
 /// One language's first-use compile (CR-197): which language, how many of its
@@ -200,8 +213,9 @@ pub struct FirstUseCompile {
 }
 
 /// Every language whose queries this process compiled on first use, in order.
-/// A language appears once per process — a later registry's first use of it is
-/// served from the cache, compiles nothing and is not reported — unless
+/// A language appears once per process — a later registry's first use of it,
+/// or one racing it, is served from the cache, compiles nothing and is not
+/// reported — unless
 /// [`clear_compiled_cache`] made it compile again. Each entry is also emitted
 /// as an `info` event through the tracing seam when it happens.
 #[doc(hidden)]
@@ -311,6 +325,8 @@ impl LanguageQueries {
     /// The first-use compile, reported: its wall time once per process when it
     /// compiled anything, and a refusal as an error event naming the file.
     fn first_use(&self, language: &Language) -> Result<CompiledQueries, PluginError> {
+        let unit = self.unit_lock(language);
+        let _one_at_a_time = unit.lock().unwrap_or_else(PoisonError::into_inner);
         let started = Instant::now();
         match self.compile_unit(language) {
             Ok((queries, compiled)) => {
@@ -339,6 +355,25 @@ impl LanguageQueries {
                 Err(err)
             }
         }
+    }
+
+    /// This unit's entry in [`UNITS`]: the same lock for every registry whose
+    /// language resolved to the same sources.
+    fn unit_lock(&self, language: &Language) -> Arc<Mutex<()>> {
+        let mut hasher = blake3::Hasher::new();
+        for resolved in &self.resolved {
+            for part in [&resolved.capability, &resolved.source] {
+                hasher.update(&(part.len() as u64).to_le_bytes());
+                hasher.update(part.as_bytes());
+            }
+        }
+        let key: UnitKey = (
+            language.clone(),
+            self.grammar.clone(),
+            *hasher.finalize().as_bytes(),
+        );
+        let mut units = UNITS.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(units.entry(key).or_default())
     }
 
     /// Compile every capability through the process cache, then check the
@@ -391,6 +426,67 @@ fn check_namespace_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR-197: registries racing on the first use of one language with several
+    /// queries report it once, with every query counted and a real duration —
+    /// never two shares of it. The race is narrow, so it is run many times
+    /// over a fresh language each round.
+    #[cfg(feature = "lang-rust")]
+    #[test]
+    fn racing_registries_report_a_multi_query_language_once() {
+        const ROUNDS: usize = 200;
+        const REGISTRIES: usize = 8;
+        const QUERIES: usize = 12;
+        let language: Language = tree_sitter_rust::LANGUAGE.into();
+        let mut split = Vec::new();
+        for round in 0..ROUNDS {
+            let grammar = format!("toyunit{round}");
+            let registries: Vec<LanguageQueries> = (0..REGISTRIES)
+                .map(|_| {
+                    let resolved = (0..QUERIES)
+                        .map(|q| ResolvedQuery {
+                            capability: format!("cap{q}"),
+                            file_label: format!("{grammar}/queries/cap{q}.scm"),
+                            source: format!("; query {q}\n(identifier) @x"),
+                            overridden: false,
+                        })
+                        .collect();
+                    LanguageQueries::new(
+                        &grammar,
+                        "toyunit/plugin.toml",
+                        false,
+                        resolved,
+                        &language,
+                    )
+                    .expect("no override, nothing compiles at construction")
+                })
+                .collect();
+            let barrier = std::sync::Barrier::new(REGISTRIES);
+            std::thread::scope(|scope| {
+                for queries in &registries {
+                    let (barrier, language) = (&barrier, &language);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        assert_eq!(queries.get(language).expect("compiles").len(), QUERIES);
+                    });
+                }
+            });
+            let reports: Vec<FirstUseCompile> = first_use_compiles()
+                .into_iter()
+                .filter(|r| r.language == grammar)
+                .collect();
+            let whole = reports.len() == 1
+                && reports[0].compiled == QUERIES
+                && reports[0].elapsed > Duration::ZERO;
+            if !whole {
+                split.push((round, reports));
+            }
+        }
+        assert!(
+            split.is_empty(),
+            "rounds not reported once, whole: {split:?}"
+        );
+    }
 
     #[test]
     fn resolves_embedded_when_no_override_dir() {
