@@ -739,9 +739,10 @@ fn sync_re_decides_a_qualified_call_when_a_second_import_of_its_head_gains_and_l
     // `Helper.util()` reaches `com.x.a.Helper` only while `org.y.b.Helper` is no
     // in-repository type. Adding the second `Helper` makes the head ambiguous
     // (S-599); deleting it must bind the call again, exactly as a cold index
-    // decides it. The call spells no token of the added file's path but its own
-    // `Helper`, and the second expansion's tokens select the row
-    // (`Index::ref_affected`).
+    // decides it. The call's own target spells `Helper`, which the added and
+    // the removed file both declare, so `Index::ref_affected` selects the row
+    // on its target token; the test pins that the re-decision agrees with a
+    // cold index in both directions.
     let tmp = TempDir::new().unwrap();
     let a = "src/main/java/com/x/a/Helper.java";
     let b = "src/main/java/org/y/b/Helper.java";
