@@ -461,10 +461,12 @@ pub(crate) struct Index {
     imported: HashMap<i64, HashMap<String, Vec<NodeId>>>,
     /// Normalised crate names present in the graph.
     crates: HashSet<String>,
-    /// Which files are keyed by their package ([CR-149]) or by the namespace
-    /// they declare (S-518); empty — the default model for every file — unless
-    /// the run was built with the registry's layout
-    /// ([`Index::build_with_layout`]).
+    /// How every file is keyed: by its package ([CR-149]), by the namespace it
+    /// declares (S-518), or by its path — under its plugin's package-file stems
+    /// and import roots — plus each language's interop family (S-519). The
+    /// registry's layout in production, with the import roots detected from
+    /// this graph's files ([`Index::build_with_layout`]); Rust's stems alone
+    /// for a synthetic test graph ([`Index::build`]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     layout: PackageLayout,
@@ -561,25 +563,25 @@ impl Index {
     /// so every helper preserves the same canonical iteration order the
     /// monolith had, keeping the built `Index` byte-identical ([NFR-RA-06]).
     ///
-    /// The default module model for every file. Test-only since S-470: both
-    /// production builders — the resolution pass and the framework-promotion
-    /// pass — build with the registry's layout
+    /// The path model for every file, with the package-file stems the rust
+    /// plugin declares for `.rs` ([`PackageLayout::rust_stems_for_tests`],
+    /// S-519), so a synthetic `src/lib.rs` still names its crate. Test-only
+    /// since S-470: both production builders — the resolution pass and the
+    /// framework-promotion pass — build with the registry's layout
     /// ([`build_with_layout`](Index::build_with_layout)).
     ///
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    ///
-    /// The layout declares Rust's package-file stems for `.rs`
-    /// ([`PackageLayout::rust_stems_for_tests`]), which the loaded rust plugin
-    /// declares in production (S-519), so a synthetic `src/lib.rs` still names
-    /// its crate.
     #[cfg(test)]
     pub(crate) fn build(nodes: &[NodeRow], edges: &[EdgeRow], refs: &[UnresolvedRefRow]) -> Index {
         Self::build_with_layout(nodes, edges, refs, PackageLayout::rust_stems_for_tests())
     }
 
-    /// [`build`](Index::build), keying every file of a package-shaped language by
-    /// its package ([CR-149]) — the layout the loaded plugins declare
-    /// ([`PackageLayout::from_registry`]). An empty layout is exactly `build`.
+    /// [`build`](Index::build), keying every file by `layout` — in production
+    /// the layout the loaded plugins declare ([`PackageLayout::from_registry`]):
+    /// a package-shaped file by its package ([CR-149]), a declared-namespace
+    /// file by its namespace, a path-model file by its path under its plugin's
+    /// stems and import roots, the roots detected here from this graph's files
+    /// (S-519). `build` is this with Rust's stems alone.
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub(crate) fn build_with_layout(
