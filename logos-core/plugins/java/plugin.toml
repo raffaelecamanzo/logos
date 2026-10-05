@@ -79,7 +79,11 @@ http_client_detectors = [
 # file outside both roots keeps the default key, which is already the package for
 # a flat or `src/`-rooted layout. Both roots are listed because a test type sees
 # its production package: one fully-qualified name declared under both is
-# ambiguous and binds neither (NFR-RA-05).
+# ambiguous and binds neither (NFR-RA-05). `[module_model]` names the model
+# (S-518); `[package_modules]` is its data.
+[module_model]
+kind = "package"
+
 [package_modules]
 source_roots = ["src/main/java", "src/test/java"]
 

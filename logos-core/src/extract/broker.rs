@@ -2833,6 +2833,7 @@ class OrderService {
             config_source: None,
             forwarding: Vec::new(),
             declared_types: Vec::new(),
+            namespace: None,
         };
         let index = props.map(|p| {
             crate::extract::config::binding::PropertiesIndex::from_sources(

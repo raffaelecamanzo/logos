@@ -9,20 +9,25 @@
 //! # From source
 //!
 //! Every **top-level** class, interface, enum or record of a package-shaped
-//! language (Java and Kotlin, whose descriptors declare `[package_modules]`) is
-//! one fact ([`source_types`]). A top-level type is a type node the file's own
-//! module contains — a nested type is reached through its outer type and is not
-//! a declaration of the package. Its name is the one derivation
+//! language (Java, whose descriptor declares `[package_modules]`) or of a
+//! declared-namespace one (PHP, C#, Kotlin, Scala; S-518) is one fact
+//! ([`source_types`]). A top-level type is a type node the file's own module
+//! contains — a nested type is reached through its outer type and is not a
+//! declaration of the package. Its name is the one derivation
 //! [`PackageLayout::type_fqn`] gives, never a second split of the path
-//! ([FR-RS-01]): the file's package by its location, plus the type's name.
+//! ([FR-RS-01]): the file's package — by its location, or the namespace it
+//! declares — plus the type's name.
 //!
-//! The location is what the binder keys the file by, so it is what an import
-//! of the type can bind to — but the file's own `package` statement is what the
-//! compiler names the type by. When the two **disagree** the fact is recorded
-//! **refused**, with a reason naming both, and carries no name: resolving it to
-//! the path would publish a name the compiler never gave the type
-//! ([NFR-RA-05]). A file with no `package` statement declares the default
-//! package, which agrees only with a file directly under its source root.
+//! For a package-shaped file the location is what the binder keys the file by,
+//! so it is what an import of the type can bind to — but the file's own
+//! `package` statement is what the compiler names the type by. When the two
+//! **disagree** the fact is recorded **refused**, with a reason naming both, and
+//! carries no name: resolving it to the path would publish a name the compiler
+//! never gave the type ([NFR-RA-05]). A file with no `package` statement
+//! declares the default package, which agrees only with a file directly under
+//! its source root. A declared-namespace file is keyed by the namespace it
+//! declares ([`file_namespace`]), so the two cannot disagree; one whose
+//! declarations sit in two namespaces names no type at all.
 //!
 //! Each fact carries its node's [`LogosSymbol`] and the **tree** it sits in —
 //! `test` when the source root that keyed the file is a test root
@@ -144,7 +149,8 @@ pub struct SourceType {
 /// `facts` (its path, nodes and `Contains` edges).
 ///
 /// `package` is the file's `package` statement as its grammar captured it
-/// ([`package_name`]). Empty for a file whose language is not package-shaped
+/// ([`package_name`]) — for a declared-namespace file, the namespace it declares
+/// ([`file_namespace`]). Empty for a file whose language is not package-shaped
 /// under `layout`, and for one that declares no class, interface or enum at
 /// file scope.
 pub fn source_types(facts: &Facts, package: Option<&str>, layout: &PackageLayout) -> Vec<SourceType> {
@@ -244,6 +250,139 @@ pub(crate) fn note_package(
         *package = package_name(node, source);
     }
     true
+}
+
+/// The namespace captures (S-518) are the module model's vocabulary, owned by
+/// the plugin descriptor that declares the model.
+pub(crate) use crate::plugin::manifest::{NAMESPACE_CAPTURE, NAMESPACE_CHAINED_CAPTURE};
+
+/// One namespace declaration of a file: the name it declares, as segments, and
+/// the byte range it scopes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NamespaceScope {
+    segments: Vec<String>,
+    start: usize,
+    end: usize,
+    /// A bodiless declaration (`namespace X;`, `package x`), which scopes the
+    /// rest of the node enclosing it.
+    statement: bool,
+    /// A bodiless declaration that composes with a later one rather than
+    /// ending where it starts ([`NAMESPACE_CHAINED_CAPTURE`]).
+    chained: bool,
+}
+
+/// Record a namespace declaration from a `symbols` capture: `true` when
+/// `capture` is the [`NAMESPACE_CAPTURE`] (so the declaration walk skips it).
+///
+/// The captured node is the declaration's name; its parent is the declaration.
+/// A declaration with a `body` field (C#'s `namespace X { … }`, PHP's
+/// `namespace X { … }`, Scala's `package x { … }`) scopes its own range; one
+/// without (C#'s `namespace X;`, PHP's `namespace X;`, Kotlin's and Scala's
+/// `package x`) scopes the rest of the node that encloses it — up to the next
+/// such declaration there, unless its match carries the `chained` marker
+/// ([`NAMESPACE_CHAINED_CAPTURE`]), in which case the two compose
+/// ([`file_namespace`]). A name that spells nothing is skipped.
+pub(crate) fn note_namespace(
+    scopes: &mut Vec<NamespaceScope>,
+    capture: &str,
+    node: Node<'_>,
+    source: &[u8],
+    chained: bool,
+) -> bool {
+    if capture != NAMESPACE_CAPTURE {
+        return false;
+    }
+    let Some(name) = package_name(node, source) else {
+        return true;
+    };
+    let declaration = node.parent().unwrap_or(node);
+    let statement = declaration.child_by_field_name("body").is_none();
+    let end = if statement {
+        declaration.parent().unwrap_or(declaration).end_byte()
+    } else {
+        declaration.end_byte()
+    };
+    scopes.push(NamespaceScope {
+        segments: crate::resolve::package_key::namespace_segments(&name),
+        start: declaration.start_byte(),
+        end,
+        statement,
+        chained,
+    });
+    true
+}
+
+/// `scopes` with every bodiless, unchained declaration ended where the next
+/// bodiless declaration of the same enclosing node starts — PHP's second
+/// `namespace B;` replaces the first rather than nesting in it. Two such
+/// declarations share an enclosing node exactly when they share its end.
+fn replaced_statements(scopes: &[NamespaceScope]) -> Vec<NamespaceScope> {
+    scopes
+        .iter()
+        .map(|s| {
+            if !s.statement || s.chained {
+                return s.clone();
+            }
+            let next = scopes
+                .iter()
+                .filter(|t| t.statement && t.end == s.end && t.start > s.start)
+                .map(|t| t.start)
+                .min();
+            NamespaceScope {
+                end: next.map_or(s.end, |n| n.saturating_sub(1)),
+                ..s.clone()
+            }
+        })
+        .collect()
+}
+
+/// The namespace a file declares, in
+/// [`namespace_text`](crate::resolve::package_key::namespace_text) form (S-518):
+/// the namespace every one of its **top-level** declarations (`top_level`,
+/// their start bytes) sits in — the names of the namespace declarations
+/// enclosing it, outermost first, so `namespace A { namespace B { … } }` and
+/// `namespace A.B;` and `package a\npackage b` (Scala's chained clauses) each
+/// declare `A.B` — while PHP's `namespace A;` … `namespace B;` puts what
+/// follows the second in `B` alone ([`replaced_statements`]). A file of no
+/// top-level declaration takes the namespace in force at its end
+/// (`source_len`).
+///
+/// `None` when two top-level declarations sit in different namespaces: the file
+/// has no one namespace, and keying it by either would name the other's types
+/// wrongly ([NFR-RA-05]). `None` too when the file declares a namespace but
+/// none of its declarations sits in one — what a parse damaged by preprocessor
+/// branches leaves (a C# `#if` around `using`s can close the namespace block
+/// before its types) — since the global namespace would then be a guess.
+/// `Some("")` is the global namespace of a file that declares none.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+pub(crate) fn file_namespace(
+    scopes: &[NamespaceScope],
+    top_level: &[usize],
+    source_len: usize,
+) -> Option<String> {
+    let scoped = replaced_statements(scopes);
+    let at = |pos: usize| -> Vec<String> {
+        let mut enclosing: Vec<&NamespaceScope> = scoped
+            .iter()
+            .filter(|s| s.start <= pos && pos <= s.end)
+            .collect();
+        enclosing.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+        enclosing
+            .into_iter()
+            .flat_map(|s| s.segments.iter().cloned())
+            .collect()
+    };
+    let positions: Vec<usize> = if top_level.is_empty() {
+        vec![source_len]
+    } else {
+        top_level.to_vec()
+    };
+    let mut namespaces = positions.into_iter().map(at);
+    let first = namespaces.next().unwrap_or_default();
+    let agreed = namespaces.all(|n| n == first);
+    let stranded = first.is_empty() && !scopes.is_empty();
+    (agreed && !stranded).then(|| crate::resolve::package_key::namespace_text(&first))
 }
 
 /// The dotted name a captured `package` name node spells: its identifier

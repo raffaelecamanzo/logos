@@ -18,8 +18,8 @@ use std::sync::Arc;
 use tree_sitter::{Language, Query};
 
 use super::manifest::{
-    ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier, PackageModules,
-    PluginManifest, PropertiesDescriptor, Reach, TestConvention,
+    ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier, ModuleModelKind,
+    PackageModules, PluginManifest, PropertiesDescriptor, Reach, TestConvention,
 };
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
@@ -46,6 +46,14 @@ pub struct Semantics {
     /// consumed by the binder's module key through
     /// [`crate::resolve::package_key`].
     pub package_modules: Option<PackageModules>,
+    /// Which module model keys this language's files (S-518, [FR-RS-13]; see
+    /// [`PluginManifest::module_model_kind`]), the omitted table already
+    /// resolved — consumed by [`crate::resolve::package_key`] and by extraction,
+    /// which reads a declared namespace only under
+    /// [`ModuleModelKind::Namespace`].
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    pub module_model: ModuleModelKind,
     /// Keywords that increment cyclomatic complexity for this language.
     /// Carried declaratively now; consumed by the complexity metric (S-011+).
     pub complexity_keywords: Vec<String>,
@@ -268,12 +276,14 @@ impl CompiledPlugin {
         queries: CompiledQueries,
         overridden: Vec<String>,
     ) -> Self {
+        let module_model = manifest.module_model_kind();
         let semantics = Semantics {
             module_separator: manifest.module_separator,
             import_specifier: manifest.import_specifier,
             specifier_extensions: manifest.specifier_extensions,
             implicit_receiver: manifest.implicit_receiver,
             package_modules: manifest.package_modules,
+            module_model,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,
             body_node_kinds: manifest.body_node_kinds,

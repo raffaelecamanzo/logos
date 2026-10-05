@@ -3214,6 +3214,63 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 29");
     }
 
+    /// S-518 / CR-170 / FR-RS-13: a populated v29 store upgrades to v30 forward
+    /// only. `files` gains `namespace` in place — `NULL` on every existing row
+    /// until re-extraction — while every other `files` column but the cleared
+    /// hash, all of `nodes`, `edges` and `shingles`, and the reference ledger are
+    /// byte-for-byte unchanged.
+    #[test]
+    fn migration_30_adds_the_file_namespace_and_triggers_reextraction() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..29]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/Order.cs', 'c-sharp', 'h-cs'),
+                 (2, 'src/lib.rs', 'rust', 'h-rs');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local o'), (2, 'local l');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES
+                 (10, 1, 5, 'Order', 1), (11, 2, 1, 'lib', 2);
+             INSERT INTO edges (source, target, kind) VALUES (11, 10, 2);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload) VALUES
+                 (1, 'local o', 'Shop::Domain', NULL, 2, 3, 1, 0, NULL);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..30]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 30, "29 → 30, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are untouched");
+        assert_eq!(read_ledger(&conn), ledger_before, "the reference ledger is unchanged");
+        type FileRow = (i64, String, Option<String>, Option<String>, Option<String>);
+        let files: Vec<FileRow> = conn
+            .prepare("SELECT id, path, language, content_hash, namespace FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                (1, "src/Order.cs".to_string(), Some("c-sharp".to_string()), None, None),
+                (2, "src/lib.rs".to_string(), Some("rust".to_string()), None, None),
+            ],
+            "the namespace is NULL until re-extraction, every hash is cleared so the next \
+             scan re-extracts the file; ids, paths and languages stay"
+        );
+        conn.execute("UPDATE files SET namespace = 'Shop.Domain' WHERE id = 1", [])
+            .expect("a namespace is admitted");
+
+        // Forward-only: re-running the full ledger never re-applies migration 30.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 30", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 30 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 30");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

@@ -443,12 +443,13 @@ pub fn run(
 
     // Snapshot (one reader-pool read): the same consistent basis the
     // resolution pass binds against.
-    let (files, nodes, edges, refs) = runtime.submit_read(|store| {
+    let (files, nodes, edges, refs, namespaces) = runtime.submit_read(|store| {
         Ok((
             store.indexed_files()?,
             store.all_nodes()?,
             store.all_edges()?,
             store.unresolved_refs()?,
+            store.file_namespaces()?,
         ))
     })?;
 
@@ -509,7 +510,7 @@ pub fn run(
     // The binder index keys every package-shaped file by its package (S-465),
     // as the resolution pass does, and is built before the scan because the
     // fold reads it to find a constant's declaring type (S-470).
-    let layout = PackageLayout::from_registry(registry);
+    let layout = PackageLayout::from_registry(registry).with_declared_namespaces(namespaces);
     let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout.clone());
     let member = MemberConstants {
         root,

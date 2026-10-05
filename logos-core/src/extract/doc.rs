@@ -98,6 +98,7 @@ pub(super) fn extract_one_doc(
         config_source: None,
         forwarding: Vec::new(),
         declared_types: Vec::new(),
+        namespace: None,
     };
 
     if parser.set_language(plugin.language()).is_err() {

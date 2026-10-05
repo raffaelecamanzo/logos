@@ -693,15 +693,22 @@ pub fn sync(
         .chain(removals.iter().cloned())
         .chain(module_descriptors)
         .collect();
-    let old_names: Vec<String> = if changed_paths.is_empty() {
-        Vec::new()
+    // With them, the namespace each declared (S-518): a file that changes it
+    // renames no node, so its segments are the keys that move. And whether one
+    // of them declared a global namespace wildcard, read here for the same
+    // reason: the re-extract replaces its ledger rows.
+    let (old_names, old_global_imports): (Vec<String>, bool) = if changed_paths.is_empty() {
+        (Vec::new(), false)
     } else {
         runtime.submit_read(|store| {
             let mut names = Vec::new();
+            let mut global_imports = false;
             for path in &changed_paths {
                 names.extend(store.node_names_for_path(path)?);
+                names.extend(store.file_namespace(path)?);
+                global_imports |= store.declares_global_import(path)?;
             }
-            Ok(names)
+            Ok((names, global_imports))
         })?
     };
 
@@ -771,7 +778,7 @@ pub fn sync(
         && flag_nothing_persisted(facts.len(), result.persist_failures.len(), &mut warnings);
 
     // CR-015 incremental resolution change-set (part 2 of 2) — see `sync_delta`.
-    let delta = sync_delta(changed_paths, &old_names, &facts);
+    let delta = sync_delta(changed_paths, &old_names, old_global_imports, &facts);
 
     // Pass 2: a deferred reference binds once its target is indexed (UAT-RS-01)
     // and captured cross-file edges rebind (ADR-10) — now over just the
@@ -955,6 +962,7 @@ pub fn reconcile(
             let delta = crate::resolve::Delta {
                 changed_paths: purge.paths.iter().cloned().collect(),
                 dirty_tokens,
+                global_imports_moved: purge.global_imports,
             };
             let (res, _resolve_ms) =
                 resolve_pass(runtime, registry, root, config.resolution.policy, Some(&delta))?;
@@ -1075,6 +1083,8 @@ struct PurgeOutcome {
     count: u64,
     paths: Vec<String>,
     names: Vec<String>,
+    /// Whether a purged file declared a global namespace wildcard (S-518).
+    global_imports: bool,
 }
 
 /// Purge every stored file the current config no longer admits — the
@@ -1101,14 +1111,19 @@ fn purge_unadmitted(runtime: &Runtime, admitted: &HashSet<&str>) -> Result<Purge
     // Capture the node names of the files about to be purged BEFORE the delete
     // cascades them away, so the caller can re-resolve the inbound cross-file
     // references that targeted them ([NFR-RA-05]).
-    let names = {
+    let (names, global_imports) = {
         let paths = paths.clone();
         runtime.submit_read(move |store| {
             let mut names = Vec::new();
+            let mut global_imports = false;
             for p in &paths {
                 names.extend(store.node_names_for_path(p)?);
+                // The namespace it declared (S-518): a wildcard that bound to
+                // the file spells that, not a node name.
+                names.extend(store.file_namespace(p)?);
+                global_imports |= store.declares_global_import(p)?;
             }
-            Ok(names)
+            Ok((names, global_imports))
         })?
     };
     for path in &paths {
@@ -1118,6 +1133,7 @@ fn purge_unadmitted(runtime: &Runtime, admitted: &HashSet<&str>) -> Result<Purge
         count: paths.len() as u64,
         paths,
         names,
+        global_imports,
     })
 }
 
@@ -2002,14 +2018,16 @@ fn persist_failure_warning(failure: &PersistFailure, stale: bool) -> String {
 }
 
 /// A sync's CR-015 incremental resolution change-set (part 2 of 2): union the
-/// names that entered the changed files (this sync's freshly extracted facts)
-/// with those that left them (`old_names`) and the changed paths, tokenized. The
+/// names that entered the changed files (this sync's freshly extracted facts,
+/// with the namespaces they declare, S-518) with those that left them
+/// (`old_names`) and the changed paths, tokenized. The
 /// resolve pass re-binds exactly the rows these can move and skips the rest —
 /// the same result as retrying the whole ledger (FR-RS-03), a fraction of the
 /// cost.
 fn sync_delta(
     changed_paths: HashSet<String>,
     old_names: &[String],
+    old_global_imports: bool,
     facts: &[Facts],
 ) -> crate::resolve::Delta {
     let mut dirty_tokens: HashSet<String> = HashSet::new();
@@ -2020,13 +2038,24 @@ fn sync_delta(
         for n in &f.nodes {
             dirty_tokens.extend(crate::resolve::tokens(&n.name));
         }
+        if let Some(namespace) = &f.namespace {
+            dirty_tokens.extend(crate::resolve::tokens(namespace));
+        }
     }
     for path in &changed_paths {
         dirty_tokens.extend(crate::resolve::tokens(path));
     }
+    // A global namespace wildcard declared before or after the sync (S-518).
+    let global_imports_moved = old_global_imports
+        || facts.iter().flat_map(|f| &f.refs).any(|r| {
+            r.kind == EdgeKind::Imports
+                && r.form == RefForm::Glob
+                && r.alias.as_deref() == Some(crate::resolve::GLOBAL_WILDCARD_ALIAS)
+        });
     crate::resolve::Delta {
         changed_paths,
         dirty_tokens,
+        global_imports_moved,
     }
 }
 
@@ -2148,13 +2177,22 @@ fn persist_file(
             // Capture-before-delete: snapshot inbound cross-file edges BEFORE the
             // node delete cascades them away ([ADR-10]). They are persisted as
             // exact-symbol ledger rows below, and Pass 2 rebinds them.
-            let captured = if capture {
+            //
+            // Not when the file changes the namespace it declares (S-518): its
+            // symbols are its path's, so an edge bound through the old
+            // namespace would come back by exact symbol although nothing names
+            // it any more. Every row that bound into the file spells one of its
+            // node names or that namespace, so the sync's change-set re-binds
+            // it instead.
+            let same_namespace = w.file_namespace_of(file_id)? == facts.namespace;
+            let captured = if capture && same_namespace {
                 w.inbound_cross_file_edges(file_id)?
             } else {
                 Vec::new()
             };
             w.delete_nodes_for_file(file_id)?;
             w.update_file(file_id, Some(&facts.language), Some(hash))?;
+            w.set_file_namespace(file_id, facts.namespace.as_deref())?;
             // Replace the file's ledger rows wholesale: stale refs from the
             // previous version never linger.
             w.delete_unresolved_refs_for_file(file_id)?;
@@ -2190,6 +2228,8 @@ fn persist_file(
         }
         None => w.insert_file(&facts.path, Some(&facts.language), Some(hash))?,
     };
+    // The namespace the file declares (S-518), which the binder keys it by.
+    w.set_file_namespace(file_id, facts.namespace.as_deref())?;
 
     let counts = insert_facts(w, facts, file_id)?;
     insert_refs(w, facts, file_id)?;
@@ -2419,7 +2459,8 @@ fn persist_build_manifests(
 /// member's facts, however few, are complete.
 ///
 /// A member with no schema and none recorded reads nothing and writes only
-/// that marker — with no Java/Kotlin file either, the one row that separates it
+/// that marker — with no type-declaring source file either (Java, Kotlin, PHP,
+/// C#, Scala), the one row that separates it
 /// from a store upgraded across migration 24, whose tables are just as empty.
 ///
 /// [CR-152]: ../../../docs/requests/CR-152-cross-member-type-references-overlay.md
@@ -2447,7 +2488,8 @@ fn mark_declared_types_extracted(w: &BatchWriter<'_>) -> Result<()> {
 /// The declared-type backfill a [`sync`] runs (S-472): a full walk over a
 /// store whose declared-type facts were never extracted — one upgraded across
 /// migration 24, whose source files re-extract only when they change —
-/// re-extracts every package-shaped source file once, unchanged or not, so the
+/// re-extracts every package-shaped or declared-namespace source file once,
+/// unchanged or not, so the
 /// facts become complete and are marked so ([`sync_avro_schemas`]). Once
 /// marked, never again; a partial sync never backfills, having seen a subset.
 struct DeclaredTypesBackfill {
@@ -2468,9 +2510,11 @@ impl DeclaredTypesBackfill {
         })
     }
 
-    /// Whether the unchanged file at `rel` must be re-extracted for its facts.
+    /// Whether the unchanged file at `rel` must be re-extracted for its facts:
+    /// a file of a package-shaped or declared-namespace language (S-518), the
+    /// languages whose top-level types are facts.
     fn wants(&self, rel: &str) -> bool {
-        self.active && self.layout.is_package_shaped(rel)
+        self.active && (self.layout.is_package_shaped(rel) || self.layout.declares_namespaces(rel))
     }
 
     /// Whether this sync completed the backfill, and so may mark the facts
@@ -2920,6 +2964,7 @@ fn rebind_for_promotions(
     let delta = crate::resolve::Delta {
         changed_paths: HashSet::new(),
         dirty_tokens,
+        global_imports_moved: false,
     };
     let (res, ms) = resolve_pass(runtime, registry, root, policy, Some(&delta))?;
     *resolution = res;

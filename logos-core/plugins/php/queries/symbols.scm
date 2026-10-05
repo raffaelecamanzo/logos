@@ -38,3 +38,11 @@
 (property_declaration
   (property_element
     name: (variable_name (name) @symbol.field)))
+
+; The file's namespace (S-518, CR-170, FR-RS-13). Not a declaration — its
+; capture group is `module`, not `symbol`, so the declaration walk skips it. The
+; statement form (`namespace Monolog\Handler;`) scopes the rest of the file, the
+; braced form (`namespace App { … }`) its body; each top-level type is named
+; that namespace plus its own name, whatever directory the file sits in.
+(namespace_definition
+  name: (namespace_name) @module.namespace)

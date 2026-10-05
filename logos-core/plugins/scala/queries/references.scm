@@ -37,12 +37,15 @@
 ;
 ; Droppable on disk at `.logos/plugins/scala/queries/references.scm`.
 ;
-; Deliberately NOT captured in v1 (best-effort, never fabricated): import edges
-; — Scala flattens a dotted `import a.b.c` into repeated `path:` identifiers with
-; no single spanning node, and selector/wildcard imports (`import a.{b, c}`,
-; `import a.*`) need a structural walk beyond a text split (the same reason Rust
-; keeps a dedicated `ref.use` walk). Their absence lowers measured cross-file
-; resolution coverage but never produces a wrong edge.
+;   @ref.import.dotted — an `import` declaration (S-518, CR-170, FR-RS-13):
+;                 `import a.b.C`, `import a.b._` / `a.b.*`, `import a.b.{C, D}`
+;                 and comma-separated paths. Scala flattens a dotted path into
+;                 repeated `path:` identifiers with no single spanning node, so
+;                 the whole declaration is captured and walked structurally
+;                 (`extract::refs::flatten_dotted_import`, the twin of Rust's
+;                 `ref.use` walk): one row per imported path, a wildcard a
+;                 `Glob` row. The binder resolves each through the declared
+;                 package's fully-qualified type index.
 
 ; A call by simple name: `compute()`, `assert(...)`, the `test`/`it` markers.
 ; An auxiliary constructor's `def this(a: Int) = this(a, 0)` delegates to the
@@ -81,3 +84,6 @@
     field: (identifier) @ref.access)
   (#eq? @_recv "this")
 )
+
+; An import declaration, walked into one row per imported path (S-518).
+(import_declaration) @ref.import.dotted

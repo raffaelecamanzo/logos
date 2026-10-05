@@ -38,3 +38,15 @@
   (variable_declaration
     (variable_declarator
       name: (identifier) @symbol.field)))
+
+; The file's namespace (S-518, CR-170, FR-RS-13). Not a declaration — its
+; capture group is `module`, not `symbol`, so the declaration walk skips it. A
+; file-scoped `namespace A.B;` and a block `namespace A.B { … }` give the same
+; identity, and nested blocks (`namespace A { namespace B { … } }`) compose to
+; `A.B`; each top-level type is named that namespace plus its own name, whatever
+; directory the file sits in.
+(namespace_declaration
+  name: (_) @module.namespace)
+
+(file_scoped_namespace_declaration
+  name: (_) @module.namespace)

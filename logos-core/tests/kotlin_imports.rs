@@ -1,11 +1,14 @@
-//! A Kotlin file's module identity follows its package, as a Java file's does
-//! (S-472, CR-152; the "data change later" CR-149 named for Kotlin), so its
-//! imports of in-repository types bind — exercised end-to-end through the public
-//! [`Engine`] against real temp-directory fixtures.
+//! A Kotlin file's module identity follows its package (S-472, CR-152; the "data
+//! change later" CR-149 named for Kotlin), so its imports of in-repository types
+//! bind — exercised end-to-end through the public [`Engine`] against real
+//! temp-directory fixtures.
 //!
-//! The Kotlin descriptor now declares `[package_modules]` under
-//! `src/{main,test}/kotlin`, which is what lets a declared type be named by the
-//! one derivation (`resolve::package_key::PackageLayout`). The Java shapes are
+//! The Kotlin descriptor declares the declared-namespace module model (S-518,
+//! FR-RS-13; it replaced S-472's `[package_modules]` source roots): a file is
+//! named by its `package` header, which is what lets a declared type be named
+//! by the one derivation (`resolve::package_key::PackageLayout`) wherever the
+//! file sits — `namespace_imports.rs` pins a Multiplatform `commonMain` tree.
+//! The Java shapes are
 //! pinned in `java_imports.rs`; this file pins the Kotlin consequences the
 //! change has: an import reaches the class it names, a type declared in both
 //! trees binds neither, an external import stays unbound, and a bare call

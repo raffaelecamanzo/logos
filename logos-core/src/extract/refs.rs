@@ -410,6 +410,133 @@ fn flatten_with_prefix(node: Node<'_>, source: &[u8], prefix: &[String], out: &m
     }
 }
 
+/// Flatten an import declaration whose grammar spreads each imported path over
+/// repeated `path:` children of the declaration itself, with no node spanning
+/// one path (S-518) — Scala's `import a.b.C`, `import a.b._` / `a.b.*`,
+/// `import a.b.{C, D => E, _}` and `import a.B, c.D`. A capture-name-driven
+/// walk of the one declaration ([`flatten_use_tree`]'s twin for this shape):
+///
+/// - the `path:` children accumulate one expression's segments, and a `,`
+///   token ends it;
+/// - an expression with nothing after its path imports its last segment;
+/// - a wildcard after it (`_` or `*`) is a [`UseItem::glob`] of the path;
+/// - a braced group imports each selector under the path — a name, the `name`
+///   of a rename (`D => E`, `D as E`; the rename itself is the alias work of
+///   S-520), or a wildcard — and a selector renamed to `_` hides its name, so
+///   it imports nothing;
+/// - a rename directly after the path (Scala 3's `import a.b as c`) imports
+///   its `name` under the path.
+///
+/// Every non-glob item's alias is its last segment, as for every other
+/// language's import. A `given` selector — bare, or `given T`, which imports
+/// given instances of `T` and not `T` — imports no declaration and is skipped,
+/// as is anything else no rule above reads — never a path made of other text.
+pub(crate) fn flatten_dotted_import(node: Node<'_>, source: &[u8], out: &mut Vec<UseItem>) {
+    let mut path: Vec<String> = Vec::new();
+    let mut selected = false;
+    let mut cursor = node.walk();
+    for (i, child) in node.children(&mut cursor).enumerate() {
+        if node.field_name_for_child(i as u32) == Some("path") {
+            if child.is_named() {
+                path.push(node_text(child, source));
+            }
+            continue;
+        }
+        if !child.is_named() {
+            if child.kind() == "," {
+                finish_dotted_expression(&mut path, selected, out);
+                selected = false;
+            }
+            continue;
+        }
+        selected = true;
+        dotted_selector(child, source, &path, true, out);
+    }
+    finish_dotted_expression(&mut path, selected, out);
+}
+
+/// End one expression of [`flatten_dotted_import`]: a path no selector
+/// followed imports its last segment. Clears `path` for the next expression.
+fn finish_dotted_expression(path: &mut Vec<String>, selected: bool, out: &mut Vec<UseItem>) {
+    let path = std::mem::take(path);
+    if selected {
+        return;
+    }
+    if let Some(alias) = path.last().cloned() {
+        out.push(UseItem {
+            path,
+            alias: Some(alias),
+            glob: false,
+        });
+    }
+}
+
+/// One selector of [`flatten_dotted_import`] under `path`: a wildcard, a name,
+/// a rename, or — when `group_allowed` — a braced group of them.
+fn dotted_selector(
+    node: Node<'_>,
+    source: &[u8],
+    path: &[String],
+    group_allowed: bool,
+    out: &mut Vec<UseItem>,
+) {
+    if path.is_empty() {
+        return;
+    }
+    let text = node_text(node, source);
+    let item = |name: String| {
+        let mut full = path.to_vec();
+        full.push(name.clone());
+        UseItem {
+            path: full,
+            alias: Some(name),
+            glob: false,
+        }
+    };
+    if node.named_child_count() == 0 {
+        match text.as_str() {
+            "_" | "*" => out.push(UseItem {
+                path: path.to_vec(),
+                alias: None,
+                glob: true,
+            }),
+            "given" | "" => {}
+            name => out.push(item(name.to_string())),
+        }
+        return;
+    }
+    if let Some(name) = node.child_by_field_name("name") {
+        let hidden = node
+            .child_by_field_name("alias")
+            .is_some_and(|alias| node_text(alias, source) == "_");
+        if !hidden {
+            out.push(item(node_text(name, source)));
+        }
+        return;
+    }
+    let braced = node.child(0).is_some_and(|c| c.kind() == "{");
+    if group_allowed && braced {
+        // A `given T` selector imports given instances of `T`, never the type
+        // `T` itself: the type after a `given` token is skipped.
+        let mut after_given = false;
+        let mut cursor = node.walk();
+        for selector in node.children(&mut cursor) {
+            if !selector.is_named() {
+                after_given = selector.kind() == "given";
+                continue;
+            }
+            if !std::mem::take(&mut after_given) {
+                dotted_selector(selector, source, path, false, out);
+            }
+        }
+    }
+}
+
+/// `node`'s source text, trimmed; empty when it is not UTF-8.
+fn node_text(node: Node<'_>, source: &[u8]) -> String {
+    node.utf8_text(source).unwrap_or_default().trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

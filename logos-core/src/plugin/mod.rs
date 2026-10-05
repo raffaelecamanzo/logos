@@ -56,7 +56,7 @@ pub use abi::AbiRange;
 pub use error::{PluginError, SkipReason, SkippedGrammar};
 pub use manifest::{
     AnchorDescriptor, ConfigDescriptor, CrossFileRelation, ExportConvention, ImplicitReceiver,
-    ImportSpecifier, PackageModules, PluginManifest, PropertiesDescriptor, Reach, ReachLevel,
+    ImportSpecifier, ModuleModel, ModuleModelKind, PackageModules, PluginManifest, PropertiesDescriptor, Reach, ReachLevel,
     TestConvention,
 };
 pub use plugin::{CompiledPlugin, LanguagePlugin, Semantics};

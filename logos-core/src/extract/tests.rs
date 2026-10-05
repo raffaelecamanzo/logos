@@ -40,6 +40,7 @@ impl NoSymbolsPlugin {
                 specifier_extensions: Vec::new(),
                 implicit_receiver: crate::plugin::ImplicitReceiver::None,
                 package_modules: None,
+                module_model: crate::plugin::ModuleModelKind::Path,
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
                 body_node_kinds: Vec::new(),
@@ -6140,5 +6141,60 @@ trait T {
             ("run".to_string(), "go".to_string(), RefForm::Method, Some(Other)),
             ("run".to_string(), "helper".to_string(), RefForm::Method, Some(SelfInstance)),
         ]
+    );
+}
+
+/// The `Imports` rows a Scala file records, as `(target, alias, form)`, sorted
+/// (S-518, `refs::flatten_dotted_import`).
+#[cfg(feature = "lang-scala")]
+fn scala_imports(imports: &str) -> Vec<(String, Option<String>, RefForm)> {
+    let facts = extract_lang("scala", "src/App.scala", &format!("package app\n\n{imports}\nobject App\n"));
+    let mut rows: Vec<(String, Option<String>, RefForm)> = facts
+        .refs
+        .into_iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target, r.alias, r.form))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// A `given` selector imports given instances, never the type it names: no
+/// row for `T` in a group (S-518). After the path, the grammar reads `given`
+/// itself as the wildcard, which imports nothing either.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn a_scala_given_selector_imports_no_type() {
+    assert_eq!(
+        scala_imports("import a.b.{given T, C}"),
+        vec![("a::b::C".to_string(), Some("C".to_string()), RefForm::Path)]
+    );
+    assert!(scala_imports("import a.b.given T").is_empty());
+    assert!(scala_imports("import a.b.given").is_empty());
+}
+
+/// Every Scala selector shape records its own rows (S-518): a rename imports
+/// the name it renames (its local name is S-520's alias work), a selector
+/// hidden with `=> _` imports nothing, `_` and Scala 3's `*` are wildcards, a
+/// Scala 3 `as` rename after the path imports its name, and comma-separated
+/// paths are separate imports.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn every_scala_selector_shape_records_its_own_rows() {
+    let row = |t: &str, alias: Option<&str>, form| (t.to_string(), alias.map(str::to_string), form);
+    assert_eq!(
+        scala_imports("import a.b.{C => X, D => _, E}"),
+        vec![row("a::b::C", Some("C"), RefForm::Path), row("a::b::E", Some("E"), RefForm::Path)]
+    );
+    assert_eq!(scala_imports("import a.b._"), vec![row("a::b", None, RefForm::Glob)]);
+    assert_eq!(scala_imports("import a.b.*"), vec![row("a::b", None, RefForm::Glob)]);
+    assert_eq!(
+        scala_imports("import a.b.{C, _}"),
+        vec![row("a::b", None, RefForm::Glob), row("a::b::C", Some("C"), RefForm::Path)]
+    );
+    assert_eq!(scala_imports("import a.b.C as K"), vec![row("a::b::C", Some("C"), RefForm::Path)]);
+    assert_eq!(
+        scala_imports("import a.B, c.d.E"),
+        vec![row("a::B", Some("B"), RefForm::Path), row("c::d::E", Some("E"), RefForm::Path)]
     );
 }

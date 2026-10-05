@@ -51,9 +51,10 @@
     (variable_declaration
       (identifier) @symbol.field)))
 
-; The file's `package` header (S-472). Not a declaration — its capture group is
-; `package`, not `symbol`, so the declaration walk skips it; the declared-type
-; reader compares it with the package the file's directory keys it by, and a
-; disagreement is recorded refused rather than resolved to the path.
+; The file's `package` header (S-472, S-518, FR-RS-13). Not a declaration — its
+; capture group is `module`, not `symbol`, so the declaration walk skips it. It is
+; the file's module identity: each top-level type is named that package plus its
+; own name, whatever source set or directory the file sits in (`commonMain`,
+; `src/main/java`), so a Multiplatform file's imports bind like a JVM one's.
 (package_header
-  (qualified_identifier) @package.name)
+  (qualified_identifier) @module.namespace)

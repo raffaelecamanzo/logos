@@ -294,6 +294,85 @@ pub struct PackageModules {
     pub source_roots: Vec<String>,
 }
 
+/// The `[module_model]` descriptor sub-table: **which** module model keys this
+/// language's files ([FR-RS-01], [FR-RS-13]) — the one declaration the binder's
+/// module key ([`crate::resolve::package_key`]) dispatches on.
+///
+/// ```toml
+/// [module_model]
+/// kind = "namespace"
+/// ```
+///
+/// One table, one `kind`, so a further model is a further [`ModuleModelKind`]
+/// variant validated in [`validate_module_model`], never a second table with
+/// its own precedence rules. A kind that needs data carries it beside `kind` in
+/// this table — except `package`, whose source roots predate this table and
+/// stay in `[package_modules]` ([`PackageModules`]).
+///
+/// Omitted, the model is `package` when `[package_modules]` is declared and
+/// `path` otherwise ([`PluginManifest::module_model_kind`]), so every
+/// descriptor written before the table keeps its keys ([NFR-MA-01]).
+///
+/// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
+/// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleModel {
+    /// The model's name.
+    pub kind: ModuleModelKind,
+}
+
+/// The module models a language may declare ([`ModuleModel`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModuleModelKind {
+    /// Rust's model, the default: the directory before the last `src/` names
+    /// the crate and every later directory is a module.
+    #[default]
+    Path,
+    /// A package under fixed source roots, named by the path after the root
+    /// (Java, [CR-149]). Requires `[package_modules]`.
+    ///
+    /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    Package,
+    /// The namespace or package each file **declares** (PHP, C#, Kotlin, Scala;
+    /// [FR-RS-13]): its `symbols` query captures the declaration's name with
+    /// `@module.namespace`, and that name — not the path — is the file's
+    /// package. A file declaring none is in the global namespace.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    Namespace,
+}
+
+/// The capture a declared-namespace language's `symbols` query names a
+/// namespace or package declaration's **name** with (S-518, [FR-RS-13]):
+/// PHP's `namespace`, C#'s file-scoped or block `namespace`, Kotlin's and
+/// Scala's `package`. Its group is `module`, not the declaration group
+/// `symbol`, so extraction's declaration walk never reads it as a node; a
+/// namespace-model plugin whose `symbols` query lacks it fails to load
+/// (`registry::check_namespace_capture`).
+///
+/// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
+
+/// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the
+/// language's bodiless namespace declarations **compose** rather than replace
+/// one another — Scala's chained `package a` / `package b` is `a.b`, where
+/// PHP's `namespace A;` … `namespace B;` puts what follows in `B` alone (S-518).
+pub(crate) const NAMESPACE_CHAINED_CAPTURE: &str = "module.namespace.chained";
+
+impl ModuleModelKind {
+    /// The descriptor token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModuleModelKind::Path => "path",
+            ModuleModelKind::Package => "package",
+            ModuleModelKind::Namespace => "namespace",
+        }
+    }
+}
+
 /// How a language marks a function as a test — the declarative rule behind the
 /// extraction-time test-marker evidence flag ([FR-EX-06], [ADR-18], [CR-001]).
 ///
@@ -427,6 +506,14 @@ pub struct PluginManifest {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     #[serde(default)]
     pub package_modules: Option<PackageModules>,
+    /// Which module model keys this language's files ([`ModuleModel`],
+    /// [FR-RS-13]). `None` when the `[module_model]` table is omitted; read it
+    /// through [`module_model_kind`](Self::module_model_kind), which resolves
+    /// the omission.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    #[serde(default)]
+    pub module_model: Option<ModuleModel>,
     /// The cross-file reach this code language declares ([`Reach`], [FR-PL-09]).
     /// `None` for the documentation and artifact classes, which bind no code
     /// reference at all.
@@ -842,6 +929,13 @@ pub struct PropertiesDescriptor {
 }
 
 impl PluginManifest {
+    /// The module model this descriptor declares ([`ModuleModel`]), with an
+    /// omitted `[module_model]` table resolved: `package` when
+    /// `[package_modules]` is declared, `path` otherwise.
+    pub fn module_model_kind(&self) -> ModuleModelKind {
+        resolved_module_model(self.module_model.as_ref(), self.package_modules.as_ref())
+    }
+
     /// Parse a descriptor from TOML text, attributing any error to `file`.
     ///
     /// `file` is the embedded asset name or the on-disk override path; it is
@@ -1013,10 +1107,10 @@ impl PluginManifest {
                 "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
             ));
         }
-        if let Some(pm) = &self.package_modules {
-            if let Err(detail) = validate_package_modules(pm) {
-                return bail(detail);
-            }
+        if let Err(detail) =
+            validate_module_model(self.module_model.as_ref(), self.package_modules.as_ref())
+        {
+            return bail(detail);
         }
         if let Err(detail) = validate_reach(self.reach.as_ref()) {
             return bail(detail);
@@ -1147,6 +1241,48 @@ fn validate_reach(reach: Option<&Reach>) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The module-model declaration's rules ([`ModuleModel`], S-518): the declared
+/// `kind` and the `[package_modules]` table must agree — `package` needs its
+/// source roots, and roots under any other kind would be data nothing reads —
+/// and the package model's roots pass [`validate_package_modules`].
+///
+/// One arm per kind, so a kind that gains data validates it here (S-519's
+/// path-module keys are the next).
+fn validate_module_model(
+    model: Option<&ModuleModel>,
+    package_modules: Option<&PackageModules>,
+) -> Result<(), String> {
+    match (resolved_module_model(model, package_modules), package_modules) {
+        (ModuleModelKind::Package, Some(pm)) => validate_package_modules(pm),
+        (ModuleModelKind::Package, None) => Err(
+            "`[module_model]` kind 'package' requires a `[package_modules]` table naming its \
+             source roots"
+                .to_string(),
+        ),
+        (other, Some(_)) => Err(format!(
+            "`[package_modules]` is the data of the 'package' module model, but \
+             `[module_model]` declares kind '{}'",
+            other.as_str()
+        )),
+        (ModuleModelKind::Path | ModuleModelKind::Namespace, None) => Ok(()),
+    }
+}
+
+/// The module model a descriptor declares: its `[module_model]` kind, else
+/// `package` when `[package_modules]` is declared, else `path` — the one
+/// resolution of an omitted table, shared by validation and
+/// [`PluginManifest::module_model_kind`].
+fn resolved_module_model(
+    model: Option<&ModuleModel>,
+    package_modules: Option<&PackageModules>,
+) -> ModuleModelKind {
+    match (model, package_modules) {
+        (Some(m), _) => m.kind,
+        (None, Some(_)) => ModuleModelKind::Package,
+        (None, None) => ModuleModelKind::Path,
+    }
 }
 
 /// The `[package_modules]` table's rules (S-465, CR-149): at least one root to
@@ -1332,8 +1468,11 @@ mod tests {
         // name grammar it always had (S-439, NFR-MA-01).
         assert_eq!(m.import_specifier, ImportSpecifier::Name);
         assert!(m.specifier_extensions.is_empty());
-        // …and the default module model: no package-shaped path (CR-149).
+        // …and the default module model: no package-shaped path (CR-149), no
+        // declared model, which resolves to `path` (S-518).
         assert!(m.package_modules.is_none());
+        assert!(m.module_model.is_none());
+        assert_eq!(m.module_model_kind(), ModuleModelKind::Path);
         // …and no declared reach: only a code language declares one (FR-PL-09).
         assert!(m.reach.is_none());
     }
@@ -1447,6 +1586,48 @@ mod tests {
         let unknown =
             format!("{GOOD}\n[package_modules]\nsource_roots = [\"src\"]\nroots = [\"x\"]\n");
         assert!(PluginManifest::parse("java/plugin.toml", &unknown).is_err());
+    }
+
+    /// The module model is one declaration naming the model (S-518, FR-RS-13):
+    /// each kind parses, an omitted table resolves to `package` beside
+    /// `[package_modules]` and `path` otherwise, and the kind and the package
+    /// roots must agree — so a further model is one more kind, never a second
+    /// table with its own precedence.
+    #[test]
+    fn the_module_model_is_one_declaration_naming_the_model() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        let roots = "[package_modules]\nsource_roots = [\"src/main/java\"]\n";
+
+        let namespace = with("[module_model]\nkind = \"namespace\"\n").unwrap();
+        assert_eq!(namespace.module_model_kind(), ModuleModelKind::Namespace);
+        let path = with("[module_model]\nkind = \"path\"\n").unwrap();
+        assert_eq!(path.module_model_kind(), ModuleModelKind::Path);
+        let package = with(&format!("[module_model]\nkind = \"package\"\n{roots}")).unwrap();
+        assert_eq!(package.module_model_kind(), ModuleModelKind::Package);
+        // Omitted beside the roots: the package model, as every descriptor
+        // written before the table declared it.
+        let implied = with(roots).unwrap();
+        assert!(implied.module_model.is_none());
+        assert_eq!(implied.module_model_kind(), ModuleModelKind::Package);
+
+        // The kind and the roots must agree, in both directions.
+        let err = with("[module_model]\nkind = \"package\"\n").unwrap_err().to_string();
+        assert!(err.contains("x/plugin.toml") && err.contains("package_modules"), "{err}");
+        for kind in ["namespace", "path"] {
+            let err = with(&format!("[module_model]\nkind = \"{kind}\"\n{roots}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("kind '{kind}'")), "{err}");
+        }
+        // The package model's roots are still validated through the table.
+        let err = with("[module_model]\nkind = \"package\"\n[package_modules]\nsource_roots = []\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least one `source_roots`"), "{err}");
+        // An unknown kind or key is refused loudly, never read as the default.
+        assert!(with("[module_model]\nkind = \"modules\"\n").is_err());
+        assert!(with("[module_model]\nkind = \"namespace\"\nroots = []\n").is_err());
+        assert!(with("[module_model]\n").is_err(), "a table without a kind");
     }
 
     /// The implicit-receiver policy (S-514) defaults to `none`, parses `self`,

@@ -62,6 +62,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (27, MIGRATION_27),
     (28, MIGRATION_28),
     (29, MIGRATION_29),
+    (30, MIGRATION_30),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2537,6 +2538,50 @@ CREATE UNIQUE INDEX idx_unresolved_refs_identity
     ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0));
 
 -- 3. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 30 — the namespace a file **declares**, recorded beside its row
+/// (S-518, [CR-170], [FR-RS-13]).
+///
+/// One nullable column added **in place** on `files` (the migration-25/28
+/// shape — no rebuild, every existing row and id untouched, the FTS index, its
+/// triggers and the `annotations` view unaffected):
+///
+/// **`files.namespace`** — for a file of a language whose plugin declares the
+/// declared-namespace module model (`[module_model] kind = "namespace"`: PHP,
+/// C#, Kotlin, Scala), the namespace or package its top-level declarations sit
+/// in, its segments joined by `.` (`Shop.Domain`; `''` for the global
+/// namespace). `NULL` on every file of any other model, and on one whose
+/// top-level declarations sit in two different namespaces. **Plugin-agnostic by
+/// construction**: the column names no language; a language fills it by
+/// declaring the model and capturing `@module.namespace`. The binder keys such a
+/// file by it ([`crate::resolve::package_key`]); symbols are unchanged
+/// ([ADR-07]).
+///
+/// `NULL` on every row until its file is re-extracted, and **re-extraction is
+/// triggered here** as migrations 25, 28 and 29 do it: every
+/// `files.content_hash` is cleared, so the next scan, index or full-walk sync
+/// re-extracts each file like a modified one. Until then each such file keeps
+/// the path-derived key it had.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_30_adds_the_file_namespace_and_triggers_reextraction` in
+/// [`super::migrate`].
+///
+/// [CR-170]: ../../../../docs/requests/CR-170-modules-namespaces-and-types-beyond-rust-and-java.md
+/// [FR-RS-13]: ../../../../docs/specs/requirements/FR-RS-13.md
+/// [ADR-07]: ../../../../docs/specs/architecture/decisions/ADR-07.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_30: &str = "\
+-- 1. The namespace a file declares (FR-RS-13): '.'-joined, '' for the global
+-- namespace. NULL for a file keyed by its path, and on rows indexed before this
+-- migration.
+ALTER TABLE files ADD COLUMN namespace TEXT;
+
+-- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
 -- next scan like a modified one, filling the column.
 UPDATE files SET content_hash = NULL;
 ";

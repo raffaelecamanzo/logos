@@ -74,13 +74,24 @@ framework_detectors = ["Microsoft::AspNetCore"]
 # is honestly uncaptured. Under-capture is the safe direction (NFR-RA-05).
 http_client_detectors = ["System::Net::Http"]
 
-# Declared cross-file reach (S-570, CR-180, FR-PL-09): references bind only
-# inside the file that wrote them.
+# A C# file's module identity is the namespace it DECLARES, not its path
+# (S-518, CR-170, FR-RS-13): its `symbols` query captures the declaration's name
+# with `@module.namespace`, and each top-level type is named that namespace plus its
+# own name (`resolve::package_key`). Imports bind through that fully-qualified
+# name, so a namespace that differs from its directory still binds; a type
+# declared twice under one name binds neither (NFR-RA-05).
+[module_model]
+kind = "namespace"
+
+# Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
+# files through the declared namespace (S-518); calls bind only inside the file
+# that wrote them.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
-level = "same-file"
+level = "partial"
+cross_file = ["imports"]
 
 [queries]
 symbols = "queries/symbols.scm"

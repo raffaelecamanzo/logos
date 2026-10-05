@@ -1625,6 +1625,25 @@ pub trait GraphStore {
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     fn node_names_for_path(&self, path: &str) -> Result<Vec<String>>;
 
+    /// Whether the file at `path` records a **global** namespace wildcard — a
+    /// C# `global using N;`, an `Imports` `Glob` row carrying
+    /// `resolve::GLOBAL_WILDCARD_ALIAS` (S-518).
+    ///
+    /// The incremental resolver's twin of
+    /// [`node_names_for_path`](GraphStore::node_names_for_path), read for each
+    /// changed file before persist replaces its ledger rows: such a row brings
+    /// names into view in files the change does not touch, under names it does
+    /// not spell, so a sync that adds or removes one re-binds every
+    /// package-shaped row (`resolve::Delta::global_imports_moved`).
+    fn declares_global_import(&self, path: &str) -> Result<bool>;
+
+    /// The namespace recorded for the file at `path` (S-518, `files.namespace`)
+    /// — `None` when the file is absent or keyed by its path. Read for each
+    /// changed file before persist replaces it: a file that changes the
+    /// namespace it declares renames no node, so the namespace's own segments
+    /// are what select the rows binding through it.
+    fn file_namespace(&self, path: &str) -> Result<Option<String>>;
+
     /// Every committed definition of one canonical configuration key: the file
     /// that proves it, the profile that file declares, and the value (S-380,
     /// [CR-121], [FR-WS-19]).
@@ -1782,6 +1801,20 @@ pub trait GraphStore {
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     fn node_self_types(&self) -> Result<Vec<(NodeId, String)>> {
+        Ok(Vec::new())
+    }
+
+    /// The `(path, namespace)` of every file carrying a recorded declared
+    /// namespace (S-518, [FR-RS-13]) — the `files.namespace` column, ordered by
+    /// path. The binder's module key reads it through
+    /// [`PackageLayout::with_declared_namespaces`](crate::resolve::package_key::PackageLayout::with_declared_namespaces).
+    ///
+    /// The [`node_self_types`](GraphStore::node_self_types) shape: the default
+    /// is empty — only the SQLite store implements it — so a non-SQLite or test
+    /// store keys every file by the path, as before.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    fn file_namespaces(&self) -> Result<Vec<(String, String)>> {
         Ok(Vec::new())
     }
 
@@ -2605,6 +2638,33 @@ impl GraphStore for SqliteGraphStore {
         Ok(names)
     }
 
+    fn file_namespace(&self, path: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT namespace FROM files WHERE path = ?1", [path], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .map(Option::flatten)
+            .context("reading a file's declared namespace")
+    }
+
+    fn declares_global_import(&self, path: &str) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM unresolved_refs r \
+                 JOIN files f ON f.id = r.file_id \
+                 WHERE f.path = ?1 AND r.kind = ?2 AND r.form = ?3 AND r.alias = ?4)",
+                rusqlite::params![
+                    path,
+                    EdgeKind::Imports as i64,
+                    RefForm::Glob as i64,
+                    crate::resolve::GLOBAL_WILDCARD_ALIAS
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .context("reading whether a file declares a global import")
+    }
+
     fn config_definitions(&self, key: &str) -> Result<Vec<ConfigDefinition>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT f.path, s.profile, v.value \
@@ -2968,6 +3028,18 @@ impl GraphStore for SqliteGraphStore {
             .query_map([], |row| Ok((NodeId(row.get(0)?), row.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting node self types for the binder")?;
+        Ok(rows)
+    }
+
+    fn file_namespaces(&self) -> Result<Vec<(String, String)>> {
+        // ORDER BY path keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT path, namespace FROM files WHERE namespace IS NOT NULL ORDER BY path",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting file namespaces for the binder")?;
         Ok(rows)
     }
 
@@ -4132,6 +4204,39 @@ impl BatchWriter<'_> {
                 rusqlite::params![file_id, language, content_hash],
             )
             .context("updating file row")?;
+        Ok(())
+    }
+
+    /// The namespace recorded for the file `file_id` (S-518) — `None` when it is
+    /// keyed by its path. Read by persist before it records the new one.
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn file_namespace_of(&self, file_id: i64) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT namespace FROM files WHERE id = ?1", [file_id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .map(Option::flatten)
+            .context("reading the file's declared namespace")
+    }
+
+    /// Record the namespace the file `file_id` declares (S-518, [FR-RS-13]) —
+    /// `None` for a file keyed by its path. Written on every persist, so a file
+    /// that stops declaring one has its old namespace cleared.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn set_file_namespace(&self, file_id: i64, namespace: Option<&str>) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE files SET namespace = ?2 WHERE id = ?1",
+                rusqlite::params![file_id, namespace],
+            )
+            .context("recording the file's declared namespace")?;
         Ok(())
     }
 

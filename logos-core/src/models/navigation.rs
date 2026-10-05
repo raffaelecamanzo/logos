@@ -1089,8 +1089,8 @@ pub struct LanguageResolution {
     pub imports: RelationResolution,
     /// Why this language's unbound `Calls` rows stay unbound, by reason (S-468,
     /// [FR-RS-10], [CR-150] §3.2 C) — present on the `status` row of a
-    /// **package-shaped** language (Java, and Kotlin since S-472) and absent
-    /// from every other row.
+    /// **package-shaped** language (Java) or declared-namespace one (PHP, C#,
+    /// Kotlin and Scala, S-518) and absent from every other row.
     ///
     /// A status-only extension: the reasons are decided by re-walking each
     /// unbound row through the binder, which needs the whole graph, so the

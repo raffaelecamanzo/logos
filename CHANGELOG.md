@@ -13,6 +13,41 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **PHP, C#, Kotlin and Scala files take their identity from the namespace or package
+  they declare (CR-170, S-518).** A plugin now names its module model in one
+  `plugin.toml` table, `[module_model] kind = "path" | "package" | "namespace"`; PHP,
+  C#, Kotlin and Scala declare `namespace`, Java `package` (unchanged). A file's
+  `namespace` / `package` declaration — not its directory — names its types, so a
+  PSR-4 tree, a C# project whose namespaces differ from its folders and a Kotlin
+  Multiplatform `commonMain` source set all bind their imports. A single-type import
+  binds the type it names and is final for that name; a type of the file's own
+  namespace is visible without an import; C#'s `using N;`, Kotlin's `a.b.*` and Scala's
+  `a.b._` are wildcards that bind to every other file declaring the namespace; C#'s
+  `global using` applies to every C# file under its file's directory; `using static`
+  and aliases bind the type they name. Composer maps and `.csproj` files are not read.
+  Scala imports are captured for the first time.
+- **Measured on the inspection repositories**, import rows bound before → after:
+  monolog 0 → 429 of 568, mantisbt 0 → 201 of 224, koel 0 → 4,555 of 7,705, eShop
+  0 → 411 of 929, Newtonsoft 1 → 947 of 5,038, koin (Kotlin) 25 → 893 of 3,249. What
+  stays unbound is library code (PSR, `System`, Illuminate, PHPUnit) and imports of
+  functions rather than types. C# rows fell because an alias `using X = Y;` no longer
+  also records `X` as an import. Coupling metrics move for these languages: a C#
+  `using` binds every file of its namespace (Newtonsoft: 48,604 `Imports` edges).
+- **Kotlin's `src/{main,test}/kotlin` source-root keying is replaced** by its `package`
+  header. Its declared-type facts are named by the package and are no longer refused
+  when the package differs from the directory.
+- **PHP, C# and Scala now declare `partial` reach** (`imports` bound across files);
+  `logos languages` and the manual's table say so.
+
+### Upgrade
+
+- One forward-only store migration, **30** (`files.namespace`). It clears every file's
+  content hash, so run **one `logos scan` or `logos index`** after upgrading — a bare
+  `logos sync` re-reads nothing and the new bindings would not appear. Until then each
+  such file keeps the path key it had.
+
 ## [1.10.0] — 2026-10-04
 
 ### Changed
