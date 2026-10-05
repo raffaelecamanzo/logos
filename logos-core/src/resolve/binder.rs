@@ -46,6 +46,18 @@
 //! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 //! [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 //!
+//! A file of an **import-root** language (Python; S-519, [FR-RS-14]) keeps
+//! rungs 1–5, keyed under its family's own crate: a relative import reads its
+//! `.`/`..` level from the file's package ([`Ctx::resolve_relative`]), every
+//! directory under its import root descends as a module, a `from pkg import
+//! Name` that names nothing `pkg/__init__.py` declares binds to the package
+//! ([`Ctx::package_reexport`]), and its workspace fallbacks never leave the
+//! crate. The fully-qualified type and namespace indexes the package rungs read
+//! are partitioned by interop family, so no source reaches another family's
+//! types.
+//!
+//! [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+//!
 //! # Never fabricate ([NFR-RA-05])
 //!
 //! Every level ends in the same acceptance rule: bind **iff the candidate set
