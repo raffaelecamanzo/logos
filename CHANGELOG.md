@@ -23,8 +23,10 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   function-like macro records `Calls` to that Macro node. The exactly-one rule is
   unchanged: two classes of one name, a function and a class (or macro) of one name
   in one scope, or no candidate leave the call unbound. Every other language binds
-  its calls as before. Python's declared reach adds `type_relations` (the
-  instantiation of an imported class).
+  its calls as before. The declared reach of Python, Kotlin and Scala adds
+  `type_relations`: a free `Foo()` instantiates a class declared in another file.
+  A Kotlin or Scala `Foo()` inside a class body is a call on the current instance,
+  and still binds among that type's own members only.
 - **Measured on libuv** (`49b1c064`): C calls bound to a macro go from 0 to 342, and
   all C calls bound from 1,210 to 1,550 of 13,308. The calls in `src/fs-poll.c` to
   `uv__make_close_pending`, which that file defines as a macro, now bind. Two calls

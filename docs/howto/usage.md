@@ -39,10 +39,10 @@ descriptors and a test fails when it drifts.
 | Rust | `resolved` | `calls`, `imports`, `type_relations` |
 | C# | `partial` | `imports` |
 | Go | `partial` | `calls`, `imports` |
-| Kotlin | `partial` | `imports` |
+| Kotlin | `partial` | `imports`, `type_relations` |
 | PHP | `partial` | `imports` |
 | Python | `partial` | `calls`, `imports`, `type_relations` |
-| Scala | `partial` | `imports` |
+| Scala | `partial` | `imports`, `type_relations` |
 | TSX (incl. JSX) | `partial` | `calls`, `imports` |
 | TypeScript (incl. JavaScript) | `partial` | `calls`, `imports` |
 | C | `same-file` | none |
