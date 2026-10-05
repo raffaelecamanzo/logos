@@ -1038,15 +1038,13 @@ fn sync_equals_a_full_reindex_after_a_supertype_loses_the_method() {
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &HIERARCHY_FILES));
 }
 
-/// **Known pre-existing gap, pinned — not an S-468 regression** (coordinator
-/// decision 12; commit semantics since S-439, reproduced by S-467 on
-/// `Clock.now()`). A bound row whose target type gains a same-named overload is
-/// re-selected on `sync` and re-binds to nothing, but the commit only flips its
-/// `resolved` flag: the edge it bound before stays. A cold index over the same
-/// files leaves the call unbound as `overload-ambiguous`. When the gap is fixed
-/// this test fails and becomes the plain sync ≡ reindex assertion.
+/// A bound row whose target type gains a same-named overload is re-selected on
+/// `sync` and re-binds to nothing, and the edge it bound before goes with it
+/// (S-596, FR-SY-12): the synced store equals a cold index over the same files,
+/// which leaves the call unbound as `overload-ambiguous`. Until S-596 the
+/// commit only flipped the row's `resolved` flag and kept the edge.
 #[test]
-fn known_gap_sync_keeps_the_edge_of_a_call_whose_target_gains_an_overload() {
+fn sync_equals_a_full_reindex_when_a_call_target_gains_an_overload() {
     let files = [MAILER_FILE, PAGER_FILE, CLIENT_FILE];
     let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     let engine = index(tmp.path());
@@ -1076,20 +1074,15 @@ fn known_gap_sync_keeps_the_edge_of_a_call_whose_target_gains_an_overload() {
         2,
         "viaMailer and viaLocal both name the overloaded `send`"
     );
-    // The gap: the synced store still holds an edge from `viaMailer` into
-    // `Mailer`'s `send` — its old target node survived the re-extraction, or a
-    // same-named one replaced it — while the ledger row reads unresolved.
     let synced = call_edges(rt);
-    assert!(
-        synced.iter().any(|(s, t)| *s == bound.0 && t.starts_with(MAILER_FILE)),
-        "the gap is closed — replace this pin with a sync ≡ reindex assertion: {synced:?}"
-    );
+    assert!(!synced.iter().any(|(s, _)| *s == bound.0), "{synced:?}");
     assert!(call_rows(rt, CLIENT_FILE).contains(&(
         "viaMailer".to_string(),
         "Mailer::send".to_string(),
         RefForm::Path,
         false
     )));
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 }
 
 /// A capture-before-delete `Symbol` row ([ADR-10]) is counted in the ledger's
@@ -1126,18 +1119,14 @@ fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
     assert_eq!(residue.unbound, java.calls.references - java.calls.bound);
 }
 
-/// **Known pre-existing gap, pinned — the supertype walk's shapes of it**
-/// (coordinator decision 12; the same commit semantics as the overload pin
-/// above). A sync that moves the hierarchy re-selects every package-shaped
-/// call (`is_affected` rule 5) and re-binds it correctly, but the commit only
-/// inserts the new edge and flips the row's `resolved` flag: an edge the row
-/// bound before survives wherever its target node does. A mid-chain `Mid`
-/// gaining an override of `start()` therefore leaves each inherited call with
-/// **two** edges — the new nearest `Mid.start` and the stale `Base.start` —
-/// where a cold index has only `Mid.start`. When the gap is fixed this fails
-/// and becomes the sync ≡ reindex assertion.
+/// A sync that moves the hierarchy re-selects every package-shaped call
+/// (`is_affected` rule 5) and re-binds it. A mid-chain `Mid` gaining an
+/// override of `start()` moves each inherited call to the nearest `Mid.start`,
+/// and the edge into `Base.start` it bound before is retracted (S-596,
+/// FR-SY-12) — a cold index has only `Mid.start`. Until S-596 the stale edge
+/// stayed beside the new one.
 #[test]
-fn known_gap_sync_keeps_the_old_edge_when_a_mid_chain_type_gains_an_override() {
+fn sync_equals_a_full_reindex_when_a_mid_chain_type_gains_an_override() {
     let tmp = hierarchy();
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
@@ -1150,27 +1139,17 @@ fn known_gap_sync_keeps_the_old_edge_when_a_mid_chain_type_gains_an_override() {
     );
     engine.sync(&[MID_FILE.into()]);
     let new = edge(LEAF_FILE, "viaInherited", MID_FILE, "start");
-    let cold = cold_facts(&tmp, &HIERARCHY_FILES);
-    assert_ne!(binding_facts(rt), cold, "the gap is closed — assert sync ≡ reindex instead");
     let synced = call_edges(rt);
-    assert!(synced.contains(&new) && synced.contains(&old), "{synced:?}");
-    let cold_engine = {
-        let dir = TempDir::new().unwrap();
-        for rel in HIERARCHY_FILES {
-            write(dir.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
-        }
-        (index(dir.path()), dir)
-    };
-    let cold_edges = call_edges(cold_engine.0.runtime().unwrap());
-    assert!(cold_edges.contains(&new) && !cold_edges.contains(&old), "{cold_edges:?}");
+    assert!(synced.contains(&new) && !synced.contains(&old), "{synced:?}");
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &HIERARCHY_FILES));
 }
 
-/// **Known pre-existing gap, pinned** — the same commit semantics when a
-/// mid-chain type **drops** its superclass: the inherited calls are
-/// re-selected and re-bind to nothing (`resolved` flips to false), but their
-/// edges into `Base.start` stay; a cold index has none.
+/// A mid-chain type **drops** its superclass: the inherited calls are
+/// re-selected and re-bind to nothing (`resolved` flips to false), and their
+/// edges into `Base.start` are retracted (S-596, FR-SY-12) — a cold index has
+/// none.
 #[test]
-fn known_gap_sync_keeps_the_edge_when_a_mid_chain_type_drops_its_superclass() {
+fn sync_equals_a_full_reindex_when_a_mid_chain_type_drops_its_superclass() {
     let tmp = hierarchy();
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
@@ -1191,13 +1170,14 @@ fn known_gap_sync_keeps_the_edge_when_a_mid_chain_type_drops_its_superclass() {
         )),
         "the row is re-selected and unbinds"
     );
-    assert!(call_edges(rt).contains(&stale), "the gap is closed — assert sync ≡ reindex instead");
+    assert!(!call_edges(rt).contains(&stale));
     let cold = cold_facts(&tmp, &HIERARCHY_FILES);
     assert!(
         !cold.0.iter().any(|(_, t, k)| k == "calls" && t.contains("Base#start")),
         "a cold index binds nothing into `Base.start`: {:?}",
         cold.0
     );
+    assert_eq!(binding_facts(rt), cold);
 }
 
 /// A sync of a supertype's file captures each inbound `Extends` edge as an
@@ -1243,13 +1223,13 @@ fn a_captured_extends_row_never_lends_the_walk_a_superclass_the_subtype_dropped(
     assert_eq!(synced, call_edges(index(cold.path()).runtime().unwrap()));
 }
 
-/// **Known pre-existing gap, pinned** — a supertype **between** the caller's
-/// type and the declaring one is deleted. The row names neither deleted file's
-/// type, and only the hierarchy tokens (every `Extends` target, bound or not)
-/// re-select it; it re-binds to nothing, but its edge into `Root.start`
-/// survives, since `Root` is untouched.
+/// A supertype **between** the caller's type and the declaring one is
+/// deleted. The row names neither deleted file's type, and only the hierarchy
+/// tokens (every `Extends` target, bound or not) re-select it; it re-binds to
+/// nothing, and its edge into the untouched `Root.start` is retracted (S-596,
+/// FR-SY-12).
 #[test]
-fn known_gap_sync_keeps_the_edge_when_a_supertype_between_is_deleted() {
+fn sync_equals_a_full_reindex_when_a_supertype_between_is_deleted() {
     const ROOT: &str = "src/main/java/com/x/h/Root.java";
     const BASE: &str = "src/main/java/com/x/h/Base.java";
     const MID: &str = "src/main/java/com/x/h/Mid.java";
@@ -1278,9 +1258,10 @@ fn known_gap_sync_keeps_the_edge_when_a_supertype_between_is_deleted() {
         )),
         "the hierarchy tokens re-select the row, and it unbinds"
     );
-    assert!(call_edges(rt).contains(&stale), "the gap is closed — assert sync ≡ reindex instead");
+    assert!(!call_edges(rt).contains(&stale));
     let cold = cold_facts(&tmp, &[ROOT, MID, USER]);
     assert!(!cold.0.iter().any(|(_, _, k)| k == "calls"), "{:?}", cold.0);
+    assert_eq!(binding_facts(rt), cold);
 }
 
 /// **Known limitation, pinned — deferred for a decision (sprint-81 review).**

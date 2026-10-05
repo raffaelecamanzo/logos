@@ -13,6 +13,25 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An incremental re-bind retracts the edges it no longer produces, for every
+  language (CR-193, S-596).** When a sync re-selected a row that was bound and
+  the row came back unbound, ambiguous or bound to another target, the row's
+  flag flipped but its old edge stayed, so the synced graph kept a call, import
+  or supertype edge that a fresh index of the same tree does not have. This
+  happened, for example, when a rival `helper` or a second Kotlin `class Bar`
+  arrived, when a second glob import supplied the called name, when `x.rs`
+  arrived beside `x/mod.rs`, or when a Java class dropped the supertype a call
+  climbed through. Python import-root files were already covered (S-519).
+  Now every row of the re-selected row's source is re-bound, in every language,
+  and each reference-bound edge out of that source that no row produces any
+  more is deleted in the same transaction. A capture-before-delete row no longer
+  restores an edge that its source's own re-bound rows do not produce. The unit
+  is the source symbol, not its whole file: a whole-file sweep re-bound about
+  40% of this repository's ledger on every one-file sync. A full index is
+  unchanged.
+
 ## [1.11.0] — 2026-10-05
 
 ### Changed
