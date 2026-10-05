@@ -39,6 +39,7 @@ const ROUTING_INIT_PY: i64 = 31;
 const TEST_MAP_PY: i64 = 32;
 const TOP_PY: i64 = 34;
 const APP_LIB_RS: i64 = 35;
+const MYLIB_RS: i64 = 36;
 
 const POLICIES: [BindingPolicy; 3] = [
     BindingPolicy::Strict,
@@ -318,6 +319,16 @@ fn the_suffix_match_compares_a_module_by_its_parent_key() {
     // The fallback is policy-gated, as everywhere.
     let r = import(3, TEST_MAP_PY, 160, "routing::map");
     assert_eq!(bind_last(&[r], BindingPolicy::Strict), Outcome::Unbound);
+}
+
+/// A crate root has no parent key, so the parent-key suffix match never
+/// reaches it: `zzz::app` from another crate names no `app` under a `zzz`.
+#[test]
+fn the_suffix_match_never_reaches_a_crate_root() {
+    for policy in [BindingPolicy::Balanced, BindingPolicy::Aggressive] {
+        let r = import(1, MYLIB_RS, 190, "zzz::app");
+        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
+    }
 }
 
 /// An import-root family's crate is closed: a Python import no Python module
