@@ -28,6 +28,11 @@
 ;                 (only slashes → `::`; a host's dots are kept, S-439) into
 ;                 the ledger form feeding the binder and the framework
 ;                 candidacy gate (FR-FW-04).
+;   @ref.import.alias — the package name an aliased import binds
+;                 (`internalcloud "…/internal/cloud"` → `internalcloud`; S-520).
+;                 The row's alias is that name, not the path's last segment; an
+;                 unaliased import keeps the last segment, and a dot or blank
+;                 import (not a `package_identifier`) captures none.
 ;
 ; Droppable on disk at `.logos/plugins/go/queries/references.scm`.
 
@@ -52,4 +57,5 @@
       name: (identifier) @ref.receiver.self_name)))
 
 (import_spec
+  name: (package_identifier)? @ref.import.alias
   path: (interpreted_string_literal) @ref.import)

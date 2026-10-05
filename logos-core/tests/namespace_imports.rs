@@ -198,15 +198,57 @@ fn each_csharp_using_form_records_its_own_ledger_shape() {
             ("eShop::Ordering::Domain".to_string(), Some("global".to_string()), RefForm::Glob),
             // `global using static`: one static row, never a second, global one.
             ("eShop::Ordering::Domain::Order".to_string(), Some("*".to_string()), RefForm::Glob),
+            // `using Item = …OrderItem;` binds `Item` (S-520), not `OrderItem`.
             (
                 "eShop::Ordering::Domain::OrderItem".to_string(),
-                Some("OrderItem".to_string()),
+                Some("Item".to_string()),
                 RefForm::Path
             ),
             ("eShop::Shared::Guard".to_string(), Some("*".to_string()), RefForm::Glob),
         ],
-        "one row per directive — an alias no longer records its own name as an import"
+        "one row per directive — an alias records the type it names, aliased by its own name"
     );
+}
+
+/// S-520 / FR-EX-14: `use App\Models\User as U;` records the path `App\Models\User`
+/// under the local name `U`, and that row reaches the declared class — the
+/// binding a `new U()` in the file rides on once its relation captures exist
+/// (S-522). The unaliased `use` keeps the class's own name.
+#[test]
+fn a_php_use_as_binds_the_class_it_names_under_its_local_name() {
+    let (_tmp, engine) = indexed(fixtures::PHP_ALIAS);
+    let rt = engine.runtime().unwrap();
+    let file = "src/Http/Controller.php";
+    assert_eq!(
+        edges_from(rt, file, EdgeKind::Imports),
+        strings(&[
+            "src/Models/Post.php:Post:class",
+            "src/Models/User.php:User:class",
+        ])
+    );
+    assert_eq!(
+        import_aliases(rt),
+        vec![
+            ("App::Models::Post".to_string(), Some("Post".to_string())),
+            ("App::Models::User".to_string(), Some("U".to_string())),
+        ]
+    );
+}
+
+/// The `(target, alias)` of every `Imports` ledger row, sorted.
+fn import_aliases(rt: &Runtime) -> Vec<(String, Option<String>)> {
+    let mut rows: Vec<(String, Option<String>)> = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.kind == EdgeKind::Imports)
+                .map(|r| (r.target, r.alias))
+                .collect())
+        })
+        .unwrap();
+    rows.sort();
+    rows
 }
 
 // ── Kotlin ───────────────────────────────────────────────────────────────────

@@ -6178,7 +6178,8 @@ fn a_scala_given_selector_imports_no_type() {
 }
 
 /// Every Scala selector shape records its own rows (S-518): a rename imports
-/// the name it renames (its local name is S-520's alias work), a selector
+/// the name it renames (Scala's local name is not recorded: S-520 covers
+/// Python, PHP, C# and Go), a selector
 /// hidden with `=> _` imports nothing, `_` and Scala 3's `*` are wildcards, a
 /// Scala 3 `as` rename after the path imports its name, and comma-separated
 /// paths are separate imports.
@@ -6240,8 +6241,8 @@ fn a_python_from_import_records_one_row_per_name_and_keeps_its_relative_level() 
         path("..::..::a::b::c", "c"),
         path("hc::api::models::Check", "Check"),
     ];
-    // An `as` import records no alias: `name` is not what the file binds.
-    expected.push(("pkg::name".to_string(), RefForm::Path, None));
+    // An `as` import is aliased by the name it binds (S-520), not `name`.
+    expected.push(("pkg::name".to_string(), RefForm::Path, Some("other".to_string())));
     expected.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(import_rows(&facts), expected);
 }
@@ -6287,4 +6288,97 @@ fn a_file_module_is_named_by_its_own_plugins_package_stems() {
         assert_eq!(module_name("js", "web/src/main.js", "const x = 1;\n"), "main");
         assert_eq!(module_name("js", "web/src/mod.js", "const x = 1;\n"), "mod");
     }
+}
+
+// ── S-520 / FR-EX-14: an import's alias is the name it binds locally ──
+
+/// The `(target, form, alias)` rows of every import `source` records for the
+/// language owning `ext`.
+fn alias_rows(ext: &str, path: &str, source: &str) -> Vec<(String, RefForm, Option<String>)> {
+    let mut rows: Vec<(String, RefForm, Option<String>)> = extract_lang(ext, path, source)
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target.clone(), r.form, r.alias.clone()))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+fn path_row(target: &str, alias: &str) -> (String, RefForm, Option<String>) {
+    (target.to_string(), RefForm::Path, Some(alias.to_string()))
+}
+
+/// Python: `import typing as t` binds `t`, and `from m import a as b` binds
+/// `b` — each row names the imported path and is aliased by the local name,
+/// never by the imported one (a call to `a` must not bind through it). A plain
+/// import keeps its last segment.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_as_import_is_aliased_by_the_name_it_binds() {
+    let src = "import typing as t\nimport os.path as osp\nimport json\n\
+               from pkg.mod import Thing as Other, Plain\n";
+    assert_eq!(
+        alias_rows("py", "app/main.py", src),
+        vec![
+            path_row("json", "json"),
+            path_row("os::path", "osp"),
+            path_row("pkg::mod::Plain", "Plain"),
+            path_row("pkg::mod::Thing", "Other"),
+            path_row("typing", "t"),
+        ]
+    );
+}
+
+/// PHP: `use A\B as C;` binds `C`; an unaliased `use A\B;` keeps `B`.
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_php_use_as_is_aliased_by_the_name_it_binds() {
+    let src = "<?php\nnamespace App;\nuse A\\B as C;\nuse A\\D;\nuse E\\F\\G as H;\n";
+    assert_eq!(
+        alias_rows("php", "src/App.php", src),
+        vec![path_row("A::B", "C"), path_row("A::D", "D"), path_row("E::F::G", "H")]
+    );
+}
+
+/// C#: `using Test = Xunit.FactAttribute;` is one row naming the type, aliased
+/// `Test` — the alias is not itself an import row and the type's own name is
+/// not the alias. The other directive forms are unchanged.
+#[cfg(feature = "lang-c-sharp")]
+#[test]
+fn a_csharp_alias_directive_is_one_row_aliased_by_its_local_name() {
+    let src = "using Test = Xunit.FactAttribute;\nusing Json = Newtonsoft.Json;\n\
+               using System.Text;\nusing static System.Math;\n";
+    let rows = alias_rows("cs", "src/Tests.cs", src);
+    assert_eq!(
+        rows,
+        vec![
+            path_row("Newtonsoft::Json", "Json"),
+            ("System::Math".to_string(), RefForm::Glob, Some("*".to_string())),
+            ("System::Text".to_string(), RefForm::Glob, None),
+            path_row("Xunit::FactAttribute", "Test"),
+        ]
+    );
+    assert!(
+        !rows.iter().any(|(t, ..)| t == "Test" || t == "Json"),
+        "an alias directive never records its own name as an import"
+    );
+}
+
+/// Go: an aliased import binds its alias; an unaliased one its last segment; a
+/// dot or blank import keeps the last-segment alias it always had.
+#[cfg(feature = "lang-go")]
+#[test]
+fn a_go_aliased_import_is_aliased_by_its_package_name() {
+    let src = "package main\n\nimport (\n\tinternalcloud \"github.com/acme/x/internal/cloud\"\n\
+               \t\"net/http\"\n\t. \"github.com/acme/x/dots\"\n\t_ \"github.com/acme/x/blank\"\n)\n";
+    assert_eq!(
+        alias_rows("go", "cmd/main.go", src),
+        vec![
+            path_row("github.com::acme::x::blank", "blank"),
+            path_row("github.com::acme::x::dots", "dots"),
+            path_row("github.com::acme::x::internal::cloud", "internalcloud"),
+            path_row("net::http", "http"),
+        ]
+    );
 }

@@ -203,6 +203,47 @@ fn a_renamed_import_never_binds_a_call_to_the_original_name() {
     assert!(edges_from(rt, "pkg/app.py", EdgeKind::Calls).is_empty());
 }
 
+/// S-520: an `as` import is aliased by the name it binds, so a call through the
+/// alias resolves as the unaliased form does — `open_resource(p)` reaches
+/// `helpers.open`. (The original name binding nothing is
+/// `a_renamed_import_never_binds_a_call_to_the_original_name`.)
+#[test]
+fn a_call_through_an_import_alias_binds_the_imported_declaration() {
+    let (_tmp, engine) = indexed(&[
+        ("pkg/__init__.py", ""),
+        ("pkg/helpers.py", "def open(p):\n    return p\n"),
+        (
+            "pkg/app.py",
+            "from .helpers import open as open_resource\n\n\ndef run(p):\n    return open_resource(p)\n",
+        ),
+    ]);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges_from(rt, "pkg/app.py", EdgeKind::Calls),
+        strings(&["pkg/helpers.py:open:function"])
+    );
+}
+
+/// S-520: `import typing as t` binds the module under the name `t`, and `t.cast(...)`
+/// is a call on a module-shaped receiver: it binds nothing, even when the
+/// workspace holds a `typing` module declaring a `cast` of its own (never
+/// fabricate). This pins the guard, not the capture: it holds with or without
+/// the alias, which is why it asserts the import itself still binds.
+#[test]
+fn a_call_through_a_module_alias_stays_external() {
+    let (_tmp, engine) = indexed(&[
+        ("typing.py", "def cast(tp, value):\n    return value\n"),
+        ("pkg/__init__.py", ""),
+        (
+            "pkg/app.py",
+            "import typing as t\n\n\ndef run(v):\n    return t.cast(int, v)\n",
+        ),
+    ]);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(edges_from(rt, "pkg/app.py", EdgeKind::Imports), strings(&["typing.py:typing:module"]));
+    assert!(edges_from(rt, "pkg/app.py", EdgeKind::Calls).is_empty());
+}
+
 // ── healthchecks: the repository root ────────────────────────────────────────
 
 /// FR-RS-14 AC: `from hc.api.models import Check` binds — one row per imported
