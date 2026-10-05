@@ -1,8 +1,9 @@
 ; C# symbol-extraction query (S-057, CR-009, capability = "symbols").
 ;
 ; Capture names map to NodeKind via NodeKind::as_str (extract engine).
-; Compiled against the built C# Language at load; fails fast naming this
-; file on drift (FR-PL-02). Droppable on disk at
+; Compiled against the built C# Language on its first use, or at
+; load as an on-disk override; drift fails naming this file (FR-PL-02,
+; CR-197). Droppable on disk at
 ; `.logos/plugins/c-sharp/queries/symbols.scm` (FR-PL-04, UAT-PL-03).
 ;
 ; v1 policy (matching Java): constructors are deliberately NOT captured — a

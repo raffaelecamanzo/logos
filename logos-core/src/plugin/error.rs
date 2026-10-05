@@ -24,7 +24,7 @@ use std::fmt;
 ///
 /// Carries the offending file path so the operator can fix the asset
 /// ([FR-PL-02] "fails ... naming the file").
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PluginError {
     /// A `plugin.toml` descriptor failed to parse or was missing a field.
     Manifest {

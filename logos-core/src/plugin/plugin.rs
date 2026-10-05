@@ -6,7 +6,7 @@
 //! capabilities it supports, and the compiled `Query` backing each capability.
 //! [`CompiledPlugin`] is the one concrete implementation in v1 — a grammar
 //! compiled in via a cargo feature whose queries have already been resolved
-//! (override-or-embedded) and compiled.
+//! (override-or-embedded), and compile on the language's first use (CR-197).
 //!
 //! [plugin-registry]: ../../../docs/specs/architecture/components/plugin-registry.md
 //! [extraction-engine]: ../../../docs/specs/architecture/components/extraction-engine.md
@@ -17,10 +17,12 @@ use std::sync::Arc;
 
 use tree_sitter::{Language, Query};
 
+use super::error::PluginError;
 use super::manifest::{
     CallTargets, ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier,
     ModuleModelKind, PackageModules, PluginManifest, PropertiesDescriptor, Reach, TestConvention,
 };
+use super::queries::LanguageQueries;
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
 ///
@@ -191,7 +193,8 @@ pub trait LanguagePlugin {
     fn semantics(&self) -> &Semantics;
     /// Extraction capabilities this grammar supports (e.g. `["symbols"]`).
     fn capabilities(&self) -> &[String];
-    /// The compiled query backing `capability`, if any.
+    /// The compiled query backing `capability`, if any. The first call on a
+    /// language may compile all of that language's queries (CR-197).
     fn query(&self, capability: &str) -> Option<&Query>;
     /// Capabilities whose active query is an on-disk override ([FR-PL-04]).
     /// Defaults to none.
@@ -272,9 +275,12 @@ pub(crate) type CompiledQueries = BTreeMap<String, Arc<Query>>;
 
 /// A grammar compiled in via a cargo feature, fully loaded and ready to parse.
 ///
-/// All ABI assertion and query compilation happens *before* a `CompiledPlugin`
-/// exists (in [`crate::plugin::LanguageRegistry`]), so holding one is proof the
-/// grammar is safe to use.
+/// ABI assertion, query resolution and every override's compile happen *before*
+/// a `CompiledPlugin` exists (in [`crate::plugin::LanguageRegistry`]), so
+/// holding one is proof the grammar is safe to use. Its embedded queries
+/// compile on the first [`query`](LanguagePlugin::query) call (CR-197); every
+/// one of them is compiled by a test, so that compile cannot fail in a shipped
+/// build.
 #[derive(Debug)]
 pub struct CompiledPlugin {
     name: String,
@@ -282,8 +288,8 @@ pub struct CompiledPlugin {
     language: Language,
     semantics: Semantics,
     capabilities: Vec<String>,
-    /// Capability → compiled query.
-    queries: CompiledQueries,
+    /// Capability → compiled query, compiled at load or on first use.
+    queries: LanguageQueries,
     /// Capabilities whose query came from an on-disk override (observability).
     overridden: Vec<String>,
     /// The declared `[reach]` ([FR-PL-09]); `None` for a non-code plugin.
@@ -294,14 +300,14 @@ pub struct CompiledPlugin {
 
 impl CompiledPlugin {
     /// Assemble a plugin from its parsed descriptor, built language, and the
-    /// compiled queries the registry resolved for it.
+    /// queries the registry resolved for it.
     ///
     /// `overridden` lists the capabilities whose query was sourced from an
     /// on-disk override rather than the embedded default.
     pub(crate) fn new(
         manifest: PluginManifest,
         language: Language,
-        queries: CompiledQueries,
+        queries: LanguageQueries,
         overridden: Vec<String>,
     ) -> Self {
         let module_model = manifest.module_model_kind();
@@ -354,6 +360,24 @@ impl CompiledPlugin {
     }
 }
 
+impl CompiledPlugin {
+    /// Every capability's compiled query, compiling the language now if this
+    /// is its first use.
+    ///
+    /// # Errors
+    /// The [`PluginError`] that refused the language's compile, naming its file.
+    pub(crate) fn compiled_queries(&self) -> Result<&CompiledQueries, &PluginError> {
+        self.queries.get(&self.language)
+    }
+
+    /// Whether this language's queries are compiled yet — at load for an
+    /// override, else by a first use.
+    #[cfg(test)]
+    pub(crate) fn queries_compiled(&self) -> bool {
+        self.queries.is_compiled()
+    }
+}
+
 impl LanguagePlugin for CompiledPlugin {
     fn name(&self) -> &str {
         &self.name
@@ -376,7 +400,10 @@ impl LanguagePlugin for CompiledPlugin {
     }
 
     fn query(&self, capability: &str) -> Option<&Query> {
-        self.queries.get(capability).map(Arc::as_ref)
+        self.compiled_queries()
+            .ok()?
+            .get(capability)
+            .map(Arc::as_ref)
     }
 
     fn overridden_capabilities(&self) -> &[String] {

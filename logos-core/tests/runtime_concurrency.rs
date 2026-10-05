@@ -183,6 +183,19 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
     // and could no longer see a query-compilation regression. A fresh process
     // is the cold start NFR-PE-05 bounds — every CLI invocation is one. The
     // budget and the tolerance are unchanged.
+    //
+    // EMBEDDED QUERIES LEFT THE COLD PATH on 2026-10-05 (CR-197, S-600): each
+    // language now compiles on its first extraction, and a start compiles only
+    // override queries. Eight fresh-process attributions per arm, run
+    // before/after/after/before on one debug build (host load ~13-14 on 12
+    // cores), gave query_compilation medians of 622.7-623.2 ms before and
+    // 0.2 ms after, and uninstrumented total medians of 710.2-710.4 ms before
+    // and 78.7-79.5 ms after. On the same runs this guard measured 720.7 and
+    // 727.7 ms before (failing) and passed both times after. The budget and the
+    // tolerance are unchanged. The deferred cost, every language's first-use
+    // compile summed (~622-626 ms debug), is reported by
+    // `cold_start_phase_attribution` as `first_use_compile_ms`, where the user
+    // now pays it.
     let elapsed = cold_start_in_a_fresh_process();
 
     let budget = Duration::from_millis(600).mul_f64(perf_tolerance());
@@ -260,4 +273,134 @@ fn perf_tolerance() -> f64 {
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| *v >= 1.0)
         .unwrap_or(1.15)
+}
+
+/// Per language, a few files that call across one another — several files per
+/// language so the extraction workers reach each language's first use at once.
+const MULTI_LANGUAGE_FIXTURE: &[(&str, &str)] = &[
+    ("src/lib.rs", "mod a;\nmod b;\npub fn root() -> u32 { a::one() + b::two() }\n"),
+    ("src/a.rs", "pub fn one() -> u32 { crate::b::two() - 1 }\n"),
+    ("src/b.rs", "pub fn two() -> u32 { 2 }\npub struct Pair { pub left: u32 }\n"),
+    ("src/c.rs", "use crate::b::Pair;\npub fn make() -> Pair { Pair { left: 1 } }\n"),
+    ("py/app.py", "from py.util import helper\n\ndef run(x):\n    return helper(x)\n"),
+    ("py/util.py", "def helper(x):\n    return x + 1\n\nclass Box:\n    def get(self):\n        return helper(1)\n"),
+    ("py/more.py", "from py.util import Box\n\ndef open_box():\n    return Box().get()\n"),
+    ("py/last.py", "def last():\n    return 3\n"),
+    ("ts/main.ts", "import { greet } from './greet';\nexport function main(): string { return greet('a'); }\n"),
+    ("ts/greet.ts", "export function greet(n: string): string { return `hi ${n}`; }\n"),
+    ("ts/shape.ts", "export class Shape { area(): number { return 1; } }\n"),
+    ("ts/use.ts", "import { Shape } from './shape';\nexport const a = new Shape().area();\n"),
+    ("go/main.go", "package main\n\nfunc main() { helper() }\n"),
+    ("go/helper.go", "package main\n\nfunc helper() int { return other() }\n"),
+    ("go/other.go", "package main\n\nfunc other() int { return 1 }\n"),
+    ("java/App.java", "package app;\n\npublic class App { int run() { return new Util().one(); } }\n"),
+    ("java/Util.java", "package app;\n\npublic class Util { int one() { return 1; } }\n"),
+    ("java/More.java", "package app;\n\npublic class More extends Util { int two() { return one() + 1; } }\n"),
+];
+
+/// Every node, edge and ledger row of `runtime`'s graph as sorted lines, edge
+/// endpoints by symbol rather than store-local rowid — the same sections
+/// `indexing.rs`'s `graph_fingerprint` compares for sync ≡ reindex.
+fn graph_lines(runtime: &logos_core::Runtime) -> String {
+    runtime
+        .submit_read(|store| {
+            let nodes = store.all_nodes()?;
+            let symbol_of: std::collections::BTreeMap<i64, String> = nodes
+                .iter()
+                .map(|n| (n.id.0, n.symbol.as_str().to_string()))
+                .collect();
+            let key = |id: i64| symbol_of.get(&id).cloned().unwrap_or_default();
+            let mut lines: Vec<String> = nodes
+                .iter()
+                .map(|n| {
+                    format!(
+                        "N {}|{:?}|{}|{}|{:?}|{:?}",
+                        n.symbol.as_str(),
+                        n.kind,
+                        n.name,
+                        n.file_path.as_deref().unwrap_or(""),
+                        n.start_line,
+                        n.end_line
+                    )
+                })
+                .collect();
+            lines.extend(store.all_edges()?.iter().map(|e| {
+                format!(
+                    "E {} -> {} [{:?}]",
+                    key(e.source.0),
+                    key(e.target.0),
+                    e.kind
+                )
+            }));
+            lines.extend(store.unresolved_refs()?.iter().map(|r| {
+                format!(
+                    "R {}|{}|{:?}|{:?}|{}|{:?}",
+                    r.source_symbol, r.target, r.form, r.kind, r.resolved, r.payload
+                )
+            }));
+            lines.sort();
+            Ok(lines.join("\n"))
+        })
+        .expect("graph read runs")
+}
+
+/// Index [`MULTI_LANGUAGE_FIXTURE`] in a fresh root from a cold process cache,
+/// compiling every language's queries before the index when `eager` — what
+/// engine start did before CR-197 — or leaving each to its first use.
+fn index_the_fixture(eager: bool) -> String {
+    let root = TempDir::new().expect("temp root");
+    for (rel, body) in MULTI_LANGUAGE_FIXTURE {
+        let path = root.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    logos_core::plugin::queries::clear_compiled_cache();
+    let engine = Engine::start(root.path()).expect("engine starts");
+    if eager {
+        let registry = engine.registry().expect("the registry loads");
+        registry
+            .compile_all_queries()
+            .expect("every query compiles");
+    }
+    let indexed = engine.index();
+    assert_eq!(
+        indexed.files_indexed,
+        MULTI_LANGUAGE_FIXTURE.len() as u64,
+        "the whole fixture indexed: {indexed:?}"
+    );
+    graph_lines(engine.runtime().expect("a started engine"))
+}
+
+/// CR-197: queries compiled on each language's first use — reached by several
+/// extraction workers at once — extract the very graph that compiling every
+/// query up front does, and each language used reports its compile once.
+///
+/// Clears the process-wide query cache, so the lazy arm genuinely compiles;
+/// no other test in this binary depends on the cache's contents.
+#[test]
+fn queries_compiled_on_first_use_extract_the_same_graph_as_compiling_them_up_front() {
+    let eager = index_the_fixture(true);
+    let lazy = index_the_fixture(false);
+    let reported: Vec<String> = logos_core::plugin::queries::first_use_compiles()
+        .into_iter()
+        .map(|r| r.language)
+        .collect();
+
+    assert!(
+        eager.lines().filter(|l| l.starts_with("E ")).count() > 0,
+        "the fixture has edges"
+    );
+    let first_difference = eager.lines().zip(lazy.lines()).find(|(e, l)| e != l);
+    assert!(
+        eager == lazy,
+        "first-use compilation changed the extracted graph; first difference \
+         (eager, lazy): {first_difference:?}"
+    );
+    for language in ["rust", "python", "typescript", "go", "java"] {
+        assert_eq!(
+            reported.iter().filter(|r| *r == language).count(),
+            1,
+            "{language} reports its first-use compile once: {reported:?}"
+        );
+    }
 }

@@ -1986,6 +1986,7 @@ mod sql_capture_tests {
     use super::*;
     use crate::extract::{extract, FileInput};
     use crate::model::EdgeKind;
+    use crate::plugin::queries::LanguageQueries;
     use crate::plugin::{CompiledPlugin, PluginManifest};
     use std::collections::BTreeMap;
 
@@ -1993,7 +1994,12 @@ mod sql_capture_tests {
         let toml = include_str!("../../../plugins/sql/plugin.toml");
         let manifest = PluginManifest::parse("sql/plugin.toml", toml).unwrap();
         let language: tree_sitter::Language = tree_sitter_sequel::LANGUAGE.into();
-        CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+        CompiledPlugin::new(
+            manifest,
+            language,
+            LanguageQueries::precompiled(BTreeMap::new()),
+            Vec::new(),
+        )
     }
 
     /// A view's `FROM` table and a table's foreign-key target both bind (by name)
@@ -2063,6 +2069,7 @@ mod terraform_capture_tests {
     use super::*;
     use crate::extract::{extract, FileInput};
     use crate::model::EdgeKind;
+    use crate::plugin::queries::LanguageQueries;
     use crate::plugin::{CompiledPlugin, PluginManifest};
     use std::collections::BTreeMap;
 
@@ -2070,7 +2077,12 @@ mod terraform_capture_tests {
         let toml = include_str!("../../../plugins/terraform/plugin.toml");
         let manifest = PluginManifest::parse("terraform/plugin.toml", toml).unwrap();
         let language: tree_sitter::Language = tree_sitter_hcl::LANGUAGE.into();
-        CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+        CompiledPlugin::new(
+            manifest,
+            language,
+            LanguageQueries::precompiled(BTreeMap::new()),
+            Vec::new(),
+        )
     }
 
     fn fixture() -> Facts {
@@ -2188,6 +2200,7 @@ mod shell_capture_tests {
     use super::*;
     use crate::extract::{extract, FileInput};
     use crate::model::EdgeKind;
+    use crate::plugin::queries::LanguageQueries;
     use crate::plugin::{CompiledPlugin, PluginManifest};
     use std::collections::BTreeMap;
 
@@ -2195,7 +2208,12 @@ mod shell_capture_tests {
         let toml = include_str!("../../../plugins/shell/plugin.toml");
         let manifest = PluginManifest::parse("shell/plugin.toml", toml).unwrap();
         let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
-        CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+        CompiledPlugin::new(
+            manifest,
+            language,
+            LanguageQueries::precompiled(BTreeMap::new()),
+            Vec::new(),
+        )
     }
 
     /// `source`/`.` of a literal path (bare or quoted) is captured as a path

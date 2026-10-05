@@ -12,16 +12,23 @@
 //! name) is threaded into a compile error so the message always points at the
 //! source the operator can actually edit ([FR-PL-02]).
 //!
-//! Compiling is the expensive half — the bulk of a [`LanguageRegistry`] load —
-//! so [`compile_shared`] compiles each distinct query **once per process** and
-//! hands every later load the same [`Arc<Query>`]. A workspace starts one engine
-//! (and so one registry load) per member, and before this every member start
-//! recompiled every built-in query from scratch (HF-3). The cache key is the
-//! grammar, the capability and a content hash of the *resolved* source, so a
-//! root's own override compiles to its own entry and is never served a
-//! neighbour's, while byte-identical sources — the embedded default above all —
-//! share one. Only successful compiles are cached: a query that fails still
-//! fails every load that resolves it, naming its file.
+//! Compiling is the expensive half, so it happens **when a language is first
+//! used**, not when the [`LanguageRegistry`] loads (CR-197). Each language's
+//! queries sit in a [`LanguageQueries`] cell that compiles them all, as one
+//! unit, on the first extraction that asks for one. A cold start therefore pays
+//! only for override queries, which still compile at load so a broken one fails
+//! naming its file ([FR-PL-04]); a broken *embedded* query is caught at test
+//! time instead, by the test that compiles every one of them.
+//!
+//! Underneath, [`compile_shared`] compiles each distinct query **once per
+//! process** and hands every later load the same [`Arc<Query>`]. A workspace
+//! starts one engine (and so one registry load) per member, and before this
+//! every member start recompiled every built-in query from scratch (HF-3). The
+//! cache key is the grammar, the capability and a content hash of the
+//! *resolved* source, so a root's own override compiles to its own entry and is
+//! never served a neighbour's, while byte-identical sources — the embedded
+//! default above all — share one. Only successful compiles are kept: a query
+//! that fails still fails every load that resolves it, naming its file.
 //!
 //! [`LanguageRegistry`]: super::LanguageRegistry
 //! [FR-PL-02]: ../../../docs/specs/requirements/FR-PL-02.md
@@ -30,13 +37,16 @@
 //! [UAT-PL-03]: ../../../docs/specs/requirements/UAT-PL-03.md
 //! [NFR-MA-05]: ../../../docs/specs/requirements/NFR-MA-05.md
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use tree_sitter::{Language, Query};
 
 use super::error::PluginError;
+use super::manifest::NAMESPACE_CAPTURE;
+use super::plugin::CompiledQueries;
 
 /// A query whose source has been resolved (override-or-embedded), ready to
 /// compile.
@@ -112,55 +122,275 @@ pub fn compile(language: &Language, resolved: &ResolvedQuery) -> Result<Query, P
 /// blake3 hash of the source it was compiled from.
 type CompiledKey = (Language, String, String, [u8; 32]);
 
-/// Every query this process has compiled successfully. Bounded by
-/// construction: one entry per distinct (grammar, capability, source) — the
-/// built-in queries plus each distinct override text seen — however many
-/// loads resolve them.
-static COMPILED: LazyLock<Mutex<HashMap<CompiledKey, Arc<Query>>>> =
+/// One compiled query's cell: empty until its first successful compile. Its
+/// own lock is what makes concurrent first uses of one query compile it once.
+type CompiledSlot = Arc<Mutex<Option<Arc<Query>>>>;
+
+/// Every query this process has compiled, one cell per distinct (grammar,
+/// capability, source). Bounded by construction: the built-in queries plus each
+/// distinct override text seen, however many loads resolve them.
+static COMPILED: LazyLock<Mutex<HashMap<CompiledKey, CompiledSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Each language whose queries compiled on first use, in the order they did
+/// (CR-197). Read by [`first_use_compiles`].
+static FIRST_USES: LazyLock<Mutex<Vec<FirstUseCompile>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// [`compile`], once per process for each distinct source: every call that
 /// resolves the same `grammar`/capability to byte-identical text shares one
 /// compiled [`Query`] (HF-3).
 ///
-/// The cache lock is not held while compiling, so two first loads racing on
-/// one query may both compile it; the first to finish is kept and both get
-/// that one, so sharing holds either way.
+/// Calls racing on one query compile it once: the first holds that query's
+/// cell while it compiles and the rest wait for the result. Calls on different
+/// queries never wait on each other — the process-wide map is locked only to
+/// find the cell.
 ///
 /// # Errors
-/// As [`compile`]. A failed compile is never cached, so every later call that
-/// resolves the same text fails again, naming its own file.
+/// As [`compile`]. A failed compile leaves its cell empty, so every later call
+/// that resolves the same text compiles again and fails again, naming its own
+/// file.
 pub fn compile_shared(
     language: &Language,
     grammar: &str,
     resolved: &ResolvedQuery,
 ) -> Result<Arc<Query>, PluginError> {
+    compile_once(language, grammar, resolved).map(|(query, _)| query)
+}
+
+/// [`compile_shared`], also saying whether this call is the one that compiled
+/// (`true`) or it was served an earlier compile (`false`).
+fn compile_once(
+    language: &Language,
+    grammar: &str,
+    resolved: &ResolvedQuery,
+) -> Result<(Arc<Query>, bool), PluginError> {
     let key: CompiledKey = (
         language.clone(),
         grammar.to_string(),
         resolved.capability.clone(),
         *blake3::hash(resolved.source.as_bytes()).as_bytes(),
     );
-    if let Some(hit) = compiled_cache().get(&key) {
-        return Ok(Arc::clone(hit));
+    let slot = Arc::clone(compiled_cache().entry(key).or_default());
+    let mut held = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(hit) = held.as_ref() {
+        return Ok((Arc::clone(hit), false));
     }
     let query = Arc::new(compile(language, resolved)?);
-    Ok(Arc::clone(compiled_cache().entry(key).or_insert(query)))
+    *held = Some(Arc::clone(&query));
+    Ok((query, true))
 }
 
-/// Forget every query [`compile_shared`] has cached, so the next load compiles
-/// cold. For measurement harnesses that time several cold starts in one
-/// process; production never calls it. Queries already handed out stay valid —
-/// their holders keep them alive.
+/// Forget every query [`compile_shared`] has compiled, and every
+/// [`first_use_compiles`] record, so the next load or first use compiles cold.
+/// For measurement harnesses that time several cold starts in one process;
+/// production never calls it. Queries already handed out stay valid — their
+/// holders keep them alive.
 #[doc(hidden)]
 pub fn clear_compiled_cache() {
     compiled_cache().clear();
+    first_uses().clear();
+}
+
+/// One language's first-use compile (CR-197): which language, how many of its
+/// queries this compile built (the rest were already in the process cache),
+/// and how long the whole unit took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUseCompile {
+    /// The grammar's name (the descriptor `name`).
+    pub language: String,
+    /// Queries compiled by this first use rather than served from the cache.
+    pub compiled: usize,
+    /// Wall time of the language's whole compile unit.
+    pub elapsed: Duration,
+}
+
+/// Every language whose queries this process compiled on first use, in order.
+/// A language appears once per process — a later registry's first use of it is
+/// served from the cache, compiles nothing and is not reported — unless
+/// [`clear_compiled_cache`] made it compile again. Each entry is also emitted
+/// as an `info` event through the tracing seam when it happens.
+#[doc(hidden)]
+pub fn first_use_compiles() -> Vec<FirstUseCompile> {
+    first_uses().clone()
 }
 
 /// The cache, locked. A poisoned lock is recovered: the map is only ever
 /// inserted into whole, so no panic can leave it half-written.
-fn compiled_cache() -> std::sync::MutexGuard<'static, HashMap<CompiledKey, Arc<Query>>> {
+fn compiled_cache() -> MutexGuard<'static, HashMap<CompiledKey, CompiledSlot>> {
     COMPILED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The first-use record, locked; recovered on poison like [`compiled_cache`].
+fn first_uses() -> MutexGuard<'static, Vec<FirstUseCompile>> {
+    FIRST_USES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One language's capability queries, compiled together as one unit — at load
+/// when any of them is an on-disk override, else on the language's first use
+/// (CR-197, [FR-PL-02], [FR-PL-04]).
+///
+/// The cell is a [`OnceLock`], so concurrent first uses of one language compile
+/// it once and every caller sees the same outcome, and no caller ever observes
+/// a partly compiled language.
+///
+/// An override forces its whole language to compile at load: the override must
+/// fail naming its file where the operator can see it, and a namespace
+/// language's `symbols` override must prove its namespace capture before the
+/// registry is handed out.
+#[derive(Debug)]
+pub(crate) struct LanguageQueries {
+    /// The grammar's name: the process cache's key and the first-use report's.
+    grammar: String,
+    /// The descriptor's label, named when the namespace check refuses.
+    manifest_label: &'static str,
+    /// Whether the language declares the namespace module model (S-518), whose
+    /// `symbols` query must capture [`NAMESPACE_CAPTURE`].
+    namespace_model: bool,
+    /// Every capability's resolved source, in declaration order.
+    resolved: Vec<ResolvedQuery>,
+    /// The compiled unit — or the error that refused it — once compiled.
+    compiled: OnceLock<Result<CompiledQueries, PluginError>>,
+}
+
+impl LanguageQueries {
+    /// Hold `resolved` for `grammar`, compiling it now when any source is an
+    /// override.
+    ///
+    /// # Errors
+    /// A [`PluginError`] from compiling an overridden language: an override
+    /// that does not compile names its file; a namespace language whose
+    /// `symbols` does not capture its namespace names the descriptor.
+    pub(crate) fn new(
+        grammar: &str,
+        manifest_label: &'static str,
+        namespace_model: bool,
+        resolved: Vec<ResolvedQuery>,
+        language: &Language,
+    ) -> Result<Self, PluginError> {
+        let queries = Self {
+            grammar: grammar.to_string(),
+            manifest_label,
+            namespace_model,
+            resolved,
+            compiled: OnceLock::new(),
+        };
+        if queries.resolved.iter().any(|q| q.overridden) {
+            let (compiled, _) = queries.compile_unit(language)?;
+            // The cell was created three lines up and nothing else holds it.
+            let _ = queries.compiled.set(Ok(compiled));
+        }
+        Ok(queries)
+    }
+
+    /// A language whose queries are already compiled — for tests that build a
+    /// [`CompiledPlugin`](super::CompiledPlugin) by hand.
+    #[cfg(test)]
+    pub(crate) fn precompiled(queries: CompiledQueries) -> Self {
+        Self {
+            grammar: String::new(),
+            manifest_label: "",
+            namespace_model: false,
+            resolved: Vec::new(),
+            compiled: OnceLock::from(Ok(queries)),
+        }
+    }
+
+    /// Whether the language's queries are compiled yet (or refused).
+    #[cfg(test)]
+    pub(crate) fn is_compiled(&self) -> bool {
+        self.compiled.get().is_some()
+    }
+
+    /// The capability → query map, compiling the language on its first call.
+    ///
+    /// # Errors
+    /// The [`PluginError`] that refused the compile, the same one on every
+    /// call. Unreachable for a shipped build: every embedded query is compiled
+    /// by a test.
+    pub(crate) fn get(&self, language: &Language) -> Result<&CompiledQueries, &PluginError> {
+        self.compiled
+            .get_or_init(|| self.first_use(language))
+            .as_ref()
+    }
+
+    /// The first-use compile, reported: its wall time once per process when it
+    /// compiled anything, and a refusal as an error event naming the file.
+    fn first_use(&self, language: &Language) -> Result<CompiledQueries, PluginError> {
+        let started = Instant::now();
+        match self.compile_unit(language) {
+            Ok((queries, compiled)) => {
+                let elapsed = started.elapsed();
+                if compiled > 0 {
+                    tracing::info!(
+                        language = %self.grammar,
+                        queries = compiled,
+                        duration_ms = elapsed.as_secs_f64() * 1000.0,
+                        "compiled the language's queries on first use"
+                    );
+                    first_uses().push(FirstUseCompile {
+                        language: self.grammar.clone(),
+                        compiled,
+                        elapsed,
+                    });
+                }
+                Ok(queries)
+            }
+            Err(err) => {
+                tracing::error!(
+                    language = %self.grammar,
+                    "the language's queries failed to compile on first use; it extracts \
+                     nothing this process: {err}"
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Compile every capability through the process cache, then check the
+    /// namespace capture. Returns the map and how many queries were compiled
+    /// rather than served from the cache.
+    fn compile_unit(&self, language: &Language) -> Result<(CompiledQueries, usize), PluginError> {
+        let mut queries = BTreeMap::new();
+        let mut compiled = 0;
+        for resolved in &self.resolved {
+            let (query, fresh) = compile_once(language, &self.grammar, resolved)?;
+            compiled += usize::from(fresh);
+            queries.insert(resolved.capability.clone(), query);
+        }
+        if self.namespace_model {
+            check_namespace_capture(self.manifest_label, &queries)?;
+        }
+        Ok((queries, compiled))
+    }
+}
+
+/// A declared-namespace language (S-518, [FR-RS-13]) must name its namespace
+/// declarations: its compiled `symbols` query — embedded or an on-disk override
+/// — carries the `@module.namespace` capture. Without it every file of the
+/// language would read as the global namespace, and every type of the
+/// repository would be visible to every other without an import — honest
+/// absence at the query becoming a fabricated binding ([NFR-RA-05]). Refused
+/// with the language's compile instead, naming the descriptor.
+///
+/// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn check_namespace_capture(
+    manifest_label: &str,
+    compiled: &CompiledQueries,
+) -> Result<(), PluginError> {
+    let captures = compiled
+        .get("symbols")
+        .is_some_and(|q| q.capture_names().contains(&NAMESPACE_CAPTURE));
+    if captures {
+        return Ok(());
+    }
+    Err(PluginError::Manifest {
+        file: manifest_label.to_string(),
+        detail: format!(
+            "`[module_model]` kind 'namespace' requires the `symbols` query to capture \
+             `@{NAMESPACE_CAPTURE}`, or every file would read as the global namespace"
+        ),
+    })
 }
 
 #[cfg(test)]

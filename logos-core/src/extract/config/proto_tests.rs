@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::extract::{extract, FileInput, SymbolContext};
 use crate::model::{EdgeKind, NodeKind};
+use crate::plugin::queries::LanguageQueries;
 use crate::plugin::{CompiledPlugin, LanguagePlugin, PluginManifest};
 
 /// Build the real Protobuf artifact plugin from its embedded descriptor + grammar.
@@ -18,7 +19,12 @@ fn proto_plugin() -> CompiledPlugin {
     let toml = include_str!("../../../plugins/protobuf/plugin.toml");
     let manifest = PluginManifest::parse("protobuf/plugin.toml", toml).unwrap();
     let language: tree_sitter::Language = tree_sitter_proto::LANGUAGE.into();
-    CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+    CompiledPlugin::new(
+        manifest,
+        language,
+        LanguageQueries::precompiled(BTreeMap::new()),
+        Vec::new(),
+    )
 }
 
 /// A proto3 fixture: two top-level messages (one with a nested message), one
@@ -503,7 +509,12 @@ fn proto_plugin_without_name_child() -> CompiledPlugin {
     "#;
     let manifest = PluginManifest::parse("protobuf/plugin.toml", toml).unwrap();
     let language: tree_sitter::Language = tree_sitter_proto::LANGUAGE.into();
-    CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+    CompiledPlugin::new(
+        manifest,
+        language,
+        LanguageQueries::precompiled(BTreeMap::new()),
+        Vec::new(),
+    )
 }
 
 /// With no `name_child`, the anchor name falls back to the node's first source

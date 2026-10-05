@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::extract::{extract, FileInput, SymbolContext};
 use crate::model::NodeKind;
+use crate::plugin::queries::LanguageQueries;
 use crate::plugin::{CompiledPlugin, LanguagePlugin, PluginManifest};
 
 /// Build a synthetic artifact-class plugin over the markdown block grammar,
@@ -42,7 +43,12 @@ fn fake_artifact_plugin(with_config: bool) -> CompiledPlugin {
     };
     let manifest = PluginManifest::parse("fakeyaml/plugin.toml", toml).unwrap();
     let language: tree_sitter::Language = tree_sitter_md::LANGUAGE.into();
-    CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+    CompiledPlugin::new(
+        manifest,
+        language,
+        LanguageQueries::precompiled(BTreeMap::new()),
+        Vec::new(),
+    )
 }
 
 fn nodes_of_kind(facts: &crate::extract::Facts, kind: NodeKind) -> Vec<&str> {
@@ -245,7 +251,12 @@ fn node_kind_override_emits_a_typed_anchor() {
     "#;
     let manifest = PluginManifest::parse("faketyped/plugin.toml", toml).unwrap();
     let language: tree_sitter::Language = tree_sitter_md::LANGUAGE.into();
-    let plugin = CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new());
+    let plugin = CompiledPlugin::new(
+        manifest,
+        language,
+        LanguageQueries::precompiled(BTreeMap::new()),
+        Vec::new(),
+    );
 
     let src = "# build\n\n# test\n";
     let facts = extract(

@@ -13,6 +13,21 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **Plugin queries compile on first use of their language (CR-197, S-600).** Engine
+  start no longer compiles every compiled-in language's tree-sitter queries — the
+  ~600 ms that made up most of a cold start and failed the NFR-PE-05 budget tests in
+  `scripts/gate.sh full`. Each language compiles all its queries, once per process,
+  on the first extraction that needs it, so a cold start pays only for the languages
+  a repository uses; concurrent first uses of one language compile it once. An
+  on-disk override under `.logos/plugins/<lang>/` still compiles its whole language
+  at load and still fails the load naming its file. A broken *embedded* query no
+  longer fails the load: a test compiles every embedded query and names the file of
+  a broken one, so it never ships. Each language's first-use compile is reported once
+  per process as an `info` event (`RUST_LOG=info`) with its duration. Extraction
+  output is unchanged.
+
 ## [1.11.0] — 2026-10-05
 
 ### Changed

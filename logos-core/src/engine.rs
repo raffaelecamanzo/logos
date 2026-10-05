@@ -64,8 +64,10 @@ pub struct Engine {
     /// The plugin substrate built **once** at [`Engine::start`] and held for the
     /// process lifetime — the canonical derived cache [ADR-04] calls for, and the
     /// heaviest item in the [NFR-PE-05] cold-start budget (parse `plugin.toml`s,
-    /// build languages, compile queries). `None` for a transient engine (built
-    /// on demand per call) or if the substrate failed to load.
+    /// build languages, resolve queries and compile any override; embedded
+    /// queries compile on each language's first use, CR-197). `None` for a
+    /// transient engine (built on demand per call) or if the substrate failed
+    /// to load.
     registry: Option<crate::plugin::LanguageRegistry>,
     /// The bounded petgraph hydration cache, keyed by `(scope, last_sync_at)`
     /// ([ADR-04], [ADR-05], [NFR-PE-07]). Held for the Engine's lifetime so
@@ -127,8 +129,10 @@ pub struct ColdStartPhases {
     /// query compilation: ABI assertion, override-dir resolution, and
     /// plugin/extension/filename bookkeeping.
     pub registry_construction: Duration,
-    /// Resolving and compiling every capability's query. Compiled queries are
-    /// shared process-wide (HF-3), so this is the compile only on the
+    /// Resolving every capability's query and compiling the languages that
+    /// carry an on-disk override. Embedded queries compile on their language's
+    /// first use instead (CR-197), outside the cold start. Compiled queries are
+    /// shared process-wide (HF-3), so an override compiles only on the
     /// process's first registry load; a later one times cache hits.
     pub query_compilation: Duration,
     /// Opening the writer store's file and applying the pragma contract.
@@ -1589,8 +1593,8 @@ impl Engine {
     /// on demand (resolving any on-disk query overrides under
     /// `<root>/.logos/plugins/`).
     ///
-    /// A load failure (a malformed descriptor or a query that fails to compile,
-    /// typically in a user-supplied override) is reported to stderr naming the
+    /// A load failure (a malformed descriptor, or a user-supplied override query
+    /// that fails to compile) is reported to stderr naming the
     /// file (FR-PL-02) and surfaced in [`LanguagesInfo::load_error`] rather than
     /// a panic, since the Engine surface is infallible until error types land
     /// (ADR-14). The failure is named in the read-model itself (S-340,
