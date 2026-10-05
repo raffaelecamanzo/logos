@@ -266,6 +266,41 @@ fn the_config_override_replaces_the_detected_import_roots() {
     assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["lib/pkg/core.py:go:function"]));
 }
 
+/// The framework pass binds a Django route's handler through the same layout
+/// as the resolution pass — the override included: under a declared `lib`
+/// root, `views.index` in `lib/app/urls.py` reaches `lib/app/views.py`.
+#[test]
+fn the_framework_pass_binds_handlers_under_the_configured_import_roots() {
+    let (_tmp, engine) = indexed_with(
+        &[
+            ("lib/app/__init__.py", ""),
+            ("lib/app/views.py", "def index(request):\n    return None\n"),
+            (
+                "lib/app/urls.py",
+                "from django.urls import path\n\nfrom app import views\n\nurlpatterns = [path(\"users/\", views.index)]\n",
+            ),
+        ],
+        &[(".logos/config.toml", "[resolution]\npolicy = \"strict\"\n\n[resolution.import_roots]\npython = [\"lib\"]\n")],
+    );
+    let rt = engine.runtime().unwrap();
+    let handlers: Vec<String> = rt
+        .submit_read(|store| {
+            let label: HashMap<NodeId, String> = store
+                .all_nodes()?
+                .into_iter()
+                .map(|n| (n.id, format!("{}:{}", n.file_path.unwrap_or_default(), n.name)))
+                .collect();
+            Ok(store
+                .all_edges()?
+                .into_iter()
+                .filter(|e| e.kind == EdgeKind::RoutesTo)
+                .map(|e| label[&e.target].clone())
+                .collect())
+        })
+        .expect("read runs");
+    assert_eq!(handlers, strings(&["lib/app/views.py:index"]));
+}
+
 /// A malformed override is a configuration error, not a root that silently
 /// matches nothing.
 #[test]
