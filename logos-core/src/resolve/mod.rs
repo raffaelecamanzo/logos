@@ -527,7 +527,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 
 /// Whether the incremental run must re-bind row `r` given `delta`.
 ///
-/// Six reasons force a re-bind; any one suffices:
+/// Seven reasons force a re-bind; any one suffices:
 /// 1. **A** — `r` belongs to a file re-extracted or removed this sync. Its source
 ///    may have moved, and capture-before-delete lands inbound cross-file edges
 ///    here as `Symbol` rows ([ADR-10]); both need rebinding.
