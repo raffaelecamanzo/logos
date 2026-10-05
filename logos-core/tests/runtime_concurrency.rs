@@ -21,6 +21,10 @@ use logos_core::graph_store::{BatchWriter, NewNode};
 use logos_core::model::{LogosSymbol, NodeKind};
 use logos_core::Engine;
 
+#[path = "support/graph_fingerprint.rs"]
+mod graph_fingerprint;
+use graph_fingerprint::graph_fingerprint;
+
 /// Insert one `function` node named `name` inside a write batch.
 fn insert_function(w: &BatchWriter<'_>, symbol: &str, name: &str) -> Result<()> {
     let sym = LogosSymbol::parse(symbol)?;
@@ -298,52 +302,6 @@ const MULTI_LANGUAGE_FIXTURE: &[(&str, &str)] = &[
     ("java/More.java", "package app;\n\npublic class More extends Util { int two() { return one() + 1; } }\n"),
 ];
 
-/// Every node, edge and ledger row of `runtime`'s graph as sorted lines, edge
-/// endpoints by symbol rather than store-local rowid — the same sections
-/// `indexing.rs`'s `graph_fingerprint` compares for sync ≡ reindex.
-fn graph_lines(runtime: &logos_core::Runtime) -> String {
-    runtime
-        .submit_read(|store| {
-            let nodes = store.all_nodes()?;
-            let symbol_of: std::collections::BTreeMap<i64, String> = nodes
-                .iter()
-                .map(|n| (n.id.0, n.symbol.as_str().to_string()))
-                .collect();
-            let key = |id: i64| symbol_of.get(&id).cloned().unwrap_or_default();
-            let mut lines: Vec<String> = nodes
-                .iter()
-                .map(|n| {
-                    format!(
-                        "N {}|{:?}|{}|{}|{:?}|{:?}",
-                        n.symbol.as_str(),
-                        n.kind,
-                        n.name,
-                        n.file_path.as_deref().unwrap_or(""),
-                        n.start_line,
-                        n.end_line
-                    )
-                })
-                .collect();
-            lines.extend(store.all_edges()?.iter().map(|e| {
-                format!(
-                    "E {} -> {} [{:?}]",
-                    key(e.source.0),
-                    key(e.target.0),
-                    e.kind
-                )
-            }));
-            lines.extend(store.unresolved_refs()?.iter().map(|r| {
-                format!(
-                    "R {}|{}|{:?}|{:?}|{}|{:?}",
-                    r.source_symbol, r.target, r.form, r.kind, r.resolved, r.payload
-                )
-            }));
-            lines.sort();
-            Ok(lines.join("\n"))
-        })
-        .expect("graph read runs")
-}
-
 /// Index [`MULTI_LANGUAGE_FIXTURE`] in a fresh root from a cold process cache,
 /// compiling every language's queries before the index when `eager` — what
 /// engine start did before CR-197 — or leaving each to its first use.
@@ -368,7 +326,7 @@ fn index_the_fixture(eager: bool) -> String {
         MULTI_LANGUAGE_FIXTURE.len() as u64,
         "the whole fixture indexed: {indexed:?}"
     );
-    graph_lines(engine.runtime().expect("a started engine"))
+    graph_fingerprint(engine.runtime().expect("a started engine"))
 }
 
 /// CR-197: queries compiled on each language's first use — reached by several
