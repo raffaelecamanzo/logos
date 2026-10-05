@@ -318,8 +318,15 @@ pub fn run(
     // bound elsewhere, and edges carry no provenance: every row of the source
     // its edge left from is re-bound, so the edges that source no longer
     // produces can be retracted below (`retract_unproduced`; S-519, S-596).
-    let swept =
-        swept_sources(&mut selected, &snap.refs, &snap.file_paths, &index, delta, roots_moved);
+    let swept = swept_sources(
+        &mut selected,
+        &snap.refs,
+        &snap.nodes,
+        &snap.file_paths,
+        &index,
+        delta,
+        roots_moved,
+    );
 
     // Parallel compute on the shared worker pool (AQ-04): pure binding against
     // the immutable index; `collect` preserves input order (NFR-RA-06).
@@ -435,7 +442,10 @@ pub fn run(
 
 /// The sources an incremental run re-binds **whole** (S-519, S-596), with every
 /// row of each added to `selected`: the source of each selected row that was
-/// bound (its binding may move, and its old edge must not outlive it), and of
+/// bound (its binding may move, and its old edge must not outlive it); of each
+/// selected capture-before-delete row whose source lies in a file this sync
+/// re-extracted (the source's fresh rows, all selected and none bound yet,
+/// decide its edges, so the capture must not restore one they dropped); and of
 /// every row of an import-root file when the run moved the detected roots
 /// (`is_affected` reason 7 selected those rows already). Empty for a full
 /// index, which re-binds the whole ledger over a graph whose files were all
@@ -453,19 +463,33 @@ pub fn run(
 fn swept_sources<'s>(
     selected: &mut Vec<&'s UnresolvedRefRow>,
     refs: &'s [UnresolvedRefRow],
+    nodes: &[NodeRow],
     file_paths: &HashMap<i64, String>,
     index: &binder::Index,
     delta: Option<&Delta>,
     roots_moved: bool,
 ) -> HashSet<&'s str> {
-    if delta.is_none() {
+    let Some(delta) = delta else {
         return HashSet::new();
-    }
+    };
     let mut swept: HashSet<&'s str> = selected
         .iter()
         .filter(|r| r.resolved)
         .map(|r| r.source_symbol.as_str())
         .collect();
+    let captured: HashSet<&'s str> = selected
+        .iter()
+        .filter(|r| r.form == RefForm::Symbol)
+        .map(|r| r.source_symbol.as_str())
+        .collect();
+    if !captured.is_empty() {
+        swept.extend(
+            nodes
+                .iter()
+                .filter(|n| n.file_path.as_ref().is_some_and(|p| delta.changed_paths.contains(p)))
+                .filter_map(|n| captured.get(n.symbol.as_str()).copied()),
+        );
+    }
     if roots_moved {
         swept.extend(
             refs.iter()

@@ -1069,6 +1069,24 @@ fn sync_equiv_a_rival_python_class_arriving_unbinds() {
     );
 }
 
+/// A capture row whose source file the same sync re-extracted: `run()` drops
+/// its call while `b.rs` is touched, so `run -> helper` is captured under
+/// `b.rs` and would come back by exact symbol. The source's fresh rows, none
+/// bound yet, decide its edges.
+#[test]
+fn sync_equiv_a_capture_row_never_restores_an_edge_its_re_extracted_source_dropped() {
+    assert_sync_matches_reindex(
+        &[
+            ("c.rs", "use crate::b::*;\nfn run() { helper(); }\n"),
+            ("b.rs", "pub fn helper() {}\n"),
+        ],
+        &[
+            Edit::Put("b.rs", "pub fn helper() {}\n// touched\n"),
+            Edit::Put("c.rs", "use crate::b::*;\nfn run() {}\n"),
+        ],
+    );
+}
+
 /// Bench (run with `--ignored --nocapture`): the CR-015 win in isolation. Times
 /// the resolve pass over the WHOLE ledger (`None` — what every sync re-bound
 /// before) vs over only a one-file change-set (`Some(delta)`) on the same large

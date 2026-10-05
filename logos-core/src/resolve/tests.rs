@@ -2782,7 +2782,8 @@ fn sweep<'s>(
     ix: &Index,
     delta: Option<&super::Delta>,
 ) -> std::collections::HashSet<&'s str> {
-    super::swept_sources(selected, refs, &std::collections::HashMap::new(), ix, delta, false)
+    let (nodes, _) = fixture();
+    super::swept_sources(selected, refs, &nodes, &std::collections::HashMap::new(), ix, delta, false)
 }
 
 /// A selected row that was bound sweeps its source: every other row of that
@@ -2818,6 +2819,31 @@ fn a_bound_selected_row_sweeps_every_row_of_its_source() {
     let mut selected = vec![&refs[0]];
     assert!(sweep(&mut selected, &refs, &ix, None).is_empty());
     assert_eq!(selected.len(), 1);
+}
+
+/// A selected capture row whose source lies in a file this sync re-extracted
+/// sweeps that source, although none of the source's fresh rows was bound
+/// before: they, not the capture, decide its edges. A capture row whose source
+/// file the sync left alone sweeps nothing — it still stands in for its
+/// source's unchanged row.
+#[test]
+fn a_capture_row_from_a_re_extracted_source_sweeps_its_source() {
+    let (nodes, edges) = fixture();
+    // Captured under `src/util.rs`, out of `alpha` in `src/lib.rs`.
+    let captured = make_ref(1, UTIL_RS, 2, "local sym5", None, RefForm::Symbol, EdgeKind::Calls);
+    let fresh = call(2, LIB_RS, 2, "helper");
+    let refs = vec![captured, fresh];
+    let ix = Index::build(&nodes, &edges, &refs);
+    let both = super::Delta {
+        changed_paths: ["src/util.rs".to_string(), "src/lib.rs".to_string()].into_iter().collect(),
+        ..some_delta()
+    };
+    let mut selected = vec![&refs[0]];
+    assert_eq!(sweep(&mut selected, &refs, &ix, Some(&both)), ["local sym2"].into_iter().collect());
+    assert_eq!(selected.len(), 2, "the source's fresh row joins the re-bind");
+
+    let mut selected = vec![&refs[0]];
+    assert!(sweep(&mut selected, &refs, &ix, Some(&some_delta())).is_empty());
 }
 
 /// Out of a swept source, the reference-bound edges no re-bound row produces
