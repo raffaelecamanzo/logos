@@ -7,6 +7,11 @@
 ;                 (`org.springframework.web…`); canonicalised (dots → `::`)
 ;                 into the ledger form feeding the binder and the framework
 ;                 candidacy gate (FR-FW-04).
+;   @ref.import.alias — the local name an `import a.b.C as D` binds (`D`;
+;                 S-520). The row's alias is that name, not `C` — which the
+;                 import does not bring into view, so a same-package `C` is
+;                 still the one an unqualified `C` names; without an `as` it
+;                 stays the path's last segment.
 ;   @ref.access — an own-property access (`this.x`): the bound LCOM4 input
 ;                 (Method → Field), the same structural pattern as Java's
 ;                 `this.<field>` access (CR-005, FR-EX-08).
@@ -103,9 +108,11 @@
 ; aliased form) names one declaration; `import a.b.*` brings every type of the
 ; package `a.b` into view, so it is marked a wildcard (`@ref.import.asterisk`,
 ; S-518) and records no alias. The two are told apart by the trailing `*`, so
-; exactly one pattern matches each import.
+; exactly one pattern matches each import. An aliased import's `identifier`
+; after `as` is its local name (`@ref.import.alias`).
 ((import
-  (qualified_identifier) @ref.import) @_import
+  (qualified_identifier) @ref.import
+  (identifier)? @ref.import.alias) @_import
   (#not-match? @_import "\\*\\s*;?\\s*$"))
 
 (import

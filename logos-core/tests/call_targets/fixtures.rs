@@ -51,6 +51,28 @@ pub const KOTLIN: Fixture = &[
     ),
 ];
 
+/// An aliased import beside a class of the imported name in the file's own
+/// package (sprint-88 review): `import other.Base as OtherBase` (Kotlin) and
+/// `import sother.{Base => OtherBase}` (Scala) bring `OtherBase` into view and
+/// never `Base`, so the file's `Base` is its own package's and its `OtherBase`
+/// the imported one.
+pub const ALIASED_IMPORT: Fixture = &[
+    ("src/main/kotlin/app/models/Base.kt", "package app.models\n\nopen class Base\n"),
+    ("src/main/kotlin/other/Base.kt", "package other\n\nopen class Base\n"),
+    (
+        "src/main/kotlin/app/models/Child.kt",
+        "package app.models\n\nimport other.Base as OtherBase\n\nclass Child : Base()\n\nclass Stranger : OtherBase()\n\nfun make() = Base()\n\nfun makeOther() = OtherBase()\n",
+    ),
+    // Scala's own packages: Kotlin and Scala share the `jvm` family, so a
+    // Scala `app.models.Base` would be a second candidate for Kotlin's `Base`.
+    ("src/main/scala/sapp/models/Base.scala", "package sapp.models\n\nclass Base\n"),
+    ("src/main/scala/sother/Base.scala", "package sother\n\nclass Base\n"),
+    (
+        "src/main/scala/sapp/models/Make.scala",
+        "package sapp.models\n\nimport sother.{Base => OtherBase}\n\ndef make() = Base()\n\ndef makeOther() = OtherBase()\n",
+    ),
+];
+
 /// libuv's `src/fs-poll.c`: it defines `uv__make_close_pending` as a macro and
 /// calls it, while `src/unix/core.c` defines and calls a function of the same
 /// name. A file defining a macro and a function of one name leaves a call to it

@@ -205,6 +205,42 @@ fn a_kotlin_class_beside_its_factory_function_stays_unbound() {
     }
 }
 
+/// An aliased import names only its alias ([FR-EX-14], [NFR-RA-05]): beside
+/// `import other.Base as OtherBase`, a Kotlin `Base()` and `: Base()` reach the
+/// file's own-package `Base`, and `OtherBase()` / `: OtherBase()` the imported
+/// one — the import row is aliased `OtherBase`, so it never answers for `Base`.
+/// Scala's `import other.{Base => OtherBase}` reads the same way.
+///
+/// [FR-EX-14]: ../../docs/specs/requirements/FR-EX-14.md
+#[test]
+fn an_aliased_import_never_answers_for_the_name_it_renames() {
+    let (_tmp, engine) = indexed(fixtures::ALIASED_IMPORT);
+    let rt = engine.runtime().unwrap();
+    let child = "src/main/kotlin/app/models/Child.kt";
+    assert_eq!(
+        edges_from(rt, child, EdgeKind::Instantiates),
+        strings(&[
+            "make -> src/main/kotlin/app/models/Base.kt:Base:class",
+            "makeOther -> src/main/kotlin/other/Base.kt:Base:class",
+        ])
+    );
+    assert_eq!(
+        edges_from(rt, child, EdgeKind::Extends),
+        strings(&[
+            "Child -> src/main/kotlin/app/models/Base.kt:Base:class",
+            "Stranger -> src/main/kotlin/other/Base.kt:Base:class",
+        ])
+    );
+    #[cfg(feature = "lang-scala")]
+    assert_eq!(
+        edges_from(rt, "src/main/scala/sapp/models/Make.scala", EdgeKind::Instantiates),
+        strings(&[
+            "make -> src/main/scala/sapp/models/Base.scala:Base:class",
+            "makeOther -> src/main/scala/sother/Base.scala:Base:class",
+        ])
+    );
+}
+
 /// FR-RS-16 AC (libuv `src/fs-poll.c`): a call to the macro its file defines
 /// binds `Calls` to the Macro node, while `src/unix/core.c`'s call binds its own
 /// function of the same name. A macro and a function of one name in one file
