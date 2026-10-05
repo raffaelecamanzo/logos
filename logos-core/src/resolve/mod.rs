@@ -292,7 +292,7 @@ pub fn run(
     // package file that can move the detected import roots (S-519), which
     // re-keys a whole language.
     let roots_moved = delta.is_some_and(|d| d.changed_paths.iter().any(|p| index.moves_import_roots(p)));
-    let selected: Vec<&UnresolvedRefRow> = match delta {
+    let mut selected: Vec<&UnresolvedRefRow> = match delta {
         None => snap.refs.iter().collect(),
         Some(d) if d.changed_paths.is_empty() && d.dirty_tokens.is_empty() => Vec::new(),
         Some(d) => {
@@ -308,6 +308,12 @@ pub fn run(
                 .collect()
         }
     };
+
+    // An import-root file whose binding can move while neither endpoint's file
+    // changes (S-519): every row of it is re-bound, so the edges it no longer
+    // produces can be retracted below (`stale_import_root_edges`).
+    let swept =
+        swept_import_root_files(&mut selected, &snap.refs, &snap.file_paths, &index, delta, roots_moved);
 
     // Parallel compute on the shared worker pool (AQ-04): pure binding against
     // the immutable index; `collect` preserves input order (NFR-RA-06).
@@ -337,16 +343,13 @@ pub fn run(
     let by_relation =
         relation_coverage(snap.refs.iter().map(|r| (r.payload.as_deref(), final_bound(r))));
 
-    // A moved import root re-keys every file of the language, so a binding can
-    // move although neither endpoint's file changed — and an edge whose row no
-    // longer binds there would outlive it. Every row of those files was re-bound
-    // above (`is_affected` reason 7), so the edges they no longer produce are
+    // A binding of an import-root file can move although neither endpoint's
+    // file changed — a moved import root re-keys the language; a submodule
+    // arriving takes over a name its package's `__init__.py` re-exported — and
+    // the edge its row no longer binds there would outlive it. Every row of the
+    // swept files was re-bound above, so the edges they no longer produce are
     // exactly the stale ones (S-519, NFR-RA-06).
-    let stale = if roots_moved {
-        stale_import_root_edges(&snap.nodes, &snap.edges, &index, &outcomes)
-    } else {
-        Vec::new()
-    };
+    let stale = stale_import_root_edges(&snap.nodes, &snap.edges, &swept, &outcomes);
 
     // Serial commit: one transaction through the writer actor (ADR-02).
     let edges_created = runtime.submit_write(move |w| {
@@ -418,17 +421,61 @@ pub fn run(
     Ok(stats(refs_total, refs_resolved, edges_created, by_relation))
 }
 
-/// The reference-bound edges out of import-root files (S-519) that this run's
-/// outcomes no longer produce — what a moved import root leaves stale. Called
-/// only when every row of those files was re-bound, so an edge no outcome
-/// names has lost the row that bound it. Only the kinds a ledger row binds are
-/// considered: containment and the framework pass's edges are other passes'.
+/// The import-root files an incremental run re-binds **whole** (S-519), with
+/// every row of them added to `selected`: each file a selected row that was
+/// bound comes from (its binding may move, and its old edge must not outlive
+/// it), and every import-root file when the run moved the detected roots
+/// (`is_affected` reason 7 selected their rows already). Empty for a full
+/// index, which re-binds the whole ledger over a graph whose files were all
+/// re-extracted.
+fn swept_import_root_files<'s>(
+    selected: &mut Vec<&'s UnresolvedRefRow>,
+    refs: &'s [UnresolvedRefRow],
+    file_paths: &HashMap<i64, String>,
+    index: &binder::Index,
+    delta: Option<&Delta>,
+    roots_moved: bool,
+) -> HashSet<String> {
+    if delta.is_none() {
+        return HashSet::new();
+    }
+    let path_of = |r: &UnresolvedRefRow| r.file_id.and_then(|id| file_paths.get(&id));
+    let mut swept: HashSet<String> = selected
+        .iter()
+        .filter(|r| r.resolved)
+        .filter_map(|r| path_of(r))
+        .filter(|p| index.has_import_roots(p))
+        .cloned()
+        .collect();
+    if roots_moved {
+        swept.extend(file_paths.values().filter(|p| index.has_import_roots(p)).cloned());
+    }
+    if swept.is_empty() {
+        return swept;
+    }
+    let chosen: HashSet<i64> = selected.iter().map(|r| r.id).collect();
+    selected.extend(
+        refs.iter()
+            .filter(|r| !chosen.contains(&r.id) && path_of(r).is_some_and(|p| swept.contains(p))),
+    );
+    swept
+}
+
+/// The reference-bound edges out of the `swept` files (S-519) that this run's
+/// outcomes no longer produce — what a moved binding leaves stale. Every row of
+/// those files was re-bound ([`swept_import_root_files`]), so an edge no
+/// outcome names has lost the row that bound it. Only the kinds a ledger row
+/// binds are considered: containment and the framework pass's edges are other
+/// passes'.
 fn stale_import_root_edges(
     nodes: &[NodeRow],
     edges: &[EdgeRow],
-    index: &binder::Index,
+    swept: &HashSet<String>,
     outcomes: &[(i64, bool, binder::Outcome)],
 ) -> Vec<(NodeId, NodeId, EdgeKind)> {
+    if swept.is_empty() {
+        return Vec::new();
+    }
     let mut produced: HashSet<(NodeId, NodeId, EdgeKind)> = HashSet::new();
     for (_, _, outcome) in outcomes {
         match outcome {
@@ -448,7 +495,7 @@ fn stale_import_root_edges(
     }
     let in_import_root_file: HashSet<NodeId> = nodes
         .iter()
-        .filter(|n| n.file_path.as_deref().is_some_and(|p| index.has_import_roots(p)))
+        .filter(|n| n.file_path.as_ref().is_some_and(|p| swept.contains(p)))
         .map(|n| n.id)
         .collect();
     edges

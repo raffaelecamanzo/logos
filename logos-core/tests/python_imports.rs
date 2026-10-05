@@ -424,3 +424,33 @@ fn sync_equals_a_full_reindex_with_a_module_beside_its_stub() {
     assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/foo.py:X:class"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(files)));
 }
+
+/// `from pkg import helper` goes through `pkg/__init__.py` until a submodule
+/// `pkg/helper.py` arrives and takes the name: the import's old edge to the
+/// package must not outlive the binding, although neither the importing file
+/// nor `__init__.py` changed.
+#[test]
+fn sync_equals_a_full_reindex_when_a_submodule_takes_over_a_reexported_name() {
+    let files: &[(&str, &str)] = &[
+        ("pkg/__init__.py", ""),
+        ("pkg/core.py", "def go():\n    pass\n"),
+        ("app.py", "from pkg import helper\n"),
+        // Bound beforehand through the same package, and kept: the sweep
+        // re-binds every row of a swept file, not only the moved one.
+        ("tool.py", "from pkg import core\nfrom pkg import helper\n"),
+    ];
+    let (tmp, engine) = indexed(files);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/__init__.py:pkg:module"]));
+    let helper = "pkg/helper.py";
+    write(tmp.path(), helper, "def h():\n    pass\n");
+    engine.sync(&[helper.into()]);
+    assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/helper.py:helper:module"]));
+    assert_eq!(
+        edges_from(rt, "tool.py", EdgeKind::Imports),
+        strings(&["pkg/core.py:core:module", "pkg/helper.py:helper:module"])
+    );
+    let mut all = paths(files);
+    all.push(helper);
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &all));
+}
