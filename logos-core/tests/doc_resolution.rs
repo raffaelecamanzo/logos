@@ -236,6 +236,34 @@ fn explicit_repo_path_binds_to_the_code_file_module() {
 }
 
 #[test]
+fn an_explicit_repo_path_binds_through_the_files_own_module_model() {
+    // The path → module key is the layout's (S-519): a Python file is keyed
+    // under its import root and its family's crate, and a Rust `lib.rs` names
+    // its crate through the stems the rust plugin declares — a path reference
+    // to either still reaches its file-root module.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/pkg/__init__.py", "");
+    write(tmp.path(), "src/pkg/rules.py", "class Rule:\n    pass\n");
+    write(tmp.path(), "core/src/lib.rs", "pub fn helper() {}\n");
+    write(
+        tmp.path(),
+        "docs/guide.md",
+        "# Guide\n\nRules live in `src/pkg/rules.py`; the crate root is `core/src/lib.rs`.\n",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    let guide = node_id(rt, "Guide", NodeKind::DocSection);
+    let rules = node_id(rt, "rules", NodeKind::Module);
+    let core = node_id(rt, "core", NodeKind::Module);
+    let refs = edges_of(rt, EdgeKind::DocReference);
+    assert!(refs.contains(&(guide, rules)), "a Python path binds its module: {refs:?}");
+    assert!(refs.contains(&(guide, core)), "a Rust lib.rs path binds its crate root: {refs:?}");
+}
+
+#[test]
 fn duplicate_heading_anchor_stays_unresolved() {
     // Two headings slugify to the same anchor → the link is ambiguous and must
     // never bind (NFR-RA-05, the doc→doc analogue of the doc→code ambiguity).
