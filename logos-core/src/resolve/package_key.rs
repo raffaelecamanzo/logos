@@ -1041,6 +1041,16 @@ mod path_model_tests {
         // `src/` holds a package, but the override replaced the detection.
         assert_eq!(lib.module_key("src/werkzeug/_internal.py"), key("src/werkzeug/_internal"));
         assert!(!lib.moves_import_roots("src/other/__init__.py"));
+        // Nested roots: the longest one prefixing a path keys it, with the
+        // repository root (`.`) still in force for every other file.
+        let nested = PackageLayout::default()
+            .with_path_models(HashMap::from([("py".to_string(), py_decl(&["src"]))]))
+            .with_import_root_overrides(&BTreeMap::from([(
+                "python".to_string(),
+                vec![".".to_string(), "lib".to_string()],
+            )]));
+        assert_eq!(nested.module_key("lib/pkg/x.py"), key("pkg/x"));
+        assert_eq!(nested.module_key("tools/y.py"), key("tools/y"));
         // `.` is the repository root; another language's entry is ignored.
         let dot = PackageLayout::default()
             .with_path_models(HashMap::from([("py".to_string(), py_decl(&["src"]))]))
