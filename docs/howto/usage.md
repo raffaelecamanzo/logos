@@ -41,7 +41,7 @@ descriptors and a test fails when it drifts.
 | Go | `partial` | `calls`, `imports` |
 | Kotlin | `partial` | `imports` |
 | PHP | `partial` | `imports` |
-| Python | `partial` | `calls`, `imports` |
+| Python | `partial` | `calls`, `imports`, `type_relations` |
 | Scala | `partial` | `imports` |
 | TSX (incl. JSX) | `partial` | `calls`, `imports` |
 | TypeScript (incl. JavaScript) | `partial` | `calls`, `imports` |

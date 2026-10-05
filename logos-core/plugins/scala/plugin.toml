@@ -32,6 +32,13 @@ capabilities = ["symbols", "references"]
 # the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
 implicit_receiver = "self"
 
+# Calling a class constructs it (S-521, CR-170, FR-RS-16): a free `Foo()` whose
+# one candidate is a class records `Instantiates` to it. A class and its
+# companion `object` are both captured as classes, so `Foo()` naming the pair
+# stays unbound; so does a bare `Foo()` inside a class, read as a call on the
+# current instance (above).
+class_call_instantiates = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Each `case` (match arms, `catch` arms, partial functions) is a branch; the
 # boolean operators and the loop/conditional keywords mirror the Java set.

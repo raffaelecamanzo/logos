@@ -1534,6 +1534,33 @@ With either model:
   `src/test`, or a Scala class and its companion object) stays unbound rather
   than being guessed, and so do library imports (JDK, Spring, PSR, `System`).
 
+### Call targets (`class_call_instantiates`, `macros_callable`)
+
+A call binds a function or a method. Two `plugin.toml` keys let it bind more:
+
+```toml
+# Python, Kotlin, Scala: `Foo()` constructs a `Foo`.
+class_call_instantiates = true
+
+# C: `f(x)` may expand a `#define f(x)`.
+macros_callable = true
+```
+
+- With `class_call_instantiates`, a call whose one candidate is a class records an
+  **`Instantiates`** edge to that class, not a `Calls` edge. A Python
+  `Check(project=p)` after `from hc.api.models import Check` instantiates
+  `hc/api/models.py`'s `Check`.
+- With `macros_callable`, a call whose one candidate is a macro records `Calls` to
+  that macro node. C headers belong to the C++ plugin, so a macro defined in a
+  `.h` file is no candidate.
+
+The rule that binds every call still holds: exactly one candidate, or nothing. Two
+classes of one name stay unbound. So do a function and a class (or macro) of one
+name in one scope, and a name that matches no declaration. Kotlin and Scala read
+a bare `Foo()` inside a class as a call on the current instance, so it binds among
+that type's own members and never reaches the class. Both keys default to
+`false`, and a plugin that declares neither binds its calls as before.
+
 ### Outbound HTTP client calls (`invocations`)
 
 `invocations.scm` is the **consumer** side of cross-service coupling: it captures

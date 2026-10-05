@@ -31,6 +31,13 @@ capabilities = ["symbols", "references", "frameworks", "invocations", "propertie
 # the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
 implicit_receiver = "self"
 
+# Calling a class constructs it (S-521, CR-170, FR-RS-16): a free `Foo()` whose
+# one candidate is a class records `Instantiates` to that class. A top-level
+# factory function and a class of one name are two candidates, and stay unbound.
+# A bare `Foo()` inside a class is a call on the current instance (above), so it
+# binds among that type's members and never reaches the class.
+class_call_instantiates = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Kotlin's anonymous control-flow/operator tokens: `when` replaces `switch`
 # (counted once per expression, the keyword-walk approximation), `?:` is the

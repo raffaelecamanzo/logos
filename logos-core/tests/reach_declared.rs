@@ -292,7 +292,7 @@ fn tsx_declared_partial_binds_across_files() {
 }
 
 #[test]
-fn python_declared_partial_binds_calls_and_imports() {
+fn python_declared_partial_binds_calls_imports_and_instantiation() {
     verify("python", fixtures::PYTHON);
 }
 
@@ -449,8 +449,9 @@ fn every_code_language_declares_a_reach_and_nothing_else_does() {
         assert_eq!(declared[name].1, ["imports"], "{name}");
     }
     // Python's import-root path modules (S-519) bind imports, and the bare
-    // calls a `from` import brings into view.
-    assert_eq!(declared["python"].1, ["calls", "imports"]);
+    // calls a `from` import brings into view — a call to a class among them as
+    // `Instantiates`, a type relation (S-521).
+    assert_eq!(declared["python"].1, ["calls", "imports", "type_relations"]);
     for name in ["ruby", "c", "cpp"] {
         assert_eq!(level(name), "same-file", "{name}");
         assert!(declared[name].1.is_empty(), "{name} binds nothing across files");

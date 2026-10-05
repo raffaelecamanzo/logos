@@ -39,6 +39,7 @@ impl NoSymbolsPlugin {
                 import_specifier: crate::plugin::ImportSpecifier::Name,
                 specifier_extensions: Vec::new(),
                 implicit_receiver: crate::plugin::ImplicitReceiver::None,
+                call_targets: crate::plugin::CallTargets::default(),
                 package_modules: None,
                 module_model: crate::plugin::ModuleModelKind::Path,
                 package_stems: Vec::new(),

@@ -58,6 +58,13 @@
 //!
 //! [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
 //!
+//! A call binds a `Function` or `Method`. A language whose plugin declares more
+//! (S-521, [FR-RS-16]) looks its calls up with [`Want::DeclaredCall`]: a `Class`
+//! it constructs, bound as `Instantiates` (Python, Kotlin, Scala), or a `Macro`
+//! it expands, bound as `Calls` (C) — on the same rungs, under the same rule.
+//!
+//! [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+//!
 //! # Never fabricate ([NFR-RA-05])
 //!
 //! Every level ends in the same acceptance rule: bind **iff the candidate set
@@ -82,6 +89,7 @@ use crate::config::BindingPolicy;
 use crate::extract::doc::heading_slug;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, ReceiverShape, RefForm};
+use crate::plugin::CallTargets;
 
 use super::go_module::GoModule;
 use super::package_key::{normalize_crate, ModuleKey, PackageLayout};
@@ -207,6 +215,17 @@ pub(crate) enum Residue {
 enum Want {
     /// A call target: `Function` or `Method`.
     Callable,
+    /// A call target in a language whose plugin declares more than callables
+    /// (S-521, [FR-RS-16]): a `Function` or `Method`, and every kind its
+    /// [`CallTargets`] admit — a `Class` the call constructs, a `Macro` it
+    /// expands. One candidate set under the one exactly-one rule, so a function
+    /// and a class of one name in one scope are two candidates ([NFR-RA-05]).
+    /// A language that declares neither looks up [`Want::Callable`], exactly as
+    /// before ([`Ctx::call_want`]).
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    DeclaredCall(CallTargets),
     /// An import target: any declared node (module preferred over a same-named
     /// item) — never a framework-promoted `route` or `component`
     /// ([`is_framework_promoted`]), which is derived from a declaration and is
@@ -239,6 +258,11 @@ impl Want {
     fn admits(self, kind: NodeKind) -> bool {
         match self {
             Want::Callable => matches!(kind, NodeKind::Function | NodeKind::Method),
+            Want::DeclaredCall(targets) => {
+                Want::Callable.admits(kind)
+                    || (targets.classes && kind == NodeKind::Class)
+                    || (targets.macros && kind == NodeKind::Macro)
+            }
             Want::Any => !is_framework_promoted(kind),
             Want::Module => kind == NodeKind::Module,
             Want::Field => kind == NodeKind::Field,
@@ -246,6 +270,14 @@ impl Want {
             Want::Interface => kind == NodeKind::Interface,
             Want::Type => is_type_like(kind),
         }
+    }
+
+    /// `true` for a call's lookup, [`Want::Callable`] or [`Want::DeclaredCall`]:
+    /// the rungs that never offer a module to a call, record a call's
+    /// [`Residue`], and take a type's member through its supertypes treat the
+    /// two alike — they differ only in what [`admits`](Want::admits).
+    fn is_call(self) -> bool {
+        matches!(self, Want::Callable | Want::DeclaredCall(_))
     }
 }
 
@@ -1919,7 +1951,7 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
                 }
             }
             let want = if r.kind == EdgeKind::Calls {
-                Want::Callable
+                ctx.call_want()
             } else {
                 Want::Any
             };
@@ -1935,6 +1967,13 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             let resolved = ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
             ctx.bare_path_call.set(false);
             match resolved {
+                // A class a declared call constructs (S-521, [FR-RS-16]).
+                Res::Found(target) if ctx.constructs(want, target) => Outcome::Bound {
+                    source,
+                    target,
+                    kind: EdgeKind::Instantiates,
+                    payload: r.payload.clone(),
+                },
                 Res::Found(target) => bound(target),
                 Res::NotFound if r.kind == EdgeKind::Imports => ctx
                     .package_reexport(&segs)
@@ -2175,12 +2214,12 @@ impl Ctx<'_> {
         self.file_id.and_then(|id| self.ix.file_scopes.get(&id))
     }
 
-    /// Record why a call lookup (`want` = [`Want::Callable`]) gave up, unless an
+    /// Record why a call lookup ([`Want::is_call`]) gave up, unless an
     /// earlier step already did. A lookup for any other kind records nothing:
     /// its miss is a sub-step (a glob's own type, an import's target), not the
     /// call's.
     fn note(&self, want: Want, why: impl FnOnce() -> Residue) {
-        if want == Want::Callable {
+        if want.is_call() {
             let mut miss = self.miss.borrow_mut();
             if miss.is_none() {
                 *miss = Some(why());
@@ -2191,6 +2230,38 @@ impl Ctx<'_> {
     /// The source's crate and module path (the `self`/`super`/relative base).
     fn source_module(&self) -> Option<ModKey> {
         self.ix.nearest_module(self.source).cloned()
+    }
+
+    /// The lookup a bare or path-qualified `Calls` row takes (S-521,
+    /// [FR-RS-16]): [`Want::DeclaredCall`] when the source file's plugin
+    /// declares a call target beyond a callable, else [`Want::Callable`] — so a
+    /// language that declares neither key resolves exactly as before.
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    fn call_want(&self) -> Want {
+        let targets = self
+            .ix
+            .info
+            .get(&self.source)
+            .and_then(|i| i.file_path.as_deref())
+            .map(|path| self.ix.layout.call_targets(path))
+            .unwrap_or_default();
+        if targets.any() {
+            Want::DeclaredCall(targets)
+        } else {
+            Want::Callable
+        }
+    }
+
+    /// `true` when a call looked up with `want` bound `target` by constructing
+    /// it: a `Class`, admitted only because the caller's plugin declares that
+    /// calling a class instantiates it (S-521, [FR-RS-16]). Such a bind records
+    /// `Instantiates`, never `Calls`.
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    fn constructs(&self, want: Want, target: NodeId) -> bool {
+        matches!(want, Want::DeclaredCall(t) if t.classes)
+            && self.ix.info.get(&target).is_some_and(|i| i.kind == NodeKind::Class)
     }
 
     /// Every path an import-root file's imports give `head`, when they give it
@@ -3324,6 +3395,12 @@ impl Ctx<'_> {
     ///   top-level `def`, or a lone associated method) → the full callable set
     ///   stands, so no previously-resolved edge is lost.
     ///
+    /// Only methods are dropped. A class or macro a [`Want::DeclaredCall`]
+    /// admits (S-521) stays beside the free function, so a function and a class
+    /// of one name in one scope are two candidates here exactly as on every
+    /// other rung. Under [`Want::Callable`] the candidates are functions and
+    /// methods alone, so dropping the methods is what keeping the functions was.
+    ///
     /// Path-qualified (`Type::f` via [`descend`](Ctx::descend)) and typed calls
     /// never reach this step, and a receiver-method call ([`RefForm::Method`])
     /// never reaches the scope walk at all — it binds by its receiver's shape
@@ -3335,14 +3412,9 @@ impl Ctx<'_> {
         if !self.bare_path_call.get() {
             return candidates;
         }
-        let is_free = |id: &NodeId| {
-            self.ix
-                .info
-                .get(id)
-                .is_some_and(|i| i.kind == NodeKind::Function)
-        };
-        if candidates.iter().any(is_free) {
-            candidates.retain(is_free);
+        let kind = |id: &NodeId| self.ix.info.get(id).map(|i| i.kind);
+        if candidates.iter().any(|id| kind(id) == Some(NodeKind::Function)) {
+            candidates.retain(|id| kind(id) != Some(NodeKind::Method));
         }
         candidates
     }
@@ -3377,7 +3449,7 @@ impl Ctx<'_> {
         //    (sibling files are linked via the path-derived module tree, not
         //    via Contains), or an extern crate's root (`use other::*` /
         //    `use other;` name the crate itself).
-        if want != Want::Callable {
+        if !want.is_call() {
             if let Some((krate, mods)) = self.source_module() {
                 let mut child = mods.clone();
                 child.push(name.to_string());
@@ -3678,7 +3750,7 @@ impl Ctx<'_> {
     /// name exactly one nested type; the last names a member admitted by
     /// `want`, and an empty `rest` is the type itself.
     ///
-    /// A **call** (`want` = [`Want::Callable`]) takes its last segment through
+    /// A **call** ([`Want::is_call`]) takes its last segment through
     /// [`type_member`](Ctx::type_member): the type's own callable, else its
     /// in-repository supertypes' (S-468). Every other lookup reads the type's
     /// own members only, as before.
@@ -3711,7 +3783,7 @@ impl Ctx<'_> {
                 }
             }
         }
-        if want == Want::Callable {
+        if want.is_call() {
             return Some(self.type_member(cursor, last));
         }
         Some(exactly_one(&self.ix.members_named(cursor, last, want)))
@@ -3955,7 +4027,7 @@ impl Ctx<'_> {
 
             // Final segment: a child module (preferred for imports) or a
             // member item of the current module.
-            if want != Want::Callable {
+            if !want.is_call() {
                 let mut child = key.1.clone();
                 child.push(seg.clone());
                 if let Some(&m) = self.ix.modules.get(&(key.0.clone(), child)) {

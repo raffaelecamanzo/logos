@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use crate::plugin::{LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl};
+use crate::plugin::{CallTargets, LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl};
 
 /// A module identity: `(crate name, module path segments)` — the binder's
 /// `ModKey`.
@@ -76,6 +76,11 @@ pub struct PackageLayout {
     /// Normalised extension → the interop family its language binds within
     /// (S-519) — what the type and namespace indexes are partitioned by.
     families: HashMap<String, String>,
+    /// Normalised extension → what a call of its language may bind besides a
+    /// callable (S-521, [FR-RS-16]). An absent extension admits a callable only.
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    call_targets: HashMap<String, CallTargets>,
 }
 
 /// One language's path-model data in a layout (S-519).
@@ -152,6 +157,7 @@ impl PackageLayout {
             .with_namespace_extensions(registry.namespace_extensions())
             .with_path_models(registry.path_models())
             .with_families(registry.families())
+            .with_call_targets(registry.call_targets())
     }
 
     /// This layout, with each extension's path-model data (S-519; the shape
@@ -190,6 +196,17 @@ impl PackageLayout {
             families
                 .into_iter()
                 .map(|(ext, family)| (ext.trim_start_matches('.').to_ascii_lowercase(), family)),
+        );
+        self
+    }
+
+    /// This layout, with each extension's call targets (S-521; the shape
+    /// [`LanguageRegistry::call_targets`] returns).
+    pub fn with_call_targets(mut self, targets: HashMap<String, CallTargets>) -> Self {
+        self.call_targets.extend(
+            targets
+                .into_iter()
+                .map(|(ext, t)| (ext.trim_start_matches('.').to_ascii_lowercase(), t)),
         );
         self
     }
@@ -337,6 +354,16 @@ impl PackageLayout {
         Some(self.families.get(&ext).cloned().unwrap_or(ext))
     }
 
+    /// What a call written in the file at `path` may bind besides a callable
+    /// (S-521, [FR-RS-16]): its language's declaration, or none.
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    pub fn call_targets(&self, path: &str) -> CallTargets {
+        extension(path)
+            .and_then(|ext| self.call_targets.get(&ext).copied())
+            .unwrap_or_default()
+    }
+
     fn path_model(&self, path: &str) -> Option<&PathModel> {
         self.path_models.get(&extension(path)?)
     }
@@ -414,6 +441,7 @@ impl PackageLayout {
                     .collect(),
             )
             .with_families(exts().map(|ext| (ext, semantics.family.clone())).collect())
+            .with_call_targets(exts().map(|ext| (ext, semantics.call_targets)).collect())
     }
 
     /// `true` when the file at `path` takes the package rungs: its language
@@ -1108,5 +1136,32 @@ mod path_model_tests {
         assert_eq!(l.family("Makefile"), None);
         assert!(l.is_family_crate(&family_crate("python")));
         assert!(!l.is_family_crate("crate"));
+    }
+}
+
+// The call targets (S-521) a single-plugin layout carries, against the
+// registry's. Every loaded plugin is walked, so no language id is spelt here.
+#[cfg(test)]
+mod call_target_tests {
+    use super::*;
+
+    /// [`PackageLayout::from_plugin`] is the registry's layout for every
+    /// extension of its plugin — call targets included — and at least one
+    /// shipped plugin declares some, so the comparison is not over defaults.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_call_targets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let mut declaring = 0;
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                assert_eq!(own.call_targets(&path), full.call_targets(&path), "{path}");
+                declaring += usize::from(own.call_targets(&path).any());
+            }
+        }
+        assert!(declaring > 0, "some shipped plugin declares a call target");
     }
 }
