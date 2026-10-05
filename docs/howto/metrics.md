@@ -290,6 +290,14 @@ snapshots and the *delta* a change introduces. Practical guidance:
   four new Java type-relation edges (`Extends`, `Implements`, `Instantiates`,
   `TypeUses`) are fenced out of the metric views, so they do not move the signal
   by themselves. Rust and every other language are unchanged.
+- **A repository's signal moves on its first index after upgrading past 1.10.0.**
+  Rust paths through a `mod x;` declaration, and the imports and inherited calls of
+  PHP, C#, Kotlin, Scala and Python, now bind across files. More cross-directory
+  edges usually lower modularity and can lengthen the dependency depth. Fewer
+  functions read as dead, which helps redundancy. On Logos's own repository the
+  signal moved 8402 → 8319, almost all of it modularity. This is the same kind of
+  correction: after that first index, re-establish the baseline with
+  `logos gate --save` rather than chasing the delta.
 
 ## Determinism guarantee
 

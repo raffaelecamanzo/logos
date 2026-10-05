@@ -159,6 +159,11 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   content hash, so run **one `logos scan` or `logos index`** after upgrading — a bare
   `logos sync` re-reads nothing and the new bindings would not appear. Until then each
   such file keeps the path key it had.
+- **The signal moves on the first index after upgrading.** The newly bound edges (Rust
+  paths through `mod x;`, and cross-file imports and supertypes in PHP, C#, Kotlin, Scala
+  and Python) usually lower modularity. On this repository it went 8402 → 8319. Re-establish
+  the baseline with `logos gate --save` after that first index. See
+  [metrics.md](docs/howto/metrics.md).
 
 ## [1.10.0] — 2026-10-04
 
