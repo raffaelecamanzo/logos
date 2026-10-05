@@ -17,6 +17,7 @@
 //! src/pkg/ns/conv.py            (module 150 "conv")     ─ convert (151)   [no ns/__init__.py]
 //! tests/test_map.py             (module 160 "test_map") ─ test_it (161)
 //! lib/thing.js                  (module 170 "thing")    ─ thing (171)     [JavaScript]
+//! manage.py                     (module 180 "manage")   [a top-level script]
 //! ```
 //!
 //! [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
@@ -34,6 +35,7 @@ use crate::plugin::PathModelDecl;
 const MAP_PY: i64 = 30;
 const ROUTING_INIT_PY: i64 = 31;
 const TEST_MAP_PY: i64 = 32;
+const TOP_PY: i64 = 34;
 
 const POLICIES: [BindingPolicy; 3] = [
     BindingPolicy::Strict,
@@ -81,6 +83,7 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         node(161, "test_it", NodeKind::Function, "tests/test_map.py"),
         node(170, "thing", NodeKind::Module, "lib/thing.js"),
         node(171, "thing", NodeKind::Function, "lib/thing.js"),
+        node(180, "manage", NodeKind::Module, "manage.py"),
     ];
     let edges = vec![
         contains(100, 101),
@@ -187,10 +190,17 @@ fn a_package_files_own_level_is_its_package() {
 }
 
 /// More levels than the package is deep name nothing, and no wider rung reads a
-/// relative head as a name — not the suffix match, not the unique name.
+/// relative head as a name — not the suffix match, not the unique name. Nor
+/// does a level that climbs exactly to the import root: Python refuses
+/// `from ... import pkg` two packages down, and `from . import x` in a
+/// top-level script.
 #[test]
 fn a_level_above_the_import_root_names_nothing() {
     for policy in POLICIES {
+        let r = import(3, MAP_PY, 130, "..::..::pkg");
+        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
+        let r = import(4, TOP_PY, 180, ".::pkg");
+        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
         let r = import(1, MAP_PY, 130, "..::..::..::_internal");
         assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
         let r = import(2, MAP_PY, 130, ".::nowhere::Rule");

@@ -2275,8 +2275,10 @@ impl Ctx<'_> {
     /// recorded `..::_internal::x`. `.` is the source's package
     /// ([`PackageLayout::package_dir`]) and each `..` one package up; the rest
     /// descends from there, and nothing follows it (`from . import *`) names
-    /// the package itself. More levels than the package is deep name nothing,
-    /// as the language refuses it.
+    /// the package itself. A level must leave at least one package: climbing to
+    /// the import root itself (`from .. import x` in a top-level package, `from
+    /// . import x` in a top-level script) names nothing, as the language
+    /// refuses it ("attempted relative import beyond top-level package").
     ///
     /// `None` for any other path or source — a relative specifier of a
     /// path-grammar language is bound by [`resolve_specifier`](Ctx::resolve_specifier),
@@ -2292,7 +2294,7 @@ impl Ctx<'_> {
         let ups = segs.iter().take_while(|s| s.as_str() == "..").count();
         let heads = segs.iter().take_while(|s| is_relative_head(s)).count();
         let rest = &segs[heads..];
-        let Some(depth) = package.len().checked_sub(ups) else {
+        let Some(depth) = package.len().checked_sub(ups).filter(|d| *d > 0) else {
             return Some(Res::NotFound);
         };
         let base = &package[..depth];
