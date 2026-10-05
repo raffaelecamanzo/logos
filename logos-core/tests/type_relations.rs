@@ -284,8 +284,9 @@ fn php_handlers_implement_the_interface_and_extend_the_abstract_handler() {
 /// interface, and each entry's edge kind follows what it binds — `Extends` to
 /// `JsonReader`, `Implements` to `IJsonLineInfo`. A struct implements, an
 /// interface extends, a generic base binds by its name, a record extends its
-/// primary-constructor base, and an alias and a `global::` name reach the
-/// reader. `IDisposable` stays unbound.
+/// base (plain or through its primary constructor), a primary-constructor class
+/// its base, and an alias and a `global::` name reach the reader. `IDisposable`
+/// stays unbound.
 #[test]
 fn csharp_supertypes_take_the_kind_of_what_they_bind() {
     let (_tmp, engine) = indexed(fixtures::NEWTONSOFT);
@@ -297,6 +298,8 @@ fn csharp_supertypes_take_the_kind_of_what_they_bind() {
             "IJsonPositionInfo -> Src/Newtonsoft.Json/IJsonLineInfo.cs:IJsonLineInfo:interface",
             "IntConverter -> Src/Newtonsoft.Json/JsonConverter.cs:JsonConverter:class",
             "JTokenReader -> Src/Newtonsoft.Json/JsonReader.cs:JsonReader:class",
+            "JsonCountingReader -> Src/Newtonsoft.Json/JsonReader.cs:JsonReader:class",
+            "JsonEndToken -> Src/Newtonsoft.Json/JsonConverter.cs:JsonToken:class",
             "JsonStartToken -> Src/Newtonsoft.Json/JsonConverter.cs:JsonToken:class",
             "JsonTextReader -> Src/Newtonsoft.Json/JsonReader.cs:JsonReader:class",
             "RootedReader -> Src/Newtonsoft.Json/JsonReader.cs:JsonReader:class",
@@ -399,8 +402,15 @@ fn a_php_trait_ends_the_inherited_walk_and_a_relative_name_records_nothing() {
     let rt = engine.runtime().unwrap();
     assert_eq!(
         edges(rt, EdgeKind::Implements),
-        strings(&["B -> src/App/T.php:T:trait"])
+        strings(&[
+            "B -> src/App/T.php:T:trait",
+            "E -> src/App/I.php:I:interface",
+            "E -> src/App/T.php:T:trait",
+            "U -> src/App/T.php:T:trait",
+        ])
     );
+    // No `Extends` out of `make`: the anonymous class's base has no node to
+    // relate, and is never the function's.
     assert_eq!(
         edges(rt, EdgeKind::Extends),
         strings(&["B -> src/App/A.php:A:class", "D -> src/App/B.php:B:class"])

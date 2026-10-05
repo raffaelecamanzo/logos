@@ -133,7 +133,7 @@ pub const NEWTONSOFT: Fixture = &[
     ),
     (
         "Src/Newtonsoft.Json/JsonConverter.cs",
-        "namespace Newtonsoft.Json\n{\n    public abstract class JsonConverter<T>\n    {\n    }\n\n    public struct LinePosition : IJsonLineInfo\n    {\n        public bool HasLineInfo()\n        {\n            return true;\n        }\n    }\n\n    public record JsonToken(int Depth);\n\n    public record JsonStartToken(int Depth) : JsonToken(Depth);\n}\n",
+        "namespace Newtonsoft.Json\n{\n    public abstract class JsonConverter<T>\n    {\n    }\n\n    public struct LinePosition : IJsonLineInfo\n    {\n        public bool HasLineInfo()\n        {\n            return true;\n        }\n    }\n\n    public record JsonToken(int Depth);\n\n    public record JsonStartToken(int Depth) : JsonToken(Depth);\n\n    public record JsonEndToken : JsonToken;\n\n    public class JsonCountingReader(int depth) : JsonReader(depth)\n    {\n    }\n}\n",
     ),
     (
         "Src/Newtonsoft.Json/Converters/IntConverter.cs",
@@ -185,7 +185,9 @@ pub const PYTHON_SHAPES: Fixture = &[
 /// PHP shapes: a used trait's method outranks the parent's, so `$this->m()` in
 /// a class that uses one stays unbound — while `parent::m()` names the parent,
 /// which the trait does not touch. A `namespace\Foo` base is not read through
-/// the file's `use` of another `Foo`.
+/// the file's `use` of another `Foo`. An enum implements and uses, a trait uses
+/// a trait, and an anonymous class's `extends` is never its enclosing
+/// function's.
 pub const PHP_SHAPES: Fixture = &[
     (
         "src/App/A.php",
@@ -214,6 +216,22 @@ pub const PHP_SHAPES: Fixture = &[
     (
         "src/App/R.php",
         "<?php\n\nnamespace App;\n\nuse Other\\Foo;\n\nclass R extends namespace\\Foo {}\n",
+    ),
+    (
+        "src/App/I.php",
+        "<?php\n\nnamespace App;\n\ninterface I {}\n",
+    ),
+    (
+        "src/App/E.php",
+        "<?php\n\nnamespace App;\n\nenum E implements I\n{\n    use T;\n\n    case One;\n}\n",
+    ),
+    (
+        "src/App/U.php",
+        "<?php\n\nnamespace App;\n\ntrait U\n{\n    use T;\n}\n",
+    ),
+    (
+        "src/App/make.php",
+        "<?php\n\nnamespace App;\n\nfunction make()\n{\n    return new class extends A {};\n}\n",
     ),
 ];
 

@@ -20,7 +20,7 @@
 //! src/elsewhere/lib.py  (module 140 "lib")    ─ class Hidden (141)
 //! Src/Reader.cs         (module 200 "Reader") ─ class Reader (201), interface ILine (202),
 //!                                                class Text (203), interface IPos (204),
-//!                                                class Exception (205)
+//!                                                class Exception (205), trait Mixin (206) [trait]
 //! src/lib.rs            (module 300 "lib")    ─ struct Sq (302), fn run (303) [impl Port for Sq]
 //! src/shapes.rs         (module 310 "shapes") ─ trait Port (301)
 //! ```
@@ -89,6 +89,7 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         node(203, "Text", NodeKind::Class, "Src/Reader.cs"),
         node(204, "IPos", NodeKind::Interface, "Src/Reader.cs"),
         node(205, "Exception", NodeKind::Class, "Src/Reader.cs"),
+        node(206, "Mixin", NodeKind::Trait, "Src/Reader.cs"),
         node(300, "lib", NodeKind::Module, "src/lib.rs"),
         node(301, "Port", NodeKind::Trait, "src/shapes.rs"),
         node(310, "shapes", NodeKind::Module, "src/shapes.rs"),
@@ -107,6 +108,7 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         contains(200, 203),
         contains(200, 204),
         contains(200, 205),
+        contains(200, 206),
         contains(310, 301),
         contains(300, 302),
         contains(300, 303),
@@ -228,14 +230,15 @@ fn a_type_relation_never_binds_a_module() {
 }
 
 /// Where the language leaves a supertype's kind unsaid (C#), a class's entry
-/// binds the class or the interface it names, and its edge kind follows the
-/// target. An interface's entry binds an interface, as `Extends`, and never a
+/// binds the class, interface or trait it names, and its edge kind follows the
+/// target — `Implements` to an interface or a trait. An interface's entry binds an interface, as `Extends`, and never a
 /// class.
 #[test]
 fn a_silent_supertype_takes_the_kind_of_what_it_binds() {
     for (source, target, expected) in [
         (203, "Reader", Some((201, EdgeKind::Extends))),
         (203, "ILine", Some((202, EdgeKind::Implements))),
+        (203, "Mixin", Some((206, EdgeKind::Implements))),
         (204, "ILine", Some((202, EdgeKind::Extends))),
         (204, "Reader", None),
     ] {
