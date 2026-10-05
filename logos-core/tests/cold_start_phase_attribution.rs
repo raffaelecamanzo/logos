@@ -28,8 +28,14 @@
 //! - the plugin-substrate subtotal **explicitly and separately** — the number
 //!   that decided CR-116 §3.2 branch (a) (a genuine breach) versus branch (b)
 //!   (the guards bounded more than the requirement enumerated);
-//! - the **instrumentation's own cost**: the mean of the per-sample delta
-//!   between the instrumented and uninstrumented totals (CR-116 R2).
+//! - the **instrumentation's own cost**: the median and mean of the per-sample delta
+//!   between the instrumented and uninstrumented totals (CR-116 R2);
+//! - **where the deferred compile went** ([CR-197]): embedded queries compile
+//!   on their language's first use, not at start, so each sample also times a
+//!   one-file sync of a language nothing in its process had used
+//!   (`first_use_sync_ms`) and the sum of every language's first-use compile
+//!   (`first_use_compile_ms`). Both are outside every cold-start figure — the
+//!   cost a guard stops seeing has to be reported where the user pays it.
 //!
 //! ## Why every sample is a fresh process
 //!
@@ -74,6 +80,7 @@
 //! [S-368]: ../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
 //! [S-369]: ../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
 //! [NFR-PE-05]: ../../docs/specs/requirements/NFR-PE-05.md
+//! [CR-197]: ../../docs/requests/CR-197-plugin-queries-compile-on-first-use-of-their-language.md
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -83,6 +90,11 @@ use tempfile::TempDir;
 use logos_core::Engine;
 
 const DEFAULT_SAMPLES: usize = 8;
+/// The file each child syncs after its instrumented start: one language, one
+/// file, so the sync times a single language's first use (CR-197).
+const FIRST_USE_FILE: &str = "first_use.py";
+const FIRST_USE_SOURCE: &str =
+    "def first_use(x):\n    return helper(x)\n\n\ndef helper(x):\n    return x + 1\n";
 /// Marker on the one line of stdout
 /// [`cold_start_phase_attribution_child_sample`] emits, so its parent can find
 /// that line amid the test harness's own banner output. Matched anywhere in a
@@ -155,6 +167,17 @@ fn mean_of(xs: &[f64]) -> f64 {
     xs.iter().sum::<f64>() / xs.len() as f64
 }
 
+fn median_of(xs: &[f64]) -> f64 {
+    let mut xs = xs.to_vec();
+    xs.sort_by(|a, b| a.partial_cmp(b).expect("no NaNs in a wall-clock sample"));
+    let mid = xs.len() / 2;
+    if xs.len().is_multiple_of(2) {
+        (xs[mid - 1] + xs[mid]) / 2.0
+    } else {
+        xs[mid]
+    }
+}
+
 /// One sample, measured in its own process: an uninstrumented [`Engine::start`]
 /// (byte-for-byte what `cold_start_to_ready_engine_is_within_pe05_budget`
 /// measures) and its phase-timed twin
@@ -179,7 +202,9 @@ fn cold_start_phase_attribution_child_sample() {
     // Compiled queries are shared process-wide (HF-3), so without this the
     // instrumented arm would time cache hits where the uninstrumented one
     // compiled — and the paired delta would measure the cache, not the
-    // instrumentation. Both arms stay cold starts.
+    // instrumentation. Both arms stay cold starts. Since CR-197 a start
+    // compiles only override queries (none here), but the first-use figures
+    // below must also start from an empty cache.
     logos_core::plugin::queries::clear_compiled_cache();
 
     let root = TempDir::new().expect("temp root");
@@ -215,6 +240,31 @@ fn cold_start_phase_attribution_child_sample() {
          (diff {diff:?} exceeds the {margin:?} margin): {phases:?}"
     );
 
+    // The one-file sync of a language no extraction in this process has used
+    // yet (CR-197): where a language's query compilation lands when it is not
+    // paid at engine start. Timed after the start, on the started engine, so it
+    // never touches the cold-start figures above.
+    let root_dir = root.path().canonicalize().expect("canonical temp root");
+    let first_use = root_dir.join(FIRST_USE_FILE);
+    std::fs::write(&first_use, FIRST_USE_SOURCE).expect("write the first-use file");
+    let t = Instant::now();
+    let synced = engine.sync(&[first_use]);
+    let first_use_sync = t.elapsed();
+    assert_eq!(
+        synced.files_added, 1,
+        "the first-use file synced: {synced:?}"
+    );
+    // Then every other language's first use, so the record carries the whole
+    // compile the start deferred: each language's own first-use report, the
+    // synced one included.
+    engine
+        .registry()
+        .expect("the registry loads")
+        .compile_all_queries()
+        .expect("every query compiles");
+    let first_uses = logos_core::plugin::queries::first_use_compiles();
+    let first_use_compile: Duration = first_uses.iter().map(|r| r.elapsed).sum();
+
     let record = serde_json::json!({
         "uninstrumented_ms": ms(uninstrumented),
         "instrumented_ms": ms(instrumented),
@@ -234,6 +284,9 @@ fn cold_start_phase_attribution_child_sample() {
             "pool_startup": ms(phases.pool_startup),
             "other": ms(phases.other),
         },
+        "first_use_sync_ms": ms(first_use_sync),
+        "first_use_compile_ms": ms(first_use_compile),
+        "first_use_languages": first_uses.len(),
     });
     println!(
         "{CHILD_MARKER}{}",
@@ -270,6 +323,8 @@ fn cold_start_phase_attribution() {
     let mut registry_subtotal_ms: Vec<f64> = Vec::with_capacity(n);
     let mut per_phase_ms: Vec<Vec<f64>> = phase_names.iter().map(|_| Vec::new()).collect();
     let mut paired_overhead_ms: Vec<f64> = Vec::with_capacity(n);
+    let mut first_use_sync_ms: Vec<f64> = Vec::with_capacity(n);
+    let mut first_use_compile_ms: Vec<f64> = Vec::with_capacity(n);
 
     for i in 0..n {
         let output = Command::new(&exe)
@@ -307,12 +362,15 @@ fn cold_start_phase_attribution() {
         // into. Averaging *this* isolates the instrumentation's own cost from
         // the much larger cross-process variance (CR-116 R2, R3).
         paired_overhead_ms.push(ins - un);
+        first_use_sync_ms.push(get("first_use_sync_ms"));
+        first_use_compile_ms.push(get("first_use_compile_ms"));
         for (bucket, name) in per_phase_ms.iter_mut().zip(phase_names) {
             bucket.push(record["phases_ms"][name].as_f64().expect("phase field is a number"));
         }
     }
 
     let overhead_mean_ms = mean_of(&paired_overhead_ms);
+    let overhead_median_ms = median_of(&paired_overhead_ms);
     let uninstrumented_mean = mean_of(&uninstrumented_ms);
     let overhead_pct = overhead_mean_ms / uninstrumented_mean * 100.0;
 
@@ -339,8 +397,17 @@ fn cold_start_phase_attribution() {
         // Kept for continuity of the measurement; no longer named for the
         // requirement, which bounds no subset of its phases separately.
         "registry_subtotal_ms": stats(registry_subtotal_ms),
+        // A one-file sync of a language no extraction in that process had
+        // used, on the engine the sample just started — outside every
+        // cold-start figure above (CR-197).
+        "first_use_sync_ms": stats(first_use_sync_ms),
+        // Every language's first-use compile summed: the work the start no
+        // longer does, paid instead by whichever extraction first needs each
+        // language (CR-197).
+        "first_use_compile_ms": stats(first_use_compile_ms),
         "instrumentation_overhead_ms": {
             "mean_of_paired_per_sample_deltas": overhead_mean_ms,
+            "median_of_paired_per_sample_deltas": overhead_median_ms,
             "pct_of_uninstrumented_mean": overhead_pct,
         },
     });
@@ -356,14 +423,23 @@ fn cold_start_phase_attribution() {
 
     // A sanity floor, not a budget: each child already asserts its own phase
     // sum reconciles with its own measured total (AC1). This only catches the
-    // instrumentation itself becoming pathologically expensive on average
-    // (e.g. an accidental syscall per phase) — loose, because the paired
+    // instrumentation itself becoming pathologically expensive in a typical
+    // sample (e.g. an accidental syscall per phase) — loose, because the paired
     // per-sample delta still carries some of each process's own scheduling
     // noise even though it cancels the cross-process ramp-up effect.
+    //
+    // Judged on the MEDIAN paired delta since 2026-10-06 (S-600), the 100 ms
+    // floor unchanged. A real instrumentation cost moves every sample, and so
+    // the median; one host stall moves one sample by seconds, and with it the
+    // mean. Once CR-197 took the cold start from ~710 to ~80 ms (debug), a single
+    // stall swamped an eight-sample mean in either direction: this floor failed
+    // at -285.7, +221.0 and -358.1 ms under shared-host load, the first on the
+    // pre-CR-197 build, each from one outlying sample. The mean stays in the
+    // record beside it.
     assert!(
-        overhead_mean_ms.abs() < 100.0,
-        "the mean paired instrumented-vs-uninstrumented delta is {overhead_mean_ms:.1} ms \
-         ({overhead_pct:.1}% of the {uninstrumented_mean:.1} ms uninstrumented mean) — the \
-         instrumentation itself looks expensive, not just measured"
+        overhead_median_ms.abs() < 100.0,
+        "the median paired instrumented-vs-uninstrumented delta is {overhead_median_ms:.1} ms \
+         (mean {overhead_mean_ms:.1} ms, {overhead_pct:.1}% of the {uninstrumented_mean:.1} ms \
+         uninstrumented mean) — the instrumentation itself looks expensive, not just measured"
     );
 }

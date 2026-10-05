@@ -11,13 +11,19 @@ use std::collections::BTreeMap;
 
 use crate::extract::{extract, FileInput, SymbolContext};
 use crate::model::{EdgeKind, NodeKind};
+use crate::plugin::queries::LanguageQueries;
 use crate::plugin::{CompiledPlugin, LanguagePlugin, PluginManifest};
 
 fn graphql_plugin() -> CompiledPlugin {
     let toml = include_str!("../../../plugins/graphql/plugin.toml");
     let manifest = PluginManifest::parse("graphql/plugin.toml", toml).unwrap();
     let language: tree_sitter::Language = tree_sitter_graphql::LANGUAGE.into();
-    CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+    CompiledPlugin::new(
+        manifest,
+        language,
+        LanguageQueries::precompiled(BTreeMap::new()),
+        Vec::new(),
+    )
 }
 
 /// A schema exercising all six type-definition subtypes.

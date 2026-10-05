@@ -3,8 +3,9 @@
 ; Captures the top-level declarations that become NodeKind nodes in the code
 ; graph (model::NodeKind). The capture name after the `@` carries the kind so
 ; the extraction engine (S-007) can map a match to a NodeKind without a second
-; lookup. This file is compiled against the built Rust `Language` at load and
-; fails fast — naming this path — if a node type or field name drifts.
+; lookup. This file is compiled against the built Rust `Language` on its first
+; use, or at load as an on-disk override, and fails — naming this path — if a
+; node type or field name drifts (CR-197).
 ;
 ; This query is intentionally droppable-on-disk: placing a modified copy at
 ; `.logos/plugins/rust/queries/symbols.scm` shadows it without a rebuild

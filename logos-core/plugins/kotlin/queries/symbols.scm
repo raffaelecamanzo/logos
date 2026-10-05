@@ -1,8 +1,9 @@
 ; Kotlin symbol-extraction query (S-055, capability = "symbols").
 ;
 ; Capture names map to NodeKind via NodeKind::as_str (extract engine).
-; Compiled against the built Kotlin Language at load; fails fast naming this
-; file on drift (FR-PL-02). Droppable on disk at
+; Compiled against the built Kotlin Language on its first use, or at
+; load as an on-disk override; drift fails naming this file (FR-PL-02,
+; CR-197). Droppable on disk at
 ; `.logos/plugins/kotlin/queries/symbols.scm` (FR-PL-04, UAT-PL-03).
 ;
 ; class-bearing applicability (FR-QM-11): mapping a class construct to

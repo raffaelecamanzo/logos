@@ -6,12 +6,18 @@
 //! 1. parses its embedded `plugin.toml` ([FR-PL-02]);
 //! 2. builds the `Language` from its `LanguageFn` and asserts ABI — a mismatch
 //!    is skipped-and-warned, never fatal ([FR-PL-03], [NFR-PC-03]);
-//! 3. resolves each capability's query (on-disk override shadows embedded) and
-//!    compiles it, failing fast and naming the file on error ([FR-PL-02],
-//!    [FR-PL-04]) — once per process for each distinct source, so a later load
-//!    that resolves the same text shares the compiled query (HF-3,
-//!    [`queries::compile_shared`]);
+//! 3. resolves each capability's query (on-disk override shadows embedded). A
+//!    language with an override compiles now, failing fast and naming the file
+//!    on error ([FR-PL-02], [FR-PL-04]); every other language compiles its
+//!    queries on its first use instead (CR-197, [`queries::LanguageQueries`]),
+//!    so a cold start pays only for the languages it uses. Either way each
+//!    distinct source compiles once per process, so a later load that resolves
+//!    the same text shares the compiled query (HF-3, [`queries::compile_shared`]);
 //! 4. indexes the loaded grammar by extension for `for_extension` lookups.
+//!
+//! A broken *embedded* query no longer fails the load: shipped queries are
+//! fixed per build, so the test that compiles every one of them
+//! ([`LanguageRegistry::compile_all_queries`]) catches it before a user can.
 //!
 //! Built once per engine ([ADR-04]) — a workspace process builds one per member,
 //! over queries compiled once per process — and thereafter every lookup is a
@@ -25,7 +31,7 @@
 //! [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 //! [NFR-PC-03]: ../../../docs/specs/requirements/NFR-PC-03.md
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -35,8 +41,8 @@ use super::abi::{assert_abi, AbiRange};
 use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
 use super::manifest::{CallTargets, PluginManifest};
-use super::plugin::{CompiledPlugin, CompiledQueries, LanguagePlugin};
-use super::queries;
+use super::plugin::{CompiledPlugin, LanguagePlugin};
+use super::queries::{self, LanguageQueries};
 
 /// One language's path-model declaration (S-519, [FR-RS-14]), as
 /// [`LanguageRegistry::path_models`] hands it to the module key: the package-file
@@ -101,12 +107,14 @@ impl LanguageRegistry {
     /// `project_root` and asserting ABI against the linked tree-sitter runtime.
     ///
     /// ABI mismatches are skipped with a warning to stderr; a malformed
-    /// descriptor or a query that fails to compile is a hard error naming the
-    /// file ([FR-PL-02]).
+    /// descriptor, an override query that fails to compile, or an unreadable
+    /// override is a hard error naming the file ([FR-PL-02]). Embedded queries
+    /// are not compiled here — each language compiles on its first use
+    /// (CR-197).
     ///
     /// # Errors
-    /// Returns [`PluginError`] on a descriptor parse error, a query compile
-    /// error, or an unreadable override file.
+    /// Returns [`PluginError`] on a descriptor parse error, an override query
+    /// compile error, or an unreadable override file.
     pub fn load(project_root: impl AsRef<Path>) -> Result<Self, PluginError> {
         Self::load_from(
             &grammars::compiled(),
@@ -432,6 +440,25 @@ impl LanguageRegistry {
         &self.skipped
     }
 
+    /// Compile every loaded language's queries now, stopping at the first that
+    /// fails (CR-197, [FR-PL-02]). A language already compiled — at load for
+    /// an override, or by an earlier first use — is not compiled again.
+    ///
+    /// Production never needs it: each language compiles on its first use. It
+    /// is the test-time fail-fast for the embedded queries, and the way a
+    /// harness prices what a cold start no longer pays.
+    ///
+    /// # Errors
+    /// The [`PluginError`] of the first language whose queries do not compile,
+    /// naming the query file — or, for a namespace language whose `symbols`
+    /// does not capture its namespace, the descriptor.
+    pub fn compile_all_queries(&self) -> Result<(), PluginError> {
+        for plugin in &self.plugins {
+            plugin.compiled_queries().map_err(PluginError::clone)?;
+        }
+        Ok(())
+    }
+
     /// Number of successfully loaded grammars.
     pub fn len(&self) -> usize {
         self.plugins.len()
@@ -545,9 +572,10 @@ impl LanguageRegistry {
 pub(crate) struct RegistryLoadTimings {
     /// Parsing every grammar's embedded `plugin.toml`.
     pub manifest_parse: Duration,
-    /// Resolving and compiling every capability's query — or, for a query this
-    /// process already compiled, fetching it from the cache (HF-3), so only a
-    /// process's first load times the compile itself.
+    /// Resolving every capability's query and compiling the languages that
+    /// carry an override — or, for a query this process already compiled,
+    /// fetching it from the cache (HF-3). Embedded queries compile on first
+    /// use (CR-197), outside this phase.
     pub query_compile: Duration,
     /// Everything else the load loop does: ABI assertion, override-dir
     /// resolution, plugin/extension/filename bookkeeping — the
@@ -562,8 +590,9 @@ pub(crate) struct RegistryLoadTimings {
 /// does not compile ([FR-PL-02]). A misspelt kind would otherwise match nothing,
 /// silently recording every callable of the language as bodyless.
 ///
-/// Checked here, beside the queries, because both registry load paths compile
-/// a descriptor's queries through [`compile_capabilities`].
+/// Checked here, beside the queries, because both registry load paths resolve
+/// a descriptor's queries through [`compile_capabilities`]. It needs no
+/// compiled query, so it stays at load for every language.
 ///
 /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 /// [FR-PL-02]: ../../../docs/specs/requirements/FR-PL-02.md
@@ -588,20 +617,21 @@ fn check_body_node_kinds(
     }
 }
 
-/// Resolve and compile every capability's query for one grammar.
+/// Resolve every capability's query for one grammar, compiling them now only
+/// when one is an on-disk override (CR-197; see [`queries::LanguageQueries`]).
 ///
-/// Returns the capability → compiled query map and the list of query keys whose
-/// source was an on-disk override. Each query comes from the process-wide
-/// cache when this grammar's capability already compiled to the same text.
+/// Returns the language's queries and the list of query keys whose source was
+/// an on-disk override. Each compiled query comes from the process-wide cache
+/// when this grammar's capability already compiled to the same text.
 fn compile_capabilities(
     entry: &GrammarEntry,
     manifest: &PluginManifest,
     language: &Language,
     override_dir: Option<&Path>,
-) -> Result<(CompiledQueries, Vec<String>), PluginError> {
+) -> Result<(LanguageQueries, Vec<String>), PluginError> {
     check_body_node_kinds(entry, manifest, language)?;
 
-    let mut compiled = BTreeMap::new();
+    let mut resolved_queries = Vec::with_capacity(manifest.capabilities.len());
     let mut overridden = Vec::new();
 
     // Each declared capability has a required, fail-fast query (`validate`
@@ -631,46 +661,17 @@ fn compile_capabilities(
         if resolved.overridden {
             overridden.push(key.to_string());
         }
-        let query = queries::compile_shared(language, &manifest.name, &resolved)?;
-        compiled.insert(key.to_string(), query);
+        resolved_queries.push(resolved);
     }
-    check_namespace_capture(entry, manifest, &compiled)?;
+    let queries = LanguageQueries::new(
+        &manifest.name,
+        entry.manifest_label,
+        manifest.module_model_kind() == super::ModuleModelKind::Namespace,
+        resolved_queries,
+        language,
+    )?;
 
-    Ok((compiled, overridden))
-}
-
-/// A declared-namespace language (S-518, [FR-RS-13]) must name its namespace
-/// declarations: its compiled `symbols` query — embedded or an on-disk override
-/// — carries the `@module.namespace` capture. Without it every file of the
-/// language would read as the global namespace, and every type of the
-/// repository would be visible to every other without an import — honest
-/// absence at the query becoming a fabricated binding ([NFR-RA-05]). Refused at
-/// load instead, naming the descriptor.
-///
-/// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
-/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn check_namespace_capture(
-    entry: &GrammarEntry,
-    manifest: &PluginManifest,
-    compiled: &CompiledQueries,
-) -> Result<(), PluginError> {
-    use super::manifest::NAMESPACE_CAPTURE;
-    if manifest.module_model_kind() != super::ModuleModelKind::Namespace {
-        return Ok(());
-    }
-    let captures = compiled
-        .get("symbols")
-        .is_some_and(|q| q.capture_names().contains(&NAMESPACE_CAPTURE));
-    if captures {
-        return Ok(());
-    }
-    Err(PluginError::Manifest {
-        file: entry.manifest_label.to_string(),
-        detail: format!(
-            "`[module_model]` kind 'namespace' requires the `symbols` query to capture \
-             `@{NAMESPACE_CAPTURE}`, or every file would read as the global namespace"
-        ),
-    })
+    Ok((queries, overridden))
 }
 
 /// The override directory for a language: `<root>/.logos/plugins/<name>/`.
@@ -792,10 +793,12 @@ mod tests {
 
     /// S-518 / FR-RS-13: a declared-namespace grammar whose `symbols` query
     /// names no `@module.namespace` would read every file as the global
-    /// namespace, so the load fails naming the descriptor; the same grammar
-    /// capturing it loads with the model in its semantics.
+    /// namespace, so its compile fails naming the descriptor — at the
+    /// compile-every-query check for an embedded query (CR-197), at load for an
+    /// override; the same grammar capturing it compiles with the model in its
+    /// semantics.
     #[test]
-    fn a_namespace_model_without_the_namespace_capture_fails_the_load() {
+    fn a_namespace_model_without_the_namespace_capture_fails_its_compile() {
         fn entry(source: &'static str) -> GrammarEntry {
             GrammarEntry {
                 manifest_label: "toyns/plugin.toml",
@@ -819,14 +822,26 @@ mod tests {
                 .leak(),
             }
         }
-        let load = |source: &'static str| {
+        let load = |source: &'static str, root: Option<&Path>| {
             let mut entries = grammars::compiled();
             entries.push(entry(source));
-            LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+            LanguageRegistry::load_from(&entries, AbiRange::runtime(), root, &mut |_| {})
         };
+        const UNCAPTURED: &str = "(function_item name: (identifier) @symbol.function)";
 
-        let Err(err) = load("(function_item name: (identifier) @symbol.function)") else {
-            panic!("no namespace capture fails the load");
+        let reg = load(UNCAPTURED, None).expect("an embedded query compiles on first use");
+        let err = reg
+            .compile_all_queries()
+            .expect_err("no namespace capture fails the compile")
+            .to_string();
+        assert!(err.contains("toyns/plugin.toml") && err.contains("@module.namespace"), "{err}");
+
+        let root = tempfile::tempdir().unwrap();
+        let qdir = override_dir_for(root.path(), "toyns").join("queries");
+        std::fs::create_dir_all(&qdir).unwrap();
+        std::fs::write(qdir.join("symbols.scm"), format!("; override\n{UNCAPTURED}")).unwrap();
+        let Err(err) = load(UNCAPTURED, Some(root.path())) else {
+            panic!("an override without the namespace capture fails the load");
         };
         let err = err.to_string();
         assert!(err.contains("toyns/plugin.toml") && err.contains("@module.namespace"), "{err}");
@@ -834,8 +849,10 @@ mod tests {
         let reg = load(
             "(function_item name: (identifier) @symbol.function)\n\
              (mod_item name: (identifier) @module.namespace)",
+            None,
         )
         .expect("the captured namespace loads");
+        reg.compile_all_queries().expect("the captured namespace compiles");
         assert_eq!(
             reg.for_extension("toyns").unwrap().semantics().module_model,
             crate::plugin::ModuleModelKind::Namespace
@@ -1513,6 +1530,179 @@ mod tests {
             rest.iter().max().unwrap(),
             total
         );
+    }
+
+    /// Load `entries` with no override root and compile every query in it —
+    /// the test-time fail-fast for embedded queries (CR-197, [FR-PL-02]).
+    /// Returns how many capability queries compiled.
+    ///
+    /// [FR-PL-02]: ../../../docs/specs/requirements/FR-PL-02.md
+    fn compile_every_embedded_query(entries: &[GrammarEntry]) -> Result<usize, PluginError> {
+        let reg = LanguageRegistry::load_from(entries, AbiRange::runtime(), None, &mut |_| {})?;
+        reg.compile_all_queries()?;
+        Ok(reg
+            .iter()
+            .flat_map(|p| p.capabilities().iter().map(move |c| p.query(c)))
+            .filter(Option::is_some)
+            .count())
+    }
+
+    /// A language entry whose one `symbols` query has `source` — a fresh
+    /// language per call site, so its compiles and first-use reports are its
+    /// own however the test binary interleaves.
+    fn toy_entry(name: &'static str, source: &'static str) -> GrammarEntry {
+        GrammarEntry {
+            manifest_label: format!("{name}/plugin.toml").leak(),
+            manifest_toml: format!(
+                r#"
+                name = "{name}"
+                extensions = ["{name}"]
+                module_separator = "."
+                abi_version = 15
+                capabilities = ["symbols"]
+                [queries]
+                symbols = "queries/symbols.scm"
+                "#
+            )
+            .leak(),
+            language: tree_sitter_rust::LANGUAGE,
+            embedded_queries: vec![grammars::EmbeddedQuery {
+                relative_path: "queries/symbols.scm",
+                label: format!("{name}/queries/symbols.scm").leak(),
+                source,
+            }]
+            .leak(),
+        }
+    }
+
+    /// CR-197 / FR-PL-02: every embedded query of every compiled-in grammar
+    /// compiles. Embedded queries no longer compile at load, so this is what
+    /// keeps a broken shipped query from ever reaching a user.
+    #[test]
+    fn every_embedded_query_compiles() {
+        let entries = grammars::compiled();
+        let compiled = compile_every_embedded_query(&entries)
+            .unwrap_or_else(|err| panic!("an embedded query does not compile: {err}"));
+        let declared: usize = entries
+            .iter()
+            .map(|e| PluginManifest::parse(e.manifest_label, e.manifest_toml).unwrap())
+            .map(|m| m.capabilities.len())
+            .sum();
+        assert!(compiled > 0, "no embedded query was compiled");
+        assert_eq!(compiled, declared, "every declared capability compiled a query");
+    }
+
+    /// CR-197: a broken embedded query loads — nothing compiles at load — and
+    /// fails the compile-every-query check naming its file.
+    #[test]
+    fn a_broken_embedded_query_fails_the_compile_check_naming_its_file() {
+        let mut entries = grammars::compiled();
+        entries.push(toy_entry("toybroken", "(no_such_node_kind) @x"));
+
+        LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+            .expect("a broken embedded query does not fail the load");
+        match compile_every_embedded_query(&entries) {
+            Err(PluginError::QueryCompile { file, .. }) => {
+                assert_eq!(file, "toybroken/queries/symbols.scm")
+            }
+            other => panic!("expected QueryCompile naming the file, got {other:?}"),
+        }
+    }
+
+    /// CR-197: a load compiles no embedded query; a language compiles, whole,
+    /// on the first query anyone asks of it, and no other language does.
+    #[test]
+    fn a_load_compiles_no_embedded_query_until_its_language_is_used() {
+        let root = tempfile::tempdir().unwrap();
+        let reg = LanguageRegistry::load(root.path()).expect("embedded grammars load");
+        let compiled = |reg: &LanguageRegistry| -> Vec<String> {
+            reg.plugins
+                .iter()
+                .filter(|p| p.queries_compiled())
+                .map(|p| p.name().to_string())
+                .collect()
+        };
+        assert!(compiled(&reg).is_empty(), "compiled at load: {:?}", compiled(&reg));
+
+        let rust = reg.for_extension("rs").expect("rust claims .rs");
+        assert!(rust.query("symbols").is_some());
+        assert_eq!(compiled(&reg), ["rust"], "only the used language compiled");
+        assert!(
+            rust.capabilities().iter().all(|c| rust.query(c).is_some()),
+            "the first use compiled every capability of the language"
+        );
+    }
+
+    /// CR-197 / FR-PL-04: an override compiles its language at load — the
+    /// embedded siblings too, as one unit — so a broken one fails where the
+    /// operator sees it.
+    #[test]
+    fn an_override_compiles_its_whole_language_at_load() {
+        let root = tempfile::tempdir().unwrap();
+        write_rust_override(
+            root.path(),
+            "symbols",
+            "; CR-197 eager override\n(function_item name: (identifier) @symbol.function)",
+        );
+        let reg = LanguageRegistry::load(root.path()).expect("the override loads");
+        let eager: Vec<&str> = reg
+            .plugins
+            .iter()
+            .filter(|p| p.queries_compiled())
+            .map(|p| p.name())
+            .collect();
+        assert_eq!(eager, ["rust"], "only the overridden language compiled at load");
+    }
+
+    /// CR-197: several threads over several registries hitting one language's
+    /// first use at once compile it once, all get the same query, and the
+    /// compile is reported once for the process.
+    #[test]
+    fn concurrent_first_use_of_one_language_compiles_it_once() {
+        const REGISTRIES: usize = 3;
+        const THREADS: usize = 4;
+        let mut entries = grammars::compiled();
+        entries.push(toy_entry(
+            "toyrace",
+            "; CR-197 race\n(function_item name: (identifier) @symbol.function)",
+        ));
+        let regs: Vec<LanguageRegistry> = (0..REGISTRIES)
+            .map(|_| {
+                LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+                    .expect("loads")
+            })
+            .collect();
+        let barrier = std::sync::Barrier::new(REGISTRIES * THREADS);
+        let addresses: Vec<usize> = std::thread::scope(|scope| {
+            let handles: Vec<_> = regs
+                .iter()
+                .flat_map(|reg| std::iter::repeat_n(reg, THREADS))
+                .map(|reg| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let toy = reg.for_extension("toyrace").expect("toyrace loads");
+                        barrier.wait();
+                        let query: *const tree_sitter::Query =
+                            toy.query("symbols").expect("compiles");
+                        query as usize
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        assert_eq!(addresses.len(), REGISTRIES * THREADS);
+        assert!(
+            addresses.iter().all(|&a| a == addresses[0]),
+            "every first use got the one compiled query: {addresses:?}"
+        );
+        let reports: Vec<_> = queries::first_use_compiles()
+            .into_iter()
+            .filter(|r| r.language == "toyrace")
+            .collect();
+        assert_eq!(reports.len(), 1, "one first-use report per process: {reports:?}");
+        assert_eq!(reports[0].compiled, 1, "the one query compiled once: {reports:?}");
+        assert!(reports[0].elapsed > Duration::ZERO, "the compile time is reported: {reports:?}");
     }
 
     /// [`load_with_timings`](LanguageRegistry::load_with_timings) is a

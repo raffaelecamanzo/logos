@@ -2,8 +2,9 @@
 ;
 ; Captures the declarations that become NodeKind nodes. The capture name after
 ; the `@` carries the kind (extract::kind_for_capture maps it via
-; NodeKind::as_str). Compiled against the built Python Language at load;
-; fails fast naming this file on drift (FR-PL-02). Droppable on disk at
+; NodeKind::as_str). Compiled against the built Python Language on its first use, or at
+; load as an on-disk override; drift fails naming this file (FR-PL-02,
+; CR-197). Droppable on disk at
 ; `.logos/plugins/python/queries/symbols.scm` (FR-PL-04, UAT-PL-03).
 ;
 ; v1 policy (mirrors the Rust grammar's): every `function_definition` —

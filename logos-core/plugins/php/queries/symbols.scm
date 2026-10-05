@@ -1,8 +1,9 @@
 ; PHP symbol-extraction query (S-060, capability = "symbols").
 ;
 ; Capture names map to NodeKind via NodeKind::as_str (extract engine).
-; Compiled against the built PHP Language at load; fails fast naming this
-; file on drift (FR-PL-02). Droppable on disk at
+; Compiled against the built PHP Language on its first use, or at
+; load as an on-disk override; drift fails naming this file (FR-PL-02,
+; CR-197). Droppable on disk at
 ; `.logos/plugins/php/queries/symbols.scm` (FR-PL-04, UAT-PL-03).
 ;
 ; Classes map to NodeKind::Class, which is what makes Cohesion (LCOM4)

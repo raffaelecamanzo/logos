@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use crate::extract::{extract, Facts, FileInput, SymbolContext};
 use crate::model::{EdgeKind, NodeKind};
+use crate::plugin::queries::LanguageQueries;
 use crate::plugin::{CompiledPlugin, PluginManifest};
 
 /// The real YAML artifact plugin, built from the embedded descriptor + grammar.
@@ -21,7 +22,12 @@ fn yaml_plugin() -> CompiledPlugin {
     let toml = include_str!("../../../../plugins/yaml/plugin.toml");
     let manifest = PluginManifest::parse("yaml/plugin.toml", toml).unwrap();
     let language: tree_sitter::Language = tree_sitter_yaml::LANGUAGE.into();
-    CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+    CompiledPlugin::new(
+        manifest,
+        language,
+        LanguageQueries::precompiled(BTreeMap::new()),
+        Vec::new(),
+    )
 }
 
 /// The real JSON artifact plugin, built from the embedded descriptor + grammar.
@@ -29,7 +35,12 @@ fn json_plugin() -> CompiledPlugin {
     let toml = include_str!("../../../../plugins/json/plugin.toml");
     let manifest = PluginManifest::parse("json/plugin.toml", toml).unwrap();
     let language: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-    CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+    CompiledPlugin::new(
+        manifest,
+        language,
+        LanguageQueries::precompiled(BTreeMap::new()),
+        Vec::new(),
+    )
 }
 
 /// A version-bearing OpenAPI 3.x document, in block YAML — note the file is named

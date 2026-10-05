@@ -419,6 +419,7 @@ mod tests {
 
     use crate::extract::{extract, Facts, FileInput, SymbolContext};
     use crate::model::NodeKind;
+    use crate::plugin::queries::LanguageQueries;
     use crate::plugin::{CompiledPlugin, PluginManifest};
 
     /// The real Terraform artifact plugin, built from the embedded descriptor and
@@ -427,7 +428,12 @@ mod tests {
         let toml = include_str!("../../../plugins/terraform/plugin.toml");
         let manifest = PluginManifest::parse("terraform/plugin.toml", toml).unwrap();
         let language: tree_sitter::Language = tree_sitter_hcl::LANGUAGE.into();
-        CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+        CompiledPlugin::new(
+            manifest,
+            language,
+            LanguageQueries::precompiled(BTreeMap::new()),
+            Vec::new(),
+        )
     }
 
     /// The real SQL artifact plugin, built from the embedded descriptor and the
@@ -436,7 +442,12 @@ mod tests {
         let toml = include_str!("../../../plugins/sql/plugin.toml");
         let manifest = PluginManifest::parse("sql/plugin.toml", toml).unwrap();
         let language: tree_sitter::Language = tree_sitter_sequel::LANGUAGE.into();
-        CompiledPlugin::new(manifest, language, BTreeMap::new(), Vec::new())
+        CompiledPlugin::new(
+            manifest,
+            language,
+            LanguageQueries::precompiled(BTreeMap::new()),
+            Vec::new(),
+        )
     }
 
     fn names_of_kind(facts: &Facts, kind: NodeKind) -> Vec<String> {
