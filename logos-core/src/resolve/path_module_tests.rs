@@ -18,6 +18,7 @@
 //! tests/test_map.py             (module 160 "test_map") ─ test_it (161)
 //! lib/thing.js                  (module 170 "thing")    ─ thing (171)     [JavaScript]
 //! manage.py                     (module 180 "manage")   [a top-level script]
+//! mylib/src/lib.rs, util.rs     (modules 190, 191)      ─ g (192)          [a Rust crate]
 //! ```
 //!
 //! [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
@@ -84,6 +85,9 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         node(170, "thing", NodeKind::Module, "lib/thing.js"),
         node(171, "thing", NodeKind::Function, "lib/thing.js"),
         node(180, "manage", NodeKind::Module, "manage.py"),
+        node(190, "mylib", NodeKind::Module, "mylib/src/lib.rs"),
+        node(191, "util", NodeKind::Module, "mylib/src/util.rs"),
+        node(192, "g", NodeKind::Function, "mylib/src/util.rs"),
     ];
     let edges = vec![
         contains(100, 101),
@@ -96,13 +100,15 @@ fn graph() -> (Vec<NodeRow>, Vec<EdgeRow>) {
         contains(150, 151),
         contains(160, 161),
         contains(170, 171),
+        contains(191, 192),
     ];
     (nodes, edges)
 }
 
-/// A Python-shaped import-root declaration for `.py`.
+/// A Python-shaped import-root declaration for `.py`, beside Rust's stems for
+/// `.rs` (the rust plugin's, via the test layout).
 fn python_layout() -> PackageLayout {
-    PackageLayout::default().with_path_models(HashMap::from([(
+    PackageLayout::rust_stems_for_tests().with_path_models(HashMap::from([(
         "py".to_string(),
         PathModelDecl {
             language: "python".to_string(),
@@ -281,6 +287,19 @@ fn a_fallback_never_leaves_the_family_crate() {
         assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
         let call = row(2, TEST_MAP_PY, 161, "thing", EdgeKind::Calls);
         assert_eq!(bind_last(&[call], policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// Nor does a Python import name another language's crate: `import mylib`
+/// beside a Rust crate `mylib` (a pyo3 layout) reaches neither its root by the
+/// extern-crate rung nor its modules by a crate-name head.
+#[test]
+fn a_python_import_never_names_another_languages_crate() {
+    for policy in POLICIES {
+        let r = import(1, TEST_MAP_PY, 160, "mylib");
+        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
+        let r = import(2, TEST_MAP_PY, 160, "mylib::util::g");
+        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
     }
 }
 

@@ -2172,6 +2172,15 @@ impl Ctx<'_> {
         self.ix.nearest_module(self.source).cloned()
     }
 
+    /// Whether the source is keyed under an import-root family's crate (S-519):
+    /// a closed namespace whose paths name no other crate — `import mylib`
+    /// from Python is never a Rust crate `mylib`.
+    fn in_family_crate(&self) -> bool {
+        self.ix
+            .nearest_module(self.source)
+            .is_some_and(|(krate, _)| self.ix.layout.is_family_crate(krate))
+    }
+
     /// Resolve a multi-or-single segment path by the scope hierarchy.
     fn resolve_path(&self, segs: &[String], want: Want, depth: u8) -> Res {
         if segs.is_empty() || depth == 0 {
@@ -2235,9 +2244,10 @@ impl Ctx<'_> {
                 decided => return decided,
             }
         }
-        // 5) A crate-name head (`logos_core::…`).
+        // 5) A crate-name head (`logos_core::…`) — never from an import-root
+        //    family's crate, which names no other crate (S-519).
         let norm = normalize_crate(head);
-        if self.ix.crates.contains(&norm) {
+        if self.ix.crates.contains(&norm) && !self.in_family_crate() {
             match self.descend(&norm, &[], rest, want) {
                 Res::NotFound => {} // a same-named module may still match below
                 decided => return decided,
@@ -3320,7 +3330,12 @@ impl Ctx<'_> {
                 }
             }
             let norm = normalize_crate(name);
-            if let Some(&id) = self.ix.modules.get(&(norm, Vec::new())) {
+            if let Some(&id) = self
+                .ix
+                .modules
+                .get(&(norm, Vec::new()))
+                .filter(|_| !self.in_family_crate())
+            {
                 return Res::Found(id);
             }
         }
