@@ -142,7 +142,8 @@ static FIRST_USES: LazyLock<Mutex<Vec<FirstUseCompile>>> = LazyLock::new(|| Mute
 
 /// [`compile`], once per process for each distinct source: every call that
 /// resolves the same `grammar`/capability to byte-identical text shares one
-/// compiled [`Query`] (HF-3).
+/// compiled [`Query`] (HF-3). Returns the query and whether this call is the
+/// one that compiled it (`true`) or was served an earlier compile (`false`).
 ///
 /// Calls racing on one query compile it once: the first holds that query's
 /// cell while it compiles and the rest wait for the result. Calls on different
@@ -154,16 +155,6 @@ static FIRST_USES: LazyLock<Mutex<Vec<FirstUseCompile>>> = LazyLock::new(|| Mute
 /// that resolves the same text compiles again and fails again, naming its own
 /// file.
 pub fn compile_shared(
-    language: &Language,
-    grammar: &str,
-    resolved: &ResolvedQuery,
-) -> Result<Arc<Query>, PluginError> {
-    compile_once(language, grammar, resolved).map(|(query, _)| query)
-}
-
-/// [`compile_shared`], also saying whether this call is the one that compiled
-/// (`true`) or it was served an earlier compile (`false`).
-fn compile_once(
     language: &Language,
     grammar: &str,
     resolved: &ResolvedQuery,
@@ -357,7 +348,7 @@ impl LanguageQueries {
         let mut queries = BTreeMap::new();
         let mut compiled = 0;
         for resolved in &self.resolved {
-            let (query, fresh) = compile_once(language, &self.grammar, resolved)?;
+            let (query, fresh) = compile_shared(language, &self.grammar, resolved)?;
             compiled += usize::from(fresh);
             queries.insert(resolved.capability.clone(), query);
         }
