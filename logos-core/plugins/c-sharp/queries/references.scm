@@ -116,12 +116,11 @@
   name: (identifier) @ref.access)
 
 ;   @ref.extends — anchored to each declaration that owns a `base_list`. An
-;   enum's (`enum E : byte`) names its underlying primitive, not a type, and a
-;   record's primary-constructor base (`record R(int X) : Base(X)`) is its type.
+;   enum's (`enum E : byte`) names its underlying primitive, not a type. A
+;   record's primary-constructor base (`record R(int X) : Base(X)`) is its own
+;   node; a class's (`class P(int x) : Base(x)`) is a plain entry with arguments.
 (class_declaration
   (base_list [(identifier) (qualified_name) (generic_name) (alias_qualified_name)] @ref.extends))
-(class_declaration
-  (base_list (primary_constructor_base_type type: (_) @ref.extends)))
 (struct_declaration
   (base_list [(identifier) (qualified_name) (generic_name) (alias_qualified_name)] @ref.extends))
 (interface_declaration
