@@ -176,8 +176,9 @@ fn a_python_class_extends_the_one_base_its_module_names() {
     assert_eq!(
         edges(rt, EdgeKind::Extends),
         strings(&[
-            "EnvironBuilder -> src/werkzeug/wrappers/request.py:Request:class",
+            "EnvironBuilder -> src/werkzeug/mid.py:Mid:class",
             "IntBox -> src/werkzeug/routing/converters.py:Box:class",
+            "Mid -> src/werkzeug/wrappers/request.py:Request:class",
             "Request -> src/werkzeug/sansio/request.py:Request:class",
             "UUIDConverter -> src/werkzeug/routing/converters.py:BaseConverter:class",
             "UnicodeConverter -> src/werkzeug/routing/converters.py:BaseConverter:class",
@@ -222,7 +223,7 @@ fn a_python_super_and_self_call_climb_the_proven_base() {
     );
     assert_eq!(
         calls_from(rt, "body"),
-        strings(&["src/werkzeug/sansio/request.py:get_data"])
+        strings(&["src/werkzeug/sansio/request.py:headers"])
     );
 }
 
@@ -410,7 +411,9 @@ fn sync_equals_a_full_reindex_when_a_python_base_changes() {
 
 /// Sync ≡ reindex when a Python subclass gains and loses its base — the
 /// hierarchy moves under a call in another file that spells none of its names:
-/// `EnvironBuilder.body`'s `self.get_data()` climbs through the edited class.
+/// `EnvironBuilder.body`'s `self.headers()` climbs `Mid` (a third file) and the
+/// edited class, neither of which spells `headers`, so only the moved
+/// hierarchy re-selects it.
 #[test]
 fn sync_equals_a_full_reindex_when_a_python_class_changes_its_base() {
     let fixture = fixtures::WERKZEUG;
@@ -418,7 +421,7 @@ fn sync_equals_a_full_reindex_when_a_python_class_changes_its_base() {
     let rt = engine.runtime().unwrap();
     let sub = "src/werkzeug/wrappers/request.py";
     let original = fixture.iter().find(|(rel, _)| *rel == sub).unwrap().1;
-    assert_eq!(calls_from(rt, "body"), strings(&["src/werkzeug/sansio/request.py:get_data"]));
+    assert_eq!(calls_from(rt, "body"), strings(&["src/werkzeug/sansio/request.py:headers"]));
     for edit in [
         original.replace("class Request(_SansIORequest):", "class Request:"),
         original.to_string(),
