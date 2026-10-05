@@ -165,6 +165,58 @@ pub const KOTLIN: Fixture = &[
     ),
 ];
 
+/// Python shapes the hierarchy walk must not guess: a class named like the
+/// base it imports (`class TestCase(TestCase)`, `class Model(Model)`) names the
+/// import, never itself; and a class with two bases looks a method up in its
+/// MRO (`C, A, X, B`), which the walk does not read, so `self.m()` and
+/// `super().m()` stay unbound rather than reach `B.m` ahead of `X.m`.
+pub const PYTHON_SHAPES: Fixture = &[
+    ("pkg/__init__.py", ""),
+    (
+        "pkg/base.py",
+        "class X:\n    def m(self):\n        return 1\n\n\nclass A(X):\n    pass\n\n\nclass B:\n    def m(self):\n        return 2\n\n\nclass Model:\n    def save(self):\n        pass\n",
+    ),
+    (
+        "pkg/child.py",
+        "from unittest import TestCase\n\nfrom pkg.base import A, B, Model\n\n\nclass TestCase(TestCase):\n    pass\n\n\nclass Model(Model):\n    def go(self):\n        return self.save()\n\n\nclass C(A, B):\n    def run(self):\n        return self.m()\n\n    def run2(self):\n        return super().m()\n",
+    ),
+];
+
+/// PHP shapes: a used trait's method outranks the parent's, so `$this->m()` in
+/// a class that uses one stays unbound — while `parent::m()` names the parent,
+/// which the trait does not touch. A `namespace\Foo` base is not read through
+/// the file's `use` of another `Foo`.
+pub const PHP_SHAPES: Fixture = &[
+    (
+        "src/App/A.php",
+        "<?php\n\nnamespace App;\n\nclass A\n{\n    public function m() {}\n}\n",
+    ),
+    (
+        "src/App/T.php",
+        "<?php\n\nnamespace App;\n\ntrait T\n{\n    public function m() {}\n}\n",
+    ),
+    (
+        "src/App/B.php",
+        "<?php\n\nnamespace App;\n\nclass B extends A\n{\n    use T;\n\n    public function run() { return $this->m(); }\n\n    public function up() { return parent::m(); }\n}\n",
+    ),
+    (
+        "src/App/D.php",
+        "<?php\n\nnamespace App;\n\nclass D extends B\n{\n    public function go() { return $this->m(); }\n}\n",
+    ),
+    (
+        "src/App/Foo.php",
+        "<?php\n\nnamespace App;\n\nclass Foo {}\n",
+    ),
+    (
+        "src/Other/Foo.php",
+        "<?php\n\nnamespace Other;\n\nclass Foo {}\n",
+    ),
+    (
+        "src/App/R.php",
+        "<?php\n\nnamespace App;\n\nuse Other\\Foo;\n\nclass R extends namespace\\Foo {}\n",
+    ),
+];
+
 /// A Rust trait and its impl: the impl method's `Implements` row binds the trait
 /// by the S-281 rule, exactly as before — beside a Kotlin interface of the same
 /// name, which a Kotlin class implements without ever reaching the trait.

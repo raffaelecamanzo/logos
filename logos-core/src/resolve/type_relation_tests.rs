@@ -256,6 +256,28 @@ fn only_an_extends_bound_supertype_enters_the_hierarchy() {
     assert_eq!(ix.supertypes_for_tests(NodeId(203)), [NodeId(201)]);
 }
 
+/// A class with two rows that may each name a base class — two bound bases,
+/// or a bound and an unbound one — has no supertypes the walk may climb: its
+/// method order is its language's (Python's MRO), not one level after another.
+/// Where the kind is unsaid (C#) an unbound entry beside the bound base class is
+/// an interface, so the base class is still climbed.
+#[test]
+fn two_bases_leave_a_class_without_supertypes_unless_the_kind_is_unsaid() {
+    let two = [
+        row(1, VIEWS_PY, 122, "app::base::Base", EdgeKind::Extends),
+        row(2, VIEWS_PY, 122, "External", EdgeKind::Extends),
+    ];
+    let ix = index(&two);
+    assert!(ix.supertypes_for_tests(NodeId(122)).is_empty());
+    let one = [row(1, VIEWS_PY, 122, "app::base::Base", EdgeKind::Extends)];
+    assert_eq!(index(&one).supertypes_for_tests(NodeId(122)), [NodeId(111)]);
+    let silent = [
+        row(1, READER_CS, 203, "Reader", EdgeKind::Extends),
+        row(2, READER_CS, 203, "IDisposable", EdgeKind::Extends),
+    ];
+    assert_eq!(index(&silent).supertypes_for_tests(NodeId(203)), [NodeId(201)]);
+}
+
 /// A fully-qualified name (`\Exception`, `global::Exception`) is read from the
 /// global namespace alone: never the same-namespace class of that name, which
 /// would be the class extending it.

@@ -364,6 +364,64 @@ fn kotlin_supertypes_take_the_kind_of_what_they_bind() {
     assert_eq!(unbound_relations(rt), strings(&["extends KBase"]));
 }
 
+/// A class's header never names the class itself: `class TestCase(TestCase)`
+/// names the imported library class (unbound), and `class Model(Model)` the
+/// imported `pkg.base.Model`, whose `save` its `self.save()` then reaches. A
+/// class with two bases is no chain the walk can read, so its `self.m()` and
+/// `super().m()` stay unbound — its MRO would reach `X.m`, a level walk `B.m`.
+#[test]
+fn a_python_header_never_names_its_class_and_two_bases_bind_no_inherited_call() {
+    let (_tmp, engine) = indexed(fixtures::PYTHON_SHAPES);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, EdgeKind::Extends),
+        strings(&[
+            "A -> pkg/base.py:X:class",
+            "C -> pkg/base.py:A:class",
+            "C -> pkg/base.py:B:class",
+            "Model -> pkg/base.py:Model:class",
+        ])
+    );
+    assert_eq!(unbound_relations(rt), strings(&["extends TestCase"]));
+    assert_eq!(calls_from(rt, "go"), strings(&["pkg/base.py:save"]));
+    assert!(calls_from(rt, "run").is_empty(), "{:?}", calls_from(rt, "run"));
+    assert!(calls_from(rt, "run2").is_empty(), "{:?}", calls_from(rt, "run2"));
+}
+
+/// A used trait's method outranks the parent's: `$this->m()` in a class that
+/// uses a trait — or in its subclass — stays unbound rather than reach the
+/// parent's `m`, while `parent::m()` names the parent and binds it. A
+/// `namespace\Foo` base records nothing, so it never binds the `Other\Foo` the
+/// file imports.
+#[test]
+fn a_php_trait_ends_the_inherited_walk_and_a_relative_name_records_nothing() {
+    let (_tmp, engine) = indexed(fixtures::PHP_SHAPES);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, EdgeKind::Implements),
+        strings(&["B -> src/App/T.php:T:trait"])
+    );
+    assert_eq!(
+        edges(rt, EdgeKind::Extends),
+        strings(&["B -> src/App/A.php:A:class", "D -> src/App/B.php:B:class"])
+    );
+    assert!(calls_from(rt, "run").is_empty(), "{:?}", calls_from(rt, "run"));
+    assert!(calls_from(rt, "go").is_empty(), "{:?}", calls_from(rt, "go"));
+    assert_eq!(calls_from(rt, "up"), strings(&["src/App/A.php:m"]));
+    assert!(unbound_relations(rt).is_empty(), "{:?}", unbound_relations(rt));
+}
+
+/// FR-RS-15 AC (werkzeug): `precedent UUIDConverter` returns its sibling
+/// converters — the types sharing its supertype, which no Python `Extends` gave
+/// it before.
+#[test]
+fn precedent_returns_the_sibling_converters() {
+    let (_tmp, engine) = indexed(fixtures::WERKZEUG);
+    let result = engine.precedent("UUIDConverter", None);
+    let names: Vec<&str> = result.precedents.iter().map(|p| p.symbol.name.as_str()).collect();
+    assert!(names.contains(&"UnicodeConverter"), "{names:?}");
+}
+
 /// Rust's `Implements` binds as before — the impl method to its trait (S-281) —
 /// beside a Kotlin interface of the trait's name, which a Kotlin class
 /// implements without ever reaching the Rust trait (the interop family).
@@ -435,20 +493,26 @@ fn sync_equals_a_full_reindex_when_a_python_class_changes_its_base() {
 /// Sync ≡ reindex when a C# supertype changes kind: the interface a class's
 /// `base_list` names becomes a class (its edge turns `Extends`), and back.
 ///
-/// The converters file is left out. Its `base.HasLineInfo()` binds while the
-/// interface is a class, and when it turns back the call's capture-before-delete
-/// row re-binds the edge by symbol, where a cold index has none. That is the
-/// deferred incremental-retraction gap, reproduced on Java's own implicit call
-/// before this change, not this capture.
+/// The two files whose calls climb to a base are left out: the converters'
+/// `base.HasLineInfo()` binds while the interface is a class, and
+/// `JsonTextReader`'s `base.Close()` stops binding while the class is its
+/// second base (two bases, no walk). Either way a sync keeps the edge a cold
+/// index has not — the deferred incremental-retraction gap, reproduced on
+/// Java's own implicit call before this change, not this capture.
 #[test]
 fn sync_equals_a_full_reindex_when_a_csharp_supertype_changes_kind() {
-    let (converters, fixture) = fixtures::NEWTONSOFT.split_last().unwrap();
-    assert_eq!(converters.0, "Src/Newtonsoft.Json/Converters/IntConverter.cs");
+    let fixture: Vec<(&str, &str)> = fixtures::NEWTONSOFT
+        .iter()
+        .copied()
+        .filter(|(rel, _)| !rel.ends_with("IntConverter.cs") && !rel.ends_with("JsonTextReader.cs"))
+        .collect();
+    assert_eq!(fixture.len(), fixtures::NEWTONSOFT.len() - 2);
+    let fixture: fixtures::Fixture = Box::leak(fixture.into_boxed_slice());
     let (tmp, engine) = indexed(fixture);
     let rt = engine.runtime().unwrap();
     let file = "Src/Newtonsoft.Json/IJsonLineInfo.cs";
     let original = fixture.iter().find(|(rel, _)| *rel == file).unwrap().1;
-    assert!(edges(rt, EdgeKind::Implements).iter().any(|e| e.starts_with("JsonTextReader ")));
+    assert!(edges(rt, EdgeKind::Implements).iter().any(|e| e.starts_with("JTokenReader ")));
     for edit in [
         original.replace("public interface IJsonLineInfo", "public abstract class IJsonLineInfo"),
         original.to_string(),

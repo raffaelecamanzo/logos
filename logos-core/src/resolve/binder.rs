@@ -427,6 +427,14 @@ pub(crate) const SELF_TYPE_HEAD: &str = "Self";
 /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
 pub(crate) const FULLY_QUALIFIED_HEAD: &str = "\\";
 
+/// The alias a PHP trait `use`'s `Implements` row carries (S-522, [FR-RS-15]):
+/// the class uses the trait, whose method outranks every inherited one — what
+/// an `implements` never says. Its class's hierarchy ends there
+/// ([`build_supertypes`]). A relation row has no alias otherwise.
+///
+/// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+pub(crate) const TRAIT_USE_ALIAS: &str = "use";
+
 /// One node's binding-relevant facts.
 #[derive(Debug)]
 struct NodeInfo {
@@ -587,10 +595,18 @@ pub(crate) struct Index {
     /// that crosses a type other than its start crosses it as some `Extends`
     /// row's target, and a row starting at a type spells that type's name.
     hierarchy_tokens: HashSet<String>,
-    /// The file extensions of those rows' sources (S-522): the languages whose
-    /// calls a supertype walk can bind, so whose calls a moved hierarchy
-    /// re-selects ([`Index::walks_hierarchy`]).
-    hierarchy_extensions: HashSet<String>,
+    /// The interop families of those rows' sources (S-522,
+    /// [`PackageLayout::family`]): the languages whose calls a supertype walk
+    /// can bind, so whose calls a moved hierarchy re-selects
+    /// ([`Index::walks_hierarchy`]).
+    hierarchy_families: HashSet<String>,
+    /// The classes that use a trait (S-522, a PHP `use`, [`TRAIT_USE_ALIAS`]).
+    /// A used trait's method outranks every inherited one, and an unbound
+    /// trait's methods are not in the graph, so a supertype walk reads such a
+    /// class's own members and never climbs **through** it
+    /// ([`Ctx::supertype_member`]). A `parent::m()` written in it starts at its
+    /// parent, which its traits do not touch.
+    trait_users: HashSet<NodeId>,
     /// node → the self type its plugin query recorded for it (S-493,
     /// [FR-RS-11]; the `nodes.self_type` column). Empty unless the run was given
     /// the store's self types ([`Index::with_self_types`]); empty binds no call
@@ -711,7 +727,8 @@ impl Index {
             impls_by_trait_method,
             supertypes: HashMap::new(),
             hierarchy_tokens: HashSet::new(),
-            hierarchy_extensions: HashSet::new(),
+            hierarchy_families: HashSet::new(),
+            trait_users: HashSet::new(),
             self_types: HashMap::new(),
             methods_by_self_type: HashMap::new(),
             type_names: HashMap::new(),
@@ -721,7 +738,8 @@ impl Index {
         let hierarchy = build_supertypes(refs, &index);
         index.supertypes = hierarchy.supertypes;
         index.hierarchy_tokens = hierarchy.tokens;
-        index.hierarchy_extensions = hierarchy.extensions;
+        index.hierarchy_families = hierarchy.families;
+        index.trait_users = hierarchy.trait_users;
         index.trait_impl_methods = build_trait_impl_methods(refs, &index);
         index.file_ids = refs
             .iter()
@@ -967,12 +985,16 @@ impl Index {
     }
 
     /// Whether a call written in the file at `path` can bind through the type
-    /// hierarchy (S-468; S-522): a package-shaped file, or one of a language
-    /// whose types record an `Extends` the hierarchy holds. A language that
-    /// records none — Rust — has no call a moved hierarchy can move.
+    /// hierarchy (S-468; S-522): a package-shaped file, or one of an interop
+    /// family whose types record an `Extends` the hierarchy holds — a Kotlin
+    /// `.kts` script's call can climb a `.kt` class's. A family that records
+    /// none — Rust — has no call a moved hierarchy can move.
     pub(crate) fn walks_hierarchy(&self, path: &str) -> bool {
         self.layout.is_package_shaped(path)
-            || file_extension(path).is_some_and(|ext| self.hierarchy_extensions.contains(&ext))
+            || self
+                .layout
+                .family(path)
+                .is_some_and(|family| self.hierarchy_families.contains(&family))
     }
 
     /// Whether adding or removing the file at `path` can move the detected
@@ -1750,12 +1772,13 @@ fn build_trait_impl_methods(refs: &[UnresolvedRefRow], ix: &Index) -> HashSet<No
 
 /// The type hierarchy (S-468, [CR-150] §3.2 B; S-522): each type's
 /// in-repository supertypes, the name tokens a sync must watch to keep a walk
-/// over it fresh, and the languages whose rows it holds ([`Index::supertypes`],
-/// [`Index::hierarchy_tokens`], [`Index::hierarchy_extensions`]).
+/// over it fresh, and the families whose rows it holds ([`Index::supertypes`],
+/// [`Index::hierarchy_tokens`], [`Index::hierarchy_families`]).
 struct Hierarchy {
     supertypes: HashMap<NodeId, Vec<NodeId>>,
     tokens: HashSet<String>,
-    extensions: HashSet<String>,
+    families: HashSet<String>,
+    trait_users: HashSet<NodeId>,
 }
 
 /// Build the [`Hierarchy`] from the `Extends` rows the type-relation arm binds
@@ -1770,6 +1793,24 @@ struct Hierarchy {
 /// out, as a Java class's `implements` does. A row of any other arm is
 /// skipped, and the map stays empty for a graph without one — a Rust graph —
 /// exactly as before.
+///
+/// The walk reads one superclass per level, nearest first — the order of
+/// single inheritance. Two shapes break it, and neither binds a guess (S-522,
+/// [NFR-RA-05]):
+///
+/// - **several bases** — two or more rows that may each name a base class: a
+///   row bound to a class, or an unbound one (an external base). Python's
+///   `class C(A, B)` looks a method up in its MRO (`C, A, A's bases, B`), not
+///   level by level, and an unbound base ahead of a bound one may supply it.
+///   Such a class **has no supertypes here**, so a `self`/`super` call climbs no
+///   further than its own members. Where the list leaves kinds unsaid
+///   ([`Want::Supertype`], C#, Kotlin) its one base class sits among
+///   interfaces, so an unbound entry there is not counted. An interface's
+///   super-interfaces are pooled, as before;
+/// - **a used trait** (a PHP `use`, [`TRAIT_USE_ALIAS`]) — the trait's method
+///   outranks every inherited one, and an unbound trait's methods are not in
+///   the graph. Such a class is a [`trait_users`](Index::trait_users) entry,
+///   which no walk climbs through.
 ///
 /// Only the subtype's own rows count. A capture-before-delete `Symbol` row
 /// ([ADR-10]) is filed under the **supertype's** file and outlives the
@@ -1786,31 +1827,51 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
     let mut hierarchy = Hierarchy {
         supertypes: HashMap::new(),
         tokens: HashSet::new(),
-        extensions: HashSet::new(),
+        families: HashSet::new(),
+        trait_users: HashSet::new(),
     };
+    let mut bases: HashMap<NodeId, usize> = HashMap::new();
     for r in refs {
-        if r.kind != EdgeKind::Extends || r.form == RefForm::Symbol {
+        if r.form == RefForm::Symbol || !matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements) {
             continue;
         }
-        let source = ix.by_symbol.get(&r.source_symbol).and_then(|id| ix.info.get(id));
-        if relation_want_of(r, source, &ix.layout).is_none() {
+        let Some(&source_id) = ix.by_symbol.get(&r.source_symbol) else {
+            continue;
+        };
+        let source = ix.info.get(&source_id);
+        let Some(want) = relation_want_of(r, source, &ix.layout) else {
+            continue;
+        };
+        if r.kind == EdgeKind::Implements {
+            if r.alias.as_deref() == Some(TRAIT_USE_ALIAS) {
+                hierarchy.trait_users.insert(source_id);
+            }
             continue;
         }
         hierarchy.tokens.extend(super::tokens(&r.target));
-        hierarchy.extensions.extend(
+        hierarchy.families.extend(
             source
                 .and_then(|i| i.file_path.as_deref())
-                .and_then(file_extension),
+                .and_then(|p| ix.layout.family(p)),
         );
-        if let Outcome::Bound {
-            source,
-            target,
-            kind: EdgeKind::Extends,
-            ..
-        } = bind(r, ix, BindingPolicy::Strict)
-        {
-            hierarchy.supertypes.entry(source).or_default().push(target);
+        let class = source.is_some_and(|i| i.kind != NodeKind::Interface);
+        match bind(r, ix, BindingPolicy::Strict) {
+            Outcome::Bound {
+                target,
+                kind: EdgeKind::Extends,
+                ..
+            } => {
+                hierarchy.supertypes.entry(source_id).or_default().push(target);
+                *bases.entry(source_id).or_default() += usize::from(class);
+            }
+            Outcome::Unbound if want != Want::Supertype => {
+                *bases.entry(source_id).or_default() += usize::from(class);
+            }
+            _ => {}
         }
+    }
+    for (id, _) in bases.into_iter().filter(|&(_, n)| n > 1) {
+        hierarchy.supertypes.remove(&id);
     }
     for ids in hierarchy.supertypes.values_mut() {
         ids.sort_unstable();
@@ -1923,14 +1984,6 @@ fn relation_edge_kind(row_kind: EdgeKind, want: Want, target: Option<NodeKind>) 
         (Want::Supertype, Some(NodeKind::Interface | NodeKind::Trait)) => EdgeKind::Implements,
         _ => row_kind,
     }
-}
-
-/// The file extension of `path`, normalised as the layout's are.
-fn file_extension(path: &str) -> Option<String> {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
 }
 
 /// Reduce a candidate list to a [`Res`] — the single acceptance rule every
@@ -4119,7 +4172,9 @@ impl Ctx<'_> {
     /// [`type_member`](Ctx::type_member)'s walk, from the level `level` up —
     /// `seen` holds the types already visited, which the walk never revisits.
     /// An empty first level is a chain that never entered the graph:
-    /// [`Residue::SupertypeUnreached`].
+    /// [`Residue::SupertypeUnreached`]. A class that uses a trait
+    /// ([`Index::trait_users`], S-522) is read for its own members and never
+    /// climbed through, so the walk ends there too.
     fn supertype_member(&self, mut level: Vec<NodeId>, mut seen: HashSet<NodeId>, name: &str) -> Res {
         level.sort_unstable();
         level.dedup();
@@ -4142,8 +4197,10 @@ impl Ctx<'_> {
                 }
                 decided => return decided,
             }
+            // A class that uses a trait is never climbed through (S-522).
             let mut next: Vec<NodeId> = level
                 .iter()
+                .filter(|t| !self.ix.trait_users.contains(t))
                 .flat_map(|&t| self.ix.supertypes_of(t).iter().copied())
                 .filter(|s| seen.insert(*s))
                 .collect();

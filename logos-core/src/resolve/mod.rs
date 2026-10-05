@@ -45,6 +45,7 @@
 mod binder;
 pub(crate) use binder::{
     is_class_like, FULLY_QUALIFIED_HEAD, GLOBAL_WILDCARD_ALIAS, SELF_TYPE_HEAD, STATIC_WILDCARD_ALIAS,
+    TRAIT_USE_ALIAS,
 };
 /// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
 /// function the intra-repo promotion pass, the federation bridge and the

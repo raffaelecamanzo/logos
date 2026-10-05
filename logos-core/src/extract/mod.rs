@@ -1788,10 +1788,12 @@ fn collect_refs(
                 // node is a TYPE, recorded as a Path-form row of the capture's
                 // kind — never Method form, whose `::` target the binder
                 // reserves for trait-object dispatch (S-281). Its type
-                // arguments are type uses of the same declaration(s).
+                // arguments are type uses of the same declaration(s). A used
+                // trait (S-522, `ref.implements.trait`) is marked on its row.
                 name @ ("ref.extends" | "ref.implements" | "ref.instantiates" | "ref.type_use") => {
                     let owners = declarator_symbols(node).unwrap_or_else(|| vec![source_symbol]);
-                    out.extend(type_relation_rows(name, &owners, node, source, line));
+                    let used = m.captures.iter().any(|c| capture_names[c.index as usize] == TRAIT_USE_CAPTURE);
+                    out.extend(type_relation_rows(name, &owners, node, source, line, used));
                 }
                 // An import whose paths no single node spans (S-518; Scala's
                 // `import_declaration`): the declaration is walked like a Rust
@@ -1924,15 +1926,24 @@ fn tree_import_rows(
         .collect()
 }
 
+/// The marker capture of a PHP trait `use` (S-522): present in the same match
+/// as the `ref.implements` naming the trait, it records the row's alias as
+/// [`TRAIT_USE_ALIAS`](crate::resolve::TRAIT_USE_ALIAS) — a used trait's
+/// method outranks every inherited one, which an `implements` never does.
+const TRAIT_USE_CAPTURE: &str = "ref.implements.trait";
+
 /// The Path-form rows a type-relation `capture` (`ref.extends`,
 /// `ref.implements`, `ref.instantiates`, `ref.type_use`) records for its type
 /// `node`, once per declaration in `owners` ([`type_relation_targets`], S-466).
+/// A used trait's head row (`used`, S-522) is aliased
+/// [`TRAIT_USE_ALIAS`](crate::resolve::TRAIT_USE_ALIAS).
 fn type_relation_rows(
     capture: &str,
     owners: &[LogosSymbol],
     node: Node<'_>,
     source: &[u8],
     line: u32,
+    used: bool,
 ) -> Vec<RefFact> {
     let head = match capture {
         "ref.extends" => EdgeKind::Extends,
@@ -1942,11 +1953,12 @@ fn type_relation_rows(
     };
     let mut rows = Vec::new();
     for (kind, target) in type_relation_targets(node, source, head) {
+        let alias = (used && kind == head).then(|| crate::resolve::TRAIT_USE_ALIAS.to_string());
         for owner in owners {
             rows.push(RefFact {
                 source: owner.clone(),
                 target: target.clone(),
-                alias: None,
+                alias: alias.clone(),
                 form: RefForm::Path,
                 kind,
                 line,
@@ -2024,8 +2036,9 @@ fn type_relation_targets(node: Node<'_>, source: &[u8], head: EdgeKind) -> Vec<(
 /// - a single name — Python's and C#'s `identifier`, PHP's `name`;
 /// - a dotted one — Python's `attribute` (`models.Model`), C#'s
 ///   `qualified_name` (`System.Exception`), Kotlin's `user_type` (`a.b.C<T>`);
-/// - a PHP `qualified_name` (`Monolog\Handler\HandlerInterface`) or
-///   `relative_name` (`namespace\Handler`, read from the source's namespace);
+/// - a PHP `qualified_name` (`Monolog\Handler\HandlerInterface`) — never a
+///   `relative_name` (`namespace\Handler`), whose current-namespace prefix the
+///   import rungs would misread;
 /// - a C# `generic_name` (`JsonConverter<T>`) — its name.
 ///
 /// A name written **fully qualified** — PHP's leading `\`, C#'s `global::` —
@@ -2071,9 +2084,11 @@ fn type_path(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
             path.extend(type_path(node.child_by_field_name("name")?, source)?);
             Some(path)
         }
-        // PHP `\A\B\C`, `A\B\C`, `namespace\A\C`: the namespace's names,
-        // then the name; a leading `\` makes it fully qualified.
-        "qualified_name" | "relative_name" => {
+        // PHP `\A\B\C`, `A\B\C`: the namespace's names, then the name; a
+        // leading `\` makes it fully qualified. A `relative_name`
+        // (`namespace\A\C`, the file's own namespace) names nothing here: its
+        // prefix is not a name the binder may read through imports.
+        "qualified_name" => {
             let rooted = node.child(0).is_some_and(|c| c.kind() == "\\");
             let mut path: Vec<String> = rooted
                 .then(|| crate::resolve::FULLY_QUALIFIED_HEAD.to_string())

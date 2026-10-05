@@ -22,7 +22,12 @@
 ;                 declared namespace's rungs — the file's `use` imports, its own
 ;                 namespace, then the fully-qualified name. A name written with
 ;                 a leading `\` is fully qualified, read from the global
-;                 namespace alone.
+;                 namespace alone. One written `namespace\X` is not captured:
+;                 its current-namespace prefix is no name the imports read.
+;   @ref.implements.trait — a MARKER on a trait `use`: the row records that
+;                 the class uses the trait. A used trait's method outranks
+;                 every inherited one, so the class's hierarchy ends there for
+;                 a `$this->m()` / `parent::m()` walk (S-522).
 ;
 ; Droppable on disk at `.logos/plugins/php/queries/references.scm`.
 ;
@@ -91,19 +96,19 @@
 ;   clause, so an anonymous class's (`new class extends Base {}`) is never read
 ;   as the enclosing function's: it has no class node to relate.
 (class_declaration
-  (base_clause [(name) (qualified_name) (relative_name)] @ref.extends))
+  (base_clause [(name) (qualified_name)] @ref.extends))
 (interface_declaration
-  (base_clause [(name) (qualified_name) (relative_name)] @ref.extends))
+  (base_clause [(name) (qualified_name)] @ref.extends))
 (class_declaration
-  (class_interface_clause [(name) (qualified_name) (relative_name)] @ref.implements))
+  (class_interface_clause [(name) (qualified_name)] @ref.implements))
 (enum_declaration
-  (class_interface_clause [(name) (qualified_name) (relative_name)] @ref.implements))
+  (class_interface_clause [(name) (qualified_name)] @ref.implements))
 (class_declaration
   body: (declaration_list
-    (use_declaration [(name) (qualified_name) (relative_name)] @ref.implements)))
+    (use_declaration [(name) (qualified_name)] @ref.implements) @ref.implements.trait))
 (trait_declaration
   body: (declaration_list
-    (use_declaration [(name) (qualified_name) (relative_name)] @ref.implements)))
+    (use_declaration [(name) (qualified_name)] @ref.implements) @ref.implements.trait))
 (enum_declaration
   body: (enum_declaration_list
-    (use_declaration [(name) (qualified_name) (relative_name)] @ref.implements)))
+    (use_declaration [(name) (qualified_name)] @ref.implements) @ref.implements.trait))
