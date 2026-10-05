@@ -433,3 +433,24 @@ fn two_declarations_of_one_key_resolve_by_path_not_node_id() {
         }
     }
 }
+
+/// A declaration inside an inline module — `mod outer { pub mod inner; }` —
+/// names `src/outer/inner.rs`, keyed `outer::inner` beneath the inline module
+/// exactly as the file is, and a path through it binds there (review fix).
+#[test]
+fn a_declaration_inside_an_inline_module_binds_into_its_file() {
+    let nodes = vec![
+        node(1, "crate", NodeKind::Module, "src/lib.rs"),
+        spanning(node(2, "outer", NodeKind::Module, "src/lib.rs"), 1, 3),
+        spanning(node(3, "inner", NodeKind::Module, "src/lib.rs"), 2, 2),
+        node(4, "alpha", NodeKind::Function, "src/lib.rs"),
+        node(10, "inner", NodeKind::Module, "src/outer/inner.rs"),
+        node(11, "deep", NodeKind::Function, "src/outer/inner.rs"),
+    ];
+    let edges = vec![contains(1, 2), contains(2, 3), contains(1, 4), contains(10, 11)];
+    let g = (nodes, edges);
+    assert_eq!(
+        outcome_in(&g, &[], &call(100, LIB_RS, 4, "crate::outer::inner::deep")),
+        bound(4, 11, EdgeKind::Calls)
+    );
+}
