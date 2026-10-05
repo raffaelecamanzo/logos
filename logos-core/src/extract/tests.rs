@@ -6207,7 +6207,12 @@ fn every_scala_selector_shape_records_its_own_rows() {
 // ── S-519 / FR-RS-14: Python path modules — one row per name, relative levels ──
 
 /// Every `Imports` row the file records as `(target, form, alias)`, sorted.
-#[cfg(feature = "lang-python")]
+#[cfg(any(
+    feature = "lang-python",
+    feature = "lang-php",
+    feature = "lang-c-sharp",
+    feature = "lang-go"
+))]
 fn import_rows(facts: &Facts) -> Vec<(String, RefForm, Option<String>)> {
     let mut out: Vec<(String, RefForm, Option<String>)> = facts
         .refs
@@ -6232,7 +6237,7 @@ fn a_python_from_import_records_one_row_per_name_and_keeps_its_relative_level() 
                from hc.api.models import Check\n\
                from pkg import name as other\n";
     let facts = extract_lang("py", "src/werkzeug/routing/map.py", src);
-    let path = |t: &str, alias: &str| (t.to_string(), RefForm::Path, Some(alias.to_string()));
+    let path = path_row;
     let mut expected = vec![
         path(".::rules::Map", "Map"),
         path(".::rules::Rule", "Rule"),
@@ -6292,19 +6297,13 @@ fn a_file_module_is_named_by_its_own_plugins_package_stems() {
 
 // ── S-520 / FR-EX-14: an import's alias is the name it binds locally ──
 
-/// The `(target, form, alias)` rows of every import `source` records for the
-/// language owning `ext`.
-fn alias_rows(ext: &str, path: &str, source: &str) -> Vec<(String, RefForm, Option<String>)> {
-    let mut rows: Vec<(String, RefForm, Option<String>)> = extract_lang(ext, path, source)
-        .refs
-        .iter()
-        .filter(|r| r.kind == EdgeKind::Imports)
-        .map(|r| (r.target.clone(), r.form, r.alias.clone()))
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    rows
-}
-
+/// A `Path` row aliased `alias`: what an import of `target` records.
+#[cfg(any(
+    feature = "lang-python",
+    feature = "lang-php",
+    feature = "lang-c-sharp",
+    feature = "lang-go"
+))]
 fn path_row(target: &str, alias: &str) -> (String, RefForm, Option<String>) {
     (target.to_string(), RefForm::Path, Some(alias.to_string()))
 }
@@ -6319,7 +6318,7 @@ fn a_python_as_import_is_aliased_by_the_name_it_binds() {
     let src = "import typing as t\nimport os.path as osp\nimport json\n\
                from pkg.mod import Thing as Other, Plain\n";
     assert_eq!(
-        alias_rows("py", "app/main.py", src),
+        import_rows(&extract_lang("py", "app/main.py", src)),
         vec![
             path_row("json", "json"),
             path_row("os::path", "osp"),
@@ -6336,7 +6335,7 @@ fn a_python_as_import_is_aliased_by_the_name_it_binds() {
 fn a_php_use_as_is_aliased_by_the_name_it_binds() {
     let src = "<?php\nnamespace App;\nuse A\\B as C;\nuse A\\D;\nuse E\\F\\G as H;\n";
     assert_eq!(
-        alias_rows("php", "src/App.php", src),
+        import_rows(&extract_lang("php", "src/App.php", src)),
         vec![path_row("A::B", "C"), path_row("A::D", "D"), path_row("E::F::G", "H")]
     );
 }
@@ -6349,7 +6348,7 @@ fn a_php_use_as_is_aliased_by_the_name_it_binds() {
 fn a_csharp_alias_directive_is_one_row_aliased_by_its_local_name() {
     let src = "using Test = Xunit.FactAttribute;\nusing Json = Newtonsoft.Json;\n\
                using System.Text;\nusing static System.Math;\n";
-    let rows = alias_rows("cs", "src/Tests.cs", src);
+    let rows = import_rows(&extract_lang("cs", "src/Tests.cs", src));
     assert_eq!(
         rows,
         vec![
@@ -6373,7 +6372,7 @@ fn a_go_aliased_import_is_aliased_by_its_package_name() {
     let src = "package main\n\nimport (\n\tinternalcloud \"github.com/acme/x/internal/cloud\"\n\
                \t\"net/http\"\n\t. \"github.com/acme/x/dots\"\n\t_ \"github.com/acme/x/blank\"\n)\n";
     assert_eq!(
-        alias_rows("go", "cmd/main.go", src),
+        import_rows(&extract_lang("go", "cmd/main.go", src)),
         vec![
             path_row("github.com::acme::x::blank", "blank"),
             path_row("github.com::acme::x::dots", "dots"),
