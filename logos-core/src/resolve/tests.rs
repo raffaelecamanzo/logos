@@ -2847,8 +2847,9 @@ fn a_capture_row_from_a_re_extracted_source_sweeps_its_source() {
 }
 
 /// Out of a swept source, the reference-bound edges no re-bound row produces
-/// are retracted; one a row still produces, a containment edge, and an edge
-/// out of a source that was not swept are kept.
+/// are retracted — every one of FR-SY-12's seven kinds; one a row still
+/// produces, a containment edge, and an edge out of a source that was not
+/// swept are kept.
 #[test]
 fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
     let (nodes, mut edges) = fixture();
@@ -2864,6 +2865,15 @@ fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
         // helper -> run: helper was not swept.
         edge(3, 5, EdgeKind::Calls),
     ]);
+    // alpha -> other: one unproduced edge of each remaining reference kind.
+    let other_kinds = [
+        EdgeKind::Accesses,
+        EdgeKind::Extends,
+        EdgeKind::Implements,
+        EdgeKind::Instantiates,
+        EdgeKind::TypeUses,
+    ];
+    edges.extend(other_kinds.iter().map(|&kind| edge(2, 20, kind)));
     let swept = ["local sym2"].into_iter().collect();
     let mut outcomes = vec![
         (1, true, Outcome::Unbound),
@@ -2871,14 +2881,15 @@ fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
     ];
     let no_captures = Default::default();
     let mut stale = super::retract_unproduced(&nodes, &edges, &swept, &no_captures, &mut outcomes);
-    stale.sort_by_key(|(s, t, k)| (s.0, t.0, k.as_i32()));
-    assert_eq!(
-        stale,
-        [
-            (NodeId(2), NodeId(5), EdgeKind::Calls),
-            (NodeId(2), NodeId(21), EdgeKind::Imports),
-        ]
-    );
+    let mut expected = vec![
+        (NodeId(2), NodeId(5), EdgeKind::Calls),
+        (NodeId(2), NodeId(21), EdgeKind::Imports),
+    ];
+    expected.extend(other_kinds.iter().map(|&kind| (NodeId(2), NodeId(20), kind)));
+    for list in [&mut stale, &mut expected] {
+        list.sort_by_key(|(s, t, k)| (s.0, t.0, k.as_i32()));
+    }
+    assert_eq!(stale, expected);
     // Nothing swept, nothing retracted.
     let unswept = Default::default();
     let none = super::retract_unproduced(&nodes, &edges, &unswept, &no_captures, &mut outcomes);

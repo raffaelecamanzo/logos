@@ -1087,6 +1087,37 @@ fn sync_equiv_a_capture_row_never_restores_an_edge_its_re_extracted_source_dropp
     );
 }
 
+/// An `Extends` edge: `Leaf extends Bar` binds the one `com.z.Bar` until a
+/// second source set declares another.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_equiv_a_rival_supertype_arriving_unbinds_an_extends() {
+    assert_sync_matches_reindex(
+        &[
+            ("src/main/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n"),
+            ("src/main/java/com/z/Leaf.java", "package com.z;\n\npublic class Leaf extends Bar {}\n"),
+        ],
+        &[Edit::Put("src/test/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n")],
+    );
+}
+
+/// `TypeUses` edges: a field and a parameter of type `Bar` bind the one
+/// `com.z.Bar` until a second source set declares another.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_equiv_a_rival_type_arriving_unbinds_a_type_use() {
+    assert_sync_matches_reindex(
+        &[
+            ("src/main/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n"),
+            (
+                "src/main/java/com/z/Holder.java",
+                "package com.z;\n\npublic class Holder {\n    Bar b;\n    void take(Bar x) {}\n}\n",
+            ),
+        ],
+        &[Edit::Put("src/test/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n")],
+    );
+}
+
 /// Bench (run with `--ignored --nocapture`): the CR-015 win in isolation. Times
 /// the resolve pass over the WHOLE ledger (`None` — what every sync re-bound
 /// before) vs over only a one-file change-set (`Some(delta)`) on the same large
