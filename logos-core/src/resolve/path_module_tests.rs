@@ -336,6 +336,35 @@ fn an_import_repeated_verbatim_costs_what_one_import_costs() {
     }
 }
 
+/// Rivals repeated in alternation — a compat `try: import simplejson as json` /
+/// `except ImportError: import json` re-run in every function — cost what one
+/// pair costs: a copy is recognised wherever it sits in the file, not only next
+/// to its twin (a previous-copy check costs 19,173,961 visits here against 511).
+#[test]
+fn rival_imports_repeated_in_alternation_cost_what_one_pair_costs() {
+    for policy in POLICIES {
+        let call = row(99, TEST_MAP_PY, 161, "pkg::version", EdgeKind::Calls);
+        let with = |pairs: i64| {
+            let mut refs: Vec<UnresolvedRefRow> = (0..pairs)
+                .flat_map(|n| {
+                    let itself = import(2 * n + 1, TEST_MAP_PY, 161, "pkg");
+                    let routing = UnresolvedRefRow {
+                        alias: Some("pkg".to_string()),
+                        ..import(2 * n + 2, TEST_MAP_PY, 161, "pkg::routing")
+                    };
+                    [itself, routing]
+                })
+                .collect();
+            refs.push(call.clone());
+            bind_counting_path_visits(&call, &index(&refs), policy)
+        };
+        let (once, once_visits) = with(1);
+        let (repeated, repeated_visits) = with(4);
+        assert_eq!(repeated, once, "{policy:?}");
+        assert_eq!(repeated_visits, once_visits, "{policy:?}: alternating copies did more work");
+    }
+}
+
 /// Repeating one of two rival imports never outvotes the other: the name is
 /// still imported from two places, so a call through it stays ambiguous.
 #[test]
