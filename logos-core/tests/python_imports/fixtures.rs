@@ -92,3 +92,31 @@ pub const FAMILIES: Fixture = &[
         "using App.Models;\n\nnamespace App.Api;\n\npublic class OrdersApi\n{\n}\n",
     ),
 ];
+
+/// werkzeug's `wrappers/request.py` shape (S-519 T2): every method re-runs the
+/// same imports — the external `import warnings`, an `import werkzeug` whose
+/// head expands to itself, and an aliased `from` import of an in-repository
+/// class it then calls by the alias. The methods also import a `_Fallback`, two
+/// of them from `compat` and two from `legacy`: a genuine rival, however often
+/// each side is repeated. Four methods; the real file repeats `import
+/// warnings` 13 times.
+pub const REPEATED_IMPORTS: Fixture = &[
+    ("src/werkzeug/__init__.py", ""),
+    (
+        "src/werkzeug/exceptions.py",
+        "class BadRequest(Exception):\n    pass\n",
+    ),
+    (
+        "src/werkzeug/compat.py",
+        "class BadRequest(Exception):\n    pass\n",
+    ),
+    (
+        "src/werkzeug/legacy.py",
+        "class BadRequest(Exception):\n    pass\n",
+    ),
+    ("src/werkzeug/wrappers/__init__.py", ""),
+    (
+        "src/werkzeug/wrappers/request.py",
+        "class Request:\n    def on_json_loading_failed(self):\n        import warnings\n        import werkzeug\n        from werkzeug.exceptions import BadRequest as _BadRequest\n        from werkzeug.compat import BadRequest as _Fallback\n\n        warnings.warn(\"deprecated\", DeprecationWarning)\n        return _BadRequest(werkzeug), _Fallback(werkzeug)\n\n    def get_json(self):\n        import warnings\n        import werkzeug\n        from werkzeug.exceptions import BadRequest as _BadRequest\n        from werkzeug.compat import BadRequest as _Fallback\n\n        warnings.warn(\"deprecated\", DeprecationWarning)\n        return _BadRequest(werkzeug), _Fallback(werkzeug)\n\n    def close(self):\n        import warnings\n        import werkzeug\n        from werkzeug.exceptions import BadRequest as _BadRequest\n        from werkzeug.legacy import BadRequest as _Fallback\n\n        warnings.warn(\"deprecated\", DeprecationWarning)\n        return _BadRequest(werkzeug), _Fallback(werkzeug)\n\n    def stream(self):\n        import warnings\n        import werkzeug\n        from werkzeug.exceptions import BadRequest as _BadRequest\n        from werkzeug.legacy import BadRequest as _Fallback\n\n        warnings.warn(\"deprecated\", DeprecationWarning)\n        return _BadRequest(werkzeug), _Fallback(werkzeug)\n",
+    ),
+];
