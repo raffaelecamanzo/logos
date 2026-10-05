@@ -265,6 +265,17 @@ fn a_call_never_binds_to_a_package_through_its_reexport() {
     }
 }
 
+/// The re-export rung is the import-root path model's alone: Rust declares
+/// `mod` a package stem too, but a Rust import of a name its `a/mod.rs` does
+/// not declare stays unbound rather than binding the module.
+#[test]
+fn a_rust_import_never_goes_through_a_mod_rs() {
+    for policy in POLICIES {
+        let r = import(1, APP_LIB_RS, 300, "crate::a::Missing");
+        assert_eq!(bind_last(&[r], policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
 /// A bare call to a name a `from` import brought into view binds across files,
 /// through the import's alias.
 #[test]
