@@ -1128,7 +1128,18 @@ fn build_module_tree(
         .iter()
         .filter(|n| n.kind == NodeKind::Module && !parent.contains_key(&n.id))
         .collect();
-    file_roots.sort_by_key(|n| n.id); // first-by-id wins a (rare) path tie
+    // First-by-id wins a (rare) path tie — except among import-root files
+    // (S-519), where a module and its stub (`foo.py`, `foo.pyi`) share a key
+    // routinely and a node id changes on every re-extraction: the path decides
+    // there, so a sync keeps the winner a cold index picks ([NFR-RA-06]). They
+    // sit in their family's own crate, so the two orders never compete for a key.
+    file_roots.sort_by_key(|n| {
+        let import_root_path = n
+            .file_path
+            .as_deref()
+            .filter(|p| layout.has_import_roots(p));
+        (import_root_path, n.id)
+    });
     for root in file_roots {
         let Some(path) = &root.file_path else {
             continue; // an orphaned module node cannot anchor a tree

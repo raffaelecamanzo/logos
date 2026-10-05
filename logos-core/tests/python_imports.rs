@@ -404,3 +404,23 @@ fn sync_equals_a_full_reindex_when_a_package_file_moves_the_import_root() {
     assert_eq!(unbound_imports(rt, "src/app/cli.py"), strings(&["app::core::go"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(files)));
 }
+
+/// A module and its stub (`foo.py`, `foo.pyi`) share one module key; which one
+/// answers must not depend on node ids, which a re-extraction renews — the
+/// path decides, so a sync of the module agrees with a cold index.
+#[test]
+fn sync_equals_a_full_reindex_with_a_module_beside_its_stub() {
+    let files: &[(&str, &str)] = &[
+        ("pkg/__init__.py", ""),
+        ("pkg/foo.py", "class X:\n    pass\n"),
+        ("pkg/foo.pyi", "class X: ...\n"),
+        ("app.py", "from pkg.foo import X\n"),
+    ];
+    let (tmp, engine) = indexed(files);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/foo.py:X:class"]));
+    write(tmp.path(), "pkg/foo.py", "class X:\n    y = 1\n");
+    engine.sync(&["pkg/foo.py".into()]);
+    assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/foo.py:X:class"]));
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(files)));
+}
