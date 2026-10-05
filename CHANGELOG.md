@@ -32,6 +32,41 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   40% of this repository's ledger on every one-file sync. A full index is
   unchanged.
 
+### Changed
+
+- **Two local names of one import target are two reference-ledger rows (CR-194,
+  S-597).** The ledger's identity is now `(source_symbol, target, form, kind, payload,
+  receiver, alias)`, with a missing alias normalised so a row without one dedups as
+  before. The unique index, the writer's `ON CONFLICT` target and the extractor's
+  deduplication key all name those seven components. Until now the alias was not part
+  of it, so `from pkg.m import X as A` and `… as B` in one scope, or `import numpy`
+  beside `import numpy as np`, kept one row and dropped the other at insert: the second
+  local name never reached the ledger and never bound. Python, Kotlin, Scala and every
+  other language that records an import alias keep both: a Kotlin `class Aliased :
+  KBase()` beside `import p.Base` and `import p.Base as KBase` now extends `Base`
+  (it was left unbound). Aliasless rows are unchanged.
+  Two rows of one target are still one edge (an edge is `(source, target, kind)`), so
+  the gain is the second name's binding, not a second edge.
+- **Measured** on `594452f6` of werkzeug and on this repository at `9d401b9f`, indexed
+  by 1.11.0 and by this build over identical trees: werkzeug 9,748 → 9,748 ledger rows
+  and 4,843 → 4,843 edges; this repository 103,025 → 103,026 rows and 43,641 → 43,641
+  edges. The one added row is an alias twin — `use crate::model::BridgeRole as Role`
+  beside the `BridgeRole` import already kept — and every edge is byte-identical, Rust
+  edges included. Upgrading a populated v30 store in place gives the same ledger and
+  edges as a cold index.
+
+### Upgrade
+
+- One forward-only store migration, **31** (the alias joins the ledger identity index).
+  It changes no row, id or column and clears every file's content hash, so run **one
+  `logos scan` or `logos index`** after upgrading — a bare `logos sync` re-reads nothing
+  and the rows the old identity dropped would not return. Migration 30 is not edited: a
+  store already at 30 receives 31 as its own step.
+- **This ships after 1.11.0, in the next release.** A store that already applied 1.11.0's
+  migration 30 re-extracts a second time on its first index after upgrading; a store
+  upgrading straight from 1.10.x or earlier to that release pays one re-extraction for
+  30 and 31 together. Earlier `logos` versions refuse an upgraded store.
+
 ## [1.11.0] — 2026-10-05
 
 ### Changed

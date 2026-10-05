@@ -1374,8 +1374,8 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 }
 
 /// Deduplicate references on the ledger's uniqueness key
-/// `(source, target, form, kind, relation, receiver)` — the same reference on
-/// two lines is one ref, first wins — then sort into that canonical order
+/// `(source, target, form, kind, relation, receiver, alias)` — the same reference
+/// on two lines is one ref, first wins — then sort into that canonical order
 /// ([NFR-RA-06]).
 ///
 /// The `relation` is part of the identity: two facts that share source, target,
@@ -1394,19 +1394,31 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 /// caller's `this.m()` and `x.m()` share every other component and bind
 /// differently. A row with no shape keys exactly as before.
 ///
+/// The import alias (S-597, [FR-DB-07]) completes the identity: `from m import X
+/// as A` and `… as B` share every other component and bind through different
+/// local names, so both must reach the ledger. A row with no alias keys exactly
+/// as before. The key, the writer's `ON CONFLICT` target
+/// (`insert_unresolved_ref`) and the unique index of migration 31 name the same
+/// seven components.
+///
 /// Shared by the code [`collect_refs`] and the documentation extractor
 /// ([`doc`], S-035) so both passes produce byte-identical, order-independent
 /// ledger input.
 ///
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
+/// [FR-DB-07]: ../../../docs/specs/requirements/FR-DB-07.md
 pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
     // The relation token (`None` for a plain code/doc reference) completes the
     // ledger identity; a `&'static str` keeps the key allocation-free.
     let relation_token =
         |r: &RefFact| -> Option<&'static str> { r.relation.map(crate::model::ArtifactRelation::as_str) };
-    // `(source, target, form, kind, relation, receiver)`.
-    type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>);
+    // The alias is normalised as the index's `COALESCE(alias, '')` does, so a
+    // missing alias and an empty one are one identity here exactly as in the
+    // ledger.
+    let alias_token = |r: &RefFact| -> String { r.alias.clone().unwrap_or_default() };
+    // `(source, target, form, kind, relation, receiver, alias)`.
+    type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>, String);
     let mut seen: HashSet<LedgerKey> = HashSet::new();
     refs.retain(|r| {
         seen.insert((
@@ -1416,6 +1428,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             r.kind.as_i32(),
             relation_token(r),
             r.receiver.map(ReceiverShape::as_i32),
+            alias_token(r),
         ))
     });
     refs.sort_by(|a, b| {
@@ -1426,6 +1439,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             a.kind.as_i32(),
             relation_token(a),
             a.receiver.map(ReceiverShape::as_i32),
+            a.alias.as_deref().unwrap_or_default(),
         )
             .cmp(&(
                 b.source.as_str(),
@@ -1434,6 +1448,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
                 b.kind.as_i32(),
                 relation_token(b),
                 b.receiver.map(ReceiverShape::as_i32),
+                b.alias.as_deref().unwrap_or_default(),
             ))
     });
 }

@@ -3271,6 +3271,89 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 30");
     }
 
+    /// S-597 / CR-194 / FR-DB-07: a populated v30 store upgrades to v31 forward
+    /// only. The identity index is rebuilt with the alias; no row, id or other
+    /// column changes — the alias twins the old identity dropped were never
+    /// stored, so nothing can be recovered here, only re-extracted — and every
+    /// `files.content_hash` is cleared so the next scan does that.
+    #[test]
+    fn migration_31_adds_the_alias_to_the_ledger_identity_and_triggers_reextraction() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..30]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/a.py', 'python', 'h-py'),
+                 (2, 'src/lib.rs', 'rust', 'h-rs');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local n'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES
+                 (10, 1, 8, 'n', 1), (11, 2, 8, 'm', 2);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 2);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver) VALUES
+                 (1, 'local n', 'pkg::m::X', 'A', 2, 3, 1, 1, NULL, NULL),
+                 (1, 'local n', 'numpy', NULL, 2, 3, 2, 0, NULL, NULL),
+                 (2, 'local m', 'topic', NULL, 3, 14, 5, 0, 'broker-publish', NULL),
+                 (2, 'local m', 'run', NULL, 3, 2, 6, 0, NULL, 1);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..31]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 31, "30 → 31, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are untouched");
+        assert_eq!(read_ledger(&conn), ledger_before, "every row and id is unchanged");
+        type FileRow = (i64, String, Option<String>, Option<String>);
+        let files: Vec<FileRow> = conn
+            .prepare("SELECT id, path, language, content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                (1, "src/a.py".to_string(), Some("python".to_string()), None),
+                (2, "src/lib.rs".to_string(), Some("rust".to_string()), None),
+            ],
+            "every hash is cleared so the next scan re-extracts; ids, paths, languages stay"
+        );
+
+        // The widened identity: an alias twin is a second row, once per local
+        // name; an aliasless row and a repeated alias dedup as before.
+        let insert = |target: &str, alias: Option<&str>| {
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line) \
+                 VALUES (1, 'local n', ?1, ?2, 2, 3, 9) \
+                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
+                             COALESCE(receiver, 0), COALESCE(alias, '')) DO NOTHING",
+                rusqlite::params![target, alias],
+            )
+        };
+        assert_eq!(insert("pkg::m::X", Some("B")).unwrap(), 1, "`as B` is a second row");
+        assert_eq!(insert("pkg::m::X", Some("A")).unwrap(), 0, "a repeated alias dedups");
+        assert_eq!(insert("pkg::m::X", None).unwrap(), 1, "the aliasless import is its own row");
+        assert_eq!(insert("pkg::m::X", None).unwrap(), 0, "a second aliasless row dedups");
+        assert_eq!(insert("numpy", Some("np")).unwrap(), 1, "`import numpy as np` beside `import numpy`");
+        assert_eq!(insert("numpy", None).unwrap(), 0, "the stored aliasless row still dedups");
+
+        // Forward-only: re-running the full ledger never re-applies migration 31.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 31", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 31 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 31");
+        let check: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(check.is_empty(), "PRAGMA foreign_key_check is clean: {check:?}");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

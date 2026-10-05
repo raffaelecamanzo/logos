@@ -338,9 +338,10 @@ fn a_csharp_base_call_reaches_the_base_class_never_an_interface() {
 /// delegated interface and an object implement, an interface extends one, and
 /// a companion object's supertype is never its enclosing class's.
 /// `super.start()` reaches the base class; `super<Iface>` names its supertype,
-/// which the caller's hierarchy does not decide. An `as`-renamed base stays
-/// unbound: Kotlin import rows record no local name yet (S-520 covered Python,
-/// PHP, C# and Go), so `KBase` names nothing the file imports.
+/// which the caller's hierarchy does not decide. An `as`-renamed base binds
+/// through its local name (S-520 records it; S-597 keeps the row beside the
+/// plain `import …Base` of the same target, which the ledger identity used to
+/// drop), so `class Aliased : KBase()` extends `Base`.
 #[test]
 fn kotlin_supertypes_take_the_kind_of_what_they_bind() {
     let (_tmp, engine) = indexed(fixtures::KOTLIN);
@@ -349,7 +350,11 @@ fn kotlin_supertypes_take_the_kind_of_what_they_bind() {
     let base = "src/main/kotlin/org/koin/core/Base.kt:Base:class";
     assert_eq!(
         edges(rt, EdgeKind::Extends),
-        vec![format!("Impl -> {base}"), format!("Sub -> {iface}")]
+        vec![
+            format!("Aliased -> {base}"),
+            format!("Impl -> {base}"),
+            format!("Sub -> {iface}"),
+        ]
     );
     assert_eq!(
         edges(rt, EdgeKind::Implements),
@@ -364,7 +369,7 @@ fn kotlin_supertypes_take_the_kind_of_what_they_bind() {
         strings(&["src/main/kotlin/org/koin/core/Base.kt:start"])
     );
     assert!(calls_from(rt, "both").is_empty(), "{:?}", calls_from(rt, "both"));
-    assert_eq!(unbound_relations(rt), strings(&["extends KBase"]));
+    assert!(unbound_relations(rt).is_empty(), "{:?}", unbound_relations(rt));
 }
 
 /// A class's header never names the class itself: `class TestCase(TestCase)`

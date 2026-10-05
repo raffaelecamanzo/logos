@@ -63,6 +63,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (28, MIGRATION_28),
     (29, MIGRATION_29),
     (30, MIGRATION_30),
+    (31, MIGRATION_31),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2586,13 +2587,61 @@ ALTER TABLE files ADD COLUMN namespace TEXT;
 UPDATE files SET content_hash = NULL;
 ";
 
+/// Migration 31 — the import **alias** joins the reference-ledger identity
+/// (S-597, [CR-194], [FR-DB-07]).
+///
+/// An import binds the name it is aliased by ([FR-EX-14]), so `from pkg.m import
+/// X as A` and `… as B` — and `import numpy` beside `import numpy as np` — are
+/// two bindings of one target. The identity index of migration 29 omits the
+/// alias, so the second row collided with the first and was dropped at insert:
+/// the second local name never reached the ledger and never bound. The index is
+/// recreated with `COALESCE(alias, '')` appended — the `COALESCE` for the reason
+/// migration 18 gives for `payload` (SQLite treats each bare `NULL` as distinct
+/// in a UNIQUE key), so a row with no alias dedups exactly as before.
+///
+/// Only an index is dropped and recreated: no table is rebuilt, no row, id or
+/// column changes, and `nodes`, `edges`, the FTS index and the `annotations`
+/// view are byte-for-byte unaffected. Every stored row is unique under the
+/// narrower key, so each is unique under the wider one.
+///
+/// The rows the old identity dropped were never stored, so they cannot be
+/// recovered here — only re-extracted, and **re-extraction is triggered here**
+/// as migrations 25, 28, 29 and 30 do it: every `files.content_hash` is cleared,
+/// so the next scan, index or full-walk sync re-extracts each file like a
+/// modified one. Until then a store keeps the rows it had.
+///
+/// Its own migration, not an edit of 29 or 30: those are recorded once on every
+/// store that applied them, so changing their text would reach no upgrader.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_31_adds_the_alias_to_the_ledger_identity_and_triggers_reextraction`
+/// in [`super::migrate`].
+///
+/// [CR-194]: ../../../../docs/requests/CR-194-the-reference-ledger-identity-includes-the-alias.md
+/// [FR-DB-07]: ../../../../docs/specs/requirements/FR-DB-07.md
+/// [FR-EX-14]: ../../../../docs/specs/requirements/FR-EX-14.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_31: &str = "\
+-- 1. The alias joins the ledger identity (migration 29's index, widened): two
+-- local names of one target are two rows. NULL normalised to '' so a row with no
+-- alias dedups exactly as before.
+DROP INDEX idx_unresolved_refs_identity;
+CREATE UNIQUE INDEX idx_unresolved_refs_identity
+    ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''));
+
+-- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, recovering the rows the old identity dropped.
+UPDATE files SET content_hash = NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
         MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_29, MIGRATION_3,
-        MIGRATION_4, MIGRATION_8,
+        MIGRATION_31, MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, ReceiverShape, RefForm};
 
@@ -3811,6 +3860,39 @@ mod tests {
             check_discriminants(MIGRATION_29, "receiver IN (", 0),
             shapes,
             "unresolved_refs.receiver CHECK must equal ReceiverShape::ALL discriminants"
+        );
+    }
+
+    /// Migration 31 (S-597) rebuilds the ledger identity index with the alias
+    /// and triggers re-extraction — nothing else: no column, table or row is
+    /// touched, and it is its own migration, not an edit of 29 or 30.
+    #[test]
+    fn migration_31_widens_the_ledger_identity_by_the_alias_only() {
+        let statements: Vec<String> = MIGRATION_31
+            .split(';')
+            .map(|stmt| {
+                stmt.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|stmt| stmt.trim().to_string())
+            .filter(|stmt| !stmt.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DROP INDEX idx_unresolved_refs_identity",
+                "CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, \
+                 target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''))",
+                "UPDATE files SET content_hash = NULL",
+            ],
+            "exactly the widened identity and the re-extraction trigger"
+        );
+        assert!(
+            !MIGRATION_29.contains("COALESCE(alias"),
+            "the alias joins the identity in migration 31, never by editing migration 29"
         );
     }
 }

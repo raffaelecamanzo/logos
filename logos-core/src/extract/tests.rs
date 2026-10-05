@@ -6362,6 +6362,115 @@ fn a_python_as_import_is_aliased_by_the_name_it_binds() {
     );
 }
 
+// ── S-597 / FR-DB-07: the ledger identity includes the alias ──
+
+/// Two imports of one target under two local names are two rows that reach the
+/// ledger — `dedup_sort_refs` keys on the alias, so the second name is not
+/// dropped as a duplicate of the first. Python's `from m import X as A` and
+/// `… as B` in one scope, and `import numpy` beside `import numpy as np`.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_import_under_two_local_names_keeps_both_rows() {
+    let src = "from pkg.m import X as A\nfrom pkg.m import X as B\n\
+               import numpy\nimport numpy as np\n";
+    assert_eq!(
+        import_rows(&extract_lang("py", "app/main.py", src)),
+        vec![
+            path_row("numpy", "np"),
+            path_row("numpy", "numpy"),
+            path_row("pkg::m::X", "A"),
+            path_row("pkg::m::X", "B"),
+        ]
+    );
+}
+
+/// Kotlin: `import a.b.C as D` beside `import a.b.C as E` (and the plain
+/// `import a.b.C`) are three rows of one target, one per local name.
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn a_kotlin_import_under_two_local_names_keeps_both_rows() {
+    let facts = extract_lang(
+        "kt",
+        "src/main/kotlin/app/App.kt",
+        "package app\n\nimport other.Base as First\nimport other.Base as Second\n\
+         import other.Base\n\nclass App\n",
+    );
+    let aliases: Vec<Option<String>> = import_rows(&facts)
+        .into_iter()
+        .map(|(target, _, alias)| {
+            assert_eq!(target, "other::Base");
+            alias
+        })
+        .collect();
+    assert_eq!(
+        aliases,
+        vec![Some("Base".to_string()), Some("First".to_string()), Some("Second".to_string())]
+    );
+}
+
+/// Scala: a selector rename and a Scala 3 `as` rename of one type are two rows
+/// beside the plain import.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn a_scala_import_under_two_local_names_keeps_both_rows() {
+    let rows = scala_imports("import a.b.{C => X}\nimport a.b.C as Y\nimport a.b.C");
+    let aliases: Vec<Option<String>> = rows.into_iter().map(|(_, alias, _)| alias).collect();
+    assert_eq!(
+        aliases,
+        vec![Some("C".to_string()), Some("X".to_string()), Some("Y".to_string())]
+    );
+}
+
+/// The key itself, without a grammar: rows differing in the alias alone survive,
+/// a row with no alias and one repeated alias collapse as before, and the sort
+/// is total over the alias so the ledger input stays byte-stable ([NFR-RA-06]).
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[test]
+fn dedup_sort_refs_keys_on_the_alias_with_a_missing_alias_normalised() {
+    let source = LogosSymbol::parse("logos . . . src/a.py/caller().").expect("a valid symbol");
+    let row = |alias: Option<&str>, line: u32| RefFact {
+        source: source.clone(),
+        target: "pkg::m::X".to_string(),
+        alias: alias.map(str::to_string),
+        form: RefForm::Path,
+        kind: EdgeKind::Imports,
+        line,
+        relation: None,
+        receiver: None,
+    };
+    let mut refs = vec![
+        row(Some("B"), 1),
+        row(None, 2),
+        row(Some("A"), 3),
+        row(Some("A"), 4),
+        row(None, 5),
+        row(Some("B"), 6),
+        // `''` is the same identity as no alias, as the index's COALESCE has it.
+        row(Some(""), 7),
+    ];
+    dedup_sort_refs(&mut refs);
+    let kept: Vec<(Option<&str>, u32)> = refs.iter().map(|r| (r.alias.as_deref(), r.line)).collect();
+    assert_eq!(
+        kept,
+        vec![(None, 2), (Some("A"), 3), (Some("B"), 1)],
+        "one row per distinct alias, the first-seen line kept, aliasless first"
+    );
+
+    // Order independence: the reverse input yields the same alias set.
+    let mut reversed: Vec<RefFact> = vec![
+        row(Some("B"), 6),
+        row(None, 5),
+        row(Some("A"), 4),
+        row(Some("A"), 3),
+        row(None, 2),
+        row(Some("B"), 1),
+    ];
+    dedup_sort_refs(&mut reversed);
+    let aliases: Vec<Option<&str>> = reversed.iter().map(|r| r.alias.as_deref()).collect();
+    assert_eq!(aliases, vec![None, Some("A"), Some("B")]);
+}
+
 /// PHP: `use A\B as C;` binds `C`; an unaliased `use A\B;` keeps `B`.
 #[cfg(feature = "lang-php")]
 #[test]
