@@ -295,7 +295,8 @@ fn a_package_wildcards_own_row_binds_nothing_and_a_type_wildcards_binds_the_type
 #[test]
 fn without_the_layout_no_package_rung_exists() {
     // The descriptor data is the switch (NFR-MA-01): the same snapshot under the
-    // default model binds neither the same-package name nor the import.
+    // default model binds neither the same-package name nor the import to the
+    // type it names.
     let bare = row(1, 10, 2, "Helper", RefForm::Path, EdgeKind::TypeUses);
     assert_eq!(
         bind_from_ctl(PackageLayout::default(), &bare),
@@ -309,10 +310,11 @@ fn without_the_layout_no_package_rung_exists() {
         RefForm::Path,
         EdgeKind::Imports,
     );
-    assert_eq!(
-        bind_from_svc(PackageLayout::default(), &[], &import),
-        Outcome::Unbound
-    );
+    // The path model's workspace fallback reads the import as a module path:
+    // it reaches the file module `Helper` whose parent key ends in
+    // `com::x::web` (S-519's parent-key match), never the class — naming a
+    // type is the package rung's alone.
+    bound(bind_from_svc(PackageLayout::default(), &[], &import), 7, 4);
     bound(bind_from_svc(java(), &[], &import), 7, 5);
 }
 

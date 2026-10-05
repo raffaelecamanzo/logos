@@ -70,7 +70,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
-use crate::config::{self, AdmissionAuthority, BindingPolicy, Config, ConfigGlobs, DocGlobs};
+use crate::config::{self, AdmissionAuthority, Config, ConfigGlobs, DocGlobs};
 use crate::extract::build_manifest::{self, ManifestFacts};
 use crate::extract::declared_types::{self, SchemaFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
@@ -247,9 +247,9 @@ pub fn index(
     // framework pass promotes route/component matches against the resolved
     // graph (S-012); Pass 3 annotates the resolved graph (S-014).
     let (mut resolution, resolve_ms) =
-        resolve_pass(runtime, registry, root, config.resolution.policy, None)?;
+        resolve_pass(runtime, registry, root, &config.resolution, None)?;
     let (framework, promoted_nodes) =
-        framework_pass(runtime, registry, root, config.resolution.policy, None)?;
+        framework_pass(runtime, registry, root, &config.resolution, None)?;
     // CR-017 / S-080: bind any deferred reference (an OpenAPI operation's route
     // reference) to a route/component this pass just promoted — see
     // [`rebind_for_promotions`]. The focused re-resolve it runs is timed through
@@ -258,7 +258,7 @@ pub fn index(
         runtime,
         registry,
         root,
-        config.resolution.policy,
+        &config.resolution,
         &promoted_nodes,
         &mut resolution,
     )?;
@@ -794,10 +794,10 @@ pub fn sync(
     // the seam-measured durations these passes return are discarded here — the
     // `tracing` events still reach telemetry unchanged.
     let (resolution, _resolve_ms) =
-        resolve_pass(runtime, registry, &canon_root, config.resolution.policy, Some(&delta))?;
+        resolve_pass(runtime, registry, &canon_root, &config.resolution, Some(&delta))?;
     result.resolution = resolution;
     let (framework, promoted_nodes) =
-        framework_pass(runtime, registry, &canon_root, config.resolution.policy, Some(&delta))?;
+        framework_pass(runtime, registry, &canon_root, &config.resolution, Some(&delta))?;
     result.framework = framework;
     // CR-017 / S-080: the framework pass may have promoted a route/component after
     // the resolve above; rebind deferred cross-artifact references that target it.
@@ -805,7 +805,7 @@ pub fn sync(
         runtime,
         registry,
         &canon_root,
-        config.resolution.policy,
+        &config.resolution,
         &promoted_nodes,
         &mut result.resolution,
     )?;
@@ -965,7 +965,7 @@ pub fn reconcile(
                 global_imports_moved: purge.global_imports,
             };
             let (res, _resolve_ms) =
-                resolve_pass(runtime, registry, root, config.resolution.policy, Some(&delta))?;
+                resolve_pass(runtime, registry, root, &config.resolution, Some(&delta))?;
             resolution = res;
         }
     }
@@ -2820,7 +2820,7 @@ fn resolve_pass(
     runtime: &Runtime,
     registry: &LanguageRegistry,
     root: &Path,
-    policy: BindingPolicy,
+    resolution: &crate::config::Resolution,
     delta: Option<&crate::resolve::Delta>,
 ) -> Result<(ResolutionStats, u64)> {
     // Pass 2 — instrumented through the single emission seam (FR-OB-01). `delta`
@@ -2828,7 +2828,7 @@ fn resolve_pass(
     // (re-bind only the change-affected rows, CR-015). The measured wall-clock
     // rides back for the per-phase index breakdown (FR-OB-06, CR-057).
     let (res, ms) = crate::observability::traced_timed(Tool::Resolve, || {
-        crate::resolve::run(runtime, Some((registry, root)), policy, delta)
+        crate::resolve::run(runtime, Some((registry, root)), resolution, delta)
     });
     Ok((res?, ms))
 }
@@ -2855,10 +2855,10 @@ fn framework_pass(
     runtime: &Runtime,
     registry: &LanguageRegistry,
     root: &Path,
-    policy: BindingPolicy,
+    resolution: &crate::config::Resolution,
     delta: Option<&crate::resolve::Delta>,
 ) -> Result<(FrameworkStats, Vec<String>)> {
-    crate::resolve::framework::run(runtime, registry, root, policy, delta)
+    crate::resolve::framework::run(runtime, registry, root, resolution, delta)
 }
 
 /// The broker-topic promotion pass ([resolution-engine], S-256, [FR-WS-11],
@@ -2947,7 +2947,7 @@ fn rebind_for_promotions(
     runtime: &Runtime,
     registry: &LanguageRegistry,
     root: &Path,
-    policy: BindingPolicy,
+    config: &crate::config::Resolution,
     promoted: &[String],
     resolution: &mut ResolutionStats,
 ) -> Result<u64> {
@@ -2966,7 +2966,7 @@ fn rebind_for_promotions(
         dirty_tokens,
         global_imports_moved: false,
     };
-    let (res, ms) = resolve_pass(runtime, registry, root, policy, Some(&delta))?;
+    let (res, ms) = resolve_pass(runtime, registry, root, config, Some(&delta))?;
     *resolution = res;
     Ok(ms)
 }

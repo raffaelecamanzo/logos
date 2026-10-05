@@ -15,6 +15,8 @@
 //! [ADR-15]: ../../../../docs/specs/architecture/decisions/ADR-15.md
 //! [pipeline-orchestrator]: ../../../../docs/specs/architecture/components/pipeline-orchestrator.md
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::chat::ChatConfig;
@@ -420,6 +422,48 @@ pub struct Resolution {
     /// How aggressively the binder falls back beyond scope-proven matches.
     #[serde(default)]
     pub policy: BindingPolicy,
+    /// Per-language **import roots** (S-519, [FR-RS-14]), keyed by plugin name:
+    ///
+    /// ```toml
+    /// [resolution.import_roots]
+    /// python = ["lib", "tools/src"]
+    /// ```
+    ///
+    /// For a language whose plugin declares import roots (`[module_model]
+    /// import_roots`), the listed directories **replace** the detected ones —
+    /// `src/` when it holds a package, else the repository root. Each is a
+    /// relative `/`-separated directory; `"."` is the repository root, and a
+    /// file under no listed root is keyed from the repository root. An entry for
+    /// a language that declares no import roots is ignored. Like `policy`, a
+    /// change re-binds on the next `logos index`.
+    ///
+    /// [FR-RS-14]: ../../../../docs/specs/requirements/FR-RS-14.md
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub import_roots: BTreeMap<String, Vec<String>>,
+}
+
+impl Resolution {
+    /// The `[resolution.import_roots]` rules (S-519): every root is a relative
+    /// `/`-separated directory — `"."` for the repository root — so an entry
+    /// that could never equal a path prefix (absolute, `..`, a backslash, an
+    /// empty segment) fails at load rather than silently matching nothing.
+    fn validate(&self) -> Result<(), super::error::ConfigError> {
+        for (language, roots) in &self.import_roots {
+            let bad = roots
+                .iter()
+                .find(|r| r.as_str() != "." && !crate::plugin::manifest::is_relative_dir(r));
+            if let Some(bad) = bad {
+                return Err(super::error::ConfigError::InvalidValue {
+                    key: format!("resolution.import_roots.{language}"),
+                    message: format!(
+                        "{bad:?} must be a relative `/`-separated directory (`.` for the \
+                         repository root; no empty segment, no leading or trailing `/`, no `..`)"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The binder's fallback aggressiveness ([NFR-RA-05], [AR-05]).
@@ -953,6 +997,7 @@ impl Config {
         // ignored dir, so they must still stay within the root, [NFR-SE-04]); a
         // bad glob fails at load (exit 2), not on first watch.
         super::globs::validate(&self.coverage_ingest.artifact_glob)?;
+        self.resolution.validate()?;
         // The format token, if set, must be a recognized parser name — a typo
         // fails loud at load rather than silently disabling auto-ingest.
         if let Some(format) = &self.coverage_ingest.format {

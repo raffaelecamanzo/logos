@@ -313,22 +313,66 @@ pub struct PackageModules {
 /// `path` otherwise ([`PluginManifest::module_model_kind`]), so every
 /// descriptor written before the table keeps its keys ([NFR-MA-01]).
 ///
+/// The `path` model's data (S-519, [FR-RS-14]) sits beside `kind`:
+///
+/// ```toml
+/// [module_model]
+/// kind = "path"
+/// package_stems = ["__init__"]   # a package file names its directory
+/// import_roots = ["src"]         # candidate roots; the repository root is the fallback
+/// family = "python"              # which languages' modules and types it may bind
+/// ```
+///
 /// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+/// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
 /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleModel {
     /// The model's name.
     pub kind: ModuleModelKind,
+    /// The `path` model's **package-file stems** (S-519, [FR-RS-14]): a file
+    /// with one of these stems names its directory rather than adding a module
+    /// of its own — Python's `__init__`, Rust's `mod`/`lib`/`main`. Empty (the
+    /// default) folds nothing, so a JavaScript `main.js` is the module `main`.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    #[serde(default)]
+    pub package_stems: Vec<String>,
+    /// The `path` model's **candidate import roots** (S-519, [FR-RS-14]), each
+    /// a `/`-separated directory (`"src"`). Declaring the key switches the
+    /// language's files to import-root keying: a candidate is chosen when it
+    /// holds a package (a package-stem file in a directory beneath it), the
+    /// repository root is always the fallback, and every directory under a root
+    /// is a module. `.logos/config.toml`'s `[resolution.import_roots]` replaces
+    /// the detection. `None` (omitted) keeps the default model's `src/` crate
+    /// rule — Rust's.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    #[serde(default)]
+    pub import_roots: Option<Vec<String>>,
+    /// The **interop family** this language binds within (S-519, [NFR-RA-05]):
+    /// languages that can name each other's types declare one family (Java,
+    /// Kotlin and Scala declare `jvm`), so the fully-qualified type index, the
+    /// namespace-files index and an import-root language's module tree reach
+    /// only targets of the source's own family. Omitted, a language is its own
+    /// family (its plugin name).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[serde(default)]
+    pub family: Option<String>,
 }
 
 /// The module models a language may declare ([`ModuleModel`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModuleModelKind {
-    /// Rust's model, the default: the directory before the last `src/` names
-    /// the crate and every later directory is a module.
+    /// The model keyed by the file's path, the default: the directory before
+    /// the last `src/` names the crate and every later directory is a module —
+    /// or, when the plugin declares import roots, the path after its import
+    /// root, under its family's own crate. A declared package-file stem names
+    /// its directory ([`ModuleModel::package_stems`], S-519).
     #[default]
     Path,
     /// A package under fixed source roots, named by the path after the root
@@ -936,6 +980,15 @@ impl PluginManifest {
         resolved_module_model(self.module_model.as_ref(), self.package_modules.as_ref())
     }
 
+    /// The interop family this descriptor binds within ([`ModuleModel::family`]):
+    /// the declared one, else the plugin's own name.
+    pub fn module_family(&self) -> String {
+        self.module_model
+            .as_ref()
+            .and_then(|m| m.family.clone())
+            .unwrap_or_else(|| self.name.clone())
+    }
+
     /// Parse a descriptor from TOML text, attributing any error to `file`.
     ///
     /// `file` is the embedded asset name or the on-disk override path; it is
@@ -1248,13 +1301,18 @@ fn validate_reach(reach: Option<&Reach>) -> Result<(), String> {
 /// source roots, and roots under any other kind would be data nothing reads —
 /// and the package model's roots pass [`validate_package_modules`].
 ///
-/// One arm per kind, so a kind that gains data validates it here (S-519's
-/// path-module keys are the next).
+/// One arm per kind, so a kind that gains data validates it here: the `path`
+/// model's package stems and import roots (S-519) are refused under any other
+/// kind, and the family — meaningful under every kind — is a bare token.
 fn validate_module_model(
     model: Option<&ModuleModel>,
     package_modules: Option<&PackageModules>,
 ) -> Result<(), String> {
-    match (resolved_module_model(model, package_modules), package_modules) {
+    let kind = resolved_module_model(model, package_modules);
+    if let Some(m) = model {
+        validate_path_model_data(m)?;
+    }
+    match (kind, package_modules) {
         (ModuleModelKind::Package, Some(pm)) => validate_package_modules(pm),
         (ModuleModelKind::Package, None) => Err(
             "`[module_model]` kind 'package' requires a `[package_modules]` table naming its \
@@ -1268,6 +1326,63 @@ fn validate_module_model(
         )),
         (ModuleModelKind::Path | ModuleModelKind::Namespace, None) => Ok(()),
     }
+}
+
+/// The `[module_model]` keys beside `kind` (S-519): `package_stems` and
+/// `import_roots` are the `path` model's data, and nothing else reads them; a
+/// stem is a bare file stem, a root a relative `/`-separated directory, and the
+/// family a bare token — an entry that could never match is a descriptor bug,
+/// not data that silently matches nothing.
+fn validate_path_model_data(m: &ModuleModel) -> Result<(), String> {
+    let path_data = !m.package_stems.is_empty() || m.import_roots.is_some();
+    if path_data && m.kind != ModuleModelKind::Path {
+        return Err(format!(
+            "`package_stems` and `import_roots` are the data of the 'path' module model, but \
+             `[module_model]` declares kind '{}'",
+            m.kind.as_str()
+        ));
+    }
+    if let Some(bad) = m
+        .package_stems
+        .iter()
+        .find(|s| s.is_empty() || s.contains(['.', '/', '\\']))
+    {
+        return Err(format!(
+            "`[module_model]` package stem '{bad}' must be a bare file stem (no `.`, `/` or `\\`)"
+        ));
+    }
+    if m.import_roots.is_some() && m.package_stems.is_empty() {
+        return Err(
+            "`[module_model]` `import_roots` are detected by the package files beneath them, so \
+             they require `package_stems`"
+                .to_string(),
+        );
+    }
+    if let Some(bad) = m
+        .import_roots
+        .iter()
+        .flatten()
+        .find(|r| !is_relative_dir(r))
+    {
+        return Err(format!(
+            "`[module_model]` import root '{bad}' must be a relative `/`-separated directory \
+             path (no empty segment, no leading or trailing `/`, no `..`)"
+        ));
+    }
+    if let Some(family) = &m.family {
+        if family.is_empty() || !family.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err(format!(
+                "`[module_model]` family '{family}' must be a bare token (letters, digits, `_`, `-`)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `dir` is a relative `/`-separated directory path whose every segment
+/// can equal a path segment: no backslash, no empty segment, no `..`.
+pub(crate) fn is_relative_dir(dir: &str) -> bool {
+    !dir.contains('\\') && dir.split('/').all(|seg| !seg.is_empty() && seg != "..")
 }
 
 /// The module model a descriptor declares: its `[module_model]` kind, else
@@ -1298,11 +1413,7 @@ fn validate_package_modules(pm: &PackageModules) -> Result<(), String> {
             "`[package_modules]` must declare at least one `source_roots` entry".to_string(),
         );
     }
-    if let Some(bad) = pm
-        .source_roots
-        .iter()
-        .find(|r| r.contains('\\') || r.split('/').any(|seg| seg.is_empty() || seg == ".."))
-    {
+    if let Some(bad) = pm.source_roots.iter().find(|r| !is_relative_dir(r)) {
         return Err(format!(
             "`[package_modules]` source root '{bad}' must be a relative `/`-separated \
              directory path (no empty segment, no leading or trailing `/`, no `..`)"
@@ -1628,6 +1739,54 @@ mod tests {
         assert!(with("[module_model]\nkind = \"modules\"\n").is_err());
         assert!(with("[module_model]\nkind = \"namespace\"\nroots = []\n").is_err());
         assert!(with("[module_model]\n").is_err(), "a table without a kind");
+    }
+
+    /// The path model's data (S-519, FR-RS-14) sits beside `kind` in the one
+    /// table: stems and import roots parse under `path` and are refused under
+    /// any other kind, a malformed entry fails loudly by file, and the family
+    /// — any kind — defaults to the plugin's own name.
+    #[test]
+    fn the_path_models_stems_roots_and_family_are_one_tables_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        let python = with(
+            "[module_model]\nkind = \"path\"\npackage_stems = [\"__init__\"]\nimport_roots = [\"src\", \"lib/py\"]\nfamily = \"python\"\n",
+        )
+        .unwrap();
+        let model = python.module_model.as_ref().unwrap();
+        assert_eq!(model.package_stems, ["__init__"]);
+        assert_eq!(model.import_roots.as_deref(), Some(&["src".to_string(), "lib/py".to_string()][..]));
+        assert_eq!(python.module_family(), "python");
+        // Stems alone (Rust's), and an explicit empty root list (the
+        // repository root only), are both a path model.
+        let rust = with("[module_model]\nkind = \"path\"\npackage_stems = [\"mod\", \"lib\", \"main\"]\n").unwrap();
+        assert_eq!(rust.module_model.as_ref().unwrap().import_roots, None);
+        assert!(with("[module_model]\nkind = \"path\"\npackage_stems = [\"__init__\"]\nimport_roots = []\n").is_ok());
+        // No family declared: the plugin's own name.
+        assert_eq!(rust.module_family(), rust.name);
+        // A family under another kind is fine; stems or roots are not.
+        assert!(with("[module_model]\nkind = \"namespace\"\nfamily = \"jvm\"\n").is_ok());
+        for bad in [
+            "[module_model]\nkind = \"namespace\"\npackage_stems = [\"__init__\"]\n",
+            "[module_model]\nkind = \"namespace\"\nimport_roots = [\"src\"]\n",
+        ] {
+            let err = with(bad).unwrap_err().to_string();
+            assert!(err.contains("x/plugin.toml") && err.contains("'path' module model"), "{bad}: {err}");
+        }
+        for bad in [
+            "package_stems = [\"\"]",
+            "package_stems = [\"__init__.py\"]",
+            "package_stems = [\"a/b\"]",
+            "package_stems = [\"x\"]\nimport_roots = [\"../src\"]",
+            "package_stems = [\"x\"]\nimport_roots = [\"/src\"]",
+            "package_stems = [\"x\"]\nimport_roots = [\"src/\"]",
+            "import_roots = [\"src\"]",
+            "family = \"\"",
+            "family = \"j vm\"",
+        ] {
+            let text = format!("[module_model]\nkind = \"path\"\n{bad}\n");
+            let err = with(&text).unwrap_err().to_string();
+            assert!(err.contains("x/plugin.toml") && err.contains("module_model"), "{bad}: {err}");
+        }
     }
 
     /// The implicit-receiver policy (S-514) defaults to `none`, parses `self`,

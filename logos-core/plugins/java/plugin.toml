@@ -81,8 +81,13 @@ http_client_detectors = [
 # its production package: one fully-qualified name declared under both is
 # ambiguous and binds neither (NFR-RA-05). `[module_model]` names the model
 # (S-518); `[package_modules]` is its data.
+# `family = "jvm"` (S-519, NFR-RA-05): Java, Kotlin and Scala name each other's
+# types, so they share one interop family — the fully-qualified type index and
+# the namespace-files index reach only targets of the source's own family, and a
+# C# `using` never binds a PHP namespace of the same spelling.
 [module_model]
 kind = "package"
+family = "jvm"
 
 [package_modules]
 source_roots = ["src/main/java", "src/test/java"]

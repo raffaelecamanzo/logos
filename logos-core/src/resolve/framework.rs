@@ -98,7 +98,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 use tree_sitter::{Node, Parser, QueryCursor, StreamingIterator};
 
-use crate::config::BindingPolicy;
+use crate::config::{BindingPolicy, Resolution};
 use crate::extract::symbol::{build_symbol, descriptor_for, path_segments, SymbolContext};
 use crate::graph_store::{NodeRow, UnresolvedRefRow};
 use crate::model::{EdgeKind, NodeId, NodeKind, RefForm};
@@ -406,10 +406,11 @@ pub fn run(
     runtime: &Runtime,
     registry: &LanguageRegistry,
     root: &Path,
-    policy: BindingPolicy,
+    resolution: &Resolution,
     delta: Option<&super::Delta>,
 ) -> Result<(FrameworkStats, Vec<String>)> {
     let started = Instant::now();
+    let policy = resolution.policy;
 
     // Incremental gate (S-024-HF, mirroring the CR-015 resolve delta): on a
     // `sync`/`reconcile` (`delta` is `Some`), skip the whole-graph snapshot when
@@ -510,7 +511,9 @@ pub fn run(
     // The binder index keys every package-shaped file by its package (S-465),
     // as the resolution pass does, and is built before the scan because the
     // fold reads it to find a constant's declaring type (S-470).
-    let layout = PackageLayout::from_registry(registry).with_declared_namespaces(namespaces);
+    let layout = PackageLayout::from_registry(registry)
+        .with_declared_namespaces(namespaces)
+        .with_import_root_overrides(&resolution.import_roots);
     let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout.clone());
     let member = MemberConstants {
         root,
@@ -663,8 +666,9 @@ struct MemberConstants<'a> {
     index: &'a binder::Index,
     /// Each declaring file's facts, by project-relative path.
     files: Cache<String, Arc<DeclaringFile>>,
-    /// Each `(type FQN, constant name)` answer.
-    constants: Cache<(Vec<String>, String), fold::ForeignConstant>,
+    /// Each `(interop family, type FQN, constant name)` answer — a type is
+    /// looked up within the using file's family (S-519).
+    constants: Cache<(Option<String>, Vec<String>, String), fold::ForeignConstant>,
 }
 
 /// A declaring file's text and its `@fw.const` facts, read once per pass.
@@ -708,9 +712,13 @@ impl MemberConstants<'_> {
     /// parsed once per pass, however many handler files use it: a central
     /// paths class used by every controller would otherwise be re-parsed once
     /// per controller and constant.
-    fn constant(&self, fqn: &[String], name: &str) -> Option<fold::ForeignConstant> {
-        cached(&self.constants, (fqn.to_vec(), name.to_string()), || {
-            let [type_node] = self.index.package_types(fqn) else {
+    ///
+    /// The type is the one of the using file's (`user`'s) interop family
+    /// (S-519): a same-named type of another family is not the type it names.
+    fn constant(&self, user: &str, fqn: &[String], name: &str) -> Option<fold::ForeignConstant> {
+        let key = (self.layout.family(user), fqn.to_vec(), name.to_string());
+        cached(&self.constants, key, || {
+            let [type_node] = self.index.package_types(user, fqn) else {
                 return None;
             };
             let rel = self.index.file_of(*type_node)?;
@@ -955,7 +963,7 @@ fn fold_constants(
     // Another file's constants are reachable only from a scan of the member's
     // graph (S-470); a store-less scan folds what its own file proves.
     let imports = std::mem::take(&mut out.const_imports);
-    let lookup = |fqn: &[String], name: &str| member.and_then(|m| m.constant(fqn, name));
+    let lookup = |fqn: &[String], name: &str| member.and_then(|m| m.constant(rel, fqn, name));
     let names = match member.filter(|_| !out.imports_unreadable) {
         Some(member) => names.with_reach(fold::Reach {
             imports: &imports,

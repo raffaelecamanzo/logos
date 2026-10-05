@@ -46,6 +46,18 @@
 //! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 //! [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 //!
+//! A file of an **import-root** language (Python; S-519, [FR-RS-14]) keeps
+//! rungs 1–5, keyed under its family's own crate: a relative import reads its
+//! `.`/`..` level from the file's package ([`Ctx::resolve_relative`]), every
+//! directory under its import root descends as a module, a `from pkg import
+//! Name` that names nothing `pkg/__init__.py` declares binds to the package
+//! ([`Ctx::package_reexport`]), and its workspace fallbacks never leave the
+//! crate. The fully-qualified type and namespace indexes the package rungs read
+//! are partitioned by interop family, so no source reaches another family's
+//! types.
+//!
+//! [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+//!
 //! # Never fabricate ([NFR-RA-05])
 //!
 //! Every level ends in the same acceptance rule: bind **iff the candidate set
@@ -72,7 +84,7 @@ use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, ReceiverShape, RefForm};
 
 use super::go_module::GoModule;
-use super::package_key::{module_key_for_file, normalize_crate, ModuleKey, PackageLayout};
+use super::package_key::{normalize_crate, ModuleKey, PackageLayout};
 use super::route_method::preferred_candidates;
 use super::route_template::route_key;
 use crate::extract::refs::is_relative_head;
@@ -195,7 +207,10 @@ pub(crate) enum Residue {
 enum Want {
     /// A call target: `Function` or `Method`.
     Callable,
-    /// An import target: any node (module preferred over a same-named item).
+    /// An import target: any declared node (module preferred over a same-named
+    /// item) — never a framework-promoted `route` or `component`
+    /// ([`is_framework_promoted`]), which is derived from a declaration and is
+    /// not what an import spells.
     Any,
     /// A glob's target: a module only.
     Module,
@@ -224,7 +239,7 @@ impl Want {
     fn admits(self, kind: NodeKind) -> bool {
         match self {
             Want::Callable => matches!(kind, NodeKind::Function | NodeKind::Method),
-            Want::Any => true,
+            Want::Any => !is_framework_promoted(kind),
             Want::Module => kind == NodeKind::Module,
             Want::Field => kind == NodeKind::Field,
             Want::Class => kind == NodeKind::Class,
@@ -232,6 +247,17 @@ impl Want {
             Want::Type => is_type_like(kind),
         }
     }
+}
+
+/// `true` for the nodes the framework pass promotes beside the declaration they
+/// are derived from (S-012): a `route` and a `component`. A component shares
+/// its declaration's name and file — a Django model `Check` is a class and a
+/// component — so a lookup that admitted both would read every import of the
+/// class as ambiguous (S-519 measured 541 of healthchecks' 585 unbound internal
+/// imports so). The promoted node is reached through its `References` edge to
+/// the declaration, never by name.
+fn is_framework_promoted(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Route | NodeKind::Component)
 }
 
 /// `true` for a class-bearing container whose lexically-enclosed `Field` members
@@ -368,6 +394,15 @@ pub(crate) struct Index {
     /// Module tree: `(crate, path)` → module node (file modules from their
     /// paths, inline `mod`s appended beneath them).
     modules: HashMap<ModKey, NodeId>,
+    /// The **directory modules** of the import-root languages (S-519,
+    /// [FR-RS-14]): every directory between a file's import root and the file
+    /// ([`PackageLayout::directory_modules`]). A path descends through one as
+    /// through a module, whether or not a package file (`__init__.py`) gives it
+    /// a node — a namespace package is a package too — but a directory with no
+    /// node is never itself a binding target. Empty for every other language.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    dir_modules: HashSet<ModKey>,
     /// The reverse of `modules`, for "what module am I in" walks.
     module_key: HashMap<NodeId, ModKey>,
     /// name → every node carrying it, sorted by `NodeId` (the unique-match
@@ -426,10 +461,12 @@ pub(crate) struct Index {
     imported: HashMap<i64, HashMap<String, Vec<NodeId>>>,
     /// Normalised crate names present in the graph.
     crates: HashSet<String>,
-    /// Which files are keyed by their package ([CR-149]) or by the namespace
-    /// they declare (S-518); empty — the default model for every file — unless
-    /// the run was built with the registry's layout
-    /// ([`Index::build_with_layout`]).
+    /// How every file is keyed: by its package ([CR-149]), by the namespace it
+    /// declares (S-518), or by its path — under its plugin's package-file stems
+    /// and import roots — plus each language's interop family (S-519). The
+    /// registry's layout in production, with the import roots detected from
+    /// this graph's files ([`Index::build_with_layout`]); Rust's stems alone
+    /// for a synthetic test graph ([`Index::build`]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     layout: PackageLayout,
@@ -441,16 +478,23 @@ pub(crate) struct Index {
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    types_by_fqn: HashMap<Vec<String>, Vec<NodeId>>,
+    ///
+    /// Partitioned by **interop family** first (S-519, [NFR-RA-05];
+    /// [`PackageLayout::family`]): a source reaches only the types of its own
+    /// family, so a C# import never names a PHP class of the same
+    /// fully-qualified spelling, while Java and Kotlin — one `jvm` family —
+    /// still name each other's.
+    types_by_fqn: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
     /// Declared namespace → the file-root module nodes of the declared-namespace
     /// files declaring it, id-sorted (S-518, [FR-RS-13]) — what a namespace
     /// wildcard (C#'s `using N;`, Kotlin's `import n.*`) binds to: a namespace
     /// has no node of its own, and the files declaring it are the code it names,
     /// as a Go import path names its directory's files (S-439). Empty for every
-    /// file of any other module model.
+    /// file of any other module model. Partitioned by interop family first,
+    /// as [`types_by_fqn`](Index::types_by_fqn) is (S-519).
     ///
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
-    files_by_namespace: HashMap<Vec<String>, Vec<NodeId>>,
+    files_by_namespace: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
     /// `(trait node, method name)` → the concrete workspace impl method nodes of
     /// that trait method, id-sorted and deduplicated — the fan-out universe for a
     /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]). Built from the
@@ -519,20 +563,25 @@ impl Index {
     /// so every helper preserves the same canonical iteration order the
     /// monolith had, keeping the built `Index` byte-identical ([NFR-RA-06]).
     ///
-    /// The default module model for every file. Test-only since S-470: both
-    /// production builders — the resolution pass and the framework-promotion
-    /// pass — build with the registry's layout
+    /// The path model for every file, with the package-file stems the rust
+    /// plugin declares for `.rs` ([`PackageLayout::rust_stems_for_tests`],
+    /// S-519), so a synthetic `src/lib.rs` still names its crate. Test-only
+    /// since S-470: both production builders — the resolution pass and the
+    /// framework-promotion pass — build with the registry's layout
     /// ([`build_with_layout`](Index::build_with_layout)).
     ///
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     #[cfg(test)]
     pub(crate) fn build(nodes: &[NodeRow], edges: &[EdgeRow], refs: &[UnresolvedRefRow]) -> Index {
-        Self::build_with_layout(nodes, edges, refs, PackageLayout::default())
+        Self::build_with_layout(nodes, edges, refs, PackageLayout::rust_stems_for_tests())
     }
 
-    /// [`build`](Index::build), keying every file of a package-shaped language by
-    /// its package ([CR-149]) — the layout the loaded plugins declare
-    /// ([`PackageLayout::from_registry`]). An empty layout is exactly `build`.
+    /// [`build`](Index::build), keying every file by `layout` — in production
+    /// the layout the loaded plugins declare ([`PackageLayout::from_registry`]):
+    /// a package-shaped file by its package ([CR-149]), a declared-namespace
+    /// file by its namespace, a path-model file by its path under its plugin's
+    /// stems and import roots, the roots detected here from this graph's files
+    /// (S-519). `build` is this with Rust's stems alone.
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub(crate) fn build_with_layout(
@@ -544,12 +593,18 @@ impl Index {
         // Built once and shared: module-tree construction and containment both
         // look nodes up by id.
         let node_by_id: HashMap<NodeId, &NodeRow> = nodes.iter().map(|n| (n.id, n)).collect();
+        // The import roots in force are read off the files this graph holds
+        // (S-519), so a cold index and a sync over one tree key alike.
+        let layout = layout.with_detected_import_roots(nodes.iter().filter_map(|n| {
+            (n.kind == NodeKind::Module).then_some(n.file_path.as_deref()).flatten()
+        }));
 
         // Contains topology first — module-tree construction needs it.
         let (parent, members) = build_containment(edges, &node_by_id);
         let (modules, module_key) =
             build_module_tree(nodes, &parent, &members, &node_by_id, &layout);
         let crates: HashSet<String> = modules.keys().map(|(c, _)| c.clone()).collect();
+        let dir_modules = build_directory_modules(nodes, &parent, &layout);
 
         let info = build_node_info(nodes, &parent, &module_key, &layout);
         let types_by_fqn = build_package_types(nodes, &parent, &members, &node_by_id, &layout);
@@ -569,6 +624,7 @@ impl Index {
             parent,
             members,
             modules,
+            dir_modules,
             module_key,
             by_name,
             by_file_path,
@@ -800,8 +856,15 @@ impl Index {
     /// rather than deriving a second FQN from a path.
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
-    pub(crate) fn package_types(&self, fqn: &[String]) -> &[NodeId] {
-        self.types_by_fqn.get(fqn).map_or(&[], Vec::as_slice)
+    ///
+    /// Read within the interop family of the file at `source_path` (S-519): a
+    /// type of another family is never the type a source names.
+    pub(crate) fn package_types(&self, source_path: &str, fqn: &[String]) -> &[NodeId] {
+        self.layout
+            .family(source_path)
+            .and_then(|family| self.types_by_fqn.get(&family))
+            .and_then(|types| types.get(fqn))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Every fully-qualified name a top-level package-shaped type of this graph
@@ -812,8 +875,13 @@ impl Index {
     ///
     /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
     pub(crate) fn declared_type_names(&self) -> Vec<Vec<String>> {
-        let mut names: Vec<Vec<String>> = self.types_by_fqn.keys().cloned().collect();
+        let mut names: Vec<Vec<String>> = self
+            .types_by_fqn
+            .values()
+            .flat_map(|types| types.keys().cloned())
+            .collect();
         names.sort();
+        names.dedup();
         names
     }
 
@@ -824,6 +892,17 @@ impl Index {
     /// when this holds (`resolve::is_affected`).
     pub(crate) fn hierarchy_touched(&self, dirty: &HashSet<String>) -> bool {
         self.hierarchy_tokens.iter().any(|t| dirty.contains(t))
+    }
+
+    /// Whether adding or removing the file at `path` can move the detected
+    /// import roots (S-519, [`PackageLayout::moves_import_roots`]).
+    pub(crate) fn moves_import_roots(&self, path: &str) -> bool {
+        self.layout.moves_import_roots(path)
+    }
+
+    /// Whether the file at `path` is keyed under import roots (S-519).
+    pub(crate) fn has_import_roots(&self, path: &str) -> bool {
+        self.layout.has_import_roots(path)
     }
 
     /// Whether the file at `path` is keyed by its package ([CR-149]).
@@ -955,8 +1034,16 @@ impl Index {
             return true;
         }
         // A package-shaped row reads every expansion of its head, not only the
-        // first (`FileScope::alias_expansions`), so each must be able to select it.
+        // first (`FileScope::alias_expansions`), so each must be able to select
+        // it — and so does an import-root file's row (S-519).
         let first = r.target.split("::").next().unwrap_or_default();
+        let import_root = || {
+            self.by_symbol
+                .get(&r.source_symbol)
+                .and_then(|id| self.info.get(id))
+                .and_then(|i| i.file_path.as_deref())
+                .is_some_and(|p| self.layout.has_import_roots(p))
+        };
         if scope
             .alias_expansions
             .get(first)
@@ -966,7 +1053,7 @@ impl Index {
                 .flatten()
                 .flat_map(|seg| super::tokens(seg))
                 .any(|t| dirty.contains(&t))
-            && package_shaped()
+            && (package_shaped() || import_root())
         {
             return true;
         }
@@ -1043,7 +1130,18 @@ fn build_module_tree(
         .iter()
         .filter(|n| n.kind == NodeKind::Module && !parent.contains_key(&n.id))
         .collect();
-    file_roots.sort_by_key(|n| n.id); // first-by-id wins a (rare) path tie
+    // First-by-id wins a (rare) path tie — except among import-root files
+    // (S-519), where a module and its stub (`foo.py`, `foo.pyi`) share a key
+    // routinely and a node id changes on every re-extraction: the path decides
+    // there, so a sync keeps the winner a cold index picks ([NFR-RA-06]). They
+    // sit in their family's own crate, so the two orders never compete for a key.
+    file_roots.sort_by_key(|n| {
+        let import_root_path = n
+            .file_path
+            .as_deref()
+            .filter(|p| layout.has_import_roots(p));
+        (import_root_path, n.id)
+    });
     for root in file_roots {
         let Some(path) = &root.file_path else {
             continue; // an orphaned module node cannot anchor a tree
@@ -1163,6 +1261,9 @@ fn crate_of_node(
 /// anyway, so the map is deterministic regardless of visit order
 /// ([NFR-RA-06]). Empty under the default layout.
 ///
+/// Partitioned by the declaring file's interop family (S-519,
+/// [`PackageLayout::family`]).
+///
 /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 fn build_package_types(
@@ -1171,8 +1272,8 @@ fn build_package_types(
     members: &Members,
     node_by_id: &HashMap<NodeId, &NodeRow>,
     layout: &PackageLayout,
-) -> HashMap<Vec<String>, Vec<NodeId>> {
-    let mut by_fqn: HashMap<Vec<String>, Vec<NodeId>> = HashMap::new();
+) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
+    let mut by_family: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> = HashMap::new();
     for root in nodes {
         if root.kind != NodeKind::Module || parent.contains_key(&root.id) {
             continue;
@@ -1181,6 +1282,8 @@ fn build_package_types(
         if !layout.is_package_shaped(path) {
             continue;
         }
+        let Some(family) = layout.family(path) else { continue };
+        let by_fqn = by_family.entry(family).or_default();
         for (name, id) in sorted_children(members, root.id) {
             if !node_by_id.get(&id).is_some_and(|n| is_type_like(n.kind)) {
                 continue;
@@ -1190,11 +1293,28 @@ fn build_package_types(
             }
         }
     }
-    for list in by_fqn.values_mut() {
+    for list in by_family.values_mut().flat_map(HashMap::values_mut) {
         list.sort();
         list.dedup();
     }
-    by_fqn
+    by_family
+}
+
+/// The directory modules of every import-root file (S-519,
+/// [`Index::dir_modules`]): each directory between a file-root module's import
+/// root and its file ([`PackageLayout::directory_modules`]). Empty under a
+/// layout that declares no import roots.
+fn build_directory_modules(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    layout: &PackageLayout,
+) -> HashSet<ModKey> {
+    nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Module && !parent.contains_key(&n.id))
+        .filter_map(|n| n.file_path.as_deref())
+        .flat_map(|path| layout.directory_modules(path))
+        .collect()
 }
 
 /// Declared namespace → the file-root modules of the declared-namespace files
@@ -1208,8 +1328,8 @@ fn build_namespace_files(
     nodes: &[NodeRow],
     parent: &HashMap<NodeId, NodeId>,
     layout: &PackageLayout,
-) -> HashMap<Vec<String>, Vec<NodeId>> {
-    let mut by_namespace: HashMap<Vec<String>, Vec<NodeId>> = HashMap::new();
+) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
+    let mut by_family: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> = HashMap::new();
     for root in nodes {
         if root.kind != NodeKind::Module || parent.contains_key(&root.id) {
             continue;
@@ -1218,15 +1338,21 @@ fn build_namespace_files(
         if !layout.declares_namespaces(path) {
             continue;
         }
-        if let Some(namespace) = layout.package_of(path) {
-            by_namespace.entry(namespace).or_default().push(root.id);
-        }
+        let (Some(family), Some(namespace)) = (layout.family(path), layout.package_of(path)) else {
+            continue;
+        };
+        by_family
+            .entry(family)
+            .or_default()
+            .entry(namespace)
+            .or_default()
+            .push(root.id);
     }
-    for list in by_namespace.values_mut() {
+    for list in by_family.values_mut().flat_map(HashMap::values_mut) {
         list.sort();
         list.dedup();
     }
-    by_namespace
+    by_family
 }
 
 /// Canonical symbol → node. First-wins on a (model-prohibited) duplicate
@@ -1631,15 +1757,16 @@ fn bind_traced(
         return (Outcome::Unbound, None);
     };
     let source_info = ix.info.get(&source);
-    let source_package = source_info
-        .and_then(|i| i.file_path.as_deref())
-        .and_then(|p| ix.layout.package_of(p));
+    let source_file = source_info.and_then(|i| i.file_path.as_deref());
+    let source_package = source_file.and_then(|p| ix.layout.package_of(p));
+    let source_family = source_file.and_then(|p| ix.layout.family(p));
     let relation = type_relation_want(r, source_info.map(|i| i.kind), source_package.is_some());
     let ctx = Ctx {
         source,
         file_id: r.file_id,
         ix,
         source_package,
+        source_family,
         policy,
         in_glob_resolution: Cell::new(false),
         bare_path_call: Cell::new(false),
@@ -1809,6 +1936,9 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             ctx.bare_path_call.set(false);
             match resolved {
                 Res::Found(target) => bound(target),
+                Res::NotFound if r.kind == EdgeKind::Imports => ctx
+                    .package_reexport(&segs)
+                    .map_or(Outcome::Unbound, bound),
                 _ => Outcome::Unbound,
             }
         }
@@ -1993,6 +2123,10 @@ struct Ctx<'a> {
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     source_package: Option<Vec<String>>,
+    /// The interop family of the source's file ([`PackageLayout::family`],
+    /// S-519) — the partition of the type and namespace indexes its package
+    /// rungs read. `None` for a source with no file.
+    source_family: Option<String>,
     policy: BindingPolicy,
     /// Re-entrancy guard for [`through_globs`](Ctx::through_globs): set while a
     /// glob's own module path is being resolved, so that resolution cannot fan
@@ -2059,10 +2193,56 @@ impl Ctx<'_> {
         self.ix.nearest_module(self.source).cloned()
     }
 
+    /// Every path an import-root file's imports give `head`, when they give it
+    /// more than one (S-519): `try: from .fast import parse` / `except
+    /// ImportError: from .slow import parse` names two declarations, and the
+    /// first-wins alias map would pick one ([NFR-RA-05]). `None` for any other
+    /// source, or a name imported once — the alias map answers those.
+    fn rival_expansions(&self, head: &str) -> Option<&[Vec<String>]> {
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if !self.ix.layout.has_import_roots(source_file) {
+            return None;
+        }
+        let all = self.scope()?.alias_expansions.get(head)?;
+        (all.len() > 1).then_some(all.as_slice())
+    }
+
+    /// `rest` resolved under each of `expansions`, exactly-one across all of
+    /// them (two imports of one declaration agree) — sticky on an ambiguity.
+    fn resolve_expansions(&self, expansions: &[Vec<String>], rest: &[String], want: Want, depth: u8) -> Res {
+        let mut found: Vec<NodeId> = Vec::new();
+        for expansion in expansions {
+            let mut path = expansion.clone();
+            path.extend(rest.iter().cloned());
+            match self.resolve_path(&path, want, depth - 1) {
+                Res::Found(id) => found.push(id),
+                Res::Ambiguous => return Res::Ambiguous,
+                Res::NotFound => {}
+            }
+        }
+        found.sort();
+        found.dedup();
+        exactly_one(&found)
+    }
+
+    /// Whether the source is keyed under an import-root family's crate (S-519):
+    /// a closed namespace whose paths name no other crate — `import mylib`
+    /// from Python is never a Rust crate `mylib`.
+    fn in_family_crate(&self) -> bool {
+        self.ix
+            .nearest_module(self.source)
+            .is_some_and(|(krate, _)| self.ix.layout.is_family_crate(krate))
+    }
+
     /// Resolve a multi-or-single segment path by the scope hierarchy.
     fn resolve_path(&self, segs: &[String], want: Want, depth: u8) -> Res {
         if segs.is_empty() || depth == 0 {
             return Res::NotFound;
+        }
+        // 0) A relative import of an import-root language (S-519, [FR-RS-14]):
+        //    `.`/`..` heads are its level, read from the source's package.
+        if let Some(resolved) = self.resolve_relative(segs, want) {
+            return resolved;
         }
         if segs.len() == 1 {
             return self.resolve_name(&segs[0], want, depth);
@@ -2108,8 +2288,14 @@ impl Ctx<'_> {
             return self.resolve_package_path(package, segs, want, depth);
         }
         // 4b) A `use`-alias head: substitute and resolve the expansion
-        //     (depth-limited — an import cycle terminates as NotFound).
-        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
+        //     (depth-limited — an import cycle terminates as NotFound). An
+        //     import-root file importing the head twice reads every import.
+        if let Some(rivals) = self.rival_expansions(head) {
+            match self.resolve_expansions(rivals, rest, want, depth) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+        } else if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
             let mut expanded = alias_path.clone();
             expanded.extend(rest.iter().cloned());
             match self.resolve_path(&expanded, want, depth - 1) {
@@ -2117,9 +2303,10 @@ impl Ctx<'_> {
                 decided => return decided,
             }
         }
-        // 5) A crate-name head (`logos_core::…`).
+        // 5) A crate-name head (`logos_core::…`) — never from an import-root
+        //    family's crate, which names no other crate (S-519).
         let norm = normalize_crate(head);
-        if self.ix.crates.contains(&norm) {
+        if self.ix.crates.contains(&norm) && !self.in_family_crate() {
             match self.descend(&norm, &[], rest, want) {
                 Res::NotFound => {} // a same-named module may still match below
                 decided => return decided,
@@ -2149,6 +2336,75 @@ impl Ctx<'_> {
             return self.suffix_match(segs, want);
         }
         Res::NotFound
+    }
+
+    /// A path headed by a relative level (`.`, `..`; [`is_relative_head`]) from
+    /// a file keyed under import roots (S-519, [FR-RS-14]) — `from .rules
+    /// import Rule` recorded `.::rules::Rule`, `from .._internal import x`
+    /// recorded `..::_internal::x`. `.` is the source's package
+    /// ([`PackageLayout::package_dir`]) and each `..` one package up; the rest
+    /// descends from there, and nothing follows it (`from . import *`) names
+    /// the package itself. A level must leave at least one package: climbing to
+    /// the import root itself (`from .. import x` in a top-level package, `from
+    /// . import x` in a top-level script) names nothing, as the language
+    /// refuses it ("attempted relative import beyond top-level package").
+    ///
+    /// `None` for any other path or source — a relative specifier of a
+    /// path-grammar language is bound by [`resolve_specifier`](Ctx::resolve_specifier),
+    /// and no other language records a relative head.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    fn resolve_relative(&self, segs: &[String], want: Want) -> Option<Res> {
+        if !segs.first().is_some_and(|h| is_relative_head(h)) {
+            return None;
+        }
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        let (krate, package) = self.ix.layout.package_dir(source_file)?;
+        let ups = segs.iter().take_while(|s| s.as_str() == "..").count();
+        let heads = segs.iter().take_while(|s| is_relative_head(s)).count();
+        let rest = &segs[heads..];
+        let Some(depth) = package.len().checked_sub(ups).filter(|d| *d > 0) else {
+            return Some(Res::NotFound);
+        };
+        let base = &package[..depth];
+        if rest.is_empty() {
+            let admitted = |id: &NodeId| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind));
+            let module = self.ix.modules.get(&(krate, base.to_vec())).filter(|id| admitted(id));
+            return Some(module.map_or(Res::NotFound, |&id| Res::Found(id)));
+        }
+        Some(self.descend(&krate, base, rest, want))
+    }
+
+    /// The package an import-root file's `from pkg import Name` goes **through**
+    /// when `Name` is nothing `pkg` declares (S-519, [FR-RS-14]): the import
+    /// binds to the package's own module — its `__init__.py` — which is where a
+    /// package re-exports a name it imports from a submodule
+    /// (`from .map import Map`). The edge says what the file provably depends
+    /// on, the package; which declaration the re-export finally names is not
+    /// followed ([NFR-RA-05]).
+    ///
+    /// Only a **package file** answers: a name an ordinary module does not
+    /// declare (`from hc.api.models import Missing`) stays unbound, and so does
+    /// a namespace package with no `__init__.py`, which re-exports nothing. A
+    /// package never imports itself. `None` for any other source.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn package_reexport(&self, segs: &[String]) -> Option<NodeId> {
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if !self.ix.layout.has_import_roots(source_file) {
+            return None;
+        }
+        let (_, package) = segs.split_last()?;
+        if package.is_empty() {
+            return None;
+        }
+        let Res::Found(module) = self.resolve_path(package, Want::Module, MAX_ALIAS_DEPTH) else {
+            return None;
+        };
+        let file = self.ix.info.get(&module)?.file_path.as_deref()?;
+        let own = self.ix.nearest_module(self.source) == self.ix.module_key.get(&module);
+        (self.ix.layout.is_package_file(file) && !own).then_some(module)
     }
 
     /// Resolve a Java type relation (S-466, [CR-149] §3.2 B, [FR-EX-10]) to the
@@ -2655,6 +2911,12 @@ impl Ctx<'_> {
         let segs = split(target);
         let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
         let targets = self.ix.specifier_targets.get(&extension_of(source_file));
+        // A relative import of an import-root language names modules, not a
+        // path: the member-path hierarchy reads its level (S-519,
+        // [`resolve_relative`](Ctx::resolve_relative)).
+        if targets.is_none() && self.ix.layout.has_import_roots(source_file) {
+            return None;
+        }
         if segs.first().is_some_and(|h| is_relative_head(h)) {
             let resolved = targets.map_or(Res::NotFound, |targets| {
                 self.resolve_relative_specifier(source_file, &segs, targets)
@@ -3127,12 +3389,23 @@ impl Ctx<'_> {
                 }
             }
             let norm = normalize_crate(name);
-            if let Some(&id) = self.ix.modules.get(&(norm, Vec::new())) {
+            if let Some(&id) = self
+                .ix
+                .modules
+                .get(&(norm, Vec::new()))
+                .filter(|_| !self.in_family_crate())
+            {
                 return Res::Found(id);
             }
         }
-        // 3) The file's `use` aliases.
-        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(name)) {
+        // 3) The file's `use` aliases — every one of them, exactly-one, when an
+        //    import-root file imports the name twice.
+        if let Some(rivals) = self.rival_expansions(name) {
+            match self.resolve_expansions(rivals, &[], want, depth) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+        } else if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(name)) {
             match self.resolve_path(alias_path, want, depth - 1) {
                 Res::NotFound => {}
                 decided => return decided,
@@ -3333,8 +3606,11 @@ impl Ctx<'_> {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn resolve_fqn(&self, segs: &[String], want: Want) -> Res {
+        let Some(family_types) = self.family_types() else {
+            return Res::NotFound;
+        };
         for split_at in (1..=segs.len()).rev() {
-            if let Some(types) = self.ix.types_by_fqn.get(&segs[..split_at]) {
+            if let Some(types) = family_types.get(&segs[..split_at]) {
                 return self
                     .walk_from(types, &segs[split_at..], want)
                     .unwrap_or(Res::NotFound);
@@ -3365,6 +3641,7 @@ impl Ctx<'_> {
         let targets: Vec<NodeId> = self
             .ix
             .files_by_namespace
+            .get(self.source_family.as_deref()?)?
             .get(segs)?
             .iter()
             .copied()
@@ -3378,11 +3655,21 @@ impl Ctx<'_> {
         })
     }
 
-    /// The top-level types named `name` in `package`, id-sorted.
+    /// The top-level types named `name` in `package`, id-sorted — of the
+    /// source's own interop family only (S-519).
     fn package_type(&self, package: &[String], name: &str) -> &[NodeId] {
         let mut fqn = package.to_vec();
         fqn.push(name.to_string());
-        self.ix.package_types(&fqn)
+        self.family_types()
+            .and_then(|types| types.get(&fqn))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The fully-qualified type index of the source's interop family (S-519,
+    /// [`Index::types_by_fqn`]); `None` when no file of that family declares a
+    /// type, or the source has no file.
+    fn family_types(&self) -> Option<&HashMap<Vec<String>, Vec<NodeId>>> {
+        self.ix.types_by_fqn.get(self.source_family.as_deref()?)
     }
 
     /// Walk `rest` down from the one type in `candidates`: `None` when there is
@@ -3549,9 +3836,8 @@ impl Ctx<'_> {
                 // wildcard, so it must not be blocked by it.
                 Res::Ambiguous => {
                     let could_supply = self
-                        .ix
-                        .types_by_fqn
-                        .get(glob.as_slice())
+                        .family_types()
+                        .and_then(|types| types.get(glob.as_slice()))
                         // `None`: ambiguous below a nested segment — stay conservative.
                         .is_none_or(|types| {
                             types.iter().any(|&ty| {
@@ -3635,9 +3921,11 @@ impl Ctx<'_> {
 
             if !is_last {
                 // Try the segment as a child module in place (push, check,
-                // pop on miss) — no per-step key clone.
+                // pop on miss) — no per-step key clone. An import-root
+                // language's directory is a module whether or not a package
+                // file gives it a node (S-519).
                 key.1.push(seg.clone());
-                if self.ix.modules.contains_key(&key) {
+                if self.ix.modules.contains_key(&key) || self.ix.dir_modules.contains(&key) {
                     continue;
                 }
                 key.1.pop();
@@ -3686,9 +3974,16 @@ impl Ctx<'_> {
     }
 
     /// Workspace fallback for a multi-segment path (balanced+): the final
-    /// segment's name matches and the node's module path ends with the
+    /// segment's name matches and the module the node sits in ends with the
     /// leading segments — crate-first, then workspace, exactly-one at each
     /// step ([FR-RS-03] crate → workspace levels).
+    ///
+    /// A **module** candidate sits in its parent: its own key ends in its own
+    /// name, so `pkg::mod` reaches the module `[…, pkg, mod]` through its parent
+    /// key `[…, pkg]` (S-519, [FR-RS-14]). Compared against its own key, a
+    /// module could only ever match a path that spelled its name twice.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
     fn suffix_match(&self, segs: &[String], want: Want) -> Res {
         let (prefix, last) = segs.split_at(segs.len() - 1);
         let Some(all) = self.ix.by_name.get(&last[0]) else {
@@ -3701,11 +3996,17 @@ impl Ctx<'_> {
             if !want.admits(info.kind) {
                 return false;
             }
-            // The node's own module path must end with the path's prefix.
-            let module_of = |id: NodeId| self.ix.nearest_module(id).cloned();
-            match module_of(*id) {
-                Some((_, mods)) => mods.ends_with(prefix),
-                None => false,
+            match self.ix.module_key.get(id) {
+                // A module: its parent's key must end with the prefix; a crate
+                // root has no parent to match.
+                Some((_, own)) => own
+                    .split_last()
+                    .is_some_and(|(_, parent)| parent.ends_with(prefix)),
+                // Any other node: its enclosing module's key must.
+                None => self
+                    .ix
+                    .nearest_module(*id)
+                    .is_some_and(|(_, mods)| mods.ends_with(prefix)),
             }
         };
         let candidates: Vec<NodeId> = all.iter().copied().filter(matches_suffix).collect();
@@ -3750,6 +4051,9 @@ impl Ctx<'_> {
             })
             .collect();
         match exactly_one(&in_crate) {
+            // An import-root family's crate is a closed namespace (S-519): its
+            // fallback never escalates to another language's modules.
+            Res::NotFound if self.ix.layout.is_family_crate(source_crate) => Res::NotFound,
             Res::NotFound => exactly_one(candidates),
             decided => decided,
         }
@@ -3859,7 +4163,7 @@ impl Ctx<'_> {
                 .collect();
             return exactly_one(&roots);
         }
-        match self.ix.modules.get(&module_key_for_file(path)) {
+        match self.ix.modules.get(&self.ix.layout.module_key(path)) {
             Some(&m) => Res::Found(m),
             None => Res::NotFound,
         }
@@ -3955,28 +4259,24 @@ mod tests {
 
     #[test]
     fn module_key_derives_crate_and_modules_from_src_layout() {
+        let layout = PackageLayout::rust_stems_for_tests();
+        let key = |path: &str| layout.module_key(path);
         assert_eq!(
-            module_key_for_file("logos-core/src/extract/mod.rs"),
+            key("logos-core/src/extract/mod.rs"),
             ("logos_core".to_string(), vec!["extract".to_string()])
         );
+        assert_eq!(key("logos-core/src/lib.rs"), ("logos_core".to_string(), vec![]));
         assert_eq!(
-            module_key_for_file("logos-core/src/lib.rs"),
-            ("logos_core".to_string(), vec![])
-        );
-        assert_eq!(
-            module_key_for_file("src/engine.rs"),
+            key("src/engine.rs"),
             ("crate".to_string(), vec!["engine".to_string()])
         );
         assert_eq!(
-            module_key_for_file("src/a/b.rs"),
+            key("src/a/b.rs"),
             ("crate".to_string(), vec!["a".to_string(), "b".to_string()])
         );
         // No src/ layout (flat fixtures): everything is a module under
         // the anonymous crate.
-        assert_eq!(
-            module_key_for_file("alpha.rs"),
-            ("crate".to_string(), vec!["alpha".to_string()])
-        );
+        assert_eq!(key("alpha.rs"), ("crate".to_string(), vec!["alpha".to_string()]));
     }
 
     #[test]

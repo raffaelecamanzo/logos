@@ -115,7 +115,7 @@ use std::path::Path;
 use anyhow::Result;
 use rayon::prelude::*;
 
-use crate::config::BindingPolicy;
+use crate::config::{BindingPolicy, Resolution};
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
 use crate::model::{EdgeKind, NodeId};
 use crate::models::navigation::{
@@ -229,9 +229,10 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 pub fn run(
     runtime: &Runtime,
     tree: Option<(&LanguageRegistry, &Path)>,
-    policy: BindingPolicy,
+    resolution: &Resolution,
     delta: Option<&Delta>,
 ) -> Result<ResolutionStats> {
+    let policy = resolution.policy;
     let want_file_paths = delta.is_some();
     let snap = runtime.submit_read(|store| {
         Ok(Snapshot {
@@ -274,6 +275,7 @@ pub fn run(
     let layout = tree.map_or_else(Default::default, |(registry, _)| {
         package_key::PackageLayout::from_registry(registry)
             .with_declared_namespaces(snap.namespaces.iter().cloned())
+            .with_import_root_overrides(&resolution.import_roots)
     });
     let index = binder::Index::build_with_layout(&snap.nodes, &snap.edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
@@ -286,19 +288,32 @@ pub fn run(
     // so the committed graph is byte-identical to a full re-bind (the CR-015
     // equivalence invariant, guarded by `tests/indexing.rs`). Binding a handful
     // of rows instead of the entire ~40k ledger on every core is the melt fix.
-    let selected: Vec<&UnresolvedRefRow> = match delta {
+    // Decided once per run, not per row: whether the change added or removed a
+    // package file that can move the detected import roots (S-519), which
+    // re-keys a whole language.
+    let roots_moved = delta.is_some_and(|d| d.changed_paths.iter().any(|p| index.moves_import_roots(p)));
+    let mut selected: Vec<&UnresolvedRefRow> = match delta {
         None => snap.refs.iter().collect(),
         Some(d) if d.changed_paths.is_empty() && d.dirty_tokens.is_empty() => Vec::new(),
         Some(d) => {
-            // Decided once per run, not per row: whether the change moved a
-            // type of the package-shaped hierarchy a supertype walk climbs.
-            let hierarchy_moved = index.hierarchy_touched(&d.dirty_tokens);
+            // …and whether it moved a type of the package-shaped hierarchy a
+            // supertype walk climbs.
+            let moved = Moved {
+                hierarchy: index.hierarchy_touched(&d.dirty_tokens),
+                import_roots: roots_moved,
+            };
             snap.refs
                 .iter()
-                .filter(|&r| is_affected(r, d, &snap.file_paths, &index, hierarchy_moved))
+                .filter(|&r| is_affected(r, d, &snap.file_paths, &index, moved))
                 .collect()
         }
     };
+
+    // An import-root file whose binding can move while neither endpoint's file
+    // changes (S-519): every row of it is re-bound, so the edges it no longer
+    // produces can be retracted below (`stale_import_root_edges`).
+    let swept =
+        swept_import_root_files(&mut selected, &snap.refs, &snap.file_paths, &index, delta, roots_moved);
 
     // Parallel compute on the shared worker pool (AQ-04): pure binding against
     // the immutable index; `collect` preserves input order (NFR-RA-06).
@@ -328,8 +343,19 @@ pub fn run(
     let by_relation =
         relation_coverage(snap.refs.iter().map(|r| (r.payload.as_deref(), final_bound(r))));
 
+    // A binding of an import-root file can move although neither endpoint's
+    // file changed — a moved import root re-keys the language; a submodule
+    // arriving takes over a name its package's `__init__.py` re-exported — and
+    // the edge its row no longer binds there would outlive it. Every row of the
+    // swept files was re-bound above, so the edges they no longer produce are
+    // exactly the stale ones (S-519, NFR-RA-06).
+    let stale = stale_import_root_edges(&snap.nodes, &snap.edges, &swept, &outcomes);
+
     // Serial commit: one transaction through the writer actor (ADR-02).
     let edges_created = runtime.submit_write(move |w| {
+        for (source, target, kind) in &stale {
+            w.delete_edge(*source, *target, *kind)?;
+        }
         let mut created = 0u64;
         for (ref_id, was_resolved, outcome) in &outcomes {
             match outcome {
@@ -395,6 +421,102 @@ pub fn run(
     Ok(stats(refs_total, refs_resolved, edges_created, by_relation))
 }
 
+/// The import-root files an incremental run re-binds **whole** (S-519), with
+/// every row of them added to `selected`: each file a selected row that was
+/// bound comes from (its binding may move, and its old edge must not outlive
+/// it), and every import-root file when the run moved the detected roots
+/// (`is_affected` reason 7 selected their rows already). Empty for a full
+/// index, which re-binds the whole ledger over a graph whose files were all
+/// re-extracted.
+fn swept_import_root_files<'s>(
+    selected: &mut Vec<&'s UnresolvedRefRow>,
+    refs: &'s [UnresolvedRefRow],
+    file_paths: &HashMap<i64, String>,
+    index: &binder::Index,
+    delta: Option<&Delta>,
+    roots_moved: bool,
+) -> HashSet<String> {
+    if delta.is_none() {
+        return HashSet::new();
+    }
+    let path_of = |r: &UnresolvedRefRow| r.file_id.and_then(|id| file_paths.get(&id));
+    let mut swept: HashSet<String> = selected
+        .iter()
+        .filter(|r| r.resolved)
+        .filter_map(|r| path_of(r))
+        .filter(|p| index.has_import_roots(p))
+        .cloned()
+        .collect();
+    if roots_moved {
+        swept.extend(file_paths.values().filter(|p| index.has_import_roots(p)).cloned());
+    }
+    if swept.is_empty() {
+        return swept;
+    }
+    let chosen: HashSet<i64> = selected.iter().map(|r| r.id).collect();
+    selected.extend(
+        refs.iter()
+            .filter(|r| !chosen.contains(&r.id) && path_of(r).is_some_and(|p| swept.contains(p))),
+    );
+    swept
+}
+
+/// The reference-bound edges out of the `swept` files (S-519) that this run's
+/// outcomes no longer produce — what a moved binding leaves stale. Every row of
+/// those files was re-bound ([`swept_import_root_files`]), so an edge no
+/// outcome names has lost the row that bound it. Only the kinds a ledger row
+/// binds are considered: containment and the framework pass's edges are other
+/// passes'.
+fn stale_import_root_edges(
+    nodes: &[NodeRow],
+    edges: &[EdgeRow],
+    swept: &HashSet<String>,
+    outcomes: &[(i64, bool, binder::Outcome)],
+) -> Vec<(NodeId, NodeId, EdgeKind)> {
+    if swept.is_empty() {
+        return Vec::new();
+    }
+    let mut produced: HashSet<(NodeId, NodeId, EdgeKind)> = HashSet::new();
+    for (_, _, outcome) in outcomes {
+        match outcome {
+            binder::Outcome::Bound {
+                source, target, kind, ..
+            } => {
+                produced.insert((*source, *target, *kind));
+            }
+            binder::Outcome::BoundMany {
+                source,
+                targets,
+                kind,
+                ..
+            } => produced.extend(targets.iter().map(|t| (*source, *t, *kind))),
+            binder::Outcome::Unbound => {}
+        }
+    }
+    let in_import_root_file: HashSet<NodeId> = nodes
+        .iter()
+        .filter(|n| n.file_path.as_ref().is_some_and(|p| swept.contains(p)))
+        .map(|n| n.id)
+        .collect();
+    edges
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                EdgeKind::Calls
+                    | EdgeKind::Imports
+                    | EdgeKind::Accesses
+                    | EdgeKind::Extends
+                    | EdgeKind::Implements
+                    | EdgeKind::Instantiates
+                    | EdgeKind::TypeUses
+            ) && in_import_root_file.contains(&e.source)
+                && !produced.contains(&(e.source, e.target, e.kind))
+        })
+        .map(|e| (e.source, e.target, e.kind))
+        .collect()
+}
+
 /// `true` when a bind [`Outcome`](binder::Outcome) produced at least one edge.
 fn is_bound(o: &binder::Outcome) -> bool {
     matches!(
@@ -405,7 +527,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 
 /// Whether the incremental run must re-bind row `r` given `delta`.
 ///
-/// Six reasons force a re-bind; any one suffices:
+/// Seven reasons force a re-bind; any one suffices:
 /// 1. **A** — `r` belongs to a file re-extracted or removed this sync. Its source
 ///    may have moved, and capture-before-delete lands inbound cross-file edges
 ///    here as `Symbol` rows ([ADR-10]); both need rebinding.
@@ -425,7 +547,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 /// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
-/// 5. **Hierarchy** (S-468) — `hierarchy_moved`: the sync dirtied a type of the
+/// 5. **Hierarchy** (S-468) — `moved.hierarchy`: the sync dirtied a type of the
 ///    package-shaped `Extends` hierarchy, and `r` is a call from a
 ///    package-shaped file. Such a call may bind through a supertype walk that
 ///    crosses the moved type while spelling none of its names — `Leaf::start`
@@ -435,6 +557,10 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    declared a C# `global using` before or after the sync, and `r` is from a
 ///    package-shaped file. The wildcard brings names into view in files the sync
 ///    never touched, under names no dirty token spells.
+/// 7. **Import roots** (S-519) — `moved.import_roots`: the sync added or removed
+///    a package file beneath a candidate import root (`src/pkg/__init__.py`), so
+///    the detected roots — and with them every key of that language — may have
+///    moved, and `r` is from a file keyed under import roots.
 ///
 /// Every other row provably keeps its binding (its source is in an untouched file
 /// and no key it reads changed), so it is skipped — that is where the work goes.
@@ -445,7 +571,7 @@ fn is_affected(
     delta: &Delta,
     file_paths: &HashMap<i64, String>,
     index: &binder::Index,
-    hierarchy_moved: bool,
+    moved: Moved,
 ) -> bool {
     if let Some(path) = r.file_id.and_then(|id| file_paths.get(&id)) {
         if delta.changed_paths.contains(path) {
@@ -454,10 +580,13 @@ fn is_affected(
         if is_import_scoped(r) && index.is_path_specifier_file(path) {
             return true;
         }
-        if hierarchy_moved && r.kind == EdgeKind::Calls && index.is_package_shaped(path) {
+        if moved.hierarchy && r.kind == EdgeKind::Calls && index.is_package_shaped(path) {
             return true;
         }
         if delta.global_imports_moved && index.is_package_shaped(path) {
+            return true;
+        }
+        if moved.import_roots && index.has_import_roots(path) {
             return true;
         }
     }
@@ -465,6 +594,15 @@ fn is_affected(
         return true;
     }
     index.ref_affected(r, &delta.dirty_tokens)
+}
+
+/// What an incremental run decided once, before selecting rows: whether the
+/// sync moved a type of the package-shaped `Extends` hierarchy (S-468), and
+/// whether it moved the detected import roots (S-519).
+#[derive(Debug, Clone, Copy)]
+struct Moved {
+    hierarchy: bool,
+    import_roots: bool,
 }
 
 /// Whether `r` binds against a path-grammar import's target — an `Imports` row
@@ -749,3 +887,5 @@ fn stats(
 mod tests;
 #[cfg(all(test, feature = "lang-java"))]
 mod package_rung_tests;
+#[cfg(test)]
+mod path_module_tests;

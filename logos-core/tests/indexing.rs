@@ -955,7 +955,10 @@ fn bench_incremental_vs_full_resolve() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     engine.index();
     let rt = engine.runtime().expect("runtime");
-    let policy = logos_core::config::BindingPolicy::Balanced;
+    let resolution = logos_core::config::Resolution {
+        policy: logos_core::config::BindingPolicy::Balanced,
+        ..Default::default()
+    };
 
     // Best of 3 to damp noise; returns (fastest run, ledger size).
     let best = |delta: Option<&logos_core::resolve::Delta>| -> (Duration, u64) {
@@ -964,7 +967,7 @@ fn bench_incremental_vs_full_resolve() {
         for _ in 0..3 {
             let t = Instant::now();
             let tree = Some((engine.registry().expect("registry"), engine.root()));
-            let s = logos_core::resolve::run(rt, tree, policy, delta).expect("resolve runs");
+            let s = logos_core::resolve::run(rt, tree, &resolution, delta).expect("resolve runs");
             fastest = fastest.min(t.elapsed());
             refs_total = s.refs_total;
         }

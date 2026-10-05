@@ -8,15 +8,27 @@
 ;   @ref.import — an import path; the captured node's *text* is canonicalised
 ;                 (dots → `::`) into the ledger form that feeds both the
 ;                 binder and the framework candidacy gate (FR-FW-04).
+;   @ref.import.from — a MARKER, recording nothing on its own: the module of a
+;                 `from m import a, b` (S-519, FR-RS-14). Each imported name
+;                 is its own `@ref.import` match, recorded as its path under
+;                 that module (`m::a`, `m::b`) — one row per imported name. A
+;                 relative module keeps its level as leading `.`/`..` segments
+;                 (`from .rules import Rule` → `.::rules::Rule`, `from ..x
+;                 import y` → `..::x::y`), which the binder reads from the
+;                 importing file's package. With `@ref.import.asterisk`
+;                 (`from m import *`) the row is a glob of the module itself.
+;   @ref.import.renamed — a MARKER on an `as` import (`import a as b`,
+;                 `from m import a as b`): the imported name is NOT what the
+;                 file binds, so the row records no alias at all. A call to
+;                 `a` then never binds through an import that renamed it
+;                 (S-519 review); the `as` name becomes the alias with S-520.
 ;
 ; Droppable on disk at `.logos/plugins/python/queries/references.scm`
 ; (FR-PL-04, FR-PL-05).
 ;
-; Deliberately NOT captured in v1 (documented limitations, S-015):
-;   - the imported *names* of `from m import a, b` (only the module path is
-;     recorded; per-name aliases are a later increment);
-;   - `import x as y` rename binding (the path is recorded, the `as` name is
-;     not yet an alias).
+; Deliberately NOT captured yet (documented limitations):
+;   - `import x as y` / `from m import a as b` rename binding: the imported path
+;     is recorded with no alias; the `as` name is not yet the alias (S-520).
 
 (call
   function: (identifier) @ref.call)
@@ -57,13 +69,20 @@
 
 (import_statement
   name: (aliased_import
-    name: (dotted_name) @ref.import))
+    name: (dotted_name) @ref.import) @ref.import.renamed)
 
 (import_from_statement
-  module_name: (dotted_name) @ref.import)
+  module_name: (_) @ref.import.from
+  name: (dotted_name) @ref.import)
 
 (import_from_statement
-  module_name: (relative_import) @ref.import)
+  module_name: (_) @ref.import.from
+  name: (aliased_import
+    name: (dotted_name) @ref.import) @ref.import.renamed)
+
+(import_from_statement
+  module_name: (_) @ref.import.from
+  (wildcard_import) @ref.import @ref.import.asterisk)
 
 ;   @ref.access — an own-attribute access (`self.x`): a method reading an
 ;                 attribute of its own class (CR-005, FR-EX-08). The `#eq? self`

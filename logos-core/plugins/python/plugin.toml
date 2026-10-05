@@ -65,13 +65,29 @@ framework_detectors = ["fastapi", "django"]
 # file's header for the full rationale and its test pins.
 http_client_detectors = ["requests", "httpx"]
 
-# Declared cross-file reach (S-570, CR-180, FR-PL-09): references bind only
-# inside the file that wrote them.
+# Python's module model is the path model with import roots (S-519, CR-170,
+# FR-RS-14). A file is keyed by its path under its import root: `src/` when a
+# package (a directory with an `__init__.py`) sits beneath it, otherwise the
+# repository root, which is also where a file outside every root is keyed from.
+# An `__init__.py` names its package's directory, every directory under a root
+# is a module (so a namespace package without `__init__.py` still descends), and
+# `.logos/config.toml`'s `[resolution.import_roots] python = [...]` replaces the
+# detection. Python is its own family: its imports reach only Python modules.
+[module_model]
+kind = "path"
+package_stems = ["__init__"]
+import_roots = ["src"]
+family = "python"
+
+# Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across files
+# through the import-root module model (S-519), and so does a bare call to a name
+# a `from m import f` brought into view. Type relations do not yet (S-522).
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
-level = "same-file"
+level = "partial"
+cross_file = ["calls", "imports"]
 
 [queries]
 symbols = "queries/symbols.scm"

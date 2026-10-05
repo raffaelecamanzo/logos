@@ -164,6 +164,26 @@ fn a_static_imported_constant_of_another_type_in_the_member_folds() {
     }
 }
 
+/// The declaring type is the handler's own interop family's (S-519): a C# class
+/// declaring the same fully-qualified `a.b.GlobalControllerAdvice` beside the
+/// Java one is no candidate, so the Java constant still folds.
+#[cfg(feature = "lang-c-sharp")]
+#[test]
+fn a_same_named_type_of_another_family_never_shadows_the_constants_type() {
+    let handler = api_file("c");
+    let (_tmp, engine, stats) = index(&[
+        (ADVICE_FILE, &advice(r#""emailAddress""#)),
+        (
+            "src/A/B/GlobalControllerAdvice.cs",
+            "namespace a.b;\n\npublic class GlobalControllerAdvice\n{\n    public const string EMAIL = \"other\";\n}\n",
+        ),
+        (&handler, &api("a.c", STATIC_IMPORT, CONCATENATED)),
+    ]);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(route_names(rt), [FOLDED_ROUTE]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
+
 /// `GlobalControllerAdvice.EMAIL`, written qualified with no import, from a
 /// file of the same package: Java finds a type of the file's own package
 /// without an import, and the fold finds it the same way.

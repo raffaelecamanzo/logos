@@ -1,9 +1,9 @@
 //! The **package-shaped** module key ([CR-149], [FR-RS-01]) — the one place a
 //! package is derived from a file path.
 //!
-//! The binder's default module model is Rust's ([`module_key_for_file`]): the
-//! directory before the last `src/` names the crate, every later directory is a
-//! module. A language whose plugin declares `[package_modules]`
+//! The binder's default module model is the **path** model
+//! ([`PackageLayout::module_key`]): the directory before the last `src/` names
+//! the crate, every later directory is a module. A language whose plugin declares `[package_modules]`
 //! ([`PackageModules`](crate::plugin::PackageModules)) is keyed instead by the
 //! path *after* its source root, so `mailbox-core/src/main/java/com/x/Svc.java`
 //! is `("mailbox_core", [com, x, Svc])` — the fully-qualified name its imports
@@ -21,6 +21,17 @@
 //! declarations sit in two different namespaces, or it was indexed before the
 //! namespace was recorded — keeps the default model's key, as it had before.
 //!
+//! A language whose plugin declares **path-model data** (S-519, [FR-RS-14])
+//! keeps the path model with two refinements, both descriptor data
+//! ([`PathModelDecl`]): its **package-file stems** name their directory
+//! (Rust's `mod`/`lib`/`main`, Python's `__init__` — a stem no plugin declares,
+//! a JavaScript `main.js`, is the module `main`), and its **import roots** key
+//! a file by its path under the root that holds it — `src/` when a package sits
+//! beneath it, else the repository root ([`PackageLayout::with_detected_import_roots`],
+//! replaced by `.logos/config.toml` through
+//! [`PackageLayout::with_import_root_overrides`]) — under its family's own crate
+//! ([`family_crate`]), so one language's module tree never reaches another's.
+//!
 //! **This is the single source of FQN derivation.** Anything that needs the
 //! package a file declares, or the fully-qualified name of a type it declares,
 //! asks [`PackageLayout::package_of`] / [`PackageLayout::type_fqn`] — never a
@@ -30,11 +41,12 @@
 //! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 //! [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
 //! [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+//! [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use crate::plugin::{LanguagePlugin, LanguageRegistry, ModuleModelKind};
+use crate::plugin::{LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl};
 
 /// A module identity: `(crate name, module path segments)` — the binder's
 /// `ModKey`.
@@ -58,6 +70,53 @@ pub struct PackageLayout {
     /// [`namespace_exts`](Self::namespace_exts) language whose namespace was
     /// recorded.
     namespaces: HashMap<String, Vec<String>>,
+    /// Normalised extension → its language's path-model data (S-519): the
+    /// package-file stems, and the import roots when it declares them.
+    path_models: HashMap<String, PathModel>,
+    /// Normalised extension → the interop family its language binds within
+    /// (S-519) — what the type and namespace indexes are partitioned by.
+    families: HashMap<String, String>,
+}
+
+/// One language's path-model data in a layout (S-519).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathModel {
+    /// File stems that name their directory.
+    stems: Vec<String>,
+    /// Import-root keying, when the language declares it.
+    roots: Option<ImportRoots>,
+}
+
+/// An import-root language's roots (S-519, [FR-RS-14]).
+///
+/// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportRoots {
+    /// The plugin's name — the key the config override is read under.
+    language: String,
+    /// The crate every file of the language is keyed under ([`family_crate`]).
+    crate_name: String,
+    /// The declared candidate roots, as path segments, in declaration order.
+    candidates: Vec<Vec<String>>,
+    /// The roots in force: the candidates that hold a package
+    /// ([`PackageLayout::with_detected_import_roots`]), or the configured
+    /// override. The repository root (no segments) is always the fallback.
+    selected: Vec<Vec<String>>,
+    /// Whether `selected` is the configured override, which detection never
+    /// replaces.
+    overridden: bool,
+}
+
+/// The crate an import-root language's files are keyed under: its family,
+/// bracketed so that it can never equal a crate-name head an import spells
+/// (`import python` names a module, not this crate). One crate per family, so
+/// every root of the language shares one namespace — `sys.path` is one
+/// namespace — and no other family's module is ever under it (S-519,
+/// [NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+pub(crate) fn family_crate(family: &str) -> String {
+    format!("<{family}>")
 }
 
 impl PackageLayout {
@@ -91,6 +150,214 @@ impl PackageLayout {
     pub fn from_registry(registry: &LanguageRegistry) -> Self {
         Self::new(registry.package_source_roots())
             .with_namespace_extensions(registry.namespace_extensions())
+            .with_path_models(registry.path_models())
+            .with_families(registry.families())
+    }
+
+    /// This layout, with each extension's path-model data (S-519; the shape
+    /// [`LanguageRegistry::path_models`] returns). Import roots start at their
+    /// declared candidates until [`with_detected_import_roots`](Self::with_detected_import_roots)
+    /// or [`with_import_root_overrides`](Self::with_import_root_overrides)
+    /// selects among them.
+    pub fn with_path_models(mut self, models: HashMap<String, PathModelDecl>) -> Self {
+        for (ext, decl) in models {
+            let roots = decl.import_roots.as_ref().map(|candidates| {
+                let candidates: Vec<Vec<String>> =
+                    candidates.iter().map(|r| root_segments(r)).collect();
+                ImportRoots {
+                    language: decl.language.clone(),
+                    crate_name: family_crate(&decl.family),
+                    selected: candidates.clone(),
+                    candidates,
+                    overridden: false,
+                }
+            });
+            self.path_models.insert(
+                ext.trim_start_matches('.').to_ascii_lowercase(),
+                PathModel {
+                    stems: decl.package_stems,
+                    roots,
+                },
+            );
+        }
+        self
+    }
+
+    /// This layout, with each extension's interop family (S-519; the shape
+    /// [`LanguageRegistry::families`] returns).
+    pub fn with_families(mut self, families: HashMap<String, String>) -> Self {
+        self.families.extend(
+            families
+                .into_iter()
+                .map(|(ext, family)| (ext.trim_start_matches('.').to_ascii_lowercase(), family)),
+        );
+        self
+    }
+
+    /// This layout, with the import roots `.logos/config.toml` declares per
+    /// language (`[resolution.import_roots]`, S-519) in force for that
+    /// language's files: they **replace** the detected ones — the repository
+    /// root among them, unless listed (`"."`). A language that declares no import
+    /// roots ignores its entry.
+    pub fn with_import_root_overrides(mut self, overrides: &BTreeMap<String, Vec<String>>) -> Self {
+        for roots in self.path_models.values_mut().filter_map(|m| m.roots.as_mut()) {
+            if let Some(configured) = overrides.get(&roots.language) {
+                roots.selected = configured.iter().map(|r| root_segments(r)).collect();
+                roots.overridden = true;
+            }
+        }
+        self
+    }
+
+    /// This layout, with each import-root language's roots detected from the
+    /// files indexed (`paths`, project-relative): a candidate root is in force
+    /// when it **holds a package** — a package-stem file of the language in a
+    /// directory beneath it (`src/werkzeug/__init__.py` selects `src`). Read
+    /// from the indexed paths rather than the disk, so a cold index and a sync
+    /// over the same tree select the same roots ([NFR-RA-06]); a configured
+    /// override is never replaced.
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub fn with_detected_import_roots<'a>(mut self, paths: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut held: HashMap<String, HashSet<usize>> = HashMap::new();
+        for path in paths {
+            let Some(ext) = extension(path) else { continue };
+            let Some(model) = self.path_models.get(&ext) else { continue };
+            let Some(roots) = model.roots.as_ref().filter(|r| !r.overridden) else {
+                continue;
+            };
+            for (idx, candidate) in roots.candidates.iter().enumerate() {
+                if holds_package(path, candidate, &model.stems) {
+                    held.entry(ext.clone()).or_default().insert(idx);
+                }
+            }
+        }
+        for (ext, model) in &mut self.path_models {
+            let Some(roots) = model.roots.as_mut().filter(|r| !r.overridden) else {
+                continue;
+            };
+            let held = held.get(ext);
+            roots.selected = roots
+                .candidates
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| held.is_some_and(|h| h.contains(idx)))
+                .map(|(_, c)| c.clone())
+                .collect();
+        }
+        self
+    }
+
+    /// Whether adding or removing the file at `path` can change which import
+    /// roots [`with_detected_import_roots`](Self::with_detected_import_roots)
+    /// selects: a package-stem file beneath a candidate root of a language whose
+    /// roots are detected, not configured. A sync that changes one re-binds
+    /// every row of that language's files (S-519, [NFR-RA-06]).
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub fn moves_import_roots(&self, path: &str) -> bool {
+        let Some(model) = extension(path).and_then(|ext| self.path_models.get(&ext)) else {
+            return false;
+        };
+        model.roots.as_ref().is_some_and(|roots| {
+            !roots.overridden
+                && roots
+                    .candidates
+                    .iter()
+                    .any(|c| holds_package(path, c, &model.stems))
+        })
+    }
+
+    /// Whether the file at `path` is keyed under import roots (S-519) — its
+    /// relative imports keep their level and every directory above it under its
+    /// root is a module.
+    pub fn has_import_roots(&self, path: &str) -> bool {
+        self.path_model(path).is_some_and(|m| m.roots.is_some())
+    }
+
+    /// The key of the package a relative import in the file at `path` starts
+    /// from — `from . import x` names it (S-519, [FR-RS-14]): the directory the
+    /// file sits in, which a package file (`__init__.py`) is itself the module
+    /// of. `None` unless the file is keyed under import roots.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    pub fn package_dir(&self, path: &str) -> Option<ModuleKey> {
+        let model = self.path_model(path)?;
+        model.roots.as_ref()?;
+        let (crate_name, mut mods) = self.module_key(path);
+        if !self.is_package_file(path) {
+            mods.pop();
+        }
+        Some((crate_name, mods))
+    }
+
+    /// The directory modules above the file at `path` (S-519, [FR-RS-14]):
+    /// every directory between its import root and the file, as module keys,
+    /// outermost first — modules whether or not a package file names them, so a
+    /// namespace package still descends. Empty unless the file is keyed under
+    /// import roots.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    pub fn directory_modules(&self, path: &str) -> Vec<ModuleKey> {
+        let Some((crate_name, dir)) = self.package_dir(path) else {
+            return Vec::new();
+        };
+        (1..=dir.len())
+            .map(|len| (crate_name.clone(), dir[..len].to_vec()))
+            .collect()
+    }
+
+    /// Whether the file at `path` is a package file of its language — its stem
+    /// is one its plugin declares (`__init__.py`; `mod.rs`).
+    pub fn is_package_file(&self, path: &str) -> bool {
+        let Some(model) = self.path_model(path) else {
+            return false;
+        };
+        path.rsplit('/')
+            .find(|s| !s.is_empty())
+            .is_some_and(|file| model.stems.contains(&file_stem(file)))
+    }
+
+    /// Whether `crate_name` is an import-root family's crate ([`family_crate`]):
+    /// a closed namespace whose workspace fallbacks never reach another crate.
+    pub fn is_family_crate(&self, crate_name: &str) -> bool {
+        self.path_models
+            .values()
+            .filter_map(|m| m.roots.as_ref())
+            .any(|r| r.crate_name == crate_name)
+    }
+
+    /// The interop family of the file at `path`'s language (S-519): the family
+    /// its plugin declares, else the plugin's own name. A file of no loaded
+    /// language (a synthetic graph's, under a layout told no families) is the
+    /// family of its extension, so two extensions never share one by default.
+    /// `None` only for a path with no extension.
+    pub fn family(&self, path: &str) -> Option<String> {
+        let ext = extension(path)?;
+        Some(self.families.get(&ext).cloned().unwrap_or(ext))
+    }
+
+    fn path_model(&self, path: &str) -> Option<&PathModel> {
+        self.path_models.get(&extension(path)?)
+    }
+
+    /// A registry-less layout folding the package-file stems the rust plugin
+    /// declares (`mod`, `lib`, `main`) for `.rs` files — what a synthetic test
+    /// graph of Rust paths is keyed with (`binder::Index::build`). Pinned
+    /// against the loaded descriptor by
+    /// `rust_tests::the_test_layout_folds_the_stems_the_rust_plugin_declares`,
+    /// so the two cannot drift.
+    #[cfg(test)]
+    pub(crate) fn rust_stems_for_tests() -> Self {
+        Self::default().with_path_models(HashMap::from([(
+            "rs".to_string(),
+            PathModelDecl {
+                language: "rust".to_string(),
+                family: "rust".to_string(),
+                package_stems: ["mod", "lib", "main"].map(str::to_string).to_vec(),
+                import_roots: None,
+            },
+        )]))
     }
 
     /// This layout, with the files of `exts` (extensions, with or without a
@@ -132,13 +399,21 @@ impl PackageLayout {
                 .iter()
                 .map(|ext| ext.trim_start_matches('.').to_string())
         };
-        match (semantics.module_model, semantics.package_modules.as_ref()) {
+        let layout = match (semantics.module_model, semantics.package_modules.as_ref()) {
             (ModuleModelKind::Package, Some(pm)) => {
                 Self::new(exts().map(|ext| (ext, pm.source_roots.clone())).collect())
             }
             (ModuleModelKind::Namespace, _) => Self::default().with_namespace_extensions(exts()),
             _ => Self::default(),
-        }
+        };
+        layout
+            .with_path_models(
+                PathModelDecl::of(plugin)
+                    .into_iter()
+                    .flat_map(|decl| exts().map(move |ext| (ext, decl.clone())))
+                    .collect(),
+            )
+            .with_families(exts().map(|ext| (ext, semantics.family.clone())).collect())
     }
 
     /// `true` when the file at `path` takes the package rungs: its language
@@ -160,9 +435,9 @@ impl PackageLayout {
     /// the crate is the directory before the root (normalised `-` → `_`,
     /// `crate` when the root starts the path), and the modules are the
     /// directories after it plus the file stem. A file outside every root, and
-    /// every file of any other language, keeps the default model's key — for a
-    /// package-shaped language only the file stem is always kept, because a
-    /// type is never the `mod`/`lib`/`main` marker the Rust rule folds away.
+    /// every file of any other language, keeps the path model's key — for a
+    /// package-shaped language the file stem is always kept, because its plugin
+    /// declares no package-file stem.
     ///
     /// The **rightmost** match of any root wins, as the default model takes the
     /// last `src/`, so a nested module's own root is the one that counts.
@@ -182,7 +457,7 @@ impl PackageLayout {
         }
         let (crate_name, mut mods, stem) = match self.roots_of(path) {
             Some(roots) => rooted(path, roots).unwrap_or_else(|| default_layout(path)),
-            None => return module_key_for_file(path),
+            None => return self.path_key(path),
         };
         if let Some(stem) = stem {
             mods.push(stem);
@@ -227,6 +502,72 @@ impl PackageLayout {
     fn roots_of(&self, path: &str) -> Option<&[Vec<String>]> {
         self.roots_by_ext.get(&extension(path)?).map(Vec::as_slice)
     }
+
+    /// The path model's key of `path` (S-519, [FR-RS-14]). Under import roots:
+    /// the language's family crate, then the directories after the **longest**
+    /// root in force that prefixes the path — the repository root when none
+    /// does — then the stem. Otherwise the default model's `src/` crate rule.
+    /// Either way the stem is dropped when it is one of the language's
+    /// package-file stems, so the file names its directory; a stem no plugin
+    /// declares (a JavaScript `main.js`) is kept.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    fn path_key(&self, path: &str) -> ModuleKey {
+        let model = self.path_model(path);
+        let (crate_name, mut mods, stem) = match model.and_then(|m| m.roots.as_ref()) {
+            Some(roots) => under_import_root(path, roots),
+            None => default_layout(path),
+        };
+        let folded = |s: &String| model.is_some_and(|m| m.stems.contains(s));
+        if let Some(stem) = stem.filter(|s| !folded(s)) {
+            mods.push(stem);
+        }
+        (crate_name, mods)
+    }
+}
+
+/// An import root's segments from its declared or configured text: `"src"` →
+/// `[src]`; `"."` or `""`, the repository root, → none.
+fn root_segments(root: &str) -> Vec<String> {
+    root.split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `path` is a package file of one of `stems` in a directory beneath
+/// `root` — the evidence that `root` is an import root (`src/pkg/__init__.py`
+/// for `src`). A package file directly in the root is not: it would make the
+/// root itself a package.
+fn holds_package(path: &str, root: &[String], stems: &[String]) -> bool {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let Some((file, dirs)) = segs.split_last() else {
+        return false;
+    };
+    dirs.len() > root.len()
+        && dirs.iter().zip(root).all(|(d, r)| *d == r)
+        && stems.contains(&file_stem(file))
+}
+
+/// `(family crate, directories after the longest root in force prefixing the
+/// path, stem)` — the repository root (no segments) when no root does. A root
+/// is matched from the path's start, never in its middle: an import root is a
+/// directory of the repository, where a package root (`src/main/java`) is
+/// matched anywhere because a Maven module may sit at any depth.
+fn under_import_root(path: &str, roots: &ImportRoots) -> (String, Vec<String>, Option<String>) {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let Some((file, dirs)) = segs.split_last() else {
+        return (roots.crate_name.clone(), Vec::new(), None);
+    };
+    let skip = roots
+        .selected
+        .iter()
+        .filter(|r| r.len() <= dirs.len() && dirs.iter().zip(r.iter()).all(|(d, s)| *d == s))
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0);
+    let mods = dirs[skip..].iter().map(|s| (*s).to_string()).collect();
+    (roots.crate_name.clone(), mods, Some(file_stem(file)))
 }
 
 /// `path`'s extension, lower-cased — the key both models are declared under.
@@ -289,33 +630,11 @@ fn matched_root(path: &str, roots: &[Vec<String>]) -> Option<(usize, usize, usiz
         .max()
 }
 
-/// Derive a file's module identity from its project-relative path, by the
-/// **default** (Rust) module model.
-///
-/// The segment before the last `src/` names the crate (normalised `-` → `_`,
-/// `crate` when there is none); segments after it are modules, with the
-/// `mod`/`lib`/`main` stems naming their enclosing module rather than adding a
-/// segment. `logos-core/src/extract/mod.rs` → `("logos_core", ["extract"])`.
-///
-/// A package-shaped language's files are keyed by
-/// [`PackageLayout::module_key`] instead ([CR-149]), which falls back to this
-/// for every other file. Rust's model and the package model live side by side
-/// in this module, so there is one home for path → module key.
-///
-/// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
-pub(crate) fn module_key_for_file(path: &str) -> ModuleKey {
-    let (crate_name, mut mods, stem) = default_layout(path);
-    if let Some(stem) = stem.filter(|s| !matches!(s.as_str(), "mod" | "lib" | "main")) {
-        mods.push(stem);
-    }
-    (crate_name, mods)
-}
-
 /// The default model's parts of `path`: the crate, the module directories after
 /// its last `src/`, and the file stem (`None` when nothing follows the crate
-/// root) — before the `mod`/`lib`/`main` fold [`module_key_for_file`] applies.
-/// Shared with [`PackageLayout::module_key`] so the two models agree on every
-/// file outside a package root.
+/// root) — before the package-stem fold [`PackageLayout::module_key`] applies
+/// for the stems the file's plugin declares (Rust's `mod`/`lib`/`main`, S-519).
+/// Shared by every model so they agree on every file outside a package root.
 fn default_layout(path: &str) -> (String, Vec<String>, Option<String>) {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let (crate_name, mods_start) = match segs.iter().rposition(|s| *s == "src") {
@@ -435,9 +754,8 @@ mod tests {
             "src/main.rs",
             "src/lib.rs",
             "a/src/main/java/b.rs",
-            "src/main/java/x.py",
         ] {
-            assert_eq!(l.module_key(path), module_key_for_file(path), "{path}");
+            assert_eq!(l.module_key(path), rust_tests::legacy_rust_key(path), "{path}");
             assert_eq!(l.package_of(path), None, "{path}");
         }
         assert_eq!(
@@ -525,7 +843,7 @@ mod namespace_tests {
         assert!(!l.is_package_shaped("src/Ordering/Order.cs"));
         assert_eq!(
             l.module_key("src/Ordering/Order.cs"),
-            module_key_for_file("src/Ordering/Order.cs")
+            PackageLayout::default().module_key("src/Ordering/Order.cs")
         );
         assert_eq!(l.package_of("src/Ordering/Order.cs"), None);
     }
@@ -538,7 +856,7 @@ mod namespace_tests {
         for path in ["logos-core/src/extract/mod.rs", "src/lib.rs"] {
             assert!(!l.declares_namespaces(path), "{path}");
             assert!(!l.is_package_shaped(path), "{path}");
-            assert_eq!(l.module_key(path), module_key_for_file(path), "{path}");
+            assert_eq!(l.module_key(path), PackageLayout::default().module_key(path), "{path}");
             assert_eq!(l.package_of(path), None, "{path}");
         }
     }
@@ -549,5 +867,246 @@ mod namespace_tests {
         assert_eq!(namespace_segments("Monolog.Handler"), segs("Monolog/Handler"));
         assert_eq!(namespace_text(&[]), "");
         assert!(namespace_segments("").is_empty());
+    }
+}
+
+// Rust's package-file stems moved from a hard-coded fold into the rust plugin
+// (S-519). Every Rust module key must be byte-identical across the move
+// (ADR-07): the oracle below is the fold as it was, verbatim.
+#[cfg(test)]
+pub(crate) mod rust_tests {
+    use super::*;
+
+    /// The pre-S-519 `module_key_for_file`, verbatim — the oracle every Rust
+    /// key is compared against. Not a production path: nothing outside tests
+    /// may fold a stem the plugins do not declare.
+    pub(crate) fn legacy_rust_key(path: &str) -> ModuleKey {
+        let (crate_name, mut mods, stem) = default_layout(path);
+        if let Some(stem) = stem.filter(|s| !matches!(s.as_str(), "mod" | "lib" | "main")) {
+            mods.push(stem);
+        }
+        (crate_name, mods)
+    }
+
+    #[cfg(feature = "lang-rust")]
+    fn registry_layout() -> PackageLayout {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        PackageLayout::from_registry(&LanguageRegistry::load(tmp.path()).expect("registry loads"))
+    }
+
+    /// The synthetic-graph layout (`binder::Index::build`) folds exactly the
+    /// stems the loaded rust plugin declares, and declares no import roots.
+    #[cfg(feature = "lang-rust")]
+    #[test]
+    fn the_test_layout_folds_the_stems_the_rust_plugin_declares() {
+        let registry = registry_layout();
+        let test = PackageLayout::rust_stems_for_tests();
+        assert_eq!(registry.path_models.get("rs"), test.path_models.get("rs"));
+        assert!(registry.path_models["rs"].roots.is_none());
+    }
+
+    /// Every `.rs` file of this repository keeps the module key the hard-coded
+    /// fold gave it (S-519, ADR-07) — the serialized before/after comparison,
+    /// run over the live tree so a new file is covered the day it lands.
+    #[cfg(feature = "lang-rust")]
+    #[test]
+    fn every_rust_module_key_on_this_repository_is_byte_identical() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let layout = registry_layout();
+        let mut stack = vec![root.to_path_buf()];
+        let mut compared = 0usize;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Ok(kind) = entry.file_type() else { continue };
+                if kind.is_dir() {
+                    if !name.starts_with('.') && name != "target" && name != "node_modules" {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if !name.ends_with(".rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("under root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                assert_eq!(layout.module_key(&rel), legacy_rust_key(&rel), "{rel}");
+                compared += 1;
+            }
+        }
+        assert!(compared > 300, "the walk must reach the repository's Rust files: {compared}");
+    }
+}
+
+// The path model's data (S-519, FR-RS-14), exercised without a grammar: a layout
+// is told each extension's declaration, as the registry tells it. The language
+// names are fixture data, not a roster in core.
+#[cfg(test)]
+mod path_model_tests {
+    use super::*;
+
+    fn py_decl(roots: &[&str]) -> PathModelDecl {
+        PathModelDecl {
+            language: "python".to_string(),
+            family: "python".to_string(),
+            package_stems: vec!["__init__".to_string()],
+            import_roots: Some(roots.iter().map(|r| (*r).to_string()).collect()),
+        }
+    }
+
+    /// A layout with a Python-shaped import-root model for `.py`, roots
+    /// detected from `files`.
+    fn py(files: &[&str]) -> PackageLayout {
+        PackageLayout::default()
+            .with_path_models(HashMap::from([("py".to_string(), py_decl(&["src"]))]))
+            .with_detected_import_roots(files.iter().copied())
+    }
+
+    fn key(mods: &str) -> ModuleKey {
+        (
+            family_crate("python"),
+            mods.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect(),
+        )
+    }
+
+    const WERKZEUG: &[&str] = &[
+        "src/werkzeug/__init__.py",
+        "src/werkzeug/_internal.py",
+        "src/werkzeug/routing/__init__.py",
+        "src/werkzeug/routing/rules.py",
+        "tests/test_routing.py",
+    ];
+    const HEALTHCHECKS: &[&str] = &[
+        "hc/__init__.py",
+        "hc/api/__init__.py",
+        "hc/api/models.py",
+        "manage.py",
+    ];
+
+    #[test]
+    fn a_src_root_holding_a_package_is_detected_and_a_package_file_names_its_directory() {
+        let l = py(WERKZEUG);
+        assert_eq!(l.module_key("src/werkzeug/__init__.py"), key("werkzeug"));
+        assert_eq!(l.module_key("src/werkzeug/routing/rules.py"), key("werkzeug/routing/rules"));
+        assert_eq!(l.module_key("src/werkzeug/routing/__init__.py"), key("werkzeug/routing"));
+        // A file outside every root is keyed from the repository root — and a
+        // root is matched from the path's start, never in its middle.
+        assert_eq!(l.module_key("tests/test_routing.py"), key("tests/test_routing"));
+        assert_eq!(l.module_key("docs/src/conf.py"), key("docs/src/conf"));
+        assert!(l.has_import_roots("src/werkzeug/_internal.py"));
+        assert!(l.is_package_file("src/werkzeug/__init__.py"));
+        assert!(!l.is_package_file("src/werkzeug/_internal.py"));
+    }
+
+    #[test]
+    fn without_a_package_under_src_the_repository_root_is_the_import_root() {
+        let l = py(HEALTHCHECKS);
+        assert_eq!(l.module_key("hc/api/models.py"), key("hc/api/models"));
+        assert_eq!(l.module_key("hc/__init__.py"), key("hc"));
+        // A `src/` holding only a script is no package root.
+        let script = py(&["src/tool.py", "app/__init__.py"]);
+        assert_eq!(script.module_key("src/tool.py"), key("src/tool"));
+        assert_eq!(script.module_key("app/__init__.py"), key("app"));
+        // Nor is a package file directly in `src/`, nor a `src` deeper down.
+        let flat = py(&["src/__init__.py", "docs/src/pkg/__init__.py"]);
+        assert_eq!(flat.module_key("docs/src/pkg/__init__.py"), key("docs/src/pkg"));
+        assert_eq!(flat.module_key("src/__init__.py"), key("src"));
+    }
+
+    #[test]
+    fn the_configured_import_roots_replace_the_detected_ones() {
+        let lib = PackageLayout::default()
+            .with_path_models(HashMap::from([("py".to_string(), py_decl(&["src"]))]))
+            .with_import_root_overrides(&BTreeMap::from([(
+                "python".to_string(),
+                vec!["lib".to_string()],
+            )]))
+            .with_detected_import_roots(WERKZEUG.iter().copied().chain(["lib/pkg/__init__.py"]));
+        assert_eq!(lib.module_key("lib/pkg/__init__.py"), key("pkg"));
+        // `src/` holds a package, but the override replaced the detection.
+        assert_eq!(lib.module_key("src/werkzeug/_internal.py"), key("src/werkzeug/_internal"));
+        assert!(!lib.moves_import_roots("src/other/__init__.py"));
+        // Nested roots: the longest one prefixing a path keys it, with the
+        // repository root (`.`) still in force for every other file.
+        let nested = PackageLayout::default()
+            .with_path_models(HashMap::from([("py".to_string(), py_decl(&["src"]))]))
+            .with_import_root_overrides(&BTreeMap::from([(
+                "python".to_string(),
+                vec![".".to_string(), "lib".to_string()],
+            )]));
+        assert_eq!(nested.module_key("lib/pkg/x.py"), key("pkg/x"));
+        assert_eq!(nested.module_key("tools/y.py"), key("tools/y"));
+        // `.` is the repository root; another language's entry is ignored.
+        let dot = PackageLayout::default()
+            .with_path_models(HashMap::from([("py".to_string(), py_decl(&["src"]))]))
+            .with_import_root_overrides(&BTreeMap::from([
+                ("python".to_string(), vec![".".to_string()]),
+                ("ruby".to_string(), vec!["lib".to_string()]),
+            ]))
+            .with_detected_import_roots(WERKZEUG.iter().copied());
+        assert_eq!(dot.module_key("src/werkzeug/_internal.py"), key("src/werkzeug/_internal"));
+    }
+
+    #[test]
+    fn a_relative_import_starts_from_the_package_the_file_sits_in() {
+        let l = py(WERKZEUG);
+        assert_eq!(l.package_dir("src/werkzeug/routing/rules.py"), Some(key("werkzeug/routing")));
+        // A package file is the module of its own package.
+        assert_eq!(l.package_dir("src/werkzeug/routing/__init__.py"), Some(key("werkzeug/routing")));
+        assert_eq!(
+            l.directory_modules("src/werkzeug/routing/rules.py"),
+            vec![key("werkzeug"), key("werkzeug/routing")]
+        );
+        // Not an import-root file: no package, no directory modules.
+        assert_eq!(l.package_dir("src/werkzeug/routing/rules.js"), None);
+        assert!(l.directory_modules("src/lib.rs").is_empty());
+    }
+
+    #[test]
+    fn only_a_package_file_beneath_a_detected_candidate_moves_the_roots() {
+        let l = py(HEALTHCHECKS);
+        assert!(l.moves_import_roots("src/pkg/__init__.py"));
+        assert!(l.moves_import_roots("src/pkg/sub/__init__.py"));
+        assert!(!l.moves_import_roots("src/pkg/module.py"));
+        assert!(!l.moves_import_roots("hc/__init__.py"));
+        assert!(!l.moves_import_roots("src/pkg/__init__.rs"));
+    }
+
+    #[test]
+    fn a_stem_no_plugin_declares_is_kept_and_a_declared_one_folds() {
+        let l = PackageLayout::rust_stems_for_tests();
+        assert_eq!(l.module_key("web/src/main.js"), ("web".to_string(), vec!["main".to_string()]));
+        assert_eq!(l.module_key("web/src/lib.ts"), ("web".to_string(), vec!["lib".to_string()]));
+        assert_eq!(l.module_key("cli/src/main.rs"), ("cli".to_string(), vec![]));
+        assert_eq!(
+            l.module_key("cli/src/cmd/mod.rs"),
+            ("cli".to_string(), vec!["cmd".to_string()])
+        );
+        // Rust declares no import roots: no family crate, no directory modules.
+        assert!(!l.has_import_roots("cli/src/cmd/mod.rs"));
+        assert!(!l.is_family_crate("cli"));
+    }
+
+    #[test]
+    fn a_family_is_declared_per_extension_and_otherwise_the_extension_itself() {
+        // Two extensions declared into one family (fixture tokens: this
+        // directory spells no language id, the `jvm_parity` guard).
+        let l = py(WERKZEUG).with_families(HashMap::from([
+            ("ja".to_string(), "shared".to_string()),
+            ("kx".to_string(), "shared".to_string()),
+        ]));
+        assert_eq!(l.family("a/B.ja").as_deref(), Some("shared"));
+        assert_eq!(l.family("a/B.KX").as_deref(), Some("shared"));
+        assert_eq!(l.family("a/B.cs").as_deref(), Some("cs"));
+        assert_eq!(l.family("Makefile"), None);
+        assert!(l.is_family_crate(&family_crate("python")));
+        assert!(!l.is_family_crate("crate"));
     }
 }

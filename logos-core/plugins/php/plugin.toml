@@ -79,7 +79,9 @@ http_client_detectors = ["GuzzleHttp"]
 # with `@module.namespace`, and each top-level type is named that namespace plus its
 # own name (`resolve::package_key`). Imports bind through that fully-qualified
 # name, so a namespace that differs from its directory still binds; a type
-# declared twice under one name binds neither (NFR-RA-05).
+# declared twice under one name binds neither (NFR-RA-05). No `family` is
+# declared, so the language is its own interop family (S-519): its imports reach
+# only its own types and namespaces.
 [module_model]
 kind = "namespace"
 
