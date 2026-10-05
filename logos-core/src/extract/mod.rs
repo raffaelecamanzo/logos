@@ -171,8 +171,9 @@ const FROM_MODULE_CAPTURE: &str = "ref.import.from";
 /// `internalcloud` of Go's `internalcloud "…/internal/cloud"`. Its text is the
 /// row's alias, replacing the path's last segment — the name a file can call
 /// is the one it bound, never the one it imported. Like [`FROM_MODULE_CAPTURE`]
-/// it records no row of its own, and it never reaches a wildcard row (whose
-/// alias is a scope marker).
+/// it records no row of its own. A wildcard row's alias is a scope marker, so
+/// [`import_row`] never lets it take this one — a guard against a droppable
+/// query that captures it on a wildcard match; no shipped query does.
 const IMPORT_ALIAS_CAPTURE: &str = "ref.import.alias";
 
 /// One source file handed to the extractor.
@@ -1684,13 +1685,10 @@ fn collect_refs(
                 // `ref.import.global` marks one whose scope is every file of
                 // the declaring file's directory (a C# `global using`). A match
                 // carrying `ref.import.from` names its module apart from the
-                // imported name (Python's `from m import a`, S-519).
+                // imported name (Python's `from m import a`, S-519), and one
+                // carrying `ref.import.alias` names the local binding, which
+                // [`import_row`] records as the row's alias (S-520).
                 "ref.import" => {
-                    let marked = |name: &str| {
-                        m.captures
-                            .iter()
-                            .any(|c| capture_names[c.index as usize] == name)
-                    };
                     let Some((segments, form, alias)) =
                         import_row(m.captures, capture_names, source, text, semantics)
                     else {
@@ -1699,7 +1697,11 @@ fn collect_refs(
                     if let (Some(receivers), RefForm::Path, Some(name)) =
                         (receivers.as_mut(), form, alias.as_deref())
                     {
-                        if !marked("ref.import.static") {
+                        let is_static = m
+                            .captures
+                            .iter()
+                            .any(|c| capture_names[c.index as usize] == "ref.import.static");
+                        if !is_static {
                             receivers.type_import(name);
                         }
                     }
