@@ -8,7 +8,8 @@ pub type Fixture = &'static [(&'static str, &'static str)];
 
 /// werkzeug's layout (`src/` is its import root): the WSGI `Request` extends
 /// the sans-IO one through a relative import that renames it, and calls up to
-/// it through `super()` and `self`. Converters share one base. A library base
+/// it through `super()` and `self`; a test helper subclasses it again, two
+/// levels above the method its `self` call reaches. Converters share one base. A library base
 /// (`Generic[T]`), a metaclass keyword and a class the module never imports
 /// stay unbound.
 pub const WERKZEUG: Fixture = &[
@@ -31,6 +32,10 @@ pub const WERKZEUG: Fixture = &[
     (
         "src/werkzeug/datastructures.py",
         "class Unimported:\n    pass\n",
+    ),
+    (
+        "src/werkzeug/test.py",
+        "from .wrappers.request import Request\n\n\nclass EnvironBuilder(Request):\n    def body(self):\n        return self.get_data()\n",
     ),
 ];
 

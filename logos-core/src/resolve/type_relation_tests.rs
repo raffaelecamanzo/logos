@@ -268,6 +268,19 @@ fn a_fully_qualified_supertype_never_names_a_same_namespace_type() {
     assert_eq!(bind_last(&[r], BindingPolicy::Strict), bound(203, 205, EdgeKind::Extends));
 }
 
+/// A type's `Implements` never enters the `dyn T` fan-out universe (S-281),
+/// though it names the one workspace trait: a `dyn Port` call to `View` fans out
+/// to no class.
+#[test]
+fn a_types_implements_never_enters_the_dyn_fan_out() {
+    let implements = row(1, VIEWS_PY, 121, "Port", EdgeKind::Implements);
+    let dyn_call = UnresolvedRefRow {
+        form: RefForm::Method,
+        ..row(2, LIB_RS, 303, "Port::View", EdgeKind::Calls)
+    };
+    assert_eq!(bind_last(&[implements, dyn_call], BindingPolicy::Strict), Outcome::Unbound);
+}
+
 /// Rust's `Implements` is sourced at an impl **method**, so it keeps the S-281
 /// rule — the one workspace trait of its last segment, here in a file the
 /// impl's never imports, which no scope-only type relation would reach — beside
