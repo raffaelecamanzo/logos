@@ -208,9 +208,15 @@ fn success_exits_zero_with_machine_readable_json() {
     assert!(json.get("languages").is_some(), "read-model shape: {json}");
 }
 
-/// S-570 / FR-PL-09: `logos languages --json` carries `reach` for every code
-/// language — Scala `same-file` with an empty set — and omits it from the
-/// documentation and artifact plugins, which bind no code reference.
+/// S-570 / FR-PL-09: `logos languages --json` carries, for every code
+/// language, exactly the `reach` its descriptor declares — level and
+/// cross-file set in their wire spelling — and omits it from the documentation
+/// and artifact plugins, which bind no code reference.
+///
+/// Every language is compared against its own declaration rather than a
+/// literal: a story that changes a language's reach updates its `plugin.toml`
+/// (verified against the graph by `logos-core`'s `reach_declared`), and this
+/// surface must follow it without a second edit here.
 #[test]
 fn languages_json_carries_each_code_languages_declared_reach() {
     let tmp = TempDir::new().unwrap();
@@ -218,33 +224,33 @@ fn languages_json_carries_each_code_languages_declared_reach() {
     assert_eq!(exit_code(&out), 0);
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let rows = json["languages"].as_array().expect("languages array");
+    let registry = logos_core::plugin::LanguageRegistry::load(tmp.path()).expect("embedded plugins load");
 
     let mut code = 0;
     for row in rows {
+        let name = row["name"].as_str().expect("a language row names itself");
+        let plugin = registry
+            .iter()
+            .find(|p| p.name() == name)
+            .unwrap_or_else(|| panic!("{name} is a loaded plugin"));
         let is_code = row["capabilities"]
             .as_array()
             .is_some_and(|c| c.iter().any(|c| c == "symbols"));
-        if is_code {
-            code += 1;
-            let level = row["reach"]["level"].as_str();
-            assert!(
-                matches!(level, Some("resolved" | "partial" | "same-file" | "symbols")),
-                "{} carries a reach level: {row}",
-                row["name"]
-            );
-            assert!(row["reach"]["cross_file"].is_array(), "{row}");
-        } else {
-            assert!(row.get("reach").is_none(), "{} has no reach: {row}", row["name"]);
+        assert_eq!(plugin.reach().is_some(), is_code, "{name}: a code language, and only one, declares a reach");
+        match plugin.reach() {
+            Some(reach) => {
+                code += 1;
+                let cross_file: Vec<&str> = reach.cross_file.iter().map(|r| r.as_str()).collect();
+                assert_eq!(
+                    row["reach"],
+                    serde_json::json!({ "level": reach.level.as_str(), "cross_file": cross_file }),
+                    "{name} carries the reach its descriptor declares"
+                );
+            }
+            None => assert!(row.get("reach").is_none(), "{name} has no reach: {row}"),
         }
     }
     assert!(code >= 1, "the default build lists code languages: {json}");
-
-    if let Some(scala) = rows.iter().find(|r| r["name"] == "scala") {
-        assert_eq!(
-            scala["reach"],
-            serde_json::json!({ "level": "same-file", "cross_file": [] })
-        );
-    }
 }
 
 #[test]
