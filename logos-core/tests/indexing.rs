@@ -1118,6 +1118,39 @@ fn sync_equiv_a_rival_type_arriving_unbinds_a_type_use() {
     );
 }
 
+/// The resolution figures a sync reports read the ledger it commits: a
+/// capture row the retraction turns unbound (R8) is not counted resolved.
+#[cfg(feature = "lang-java")]
+#[test]
+fn sync_stats_never_count_a_suppressed_capture_row() {
+    let path = "src/main/java/app/Base.java";
+    let tmp = TempDir::new().expect("temp");
+    write(tmp.path(), JAVA_LEAF.0, JAVA_LEAF.1);
+    write(
+        tmp.path(),
+        path,
+        "package app;\n\npublic class Base {\n    public void start() {}\n}\n\nclass Mid extends Base {}\n",
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    write(
+        tmp.path(),
+        path,
+        "package app;\n\npublic class Base {\n    public void start() {}\n}\n\nclass Mid {}\n",
+    );
+    let root = tmp.path().canonicalize().expect("canonicalize root");
+    let synced = engine.sync(&[root.join(path)]);
+    let ledger = engine
+        .runtime()
+        .expect("runtime")
+        .submit_read(|store| logos_core::resolve::coverage(store))
+        .expect("coverage read runs");
+    assert_eq!(
+        (synced.resolution.refs_total, synced.resolution.refs_resolved),
+        (ledger.refs_total, ledger.refs_resolved)
+    );
+}
+
 /// Bench (run with `--ignored --nocapture`): the CR-015 win in isolation. Times
 /// the resolve pass over the WHOLE ledger (`None` — what every sync re-bound
 /// before) vs over only a one-file change-set (`Some(delta)`) on the same large
