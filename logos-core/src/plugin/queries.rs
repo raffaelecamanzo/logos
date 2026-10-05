@@ -488,6 +488,63 @@ mod tests {
         );
     }
 
+    /// CR-197: a language's first use reports its compile time as one `info`
+    /// event naming the language, its query count and the duration; a second
+    /// use, and a second registry's first use, report nothing more.
+    #[cfg(feature = "lang-rust")]
+    #[test]
+    fn a_first_use_compile_emits_one_info_event_with_its_duration() {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let language: Language = tree_sitter_rust::LANGUAGE.into();
+        let registry = || {
+            let resolved = ["symbols", "references"]
+                .map(|cap| ResolvedQuery {
+                    capability: cap.to_string(),
+                    file_label: format!("toyevent/queries/{cap}.scm"),
+                    source: format!("; CR-197 event {cap}\n(identifier) @x"),
+                    overridden: false,
+                })
+                .to_vec();
+            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, resolved, &language)
+                .expect("no override, nothing compiles at construction")
+        };
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let (first, second) = (registry(), registry());
+            first.get(&language).expect("compiles");
+            first.get(&language).expect("compiled already");
+            second.get(&language).expect("served from the cache");
+        });
+
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let events: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("compiled the language's queries on first use"))
+            .collect();
+        assert_eq!(events.len(), 1, "one first-use event: {log}");
+        let event = events[0];
+        assert!(event.contains("INFO"), "{event}");
+        assert!(event.contains("language=toyevent") && event.contains("queries=2"), "{event}");
+        assert!(event.contains("duration_ms="), "the event carries the compile time: {event}");
+    }
+
     #[test]
     fn resolves_embedded_when_no_override_dir() {
         let r = resolve_query(
