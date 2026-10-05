@@ -527,6 +527,10 @@ mod tests {
             .with_ansi(false)
             .finish();
         tracing::subscriber::with_default(subscriber, || {
+            // Sibling tests hit the same callsite from other threads with no
+            // subscriber; one that registered its interest while this
+            // subscriber was being installed would leave it cached as "never".
+            tracing::callsite::rebuild_interest_cache();
             let (first, second) = (registry(), registry());
             first.get(&language).expect("compiles");
             first.get(&language).expect("compiled already");
