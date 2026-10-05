@@ -774,8 +774,9 @@ mod tests {
     /// migration 25), CR-162's snapshot offender lists (S-498, migration 26),
     /// CR-168's persist-failure record (S-513, migration 27), CR-159's
     /// method self type (S-493, migration 28), CR-169's receiver shape
-    /// (S-514, migration 29) and CR-170's file namespace (S-518, migration
-    /// 30) — not the ledger-only binding
+    /// (S-514, migration 29), CR-170's file namespace (S-518, migration 30)
+    /// and CR-194's alias in the ledger identity (S-597, migration 31) — not
+    /// the ledger-only binding
     /// under test here.
     ///
     /// [S-255]: ../../../../docs/planning/journal.md#s-255-migration-17-first-class-broker-topic-node-and-edge-kinds
@@ -785,7 +786,7 @@ mod tests {
         let store = SqliteGraphStore::open_in_memory().expect("in-memory store opens");
         assert_eq!(
             store.schema_version().expect("read PRAGMA user_version"),
-            30,
+            31,
             "no migration is added by the ledger-only arm itself — user_version reflects \
              only the later, separate broker-kind widening (migration 17), the \
              relation-aware ledger key (migration 18), the configuration-corpus \
@@ -795,7 +796,8 @@ mod tests {
              facts (migration 24), the callable has-body fact (migration 25), the \
              snapshot offender lists (migration 26), the persist-failure record \
              (migration 27), the method self type (migration 28), the receiver \
-             shape (migration 29) and the file namespace (migration 30)"
+             shape (migration 29), the file namespace (migration 30) and the alias in \
+             the ledger identity (migration 31)"
         );
     }
 }

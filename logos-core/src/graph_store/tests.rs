@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        30,
-        "v30 = migration 30 (S-518 CR-170 file namespace)"
+        31,
+        "v31 = migration 31 (S-597 CR-194 alias in the ledger identity)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 30,
+        recorded, 31,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 30);
+        assert_eq!(store.schema_version().unwrap(), 31);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 30);
+    assert_eq!(store.schema_version().unwrap(), 31);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 30, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 31, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -528,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 30);
+    assert_eq!(reopened.schema_version().unwrap(), 31);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1095,11 +1095,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v30 forward-only).
+    // data (the runner applies v2..v31 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        30,
+        31,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -1164,6 +1164,50 @@ fn ledger_insert_is_idempotent_over_the_uniqueness_rule() {
     let rows = store.unresolved_refs().unwrap();
     assert_eq!(rows.len(), 2, "duplicate collapses; distinct form does not");
     assert_eq!(rows[0].line, Some(3), "the first row's line is kept");
+}
+
+/// S-597 / FR-DB-07: the import alias is part of the ledger identity. Two
+/// imports of one target under two local names are two rows — each name binds
+/// through its own — while an aliasless row, and a repeat of an alias already
+/// recorded, dedup exactly as before. The unique index and the writer's
+/// `ON CONFLICT` target agree: a writer whose target omitted the alias would
+/// raise on the second twin instead of inserting it.
+#[test]
+fn ledger_keeps_each_alias_of_one_target_but_still_dedups_aliasless_rows() {
+    let mut store = mem();
+    let import = |alias: Option<&'static str>| NewUnresolvedRef {
+        alias,
+        kind: EdgeKind::Imports,
+        ..path_ref(None, "local src", "pkg::m::X")
+    };
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&import(Some("A")))?;
+            w.insert_unresolved_ref(&import(Some("B")))?;
+            // A repeat of a recorded alias is a duplicate, on another line.
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                line: Some(9),
+                ..import(Some("A"))
+            })?;
+            // `import numpy` beside `import numpy as np`: the aliasless row is
+            // its own identity, and a second aliasless row collapses onto it.
+            w.insert_unresolved_ref(&import(None))?;
+            w.insert_unresolved_ref(&import(None))
+        })
+        .unwrap();
+
+    let mut aliases: Vec<Option<String>> = store
+        .unresolved_refs()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.alias)
+        .collect();
+    aliases.sort();
+    assert_eq!(
+        aliases,
+        [None, Some("A".to_string()), Some("B".to_string())],
+        "each local name keeps its row; the aliasless row and repeats dedup"
+    );
 }
 
 /// A broker **relay**'s two rows — a publish and a subscribe on the same topic,

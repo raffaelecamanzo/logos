@@ -143,12 +143,14 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// columns), 26 (S-498, the snapshot offender table and its flag column), 27
 /// (S-513, the persist-failure record), 28 (S-493, the `nodes.self_type`
 /// column), 29 (S-514, the ledger's `receiver` column and its identity
-/// index) and 30 (S-518, the `files.namespace` column) after it; the next
-/// [`Engine::start`] re-applies all seven, as a real upgrade does.
+/// index), 30 (S-518, the `files.namespace` column) and 31 (S-597, the alias in
+/// that identity index) after it; the next [`Engine::start`] re-applies all
+/// eight, as a real upgrade does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE files DROP COLUMN namespace; DELETE FROM schema_versions WHERE version = 30; \
+        "DELETE FROM schema_versions WHERE version = 31; \
+         ALTER TABLE files DROP COLUMN namespace; DELETE FROM schema_versions WHERE version = 30; \
          DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN receiver; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, '')); \
          DELETE FROM schema_versions WHERE version = 29; \

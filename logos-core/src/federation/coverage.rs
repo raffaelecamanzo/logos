@@ -2331,7 +2331,9 @@ where
                 // identity — `idx_unresolved_refs_identity` over
                 // `(source_symbol, target, form, kind, COALESCE(payload, ''))`
                 // since migration 18, so `payload` is *inside* it, unlike what
-                // this comment claimed before [CR-107] reviewed it), and the
+                // this comment claimed before [CR-107] reviewed it; migrations
+                // 29 and 31 later widened it by `receiver` and `alias`, both
+                // unset on a broker row), and the
                 // fan-out treats each as a separate provider. The bridge de-duplicates, so before [CR-118]
                 // this tier could differ only in a boolean nobody could see. Now
                 // the set is NAMED and COUNTED, so a duplicate would report "3
@@ -7341,7 +7343,7 @@ mod tests {
     /// publishes reach this tier as three rows when they sit in three **methods**,
     /// which is what this fixture's three distinct symbols model. Three in ONE
     /// method reach the ledger as ONE row — `dedup_sort_refs` keys on
-    /// `(source, target, form, kind, relation)` and every refusal shares an empty
+    /// `(source, target, form, kind, relation, receiver, alias)` and every refusal shares an empty
     /// target — so the "at most once per site" discipline is enforced upstream in
     /// [`crate::extract::broker`], not here. This test asserts what this layer
     /// actually owns: that whatever rows arrive are classified under the arm's own

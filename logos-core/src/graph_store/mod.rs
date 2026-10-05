@@ -1537,8 +1537,8 @@ pub struct AvroSchemaRow {
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind, payload,
-/// receiver)` — the ledger's UNIQUE rule absorbs a function calling the same
-/// path twice.
+/// receiver, alias)` — the ledger's UNIQUE rule absorbs a function calling the
+/// same path twice, and keeps one row per local name an import is aliased by.
 #[derive(Debug, Clone, Copy)]
 pub struct NewUnresolvedRef<'a> {
     /// FK into `files(id)` — the file whose extraction produced the ref.
@@ -4498,10 +4498,12 @@ impl BatchWriter<'_> {
 
     // ── Reference-ledger primitives (S-011, [ADR-10]) ────────────────────────
 
-    /// Insert a reference-ledger row, idempotently over the relation- and
-    /// receiver-aware `(source_symbol, target, form, kind, COALESCE(payload, ''),
-    /// COALESCE(receiver, 0))` uniqueness rule (migration 18, [CR-080]; widened
-    /// by the receiver shape in migration 29, S-514).
+    /// Insert a reference-ledger row, idempotently over the relation-,
+    /// receiver- and alias-aware `(source_symbol, target, form, kind,
+    /// COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''))`
+    /// uniqueness rule (migration 18, [CR-080]; widened by the receiver shape in
+    /// migration 29, S-514, and by the import alias in migration 31, S-597 — two
+    /// local names of one target are two rows, [FR-DB-07]).
     ///
     /// A duplicate (the same function calling the same path twice, or a
     /// captured edge re-captured on a later sync) is a no-op — the first row's
@@ -4513,6 +4515,7 @@ impl BatchWriter<'_> {
     /// raw-`payload` key would stop deduping ordinary (`payload = NULL`) code refs.
     ///
     /// [CR-080]: ../../../docs/requests/CR-080-broker-relay-ledger-dedup.md
+    /// [FR-DB-07]: ../../../docs/specs/requirements/FR-DB-07.md
     ///
     /// # Errors
     /// Returns an error if a CHECK/FK constraint fires or I/O fails.
@@ -4523,7 +4526,7 @@ impl BatchWriter<'_> {
                  (file_id, source_symbol, target, alias, form, kind, line, payload, receiver) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
                  ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
-                             COALESCE(receiver, 0)) DO NOTHING",
+                             COALESCE(receiver, 0), COALESCE(alias, '')) DO NOTHING",
                 rusqlite::params![
                     r.file_id,
                     r.source_symbol,

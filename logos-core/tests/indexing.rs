@@ -1668,13 +1668,15 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migrations 30 (S-518, the `files.namespace` column), 29 (S-514, the
+    // Migrations 31 (S-597, the alias in the ledger identity index), 30 (S-518,
+    // the `files.namespace` column), 29 (S-514, the
     // ledger's `receiver` column and its identity index), 28 (S-493, the `nodes.self_type` column), 27 (S-513, the
     // persist-failure record) and 26 (S-498, the snapshot offender table and
     // its flag column) are inverted first, since the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "ALTER TABLE files DROP COLUMN namespace; DELETE FROM schema_versions WHERE version = 30; \
+        "DELETE FROM schema_versions WHERE version = 31; \
+         ALTER TABLE files DROP COLUMN namespace; DELETE FROM schema_versions WHERE version = 30; \
          DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN receiver; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, '')); \
          DELETE FROM schema_versions WHERE version = 29; \

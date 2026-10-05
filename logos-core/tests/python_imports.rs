@@ -11,9 +11,12 @@
 //! healthchecks' absolute imports bind from the repository root, the
 //! `.logos/config.toml` override replaces the detected roots, a JavaScript
 //! `main.js` is the module `main`, the interop family keeps Java↔Kotlin binding
-//! and C#↛PHP apart, and a one-file sync equals a full reindex ([NFR-RA-06]).
+//! and C#↛PHP apart, two local names of one import target are two ledger rows
+//! that both bind ([FR-DB-07]), and a one-file sync equals a full reindex
+//! ([NFR-RA-06]).
 //!
 //! [FR-RS-14]: ../../docs/specs/requirements/FR-RS-14.md
+//! [FR-DB-07]: ../../docs/specs/requirements/FR-DB-07.md
 //! [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
 #![cfg(all(
     feature = "lang-python",
@@ -434,7 +437,12 @@ fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
             .unresolved_refs()?
             .into_iter()
             .filter(|r| r.form != RefForm::Symbol)
-            .map(|r| format!("{} {} {:?} {:?} {}", r.source_symbol, r.target, r.form, r.kind, r.resolved))
+            .map(|r| {
+                format!(
+                    "{} {} {:?} {:?} {:?} {}",
+                    r.source_symbol, r.target, r.alias, r.form, r.kind, r.resolved
+                )
+            })
             .collect();
         refs.sort();
         Ok((edges, refs))
@@ -563,4 +571,84 @@ fn sync_equals_a_full_reindex_when_a_submodule_takes_over_a_reexported_name() {
     let mut all = paths(files);
     all.push(helper);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &all));
+}
+
+// ── S-597 / FR-DB-07: the ledger identity includes the alias ─────────────────
+
+/// The `Imports` ledger rows out of `rel` as `(target, alias, resolved)`, sorted.
+fn import_rows(rt: &Runtime, rel: &str) -> Vec<(String, Option<String>, bool)> {
+    let rel = rel.to_string();
+    let mut rows: Vec<(String, Option<String>, bool)> = rt
+        .submit_read(move |store| {
+            let files: HashMap<i64, String> =
+                store.indexed_files()?.into_iter().map(|f| (f.id, f.path)).collect();
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| {
+                    r.kind == EdgeKind::Imports && r.file_id.and_then(|id| files.get(&id)) == Some(&rel)
+                })
+                .map(|r| (r.target, r.alias, r.resolved))
+                .collect())
+        })
+        .expect("read runs");
+    rows.sort();
+    rows
+}
+
+const ALIAS_TWINS: &[(&str, &str)] = &[
+    ("pkg/__init__.py", ""),
+    ("pkg/m.py", "class X:\n    pass\n"),
+    (
+        "app.py",
+        "from pkg.m import X as A\nfrom pkg.m import X as B\nimport numpy\nimport numpy as np\n\n\n\
+         def run():\n    return A(), B()\n",
+    ),
+];
+
+/// `from pkg.m import X as A` and `… as B` in one scope are two ledger rows and
+/// both bind; `import numpy` beside `import numpy as np` keeps both rows (the
+/// external module binds nothing, so both stay unresolved). Before migration 31
+/// the second name of each pair was dropped at insert.
+#[test]
+fn two_local_names_of_one_import_target_both_persist_and_both_bind() {
+    let (_tmp, engine) = indexed(ALIAS_TWINS);
+    let rt = engine.runtime().unwrap();
+    let some = |s: &str| Some(s.to_string());
+    assert_eq!(
+        import_rows(rt, "app.py"),
+        vec![
+            ("numpy".to_string(), some("np"), false),
+            ("numpy".to_string(), some("numpy"), false),
+            ("pkg::m::X".to_string(), some("A"), true),
+            ("pkg::m::X".to_string(), some("B"), true),
+        ]
+    );
+    // Two bound rows, one edge: an edge is `(source, target, kind)`, so the twins
+    // share it — the second name is a binding in the ledger, not a second edge.
+    assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/m.py:X:class"]));
+}
+
+/// A one-file sync of the importer equals a cold index: the alias twins that the
+/// old identity dropped are re-created identically on the incremental path.
+#[test]
+fn sync_equals_a_full_reindex_over_alias_twins() {
+    let (tmp, engine) = indexed(ALIAS_TWINS);
+    let rt = engine.runtime().unwrap();
+    write(
+        tmp.path(),
+        "app.py",
+        "from pkg.m import X as A\nfrom pkg.m import X as B\nfrom pkg.m import X as C\n",
+    );
+    engine.sync(&["app.py".into()]);
+    let some = |s: &str| Some(s.to_string());
+    assert_eq!(
+        import_rows(rt, "app.py"),
+        vec![
+            ("pkg::m::X".to_string(), some("A"), true),
+            ("pkg::m::X".to_string(), some("B"), true),
+            ("pkg::m::X".to_string(), some("C"), true),
+        ]
+    );
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(ALIAS_TWINS)));
 }
