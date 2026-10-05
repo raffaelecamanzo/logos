@@ -117,7 +117,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rayon::prelude::*;
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Node, Parser, Query, QueryCapture, QueryCursor, StreamingIterator};
 
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, ReceiverShape, RefForm};
 use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, ModuleModelKind, Semantics};
@@ -165,11 +165,16 @@ const SELF_RECEIVER_METHOD_CAPTURE: &str = "ref.method.self";
 /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
 const FROM_MODULE_CAPTURE: &str = "ref.import.from";
 
-/// The `references`-query marker on an import that **renames** what it imports
-/// (`import a as b`, `from m import a as b`; S-519): the row records no alias,
-/// because the imported name is not a name the file binds — a call to `a` must
-/// never bind through it.
-const RENAMED_IMPORT_MARKER: &str = "ref.import.renamed";
+/// The `references`-query capture naming the **local name** an import binds
+/// (S-520): the `t` of Python's `import typing as t`, the `C` of PHP's
+/// `use A\B as C`, the `Test` of C#'s `using Test = Xunit.FactAttribute`, the
+/// `internalcloud` of Go's `internalcloud "…/internal/cloud"`. Its text is the
+/// row's alias, replacing the path's last segment — the name a file can call
+/// is the one it bound, never the one it imported. Like [`FROM_MODULE_CAPTURE`]
+/// it records no row of its own. A wildcard row's alias is a scope marker, so
+/// [`import_row`] never lets it take this one — a guard against a droppable
+/// query that captures it on a wildcard match; no shipped query does.
+const IMPORT_ALIAS_CAPTURE: &str = "ref.import.alias";
 
 /// One source file handed to the extractor.
 #[derive(Debug, Clone)]
@@ -1680,46 +1685,23 @@ fn collect_refs(
                 // `ref.import.global` marks one whose scope is every file of
                 // the declaring file's directory (a C# `global using`). A match
                 // carrying `ref.import.from` names its module apart from the
-                // imported name (Python's `from m import a`, S-519).
+                // imported name (Python's `from m import a`, S-519), and one
+                // carrying `ref.import.alias` names the local binding, which
+                // [`import_row`] records as the row's alias (S-520).
                 "ref.import" => {
-                    let marked = |name: &str| {
-                        m.captures
-                            .iter()
-                            .any(|c| capture_names[c.index as usize] == name)
-                    };
-                    // `from m import a` (`ref.import.from`, S-519): the name is
-                    // recorded under its module, one row per imported name; a
-                    // wildcard's row is the module itself.
-                    let from = m
-                        .captures
-                        .iter()
-                        .find(|c| capture_names[c.index as usize] == FROM_MODULE_CAPTURE)
-                        .and_then(|c| c.node.utf8_text(source).ok());
-                    let segments = match (from, semantics.import_specifier) {
-                        (Some(module), _) => {
-                            let mut segments = from_module_segments(module);
-                            if !marked("ref.import.asterisk") {
-                                segments.extend(import_segments(text));
-                            }
-                            segments
-                        }
-                        (None, ImportSpecifier::Path) => {
-                            specifier_segments(text, &semantics.specifier_extensions)
-                        }
-                        (None, ImportSpecifier::Name) => import_segments(text),
-                    };
-                    if segments.is_empty() {
+                    let Some((segments, form, alias)) =
+                        import_row(m.captures, capture_names, source, text, semantics)
+                    else {
                         continue;
-                    }
-                    let (form, alias) = import_form(&marked, &segments);
-                    // An `as` import (`ref.import.renamed`, S-519) binds another
-                    // name than the one it imports: the imported name is no
-                    // alias of the file's.
-                    let alias = alias.filter(|_| !marked(RENAMED_IMPORT_MARKER));
+                    };
                     if let (Some(receivers), RefForm::Path, Some(name)) =
                         (receivers.as_mut(), form, alias.as_deref())
                     {
-                        if !marked("ref.import.static") {
+                        let is_static = m
+                            .captures
+                            .iter()
+                            .any(|c| capture_names[c.index as usize] == "ref.import.static");
+                        if !is_static {
                             receivers.type_import(name);
                         }
                     }
@@ -1834,13 +1816,59 @@ fn collect_refs(
     out
 }
 
+/// The canonical `segments`, form and alias of one `@ref.import` match, or
+/// `None` when its specifier canonicalises to nothing.
+///
+/// - `from m import a` (`ref.import.from`, S-519): the name is recorded under
+///   its module, one row per imported name; a wildcard's row is the module
+///   itself.
+/// - An import that names its local binding (`ref.import.alias`, S-520) is
+///   aliased by it, not by the last segment of the path it imports; a
+///   wildcard's alias is a scope marker and never takes it.
+fn import_row(
+    captures: &[QueryCapture<'_>],
+    capture_names: &[&str],
+    source: &[u8],
+    text: &str,
+    semantics: &Semantics,
+) -> Option<(Vec<String>, RefForm, Option<String>)> {
+    let marked = |name: &str| captures.iter().any(|c| capture_names[c.index as usize] == name);
+    let capture_text = |name: &str| {
+        captures
+            .iter()
+            .find(|c| capture_names[c.index as usize] == name)
+            .and_then(|c| c.node.utf8_text(source).ok())
+    };
+    let segments = match (capture_text(FROM_MODULE_CAPTURE), semantics.import_specifier) {
+        (Some(module), _) => {
+            let mut segments = from_module_segments(module);
+            if !marked("ref.import.asterisk") {
+                segments.extend(import_segments(text));
+            }
+            segments
+        }
+        (None, ImportSpecifier::Path) => specifier_segments(text, &semantics.specifier_extensions),
+        (None, ImportSpecifier::Name) => import_segments(text),
+    };
+    if segments.is_empty() {
+        return None;
+    }
+    let (form, alias) = import_form(&marked, &segments);
+    let alias = match (form, capture_text(IMPORT_ALIAS_CAPTURE)) {
+        (RefForm::Path, Some(local)) => Some(local.to_string()),
+        _ => alias,
+    };
+    Some((segments, form, alias))
+}
+
 /// The form and alias of one `@ref.import` row, from the markers its match
 /// carries (`marked`) and its canonical `segments`: a wildcard
 /// (`ref.import.asterisk`) is a `Glob` row whose alias says what it brings in
 /// — every static member (`ref.import.static`, the `*` alias
 /// `STATIC_WILDCARD_ALIAS`) or, for a global one (`ref.import.global`, S-518),
 /// the global marker — since the ledger has no other column for it; any other
-/// import is a `Path` row aliased by its last segment.
+/// import is a `Path` row aliased by its last segment (`import_row` replaces that
+/// with the local name an `@ref.import.alias` capture names, S-520).
 fn import_form(marked: &impl Fn(&str) -> bool, segments: &[String]) -> (RefForm, Option<String>) {
     if !marked("ref.import.asterisk") {
         return (RefForm::Path, segments.last().cloned());

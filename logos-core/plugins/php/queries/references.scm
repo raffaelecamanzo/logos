@@ -8,6 +8,9 @@
 ;   @ref.import — a `use` clause's namespace path (`Illuminate\Support\…\Route`);
 ;                 canonicalised (backslash → `::`) into the ledger form feeding
 ;                 the binder and the framework candidacy gate (FR-FW-04).
+;   @ref.import.alias — the local name a `use A\B as C;` binds (`C`; S-520). The
+;                 row's alias is that name, not `B`; without an `as` it stays
+;                 the path's last segment.
 ;   @ref.access — an own-property access (`$this->balance`): a method reading a
 ;                 field of its own class (CR-005, FR-EX-08), the bound LCOM4 input.
 ;
@@ -60,7 +63,8 @@
 (anonymous_class body: (declaration_list) @ref.receiver.anonymous)
 
 (namespace_use_clause
-  (qualified_name) @ref.import)
+  (qualified_name) @ref.import
+  alias: (name)? @ref.import.alias)
 
 ;   @ref.access — `$this->field`: an own-field read/write. `member_access_expression`
 ; is a distinct node from `member_call_expression`, so this never double-captures

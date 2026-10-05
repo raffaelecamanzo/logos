@@ -30,6 +30,24 @@ pub const PHP: Fixture = &[
     ),
 ];
 
+/// A PHP tree whose controller imports one class under an alias (`use … as U`)
+/// and one plainly: the alias is the name the file binds (S-520), the path is
+/// the class the row must still reach.
+pub const PHP_ALIAS: Fixture = &[
+    (
+        "src/Models/User.php",
+        "<?php\n\nnamespace App\\Models;\n\nclass User\n{\n}\n",
+    ),
+    (
+        "src/Models/Post.php",
+        "<?php\n\nnamespace App\\Models;\n\nclass Post\n{\n}\n",
+    ),
+    (
+        "src/Http/Controller.php",
+        "<?php\n\nnamespace App\\Http;\n\nuse App\\Models\\User as U;\nuse App\\Models\\Post;\n\nclass Controller\n{\n    public function make()\n    {\n        return [new U(), new Post()];\n    }\n}\n",
+    ),
+];
+
 /// A C# tree mixing both namespace forms, a `global using`, a `using static`
 /// (and a `global using static`, read as a file-local one),
 /// an alias, and a namespace that differs from its directory.

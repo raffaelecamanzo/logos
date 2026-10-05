@@ -15,6 +15,19 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Changed
 
+- **An import's alias is the name it binds locally (CR-170, S-520).** A `references`
+  query can now mark that name with `@ref.import.alias`, and the extractor records it
+  as the import row's alias instead of the path's last segment. Python, PHP, C# and Go
+  switch it on: `import typing as t` records `t`, `use A\B as C` records `C`,
+  `using Test = Xunit.FactAttribute` records `Test` (one row naming the type; the
+  alias is not an import row of its own) and Go's `internalcloud "…/internal/cloud"`
+  records `internalcloud`. A Python `as` import used to record no alias at all; a call
+  through the alias (`from .helpers import open as open_resource`, then
+  `open_resource(p)`) now binds, and a call to the original name still does not. Rust's
+  import rows are unchanged (3,459 rows byte-identical on this repository).
+- **Measured on Newtonsoft.Json**: the 654 junk import rows an alias directive used to
+  record as its own name (before S-518) are 0, and all 657 alias directives are one row
+  each aliased by their local name.
 - **Python imports bind: packages, import roots and relative levels (CR-170, S-519).**
   The path module model gains plugin-declared data on `[module_model]`:
   `package_stems` (a package file names its directory — Python `__init__`, Rust

@@ -70,7 +70,10 @@
 ;                              (`@ref.import.static`, Java's `import static
 ;                              a.b.C.*`). A `global using static` is read as a
 ;                              plain one: this file only.
-;   `using X = A.B.C;`       — an alias: one single-type row naming `A.B.C`.
+;   `using X = A.B.C;`       — an alias: one single-type row naming `A.B.C`,
+;                              aliased by the name it binds, `X`
+;                              (`@ref.import.alias`, S-520) — never by `C`, and
+;                              `X` is not itself an import row.
 ;
 ; The namespace path is qualified or a single segment.
 ((using_directive
@@ -90,7 +93,7 @@
   (#match? @_using "^(global\\s+)?using\\s+static\\s"))
 
 (using_directive
-  name: (identifier)
+  name: (identifier) @ref.import.alias
   [(qualified_name) (identifier)] @ref.import)
 
 ; Own-field access (`this.Count`): the binder proves an exactly-one Field
