@@ -28,7 +28,7 @@
 //! - the plugin-substrate subtotal **explicitly and separately** — the number
 //!   that decided CR-116 §3.2 branch (a) (a genuine breach) versus branch (b)
 //!   (the guards bounded more than the requirement enumerated);
-//! - the **instrumentation's own cost**: the mean of the per-sample delta
+//! - the **instrumentation's own cost**: the median and mean of the per-sample delta
 //!   between the instrumented and uninstrumented totals (CR-116 R2);
 //! - **where the deferred compile went** ([CR-197]): embedded queries compile
 //!   on their language's first use, not at start, so each sample also times a
@@ -165,6 +165,17 @@ fn stats(mut xs: Vec<f64>) -> serde_json::Value {
 
 fn mean_of(xs: &[f64]) -> f64 {
     xs.iter().sum::<f64>() / xs.len() as f64
+}
+
+fn median_of(xs: &[f64]) -> f64 {
+    let mut xs = xs.to_vec();
+    xs.sort_by(|a, b| a.partial_cmp(b).expect("no NaNs in a wall-clock sample"));
+    let mid = xs.len() / 2;
+    if xs.len() % 2 == 0 {
+        (xs[mid - 1] + xs[mid]) / 2.0
+    } else {
+        xs[mid]
+    }
 }
 
 /// One sample, measured in its own process: an uninstrumented [`Engine::start`]
@@ -359,6 +370,7 @@ fn cold_start_phase_attribution() {
     }
 
     let overhead_mean_ms = mean_of(&paired_overhead_ms);
+    let overhead_median_ms = median_of(&paired_overhead_ms);
     let uninstrumented_mean = mean_of(&uninstrumented_ms);
     let overhead_pct = overhead_mean_ms / uninstrumented_mean * 100.0;
 
@@ -395,6 +407,7 @@ fn cold_start_phase_attribution() {
         "first_use_compile_ms": stats(first_use_compile_ms),
         "instrumentation_overhead_ms": {
             "mean_of_paired_per_sample_deltas": overhead_mean_ms,
+            "median_of_paired_per_sample_deltas": overhead_median_ms,
             "pct_of_uninstrumented_mean": overhead_pct,
         },
     });
@@ -410,14 +423,23 @@ fn cold_start_phase_attribution() {
 
     // A sanity floor, not a budget: each child already asserts its own phase
     // sum reconciles with its own measured total (AC1). This only catches the
-    // instrumentation itself becoming pathologically expensive on average
-    // (e.g. an accidental syscall per phase) — loose, because the paired
+    // instrumentation itself becoming pathologically expensive in a typical
+    // sample (e.g. an accidental syscall per phase) — loose, because the paired
     // per-sample delta still carries some of each process's own scheduling
     // noise even though it cancels the cross-process ramp-up effect.
+    //
+    // Judged on the MEDIAN paired delta since 2026-10-06 (S-600), the 100 ms
+    // floor unchanged. A real instrumentation cost moves every sample, and so
+    // the median; one host stall moves one sample by seconds, and with it the
+    // mean. Once CR-197 took the cold start from ~710 to ~80 ms (debug), a single
+    // stall swamped an eight-sample mean in either direction: this floor failed
+    // at -285.7, +221.0 and -358.1 ms under shared-host load, the first on the
+    // pre-CR-197 build, each from one outlying sample. The mean stays in the
+    // record beside it.
     assert!(
-        overhead_mean_ms.abs() < 100.0,
-        "the mean paired instrumented-vs-uninstrumented delta is {overhead_mean_ms:.1} ms \
-         ({overhead_pct:.1}% of the {uninstrumented_mean:.1} ms uninstrumented mean) — the \
-         instrumentation itself looks expensive, not just measured"
+        overhead_median_ms.abs() < 100.0,
+        "the median paired instrumented-vs-uninstrumented delta is {overhead_median_ms:.1} ms \
+         (mean {overhead_mean_ms:.1} ms, {overhead_pct:.1}% of the {uninstrumented_mean:.1} ms \
+         uninstrumented mean) — the instrumentation itself looks expensive, not just measured"
     );
 }
