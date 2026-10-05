@@ -262,6 +262,24 @@ fn a_call_through_a_from_import_binds_across_files() {
     }
 }
 
+/// A name imported twice — a compat `try`/`except` import — names two
+/// declarations: a call through it is ambiguous, never the first import's. Two
+/// imports of one declaration still agree.
+#[test]
+fn a_name_imported_twice_binds_only_where_both_imports_agree() {
+    for policy in POLICIES {
+        let fast = import(1, MAP_PY, 130, ".::rules::parse_rule");
+        let slow = UnresolvedRefRow {
+            alias: Some("parse_rule".to_string()),
+            ..import(2, MAP_PY, 130, "..::_internal::_wsgi_decoding_dance")
+        };
+        let call = row(3, MAP_PY, 132, "parse_rule", EdgeKind::Calls);
+        assert_eq!(bind_last(&[fast.clone(), slow, call.clone()], policy), Outcome::Unbound, "{policy:?}");
+        let again = import(4, MAP_PY, 130, "..::routing::rules::parse_rule");
+        bound(bind_last(&[fast, again, call], policy), 132, 122, EdgeKind::Calls);
+    }
+}
+
 /// The workspace suffix match compares a module by its **parent** key: the
 /// path `routing::map` reaches the module `[pkg, routing, map]`, whose own key
 /// would need to end in `routing` (S-519).

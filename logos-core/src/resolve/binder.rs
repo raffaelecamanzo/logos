@@ -1032,8 +1032,16 @@ impl Index {
             return true;
         }
         // A package-shaped row reads every expansion of its head, not only the
-        // first (`FileScope::alias_expansions`), so each must be able to select it.
+        // first (`FileScope::alias_expansions`), so each must be able to select
+        // it — and so does an import-root file's row (S-519).
         let first = r.target.split("::").next().unwrap_or_default();
+        let import_root = || {
+            self.by_symbol
+                .get(&r.source_symbol)
+                .and_then(|id| self.info.get(id))
+                .and_then(|i| i.file_path.as_deref())
+                .is_some_and(|p| self.layout.has_import_roots(p))
+        };
         if scope
             .alias_expansions
             .get(first)
@@ -1043,7 +1051,7 @@ impl Index {
                 .flatten()
                 .flat_map(|seg| super::tokens(seg))
                 .any(|t| dirty.contains(&t))
-            && package_shaped()
+            && (package_shaped() || import_root())
         {
             return true;
         }
@@ -2172,6 +2180,38 @@ impl Ctx<'_> {
         self.ix.nearest_module(self.source).cloned()
     }
 
+    /// Every path an import-root file's imports give `head`, when they give it
+    /// more than one (S-519): `try: from .fast import parse` / `except
+    /// ImportError: from .slow import parse` names two declarations, and the
+    /// first-wins alias map would pick one ([NFR-RA-05]). `None` for any other
+    /// source, or a name imported once — the alias map answers those.
+    fn rival_expansions(&self, head: &str) -> Option<&[Vec<String>]> {
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if !self.ix.layout.has_import_roots(source_file) {
+            return None;
+        }
+        let all = self.scope()?.alias_expansions.get(head)?;
+        (all.len() > 1).then_some(all.as_slice())
+    }
+
+    /// `rest` resolved under each of `expansions`, exactly-one across all of
+    /// them (two imports of one declaration agree) — sticky on an ambiguity.
+    fn resolve_expansions(&self, expansions: &[Vec<String>], rest: &[String], want: Want, depth: u8) -> Res {
+        let mut found: Vec<NodeId> = Vec::new();
+        for expansion in expansions {
+            let mut path = expansion.clone();
+            path.extend(rest.iter().cloned());
+            match self.resolve_path(&path, want, depth - 1) {
+                Res::Found(id) => found.push(id),
+                Res::Ambiguous => return Res::Ambiguous,
+                Res::NotFound => {}
+            }
+        }
+        found.sort();
+        found.dedup();
+        exactly_one(&found)
+    }
+
     /// Whether the source is keyed under an import-root family's crate (S-519):
     /// a closed namespace whose paths name no other crate — `import mylib`
     /// from Python is never a Rust crate `mylib`.
@@ -2235,8 +2275,14 @@ impl Ctx<'_> {
             return self.resolve_package_path(package, segs, want, depth);
         }
         // 4b) A `use`-alias head: substitute and resolve the expansion
-        //     (depth-limited — an import cycle terminates as NotFound).
-        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
+        //     (depth-limited — an import cycle terminates as NotFound). An
+        //     import-root file importing the head twice reads every import.
+        if let Some(rivals) = self.rival_expansions(head) {
+            match self.resolve_expansions(rivals, rest, want, depth) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+        } else if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
             let mut expanded = alias_path.clone();
             expanded.extend(rest.iter().cloned());
             match self.resolve_path(&expanded, want, depth - 1) {
@@ -3339,8 +3385,14 @@ impl Ctx<'_> {
                 return Res::Found(id);
             }
         }
-        // 3) The file's `use` aliases.
-        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(name)) {
+        // 3) The file's `use` aliases — every one of them, exactly-one, when an
+        //    import-root file imports the name twice.
+        if let Some(rivals) = self.rival_expansions(name) {
+            match self.resolve_expansions(rivals, &[], want, depth) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+        } else if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(name)) {
             match self.resolve_path(alias_path, want, depth - 1) {
                 Res::NotFound => {}
                 decided => return decided,
