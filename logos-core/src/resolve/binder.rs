@@ -372,8 +372,9 @@ const MAX_SUPERTYPE_DEPTH: usize = 64;
 struct FileScope {
     /// In-scope name → the `::`-split path it abbreviates.
     aliases: HashMap<String, Vec<String>>,
-    /// In-scope name → **every** path the file's imports give it, in ledger
-    /// order. The package rung reads this, not the first-wins `aliases`: two
+    /// In-scope name → **every** distinct path the file's imports give it, in
+    /// ledger order of first appearance — an import repeated verbatim is one
+    /// path (S-519). The package rung reads this, not the first-wins `aliases`: two
     /// static imports may name one method overloaded across two types
     /// (`import static a.A.m; import static b.B.m;`, CR-149), and that name is
     /// then ambiguous rather than the first import's ([NFR-RA-05]).
@@ -1679,11 +1680,14 @@ fn build_file_scopes(refs: &[UnresolvedRefRow]) -> HashMap<i64, FileScope> {
             RefForm::Glob => scope.globs.push(path),
             _ => {
                 if let Some(alias) = &r.alias {
-                    scope
-                        .alias_expansions
-                        .entry(alias.clone())
-                        .or_default()
-                        .push(path.clone());
+                    // An identical import is one expansion, not a rival
+                    // (S-519): werkzeug's functions each re-run `import
+                    // warnings`, and a head that expands to itself would branch
+                    // once per copy at every alias level.
+                    let expansions = scope.alias_expansions.entry(alias.clone()).or_default();
+                    if !expansions.contains(&path) {
+                        expansions.push(path.clone());
+                    }
                     scope.aliases.entry(alias.clone()).or_insert(path);
                 }
             }
@@ -2001,6 +2005,22 @@ fn exactly_one(candidates: &[NodeId]) -> Res {
 /// Bind one ledger row against the index under `policy`.
 pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> Outcome {
     bind_traced(r, ix, policy).0
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`Ctx::resolve_path`] entries on this thread, which the binder's own
+    /// tests read to bound the work one bind does (S-519) instead of timing it.
+    static PATH_VISITS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// [`bind`], and how many times it entered [`Ctx::resolve_path`] — a work
+/// count a test can compare across inputs deterministically.
+#[cfg(test)]
+pub(crate) fn bind_counting_path_visits(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> (Outcome, u64) {
+    PATH_VISITS.with(|v| v.set(0));
+    let outcome = bind(r, ix, policy);
+    (outcome, PATH_VISITS.with(Cell::get))
 }
 
 /// Why `r` — a `Calls` row from a package-shaped source, or in any language a
@@ -2609,7 +2629,9 @@ impl Ctx<'_> {
     /// more than one (S-519): `try: from .fast import parse` / `except
     /// ImportError: from .slow import parse` names two declarations, and the
     /// first-wins alias map would pick one ([NFR-RA-05]). `None` for any other
-    /// source, or a name imported once — the alias map answers those.
+    /// source, or a name whose imports all give one path — imported once, or
+    /// the same import repeated, which [`build_file_scopes`] records once — the
+    /// alias map answers those.
     fn rival_expansions(&self, head: &str) -> Option<&[Vec<String>]> {
         let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
         if !self.ix.layout.has_import_roots(source_file) {
@@ -2648,6 +2670,8 @@ impl Ctx<'_> {
 
     /// Resolve a multi-or-single segment path by the scope hierarchy.
     fn resolve_path(&self, segs: &[String], want: Want, depth: u8) -> Res {
+        #[cfg(test)]
+        PATH_VISITS.with(|v| v.set(v.get() + 1));
         if segs.is_empty() || depth == 0 {
             return Res::NotFound;
         }

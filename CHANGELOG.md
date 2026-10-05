@@ -15,6 +15,16 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Changed
 
+- **Indexing Python is no longer exponential in a repeated import (S-519).** A
+  file that repeats one import verbatim — werkzeug's functions each re-run
+  `import warnings`, 13 times in `wrappers/request.py` — counted every copy as a
+  rival import of the name, and each copy re-entered the same name, so binding
+  branched once per copy at every alias level. A file's identical imports are now
+  one import. Imports that genuinely differ are still rivals, and a name imported
+  from two places binds only where they agree. Every edge is unchanged. Measured
+  on three debug builds made the same way, a cold index of werkzeug takes 3.3 s,
+  against 37 min 36 s before the fix and 3.4 s for the released 1.10.0;
+  healthchecks takes 5.9 s (6.8 s before, 5.7 s for 1.10.0).
 - **Inheritance binds for Python, PHP, C# and Kotlin (CR-170, S-522).** Their
   `references` queries capture supertypes — Python `class A(B)`, PHP `extends`,
   `implements` and trait `use`, C#'s `base_list`, Kotlin's supertype list — and an

@@ -7,7 +7,8 @@
 //! declares its `mod`/`lib`/`main` stems the same way. The binder rules are
 //! pinned in memory by `resolve::path_module_tests`; this suite pins what
 //! reaches the product: werkzeug's relative imports and `__init__` re-exports
-//! bind, healthchecks' absolute imports bind from the repository root, the
+//! bind, an import repeated in every method binds as one import does,
+//! healthchecks' absolute imports bind from the repository root, the
 //! `.logos/config.toml` override replaces the detected roots, a JavaScript
 //! `main.js` is the module `main`, the interop family keeps Java↔Kotlin binding
 //! and C#↛PHP apart, and a one-file sync equals a full reindex ([NFR-RA-06]).
@@ -242,6 +243,33 @@ fn a_call_through_a_module_alias_stays_external() {
     let rt = engine.runtime().unwrap();
     assert_eq!(edges_from(rt, "pkg/app.py", EdgeKind::Imports), strings(&["typing.py:typing:module"]));
     assert!(edges_from(rt, "pkg/app.py", EdgeKind::Calls).is_empty());
+}
+
+/// S-519 T2: the same import repeated in every method (werkzeug's
+/// `wrappers/request.py`) binds as one import does — each copy reaches the
+/// package and the class, the external `warnings` stays unbound, and the calls
+/// through the alias bind. Two methods import one class as `_Fallback` and two
+/// import another under the same name: the file's scope holds two rivals
+/// however often each is repeated, so each import binds its own class and a
+/// call through the name binds neither. The work bound is
+/// `resolve::path_module_tests`'s; this pins what the real extractor records.
+#[test]
+fn an_import_repeated_in_every_method_binds_as_one_import() {
+    let (_tmp, engine) = indexed(fixtures::REPEATED_IMPORTS);
+    let rt = engine.runtime().unwrap();
+    let request = "src/werkzeug/wrappers/request.py";
+    let copies = |n, edge: &str| vec![edge.to_string(); n];
+    let mut imports = copies(4, "src/werkzeug/__init__.py:werkzeug:module");
+    imports.extend(copies(2, "src/werkzeug/compat.py:BadRequest:class"));
+    imports.extend(copies(4, "src/werkzeug/exceptions.py:BadRequest:class"));
+    imports.extend(copies(2, "src/werkzeug/legacy.py:BadRequest:class"));
+    assert_eq!(edges_from(rt, request, EdgeKind::Imports), imports);
+    assert_eq!(
+        edges_from(rt, request, EdgeKind::Instantiates),
+        copies(4, "src/werkzeug/exceptions.py:BadRequest:class")
+    );
+    assert!(edges_from(rt, request, EdgeKind::Calls).is_empty());
+    assert_eq!(unbound_imports(rt, request), copies(4, "warnings"));
 }
 
 // ── healthchecks: the repository root ────────────────────────────────────────

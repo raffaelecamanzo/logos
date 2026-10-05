@@ -1,7 +1,8 @@
 //! The path model with import roots (S-519, [FR-RS-14], [NFR-RA-05]), over a
 //! synthetic snapshot: relative levels, directory modules, the package an
-//! `__init__.py` re-exports through, the parent-key suffix match, and the family
-//! crate a fallback never leaves. End to end, against real Python, in
+//! `__init__.py` re-exports through, the parent-key suffix match, the family
+//! crate a fallback never leaves, and the work a repeated import costs (S-519
+//! T2, counted rather than timed). End to end, against real Python, in
 //! `tests/python_imports.rs`.
 //!
 //! The layout is told a Python-shaped declaration for `.py` (fixture data, as
@@ -27,7 +28,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::binder::{bind, Index, Outcome};
+use super::binder::{bind, bind_counting_path_visits, Index, Outcome};
 use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
@@ -304,6 +305,101 @@ fn a_name_imported_twice_binds_only_where_both_imports_agree() {
         let again = import(4, MAP_PY, 130, "..::routing::rules::parse_rule");
         bound(bind_last(&[fast, again, call], policy), 132, 122, EdgeKind::Calls);
     }
+}
+
+/// The same import repeated is one import, not rivals (S-519 T2): werkzeug's
+/// functions each re-run `import warnings`, a head that expands to itself, and
+/// counting each copy as a rival branched once per copy at every alias level —
+/// on the order of `copies^MAX_ALIAS_DEPTH` resolutions per row, 37 minutes to
+/// index werkzeug in a debug build. Bound by work, not time: any number of copies
+/// costs exactly what one import does, and binds the same. Four copies are enough
+/// to tell the two apart (87,381 path visits against 9 unfixed) and keep the
+/// unfixed run short.
+#[test]
+fn an_import_repeated_verbatim_costs_what_one_import_costs() {
+    for policy in POLICIES {
+        let copies = |n: i64| (1..=n).map(|id| import(id, TEST_MAP_PY, 161, "pkg")).collect::<Vec<_>>();
+        let call = row(99, TEST_MAP_PY, 161, "pkg::version", EdgeKind::Calls);
+        for last in [None, Some(call)] {
+            let with = |n: i64| {
+                let mut refs = copies(n);
+                refs.extend(last.clone());
+                let r = refs.last().expect("a row").clone();
+                bind_counting_path_visits(&r, &index(&refs), policy)
+            };
+            let (once, once_visits) = with(1);
+            let (repeated, repeated_visits) = with(4);
+            assert_ne!(once, Outcome::Unbound, "{policy:?}: the fixture must bind");
+            assert_eq!(repeated, once, "{policy:?}");
+            assert_eq!(repeated_visits, once_visits, "{policy:?}: repeated imports did more work");
+        }
+    }
+}
+
+/// Rivals repeated in alternation — a compat `try: import simplejson as json` /
+/// `except ImportError: import json` re-run in every function — cost what one
+/// pair costs: a copy is recognised wherever it sits in the file, not only next
+/// to its twin (a previous-copy check costs 19,173,961 visits here against 511).
+#[test]
+fn rival_imports_repeated_in_alternation_cost_what_one_pair_costs() {
+    for policy in POLICIES {
+        let call = row(99, TEST_MAP_PY, 161, "pkg::version", EdgeKind::Calls);
+        let with = |pairs: i64| {
+            let mut refs: Vec<UnresolvedRefRow> = (0..pairs)
+                .flat_map(|n| {
+                    let itself = import(2 * n + 1, TEST_MAP_PY, 161, "pkg");
+                    let routing = UnresolvedRefRow {
+                        alias: Some("pkg".to_string()),
+                        ..import(2 * n + 2, TEST_MAP_PY, 161, "pkg::routing")
+                    };
+                    [itself, routing]
+                })
+                .collect();
+            refs.push(call.clone());
+            bind_counting_path_visits(&call, &index(&refs), policy)
+        };
+        let (once, once_visits) = with(1);
+        let (repeated, repeated_visits) = with(4);
+        assert_eq!(repeated, once, "{policy:?}");
+        assert_eq!(repeated_visits, once_visits, "{policy:?}: alternating copies did more work");
+    }
+}
+
+/// Repeating one of two rival imports never outvotes the other: the name is
+/// still imported from two places, so a call through it stays ambiguous.
+#[test]
+fn a_repeated_rival_import_never_outvotes_the_other() {
+    for policy in POLICIES {
+        let fast = |id| import(id, MAP_PY, 130, ".::rules::parse_rule");
+        let slow = UnresolvedRefRow {
+            alias: Some("parse_rule".to_string()),
+            ..import(4, MAP_PY, 130, "..::_internal::_wsgi_decoding_dance")
+        };
+        let call = row(5, MAP_PY, 132, "parse_rule", EdgeKind::Calls);
+        let refs = [fast(1), fast(2), fast(3), slow, call];
+        assert_eq!(bind_last(&refs, policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// A sync still re-selects a call through a repeated `as` import when the name
+/// the import reaches changes (S-519 T2). `pr(…)` spells no token of
+/// `parse_rule`; recorded once, the copies give one expansion, so the row is
+/// reached by the alias chase rather than by the rival expansions it used to
+/// take. A dirty token the import never reaches selects nothing.
+#[test]
+fn a_call_through_a_repeated_import_is_reselected_by_what_the_import_reaches() {
+    let mut refs: Vec<UnresolvedRefRow> = (1..=4)
+        .map(|id| UnresolvedRefRow {
+            alias: Some("pr".to_string()),
+            ..import(id, MAP_PY, 130, ".::rules::parse_rule")
+        })
+        .collect();
+    refs.push(row(5, MAP_PY, 132, "pr", EdgeKind::Calls));
+    let ix = index(&refs);
+    let call = refs.last().expect("a row");
+    let dirty = |tokens: &[&str]| tokens.iter().map(|t| t.to_string()).collect::<HashSet<_>>();
+    assert!(ix.ref_affected(call, &dirty(&["parse_rule"])));
+    assert!(!ix.ref_affected(call, &dirty(&["parse_rules"])));
 }
 
 /// The workspace suffix match compares a module by its **parent** key: the
