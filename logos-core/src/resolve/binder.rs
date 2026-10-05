@@ -1190,7 +1190,10 @@ fn build_module_tree(
 ///
 /// A declaration is a nested `Module` with no `Contains` child on a single
 /// line. An inline `mod x { … }` with contents, or with braces over several
-/// lines, is not one, and keeps the key exactly as before.
+/// lines, is not one, and keeps the key exactly as before — also against a
+/// declaration of the same key from the other crate root (`src/lib.rs` and
+/// `src/main.rs` share the crate's root key): only a file module or another
+/// declaration holding a key is ever displaced.
 ///
 /// [FR-RS-41]: ../../../docs/specs/requirements/FR-RS-41.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -1209,7 +1212,9 @@ fn hand_declarations_to_their_files(
             && !members.contains_key(&n.id)
             && n.start_line == n.end_line
     };
-    for declaration in nodes.iter().filter(|n| is_declaration(n)) {
+    let declarations: Vec<&NodeRow> = nodes.iter().filter(|n| is_declaration(n)).collect();
+    let is_declared: HashSet<NodeId> = declarations.iter().map(|d| d.id).collect();
+    for declaration in declarations {
         let Some(key) = module_key.get(&declaration.id) else { continue };
         let Some(files) = files_at.get(key) else { continue };
         let language = declaration.file_path.as_deref().map(extension_of);
@@ -1218,11 +1223,16 @@ fn hand_declarations_to_their_files(
             .filter(|(_, ext)| language.as_ref() == Some(ext))
             .map(|(id, _)| *id)
             .collect();
+        let holder = modules.get(key).copied();
+        let file_holds = holder.is_some_and(|h| files.iter().any(|(id, _)| *id == h));
+        if !file_holds && !holder.is_some_and(|h| is_declared.contains(&h)) {
+            continue; // an inline module with contents holds it
+        }
         match declared.as_slice() {
             [file] => {
                 modules.insert(key.clone(), *file);
             }
-            _ if modules.get(key).is_some_and(|holder| files.iter().any(|(id, _)| id == holder)) => {
+            _ if file_holds => {
                 modules.insert(key.clone(), declaration.id);
             }
             _ => {}

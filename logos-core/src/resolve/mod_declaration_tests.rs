@@ -362,3 +362,37 @@ fn only_a_file_of_the_declarations_language_answers_it() {
         );
     }
 }
+
+/// An inline module with contents keeps its key against a declaration of the
+/// same key from the other crate root (review fix): `src/lib.rs` and
+/// `src/main.rs` share the crate's root key, so lib's `mod zed { fn f }` and
+/// main's `mod zed;` claim one key. lib's own call binds its inline `f` — as it
+/// did before S-585 — whether one file (`zed.rs`) or two (`zed.rs` and
+/// `zed/mod.rs`) sit at the path.
+#[test]
+fn an_inline_module_keeps_its_key_against_another_roots_declaration() {
+    for two_files in [false, true] {
+        let mut nodes = vec![
+            node(1, "crate", NodeKind::Module, "src/lib.rs"),
+            spanning(node(2, "zed", NodeKind::Module, "src/lib.rs"), 1, 3),
+            node(3, "f", NodeKind::Function, "src/lib.rs"),
+            node(4, "alpha", NodeKind::Function, "src/lib.rs"),
+            node(5, "main", NodeKind::Module, "src/main.rs"),
+            spanning(node(6, "zed", NodeKind::Module, "src/main.rs"), 1, 1),
+            node(10, "zed", NodeKind::Module, "src/zed.rs"),
+            node(11, "f", NodeKind::Function, "src/zed.rs"),
+        ];
+        let mut edges = vec![contains(1, 2), contains(2, 3), contains(1, 4), contains(5, 6), contains(10, 11)];
+        if two_files {
+            nodes.push(node(12, "zed", NodeKind::Module, "src/zed/mod.rs"));
+            nodes.push(node(13, "f", NodeKind::Function, "src/zed/mod.rs"));
+            edges.push(contains(12, 13));
+        }
+        let g = (nodes, edges);
+        assert_eq!(
+            outcome_in(&g, &[], &call(100, LIB_RS, 4, "crate::zed::f")),
+            bound(4, 3, EdgeKind::Calls),
+            "two_files={two_files}"
+        );
+    }
+}
