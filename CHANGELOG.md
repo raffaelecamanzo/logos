@@ -15,16 +15,6 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Changed
 
-- **Indexing Python is no longer exponential in a repeated import (S-519).** A
-  file that repeats one import verbatim — werkzeug's functions each re-run
-  `import warnings`, 13 times in `wrappers/request.py` — counted every copy as a
-  rival import of the name, and each copy re-entered the same name, so binding
-  branched once per copy at every alias level. A file's identical imports are now
-  one import. Imports that genuinely differ are still rivals, and a name imported
-  from two places binds only where they agree. Every edge is unchanged. Measured
-  on three debug builds made the same way, a cold index of werkzeug takes 3.3 s,
-  against 37 min 36 s before the fix and 3.4 s for the released 1.10.0;
-  healthchecks takes 5.9 s (6.8 s before, 5.7 s for 1.10.0).
 - **Inheritance binds for Python, PHP, C# and Kotlin (CR-170, S-522).** Their
   `references` queries capture supertypes — Python `class A(B)`, PHP `extends`,
   `implements` and trait `use`, C#'s `base_list`, Kotlin's supertype list — and an
@@ -112,7 +102,12 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   imports, werkzeug binds 716 of 760 and healthchecks 1,123 of 1,167; the rest name
   module-level variables, which are not declarations. Cross-file Python calls appear
   for the first time (werkzeug 310, healthchecks 270), and healthchecks' Django routes
-  bound to their views rise from 88 to 136.
+  bound to their views rise from 88 to 136. A name imported from two places (a
+  `try`/`except` compat import) binds only where both imports agree, and an import
+  repeated verbatim is one import, not a rival (werkzeug's functions each re-run
+  `import warnings`, 13 times in `wrappers/request.py`), so the binding adds no
+  measurable indexing time: on debug builds made the same way, a cold index of
+  werkzeug takes 3.3 s and healthchecks 5.9 s, against 3.4 s and 5.7 s for 1.10.0.
 - **A JavaScript, TypeScript, Go or C `main`, `lib` or `mod` file is named after
   itself**, not its folder: those stems are Rust's, now declared by the Rust plugin
   alone. On this repository 12 documentation tokens that bound `ui` to
