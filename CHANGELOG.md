@@ -15,6 +15,41 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Changed
 
+- **Python imports bind: packages, import roots and relative levels (CR-170, S-519).**
+  The path module model gains plugin-declared data on `[module_model]`:
+  `package_stems` (a package file names its directory — Python `__init__`, Rust
+  `mod`/`lib`/`main`, moved out of the core with every Rust module key and symbol id
+  unchanged) and `import_roots` (Python is keyed under `src/` when a package sits
+  beneath it, else the repository root). Every directory under an import root is a
+  module, so a namespace package descends; a relative import keeps its level
+  (`from .rules import Rule`, `from .._internal import x`); `from a import b, c`
+  records one import row per name; and an import of a name a package's `__init__.py`
+  re-exports binds to that package. `.logos/config.toml` gains
+  `[resolution.import_roots] python = [...]`, which replaces the detection. Python's
+  declared reach rises from `same-file` to `partial` (calls, imports).
+- **Measured on the inspection repositories**, Python import rows bound before → after
+  (the denominator grew because each imported name is now its own row): werkzeug
+  0 of 1,072 → 732 of 1,520, healthchecks 0 of 2,343 → 1,123 of 3,171. Of the internal
+  imports, werkzeug binds 716 of 760 and healthchecks 1,123 of 1,167; the rest name
+  module-level variables, which are not declarations. Cross-file Python calls appear
+  for the first time (werkzeug 310, healthchecks 270), and healthchecks' Django routes
+  bound to their views rise from 88 to 136.
+- **A JavaScript, TypeScript, Go or C `main`, `lib` or `mod` file is named after
+  itself**, not its folder: those stems are Rust's, now declared by the Rust plugin
+  alone. On this repository 12 documentation tokens that bound `ui` to
+  `web/ui/src/main.tsx` only because of the old name no longer bind.
+- **An interop `family` on `[module_model]` keeps binding inside languages that can
+  name each other's types.** Java, Kotlin and Scala declare `jvm`; a plugin declaring
+  none is its own family. The fully-qualified type index and the namespace index are
+  partitioned by it, so a C# `using App.Models;` never binds a PHP `namespace
+  App\Models;`, while Java↔Kotlin binding is unchanged (koin: identical edges).
+- **An import never names a framework-promoted `route` or `component`.** A Django model
+  or an Axum state type is both a class and a promoted component of the same name, and
+  every import of it read as ambiguous.
+- **The workspace suffix match compares a module by its parent key**, so `pkg.mod`
+  reaches `pkg/mod.py`. On this repository one Rust import newly binds
+  (`observability/mod.rs` → `stats::stats`).
+
 - **PHP, C#, Kotlin and Scala files take their identity from the namespace or package
   they declare (CR-170, S-518).** A plugin now names its module model in one
   `plugin.toml` table, `[module_model] kind = "path" | "package" | "namespace"`; PHP,

@@ -2682,6 +2682,14 @@ fn without_a_recorded_namespace_a_file_keeps_the_default_model() {
     assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
 }
 
+/// Nothing moved but the change-set itself: no supertype walk, no import root.
+fn unmoved() -> super::Moved {
+    super::Moved {
+        hierarchy: false,
+        import_roots: false,
+    }
+}
+
 /// A sync that adds or removes a `global using` re-binds every row of a
 /// declared-namespace file (S-518): the wildcard moves a bare name in a file
 /// the sync never touched, under a name no dirty token spells. Without the
@@ -2702,8 +2710,8 @@ fn a_moved_global_wildcard_reselects_every_namespaced_row() {
         dirty_tokens: ["globalusings", "src", "api", "cs"].iter().map(|t| t.to_string()).collect(),
         global_imports_moved: moved,
     };
-    assert!(super::is_affected(&r, &delta(true), &file_paths, &ix, false));
-    assert!(!super::is_affected(&r, &delta(false), &file_paths, &ix, false));
+    assert!(super::is_affected(&r, &delta(true), &file_paths, &ix, unmoved()));
+    assert!(!super::is_affected(&r, &delta(false), &file_paths, &ix, unmoved()));
 }
 
 /// A `global using` applies to its own language's files only (S-518): a PHP

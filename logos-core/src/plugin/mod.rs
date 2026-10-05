@@ -60,4 +60,4 @@ pub use manifest::{
     TestConvention,
 };
 pub use plugin::{CompiledPlugin, LanguagePlugin, Semantics};
-pub use registry::LanguageRegistry;
+pub use registry::{LanguageRegistry, PathModelDecl};

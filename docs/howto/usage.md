@@ -41,12 +41,12 @@ descriptors and a test fails when it drifts.
 | Go | `partial` | `calls`, `imports` |
 | Kotlin | `partial` | `imports` |
 | PHP | `partial` | `imports` |
+| Python | `partial` | `calls`, `imports` |
 | Scala | `partial` | `imports` |
 | TSX (incl. JSX) | `partial` | `calls`, `imports` |
 | TypeScript (incl. JavaScript) | `partial` | `calls`, `imports` |
 | C | `same-file` | none |
 | C++ | `same-file` | none |
-| Python | `same-file` | none |
 | Ruby | `same-file` | none |
 <!-- reach:end -->
 

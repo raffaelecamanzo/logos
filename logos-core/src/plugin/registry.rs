@@ -38,6 +38,25 @@ use super::manifest::PluginManifest;
 use super::plugin::{CompiledPlugin, CompiledQueries, LanguagePlugin};
 use super::queries;
 
+/// One language's path-model declaration (S-519, [FR-RS-14]), as
+/// [`LanguageRegistry::path_models`] hands it to the module key: the package-file
+/// stems, the candidate import roots, and the names the import-root override and
+/// the family partition read.
+///
+/// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathModelDecl {
+    /// The plugin's name — the key of `.logos/config.toml`'s
+    /// `[resolution.import_roots]` override.
+    pub language: String,
+    /// The interop family the plugin binds within.
+    pub family: String,
+    /// The package-file stems (`__init__`; `mod`, `lib`, `main`).
+    pub package_stems: Vec<String>,
+    /// The candidate import roots; `None` keeps the default `src/` crate rule.
+    pub import_roots: Option<Vec<String>>,
+}
+
 /// The in-memory registry of loaded language grammars.
 #[derive(Debug)]
 pub struct LanguageRegistry {
@@ -307,6 +326,58 @@ impl LanguageRegistry {
             .iter()
             .filter(|p| p.semantics().module_model == super::ModuleModelKind::Namespace)
             .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose loaded plugin
+    /// declares **path-model data** — package-file stems or import roots (S-519,
+    /// [FR-RS-14]) — each mapped to that declaration. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the map folds no stem and keeps the default model's `src/` crate rule.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    pub fn path_models(&self) -> HashMap<String, PathModelDecl> {
+        self.plugins
+            .iter()
+            .filter(|p| p.semantics().module_model == super::ModuleModelKind::Path)
+            .filter(|p| {
+                let s = p.semantics();
+                !s.package_stems.is_empty() || s.import_roots.is_some()
+            })
+            .flat_map(|p| {
+                let s = p.semantics();
+                let decl = PathModelDecl {
+                    language: p.name().to_string(),
+                    family: s.family.clone(),
+                    package_stems: s.package_stems.clone(),
+                    import_roots: s.import_roots.clone(),
+                };
+                p.extensions()
+                    .iter()
+                    .map(move |e| (normalize_ext(e), decl.clone()))
+            })
+            .collect()
+    }
+
+    /// Every code plugin's file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)), each mapped to the
+    /// interop family its plugin binds within (S-519, [NFR-RA-05]) — the
+    /// declared `[module_model] family`, else the plugin's own name. Consumed
+    /// through [`crate::resolve::package_key::PackageLayout`], which partitions
+    /// the type and namespace indexes by it.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    pub fn families(&self) -> HashMap<String, String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .flat_map(|p| {
+                let family = p.semantics().family.clone();
+                p.extensions()
+                    .iter()
+                    .map(move |e| (normalize_ext(e), family.clone()))
+            })
             .collect()
     }
 

@@ -433,6 +433,13 @@ entry_points = ["main", "lambda_handler"]
 # See below.
 policy = "balanced"
 
+# Import roots per language (S-519) — replaces the detected ones for a language
+# whose plugin declares `import_roots` (Python: `src/` when it holds a package,
+# else the repository root). Relative directories; "." is the repository root.
+# A file under no listed root is keyed from the repository root. Default: none.
+[resolution.import_roots]
+python = ["lib", "tools/src"]
+
 [watcher]
 # Debounce window (ms) for the file watcher under `serve --mcp`. Default: 300 (OQ-04).
 debounce_ms = 300
@@ -554,7 +561,8 @@ through a proven base class, a call on any other receiver nowhere
 ([FR-RS-12](../specs/requirements/FR-RS-12.md)).
 
 Changing the policy needs no migration — resolution re-evaluates the whole
-unresolved-reference ledger on every run, so just `logos index` again.
+unresolved-reference ledger on every run, so just `logos index` again. The same
+holds for `[resolution.import_roots]`.
 
 ## Documentation — indexing markdown
 
@@ -1418,7 +1426,7 @@ v1 limitations.
 
 ### Module models (`[module_model]`)
 
-By default Logos keys a file's module by its path, Rust's way: the directory before
+By default Logos keys a file's module by its path: the directory before
 the last `src/` names the crate and every later directory is a module. So
 `src/main/java/com/x/Svc.java` would be `main::java::com::x::Svc`, and
 `import com.x.Svc` could never reach it. A plugin names the model its language
@@ -1431,9 +1439,52 @@ kind = "namespace"   # or "package", or "path" (the default)
 
 | `kind` | Keyed by | Shipped for |
 |---|---|---|
-| `path` | the file's path (the default when the table is omitted) | Rust, Go, Python, TypeScript, … |
+| `path` | the file's path (the default when the table is omitted) — under an **import root** when the plugin declares them | Rust, Python (import roots), Go, TypeScript, … |
 | `package` | the path after a **source root** named in `[package_modules]` | Java |
 | `namespace` | the namespace or package the file **declares** | PHP, C#, Kotlin, Scala |
+
+**`path`.** Two keys refine it, both optional:
+
+```toml
+[module_model]
+kind = "path"
+package_stems = ["__init__"]   # a package file names its directory
+import_roots = ["src"]         # candidate roots; the repository root is the fallback
+```
+
+- `package_stems` — a file with one of these stems names its **directory**
+  rather than adding a module of its own: Rust declares `mod`, `lib` and `main`,
+  Python `__init__`. A stem no plugin declares is just a name, so a JavaScript
+  `main.js` is the module `main`.
+- `import_roots` — the file is keyed by its path under the import root that
+  holds it. A candidate is chosen when a package sits beneath it (for Python, a
+  directory with an `__init__.py` under `src/`); otherwise the repository root
+  is the import root, and a file outside every root is keyed from it too. A
+  root is a directory of the repository, matched from the path's start. Every
+  directory under a root is a module, so a namespace package with no
+  `__init__.py` still descends. A relative import keeps its level: `from .rules
+  import Rule` is the importing file's own package, `from .. import x` its
+  parent. An import of a name a package's `__init__.py` re-exports without
+  declaring binds to the package. `pyproject.toml`'s `package-dir` is not read
+  — declare such roots in `.logos/config.toml` instead (below).
+
+Python records one import row per imported name (`from a import b, c` is two
+rows), and its imports reach only Python modules: a fallback never crosses into
+another language's files.
+
+**`family`.** Languages that can name each other's types declare one **interop
+family** (any kind), and binding never crosses it:
+
+```toml
+[module_model]
+kind = "namespace"
+family = "jvm"   # Java, Kotlin and Scala share it
+```
+
+The fully-qualified type index and the namespace index are partitioned by
+family, so a Java import still reaches a Kotlin class while a C# `using
+App.Models;` never binds a PHP file declaring `namespace App\Models;`. A plugin
+that declares no family is its own.
 
 **`package`.** The source roots live in their own table:
 

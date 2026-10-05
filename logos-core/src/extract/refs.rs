@@ -107,6 +107,27 @@ pub(crate) fn import_segments(text: &str) -> Vec<String> {
     split_path_text(unquote(text))
 }
 
+/// Canonicalise the module of a `from m import …` (`@ref.import.from`, S-519,
+/// [FR-RS-14]) into the segments each imported name is recorded under. A
+/// **relative** module keeps its level as leading [`is_relative_head`]
+/// segments, the shape a relative path specifier records: one dot (the
+/// importing file's own package) is `.`, and every further dot one `..` —
+/// `.rules` → `[., rules]`, `..` → `[..]`, `...a.b` → `[.., .., a, b]`. An
+/// absolute module splits as any member path does.
+///
+/// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+pub(crate) fn from_module_segments(text: &str) -> Vec<String> {
+    let text = text.trim();
+    let level = text.chars().take_while(|c| *c == '.').count();
+    let mut segments: Vec<String> = match level {
+        0 => Vec::new(),
+        1 => vec![".".to_string()],
+        n => vec!["..".to_string(); n - 1],
+    };
+    segments.extend(split_path_text(&text[level..]));
+    segments
+}
+
 /// The leading segment a relative specifier keeps in the ledger target: `.`
 /// (the importing file's directory) or `..` (its parent). Neither can survive
 /// [`split_path_text`] — `.` is one of its separators — so a target headed by

@@ -115,7 +115,7 @@ use std::path::Path;
 use anyhow::Result;
 use rayon::prelude::*;
 
-use crate::config::BindingPolicy;
+use crate::config::{BindingPolicy, Resolution};
 use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
 use crate::model::{EdgeKind, NodeId};
 use crate::models::navigation::{
@@ -229,9 +229,10 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 pub fn run(
     runtime: &Runtime,
     tree: Option<(&LanguageRegistry, &Path)>,
-    policy: BindingPolicy,
+    resolution: &Resolution,
     delta: Option<&Delta>,
 ) -> Result<ResolutionStats> {
+    let policy = resolution.policy;
     let want_file_paths = delta.is_some();
     let snap = runtime.submit_read(|store| {
         Ok(Snapshot {
@@ -274,6 +275,7 @@ pub fn run(
     let layout = tree.map_or_else(Default::default, |(registry, _)| {
         package_key::PackageLayout::from_registry(registry)
             .with_declared_namespaces(snap.namespaces.iter().cloned())
+            .with_import_root_overrides(&resolution.import_roots)
     });
     let index = binder::Index::build_with_layout(&snap.nodes, &snap.edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
@@ -293,9 +295,16 @@ pub fn run(
             // Decided once per run, not per row: whether the change moved a
             // type of the package-shaped hierarchy a supertype walk climbs.
             let hierarchy_moved = index.hierarchy_touched(&d.dirty_tokens);
+            // …and whether it added or removed a package file that can move the
+            // detected import roots (S-519), which re-keys a whole language.
+            let roots_moved = d.changed_paths.iter().any(|p| index.moves_import_roots(p));
+            let moved = Moved {
+                hierarchy: hierarchy_moved,
+                import_roots: roots_moved,
+            };
             snap.refs
                 .iter()
-                .filter(|&r| is_affected(r, d, &snap.file_paths, &index, hierarchy_moved))
+                .filter(|&r| is_affected(r, d, &snap.file_paths, &index, moved))
                 .collect()
         }
     };
@@ -425,7 +434,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 /// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
-/// 5. **Hierarchy** (S-468) — `hierarchy_moved`: the sync dirtied a type of the
+/// 5. **Hierarchy** (S-468) — `moved.hierarchy`: the sync dirtied a type of the
 ///    package-shaped `Extends` hierarchy, and `r` is a call from a
 ///    package-shaped file. Such a call may bind through a supertype walk that
 ///    crosses the moved type while spelling none of its names — `Leaf::start`
@@ -435,6 +444,10 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    declared a C# `global using` before or after the sync, and `r` is from a
 ///    package-shaped file. The wildcard brings names into view in files the sync
 ///    never touched, under names no dirty token spells.
+/// 7. **Import roots** (S-519) — `moved.import_roots`: the sync added or removed
+///    a package file beneath a candidate import root (`src/pkg/__init__.py`), so
+///    the detected roots — and with them every key of that language — may have
+///    moved, and `r` is from a file keyed under import roots.
 ///
 /// Every other row provably keeps its binding (its source is in an untouched file
 /// and no key it reads changed), so it is skipped — that is where the work goes.
@@ -445,7 +458,7 @@ fn is_affected(
     delta: &Delta,
     file_paths: &HashMap<i64, String>,
     index: &binder::Index,
-    hierarchy_moved: bool,
+    moved: Moved,
 ) -> bool {
     if let Some(path) = r.file_id.and_then(|id| file_paths.get(&id)) {
         if delta.changed_paths.contains(path) {
@@ -454,10 +467,13 @@ fn is_affected(
         if is_import_scoped(r) && index.is_path_specifier_file(path) {
             return true;
         }
-        if hierarchy_moved && r.kind == EdgeKind::Calls && index.is_package_shaped(path) {
+        if moved.hierarchy && r.kind == EdgeKind::Calls && index.is_package_shaped(path) {
             return true;
         }
         if delta.global_imports_moved && index.is_package_shaped(path) {
+            return true;
+        }
+        if moved.import_roots && index.has_import_roots(path) {
             return true;
         }
     }
@@ -465,6 +481,15 @@ fn is_affected(
         return true;
     }
     index.ref_affected(r, &delta.dirty_tokens)
+}
+
+/// What an incremental run decided once, before selecting rows: whether the
+/// sync moved a type of the package-shaped `Extends` hierarchy (S-468), and
+/// whether it moved the detected import roots (S-519).
+#[derive(Debug, Clone, Copy)]
+struct Moved {
+    hierarchy: bool,
+    import_roots: bool,
 }
 
 /// Whether `r` binds against a path-grammar import's target — an `Imports` row
@@ -749,3 +774,5 @@ fn stats(
 mod tests;
 #[cfg(all(test, feature = "lang-java"))]
 mod package_rung_tests;
+#[cfg(test)]
+mod path_module_tests;

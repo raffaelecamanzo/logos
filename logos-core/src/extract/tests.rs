@@ -41,6 +41,9 @@ impl NoSymbolsPlugin {
                 implicit_receiver: crate::plugin::ImplicitReceiver::None,
                 package_modules: None,
                 module_model: crate::plugin::ModuleModelKind::Path,
+                package_stems: Vec::new(),
+                import_roots: None,
+                family: "mock".to_string(),
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
                 body_node_kinds: Vec::new(),
@@ -5069,7 +5072,8 @@ fn a_name_grammar_import_and_a_member_path_still_split_on_every_dot() {
             "app/views.py",
             "import a.b.c\nfrom django.urls import path\n",
         );
-        assert_eq!(targets_only(&facts), ["a::b::c", "django::urls"]);
+        // A `from` import records the imported name under its module (S-519).
+        assert_eq!(targets_only(&facts), ["a::b::c", "django::urls::path"]);
     }
     #[cfg(feature = "lang-java")]
     {
@@ -6197,4 +6201,90 @@ fn every_scala_selector_shape_records_its_own_rows() {
         scala_imports("import a.B, c.d.E"),
         vec![row("a::B", Some("B"), RefForm::Path), row("c::d::E", Some("E"), RefForm::Path)]
     );
+}
+
+// ── S-519 / FR-RS-14: Python path modules — one row per name, relative levels ──
+
+/// Every `Imports` row the file records as `(target, form, alias)`, sorted.
+#[cfg(feature = "lang-python")]
+fn import_rows(facts: &Facts) -> Vec<(String, RefForm, Option<String>)> {
+    let mut out: Vec<(String, RefForm, Option<String>)> = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target.clone(), r.form, r.alias.clone()))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// FR-RS-14: `from m import a, b` records one row per imported name, each under
+/// its module and aliased by the name; a relative module keeps its level as
+/// `.`/`..` heads — one dot the file's own package, each further dot one up.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_from_import_records_one_row_per_name_and_keeps_its_relative_level() {
+    let src = "from .rules import Rule, Map\n\
+               from .. import _internal\n\
+               from .._internal import _wsgi_decoding_dance\n\
+               from ...a.b import c\n\
+               from hc.api.models import Check\n\
+               from pkg import name as other\n";
+    let facts = extract_lang("py", "src/werkzeug/routing/map.py", src);
+    let path = |t: &str, alias: &str| (t.to_string(), RefForm::Path, Some(alias.to_string()));
+    let mut expected = vec![
+        path(".::rules::Map", "Map"),
+        path(".::rules::Rule", "Rule"),
+        path("..::_internal", "_internal"),
+        path("..::_internal::_wsgi_decoding_dance", "_wsgi_decoding_dance"),
+        path("..::..::a::b::c", "c"),
+        path("hc::api::models::Check", "Check"),
+        // The `as` name is not the alias yet (S-520): the imported name is.
+        path("pkg::name", "name"),
+    ];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(import_rows(&facts), expected);
+}
+
+/// A `from` wildcard is a glob of the module itself — a relative one of the
+/// package its level names — and a plain `import a.b` keeps its one row.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_from_wildcard_is_a_glob_of_its_module() {
+    let src = "from . import *\nfrom .views import *\nfrom os import *\nimport a.b\n";
+    let facts = extract_lang("py", "app/__init__.py", src);
+    let mut expected = vec![
+        (".".to_string(), RefForm::Glob, None),
+        (".::views".to_string(), RefForm::Glob, None),
+        ("a::b".to_string(), RefForm::Path, Some("b".to_string())),
+        ("os".to_string(), RefForm::Glob, None),
+    ];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(import_rows(&facts), expected);
+}
+
+/// A package-file stem names its directory only for the plugin that declares
+/// it (S-519): Python's `__init__.py` is its package, Rust's `mod.rs` its
+/// module, and a JavaScript `main.js` — a stem no plugin declares — is `main`.
+#[test]
+fn a_file_module_is_named_by_its_own_plugins_package_stems() {
+    let module_name = |ext: &str, path: &str, src: &str| {
+        extract_lang(ext, path, src)
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Module)
+            .map(|n| n.name.clone())
+            .expect("file module present")
+    };
+    assert_eq!(module_name("rs", "src/extract/mod.rs", "fn f() {}\n"), "extract");
+    #[cfg(feature = "lang-python")]
+    {
+        assert_eq!(module_name("py", "src/werkzeug/__init__.py", "x = 1\n"), "werkzeug");
+        assert_eq!(module_name("py", "src/werkzeug/main.py", "x = 1\n"), "main");
+    }
+    #[cfg(feature = "lang-typescript")]
+    {
+        assert_eq!(module_name("js", "web/src/main.js", "const x = 1;\n"), "main");
+        assert_eq!(module_name("js", "web/src/mod.js", "const x = 1;\n"), "mod");
+    }
 }

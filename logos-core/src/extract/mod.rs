@@ -128,8 +128,8 @@ use config::accessor::{BindingView, DeclaredTypes};
 use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 
 use refs::{
-    flatten_dotted_import, flatten_use_tree, import_segments, is_relative_head, macro_call_refs,
-    specifier_segments, split_path_text,
+    flatten_dotted_import, flatten_use_tree, from_module_segments, import_segments,
+    is_relative_head, macro_call_refs, specifier_segments, split_path_text,
 };
 use symbol::{build_symbol, descriptor_family, descriptor_for, path_segments, DescriptorFamily};
 
@@ -156,6 +156,14 @@ const SELF_TYPE_CAPTURE: &str = "symbol.self_type";
 ///
 /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
 const SELF_RECEIVER_METHOD_CAPTURE: &str = "ref.method.self";
+
+/// The `references`-query marker naming the module of a `from m import a`
+/// (S-519, [FR-RS-14]): it records no row of its own, and each `@ref.import`
+/// in its match is recorded under it — one row per imported name, a relative
+/// module keeping its level ([`from_module_segments`]).
+///
+/// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+const FROM_MODULE_CAPTURE: &str = "ref.import.from";
 
 /// One source file handed to the extractor.
 #[derive(Debug, Clone)]
@@ -689,7 +697,7 @@ fn extract_one(
             facts.nodes.push(NodeFact {
                 symbol: sym.clone(),
                 kind: NodeKind::Module,
-                name: file_module_name(&path_segments),
+                name: file_module_name(&path_segments, &plugin.semantics().package_stems),
                 start_line: 1,
                 end_line: input.source.lines().count().max(1) as u32,
                 metrics: None,
@@ -1419,13 +1427,15 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
     });
 }
 
-/// The human-facing name of a file's module node: the file stem, or — for the
-/// `mod`/`lib`/`main` stems that name their *enclosing* module — the nearest
-/// preceding path segment that is not `src`, falling back to `crate`.
+/// The human-facing name of a file's module node: the file stem, or — for a
+/// package-file stem the file's plugin declares, which names its *enclosing*
+/// module (Rust's `mod`/`lib`/`main`, Python's `__init__`; S-519) — the nearest
+/// preceding path segment that is not `src`, falling back to `crate`. A stem no
+/// plugin declares is the name: a JavaScript `main.js` is `main`.
 ///
 /// Display-only: resolution computes real module paths independently, so this
 /// name carries no binding semantics (it is what FTS search shows).
-fn file_module_name(path_segments: &[&str]) -> String {
+fn file_module_name(path_segments: &[&str], package_stems: &[String]) -> String {
     let stem = path_segments
         .last()
         .map(|s| {
@@ -1436,7 +1446,7 @@ fn file_module_name(path_segments: &[&str]) -> String {
                 .to_string()
         })
         .unwrap_or_default();
-    if !stem.is_empty() && !matches!(stem.as_str(), "mod" | "lib" | "main") {
+    if !stem.is_empty() && !package_stems.contains(&stem) {
         return stem;
     }
     path_segments
@@ -1662,22 +1672,39 @@ fn collect_refs(
                 // into view, not one declaration, so it is a `Glob` row and
                 // introduces no alias — `b` is not a name the file can now use.
                 // `ref.import.global` marks one whose scope is every file of
-                // the declaring file's directory (a C# `global using`).
+                // the declaring file's directory (a C# `global using`). A match
+                // carrying `ref.import.from` names its module apart from the
+                // imported name (Python's `from m import a`, S-519).
                 "ref.import" => {
-                    let segments = match semantics.import_specifier {
-                        ImportSpecifier::Path => {
-                            specifier_segments(text, &semantics.specifier_extensions)
-                        }
-                        ImportSpecifier::Name => import_segments(text),
-                    };
-                    if segments.is_empty() {
-                        continue;
-                    }
                     let marked = |name: &str| {
                         m.captures
                             .iter()
                             .any(|c| capture_names[c.index as usize] == name)
                     };
+                    // `from m import a` (`ref.import.from`, S-519): the name is
+                    // recorded under its module, one row per imported name; a
+                    // wildcard's row is the module itself.
+                    let from = m
+                        .captures
+                        .iter()
+                        .find(|c| capture_names[c.index as usize] == FROM_MODULE_CAPTURE)
+                        .and_then(|c| c.node.utf8_text(source).ok());
+                    let segments = match (from, semantics.import_specifier) {
+                        (Some(module), _) => {
+                            let mut segments = from_module_segments(module);
+                            if !marked("ref.import.asterisk") {
+                                segments.extend(import_segments(text));
+                            }
+                            segments
+                        }
+                        (None, ImportSpecifier::Path) => {
+                            specifier_segments(text, &semantics.specifier_extensions)
+                        }
+                        (None, ImportSpecifier::Name) => import_segments(text),
+                    };
+                    if segments.is_empty() {
+                        continue;
+                    }
                     let (form, alias) = import_form(&marked, &segments);
                     if let (Some(receivers), RefForm::Path, Some(name)) =
                         (receivers.as_mut(), form, alias.as_deref())

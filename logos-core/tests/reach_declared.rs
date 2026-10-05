@@ -292,7 +292,7 @@ fn tsx_declared_partial_binds_across_files() {
 }
 
 #[test]
-fn python_declared_same_file_binds_nothing_across_files() {
+fn python_declared_partial_binds_calls_and_imports() {
     verify("python", fixtures::PYTHON);
 }
 
@@ -441,14 +441,17 @@ fn every_code_language_declares_a_reach_and_nothing_else_does() {
     for name in ["rust", "java"] {
         assert_eq!(level(name), "resolved", "{name}");
     }
-    for name in ["go", "typescript", "tsx", "kotlin", "php", "c-sharp", "scala"] {
+    for name in ["go", "typescript", "tsx", "kotlin", "php", "c-sharp", "scala", "python"] {
         assert_eq!(level(name), "partial", "{name}");
     }
     // The declared-namespace languages (S-518) bind imports, and only imports.
     for name in ["php", "c-sharp", "scala"] {
         assert_eq!(declared[name].1, ["imports"], "{name}");
     }
-    for name in ["python", "ruby", "c", "cpp"] {
+    // Python's import-root path modules (S-519) bind imports, and the bare
+    // calls a `from` import brings into view.
+    assert_eq!(declared["python"].1, ["calls", "imports"]);
+    for name in ["ruby", "c", "cpp"] {
         assert_eq!(level(name), "same-file", "{name}");
         assert!(declared[name].1.is_empty(), "{name} binds nothing across files");
     }

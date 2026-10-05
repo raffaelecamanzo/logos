@@ -54,6 +54,21 @@ pub struct Semantics {
     ///
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
     pub module_model: ModuleModelKind,
+    /// The `path` model's package-file stems (S-519, [FR-RS-14]; see
+    /// [`ModuleModel::package_stems`](super::ModuleModel::package_stems)) — a
+    /// file with one of them names its directory. Read by
+    /// [`crate::resolve::package_key`] and by extraction's file-module name.
+    ///
+    /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
+    pub package_stems: Vec<String>,
+    /// The `path` model's candidate import roots (S-519; see
+    /// [`ModuleModel::import_roots`](super::ModuleModel::import_roots)), `None`
+    /// when the language keeps the default model's `src/` crate rule.
+    pub import_roots: Option<Vec<String>>,
+    /// The interop family this language binds within, resolved (S-519; see
+    /// [`PluginManifest::module_family`]): the declared one, else the plugin's
+    /// own name.
+    pub family: String,
     /// Keywords that increment cyclomatic complexity for this language.
     /// Carried declaratively now; consumed by the complexity metric (S-011+).
     pub complexity_keywords: Vec<String>,
@@ -277,6 +292,12 @@ impl CompiledPlugin {
         overridden: Vec<String>,
     ) -> Self {
         let module_model = manifest.module_model_kind();
+        let family = manifest.module_family();
+        let (package_stems, import_roots) = manifest
+            .module_model
+            .as_ref()
+            .map(|m| (m.package_stems.clone(), m.import_roots.clone()))
+            .unwrap_or_default();
         let semantics = Semantics {
             module_separator: manifest.module_separator,
             import_specifier: manifest.import_specifier,
@@ -284,6 +305,9 @@ impl CompiledPlugin {
             implicit_receiver: manifest.implicit_receiver,
             package_modules: manifest.package_modules,
             module_model,
+            package_stems,
+            import_roots,
+            family,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,
             body_node_kinds: manifest.body_node_kinds,
