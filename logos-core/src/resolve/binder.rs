@@ -1967,13 +1967,20 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             let resolved = ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
             ctx.bare_path_call.set(false);
             match resolved {
-                // A class a declared call constructs (S-521, [FR-RS-16]).
-                Res::Found(target) if ctx.constructs(want, target) => Outcome::Bound {
-                    source,
-                    target,
-                    kind: EdgeKind::Instantiates,
-                    payload: r.payload.clone(),
-                },
+                // A class a declared call constructs (S-521, [FR-RS-16]) —
+                // unless a factory function of its name rivals it.
+                Res::Found(target) if ctx.constructs(want, target) => {
+                    if ctx.rival_function(target) {
+                        ctx.note(want, || Residue::TypeAmbiguous);
+                        return Outcome::Unbound;
+                    }
+                    Outcome::Bound {
+                        source,
+                        target,
+                        kind: EdgeKind::Instantiates,
+                        payload: r.payload.clone(),
+                    }
+                }
                 Res::Found(target) => bound(target),
                 Res::NotFound if r.kind == EdgeKind::Imports => ctx
                     .package_reexport(&segs)
@@ -2262,6 +2269,45 @@ impl Ctx<'_> {
     fn constructs(&self, want: Want, target: NodeId) -> bool {
         matches!(want, Want::DeclaredCall(t) if t.classes)
             && self.ix.info.get(&target).is_some_and(|i| i.kind == NodeKind::Class)
+    }
+
+    /// `true` when a top-level `Function` of `class`'s own name sits in the
+    /// class's package, within its family (S-521): Kotlin's factory function
+    /// `fun Foo(s: String): Foo` beside `class Foo`. The package rungs read
+    /// types only, so the function is no candidate there and the class alone
+    /// would answer — but the call names both, and stays unbound ([NFR-RA-05]).
+    /// A class with no package (a path-model file) is never rivalled here: its
+    /// language's rungs already see functions and classes together.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn rival_function(&self, class: NodeId) -> bool {
+        let Some(info) = self.ix.info.get(&class) else {
+            return false;
+        };
+        let Some(path) = info.file_path.as_deref() else {
+            return false;
+        };
+        let Some(package) = self.ix.layout.package_of(path) else {
+            return false;
+        };
+        let family = self.ix.layout.family(path);
+        let top_level = |id: &NodeId| {
+            self.ix
+                .parent
+                .get(id)
+                .and_then(|p| self.ix.info.get(p))
+                .is_some_and(|p| p.kind == NodeKind::Module)
+        };
+        self.ix.by_name.get(&info.name).into_iter().flatten().any(|id| {
+            self.ix.info.get(id).is_some_and(|f| {
+                f.kind == NodeKind::Function
+                    && top_level(id)
+                    && f.file_path.as_deref().is_some_and(|fp| {
+                        self.ix.layout.package_of(fp).as_ref() == Some(&package)
+                            && self.ix.layout.family(fp) == family
+                    })
+            })
+        })
     }
 
     /// Every path an import-root file's imports give `head`, when they give it

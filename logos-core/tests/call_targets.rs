@@ -190,6 +190,21 @@ fn two_kotlin_classes_none_or_a_call_inside_a_class_stay_unbound() {
     assert_eq!(unbound_calls(rt, use_kt), strings(&["Foo", "Missing"]));
 }
 
+/// A Kotlin factory function beside its class (`fun Job(s: String): Job`) is a
+/// second declaration the call names, from the package and through an import:
+/// the package rungs read types only, and the call must not be read as
+/// constructing the class ([NFR-RA-05]).
+#[test]
+fn a_kotlin_class_beside_its_factory_function_stays_unbound() {
+    let (_tmp, engine) = indexed(fixtures::KOTLIN);
+    let rt = engine.runtime().unwrap();
+    for file in ["src/main/kotlin/com/f/Start.kt", "src/main/kotlin/com/g/Run.kt"] {
+        assert!(edges_from(rt, file, EdgeKind::Instantiates).is_empty(), "{file}");
+        assert!(edges_from(rt, file, EdgeKind::Calls).is_empty(), "{file}");
+        assert_eq!(unbound_calls(rt, file), strings(&["Job"]), "{file}");
+    }
+}
+
 /// FR-RS-16 AC (libuv `src/fs-poll.c`): a call to the macro its file defines
 /// binds `Calls` to the Macro node, while `src/unix/core.c`'s call binds its own
 /// function of the same name. A macro and a function of one name in one file

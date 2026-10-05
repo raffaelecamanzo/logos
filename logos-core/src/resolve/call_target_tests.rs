@@ -350,6 +350,11 @@ fn a_declared_call_never_binds_a_module() {
 // src/main/kotlin/com/w/Base.pkt  com.w   class Base (561) ─ m (562)
 // src/main/kotlin/com/w/Sub.pkt   com.w   class Sub (571), extends Base
 // src/main/kotlin/com/w/Run.pkt   com.w   run (581)
+// src/main/kotlin/com/v/Job.pkt   com.v   class Job (611)
+// src/main/kotlin/com/v/Jobs.pkt  com.v   Job (621)       ← a factory function
+// src/main/kotlin/com/v/Start.pkt com.v   start (631)
+// src/main/kotlin/com/v/Pipe.pkt  com.v   class Pipe (641)
+// src/main/kotlin/com/u/Pipes.pkt com.u   Pipe (651)      ← another package's
 // ```
 
 const USE_KT: i64 = 50;
@@ -357,6 +362,7 @@ const MAKE_KT: i64 = 51;
 const MK_KT: i64 = 52;
 const SUB_KT: i64 = 53;
 const RUN_KT: i64 = 54;
+const START_KT: i64 = 55;
 
 /// Bind the last of `refs` over all of them, against the Kotlin-shaped graph.
 fn bind_kotlin(refs: &[UnresolvedRefRow], policy: BindingPolicy) -> Outcome {
@@ -373,6 +379,11 @@ fn bind_kotlin(refs: &[UnresolvedRefRow], policy: BindingPolicy) -> Outcome {
         (560, "src/main/kotlin/com/w/Base.pkt", "com.w", 561, "Base", NodeKind::Class),
         (570, "src/main/kotlin/com/w/Sub.pkt", "com.w", 571, "Sub", NodeKind::Class),
         (580, "src/main/kotlin/com/w/Run.pkt", "com.w", 581, "run", NodeKind::Function),
+        (610, "src/main/kotlin/com/v/Job.pkt", "com.v", 611, "Job", NodeKind::Class),
+        (620, "src/main/kotlin/com/v/Jobs.pkt", "com.v", 621, "Job", NodeKind::Function),
+        (630, "src/main/kotlin/com/v/Start.pkt", "com.v", 631, "start", NodeKind::Function),
+        (640, "src/main/kotlin/com/v/Pipe.pkt", "com.v", 641, "Pipe", NodeKind::Class),
+        (650, "src/main/kotlin/com/u/Pipes.pkt", "com.u", 651, "Pipe", NodeKind::Function),
     ] {
         let stem = file.rsplit('/').next().unwrap().trim_end_matches(".pkt");
         nodes.push(node(module, stem, NodeKind::Module, file));
@@ -417,6 +428,26 @@ fn a_kotlin_call_to_one_class_of_its_package_or_import_records_instantiates() {
         } else {
             assert_eq!(bind_kotlin(&[r], policy), Outcome::Unbound, "unimported, {policy:?}");
         }
+    }
+}
+
+/// A top-level factory function of a class's name in the class's package —
+/// `fun Job(s: String): Job` beside `class Job` — rivals the class: the package
+/// rungs read types only, so the class alone would answer, but the call names
+/// two declarations and stays unbound, from the package and through an import
+/// alike ([NFR-RA-05]). A function of that name in another package is no rival.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[test]
+fn a_factory_function_of_the_package_rivals_its_class() {
+    for policy in POLICIES {
+        let r = call(1, START_KT, 631, "Job");
+        assert_eq!(bind_kotlin(&[r], policy), Outcome::Unbound, "{policy:?}");
+        let imported = import(2, USE_KT, 520, "com::v::Job");
+        let r = call(3, USE_KT, 521, "Job");
+        assert_eq!(bind_kotlin(&[imported, r], policy), Outcome::Unbound, "{policy:?}");
+        let r = call(4, START_KT, 631, "Pipe");
+        bound(bind_kotlin(&[r], policy), 631, 641, EdgeKind::Instantiates);
     }
 }
 

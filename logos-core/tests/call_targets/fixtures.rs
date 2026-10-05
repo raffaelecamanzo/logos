@@ -28,7 +28,8 @@ pub const PYTHON: Fixture = &[
 
 /// A Kotlin class constructed through a single-type import and from its own
 /// package; a class two source sets declare under one package, a name no
-/// declaration carries, and a bare `Foo()` inside a class body stay unbound.
+/// declaration carries, a bare `Foo()` inside a class body, and a class beside
+/// a factory function of its name (`fun Job(s: String): Job`) stay unbound.
 pub const KOTLIN: Fixture = &[
     ("src/main/kotlin/com/x/Foo.kt", "package com.x\n\nclass Foo\n"),
     ("src/main/kotlin/com/x/Make.kt", "package com.x\n\nfun make() = Foo()\n"),
@@ -39,6 +40,15 @@ pub const KOTLIN: Fixture = &[
     ("src/main/kotlin/com/z/Bar.kt", "package com.z\n\nclass Bar\n"),
     ("src/test/kotlin/com/z/Bar.kt", "package com.z\n\nclass Bar\n"),
     ("src/main/kotlin/com/z/Mk.kt", "package com.z\n\nfun mk() = Bar()\n"),
+    (
+        "src/main/kotlin/com/f/Job.kt",
+        "package com.f\n\nclass Job(val n: Int)\n\nfun Job(s: String): Job = Job(s.length)\n",
+    ),
+    ("src/main/kotlin/com/f/Start.kt", "package com.f\n\nfun start() = Job(\"a\")\n"),
+    (
+        "src/main/kotlin/com/g/Run.kt",
+        "package com.g\n\nimport com.f.Job\n\nfun run() = Job(\"b\")\n",
+    ),
 ];
 
 /// libuv's `src/fs-poll.c`: it defines `uv__make_close_pending` as a macro and
