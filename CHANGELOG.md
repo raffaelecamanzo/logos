@@ -28,6 +28,26 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 - **Measured on Newtonsoft.Json**: the 654 junk import rows an alias directive used to
   record as its own name (before S-518) are 0, and all 657 alias directives are one row
   each aliased by their local name.
+- **Calling a class instantiates it, and calling a C macro binds it (CR-170, S-521).**
+  Two new `plugin.toml` keys widen what a call may bind. `class_call_instantiates`
+  (Python, Kotlin, Scala): a call whose one candidate is a class records an
+  `Instantiates` edge to it, so `Check(project=p)` after `from hc.api.models import
+  Check` reaches `Check`. `macros_callable` (C): a call whose one candidate is a
+  function-like macro records `Calls` to that Macro node. The exactly-one rule is
+  unchanged: two classes of one name, a function and a class (or macro) of one name
+  in one scope, or no candidate leave the call unbound. Every other language binds
+  its calls as before. The declared reach of Python, Kotlin and Scala adds
+  `type_relations`: a free `Foo()` instantiates a class declared in another file.
+  A Kotlin or Scala `Foo()` inside a class body is a call on the current instance,
+  and still binds among that type's own members only.
+- **Measured on libuv** (`49b1c064`): C calls bound to a macro go from 0 to 342, and
+  all C calls bound from 1,210 to 1,550 of 13,308. The calls in `src/fs-poll.c` to
+  `uv__make_close_pending`, which that file defines as a macro, now bind. Two calls
+  that bound a function no longer bind: their file defines a macro of the same name
+  under another `#ifdef` branch (`uv__cpu_count`, `uv__random_getrandom_init`), so
+  the name has two candidates. On this repository every edge and ledger row is
+  identical before and after.
+
 - **Python imports bind: packages, import roots and relative levels (CR-170, S-519).**
   The path module model gains plugin-declared data on `[module_model]`:
   `package_stems` (a package file names its directory — Python `__init__`, Rust

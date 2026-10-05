@@ -43,6 +43,12 @@ nesting_block_kinds = ["if_statement", "for_statement", "while_statement", "do_s
 # non-root for dead-code); `extern` and the default are exported.
 export_convention = "non-static"
 
+# A call may expand a macro (S-521, CR-170, FR-RS-16): `f(x)` whose one
+# candidate is a `#define f(x)` binds `Calls` to that Macro node. A macro and a
+# function of one name in one file are two candidates, and stay unbound. Headers
+# belong to the C++ plugin (above), so a macro a `.h` defines is no candidate.
+macros_callable = true
+
 # No `test_convention` key: C has no dominant unit-test annotation/naming idiom
 # at extraction time, so it defaults to `TestConvention::None`. Test files are
 # still recognised by the path-convention `is_test` fallback (FR-QM-08); the

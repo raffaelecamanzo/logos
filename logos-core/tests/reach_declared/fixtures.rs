@@ -134,7 +134,7 @@ pub const KOTLIN: Fixture = &[
     ),
     (
         "src/main/kotlin/com/y/Child.kt",
-        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.helper\n\nclass Child : Base(), Shape {\n    override fun area(): Int {\n        val other = Base()\n        other.run()\n        return helper() + other.count + count\n    }\n}\n",
+        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.helper\n\nclass Child : Base(), Shape {\n    override fun area(): Int {\n        val other = Base()\n        other.run()\n        return helper() + other.count + count\n    }\n}\n\nfun make() = Base()\n",
     ),
 ];
 
@@ -156,7 +156,7 @@ pub const SCALA: Fixture = &[
     ),
     (
         "src/main/scala/com/y/Child.scala",
-        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.Helper.helper\n\nclass Child extends Base with Shape {\n  def area(): Int = {\n    val other = new Base()\n    other.run()\n    helper() + other.count + count\n  }\n}\n",
+        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.Helper.helper\n\nclass Child extends Base with Shape {\n  def area(): Int = {\n    val other = new Base()\n    other.run()\n    helper() + other.count + count\n  }\n}\n\ndef make() = Base()\n",
     ),
 ];
 

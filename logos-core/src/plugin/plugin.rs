@@ -18,8 +18,8 @@ use std::sync::Arc;
 use tree_sitter::{Language, Query};
 
 use super::manifest::{
-    ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier, ModuleModelKind,
-    PackageModules, PluginManifest, PropertiesDescriptor, Reach, TestConvention,
+    CallTargets, ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier,
+    ModuleModelKind, PackageModules, PluginManifest, PropertiesDescriptor, Reach, TestConvention,
 };
 
 /// The declarative, on-disk-tunable semantics of a language ([NFR-MA-05]).
@@ -41,6 +41,12 @@ pub struct Semantics {
     /// [`PluginManifest::implicit_receiver`]) — consumed by reference
     /// extraction's receiver-shape pass.
     pub implicit_receiver: ImplicitReceiver,
+    /// What a call may bind besides a callable (S-521, [FR-RS-16]; see
+    /// [`PluginManifest::call_targets`]) — consumed by the binder's call
+    /// admission through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    pub call_targets: CallTargets,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped (CR-149; see [`PluginManifest::package_modules`]) —
     /// consumed by the binder's module key through
@@ -293,6 +299,7 @@ impl CompiledPlugin {
     ) -> Self {
         let module_model = manifest.module_model_kind();
         let family = manifest.module_family();
+        let call_targets = manifest.call_targets();
         let (package_stems, import_roots) = manifest
             .module_model
             .as_ref()
@@ -303,6 +310,7 @@ impl CompiledPlugin {
             import_specifier: manifest.import_specifier,
             specifier_extensions: manifest.specifier_extensions,
             implicit_receiver: manifest.implicit_receiver,
+            call_targets,
             package_modules: manifest.package_modules,
             module_model,
             package_stems,

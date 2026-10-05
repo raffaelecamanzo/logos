@@ -292,7 +292,7 @@ fn tsx_declared_partial_binds_across_files() {
 }
 
 #[test]
-fn python_declared_partial_binds_calls_and_imports() {
+fn python_declared_partial_binds_calls_imports_and_instantiation() {
     verify("python", fixtures::PYTHON);
 }
 
@@ -307,7 +307,7 @@ fn csharp_declared_partial_binds_imports_only() {
 }
 
 #[test]
-fn kotlin_declared_partial_binds_imports_only() {
+fn kotlin_declared_partial_binds_imports_and_instantiation() {
     verify("kotlin", fixtures::KOTLIN);
 }
 
@@ -317,7 +317,7 @@ fn ruby_declared_same_file_binds_nothing_across_files() {
 }
 
 #[test]
-fn scala_declared_partial_binds_imports_only() {
+fn scala_declared_partial_binds_imports_and_instantiation() {
     verify("scala", fixtures::SCALA);
 }
 
@@ -335,8 +335,8 @@ fn cpp_declared_same_file_binds_nothing_across_files() {
 
 /// The deliberate-raise proof ([S-570] AC): a language that resolves nothing
 /// across files — Ruby — fails the suite when declared anything more, and a
-/// language that resolves only imports — Scala, since S-518 — fails when it
-/// claims calls or type relations too.
+/// language that resolves imports and instantiation — Scala, since S-518 and
+/// S-521 — fails when it claims calls too.
 ///
 /// [S-570]: ../../docs/planning/journal.md#s-570-every-language-declares-its-verified-cross-file-reach-and-scala-is-declared-same-file
 #[test]
@@ -351,7 +351,7 @@ fn a_raised_declaration_fails_the_suite() {
         assert!(why.contains("over-claim"), "{why}");
     }
     for raised in [
-        reach("partial", &["imports", "calls"]),
+        reach("partial", &["imports", "type_relations", "calls"]),
         reach("resolved", &["calls", "imports", "type_relations"]),
     ] {
         let why = violation("scala", &raised, fixtures::SCALA)
@@ -361,7 +361,7 @@ fn a_raised_declaration_fails_the_suite() {
     // …and the declarations the descriptors actually carry are the ones that pass.
     assert_eq!(violation("ruby", &reach("same-file", &[]), fixtures::RUBY), None);
     assert_eq!(
-        violation("scala", &reach("partial", &["imports"]), fixtures::SCALA),
+        violation("scala", &reach("partial", &["imports", "type_relations"]), fixtures::SCALA),
         None
     );
 }
@@ -444,13 +444,19 @@ fn every_code_language_declares_a_reach_and_nothing_else_does() {
     for name in ["go", "typescript", "tsx", "kotlin", "php", "c-sharp", "scala", "python"] {
         assert_eq!(level(name), "partial", "{name}");
     }
-    // The declared-namespace languages (S-518) bind imports, and only imports.
-    for name in ["php", "c-sharp", "scala"] {
+    // The declared-namespace languages (S-518) bind imports, and only imports —
+    // but for Kotlin and Scala, whose top-level `Foo()` also constructs the
+    // class it names, a type relation (S-521).
+    for name in ["php", "c-sharp"] {
         assert_eq!(declared[name].1, ["imports"], "{name}");
     }
+    for name in ["kotlin", "scala"] {
+        assert_eq!(declared[name].1, ["imports", "type_relations"], "{name}");
+    }
     // Python's import-root path modules (S-519) bind imports, and the bare
-    // calls a `from` import brings into view.
-    assert_eq!(declared["python"].1, ["calls", "imports"]);
+    // calls a `from` import brings into view — a call to a class among them as
+    // `Instantiates`, a type relation (S-521).
+    assert_eq!(declared["python"].1, ["calls", "imports", "type_relations"]);
     for name in ["ruby", "c", "cpp"] {
         assert_eq!(level(name), "same-file", "{name}");
         assert!(declared[name].1.is_empty(), "{name} binds nothing across files");
@@ -485,7 +491,7 @@ fn the_languages_payload_carries_reach_as_level_and_cross_file() {
     );
     assert_eq!(
         row("scala")["reach"],
-        serde_json::json!({ "level": "partial", "cross_file": ["imports"] })
+        serde_json::json!({ "level": "partial", "cross_file": ["imports", "type_relations"] })
     );
     assert_eq!(
         row("java")["reach"],

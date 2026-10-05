@@ -34,7 +34,7 @@ use tree_sitter::Language;
 use super::abi::{assert_abi, AbiRange};
 use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
-use super::manifest::PluginManifest;
+use super::manifest::{CallTargets, PluginManifest};
 use super::plugin::{CompiledPlugin, CompiledQueries, LanguagePlugin};
 use super::queries;
 
@@ -384,6 +384,28 @@ impl LanguageRegistry {
                 p.extensions()
                     .iter()
                     .map(move |e| (normalize_ext(e), family.clone()))
+            })
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares a call target beyond a callable (S-521, [FR-RS-16]), each mapped
+    /// to its [`CallTargets`]. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the map admits a `Function` or `Method` only, as before.
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    pub fn call_targets(&self) -> HashMap<String, CallTargets> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| p.semantics().call_targets.any())
+            .flat_map(|p| {
+                let targets = p.semantics().call_targets;
+                p.extensions()
+                    .iter()
+                    .map(move |e| (normalize_ext(e), targets))
             })
             .collect()
     }
@@ -993,6 +1015,36 @@ mod tests {
         }
         for ext in ["rs", "py", "ts", "go", "rb", "java", "c", "cpp"] {
             assert!(!exts.contains(ext), "`{ext}` keeps its own module model");
+        }
+    }
+
+    /// The call targets (S-521, FR-RS-16): Python, Kotlin and Scala declare that
+    /// calling a class instantiates it — every extension of each — and C that a
+    /// macro is callable. Every other grammar, Rust and Java above all, admits a
+    /// callable only, so is absent from the map.
+    #[test]
+    fn call_targets_collects_only_the_declaring_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let targets = reg.call_targets();
+        let classes = CallTargets {
+            classes: true,
+            macros: false,
+        };
+        #[cfg(all(feature = "lang-python", feature = "lang-kotlin", feature = "lang-scala"))]
+        for ext in ["py", "pyi", "kt", "kts", "scala", "sc"] {
+            assert_eq!(targets.get(ext), Some(&classes), "`{ext}` instantiates a called class");
+        }
+        #[cfg(feature = "lang-c")]
+        assert_eq!(
+            targets.get("c"),
+            Some(&CallTargets {
+                classes: false,
+                macros: true
+            })
+        );
+        for ext in ["rs", "java", "ts", "tsx", "go", "cs", "php", "rb", "cpp", "h", "md"] {
+            assert!(!targets.contains_key(ext), "`{ext}` binds a callable only");
         }
     }
 

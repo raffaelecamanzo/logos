@@ -170,6 +170,35 @@ pub enum ImplicitReceiver {
     SelfInstance,
 }
 
+/// Which declarations besides a `Function` or `Method` a call in this language
+/// may bind to (S-521, [FR-RS-16]) — the resolved form of the descriptor's
+/// [`class_call_instantiates`](PluginManifest::class_call_instantiates) and
+/// [`macros_callable`](PluginManifest::macros_callable) keys.
+///
+/// Both default to `false`, which is every language's call admission before
+/// the keys existed, so a plugin that declares neither resolves exactly as
+/// before ([NFR-MA-01]). The acceptance rule does not change: the call binds
+/// only when its candidate set has exactly one element ([NFR-RA-05]).
+///
+/// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct CallTargets {
+    /// A call may name a `Class`, and binds to it as `Instantiates`: `Foo()`
+    /// constructs (Python, Kotlin, Scala).
+    pub classes: bool,
+    /// A call may name a `Macro`, and binds to it as `Calls` (C).
+    pub macros: bool,
+}
+
+impl CallTargets {
+    /// `true` when the language admits any call target beyond a callable.
+    pub fn any(self) -> bool {
+        self.classes || self.macros
+    }
+}
+
 /// How far a code language's references bind **across a file boundary** — the
 /// one-word summary of a `[reach]` declaration ([FR-PL-09], [CR-180]).
 ///
@@ -543,6 +572,21 @@ pub struct PluginManifest {
     /// when omitted.
     #[serde(default)]
     pub implicit_receiver: ImplicitReceiver,
+    /// Whether calling a class constructs it (S-521, [FR-RS-16]): a call whose
+    /// one candidate is a `Class` records `Instantiates` to it. For the
+    /// languages where `Foo()` builds a `Foo` — Python, Kotlin, Scala. Defaults
+    /// to `false`: a call binds a `Function` or `Method` only ([`CallTargets`]).
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    #[serde(default)]
+    pub class_call_instantiates: bool,
+    /// Whether a call may bind a `Macro` (S-521, [FR-RS-16]): a call whose one
+    /// candidate is a function-like macro records `Calls` to it — C, where
+    /// `f(x)` may expand a `#define f(x)`. Defaults to `false` ([`CallTargets`]).
+    ///
+    /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
+    #[serde(default)]
+    pub macros_callable: bool,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped ([`PackageModules`], [CR-149]). `None` when the
     /// `[package_modules]` table is omitted — the default module model.
@@ -987,6 +1031,15 @@ impl PluginManifest {
             .as_ref()
             .and_then(|m| m.family.clone())
             .unwrap_or_else(|| self.name.clone())
+    }
+
+    /// The call targets this descriptor declares beyond a callable
+    /// ([`CallTargets`], S-521).
+    pub fn call_targets(&self) -> CallTargets {
+        CallTargets {
+            classes: self.class_call_instantiates,
+            macros: self.macros_callable,
+        }
     }
 
     /// Parse a descriptor from TOML text, attributing any error to `file`.
@@ -1813,6 +1866,32 @@ mod tests {
                 &format!("module_separator = \"::\"\nimplicit_receiver = {bad}"),
             );
             assert!(PluginManifest::parse("x/plugin.toml", &text).is_err(), "{bad}");
+        }
+    }
+
+    /// The two call-target keys (S-521) default to `false` — a callable only —
+    /// resolve independently into [`CallTargets`], and refuse a non-boolean
+    /// rather than reading it as the default.
+    #[test]
+    fn the_call_target_keys_default_off_and_resolve_independently() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert_eq!(m.call_targets(), CallTargets::default());
+        assert!(!m.call_targets().any());
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        let python = with("class_call_instantiates = true").unwrap().call_targets();
+        assert_eq!(python, CallTargets { classes: true, macros: false });
+        let c = with("macros_callable = true").unwrap().call_targets();
+        assert_eq!(c, CallTargets { classes: false, macros: true });
+        let off = with("class_call_instantiates = false\nmacros_callable = false").unwrap();
+        assert!(!off.call_targets().any());
+        for bad in ["class_call_instantiates = \"yes\"", "macros_callable = 1"] {
+            assert!(with(bad).is_err(), "{bad}");
         }
     }
 

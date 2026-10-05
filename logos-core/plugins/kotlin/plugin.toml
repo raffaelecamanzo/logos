@@ -31,6 +31,13 @@ capabilities = ["symbols", "references", "frameworks", "invocations", "propertie
 # the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
 implicit_receiver = "self"
 
+# Calling a class constructs it (S-521, CR-170, FR-RS-16): a free `Foo()` whose
+# one candidate is a class records `Instantiates` to that class. A top-level
+# factory function and a class of one name are two candidates, and stay unbound.
+# A bare `Foo()` inside a class is a call on the current instance (above), so it
+# binds among that type's members and never reaches the class.
+class_call_instantiates = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Kotlin's anonymous control-flow/operator tokens: `when` replaces `switch`
 # (counted once per expression, the keyword-walk approximation), `?:` is the
@@ -115,13 +122,14 @@ family = "jvm"
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
 # files through the declared package (S-518); calls bind only inside the file
-# that wrote them.
+# that wrote them. Of the type relations, only the `Instantiates` a top-level
+# `Foo()` records binds across files (S-521); inheritance does not yet (S-522).
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
 level = "partial"
-cross_file = ["imports"]
+cross_file = ["imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
