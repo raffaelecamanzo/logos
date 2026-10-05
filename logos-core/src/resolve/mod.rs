@@ -891,3 +891,5 @@ mod package_rung_tests;
 mod path_module_tests;
 #[cfg(test)]
 mod call_target_tests;
+#[cfg(test)]
+mod mod_declaration_tests;

@@ -30,7 +30,7 @@
   ],
   "counts": {
     "node_count": 12,
-    "edge_count": 3,
+    "edge_count": 4,
     "function_count": 5,
     "test_function_count": 0
   },
@@ -166,6 +166,11 @@
     {
       "source": "logos . . . src/`caller.rs`/caller().",
       "target": "logos . . . src/`callee.rs`/target().",
+      "kind": "Calls"
+    },
+    {
+      "source": "logos . . . src/`caller.rs`/caller().",
+      "target": "logos . . . src/`twin.rs`/target().",
       "kind": "Calls"
     },
     {
