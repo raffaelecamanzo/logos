@@ -1087,6 +1087,39 @@ fn sync_equiv_a_capture_row_never_restores_an_edge_its_re_extracted_source_dropp
     );
 }
 
+/// R6 (PHP, monolog's shape): `AmqpHandler::handleBatch`'s `parent::` call
+/// climbs `AbstractHandler` to `Handler::handleBatch`; `AbstractHandler` drops
+/// `extends Handler`.
+#[cfg(feature = "lang-php")]
+#[test]
+fn sync_equiv_a_php_parent_call_losing_its_climb_unbinds() {
+    let abstract_handler = "src/Handler/AbstractHandler.php";
+    assert_sync_matches_reindex(
+        &[
+            (
+                "src/Handler/Handler.php",
+                "<?php\n\nnamespace Monolog\\Handler;\n\nabstract class Handler\n{\n    public function handleBatch(array $records): void {}\n}\n",
+            ),
+            (
+                abstract_handler,
+                "<?php\n\nnamespace Monolog\\Handler;\n\nabstract class AbstractHandler extends Handler\n{\n}\n",
+            ),
+            (
+                "src/Handler/AmqpHandler.php",
+                concat!(
+                    "<?php\n\nnamespace Monolog\\Handler;\n\nclass AmqpHandler extends AbstractHandler\n{\n",
+                    "    public function handleBatch(array $records): void\n    {\n",
+                    "        parent::handleBatch($records);\n    }\n}\n",
+                ),
+            ),
+        ],
+        &[Edit::Put(
+            abstract_handler,
+            "<?php\n\nnamespace Monolog\\Handler;\n\nabstract class AbstractHandler\n{\n}\n",
+        )],
+    );
+}
+
 /// An `Extends` edge: `Leaf extends Bar` binds the one `com.z.Bar` until a
 /// second source set declares another.
 #[cfg(feature = "lang-java")]
