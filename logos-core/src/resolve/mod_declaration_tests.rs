@@ -396,3 +396,40 @@ fn an_inline_module_keeps_its_key_against_another_roots_declaration() {
         );
     }
 }
+
+/// With no file to hand over to — two files at the path, or none — two
+/// declarations of one key (`mod dup;` in `src/lib.rs` and in `src/main.rs`,
+/// which share the crate's root key) leave it with the first in **path** order,
+/// whatever their node ids (review fix; [NFR-RA-06]): a sync renumbers the
+/// re-extracted file's nodes, and `use crate::dup;` must not change target.
+#[test]
+fn two_declarations_of_one_key_resolve_by_path_not_node_id() {
+    for two_files in [true, false] {
+        for lib_first in [true, false] {
+            // A sync of `lib.rs` renumbers all of its nodes after `main.rs`'s.
+            let (lib, lib_decl, main, main_decl) =
+                if lib_first { (5, 20, 6, 30) } else { (7, 30, 6, 20) };
+            let mut nodes = vec![
+                node(lib, "crate", NodeKind::Module, "src/lib.rs"),
+                node(main, "main", NodeKind::Module, "src/main.rs"),
+                spanning(node(lib_decl, "dup", NodeKind::Module, "src/lib.rs"), 1, 1),
+                spanning(node(main_decl, "dup", NodeKind::Module, "src/main.rs"), 1, 1),
+            ];
+            let mut edges = vec![contains(lib, lib_decl), contains(main, main_decl)];
+            if two_files {
+                nodes.extend([
+                    node(1, "dup", NodeKind::Module, "src/dup.rs"),
+                    node(2, "dup", NodeKind::Module, "src/dup/mod.rs"),
+                ]);
+            }
+            nodes.sort_by_key(|n| n.id);
+            edges.sort_by_key(|e| e.target);
+            let g = (nodes, edges);
+            assert_eq!(
+                outcome_in(&g, &[], &import(100, LIB_RS, lib, "crate::dup")),
+                bound(lib, lib_decl, EdgeKind::Imports),
+                "two_files={two_files} lib_first={lib_first}"
+            );
+        }
+    }
+}

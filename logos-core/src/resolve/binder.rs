@@ -1184,9 +1184,12 @@ fn build_module_tree(
 /// language's file at that path) the declaration keeps the key, taking it back
 /// from a foreign file that won it, and binds nothing beneath; with two (`x.rs`
 /// beside `x/mod.rs`, which rustc refuses) the declaration takes it back from
-/// whichever file won, so neither is guessed ([NFR-RA-05]). The outcome reads no node id: a sync and a cold
-/// index agree ([NFR-RA-06]). No node, symbol or edge changes — only which
-/// node answers the key.
+/// whichever file won, so neither is guessed ([NFR-RA-05]). Where no file
+/// answers and two declarations claim one key (`mod x;` in both `src/lib.rs`
+/// and `src/main.rs`), the first in path order holds it. Declarations are
+/// visited in path order, never node order, so the outcome reads no node id: a
+/// sync and a cold index agree ([NFR-RA-06]). No node, symbol or edge changes
+/// — only which node answers the key.
 ///
 /// A declaration is a nested `Module` with no `Contains` child on a single
 /// line. An inline `mod x { … }` with contents, or with braces over several
@@ -1212,11 +1215,17 @@ fn hand_declarations_to_their_files(
             && !members.contains_key(&n.id)
             && n.start_line == n.end_line
     };
-    let declarations: Vec<&NodeRow> = nodes.iter().filter(|n| is_declaration(n)).collect();
+    let mut declarations: Vec<&NodeRow> = nodes.iter().filter(|n| is_declaration(n)).collect();
+    // A sync renumbers a re-extracted file's nodes; the path does not move.
+    declarations.sort_by(|a, b| {
+        (a.file_path.as_deref(), a.start_line, a.name.as_str())
+            .cmp(&(b.file_path.as_deref(), b.start_line, b.name.as_str()))
+    });
     let is_declared: HashSet<NodeId> = declarations.iter().map(|d| d.id).collect();
+    let mut claimed: HashSet<&ModKey> = HashSet::new();
     for declaration in declarations {
         let Some(key) = module_key.get(&declaration.id) else { continue };
-        let Some(files) = files_at.get(key) else { continue };
+        let files = files_at.get(key).map_or(&[][..], Vec::as_slice);
         let language = declaration.file_path.as_deref().map(extension_of);
         let declared: Vec<NodeId> = files
             .iter()
@@ -1228,11 +1237,13 @@ fn hand_declarations_to_their_files(
         if !file_holds && !holder.is_some_and(|h| is_declared.contains(&h)) {
             continue; // an inline module with contents holds it
         }
+        // Otherwise the first declaration in path order holds the key.
+        let first = claimed.insert(key);
         match declared.as_slice() {
             [file] => {
                 modules.insert(key.clone(), *file);
             }
-            _ if file_holds => {
+            _ if first => {
                 modules.insert(key.clone(), declaration.id);
             }
             _ => {}
