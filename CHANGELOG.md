@@ -23,7 +23,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   of it, so `from pkg.m import X as A` and `… as B` in one scope, or `import numpy`
   beside `import numpy as np`, kept one row and dropped the other at insert: the second
   local name never reached the ledger and never bound. Python, Kotlin, Scala and every
-  other language that records an import alias keep both. Aliasless rows are unchanged.
+  other language that records an import alias keep both: a Kotlin `class Aliased :
+  KBase()` beside `import p.Base` and `import p.Base as KBase` now extends `Base`
+  (it was left unbound). Aliasless rows are unchanged.
   Two rows of one target are still one edge (an edge is `(source, target, kind)`), so
   the gain is the second name's binding, not a second edge.
 - **Measured** on `594452f6` of werkzeug and on this repository at `9d401b9f`, indexed
