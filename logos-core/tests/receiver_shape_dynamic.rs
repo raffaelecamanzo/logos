@@ -382,20 +382,26 @@ class B:
             row(&at(7, "m"), "m", METHOD, OTHER, false),
             row(&at(10, "n"), "m", METHOD, SELF, true),
             row(&at(14, "c"), "m", METHOD, SELF, true),
-            row(&at(17, "k"), "m", METHOD, SUPER, false),
+            // `super().m()`: through the proven `Extends` (S-522) to `Base.m`.
+            row(&at(17, "k"), "m", METHOD, SUPER, true),
             // The `super()` call itself is a free call, as before.
             row(&at(17, "k"), "super", PATH, None, false),
             // A call result is any other receiver, never `super`.
             row(&at(20, "g"), "m", METHOD, OTHER, false),
             row(&at(20, "g"), "get", PATH, None, false),
-            // The two-argument form is `super` too.
-            row(&at(23, "t"), "m", METHOD, SUPER, false),
+            // The two-argument form names the class to start above, which the
+            // caller's own hierarchy does not decide: `other` (S-522).
+            row(&at(23, "t"), "m", METHOD, OTHER, false),
             row(&at(23, "t"), "super", PATH, None, false),
         ])
     );
     assert_eq!(
         edges,
-        sorted_edges(vec![edge(&at(10, "n"), &at(7, "m")), edge(&at(14, "c"), &at(7, "m"))])
+        sorted_edges(vec![
+            edge(&at(10, "n"), &at(7, "m")),
+            edge(&at(14, "c"), &at(7, "m")),
+            edge(&at(17, "k"), &at(2, "m")),
+        ])
     );
 }
 
@@ -445,12 +451,17 @@ class B {
             row(&at(11, "n"), "m", METHOD, SELF, true),
             // `self::m()` and `static::m()`: one `self` row.
             row(&at(15, "s"), "m", METHOD, SELF, true),
-            row(&at(19, "k"), "m", METHOD, SUPER, false),
+            // `parent::m()`: through the proven `Extends` (S-522) to `Base::m`.
+            row(&at(19, "k"), "m", METHOD, SUPER, true),
         ])
     );
     assert_eq!(
         edges,
-        sorted_edges(vec![edge(&at(11, "n"), &at(7, "m")), edge(&at(15, "s"), &at(7, "m"))])
+        sorted_edges(vec![
+            edge(&at(11, "n"), &at(7, "m")),
+            edge(&at(15, "s"), &at(7, "m")),
+            edge(&at(19, "k"), &at(3, "m")),
+        ])
     );
 }
 

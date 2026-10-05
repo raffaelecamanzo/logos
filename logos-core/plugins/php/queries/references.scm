@@ -13,6 +13,21 @@
 ;                 the path's last segment.
 ;   @ref.access — an own-property access (`$this->balance`): a method reading a
 ;                 field of its own class (CR-005, FR-EX-08), the bound LCOM4 input.
+;   @ref.extends — a class's parent (`extends Base`), an interface's parents:
+;                 `Extends` (class → class, interface → interface; S-522,
+;                 FR-RS-15).
+;   @ref.implements — a class's or enum's interfaces (`implements I`), and the
+;                 traits a class, trait or enum `use`s (`use Loggable;`):
+;                 `Implements` (→ interface or trait). Both bind through the
+;                 declared namespace's rungs — the file's `use` imports, its own
+;                 namespace, then the fully-qualified name. A name written with
+;                 a leading `\` is fully qualified, read from the global
+;                 namespace alone. One written `namespace\X` is not captured:
+;                 its current-namespace prefix is no name the imports read.
+;   @ref.implements.trait — a MARKER on a trait `use`: the row records that
+;                 the class uses the trait. A used trait's method outranks
+;                 every inherited one, so the class's hierarchy ends there for
+;                 a `$this->m()` / `parent::m()` walk (S-522).
 ;
 ; Droppable on disk at `.logos/plugins/php/queries/references.scm`.
 ;
@@ -39,9 +54,9 @@
 ;   @ref.receiver.self      — `$this->m()`, `self::m()`, `static::m()`: binds
 ;                             among the enclosing class's own members only.
 ;   @ref.receiver.super     — `parent::m()`: binds only through a proven
-;                             `Extends`, which this plugin does not record — so
-;                             it stays unbound, and never reaches the caller's
-;                             own class.
+;                             `Extends` of the caller's class (`@ref.extends`
+;                             below) — the nearest parent holding exactly one
+;                             `m` — and never reaches the caller's own class.
 ;   @ref.receiver.other     — every receiver or scope (`$svc->m()`, `Foo::m()`,
 ;                             `$this->repo->m()`): never binds. `self`/`super`
 ;                             outrank it.
@@ -76,3 +91,24 @@
   object: (variable_name (name) @_recv)
   name: (name) @ref.access)
   (#eq? @_recv "this"))
+
+;   @ref.extends / @ref.implements — anchored to the declaration that owns the
+;   clause, so an anonymous class's (`new class extends Base {}`) is never read
+;   as the enclosing function's: it has no class node to relate.
+(class_declaration
+  (base_clause [(name) (qualified_name)] @ref.extends))
+(interface_declaration
+  (base_clause [(name) (qualified_name)] @ref.extends))
+(class_declaration
+  (class_interface_clause [(name) (qualified_name)] @ref.implements))
+(enum_declaration
+  (class_interface_clause [(name) (qualified_name)] @ref.implements))
+(class_declaration
+  body: (declaration_list
+    (use_declaration [(name) (qualified_name)] @ref.implements) @ref.implements.trait))
+(trait_declaration
+  body: (declaration_list
+    (use_declaration [(name) (qualified_name)] @ref.implements) @ref.implements.trait))
+(enum_declaration
+  body: (enum_declaration_list
+    (use_declaration [(name) (qualified_name)] @ref.implements) @ref.implements.trait))

@@ -47,6 +47,13 @@ pub struct Semantics {
     ///
     /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
     pub call_targets: CallTargets,
+    /// Whether a supertype's edge kind follows the type it binds (S-522,
+    /// [FR-RS-15]; see [`PluginManifest::supertype_kind_follows_target`]) —
+    /// consumed by the binder's type-relation admission through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+    pub supertype_kind_follows_target: bool,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped (CR-149; see [`PluginManifest::package_modules`]) —
     /// consumed by the binder's module key through
@@ -311,6 +318,7 @@ impl CompiledPlugin {
             specifier_extensions: manifest.specifier_extensions,
             implicit_receiver: manifest.implicit_receiver,
             call_targets,
+            supertype_kind_follows_target: manifest.supertype_kind_follows_target,
             package_modules: manifest.package_modules,
             module_model,
             package_stems,

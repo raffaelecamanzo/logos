@@ -11,6 +11,16 @@
 ;                 `using` section below for `global`, `static` and aliases.
 ;   @ref.access — an own-field access (`this.X`): a method reading a field of its
 ;                 own type (CR-005, FR-EX-08); the bound LCOM4 input.
+;   @ref.extends — each entry of a class's, struct's, record's or interface's
+;                 `base_list` (`class A : B, IC` → `B`, `IC`; S-522, FR-RS-15).
+;                 The list does not say which entry is the base class, so the
+;                 plugin declares `supertype_kind_follows_target`: a type's
+;                 entry binds the one in-repository class or interface it names,
+;                 through the namespace rungs, and its edge is `Extends` to a
+;                 class, `Implements` to an interface. An interface's entries
+;                 are its base interfaces (`Extends`). A generic base binds by
+;                 its name (`JsonConverter<T>` → `JsonConverter`); `global::`
+;                 makes it fully qualified.
 ;
 ; Receiver-shape markers (S-516, FR-EX-13, FR-RS-12) — they record no row of
 ; their own; each names the receiver of the `@ref.method` that shares its parent
@@ -19,7 +29,8 @@
 ;   @ref.receiver.self     — `this.List()`: binds among the enclosing class's
 ;                            own members only.
 ;   @ref.receiver.super    — `base.List()`: binds only through a proven
-;                            `Extends`; C# records none, so it stays unbound.
+;                            `Extends` of the caller's type — its base class,
+;                            never an interface (`@ref.extends` below).
 ;   @ref.receiver.other    — every other receiver (`service.List()`,
 ;                            `Enumerable.Range()`): never bound through the
 ;                            caller's scope (`no-receiver-evidence`).
@@ -103,3 +114,18 @@
 (member_access_expression
   expression: "this"
   name: (identifier) @ref.access)
+
+;   @ref.extends — anchored to each declaration that owns a `base_list`. An
+;   enum's (`enum E : byte`) names its underlying primitive, not a type. A
+;   record's primary-constructor base (`record R(int X) : Base(X)`) is its own
+;   node; a class's (`class P(int x) : Base(x)`) is a plain entry with arguments.
+(class_declaration
+  (base_list [(identifier) (qualified_name) (generic_name) (alias_qualified_name)] @ref.extends))
+(struct_declaration
+  (base_list [(identifier) (qualified_name) (generic_name) (alias_qualified_name)] @ref.extends))
+(interface_declaration
+  (base_list [(identifier) (qualified_name) (generic_name) (alias_qualified_name)] @ref.extends))
+(record_declaration
+  (base_list [(identifier) (qualified_name) (generic_name) (alias_qualified_name)] @ref.extends))
+(record_declaration
+  (base_list (primary_constructor_base_type type: (_) @ref.extends)))

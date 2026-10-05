@@ -15,6 +15,28 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Changed
 
+- **Inheritance binds for Python, PHP, C# and Kotlin (CR-170, S-522).** Their
+  `references` queries capture supertypes — Python `class A(B)`, PHP `extends`,
+  `implements` and trait `use`, C#'s `base_list`, Kotlin's supertype list — and an
+  `Extends` or `Implements` from a type binds through the module model its language
+  declares, not only from a package-shaped source. It binds the one in-repository
+  type the file's scope names, never a workspace name guess under any policy; a
+  library base stays unbound. `Implements` may target an interface or a trait (a PHP
+  class's `use`d trait). C# and Kotlin declare the new `plugin.toml` key
+  `supertype_kind_follows_target`: their supertype list does not say which entry is
+  the base class, so each entry's edge is `Extends` to a class and `Implements` to an
+  interface or a trait. PHP's leading `\` and C#'s `global::` read a name from the
+  global namespace only; a PHP `namespace\X` is not read, and a class never names
+  itself (`class TestCase(TestCase)` names the import). A proven `Extends` is what a
+  call on the current instance climbs: `self.m()`, `$this->m()`, `this.M()` and an
+  unqualified Kotlin/C# call now reach an inherited method, and `super().m()`,
+  `parent::m()`, `base.M()` and `super.m()` the nearest base that declares it. A
+  Python class with several bases (whose MRO the walk does not read) and a PHP class
+  that uses a trait (whose methods outrank the inherited ones) are never climbed
+  through; Python's `super(A, self)` and Kotlin's `super<T>` stay unbound. Rust's
+  `Implements` is unchanged. Java's type relations are unchanged on a Java-only
+  repository; a Java class may now implement a Scala trait, and a Java file outside
+  every source root binds its `extends` through its scope.
 - **An import's alias is the name it binds locally (CR-170, S-520).** A `references`
   query can now mark that name with `@ref.import.alias`, and the extractor records it
   as the import row's alias instead of the path's last segment. Python, PHP, C# and Go

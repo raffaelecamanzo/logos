@@ -1561,6 +1561,54 @@ a bare `Foo()` inside a class as a call on the current instance, so it binds amo
 that type's own members and never reaches the class. Both keys default to
 `false`, and a plugin that declares neither binds its calls as before.
 
+### Supertypes (`@ref.extends`, `@ref.implements`, `supertype_kind_follows_target`)
+
+A type's supertypes are captured by two `references` query captures and bound
+through the module model the language declares — the package rungs, a declared
+namespace, or the path modules:
+
+- `@ref.extends` records an **`Extends`** row: a class's base class, an
+  interface's super-interfaces;
+- `@ref.implements` records an **`Implements`** row: a class's interfaces, and a
+  PHP class's `use`d traits.
+
+Python (`class A(B)`), PHP (`extends`, `implements`, trait `use`), C#
+(`base_list`), Kotlin (the supertype list) and Java capture them. A supertype
+binds only to the one in-repository type its file's scope names — its own
+module, its imports, its namespace or package, its wildcards — and never by a
+workspace-wide name guess, under any binding policy. A library base (`TestCase`,
+`IDisposable`, `\Psr\Log\LoggerInterface`) stays unbound. PHP's leading `\` and
+C#'s `global::` make a name fully qualified: `namespace Foo; class Exception
+extends \Exception` never names itself. An `Extends` binds a class (an interface,
+from an interface); an `Implements` binds an interface or a trait.
+
+C# and Kotlin write the base class and the interfaces in one list (`class A : B,
+IC`, `class A : Base(), Iface`), so their descriptors declare:
+
+```toml
+# C#, Kotlin: the supertype list does not say which entry is the class.
+supertype_kind_follows_target = true
+```
+
+Each entry is then captured as `@ref.extends`, and a class's entry binds the one
+class, interface or trait it names. Its edge kind follows the target:
+**`Extends`** to a class, **`Implements`** to an interface. The key defaults to
+`false`, where each clause binds the kind it spells.
+
+A proven `Extends` is also what a call on the current instance climbs: a Python
+`self.m()`, PHP `$this->m()`, C# `this.M()` or unqualified Kotlin/C# `m()` reaches
+an inherited `m`, and Python's `super().m()`, PHP's `parent::m()`, C#'s `base.M()`
+and Kotlin's `super.m()` bind the nearest supertype that declares exactly one
+`m`. An `Implements` is never climbed, so `base.M()` in a class whose only
+supertype is an interface binds nothing. The walk reads one base class per level,
+so it never climbs through a Python class with several bases (its MRO decides) or
+a PHP class that uses a trait (the trait's method outranks the inherited one).
+Python's `super(A, self)`, Kotlin's `super<T>` and `super@Outer` name another
+starting point and stay unbound. A class's header never names the class itself:
+`from unittest import TestCase` then `class TestCase(TestCase)` names the import.
+A PHP `namespace\X` supertype is not captured. Rust's `impl Trait for X` methods
+bind their trait as before.
+
 ### Outbound HTTP client calls (`invocations`)
 
 `invocations.scm` is the **consumer** side of cross-service coupling: it captures

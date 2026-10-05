@@ -37,10 +37,10 @@ descriptors and a test fails when it drifts.
 |---|---|---|
 | Java | `resolved` | `calls`, `imports`, `type_relations` |
 | Rust | `resolved` | `calls`, `imports`, `type_relations` |
-| C# | `partial` | `imports` |
+| C# | `partial` | `imports`, `type_relations` |
 | Go | `partial` | `calls`, `imports` |
 | Kotlin | `partial` | `imports`, `type_relations` |
-| PHP | `partial` | `imports` |
+| PHP | `partial` | `imports`, `type_relations` |
 | Python | `partial` | `calls`, `imports`, `type_relations` |
 | Scala | `partial` | `imports`, `type_relations` |
 | TSX (incl. JSX) | `partial` | `calls`, `imports` |

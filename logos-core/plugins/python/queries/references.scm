@@ -22,6 +22,11 @@
 ;                 name, never the imported one, so a call to `a` does not bind
 ;                 through an import that renamed it (S-519 review) and `b()`
 ;                 does. The path is still recorded under the imported module.
+;   @ref.extends — a class's base (`class A(B)`, `class A(models.Model)`,
+;                 `class A(Base[T])` → `Base`): `Extends`, bound through the
+;                 path modules to the one in-repository class it names (S-522,
+;                 FR-RS-15). A keyword argument (`metaclass=…`) and a `*bases`
+;                 splat are not bases.
 ;
 ; Droppable on disk at `.logos/plugins/python/queries/references.scm`
 ; (FR-PL-04, FR-PL-05).
@@ -41,10 +46,13 @@
 ;   @ref.receiver.self  — `self.m()`, `cls.m()`: the conventional instance and
 ;                         class parameters; binds among the enclosing class's
 ;                         own members only.
-;   @ref.receiver.super — `super().m()`, `super(A, self).m()`: the inner `super`
-;                         call is the receiver. Binds only through a proven
-;                         `Extends`, which this plugin does not record — so it
-;                         stays unbound, and never reaches the caller's class.
+;   @ref.receiver.super — `super().m()`: the inner `super` call is the
+;                         receiver. Binds only through a proven `Extends` of
+;                         the caller's class (`@ref.extends` below) — the
+;                         nearest base holding exactly one `m` — and never
+;                         reaches the caller's class. `super(A, self).m()`
+;                         starts above a class it names, which the caller's
+;                         own hierarchy does not decide: it is `other`.
 ;   @ref.receiver.other — every receiver (`obj.m()`, `module.f()`,
 ;                         `self.x.m()`): never binds. `self`/`super` outrank it.
 ;
@@ -55,8 +63,11 @@
   (#any-of? @ref.receiver.self "self" "cls"))
 ((call
   function: (attribute
-    object: (call function: (identifier) @_super) @ref.receiver.super))
-  (#eq? @_super "super"))
+    object: (call
+      function: (identifier) @_super
+      arguments: (argument_list) @_arguments) @ref.receiver.super))
+  (#eq? @_super "super")
+  (#eq? @_arguments "()"))
 (call
   function: (attribute object: (_) @ref.receiver.other))
 
@@ -92,3 +103,12 @@
   object: (identifier) @_recv
   attribute: (identifier) @ref.access)
   (#eq? @_recv "self"))
+
+;   @ref.extends — each base the class header lists. The base is a name, a
+;   dotted name, or the value of a subscript (a generic base).
+(class_definition
+  superclasses: (argument_list
+    [(identifier) (attribute)] @ref.extends))
+(class_definition
+  superclasses: (argument_list
+    (subscript value: [(identifier) (attribute)] @ref.extends)))

@@ -587,6 +587,20 @@ pub struct PluginManifest {
     /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
     #[serde(default)]
     pub macros_callable: bool,
+    /// Whether this language's supertype clause leaves unsaid whether a
+    /// supertype is a base class or an interface (S-522, [FR-RS-15]): C#'s
+    /// `class A : B, IC` and Kotlin's `class A : Base(), Iface` write both in
+    /// one list. Each supertype is then captured as an `Extends` row, and a
+    /// class's row binds the one in-repository class, interface or trait it
+    /// names, its edge kind following the target — `Extends` to a class,
+    /// `Implements` to an interface or a trait. An interface's supertypes are
+    /// interfaces whatever the key says. Defaults to `false`: an `Extends`
+    /// binds a class (an interface, from an interface) and an `Implements` an
+    /// interface or a trait, as each clause spells it.
+    ///
+    /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
+    #[serde(default)]
+    pub supertype_kind_follows_target: bool,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped ([`PackageModules`], [CR-149]). `None` when the
     /// `[package_modules]` table is omitted — the default module model.
@@ -1893,6 +1907,24 @@ mod tests {
         for bad in ["class_call_instantiates = \"yes\"", "macros_callable = 1"] {
             assert!(with(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The supertype key (S-522) defaults to `false` — each clause names its
+    /// kind — and refuses a non-boolean rather than reading it as the default.
+    #[test]
+    fn the_supertype_kind_key_defaults_off_and_refuses_a_non_boolean() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(!m.supertype_kind_follows_target);
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert!(with("supertype_kind_follows_target = true").unwrap().supertype_kind_follows_target);
+        assert!(!with("supertype_kind_follows_target = false").unwrap().supertype_kind_follows_target);
+        assert!(with("supertype_kind_follows_target = \"yes\"").is_err());
     }
 
     /// The specifier grammar is declared apart from the member-path separator

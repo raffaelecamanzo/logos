@@ -145,8 +145,8 @@ const OTHER: Option<ReceiverShape> = Some(ReceiverShape::Other);
 
 const CS_FILE: &str = "src/A.cs";
 
-/// `Base.M` is declared in the file, so a `base.M()` that bound anything at
-/// all could reach it — it must not, without a proven `Extends`.
+/// `Base.M` is declared in the file, and `A : Base` proves it `A`'s base
+/// class (S-522), so `base.M()` reaches it — and nothing else.
 const CS: &str = "\
 class Base {
     public int M() { return 1; }
@@ -184,8 +184,8 @@ fn csharp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
             // `this.M()` and the bare `M()`: `A.M`.
             row(&a(7, "N"), "M", RefForm::Method, SELF, true),
             row(&a(8, "J"), "M", RefForm::Method, SELF, true),
-            // `base.M()`: no proven base, so not even the in-file `Base.M`.
-            row(&a(9, "K"), "M", RefForm::Method, SUPER, false),
+            // `base.M()`: the proven base class's `Base.M` (S-522).
+            row(&a(9, "K"), "M", RefForm::Method, SUPER, true),
             // A static call on a type name is a receiver like any other.
             row(&a(10, "L"), "Run", RefForm::Method, OTHER, false),
             // A chain rooted at `this` is a receiver expression, not `this`.
@@ -197,7 +197,11 @@ fn csharp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
     let edges = call_edges(rt);
     assert_eq!(
         edges,
-        sorted_edges(vec![edge(&a(7, "N"), &a(6, "M")), edge(&a(8, "J"), &a(6, "M"))])
+        sorted_edges(vec![
+            edge(&a(7, "N"), &a(6, "M")),
+            edge(&a(8, "J"), &a(6, "M")),
+            edge(&a(9, "K"), &a(2, "M")),
+        ])
     );
     assert_no_self_loop(&edges);
 }
@@ -207,7 +211,8 @@ fn csharp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
 const KT_FILE: &str = "src/A.kt";
 
 /// A top-level `m` the class methods are named like, a `Base.m` the super
-/// call must not reach, and two top-level functions whose bare call is free.
+/// call reaches through the proven `Extends` (S-522), and two top-level
+/// functions whose bare call is free.
 const KT: &str = "\
 fun m(): Int = 0
 
@@ -250,8 +255,8 @@ fn kotlin_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
             // `this.m()` and the bare `m()`: `A.m`, never the top-level `m`.
             row(&a(9, "n"), "m", RefForm::Method, SELF, true),
             row(&a(10, "j"), "m", RefForm::Method, SELF, true),
-            // `super.m()`: no proven base, so not even the in-file `Base.m`.
-            row(&a(11, "k"), "m", RefForm::Method, SUPER, false),
+            // `super.m()`: the proven base class's `Base.m` (S-522).
+            row(&a(11, "k"), "m", RefForm::Method, SUPER, true),
             // A labelled `this@A` names an instance by label, not by position.
             row(&a(12, "l"), "m", RefForm::Method, OTHER, false),
             // A bare `m()` in `C`, which has no `m`: never the top-level `m`.
@@ -266,6 +271,7 @@ fn kotlin_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
         sorted_edges(vec![
             edge(&a(9, "n"), &a(8, "m")),
             edge(&a(10, "j"), &a(8, "m")),
+            edge(&a(11, "k"), &a(4, "m")),
             edge(&a(25, "free"), &a(23, "helper")),
         ])
     );
