@@ -1595,13 +1595,19 @@ class, interface or trait it names. Its edge kind follows the target:
 **`Extends`** to a class, **`Implements`** to an interface. The key defaults to
 `false`, where each clause binds the kind it spells.
 
-A proven `Extends` is also what a `super` call climbs: Python's `super().m()`,
-PHP's `parent::m()`, C#'s `base.M()` and Kotlin's `super.m()` bind the nearest
-supertype that declares exactly one `m`, and a Python `self.m()` reaches an
-inherited `m`. An `Implements` is never climbed, so `base.M()` in a class whose
-only supertype is an interface binds nothing. Python's `super(A, self)`, Kotlin's
-`super<T>` and `super@Outer` name another starting point and stay unbound. Rust's
-`impl Trait for X` methods bind their trait as before.
+A proven `Extends` is also what a call on the current instance climbs: a Python
+`self.m()`, PHP `$this->m()`, C# `this.M()` or unqualified Kotlin/C# `m()` reaches
+an inherited `m`, and Python's `super().m()`, PHP's `parent::m()`, C#'s `base.M()`
+and Kotlin's `super.m()` bind the nearest supertype that declares exactly one
+`m`. An `Implements` is never climbed, so `base.M()` in a class whose only
+supertype is an interface binds nothing. The walk reads one base class per level,
+so it never climbs through a Python class with several bases (its MRO decides) or
+a PHP class that uses a trait (the trait's method outranks the inherited one).
+Python's `super(A, self)`, Kotlin's `super<T>` and `super@Outer` name another
+starting point and stay unbound. A class's header never names the class itself:
+`from unittest import TestCase` then `class TestCase(TestCase)` names the import.
+A PHP `namespace\X` supertype is not captured. Rust's `impl Trait for X` methods
+bind their trait as before.
 
 ### Outbound HTTP client calls (`invocations`)
 
