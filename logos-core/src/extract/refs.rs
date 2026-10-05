@@ -442,8 +442,8 @@ fn flatten_with_prefix(node: Node<'_>, source: &[u8], prefix: &[String], out: &m
 /// - an expression with nothing after its path imports its last segment;
 /// - a wildcard after it (`_` or `*`) is a [`UseItem::glob`] of the path;
 /// - a braced group imports each selector under the path — a name, the `name`
-///   of a rename (`D => E`, `D as E`; the rename itself is the alias work of
-///   S-520), or a wildcard — and a selector renamed to `_` hides its name, so
+///   of a rename (`D => E`, `D as E`; the rename's local name is not recorded —
+///   S-520 covers Python, PHP, C# and Go), or a wildcard — and a selector renamed to `_` hides its name, so
 ///   it imports nothing;
 /// - a rename directly after the path (Scala 3's `import a.b as c`) imports
 ///   its `name` under the path.
