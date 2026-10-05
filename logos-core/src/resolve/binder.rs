@@ -2464,6 +2464,16 @@ impl Ctx<'_> {
         }
     }
 
+    /// `true` for the declaration whose header is being read (S-522): a
+    /// supertype's lexical lookup starts at the declaration's enclosing scope
+    /// ([`lexical_start`](Ctx::lexical_start)), which holds the declaration
+    /// itself — and a class never names itself as its base. Python's `from
+    /// unittest import TestCase` then `class TestCase(TestCase)` names the
+    /// import, which the scope's own `TestCase` would otherwise shadow.
+    fn is_own_header(&self, id: NodeId) -> bool {
+        id == self.source && self.lexical_start.get() != self.source
+    }
+
     /// The source's crate and module path (the `self`/`super`/relative base).
     fn source_module(&self) -> Option<ModKey> {
         self.ix.nearest_module(self.source).cloned()
@@ -2768,8 +2778,9 @@ impl Ctx<'_> {
     /// module tree: its imports, its modules, its globs. Neither ever takes a
     /// policy-gated workspace guess ([`scope_only`](Ctx::scope_only)). A target
     /// headed [`FULLY_QUALIFIED_HEAD`] is read by the fully-qualified index
-    /// alone. `want` filters
-    /// the candidates of every rung, so a same-named type of the wrong kind is
+    /// alone, and a header never names its own declaration
+    /// ([`is_own_header`](Ctx::is_own_header)). `want` filters the candidates
+    /// of every rung, so a same-named type of the wrong kind is
     /// no candidate at all (on the fully-qualified rung it is applied after
     /// the exactly-one test, so a `src/main`/`src/test` pair stays ambiguous).
     /// A type with no source here — the JDK, a library, a generated class —
@@ -3720,7 +3731,8 @@ impl Ctx<'_> {
         //    file module.
         let mut cursor = Some(self.lexical_start.get());
         while let Some(scope) = cursor {
-            let members = self.prefer_free_functions(self.ix.members_named(scope, name, want));
+            let mut members = self.prefer_free_functions(self.ix.members_named(scope, name, want));
+            members.retain(|&id| !self.is_own_header(id));
             match exactly_one(&members) {
                 Res::NotFound => {}
                 decided => return decided, // found — or a *known* ambiguity
@@ -3888,7 +3900,9 @@ impl Ctx<'_> {
         };
         let mut cursor = Some(self.lexical_start.get());
         while let Some(scope) = cursor {
-            if let Some(decided) = self.walk_from(&self.member_types(scope, head), rest, want) {
+            let mut heads = self.member_types(scope, head);
+            heads.retain(|&id| !self.is_own_header(id));
+            if let Some(decided) = self.walk_from(&heads, rest, want) {
                 return decided;
             }
             cursor = self.ix.parent.get(&scope).copied();
