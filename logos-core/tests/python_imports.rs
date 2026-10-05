@@ -385,9 +385,14 @@ fn sync_equals_a_full_reindex_when_a_package_file_moves_the_import_root() {
         (".logos/config.toml", "[resolution]\npolicy = \"strict\"\n"),
         ("src/app/core.py", "def go():\n    pass\n"),
         ("src/app/cli.py", "from app.core import go\n"),
+        // Another language's edges are no import-root edges: the retraction
+        // the moved root triggers must leave them alone.
+        ("tool/src/lib.rs", "pub fn run() {\n    helper();\n}\n\nfn helper() {}\n"),
     ];
     let (tmp, engine) = indexed(files);
     let rt = engine.runtime().unwrap();
+    let rust_call = strings(&["tool/src/lib.rs:helper:function"]);
+    assert_eq!(edges_from(rt, "tool/src/lib.rs", EdgeKind::Calls), rust_call);
     // No package under `src/` yet: the repository root is the import root, and
     // `app` is no module there.
     assert_eq!(unbound_imports(rt, "src/app/cli.py"), strings(&["app::core::go"]));
@@ -396,6 +401,7 @@ fn sync_equals_a_full_reindex_when_a_package_file_moves_the_import_root() {
     engine.sync(&[init.into()]);
     // `src/` holds a package now: `app.core` is a module under it.
     assert!(unbound_imports(rt, "src/app/cli.py").is_empty());
+    assert_eq!(edges_from(rt, "tool/src/lib.rs", EdgeKind::Calls), rust_call);
     let mut all = paths(files);
     all.push(init);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &all));
