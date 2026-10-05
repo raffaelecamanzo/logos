@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-10-05
+
 ### Changed
 
 - **Inheritance binds for Python, PHP, C# and Kotlin (CR-170, S-522).** Their
