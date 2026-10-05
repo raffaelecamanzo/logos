@@ -728,3 +728,52 @@ fn sync_re_decides_a_call_whose_second_static_import_stops_being_ambiguous() {
     );
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &[a, b, CTL_FILE]));
 }
+
+#[test]
+fn sync_re_decides_a_qualified_call_when_a_second_import_of_its_head_gains_and_loses_a_declaration() {
+    // `Helper.util()` reaches `com.x.a.Helper` only while `org.y.b.Helper` is no
+    // in-repository type. Adding the second `Helper` makes the head ambiguous
+    // (S-599); deleting it must bind the call again, exactly as a cold index
+    // decides it. The call's own target spells `Helper`, which the added and
+    // the removed file both declare, so `Index::ref_affected` selects the row
+    // on its target token; the test pins that the re-decision agrees with a
+    // cold index in both directions.
+    let tmp = TempDir::new().unwrap();
+    let a = "src/main/java/com/x/a/Helper.java";
+    let b = "src/main/java/org/y/b/Helper.java";
+    let helper = |package: &str| {
+        format!("package {package};\n\npublic class Helper {{\n    public static String util() {{ return \"u\"; }}\n}}\n")
+    };
+    write(tmp.path(), a, &helper("com.x.a"));
+    write(
+        tmp.path(),
+        CTL_FILE,
+        "package com.x.web;\n\nimport com.x.a.Helper;\nimport org.y.b.Helper;\n\npublic class Ctl {\n    public String get() { return Helper.util(); }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let a_util = format!("{a}:util:method");
+    assert_eq!(
+        callers_of(rt, &a_util),
+        [format!("{CTL_FILE}:get")],
+        "precondition: the one in-repository `Helper` binds"
+    );
+    write(tmp.path(), b, &helper("org.y.b"));
+    engine.sync(&[b.into()]);
+    // A row that flips to unbound keeps the edge it committed (the resolution
+    // pass's commit semantics, as in the tests above), so the ledger is compared.
+    assert_eq!(
+        binding_facts(rt).1,
+        cold_facts(&tmp, &[a, b, CTL_FILE]).1
+    );
+    let call_row = |facts: &(Vec<(String, String, String)>, Vec<String>)| {
+        facts.1.iter().filter(|r| r.contains(" Helper::util ")).cloned().collect::<Vec<_>>()
+    };
+    let ambiguous = call_row(&binding_facts(rt));
+    assert_eq!(ambiguous.len(), 1, "{ambiguous:?}");
+    assert!(ambiguous[0].ends_with(" false"), "the call stays unbound: {ambiguous:?}");
+    fs::remove_file(tmp.path().join(b)).unwrap();
+    engine.sync(&[b.into()]);
+    assert_eq!(callers_of(rt, &a_util), [format!("{CTL_FILE}:get")]);
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &[a, CTL_FILE]));
+}

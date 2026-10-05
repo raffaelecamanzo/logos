@@ -31,6 +31,18 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   is the source symbol, not its whole file: a whole-file sweep re-bound about
   40% of this repository's ledger on every one-file sync. A full index is
   unchanged.
+- **Two imports of one simple name are ambiguous in the package rungs (CR-196,
+  S-599).** `import a.Helper; import b.Helper;` then `Helper.util()` bound whichever
+  import the file listed first, because the qualified-head rung read a first-wins alias
+  map. It now resolves the rest of the path under every distinct import of the head's
+  name, binds only where they reach one declaration, and records `type-ambiguous`
+  where they reach two — the same rival rule Python imports already followed. A single
+  import and a verbatim repeat bind as before, and a member type in lexical scope still
+  wins. An import of a name no in-repository type carries is skipped rather than
+  shadowing a rival that does, so that rival now binds in either import order. Rival
+  heads met inside one another's expansions bind nothing, which keeps the work flat as
+  imports multiply (a re-entrancy guard, as for globs). The same head in an
+  `extends` clause (`Helper.Inner`) binds nothing under rival imports.
 
 ### Changed
 

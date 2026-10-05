@@ -2092,6 +2092,7 @@ fn bind_traced(
         source_family,
         policy,
         in_glob_resolution: Cell::new(false),
+        in_rival_expansion: Cell::new(false),
         bare_path_call: Cell::new(false),
         scope_only: relation.is_some(),
         lexical_start: Cell::new(source),
@@ -2478,6 +2479,15 @@ struct Ctx<'a> {
     /// back out through the file's glob set. Without it, a file with `G` glob
     /// imports drives `O(G^MAX_ALIAS_DEPTH)` work per reference (CR-016).
     in_glob_resolution: Cell<bool>,
+    /// Re-entrancy guard for the qualified-head rung's rival imports (S-599,
+    /// [`resolve_package_path`](Ctx::resolve_package_path)): set while a head's
+    /// rival expansions are being resolved, so a rival head met inside them
+    /// reads nothing instead of fanning out again. A path whose segments are
+    /// themselves heads with rival imports (`import a.a; import b.a; import
+    /// a.b; import b.b;` and `a.X.m()`) would otherwise drive
+    /// `O(N^MAX_ALIAS_DEPTH)` work per reference — the shape CR-016 closed for
+    /// globs.
+    in_rival_expansion: Cell<bool>,
     /// Enable the CR-068 Part B free-function/associated-method tie-break in
     /// [`prefer_free_functions`](Ctx::prefer_free_functions) for the duration of
     /// one resolution. Set **only** while resolving a single-segment bare-**path**
@@ -3963,15 +3973,21 @@ impl Ctx<'_> {
     /// A multi-segment path from a package-shaped source ([CR-149]), its head
     /// read in the language's order for a simple type name (JLS §6.5.5): a
     /// member type in lexical scope (`Inner.Deep` inside `Outer`); else the
-    /// file's single-type import of it — **final**, as in
+    /// file's single-type imports of it — **final**, as in
     /// [`resolve_package_name`](Ctx::resolve_package_name), so `Map.Entry`
-    /// under `import java.util.Map` never reaches a same-package `Map`; else a
-    /// type of the source's own package; else one a wildcard brings into view;
-    /// else the whole path read as a fully-qualified name
+    /// under `import java.util.Map` never reaches a same-package `Map`. Every
+    /// distinct import of the head's name is read
+    /// ([`resolve_expansions`](Ctx::resolve_expansions), S-599): they bind where
+    /// they reach one declaration and are [`Res::Ambiguous`] where they reach
+    /// two, never the first import's alone (a rival head met while another's
+    /// rivals are being read binds nothing, [`in_rival_expansion`]); else a type
+    /// of the source's own package; else one a wildcard brings into view; else
+    /// the whole path read as a fully-qualified name
     /// ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung whose head names a
     /// type decides — a simple type name obscures a package of the same
     /// spelling, as the language rules it.
     ///
+    /// [`in_rival_expansion`]: Ctx::in_rival_expansion
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     fn resolve_package_path(&self, package: &[String], segs: &[String], want: Want, depth: u8) -> Res {
         let Some((head, rest)) = segs.split_first() else {
@@ -3986,10 +4002,25 @@ impl Ctx<'_> {
             }
             cursor = self.ix.parent.get(&scope).copied();
         }
-        if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
-            let mut expanded = alias_path.clone();
-            expanded.extend(rest.iter().cloned());
-            return self.resolve_path(&expanded, want, depth - 1);
+        if let Some(expansions) = self.scope().and_then(|s| s.alias_expansions.get(head)) {
+            // A rival head met while another's rivals are being read binds
+            // nothing — outcome-preserving for every shape that terminates, as
+            // for `through_globs`: such a path never converged under the depth
+            // budget before S-599 either. A lone import still reads freely.
+            let rival = expansions.len() > 1;
+            if rival && self.in_rival_expansion.replace(true) {
+                return Res::NotFound;
+            }
+            let decided = self.resolve_expansions(expansions, rest, want, depth);
+            if rival {
+                self.in_rival_expansion.set(false);
+            }
+            if decided == Res::Ambiguous {
+                // Two imports of the head's name reach two declarations; a
+                // reason an inner walk already recorded is kept.
+                self.note(want, || Residue::TypeAmbiguous);
+            }
+            return decided;
         }
         if let Some(decided) = self.walk_from(self.package_type(package, head), rest, want) {
             return decided;
