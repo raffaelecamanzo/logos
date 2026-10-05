@@ -316,3 +316,49 @@ fn the_declared_file_answers_whatever_the_node_ids() {
         bound(5, 2, EdgeKind::Calls)
     );
 }
+
+/// A declaration names a file of its own language (review fix): the path model
+/// keys `src/x.js` where it keys `src/x.rs`, and a Rust `mod x;` never binds
+/// into the JavaScript file — whether the JavaScript file is alone at the path
+/// (and numbered first, the order that used to hand it the key, or after), or
+/// beside the `x.rs` the declaration does name, which is then the one candidate.
+#[test]
+fn only_a_file_of_the_declarations_language_answers_it() {
+    let rust_crate = |js_first: bool, with_rs: bool| {
+        let (lib, decl, alpha, js, js_run) = if js_first { (3, 4, 5, 1, 2) } else { (1, 2, 3, 10, 11) };
+        let mut nodes = vec![
+            node(lib, "crate", NodeKind::Module, "src/lib.rs"),
+            spanning(node(decl, "x", NodeKind::Module, "src/lib.rs"), 1, 1),
+            node(alpha, "alpha", NodeKind::Function, "src/lib.rs"),
+            node(js, "x", NodeKind::Module, "src/x.js"),
+            node(js_run, "run", NodeKind::Function, "src/x.js"),
+        ];
+        let mut edges = vec![contains(lib, decl), contains(lib, alpha), contains(js, js_run)];
+        if with_rs {
+            nodes.push(node(20, "x", NodeKind::Module, "src/x.rs"));
+            nodes.push(node(21, "run", NodeKind::Function, "src/x.rs"));
+            edges.push(contains(20, 21));
+        }
+        nodes.sort_by_key(|n| n.id);
+        ((nodes, edges), lib, alpha)
+    };
+    for js_first in [false, true] {
+        let (g, lib, alpha) = rust_crate(js_first, false);
+        assert_eq!(
+            outcome_in(&g, &[], &import(100, LIB_RS, lib, "crate::x::run")),
+            Outcome::Unbound,
+            "js_first={js_first}"
+        );
+        assert_eq!(
+            outcome_in(&g, &[], &call(101, LIB_RS, alpha, "crate::x::run")),
+            Outcome::Unbound,
+            "js_first={js_first}"
+        );
+        let (g, _, alpha) = rust_crate(js_first, true);
+        assert_eq!(
+            outcome_in(&g, &[], &call(101, LIB_RS, alpha, "crate::x::run")),
+            bound(alpha, 21, EdgeKind::Calls),
+            "js_first={js_first}"
+        );
+    }
+}

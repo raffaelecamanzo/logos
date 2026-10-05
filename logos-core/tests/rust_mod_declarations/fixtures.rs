@@ -90,3 +90,14 @@ pub const UNDECLARABLE: Fixture = &[
     ),
     ("src/x_impl.rs", "pub fn go() {}\n"),
 ];
+
+/// A Rust `mod x;` whose only file at the path is JavaScript (`src/x.js`): the
+/// path model keys both languages alike, and the declaration names neither.
+pub const FOREIGN_FILE: Fixture = &[
+    ("Cargo.toml", CARGO_TOML),
+    (
+        "src/lib.rs",
+        "mod x;\n\nuse crate::x::run;\n\npub fn alpha() {\n    run();\n}\n",
+    ),
+    ("src/x.js", "export function run() {}\n"),
+];

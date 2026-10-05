@@ -1145,7 +1145,7 @@ fn build_module_tree(
             .filter(|p| layout.has_import_roots(p));
         (import_root_path, n.id)
     });
-    let mut files_at: HashMap<ModKey, Vec<NodeId>> = HashMap::new();
+    let mut files_at: HashMap<ModKey, Vec<(NodeId, String)>> = HashMap::new();
     for root in file_roots {
         let Some(path) = &root.file_path else {
             continue; // an orphaned module node cannot anchor a tree
@@ -1153,7 +1153,10 @@ fn build_module_tree(
         let key = layout.module_key(path);
         modules.entry(key.clone()).or_insert(root.id);
         module_key.insert(root.id, key.clone());
-        files_at.entry(key.clone()).or_default().push(root.id);
+        files_at
+            .entry(key.clone())
+            .or_default()
+            .push((root.id, extension_of(path)));
         append_inline_modules(
             root.id,
             key,
@@ -1174,11 +1177,14 @@ fn build_module_tree(
 /// the first-by-id tie-break used to hand the key to whichever came first,
 /// usually the empty declaration, so every path through it found nothing.
 ///
-/// The key goes to the **one** file module at it. With none (a `#[path]`
-/// attribute, which is not read, or a missing file) the declaration keeps it
-/// and binds nothing beneath; with two (`x.rs` beside `x/mod.rs`, which rustc
-/// refuses) the declaration takes it back from whichever file won, so neither
-/// is guessed ([NFR-RA-05]). The outcome reads no node id: a sync and a cold
+/// The key goes to the **one** file module of the declaration's own language
+/// (its file extension) at it — the path model keys `src/x.js` where it keys
+/// `src/x.rs`, and a Rust declaration never names a JavaScript file. With none
+/// (a `#[path]` attribute, which is not read, a missing file, or only another
+/// language's file at that path) the declaration keeps the key, taking it back
+/// from a foreign file that won it, and binds nothing beneath; with two (`x.rs`
+/// beside `x/mod.rs`, which rustc refuses) the declaration takes it back from
+/// whichever file won, so neither is guessed ([NFR-RA-05]). The outcome reads no node id: a sync and a cold
 /// index agree ([NFR-RA-06]). No node, symbol or edge changes — only which
 /// node answers the key.
 ///
@@ -1193,7 +1199,7 @@ fn hand_declarations_to_their_files(
     nodes: &[NodeRow],
     parent: &HashMap<NodeId, NodeId>,
     members: &Members,
-    files_at: &HashMap<ModKey, Vec<NodeId>>,
+    files_at: &HashMap<ModKey, Vec<(NodeId, String)>>,
     modules: &mut HashMap<ModKey, NodeId>,
     module_key: &HashMap<NodeId, ModKey>,
 ) {
@@ -1206,11 +1212,17 @@ fn hand_declarations_to_their_files(
     for declaration in nodes.iter().filter(|n| is_declaration(n)) {
         let Some(key) = module_key.get(&declaration.id) else { continue };
         let Some(files) = files_at.get(key) else { continue };
-        match files.as_slice() {
+        let language = declaration.file_path.as_deref().map(extension_of);
+        let declared: Vec<NodeId> = files
+            .iter()
+            .filter(|(_, ext)| language.as_ref() == Some(ext))
+            .map(|(id, _)| *id)
+            .collect();
+        match declared.as_slice() {
             [file] => {
                 modules.insert(key.clone(), *file);
             }
-            _ if modules.get(key).is_some_and(|holder| files.contains(holder)) => {
+            _ if modules.get(key).is_some_and(|holder| files.iter().any(|(id, _)| id == holder)) => {
                 modules.insert(key.clone(), declaration.id);
             }
             _ => {}

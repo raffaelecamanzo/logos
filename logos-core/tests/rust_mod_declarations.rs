@@ -13,7 +13,7 @@
 //! [FR-RS-41]: ../../docs/specs/requirements/FR-RS-41.md
 //! [CR-186]: ../../docs/requests/CR-186-a-rust-mod-declaration-never-blocks-binding.md
 //! [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
-#![cfg(feature = "lang-rust")]
+#![cfg(all(feature = "lang-rust", feature = "lang-typescript"))]
 
 #[path = "rust_mod_declarations/fixtures.rs"]
 mod fixtures;
@@ -215,6 +215,26 @@ fn an_undeclarable_module_stays_unresolved_and_an_inline_one_binds() {
         strings(&["alpha -> src/lib.rs:deep"])
     );
     assert_eq!(unbound(rt, "src/lib.rs", EdgeKind::Calls), strings(&["go", "gone"]));
+}
+
+/// A declaration names a file of its own language (review fix): with only
+/// `src/x.js` at the path the Rust import and call stay unbound, and beside the
+/// `src/x.rs` it does name, that file is the one candidate — never a pair.
+#[test]
+fn a_declaration_never_binds_into_a_file_of_another_language() {
+    let (_tmp, engine) = indexed(fixtures::FOREIGN_FILE);
+    let rt = engine.runtime().unwrap();
+    assert!(edges_from(rt, "src/lib.rs", EdgeKind::Imports).is_empty());
+    assert!(edges_from(rt, "src/lib.rs", EdgeKind::Calls).is_empty());
+    assert_eq!(unbound(rt, "src/lib.rs", EdgeKind::Imports), strings(&["crate::x::run"]));
+    let mut beside = fixtures::FOREIGN_FILE.to_vec();
+    beside.push(("src/x.rs", "pub fn run() {}\n"));
+    let (_tmp, engine) = indexed(&beside);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges_from(rt, "src/lib.rs", EdgeKind::Calls),
+        strings(&["alpha -> src/x.rs:run"])
+    );
 }
 
 /// A declaration arriving in a re-extracted file binds as it does on a cold
