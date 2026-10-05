@@ -185,6 +185,24 @@ fn an_import_through_init_binds_to_its_package() {
     );
 }
 
+/// An `as` import binds the imported declaration but gives the file no alias
+/// of the imported name: after `from .helpers import open as open_resource`, a
+/// call to the builtin `open` is not a call into `helpers` (never fabricate).
+#[test]
+fn a_renamed_import_never_binds_a_call_to_the_original_name() {
+    let (_tmp, engine) = indexed(&[
+        ("pkg/__init__.py", ""),
+        ("pkg/helpers.py", "def open(p):\n    return p\n"),
+        (
+            "pkg/app.py",
+            "from .helpers import open as open_resource\n\n\ndef run(p):\n    return open(p)\n",
+        ),
+    ]);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(edges_from(rt, "pkg/app.py", EdgeKind::Imports), strings(&["pkg/helpers.py:open:function"]));
+    assert!(edges_from(rt, "pkg/app.py", EdgeKind::Calls).is_empty());
+}
+
 // ── healthchecks: the repository root ────────────────────────────────────────
 
 /// FR-RS-14 AC: `from hc.api.models import Check` binds — one row per imported

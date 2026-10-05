@@ -6239,9 +6239,9 @@ fn a_python_from_import_records_one_row_per_name_and_keeps_its_relative_level() 
         path("..::_internal::_wsgi_decoding_dance", "_wsgi_decoding_dance"),
         path("..::..::a::b::c", "c"),
         path("hc::api::models::Check", "Check"),
-        // The `as` name is not the alias yet (S-520): the imported name is.
-        path("pkg::name", "name"),
     ];
+    // An `as` import records no alias: `name` is not what the file binds.
+    expected.push(("pkg::name".to_string(), RefForm::Path, None));
     expected.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(import_rows(&facts), expected);
 }

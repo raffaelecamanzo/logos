@@ -165,6 +165,12 @@ const SELF_RECEIVER_METHOD_CAPTURE: &str = "ref.method.self";
 /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
 const FROM_MODULE_CAPTURE: &str = "ref.import.from";
 
+/// The `references`-query marker on an import that **renames** what it imports
+/// (`import a as b`, `from m import a as b`; S-519): the row records no alias,
+/// because the imported name is not a name the file binds — a call to `a` must
+/// never bind through it.
+const RENAMED_IMPORT_MARKER: &str = "ref.import.renamed";
+
 /// One source file handed to the extractor.
 #[derive(Debug, Clone)]
 pub struct FileInput {
@@ -1706,6 +1712,10 @@ fn collect_refs(
                         continue;
                     }
                     let (form, alias) = import_form(&marked, &segments);
+                    // An `as` import (`ref.import.renamed`, S-519) binds another
+                    // name than the one it imports: the imported name is no
+                    // alias of the file's.
+                    let alias = alias.filter(|_| !marked(RENAMED_IMPORT_MARKER));
                     if let (Some(receivers), RefForm::Path, Some(name)) =
                         (receivers.as_mut(), form, alias.as_deref())
                     {

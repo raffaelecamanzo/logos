@@ -17,13 +17,18 @@
 ;                 import y` → `..::x::y`), which the binder reads from the
 ;                 importing file's package. With `@ref.import.asterisk`
 ;                 (`from m import *`) the row is a glob of the module itself.
+;   @ref.import.renamed — a MARKER on an `as` import (`import a as b`,
+;                 `from m import a as b`): the imported name is NOT what the
+;                 file binds, so the row records no alias at all. A call to
+;                 `a` then never binds through an import that renamed it
+;                 (S-519 review); the `as` name becomes the alias with S-520.
 ;
 ; Droppable on disk at `.logos/plugins/python/queries/references.scm`
 ; (FR-PL-04, FR-PL-05).
 ;
 ; Deliberately NOT captured yet (documented limitations):
 ;   - `import x as y` / `from m import a as b` rename binding: the imported path
-;     is recorded, the `as` name is not yet the alias (S-520).
+;     is recorded with no alias; the `as` name is not yet the alias (S-520).
 
 (call
   function: (identifier) @ref.call)
@@ -64,7 +69,7 @@
 
 (import_statement
   name: (aliased_import
-    name: (dotted_name) @ref.import))
+    name: (dotted_name) @ref.import) @ref.import.renamed)
 
 (import_from_statement
   module_name: (_) @ref.import.from
@@ -73,7 +78,7 @@
 (import_from_statement
   module_name: (_) @ref.import.from
   name: (aliased_import
-    name: (dotted_name) @ref.import))
+    name: (dotted_name) @ref.import) @ref.import.renamed)
 
 (import_from_statement
   module_name: (_) @ref.import.from
