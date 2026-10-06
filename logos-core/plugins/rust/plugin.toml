@@ -29,6 +29,12 @@ module_separator = "::"
 # descriptor documents the grammar's contract and a mismatch is greppable.
 abi_version = 15
 
+# An unqualified call (`f()`) never reaches an associated item in Rust: a method
+# is reached only through `self.`, `Self::` or a type path. Declared explicitly —
+# not defaulted — so a bare call binds free functions only, never an `impl`
+# method that merely shares its name (S-590, CR-189, FR-RS-07).
+implicit_receiver = "none"
+
 # Extraction capabilities this descriptor provides queries for. Surfaced by
 # `logos languages` (FR-PL-06) and gates which `.scm` queries the registry
 # requires. `symbols` captures declarations (S-007); `references` captures

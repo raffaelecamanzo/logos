@@ -452,6 +452,23 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// explicitly declares `implicit_receiver = "none"`, so a bare call binds
+    /// free callables only (S-590, [FR-RS-07]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set — Java's, which declares nothing — binds exactly as before.
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    pub fn free_only_bare_call_extensions(&self) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| p.semantics().bare_calls_free_only)
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
     /// Grammars skipped at load due to an ABI mismatch ([FR-PL-03]).
     pub fn skipped(&self) -> &[SkippedGrammar] {
         &self.skipped
@@ -1128,6 +1145,23 @@ mod tests {
         #[cfg(feature = "lang-c-sharp")]
         assert!(declaring.contains("cs"), "`cs` sees its enclosing namespaces");
         for ext in ["rs", "java", "kt", "kts", "php", "py", "scala", "ts", "go", "rb", "c", "cpp", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
+        }
+    }
+
+    /// The free-only bare-call key (S-590, FR-RS-07): Go, Rust, Python, PHP,
+    /// TypeScript (with JavaScript) and TSX declare `implicit_receiver = "none"`
+    /// explicitly. Java declares nothing, and the `"self"` languages — C#,
+    /// Kotlin, Scala, C++, Ruby — reach the instance, so all are absent.
+    #[test]
+    fn free_only_bare_call_extensions_collect_only_the_explicit_none_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.free_only_bare_call_extensions();
+        for ext in ["rs", "go", "py", "php", "ts", "js", "mjs", "cjs", "tsx", "jsx"] {
+            assert!(declaring.contains(ext), "`{ext}`'s bare call reaches no member");
+        }
+        for ext in ["java", "cs", "kt", "kts", "scala", "cpp", "rb", "c", "md"] {
             assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
         }
     }

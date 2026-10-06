@@ -217,13 +217,19 @@ by each relation's payload token), read live from the graph.
 >   free function wins the tie
 >   ([CR-068](../requests/CR-068-reachability-binding-precision.md) Part B,
 >   [FR-RS-07](../specs/requirements/FR-RS-07.md)) — recovering the correct
->   target instead of leaving it ambiguous — while a scope with only the
->   method(s) still binds them (a strictly additive tie-break, never a drop).
->   That last case is a known over-binding in the languages whose bare call can
->   never reach a method — Go, Rust, Python, PHP, JavaScript and TypeScript: a
->   bare `fwrite()` inside a PHP method `fwrite`, or a bare `performWebSearch()`
->   beside a Go method of that name, binds the method (often itself) instead of
->   the builtin or package function it calls.
+>   target instead of leaving it ambiguous. In the languages whose bare call can
+>   never reach a method — Go, Rust, Python, PHP, JavaScript and TypeScript,
+>   whose plugins declare `implicit_receiver = "none"` — a bare call binds free
+>   functions only: it never binds a member of a class, nor a Go or Rust
+>   method, so a bare `fwrite()` inside a PHP method `fwrite`, or a bare
+>   `performWebSearch()` beside a Go method of that name, binds the free
+>   function of that name when there is one and otherwise stays unresolved (a
+>   builtin is external), never the method — and never itself. A function
+>   nested in a method still binds
+>   ([CR-189](../requests/CR-189-a-bare-call-never-reaches-an-instance-member.md)).
+>   Where a bare call can mean the current instance — C#, Kotlin, Scala, C++,
+>   Ruby, and Java, whose `m()` inside a class is `this.m()` — a scope with only
+>   the method(s) still binds them.
 > - **Ambiguous doc/prose tokens.** Doc→code links bind only on *exactly one*
 >   candidate. Common words that appear in prose but match zero or many code
 >   symbols (`index`, `sync`, `node`, `context`, …) correctly bind to nothing.

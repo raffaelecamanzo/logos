@@ -17,6 +17,12 @@ import_specifier = "path"
 # tree-sitter-go 0.25 is generated against ABI 15.
 abi_version = 15
 
+# An unqualified call (`f()`) is never a call on a receiver in Go: a method is
+# reached only through one (`s.f()`). Declared explicitly — not defaulted — so a
+# bare call binds free functions only, never a method that merely shares its
+# name (S-590, CR-189, FR-RS-07).
+implicit_receiver = "none"
+
 # `brokers` captures message-broker publish/subscribe sites (S-408, FR-WS-10,
 # ADR-54). Go's arm is the receiver-gated Kafka Streams topology form only —
 # `queries/brokers.scm` records why the Rust file's bare-verb patterns were

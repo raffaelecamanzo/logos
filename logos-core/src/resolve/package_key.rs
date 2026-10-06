@@ -91,6 +91,12 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     enclosing_namespace_exts: HashSet<String>,
+    /// Normalised extensions whose language explicitly declares
+    /// `implicit_receiver = "none"`, so a bare call binds free callables only
+    /// (S-590, [FR-RS-07]).
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    free_only_bare_call_exts: HashSet<String>,
 }
 
 /// One language's path-model data in a layout (S-519).
@@ -170,6 +176,18 @@ impl PackageLayout {
             .with_call_targets(registry.call_targets())
             .with_kind_following_supertypes(registry.supertype_kind_follows_target())
             .with_enclosing_namespaces(registry.enclosing_namespace_extensions())
+            .with_free_only_bare_calls(registry.free_only_bare_call_extensions())
+    }
+
+    /// This layout, with the extensions whose bare call binds free callables
+    /// only (S-590; the set
+    /// [`LanguageRegistry::free_only_bare_call_extensions`] returns).
+    pub fn with_free_only_bare_calls(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        self.free_only_bare_call_exts.extend(
+            exts.into_iter()
+                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
+        );
+        self
     }
 
     /// This layout, with the extensions whose namespace sees its enclosing
@@ -398,6 +416,16 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.enclosing_namespace_exts.contains(&ext))
     }
 
+    /// Whether a bare call written in the file at `path` binds free callables
+    /// only — never a member of a class-like container nor a callable with a
+    /// recorded self type (S-590, [FR-RS-07]): its language declares
+    /// `implicit_receiver = "none"` explicitly.
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    pub fn bare_calls_free_only(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.free_only_bare_call_exts.contains(&ext))
+    }
+
     /// What a call written in the file at `path` may bind besides a callable
     /// (S-521, [FR-RS-16]): its language's declaration, or none.
     ///
@@ -499,6 +527,7 @@ impl PackageLayout {
                 exts().filter(|_| semantics.supertype_kind_follows_target),
             )
             .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
+            .with_free_only_bare_calls(exts().filter(|_| semantics.bare_calls_free_only))
     }
 
     /// `true` when the file at `path` takes the package rungs: its language
@@ -1264,6 +1293,30 @@ mod call_target_tests {
             }
         }
         assert!(declaring > 0, "some shipped plugin declares the enclosing-namespace key");
+        assert!(silent > 0, "a plugin that does not declare it binds as before");
+    }
+
+    /// The same parity for the free-only bare-call key (S-590): the
+    /// single-plugin layout answers every extension as the registry's does,
+    /// over a set some shipped plugin is in — and one Java, which omits the
+    /// key, is out of.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_free_only_bare_call_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let (mut declaring, mut silent) = (0, 0);
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                let free_only = own.bare_calls_free_only(&path);
+                assert_eq!(free_only, full.bare_calls_free_only(&path), "{path}");
+                declaring += usize::from(free_only);
+                silent += usize::from(!free_only);
+            }
+        }
+        assert!(declaring > 0, "some shipped plugin declares the free-only key");
         assert!(silent > 0, "a plugin that does not declare it binds as before");
     }
 }
