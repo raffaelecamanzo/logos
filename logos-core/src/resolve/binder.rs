@@ -641,9 +641,11 @@ pub(crate) struct Index {
     /// module (or, for a proven receiver, the type's module) be that type's
     /// method.
     type_names: HashMap<(String, String), usize>,
-    /// project-relative path → file id, for the files whose ledger rows name a
-    /// source node of the snapshot — how a node reaches its file's
-    /// [`FileScope`] (S-493: whether its file imports its self type's name).
+    /// project-relative path → file id, for the files whose own ledger rows
+    /// name a source node of the snapshot — how a node reaches its file's
+    /// [`FileScope`] (S-493: whether its file imports its self type's name;
+    /// S-588: what a module re-exports). A capture-before-delete row is filed
+    /// under another file than its source's, so it is never read here.
     file_ids: HashMap<String, i64>,
     /// Every method of an `impl Trait for X` block — the source of an
     /// `Implements` ledger row outside a package-shaped language (S-281's rows,
@@ -756,8 +758,14 @@ impl Index {
         index.hierarchy_families = hierarchy.families;
         index.trait_users = hierarchy.trait_users;
         index.trait_impl_methods = build_trait_impl_methods(refs, &index);
+        // A capture-before-delete row (`Symbol`) is filed under its *target's*
+        // file while its source sits in another (ADR-10): it never says which
+        // file its source's path is, or a sync would read that file's scope
+        // from the synced file's rows where a cold index — which holds no
+        // capture row — reads its own (S-588).
         index.file_ids = refs
             .iter()
+            .filter(|r| r.form != RefForm::Symbol)
             .filter_map(|r| {
                 let file_id = r.file_id?;
                 let path = index.by_symbol.get(&r.source_symbol).and_then(|id| index.info.get(id))?;

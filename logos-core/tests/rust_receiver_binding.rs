@@ -337,3 +337,27 @@ fn a_re_export_added_or_removed_on_sync_rebinds_the_importing_crates_call() {
     let edges = synced_equals_reindexed(&exported, &[("app-core/src/lib.rs", "pub mod store;\n")]);
     assert!(targets(&edges, "cli/src/main.rs:run@2").is_empty(), "{edges:#?}");
 }
+
+#[test]
+fn a_capture_row_never_lends_its_file_to_the_re_exporting_module() {
+    // `config/mod.rs` re-exports `Config` and itself calls into `settings.rs`.
+    // Syncing `settings.rs` captures that inbound call as a row filed under
+    // `settings.rs` whose source is in `config/mod.rs`; the re-export must
+    // still be read from `config/mod.rs`'s own `use`s, as a cold index reads
+    // it.
+    let initial = [
+        ("app/src/lib.rs", "pub mod config;\npub mod user;\n"),
+        ("app/src/config/mod.rs", "mod settings;\npub use settings::Config;\npub fn boot() { settings::touch(); }\n"),
+        (
+            "app/src/config/settings.rs",
+            "pub struct Config;\nimpl Config {\n    pub fn get(&self) {}\n}\npub fn touch() {}\n",
+        ),
+        ("app/src/user.rs", "use crate::config::Config;\npub fn run(x: &Config) { x.get(); }\n"),
+    ];
+    let edited = (
+        "app/src/config/settings.rs",
+        "pub struct Config;\nimpl Config {\n    pub fn get(&self) {}\n    pub fn put(&self) {}\n}\npub fn touch() {}\n",
+    );
+    let edges = synced_equals_reindexed(&initial, &[edited]);
+    assert_eq!(targets(&edges, "app/src/user.rs:run@2"), ["app/src/config/settings.rs:get@3"]);
+}
