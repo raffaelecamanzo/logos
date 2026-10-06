@@ -42,19 +42,24 @@
 //!    the all-pairs counter applied, so every verdict is the same.
 //!
 //! A ubiquitous shingle sorts last and falls out of almost every prefix, so a
-//! posting shared by *n* functions adds no *n*² work; the work counter
-//! ([`ClusterWork`]) pins that growth in the hub-shingle test.
+//! posting shared by *n* otherwise-unrelated functions adds no *n*² work; the
+//! work counter ([`ClusterWork`]) pins that growth in the hub-shingle test. The
+//! work is output-sensitive, not linear: *k* functions that genuinely are near
+//! clones of one another still yield their *k*²/2 candidate and verified pairs,
+//! as they must — every one of those pairs is a verdict input.
 //!
 //! [CR-198]: ../../../docs/requests/CR-198-near-clone-clustering-is-exact-under-prefix-filtering.md
 //!
 //! # Memory ([NFR-PE-06])
 //!
-//! Memory is linear in the input: the per-function shingle sets (the index
-//! itself, re-keyed to ranks), the prefix postings (at most one entry per
-//! indexed shingle), and the verified pairs. The all-pairs counter's
-//! `{pair → count}` map — O(Σ|posting|²) entries, the whole of the old spike —
-//! is gone. No fixed ceiling is claimed: the candidate count still depends on
-//! how many functions share mid-frequency shingles within their prefixes.
+//! Memory is linear in the input — the per-function shingle sets (the index
+//! itself, re-keyed to ranks) and the prefix postings (at most one entry per
+//! indexed shingle) — **plus** the verified pairs, which are held until the
+//! union step. The all-pairs counter's `{pair → count}` map — O(Σ|posting|²)
+//! entries, the whole of the old spike — is gone. No fixed ceiling is claimed:
+//! the candidate and verified pairs still grow with how many functions share
+//! shingles within their prefixes, quadratically for a large group of mutual
+//! near clones, as under the all-pairs counter.
 //!
 //! [NFR-PE-06]: ../../../docs/specs/requirements/NFR-PE-06.md
 //!
