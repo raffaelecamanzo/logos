@@ -2886,6 +2886,31 @@ fn a_qualified_head_is_read_under_each_enclosing_namespace() {
     assert_eq!(bind_enclosing(&types, &nested, &[], &extends(4, 2, "Base::Inner")), Outcome::Unbound);
 }
 
+/// A nearer level whose type has no such member supplies nothing: the
+/// wildcard that does is still read, as it was before the rung existed, and an
+/// outer level is still never reached past that type (the rung adds bindings
+/// where its walk succeeds and takes none away).
+#[test]
+fn an_enclosing_type_without_the_member_leaves_the_wildcards_to_decide() {
+    // `Result.Inner` from `A.Sub`: `A.Result` has no `Inner`; `using X;` supplies
+    // an `X.Result` that has one.
+    let types = [("cs", "A", "Result"), ("cs", "X", "Result"), ("cs", "A.Sub", "Impl")];
+    let nested = [(900, "Inner", 1)];
+    let glob = make_ref(10, ty_file(2), ty(2), "X", None, RefForm::Glob, EdgeKind::Imports);
+    let r = extends(1, 2, "Result::Inner");
+    bound_to(bind_enclosing(&types, &nested, std::slice::from_ref(&glob), &r), ty(2), 900, EdgeKind::Extends);
+    // Without the wildcard nothing supplies the member, and without the key the
+    // wildcard binds it just the same — the rung took nothing away.
+    assert_eq!(bind_enclosing(&types, &nested, &[], &r), Outcome::Unbound);
+    let ix = enclosing_index(&types, &nested, &[glob, r.clone()], false);
+    bound_to(bind(&r, &ix, BindingPolicy::Balanced), ty(2), 900, EdgeKind::Extends);
+    // A nearer level that reached a type still hides the outer level's: the
+    // `Inner` of `A`'s `Result` is not bound past `A.B`'s `Result`.
+    let types = [("cs", "A", "Result"), ("cs", "A.B", "Result"), ("cs", "A.B.C", "Impl")];
+    let nested = [(900, "Inner", 0)];
+    assert_eq!(bind_enclosing(&types, &nested, &[], &extends(2, 2, "Result::Inner")), Outcome::Unbound);
+}
+
 /// The global namespace is not an enclosing level, and another interop
 /// family's namespace of the same spelling is never a candidate.
 #[test]

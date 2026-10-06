@@ -4020,7 +4020,9 @@ impl Ctx<'_> {
     /// (S-595, [FR-RS-45]), the path read under each namespace enclosing the
     /// source's own, nearest first
     /// ([`resolve_fqn_under`](Ctx::resolve_fqn_under)) — two types at one level
-    /// are [`Res::Ambiguous`], never a pick of an outer level; else one a
+    /// are [`Res::Ambiguous`], never a pick of an outer level, and a level
+    /// whose type has no such member ends that walk but not the rungs below it;
+    /// else one a
     /// wildcard brings into view; else the whole path read as a fully-qualified
     /// name ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung whose head names a
     /// type decides — a simple type name obscures a package of the same
@@ -4066,8 +4068,15 @@ impl Ctx<'_> {
             return decided;
         }
         for level in self.enclosing_levels(package) {
-            if let Some(decided) = self.resolve_fqn_under(level, segs, want) {
-                return decided;
+            match self.resolve_fqn_under(level, segs, want) {
+                None => {}
+                // A nearer level that reached a type hides the outer levels,
+                // but one whose walk then found no such member supplies
+                // nothing: the wildcards and the fully-qualified read decide,
+                // as they did before this rung existed — never a guess past
+                // the level (NFR-RA-05).
+                Some(Res::NotFound) => break,
+                Some(decided) => return decided,
             }
         }
         match self.glob_members(head, Want::Any, true) {
