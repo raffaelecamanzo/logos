@@ -18,7 +18,8 @@
 //!     └── fn run    (5)
 //! ```
 
-use super::binder::{bind, Index, Outcome, Residue};
+use super::binder::{bind, residue, Index, Outcome, Residue};
+use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind, ReceiverShape, RefForm};
@@ -98,6 +99,7 @@ fn make_ref(
         resolved: false,
         payload: None,
         receiver: None,
+        peeled: None,
     }
 }
 
@@ -829,6 +831,7 @@ fn artifact_ref(target: &str, form: RefForm, relation: ArtifactRelation) -> Unre
         resolved: false,
         payload: Some(relation.as_str().to_string()),
         receiver: None,
+        peeled: None,
     }
 }
 
@@ -1255,6 +1258,7 @@ fn infra_ref(
         resolved: false,
         payload: Some(relation.as_str().to_string()),
         receiver: None,
+        peeled: None,
     }
 }
 
@@ -2374,6 +2378,373 @@ fn a_self_type_the_crate_does_not_declare_or_imports_from_outside_binds_nothing(
     assert_eq!(residue(&from_util, &ix, BindingPolicy::Strict), external());
 }
 
+// ── S-588 / FR-RS-42: a call on a proven Rust receiver binds among its type's methods ──
+//
+// S-587 retypes `x.m()` on a proven receiver to the Path-form `T::m` of shape
+// `other`, with the wrappers peeled to reach `T`. The binder reads `T` through
+// the caller file's `use` declarations to one in-repository type, then binds
+// exactly one of that type's methods (S-493's universe), inherent first.
+
+/// The receiver fixture's nodes, edges, self types and `Implements` rows.
+type ReceiverFixture = (Vec<NodeRow>, Vec<EdgeRow>, Vec<(NodeId, String)>, Vec<UnresolvedRefRow>);
+
+/// `Store` (400) and `Other` (401) in `src/util.rs`, both defining `get` (402,
+/// 403). `Store` has an inherent `put` (405) beside a trait impl's (404), a
+/// `len` (406), a trait impl's `clone` (407) and two trait impls' `close` (408,
+/// 409). Crate `other` declares its own `Store` (410) with a `get` (411). The
+/// caller is `alpha` (2) in `src/lib.rs`, which imports nothing yet.
+fn receiver_fixture() -> ReceiverFixture {
+    let (mut nodes, mut edges) = fixture();
+    let mut self_types = Vec::new();
+    for (id, name, kind, file, module, self_type) in [
+        (400, "Store", NodeKind::Struct, "src/util.rs", 4, None),
+        (401, "Other", NodeKind::Struct, "src/util.rs", 4, None),
+        (402, "get", NodeKind::Method, "src/util.rs", 4, Some("Store")),
+        (403, "get", NodeKind::Method, "src/util.rs", 4, Some("Other")),
+        (404, "put", NodeKind::Method, "src/util.rs", 4, Some("Store")),
+        (405, "put", NodeKind::Method, "src/util.rs", 4, Some("Store")),
+        (406, "len", NodeKind::Method, "src/util.rs", 4, Some("Store")),
+        (407, "clone", NodeKind::Method, "src/util.rs", 4, Some("Store")),
+        (408, "close", NodeKind::Method, "src/util.rs", 4, Some("Store")),
+        (409, "close", NodeKind::Method, "src/util.rs", 4, Some("Store")),
+        (410, "Store", NodeKind::Struct, "other/src/lib.rs", 20, None),
+        (411, "get", NodeKind::Method, "other/src/lib.rs", 20, Some("Store")),
+    ] {
+        nodes.push(node(id, name, kind, file));
+        edges.push(contains(module, id));
+        if let Some(ty) = self_type {
+            self_types.push((NodeId(id), ty.to_string()));
+        }
+    }
+    let implements = [(404, "Tr"), (407, "Clone"), (408, "Open"), (409, "Shut")]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, tr))| make_ref(300 + i as i64, UTIL_RS, id, tr, None, RefForm::Path, EdgeKind::Implements))
+        .collect();
+    (nodes, edges, self_types, implements)
+}
+
+/// A call `x.<target's method>()` S-587 retyped from a proven receiver, made
+/// from `alpha` in `src/lib.rs`.
+fn proven(id: i64, target: &str, peeled: Option<&str>) -> UnresolvedRefRow {
+    UnresolvedRefRow {
+        receiver: Some(ReceiverShape::Other),
+        peeled: peeled.map(str::to_string),
+        ..call(id, LIB_RS, 2, target)
+    }
+}
+
+/// An `Imports` row of `src/lib.rs`: `use <path> as <alias>`.
+fn lib_use(id: i64, path: &str, alias: &str) -> UnresolvedRefRow {
+    make_ref(id, LIB_RS, 1, path, Some(alias), RefForm::Path, EdgeKind::Imports)
+}
+
+/// A `use` glob of `src/lib.rs`: `use <path>::*`.
+fn lib_glob(id: i64, path: &str) -> UnresolvedRefRow {
+    make_ref(id, LIB_RS, 1, path, None, RefForm::Glob, EdgeKind::Imports)
+}
+
+/// The receiver fixture's index over `r` and `extra`, minus the nodes in
+/// `drop`, keyed by `layout`.
+fn receiver_index_with(
+    r: &UnresolvedRefRow,
+    extra: &[UnresolvedRefRow],
+    drop: &[i64],
+    layout: PackageLayout,
+) -> Index {
+    let (mut nodes, edges, mut self_types, mut refs) = receiver_fixture();
+    nodes.retain(|n| !drop.contains(&n.id.0));
+    self_types.retain(|(id, _)| !drop.contains(&id.0));
+    refs.extend(extra.iter().cloned());
+    refs.push(r.clone());
+    Index::build_with_layout(&nodes, &edges, &refs, layout).with_self_types(self_types)
+}
+
+/// [`receiver_index_with`] under the layout the Rust plugin declares: its
+/// stems, and `Arc`/`Box` providing `clone` themselves.
+fn receiver_index(r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], drop: &[i64]) -> Index {
+    let wrappers = std::collections::BTreeMap::from([
+        ("Arc".to_string(), vec!["clone".to_string(), "downgrade".to_string()]),
+        ("Box".to_string(), vec!["clone".to_string()]),
+    ]);
+    let layout = PackageLayout::rust_stems_for_tests()
+        .with_wrapper_methods(std::collections::HashMap::from([("rs".to_string(), wrappers)]));
+    receiver_index_with(r, extra, drop, layout)
+}
+
+#[test]
+fn a_proven_receiver_binds_its_own_types_method_and_never_a_same_named_one() {
+    // `Store` and `Other` both define `get`; each proven receiver binds its own
+    // type's, at every tier — and the same rows as written-out Method rows bind
+    // nothing (S-514), which is why the proof is recorded.
+    let imports = [lib_use(90, "crate::util::Store", "Store"), lib_use(91, "crate::util::Other", "Other")];
+    for policy in POLICIES {
+        let store = proven(100, "Store::get", None);
+        bound_to(bind(&store, &receiver_index(&store, &imports, &[]), policy), 2, 402, EdgeKind::Calls);
+        let other = proven(101, "Other::get", Some("&"));
+        bound_to(bind(&other, &receiver_index(&other, &imports, &[]), policy), 2, 403, EdgeKind::Calls);
+    }
+    // A path the file writes out names the type without a `use`, in its own
+    // crate and in another in-repository crate.
+    let qualified = proven(102, "crate::util::Store::get", None);
+    bound_to(bind(&qualified, &receiver_index(&qualified, &[], &[]), BindingPolicy::Strict), 2, 402, EdgeKind::Calls);
+    let cross_crate = proven(103, "other::Store::get", None);
+    bound_to(bind(&cross_crate, &receiver_index(&cross_crate, &[], &[]), BindingPolicy::Strict), 2, 411, EdgeKind::Calls);
+    // …and so does a `use` of the other crate's type.
+    let imported = proven(104, "Store::get", None);
+    let ix = receiver_index(&imported, &[lib_use(92, "other::Store", "Store")], &[]);
+    bound_to(bind(&imported, &ix, BindingPolicy::Strict), 2, 411, EdgeKind::Calls);
+}
+
+#[test]
+fn a_proven_receivers_type_is_read_through_the_files_use_alone() {
+    let external = Some(Residue::ExternalType { candidates: Vec::new() });
+    // No `use` names `Store`: the crate's `util::Store` and crate `other`'s
+    // are both same-named types the file never imports — neither is a
+    // candidate, not even through the aggressive workspace fallback, which
+    // would pick the caller's crate's one.
+    let r = proven(100, "Store::get", None);
+    let ix = receiver_index(&r, &[], &[]);
+    for policy in POLICIES {
+        assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{policy:?}");
+    }
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), external);
+    // A `use` of a type outside the repository decides alone: the glob that
+    // brings the crate's `Store` into view does not override it, as Rust's
+    // explicit import shadows a glob.
+    let ix = receiver_index(&r, &[lib_use(90, "std::x::Store", "Store"), lib_glob(91, "crate::util")], &[]);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), external);
+    // The glob alone brings it into view: a glob is an import.
+    let ix = receiver_index(&r, &[lib_glob(91, "crate::util")], &[]);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 402, EdgeKind::Calls);
+    // Two globs each bringing a `Store`: the file names two types.
+    let ix = receiver_index(&r, &[lib_glob(91, "crate::util"), lib_glob(92, "other")], &[]);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::TypeAmbiguous));
+}
+
+#[test]
+fn a_type_another_crate_re_exports_is_followed_to_its_declaration() {
+    // Crate `other` declares `Engine` (414, `start` 415) in `other/src/engine.rs`
+    // (module 25) and re-exports it from its root: `pub use engine::Engine;`.
+    // `use other::Engine` names that declaration, which no member of the root
+    // module is.
+    let (mut nodes, mut edges, mut self_types, implements) = receiver_fixture();
+    nodes.extend([
+        node(25, "engine", NodeKind::Module, "other/src/engine.rs"),
+        node(414, "Engine", NodeKind::Struct, "other/src/engine.rs"),
+        node(415, "start", NodeKind::Method, "other/src/engine.rs"),
+    ]);
+    edges.extend([contains(25, 414), contains(25, 415)]);
+    self_types.push((NodeId(415), "Engine".to_string()));
+    let index = |r: &UnresolvedRefRow, extra: &[UnresolvedRefRow]| {
+        let mut refs = implements.clone();
+        refs.extend(extra.iter().cloned());
+        refs.push(r.clone());
+        Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone())
+    };
+    let reexport = |path: &str| make_ref(95, OTHER_LIB_RS, 20, path, Some("Engine"), RefForm::Path, EdgeKind::Imports);
+    let r = proven(100, "Engine::start", None);
+    let import = lib_use(90, "other::Engine", "Engine");
+    for written in ["engine::Engine", "self::engine::Engine", "crate::engine::Engine"] {
+        let ix = index(&r, &[import.clone(), reexport(written)]);
+        bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 415, EdgeKind::Calls);
+    }
+    // Written out in full, the path takes the same re-export.
+    let qualified = proven(101, "other::Engine::start", None);
+    bound_to(bind(&qualified, &index(&qualified, &[reexport("engine::Engine")]), BindingPolicy::Strict), 2, 415, EdgeKind::Calls);
+    // No re-export: the root declares no `Engine`, so the import names none.
+    let ix = index(&r, std::slice::from_ref(&import));
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::ExternalType { candidates: Vec::new() }));
+    // A glob of the re-exporting crate's root reads none of its imports (only
+    // an ancestor's glob does: the graph cannot tell a `pub use` from a
+    // private one), while a `crate::` path written inside that crate does.
+    let ix = index(&r, &[lib_glob(91, "other"), reexport("engine::Engine")]);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    let own_crate = UnresolvedRefRow {
+        receiver: Some(ReceiverShape::Other),
+        ..call(102, OTHER_LIB_RS, 21, "crate::Engine::start")
+    };
+    let ix = index(&own_crate, &[reexport("engine::Engine")]);
+    bound_to(bind(&own_crate, &ix, BindingPolicy::Strict), 21, 415, EdgeKind::Calls);
+    // A re-export of something the repository does not declare is external too,
+    // and a re-export naming itself ends.
+    for written in ["std::x::Engine", "Engine"] {
+        let ix = index(&r, &[import.clone(), reexport(written)]);
+        assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound, "{written}");
+    }
+}
+
+/// Crate `other` declares `Deep` (431, `run` 432) in `other/src/deep.rs`
+/// (module 30). `mid.rs` (module 31) and `mid/sub.rs` (module 33) sit in that
+/// crate, and a crate `facade` (module 35) beside it; `reexports` gives each
+/// file's `use` of `Deep` as `(file id, source module, path)`, and `imports`
+/// the caller's own.
+fn reexport_chain_index(r: &UnresolvedRefRow, reexports: &[(i64, i64, &str)], imports: &[UnresolvedRefRow]) -> Index {
+    let (mut nodes, mut edges, mut self_types, mut refs) = receiver_fixture();
+    nodes.extend([
+        node(30, "deep", NodeKind::Module, "other/src/deep.rs"),
+        node(31, "mid", NodeKind::Module, "other/src/mid.rs"),
+        node(33, "sub", NodeKind::Module, "other/src/mid/sub.rs"),
+        node(35, "facade", NodeKind::Module, "facade/src/lib.rs"),
+        node(431, "Deep", NodeKind::Struct, "other/src/deep.rs"),
+        node(432, "run", NodeKind::Method, "other/src/deep.rs"),
+    ]);
+    edges.extend([contains(30, 431), contains(30, 432)]);
+    self_types.push((NodeId(432), "Deep".to_string()));
+    for (i, (file, module, path)) in reexports.iter().enumerate() {
+        refs.push(make_ref(60 + i as i64, *file, *module, path, Some("Deep"), RefForm::Path, EdgeKind::Imports));
+    }
+    refs.extend(imports.iter().cloned());
+    refs.push(r.clone());
+    Index::build(&nodes, &edges, &refs).with_self_types(self_types)
+}
+
+#[test]
+fn a_re_export_chain_of_two_hops_is_followed_and_a_cycle_ends() {
+    // `other`'s root re-exports `mid::Deep`, which `mid` re-exports from
+    // `deep`: two hops to the declaration.
+    let r = proven(100, "Deep::run", None);
+    let import = [lib_use(90, "other::Deep", "Deep")];
+    let ix = reexport_chain_index(&r, &[(OTHER_LIB_RS, 20, "mid::Deep"), (40, 31, "crate::deep::Deep")], &import);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 432, EdgeKind::Calls);
+    // Two modules re-exporting each other end as not found: external.
+    let ix = reexport_chain_index(&r, &[(OTHER_LIB_RS, 20, "mid::Deep"), (40, 31, "crate::Deep")], &import);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::ExternalType { candidates: Vec::new() }));
+}
+
+#[test]
+fn a_facade_crate_re_exporting_another_crates_type_is_followed() {
+    // `facade`'s root: `pub use other::deep::Deep;` — an anchor on another
+    // crate's name.
+    let r = proven(100, "Deep::run", None);
+    let ix = reexport_chain_index(&r, &[(41, 35, "other::deep::Deep")], &[lib_use(90, "facade::Deep", "Deep")]);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 432, EdgeKind::Calls);
+}
+
+#[test]
+fn a_super_re_export_is_followed() {
+    // `other::mid::sub` re-exports `super::super::deep::Deep`; the caller
+    // writes the path through `sub`.
+    let r = proven(100, "other::mid::sub::Deep::run", None);
+    let ix = reexport_chain_index(&r, &[(42, 33, "super::super::deep::Deep")], &[]);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 432, EdgeKind::Calls);
+}
+
+#[test]
+fn an_inherent_method_outranks_a_trait_impls_and_two_of_one_rank_bind_nothing() {
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    let put = proven(100, "Store::put", None);
+    bound_to(bind(&put, &receiver_index(&put, &store, &[]), BindingPolicy::Strict), 2, 405, EdgeKind::Calls);
+    // With no inherent `put`, the trait impl's is the type's one `put`.
+    bound_to(bind(&put, &receiver_index(&put, &store, &[405]), BindingPolicy::Strict), 2, 404, EdgeKind::Calls);
+    // Two trait impls' `close`, no inherent one: Rust would make the caller
+    // say which.
+    let close = proven(101, "Store::close", None);
+    let ix = receiver_index(&close, &store, &[]);
+    assert_eq!(bind(&close, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&close, &ix, BindingPolicy::Aggressive), Some(Residue::OverloadAmbiguous));
+    // None: the type records no `missing` — a trait default or a derive
+    // supplies it — and the free `helper` beside the caller is no method of it.
+    for target in ["Store::missing", "Store::helper"] {
+        let none = proven(102, target, None);
+        let ix = receiver_index(&none, &store, &[]);
+        assert_eq!(bind(&none, &ix, BindingPolicy::Aggressive), Outcome::Unbound, "{target}");
+        assert_eq!(residue(&none, &ix, BindingPolicy::Aggressive), Some(Residue::SupertypeUnreached), "{target}");
+    }
+}
+
+#[test]
+fn a_method_the_peeled_wrapper_provides_binds_nothing() {
+    let external = Some(Residue::ExternalType { candidates: Vec::new() });
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    // `Store` implements `clone` (407). Through `Arc`, `Box` or a reference to
+    // either, `x.clone()` is the wrapper's own method.
+    for peeled in ["Arc", "Box", "& Arc", "Arc &"] {
+        let r = proven(100, "Store::clone", Some(peeled));
+        let ix = receiver_index(&r, &store, &[]);
+        assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound, "{peeled}");
+        assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), external, "{peeled}");
+    }
+    // A reference provides nothing: `x.clone()` on `&Store` is `Store`'s.
+    for peeled in [None, Some("&"), Some("&mut")] {
+        let r = proven(101, "Store::clone", peeled);
+        bound_to(bind(&r, &receiver_index(&r, &store, &[]), BindingPolicy::Strict), 2, 407, EdgeKind::Calls);
+    }
+    // A method the wrapper does not provide reaches `T`'s through it.
+    let get = proven(102, "Store::get", Some("Arc"));
+    bound_to(bind(&get, &receiver_index(&get, &store, &[]), BindingPolicy::Strict), 2, 402, EdgeKind::Calls);
+    // The list is the plugin's declaration, not the binder's: a layout that
+    // declares none lets `Arc`'s `clone` through.
+    let r = proven(103, "Store::clone", Some("Arc"));
+    let ix = receiver_index_with(&r, &store, &[], PackageLayout::rust_stems_for_tests());
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 407, EdgeKind::Calls);
+}
+
+#[test]
+fn a_receiver_type_the_repository_does_not_declare_never_binds() {
+    // `Store` defines `len` and `get`; a `String`, `Vec<_>` or `std::io::Error`
+    // receiver — imported or not — never reaches them, at any tier.
+    let imports = [lib_use(90, "crate::util::Store", "Store"), lib_use(91, "std::io", "io")];
+    for target in ["String::len", "Vec::len", "std::io::Error::get", "io::Error::get", "Option::get"] {
+        let r = proven(100, target, None);
+        let ix = receiver_index(&r, &imports, &[]);
+        for policy in POLICIES {
+            assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{target} at {policy:?}");
+        }
+        assert_eq!(
+            residue(&r, &ix, BindingPolicy::Aggressive),
+            Some(Residue::ExternalType { candidates: Vec::new() }),
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn a_type_declared_once_binds_a_method_whose_impl_sits_in_another_module() {
+    // `Store` is declared once in crate `crate` (in `util`); an impl block in
+    // `lib.rs` adds `scan` (416). Its name denotes the one `Store`, so the
+    // method binds wherever its impl sits.
+    let (mut nodes, mut edges, mut self_types, implements) = receiver_fixture();
+    nodes.push(node(416, "scan", NodeKind::Method, "src/lib.rs"));
+    edges.push(contains(1, 416));
+    self_types.push((NodeId(416), "Store".to_string()));
+    let r = proven(100, "Store::scan", None);
+    let mut refs = implements;
+    refs.extend([lib_use(90, "crate::util::Store", "Store"), r.clone()]);
+    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 416, EdgeKind::Calls);
+}
+
+#[test]
+fn a_same_named_type_of_another_module_is_told_apart_by_its_own_module() {
+    // A second `Store` in `mod inner` (412) with its own `get` (413): the
+    // crate now names two `Store`s, so a `get` binds only from the impls in
+    // the proven type's own module.
+    let (mut nodes, mut edges, mut self_types, implements) = receiver_fixture();
+    nodes.extend([node(412, "Store", NodeKind::Struct, "src/lib.rs"), node(413, "get", NodeKind::Method, "src/lib.rs")]);
+    edges.extend([contains(6, 412), contains(6, 413)]);
+    self_types.push((NodeId(413), "Store".to_string()));
+    let index = |r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], drop: &[i64]| {
+        let mut refs = implements.clone();
+        refs.extend(extra.iter().cloned());
+        refs.push(r.clone());
+        let nodes: Vec<NodeRow> = nodes.iter().filter(|n| !drop.contains(&n.id.0)).cloned().collect();
+        Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone())
+    };
+    let r = proven(100, "Store::get", None);
+    bound_to(bind(&r, &index(&r, &[lib_use(90, "crate::util::Store", "Store")], &[]), BindingPolicy::Strict), 2, 402, EdgeKind::Calls);
+    bound_to(bind(&r, &index(&r, &[lib_use(90, "crate::inner::Store", "Store")], &[]), BindingPolicy::Strict), 2, 413, EdgeKind::Calls);
+    // `inner`'s `Store` with no `get` of its own: `util`'s lone `get` may be
+    // the other type's, so nothing binds.
+    let ix = index(&r, &[lib_use(90, "crate::inner::Store", "Store")], &[413]);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::TypeAmbiguous));
+}
+
 // ── S-514 / FR-RS-12: a receiver call binds by its receiver's shape ─────────
 //
 // Extraction records each Method-form call's receiver shape (`self`, `super`,
@@ -2394,6 +2765,7 @@ fn shaped(
 ) -> UnresolvedRefRow {
     UnresolvedRefRow {
         receiver,
+        peeled: None,
         ..make_ref(id, file_id, source_node, target, None, RefForm::Method, EdgeKind::Calls)
     }
 }

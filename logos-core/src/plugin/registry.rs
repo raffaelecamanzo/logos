@@ -31,7 +31,7 @@
 //! [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 //! [NFR-PC-03]: ../../../docs/specs/requirements/NFR-PC-03.md
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -466,6 +466,28 @@ impl LanguageRegistry {
             .filter(|p| !p.is_documentation() && !p.is_artifact())
             .filter(|p| p.semantics().bare_calls_free_only)
             .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares the methods a peeled receiver wrapper provides (S-588,
+    /// [FR-RS-42]), each mapped to that declaration. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the map peels no wrapper that provides a method.
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    pub fn wrapper_methods(&self) -> HashMap<String, BTreeMap<String, Vec<String>>> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| !p.semantics().wrapper_methods.is_empty())
+            .flat_map(|p| {
+                let declared = &p.semantics().wrapper_methods;
+                p.extensions()
+                    .iter()
+                    .map(move |e| (normalize_ext(e), declared.clone()))
+            })
             .collect()
     }
 
@@ -1164,6 +1186,22 @@ mod tests {
         for ext in ["java", "cs", "kt", "kts", "scala", "cpp", "rb", "c", "md"] {
             assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
         }
+    }
+
+    /// The wrapper-method table (S-588, FR-RS-42): Rust declares what `Arc`,
+    /// `Rc` and `Box` provide themselves — `clone` among them — and no
+    /// reference wrapper; no other shipped grammar peels a receiver.
+    #[test]
+    fn wrapper_methods_are_declared_by_rust_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declared = reg.wrapper_methods();
+        assert_eq!(declared.keys().collect::<Vec<_>>(), ["rs"], "only Rust peels a receiver");
+        let rust = &declared["rs"];
+        for wrapper in ["Arc", "Rc", "Box"] {
+            assert!(rust[wrapper].iter().any(|m| m == "clone"), "{wrapper} provides `clone`");
+        }
+        assert!(!rust.contains_key("&") && !rust.contains_key("&mut"), "a reference provides nothing");
     }
 
     /// A synthetic artifact-class grammar (S-062, CR-010): it reuses the Rust

@@ -147,6 +147,7 @@ fn row(id: i64, file: i64, source: i64, target: &str, kind: EdgeKind) -> Unresol
         resolved: false,
         payload: None,
         receiver: None,
+        peeled: None,
     }
 }
 

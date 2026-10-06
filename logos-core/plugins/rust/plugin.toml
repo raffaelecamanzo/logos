@@ -136,6 +136,25 @@ package_stems = ["mod", "lib", "main"]
 level = "resolved"
 cross_file = ["calls", "imports", "type_relations"]
 
+# The methods a receiver wrapper provides itself (S-588, CR-188, FR-RS-42). A
+# call on a receiver proven through `Arc<T>`, `Rc<T>` or `Box<T>` (the wrapper
+# recorded in the ledger's `peeled` column, S-587) never binds one of these among
+# `T`'s methods: method lookup finds the wrapper's own impl — a trait impl on the
+# wrapper, or a blanket impl over it — before it derefs to `T`, so `x.clone()`
+# calls `Arc::clone` whatever `T` defines. A method the wrapper forwards to `T`
+# (`eq`, `fmt`, `hash`) is not listed: the call does reach `T`'s. Nor is an
+# associated function that takes no `self` (`Arc::downgrade(&a)`,
+# `Rc::strong_count(&a)`): `a.downgrade()` autoderefs to `T`'s. A reference
+# (`&`, `&mut`) provides nothing: `x.clone()` on `x: &T` is `T`'s `clone`.
+# `deref`, `borrow`, `borrow_mut`, `deref_mut` and `type_id` come from traits
+# outside the prelude, so without that trait imported the call reaches `T`'s
+# inherent method instead; they are refused either way — the safe direction,
+# an unbound call rather than an edge to the wrong method.
+[wrapper_methods]
+Arc = ["clone", "clone_from", "as_ref", "borrow", "deref", "to_owned", "to_string", "into", "try_into", "type_id"]
+Rc = ["clone", "clone_from", "as_ref", "borrow", "deref", "to_owned", "to_string", "into", "try_into", "type_id"]
+Box = ["clone", "clone_from", "as_ref", "as_mut", "borrow", "borrow_mut", "deref", "deref_mut", "to_owned", "to_string", "into", "try_into", "type_id"]
+
 # Maps a capability to the `.scm` query file (resolved relative to this
 # descriptor's directory, embedded or on-disk override). A query that fails to
 # compile fails fast naming this file (FR-PL-02).

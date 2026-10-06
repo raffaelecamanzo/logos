@@ -25,12 +25,28 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   and the row records which wrappers it peeled; `Option`, `Vec`, `Mutex` and
   every other wrapper are the receiver's type themselves. A shadowed, re-bound
   or two-typed name, a generic parameter, `impl Trait` and a chained call keep
-  the `other` row they had. Nothing binds through these rows yet, so every
-  node, symbol and edge is unchanged; on this repository 5,855 of the 52,526
-  Rust receiver-call rows are retyped. Store migration 32 adds the ledger's
+  the `other` row they had. On this repository 5,855 of the 52,526 Rust
+  receiver-call rows are retyped; the next entry binds them. Store migration 32 adds the ledger's
   `peeled` column to its identity and clears every content hash, so the first
   `logos scan` (or `logos index`) after upgrading re-reads every file. A bare
   `logos sync` reads no file.
+
+- **A Rust call on a proven receiver binds among its type's methods (CR-188,
+  S-588).** A call `x.f()` recorded as `T::f` now binds `T`'s one method `f`.
+  `T` is read through the calling file's `use` declarations (a `pub use`
+  re-export is followed to the declaration it names) to exactly one type
+  declared in this repository, in the caller's crate or another one, so a
+  `cli` crate's `engine.runtime()` reaches `logos_core`'s `Engine::runtime`. An
+  inherent method outranks a trait impl's of the same name. Nothing binds when
+  `T` is not declared in the repository (`String`, `Vec`, `str`,
+  `std::io::Error`, an external crate's type), when a peeled `Arc`, `Rc` or
+  `Box` provides the method itself (`x.clone()` on an `Arc<T>` is
+  `Arc::clone`; the list is the Rust plugin's new `[wrapper_methods]` table),
+  when a same-named type is one the file never imports, or when the type has
+  no such method or two of one rank. On this repository, against the same tree,
+  1,060 `Calls` edges are added (292 across crates), every one from such a
+  row; nodes and symbols are unchanged, and 153 functions reported dead are
+  now reached. Run `logos scan` or `logos index` to bind them.
 
 ### Fixed
 

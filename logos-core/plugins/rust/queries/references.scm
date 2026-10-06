@@ -97,7 +97,7 @@
 ; A call whose receiver's declared type the file proves is retyped to the
 ; Path-form `T::f`, keeping its `other` shape; the wrappers peeled off the
 ; declared type (`&`, `&mut`, `Box`, `Arc`, `Rc` — no other) ride on the row.
-; The binder does not bind such a row yet (S-588 does). Every capture below is
+; The binder binds such a row among T's own methods (S-588). Every capture below is
 ; a MARKER: it records no row, and the engine pairs each anchor capture with
 ; the companion captures of its own match (`<anchor>.<role>`).
 ;

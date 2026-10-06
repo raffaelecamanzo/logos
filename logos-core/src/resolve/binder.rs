@@ -190,26 +190,34 @@ pub(crate) enum Residue {
     /// none.
     ///
     /// Also a `Self::m` call whose self type the crate declares no type of, or
-    /// whose caller's file imports it from outside the crate (S-493), with no
-    /// candidates.
+    /// whose caller's file imports it from outside the crate (S-493), and a
+    /// Rust call on a proven receiver whose type the file's scope reaches no
+    /// in-repository declaration of — `String`, `Vec`, `std::io::Error` — or
+    /// whose method its peeled wrapper provides (`Arc::clone`, S-588); all
+    /// with no candidates.
     ExternalType { candidates: Vec<Vec<String>> },
     /// The type (or the nearest supertype level holding the name) declares two
     /// or more callables of that name, or two static imports each supply one.
     /// Also a `Self::m` call whose self type — a name the crate declares for
     /// one type — records several `m` that the caller's module does not narrow
-    /// to one (S-493).
+    /// to one (S-493), and a proven Rust receiver's type with two methods `m`
+    /// of one rank — two trait impls', with no inherent one (S-588).
     OverloadAmbiguous,
     /// The type's name reaches two in-graph declarations (a `src/main` and a
     /// `src/test` class of one fully-qualified name). Also a `Self::m` call
     /// whose self type's base name the crate declares for several types, when
-    /// the caller's module does not decide the candidate (S-493).
+    /// the caller's module does not decide the candidate (S-493). Also a proven
+    /// Rust receiver's type the file's scope names twice (two globs), or whose
+    /// name the crate declares for several types while no impl in its own
+    /// module records `m` (S-588).
     TypeAmbiguous,
     /// The type is in the graph, and neither it nor any in-graph supertype
     /// declares the name: the chain leaves the graph (a JDK, library or
     /// other-member superclass, the implicit `Object`), stops at an interface,
     /// or cycles. Also a `Self::m` call whose self type records no `m` in its
     /// crate — a trait default, an external trait or a `Deref` target supplies
-    /// it, none of which the graph records for that type (S-493).
+    /// it, none of which the graph records for that type (S-493) — and the same
+    /// for a proven Rust receiver's type (S-588).
     SupertypeUnreached,
 }
 
@@ -621,7 +629,8 @@ pub(crate) struct Index {
     self_types: HashMap<NodeId, String>,
     /// `(crate, self type, name)` → the callables recorded with that self type,
     /// id-sorted — the universe a `Self::m` call binds within
-    /// ([`Ctx::resolve_self_type_call`]). Across a type's inherent and trait
+    /// ([`Ctx::resolve_self_type_call`]), and a call on a proven Rust receiver
+    /// (S-588, [`Ctx::type_method`]). Across a type's inherent and trait
     /// impls and every file of its crate; a same-named type of another crate is
     /// another key, never a candidate. Same-named types of two modules of one
     /// crate share a key, and the call's own module tells them apart.
@@ -629,16 +638,20 @@ pub(crate) struct Index {
     /// `(crate, name)` → how many type-like nodes ([`is_type_like`]) the crate
     /// declares under that name — whether a self type's base name denotes one
     /// type of the crate, which is what lets a candidate outside the caller's
-    /// module be the caller's type's method.
+    /// module (or, for a proven receiver, the type's module) be that type's
+    /// method.
     type_names: HashMap<(String, String), usize>,
-    /// project-relative path → file id, for the files whose ledger rows name a
-    /// source node of the snapshot — how a node reaches its file's
-    /// [`FileScope`] (S-493: whether its file imports its self type's name).
+    /// project-relative path → file id, for the files whose own ledger rows
+    /// name a source node of the snapshot — how a node reaches its file's
+    /// [`FileScope`] (S-493: whether its file imports its self type's name;
+    /// S-588: what a module re-exports). A capture-before-delete row is filed
+    /// under another file than its source's, so it is never read here.
     file_ids: HashMap<String, i64>,
     /// Every method of an `impl Trait for X` block — the source of an
     /// `Implements` ledger row outside a package-shaped language (S-281's rows,
     /// whatever their trait resolves to). Read by the self-type call's module
-    /// rung (S-493): Rust resolves `Self::m` to an inherent `m` before a trait's.
+    /// rung (S-493) and a proven receiver's call (S-588, [`Ctx::type_method`]):
+    /// Rust resolves a method to an inherent `m` before a trait's.
     trait_impl_methods: HashSet<NodeId>,
 }
 
@@ -745,8 +758,14 @@ impl Index {
         index.hierarchy_families = hierarchy.families;
         index.trait_users = hierarchy.trait_users;
         index.trait_impl_methods = build_trait_impl_methods(refs, &index);
+        // A capture-before-delete row (`Symbol`) is filed under its *target's*
+        // file while its source sits in another (ADR-10): it never says which
+        // file its source's path is, or a sync would read that file's scope
+        // from the synced file's rows where a cold index — which holds no
+        // capture row — reads its own (S-588).
         index.file_ids = refs
             .iter()
+            .filter(|r| r.form != RefForm::Symbol)
             .filter_map(|r| {
                 let file_id = r.file_id?;
                 let path = index.by_symbol.get(&r.source_symbol).and_then(|id| index.info.get(id))?;
@@ -2052,7 +2071,8 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
         // Outside a package-shaped language only a call through the caller's
         // own type (S-493, [`Ctx::resolve_self_type_call`]), a receiver call
         // (S-514, the `RefForm::Method` arm) and a Rust call retyped from its
-        // proven receiver (S-587, the `RefForm::Path` arm) record a reason.
+        // proven receiver (S-588, [`Ctx::resolve_proven_receiver_call`])
+        // record a reason.
         return miss;
     }
     Some(miss.unwrap_or(match r.form {
@@ -2070,7 +2090,7 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
 /// [`bind`], and the [`Residue`] the first package-shaped call lookup that gave
 /// up recorded — `None` when none did (outside a package-shaped language, every
 /// row but a `Self::m` call through the caller's own type, S-493, a receiver
-/// call, S-514, and a Rust call retyped from its proven receiver, S-587).
+/// call, S-514, and a Rust call retyped from its proven receiver, S-588).
 /// Meaningful only for an
 /// [`Outcome::Unbound`]: a row that binds may still carry the miss of a rung it
 /// tried first (one of two static imports naming an external type).
@@ -2103,12 +2123,22 @@ fn bind_traced(
         in_glob_resolution: Cell::new(false),
         in_rival_expansion: Cell::new(false),
         bare_path_call: Cell::new(false),
-        scope_only: relation.is_some(),
+        scope_only: relation.is_some() || is_proven_receiver_call(r),
         lexical_start: Cell::new(source),
         miss: RefCell::new(None),
     };
     let outcome = bind_in(&ctx, r, relation);
     (outcome, ctx.miss.into_inner())
+}
+
+/// `true` for a Rust call retyped from its proven receiver (S-587): the
+/// Path-form `T::m` of shape `other`, which nothing else records — a written
+/// `T::m()` has no receiver shape. Bound among `T`'s methods alone (S-588,
+/// [`Ctx::resolve_proven_receiver_call`]), and `T` is read by scope and module
+/// model only ([`Ctx::scope_only`]): a same-named type the file does not import
+/// is not the type it proved.
+fn is_proven_receiver_call(r: &UnresolvedRefRow) -> bool {
+    r.kind == EdgeKind::Calls && r.form == RefForm::Path && r.receiver == Some(ReceiverShape::Other)
 }
 
 /// The body of [`bind`], against a context built for `r`.
@@ -2238,14 +2268,16 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // A Rust call on a receiver whose declared type the file proves
             // (S-587, [FR-RS-42]): `x.m()` retyped to `T::m`, its `other` shape
             // kept. It is not a written `T::m()` — the path rungs below would
-            // read it as one — so it binds nothing yet and stays the
-            // `no-receiver-evidence` row the `other` Method row it replaced
-            // was. Binding it among `T`'s methods is S-588's.
+            // read it as one, and find `m` among every type of `T`'s module —
+            // so it binds only among `T`'s own methods (S-588,
+            // [`Ctx::resolve_proven_receiver_call`]), never through a scope.
             //
             // [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
-            if r.kind == EdgeKind::Calls && r.receiver == Some(ReceiverShape::Other) {
-                ctx.note(Want::Callable, || Residue::NoReceiverEvidence);
-                return Outcome::Unbound;
+            if is_proven_receiver_call(r) {
+                return match ctx.resolve_proven_receiver_call(r) {
+                    Res::Found(target) => bound(target),
+                    _ => Outcome::Unbound,
+                };
             }
             // A call through the caller's own type (S-493, [FR-RS-11]):
             // `self.m()` / `Self::m()` inside a method with a recorded self
@@ -2344,9 +2376,9 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             }
             // A receiver call (`x.f()` → `f`): extraction records the bare
             // method name and its receiver's SHAPE, never its type ([FR-EX-13];
-            // a typed receiver is a `RefForm::Path` row bound above — a Rust one
-            // refused there, S-587). The shape
-            // decides where `f` may be found ([FR-RS-12]):
+            // a typed receiver is a `RefForm::Path` row bound above — a Rust
+            // one among its proven type's methods, S-588). The shape decides
+            // where `f` may be found ([FR-RS-12]):
             //
             // - `self` — among the caller's own class's members, then up its
             //   proven `Extends` chain; for a caller with a recorded self type,
@@ -3081,6 +3113,308 @@ impl Ctx<'_> {
             .iter()
             .any(|c| !local.contains(c) && !self.ix.trait_impl_methods.contains(c));
         (!(self.ix.trait_impl_methods.contains(&one) && inherent_elsewhere)).then_some(one)
+    }
+
+    /// Resolve a Rust call retyped from its proven receiver (S-587) — `x.m()`
+    /// recorded as `T::m` of shape `other`, with the wrappers peeled to reach
+    /// `T` — among `T`'s own methods (S-588, [FR-RS-42]).
+    ///
+    /// 1. **A wrapper's own method binds nothing.** When a peeled wrapper
+    ///    provides `m` itself ([`PackageLayout::wrapper_provides`], the list
+    ///    the plugin declares), the call is the wrapper's: `x.clone()` on an
+    ///    `Arc<T>` is `Arc::clone`, whatever `T` defines —
+    ///    [`Residue::ExternalType`], as its target is outside the repository.
+    /// 2. **`T` is the one type the file names.** Read through the file's
+    ///    `use` declarations ([`resolve_receiver_type`](Ctx::resolve_receiver_type)),
+    ///    in the caller's crate or another in-repository one, and never by a
+    ///    workspace guess ([`scope_only`](Ctx::scope_only)). A `T` the
+    ///    repository does not declare — `String`, `Vec`, `std::io::Error`, an
+    ///    external crate's — binds nothing: [`Residue::ExternalType`]; one the
+    ///    file's scope names twice is [`Residue::TypeAmbiguous`].
+    /// 3. **`m` is exactly one of `T`'s methods**
+    ///    ([`type_method`](Ctx::type_method)), from the impls recorded with its
+    ///    name — [S-493]'s universe, [`Index::methods_by_self_type`] — an
+    ///    inherent method outranking a trait impl's.
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    /// [S-493]: ../../../docs/planning/journal.md#s-493-rust-self-and-self-method-calls-bind-through-the-enclosing-impl
+    /// [`PackageLayout::wrapper_provides`]: crate::resolve::package_key::PackageLayout::wrapper_provides
+    fn resolve_proven_receiver_call(&self, r: &UnresolvedRefRow) -> Res {
+        let external = || Residue::ExternalType {
+            candidates: Vec::new(),
+        };
+        let segs = split(&r.target);
+        let Some((name, type_path)) = segs.split_last().filter(|(_, ty)| !ty.is_empty()) else {
+            self.note(Want::Callable, || Residue::NoReceiverEvidence);
+            return Res::NotFound;
+        };
+        let source_file = self
+            .ix
+            .info
+            .get(&self.source)
+            .and_then(|i| i.file_path.as_deref())
+            .unwrap_or_default();
+        let through_wrapper = r.peeled.as_deref().unwrap_or_default().split(' ').any(|wrapper| {
+            self.ix.layout.wrapper_provides(source_file, wrapper, name)
+        });
+        if through_wrapper {
+            self.note(Want::Callable, external);
+            return Res::NotFound;
+        }
+        match self.resolve_receiver_type(type_path) {
+            Res::Found(ty) => self.type_method(ty, name),
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                Res::Ambiguous
+            }
+            Res::NotFound => {
+                self.note(Want::Callable, external);
+                Res::NotFound
+            }
+        }
+    }
+
+    /// The one in-repository type a proven receiver's type path names (S-588):
+    /// the module tree's rungs ([`resolve_path`](Ctx::resolve_path)) for a type
+    /// ([`Want::Type`]), except that a type the caller's own module declares
+    /// is read first ([`own_module_type`](Ctx::own_module_type)), a name the
+    /// file imports twice (a top-level and an inline module's `use`) is
+    /// [`Res::Ambiguous`], and a head the file imports by `use` is read
+    /// through that import **alone**. Rust's explicit `use` shadows a glob and
+    /// the prelude, so `use std::fmt::Error` names std's `Error` even where a
+    /// glob or the crate root brings a crate `Error` into view — and an import
+    /// that reaches no in-repository declaration names an external type.
+    ///
+    /// A path whose module re-exports the name (`use logos_core::Engine`, with
+    /// `pub use engine::Engine;` in that crate's root; `crate::Runtime`) is
+    /// followed through the re-export ([`reexported_type`](Ctx::reexported_type)):
+    /// it names the declaration the re-export names, which the module walk
+    /// alone cannot see. So is a name a glob of an **ancestor** module brings
+    /// in from that module's own imports (`use super::*` in a test module whose
+    /// parent imports `Runtime`), exactly one across the globs; a glob of any
+    /// other module brings in only its `pub` imports, which the graph cannot
+    /// tell apart, so none is read.
+    fn resolve_receiver_type(&self, segs: &[String]) -> Res {
+        let head = segs[0].as_str();
+        if let [name] = segs {
+            match self.own_module_type(name) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+        }
+        // One file holds one import scope, its inline modules' `use`s
+        // included: two imports of the name may belong to two modules, and
+        // which is the caller's is unknown.
+        if self
+            .scope()
+            .and_then(|s| s.alias_expansions.get(head))
+            .is_some_and(|all| all.len() > 1)
+        {
+            return Res::Ambiguous;
+        }
+        let imported = (!matches!(head, "crate" | "self" | "super"))
+            .then(|| self.scope().and_then(|s| s.aliases.get(head)))
+            .flatten();
+        let path: Vec<String> = match imported {
+            Some(alias_path) => alias_path.iter().chain(&segs[1..]).cloned().collect(),
+            None => segs.to_vec(),
+        };
+        let depth = if imported.is_some() { MAX_ALIAS_DEPTH - 1 } else { MAX_ALIAS_DEPTH };
+        match self.resolve_path(&path, Want::Type, depth) {
+            Res::NotFound => {}
+            decided => return decided,
+        }
+        let Some((name, prefix)) = path.split_last() else {
+            return Res::NotFound;
+        };
+        if !prefix.is_empty() {
+            return match self.module_key_of(prefix, depth) {
+                Some(key) => self.reexported_type(&key, name, MAX_ALIAS_DEPTH),
+                None => Res::NotFound,
+            };
+        }
+        // Only an ancestor's glob brings its private imports in: a module's
+        // `use` is private to it and its descendants, and the graph does not
+        // record which imports are `pub` (a sibling's private `use` of a crate
+        // `String` must never shadow the prelude's).
+        let globs = self.scope().map_or(&[][..], |s| s.globs.as_slice());
+        let own = self.source_module();
+        let mut found: Vec<NodeId> = Vec::new();
+        for glob in globs {
+            let Some(key) = self.module_key_of(glob, depth) else { continue };
+            let ancestor = own
+                .as_ref()
+                .is_some_and(|(krate, mods)| *krate == key.0 && mods.starts_with(&key.1));
+            if !ancestor {
+                continue;
+            }
+            match self.reexported_type(&key, name, MAX_ALIAS_DEPTH) {
+                Res::Found(id) => found.push(id),
+                Res::Ambiguous => return Res::Ambiguous,
+                Res::NotFound => {}
+            }
+        }
+        found.sort();
+        found.dedup();
+        exactly_one(&found)
+    }
+
+    /// A type named `name` declared in the caller's own module (S-588): the
+    /// caller's `Contains` chain up to and including its nearest module, never
+    /// beyond it. Rust's `use` in an inline module cannot shadow a declaration
+    /// of the module enclosing it, and the file's single import scope cannot
+    /// say which module a `use` sits in — so a declaration in the caller's own
+    /// module is read first, and an enclosing module's is not read here at all.
+    fn own_module_type(&self, name: &str) -> Res {
+        let mut cursor = Some(self.source);
+        while let Some(scope) = cursor {
+            match exactly_one(&self.ix.members_named(scope, name, Want::Type)) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+            if self.ix.info.get(&scope).is_some_and(|i| i.kind == NodeKind::Module) {
+                break;
+            }
+            cursor = self.ix.parent.get(&scope).copied();
+        }
+        Res::NotFound
+    }
+
+    /// The module a path names, read from the source (S-588): `crate`, `self`
+    /// and `super` alone name the source's crate root, own module and parent,
+    /// which a path lookup for a member does not; any longer path is resolved
+    /// as a [`Want::Module`].
+    fn module_key_of(&self, segs: &[String], depth: u8) -> Option<ModKey> {
+        let (krate, mods) = self.source_module()?;
+        let supers = segs.iter().take_while(|s| s.as_str() == "super").count();
+        match segs {
+            [head] if head == "crate" => Some((krate, Vec::new())),
+            [head] if head == "self" => Some((krate, mods)),
+            _ if supers == segs.len() && supers <= mods.len() => {
+                Some((krate, mods[..mods.len() - supers].to_vec()))
+            }
+            _ => match self.resolve_path(segs, Want::Module, depth) {
+                Res::Found(module) => self.ix.module_key.get(&module).cloned(),
+                _ => None,
+            },
+        }
+    }
+
+    /// The type the module `key` re-exports as `name` (S-588): its file's
+    /// `use` of that name, read from the module itself — `crate::`, `self::`,
+    /// `super::`, a path relative to the module, or another crate's name — to
+    /// a type the target module declares, or, failing that, re-exports in
+    /// turn, `depth` hops at most (an import cycle ends as not found). A glob
+    /// re-export is not followed. A module's private `use` reads alike: a
+    /// written path through one does not compile, so no call site spells one —
+    /// and only an ancestor's glob is read through it
+    /// ([`resolve_receiver_type`](Ctx::resolve_receiver_type)).
+    fn reexported_type(&self, key: &ModKey, name: &str, depth: u8) -> Res {
+        if depth == 0 {
+            return Res::NotFound;
+        }
+        let Some(alias) = self
+            .ix
+            .modules
+            .get(key)
+            .and_then(|m| self.ix.info.get(m))
+            .and_then(|i| i.file_path.as_deref())
+            .and_then(|p| self.ix.file_ids.get(p))
+            .and_then(|id| self.ix.file_scopes.get(id))
+            .and_then(|scope| scope.aliases.get(name))
+        else {
+            return Res::NotFound;
+        };
+        let (krate, mods) = key;
+        let supers = alias.iter().take_while(|s| s.as_str() == "super").count();
+        let mut anchors: Vec<(String, Vec<String>, &[String])> = Vec::new();
+        match alias.first().map(String::as_str) {
+            Some("crate") => anchors.push((krate.clone(), Vec::new(), &alias[1..])),
+            Some("self") => anchors.push((krate.clone(), mods.clone(), &alias[1..])),
+            Some("super") if supers <= mods.len() => {
+                anchors.push((krate.clone(), mods[..mods.len() - supers].to_vec(), &alias[supers..]));
+            }
+            Some("super") | None => {}
+            Some(head) => {
+                anchors.push((krate.clone(), mods.clone(), &alias[..]));
+                let norm = normalize_crate(head);
+                if self.ix.crates.contains(&norm) && norm != *krate {
+                    anchors.push((norm, Vec::new(), &alias[1..]));
+                }
+            }
+        }
+        for (krate, base, rest) in anchors {
+            let Some((last, prefix)) = rest.split_last() else { continue };
+            match self.descend(&krate, &base, rest, Want::Type) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+            let mut next = (krate, base);
+            next.1.extend(prefix.iter().cloned());
+            if self.ix.modules.contains_key(&next) {
+                match self.reexported_type(&next, last, depth - 1) {
+                    Res::NotFound => {}
+                    decided => return decided,
+                }
+            }
+        }
+        Res::NotFound
+    }
+
+    /// The one callable `name` among the in-repository type `ty`'s methods
+    /// (S-588, [FR-RS-42]) — those recorded with its name as their self type in
+    /// its crate ([`Index::methods_by_self_type`], [S-493]'s universe).
+    ///
+    /// When the crate declares that name for one type, every candidate is
+    /// `ty`'s, wherever its impl block sits. Otherwise only the impls in `ty`'s
+    /// own module are — the impl header's name denotes `ty` there — and a
+    /// candidate elsewhere may be the other type's, so a call none of them
+    /// decides is [`Residue::TypeAmbiguous`]. Among `ty`'s candidates an
+    /// inherent method outranks a trait impl's, as Rust's method lookup does
+    /// ([FR-RS-11]); two of one rank are [`Residue::OverloadAmbiguous`], and
+    /// none — a trait default, a derive, a `Deref` target supplies it — is
+    /// [`Residue::SupertypeUnreached`].
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    /// [S-493]: ../../../docs/planning/journal.md#s-493-rust-self-and-self-method-calls-bind-through-the-enclosing-impl
+    fn type_method(&self, ty: NodeId, name: &str) -> Res {
+        let Some(info) = self.ix.info.get(&ty) else {
+            return Res::NotFound;
+        };
+        let key = (info.crate_name.clone(), info.name.clone(), name.to_string());
+        let candidates = self
+            .ix
+            .methods_by_self_type
+            .get(&key)
+            .map_or(&[][..], Vec::as_slice);
+        let one_type = self.ix.type_names.get(&(info.crate_name.clone(), info.name.clone())) == Some(&1);
+        let own: Vec<NodeId> = if one_type {
+            candidates.to_vec()
+        } else {
+            let home = self.ix.nearest_module(ty);
+            candidates
+                .iter()
+                .copied()
+                .filter(|&c| self.ix.nearest_module(c) == home)
+                .collect()
+        };
+        if own.is_empty() && !candidates.is_empty() {
+            self.note(Want::Callable, || Residue::TypeAmbiguous);
+            return Res::Ambiguous;
+        }
+        let inherent: Vec<NodeId> = own
+            .iter()
+            .copied()
+            .filter(|c| !self.ix.trait_impl_methods.contains(c))
+            .collect();
+        let res = exactly_one(if inherent.is_empty() { &own } else { &inherent });
+        match res {
+            Res::NotFound => self.note(Want::Callable, || Residue::SupertypeUnreached),
+            Res::Ambiguous => self.note(Want::Callable, || Residue::OverloadAmbiguous),
+            Res::Found(_) => {}
+        }
+        res
     }
 
     /// Resolve a member-access fact to the one `Field` of the source method's

@@ -133,6 +133,7 @@ fn row(
         resolved: false,
         payload: None,
         receiver: None,
+        peeled: None,
     }
 }
 
