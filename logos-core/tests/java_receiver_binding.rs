@@ -1090,21 +1090,54 @@ fn sync_equals_a_full_reindex_when_a_call_target_gains_an_overload() {
 /// return. It is reported apart, as `unclassified`, so the reasons still
 /// partition the denominator.
 ///
+/// Since CR-187 a capture is deleted once it is spent, so a rename that its
+/// callers' own re-bound rows answer leaves none, and the residue equals a cold
+/// index's. The one a sync keeps — its source not re-bound, nothing else
+/// carrying its edge — is planted here, as such a sync leaves it.
+///
 /// [ADR-10]: ../../docs/specs/architecture/decisions/ADR-10.md
 #[test]
 fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
     let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     let engine = index(tmp.path());
     // `Mailer.send` becomes `Mailer.post`: the two edges into `send` are
-    // captured as `Symbol` rows before the node goes, and nothing answers them.
-    write(
-        tmp.path(),
-        MAILER_FILE,
-        "package com.x.mail;\n\npublic class Mailer {\n    public void post() {}\n}\n",
-    );
+    // captured before the node goes, and spent with their callers' rows.
+    let renamed = "package com.x.mail;\n\npublic class Mailer {\n    public void post() {}\n}\n";
+    write(tmp.path(), MAILER_FILE, renamed);
     engine.sync(&[MAILER_FILE.into()]);
+    let cold = tree(&[(MAILER_FILE, renamed), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
+    assert_eq!(java_residue(&engine), java_residue(&index(cold.path())));
+
+    // A capture from a live caller, awaiting a target nothing else names,
+    // stays, unbound.
+    let rt = engine.runtime().unwrap();
+    let caller = rt
+        .submit_read(|store| {
+            Ok(store
+                .all_nodes()?
+                .into_iter()
+                .find(|n| n.name == "viaMailer")
+                .map(|n| n.symbol.as_str().to_string())
+                .expect("the viaMailer node"))
+        })
+        .unwrap();
+    rt.submit_write(move |w| {
+        w.insert_unresolved_ref(&logos_core::graph_store::NewUnresolvedRef {
+            file_id: w.file_id(MAILER_FILE)?,
+            source_symbol: &caller,
+            target: "planted vanished target",
+            alias: None,
+            form: RefForm::Symbol,
+            kind: EdgeKind::Calls,
+            line: None,
+            payload: None,
+            receiver: None,
+        })
+    })
+    .expect("plant the awaiting capture");
+    engine.sync(&[]);
     let residue = java_residue(&engine);
-    assert_eq!(residue.unclassified, 2, "{residue:?}");
+    assert_eq!(residue.unclassified, 1, "{residue:?}");
     assert_eq!(
         nonzero(&residue),
         reasons(&[(R::NoReceiverEvidence, 1), (R::SupertypeUnreached, 2)])

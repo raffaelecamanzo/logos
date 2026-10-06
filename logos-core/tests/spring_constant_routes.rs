@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use logos_core::model::{EdgeKind, NodeId, NodeKind, RefForm};
+use logos_core::model::{EdgeKind, NodeId, NodeKind};
 use logos_core::models::pipeline::FrameworkStats;
 use logos_core::Engine;
 use logos_core::Runtime;
@@ -378,9 +378,8 @@ fn an_import_is_not_followed_where_an_inherited_member_could_shadow_it() {
 // ── Incremental: the declaring file is an input of the fold ─────────────────
 
 /// Route names, `(source, target, kind)` edges by symbol, and the ledger rows —
-/// the sync ≡ reindex comparison ([NFR-RA-06]). Capture-before-delete rows
-/// (`RefForm::Symbol`) are a sync-only bookkeeping artifact and excluded, as
-/// in `tests/java_imports.rs`.
+/// the sync ≡ reindex comparison ([NFR-RA-06]). Capture-before-delete rows are
+/// compared too, as in `tests/java_imports.rs` (CR-187).
 ///
 /// [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
 type Facts = (Vec<String>, Vec<(String, String, String)>, Vec<String>);
@@ -409,7 +408,6 @@ fn facts(rt: &Runtime) -> Facts {
             let mut refs: Vec<String> = store
                 .unresolved_refs()?
                 .into_iter()
-                .filter(|r| r.form != RefForm::Symbol)
                 .map(|r| format!("{} {} {:?} {:?} {}", r.source_symbol, r.target, r.form, r.kind, r.resolved))
                 .collect();
             refs.sort();

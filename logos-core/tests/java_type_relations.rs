@@ -474,8 +474,8 @@ fn the_type_relations_are_fenced_out_of_the_dependency_view_and_kept_in_the_symb
 }
 
 /// Every binding fact of the graph in an id-free form, for the sync ≡ reindex
-/// comparison (NFR-RA-06) — the `tests/java_imports.rs` shape: capture-before-
-/// delete rows (`RefForm::Symbol`, ADR-10) are excluded, their edges compared.
+/// comparison (NFR-RA-06) — the `tests/java_imports.rs` shape: every ledger row,
+/// capture-before-delete rows (ADR-10) included (CR-187).
 fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
     rt.submit_read(|store| {
         let sym: HashMap<NodeId, String> = store
@@ -498,7 +498,6 @@ fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
         let mut refs: Vec<String> = store
             .unresolved_refs()?
             .into_iter()
-            .filter(|r| r.form != RefForm::Symbol)
             .map(|r| {
                 format!(
                     "{} {} {:?} {:?} {}",

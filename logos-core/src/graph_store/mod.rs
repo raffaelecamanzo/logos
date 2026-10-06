@@ -4773,6 +4773,24 @@ impl BatchWriter<'_> {
         Ok(())
     }
 
+    /// Delete one reference-ledger row by id, returning the count removed (0
+    /// or 1).
+    ///
+    /// The resolution pass's end of a capture-before-delete row's life
+    /// ([ADR-10], CR-187): once it is spent, the ledger drops it, so a synced
+    /// ledger equals a fresh index's ([FR-SY-10]).
+    ///
+    /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
+    /// [FR-SY-10]: ../../../docs/specs/requirements/FR-SY-10.md
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn delete_unresolved_ref(&self, ref_id: i64) -> Result<usize> {
+        self.conn
+            .execute("DELETE FROM unresolved_refs WHERE id = ?1", [ref_id])
+            .context("deleting a spent ledger row")
+    }
+
     /// Insert an edge unless `(source, target, kind)` already exists; returns
     /// `true` when a row was actually inserted.
     ///

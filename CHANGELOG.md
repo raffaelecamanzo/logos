@@ -31,6 +31,21 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   is the source symbol, not its whole file: a whole-file sweep re-bound about
   40% of this repository's ledger on every one-file sync. A full index is
   unchanged.
+- **Sync leaves no stale rows in the reference ledger (CR-187, S-586).** A sync
+  saves each cross-file edge into a re-extracted file as a capture-before-delete
+  row so the edge survives the delete. That row stayed in the ledger after it
+  re-bound, so `status` counted refs a fresh index of the same tree does not
+  have. Now the resolution pass deletes a capture row once it re-binds, once
+  its source's own rows are re-bound and decide its edges, or once its source
+  is gone, in the same transaction that restores the edge. The edge stays. A
+  capture whose target was renamed away, and whose edge no other row carries,
+  stays unresolved as before. In a store synced by an earlier version, the
+  stale resolved captures go on the next `sync`, even one that changes
+  nothing; an unresolved one goes when its source is next re-bound, or on
+  `logos index`. No migration. After any sequence of syncs the ledger now
+  equals a fresh index's row for row, so `refs_total` and `refs_resolved` agree.
+  On nlohmann/json, an edit → sync → revert → sync cycle left 47 extra resolved
+  doc→code rows; it now leaves none.
 - **Two imports of one simple name are ambiguous in the package rungs (CR-196,
   S-599).** `import a.Helper; import b.Helper;` then `Helper.util()` bound whichever
   import the file listed first, because the qualified-head rung read a first-wins alias
