@@ -291,8 +291,11 @@ fn zero_two_or_another_crates_candidates_stay_unbound() {
     );
 }
 
-/// Receivers other than `self`, and a trait's default method body, are recorded
-/// as plain method calls — exactly as before.
+/// Receivers other than `self`, and a trait's default method body, are never
+/// bound through the self type: a trait default body's `self.f()` is a plain
+/// method call, and `self.field.f()` / `other.f()` — whose types this file
+/// proves — are the Path-form `Inner::helper` of shape `other` (S-587), which
+/// binds nothing.
 #[test]
 fn other_receivers_and_trait_default_bodies_are_recorded_as_before() {
     let src = "\
@@ -328,12 +331,16 @@ pub trait Greet {
     assert_eq!(
         rows,
         vec![
-            ("src/lib.rs:by_field@9".to_string(), "helper".to_string(), RefForm::Method),
-            ("src/lib.rs:by_other@12".to_string(), "helper".to_string(), RefForm::Method),
+            ("src/lib.rs:by_field@9".to_string(), "Inner::helper".to_string(), RefForm::Path),
+            ("src/lib.rs:by_other@12".to_string(), "Inner::helper".to_string(), RefForm::Path),
             ("src/lib.rs:hello@18".to_string(), "helper".to_string(), RefForm::Method),
         ],
-        "`self.field.f()`, `other.f()` and a trait default body's `self.f()` stay \
-         bare Method-form rows"
+        "`self.field.f()` and `other.f()` are retyped (S-587); a trait default body's \
+         `self.f()` stays a bare Method-form row"
+    );
+    assert!(
+        call_edges(rt).iter().all(|(from, _)| !from.contains(":by_field@") && !from.contains(":by_other@")),
+        "a retyped receiver call binds nothing (S-587)"
     );
     assert!(
         !self_types(rt).keys().any(|k| k.contains(":hello@") || k.contains(":helper@17")),
