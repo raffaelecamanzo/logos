@@ -1180,16 +1180,8 @@ impl PluginManifest {
                     .to_string(),
             );
         }
-        // A wrapper or method name is matched exactly against one token of a
-        // space-joined `peeled` column and a call's last path segment, so an
-        // empty or space-bearing entry could never match: a descriptor bug.
-        for (wrapper, methods) in &self.wrapper_methods {
-            let bad = |t: &str| t.is_empty() || t.chars().any(char::is_whitespace);
-            if bad(wrapper) || methods.iter().any(|m| bad(m)) {
-                return bail(format!(
-                    "`[wrapper_methods]` entry '{wrapper}' must name non-empty, space-free tokens"
-                ));
-            }
+        if let Err(detail) = validate_wrapper_methods(&self.wrapper_methods) {
+            return bail(detail);
         }
         if self.extensions.iter().any(|e| e.starts_with('.')) {
             return bail(
@@ -1412,6 +1404,28 @@ impl PluginManifest {
     }
 }
 
+
+/// The `[wrapper_methods]` table's rule (S-588, [FR-RS-42]): a wrapper or
+/// method name is matched exactly against one token of a space-joined
+/// `peeled` column and a call's last path segment, so an empty or space-bearing
+/// entry could never match — a descriptor bug.
+///
+/// Its own function for the reason [`validate_reach`] is: inline, it pushed
+/// [`PluginManifest::validate`] to 53, past the `max_cc = 50` rule.
+///
+/// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+fn validate_wrapper_methods(declared: &BTreeMap<String, Vec<String>>) -> Result<(), String> {
+    let bad = |t: &str| t.is_empty() || t.chars().any(char::is_whitespace);
+    match declared
+        .iter()
+        .find(|(wrapper, methods)| bad(wrapper) || methods.iter().any(|m| bad(m)))
+    {
+        Some((wrapper, _)) => Err(format!(
+            "`[wrapper_methods]` entry '{wrapper}' must name non-empty, space-free tokens"
+        )),
+        None => Ok(()),
+    }
+}
 
 /// The `[reach]` table's rules ([FR-PL-09]): the level and the relation set must
 /// agree, so a descriptor cannot declare `same-file` and still list `calls`, or
