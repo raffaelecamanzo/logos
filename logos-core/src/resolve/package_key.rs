@@ -448,9 +448,10 @@ impl PackageLayout {
     }
 
     /// Whether the file at `path`'s language proves a receiver's declared type
-    /// through peeled wrappers (S-588, [FR-RS-42]): it declares a
-    /// `[wrapper_methods]` table. Such a language records proven `T::m` rows,
-    /// and `status` reports why its calls stay unbound (S-589).
+    /// through peeled wrappers (S-588, [FR-RS-42]): it declares a non-empty
+    /// `[wrapper_methods]` table — the declaration is the signal, as the binder
+    /// binds a proven `T::m` row by its shape alone. `status` reports why such a
+    /// language's calls stay unbound (S-589).
     ///
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
     pub fn peels_receivers(&self, path: &str) -> bool {
