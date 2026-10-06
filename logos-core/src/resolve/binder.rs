@@ -3347,7 +3347,7 @@ impl Ctx<'_> {
         if depth == 0 {
             return Res::NotFound;
         }
-        let Some(alias) = self
+        let Some(scope) = self
             .ix
             .modules
             .get(key)
@@ -3355,8 +3355,18 @@ impl Ctx<'_> {
             .and_then(|i| i.file_path.as_deref())
             .and_then(|p| self.ix.file_ids.get(p))
             .and_then(|id| self.ix.file_scopes.get(id))
-            .and_then(|scope| scope.aliases.get(name))
         else {
+            return Res::NotFound;
+        };
+        // One file holds one import scope, its inline modules' `use`s
+        // included: a file importing the name twice (a top-level `use` and an
+        // inline `mod`'s `pub use`) does not say which one `key`'s module
+        // holds — as for the caller's own file
+        // ([`resolve_receiver_type`](Ctx::resolve_receiver_type)).
+        if scope.alias_expansions.get(name).is_some_and(|all| all.len() > 1) {
+            return Res::Ambiguous;
+        }
+        let Some(alias) = scope.aliases.get(name) else {
             return Res::NotFound;
         };
         let (krate, mods) = key;

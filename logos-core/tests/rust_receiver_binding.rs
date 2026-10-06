@@ -712,3 +712,37 @@ fn the_second_hop_of_a_renamed_re_export_retargeted_on_sync_rebinds_the_call() {
     let edges = synced_equals_reindexed(&initial, &[("src/inner.rs", "pub use crate::deep2::Store;\n")]);
     assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/deep2.rs:get@3"]);
 }
+
+// ── An inline module's re-export, in a file that also imports the name ──────
+//
+// One file holds one import scope: `a.rs`'s top-level `use crate::b::Store`
+// and its inline `mod inner { pub use crate::c::Store; }` are both "the
+// import of `Store`" there, and which one `a::inner` holds is unknown. So
+// `use crate::a::inner::Store` binds nothing — never `b`'s method, whichever
+// import comes first. Without the top-level one, `inner`'s re-export binds.
+
+const INLINE_LIB: &str = "pub mod a;\npub mod b;\npub mod c;\npub mod user;\n";
+const INLINE_STORE: &str = "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n";
+const INLINE_USER: &str = "use crate::a::inner::Store;\npub fn run(x: &Store) { x.get(); }\n";
+
+fn inline_reexport_edges(a: &str) -> BTreeMap<String, Vec<String>> {
+    edges_by_source(&[
+        ("src/lib.rs", INLINE_LIB),
+        ("src/a.rs", a),
+        ("src/b.rs", INLINE_STORE),
+        ("src/c.rs", INLINE_STORE),
+        ("src/user.rs", INLINE_USER),
+    ])
+}
+
+#[test]
+fn an_inline_modules_re_export_beside_a_top_level_import_of_the_name_binds_nothing() {
+    let top_first = "use crate::b::Store;\npub fn keep(_: &Store) {}\npub mod inner {\n    pub use crate::c::Store;\n}\n";
+    let inner_first = "pub mod inner {\n    pub use crate::c::Store;\n}\nuse crate::b::Store;\npub fn keep(_: &Store) {}\n";
+    for (order, a) in [("top-level use first", top_first), ("inline module first", inner_first)] {
+        let edges = inline_reexport_edges(a);
+        assert!(targets(&edges, "src/user.rs:run@2").is_empty(), "{order}: {edges:#?}");
+    }
+    let alone = inline_reexport_edges("pub mod inner {\n    pub use crate::c::Store;\n}\n");
+    assert_eq!(targets(&alone, "src/user.rs:run@2"), ["src/c.rs:get@3"], "{alone:#?}");
+}
