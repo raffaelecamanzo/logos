@@ -352,6 +352,16 @@ pub struct PackageModules {
 /// family = "python"              # which languages' modules and types it may bind
 /// ```
 ///
+/// The `namespace` model's data (S-595, [FR-RS-45]) sits beside `kind` too:
+///
+/// ```toml
+/// [module_model]
+/// kind = "namespace"
+/// enclosing_namespaces = true    # a namespace sees its enclosing namespaces' types
+/// ```
+///
+/// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+///
 /// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
@@ -391,6 +401,18 @@ pub struct ModuleModel {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     #[serde(default)]
     pub family: Option<String>,
+    /// The `namespace` model's **enclosing-namespace visibility** (S-595,
+    /// [FR-RS-45]): when `true`, a type name — or the head of a qualified
+    /// name — that the source's own namespace does not supply is looked up in
+    /// each enclosing namespace of the source's declared one, nearest first
+    /// (`A.B.C` → `A.B` → `A`, never the global namespace), before any
+    /// namespace wildcard is read. Exactly one type decides a level; two stop
+    /// the walk unbound, and none passes outward. Defaults to `false`, so a
+    /// language that does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+    #[serde(default)]
+    pub enclosing_namespaces: bool,
 }
 
 /// The module models a language may declare ([`ModuleModel`]).
@@ -1047,6 +1069,13 @@ impl PluginManifest {
             .unwrap_or_else(|| self.name.clone())
     }
 
+    /// Whether a namespace of this language sees the types of its enclosing
+    /// namespaces ([`ModuleModel::enclosing_namespaces`], S-595): `false`
+    /// unless the descriptor declares it.
+    pub fn enclosing_namespaces(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.enclosing_namespaces)
+    }
+
     /// The call targets this descriptor declares beyond a callable
     /// ([`CallTargets`], S-521).
     pub fn call_targets(&self) -> CallTargets {
@@ -1399,8 +1428,17 @@ fn validate_module_model(
 /// `import_roots` are the `path` model's data, and nothing else reads them; a
 /// stem is a bare file stem, a root a relative `/`-separated directory, and the
 /// family a bare token — an entry that could never match is a descriptor bug,
-/// not data that silently matches nothing.
+/// not data that silently matches nothing. `enclosing_namespaces` (S-595) is
+/// the `namespace` model's data, and is refused under any other kind for the
+/// same reason.
 fn validate_path_model_data(m: &ModuleModel) -> Result<(), String> {
+    if m.enclosing_namespaces && m.kind != ModuleModelKind::Namespace {
+        return Err(format!(
+            "`enclosing_namespaces` is the data of the 'namespace' module model, but \
+             `[module_model]` declares kind '{}'",
+            m.kind.as_str()
+        ));
+    }
     let path_data = !m.package_stems.is_empty() || m.import_roots.is_some();
     if path_data && m.kind != ModuleModelKind::Path {
         return Err(format!(
@@ -1806,6 +1844,31 @@ mod tests {
         assert!(with("[module_model]\nkind = \"modules\"\n").is_err());
         assert!(with("[module_model]\nkind = \"namespace\"\nroots = []\n").is_err());
         assert!(with("[module_model]\n").is_err(), "a table without a kind");
+    }
+
+    /// The namespace model's enclosing-namespace key (S-595, FR-RS-45) sits
+    /// beside `kind`: it parses under `namespace`, defaults to off, and is
+    /// refused under any other kind and when it is not a boolean.
+    #[test]
+    fn the_enclosing_namespaces_key_is_the_namespace_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        let on = with("[module_model]\nkind = \"namespace\"\nenclosing_namespaces = true\n").unwrap();
+        assert!(on.enclosing_namespaces());
+        let off = with("[module_model]\nkind = \"namespace\"\nenclosing_namespaces = false\n").unwrap();
+        assert!(!off.enclosing_namespaces());
+        // Omitted — the key, the table, or both — a language binds as before.
+        assert!(!with("[module_model]\nkind = \"namespace\"\n").unwrap().enclosing_namespaces());
+        assert!(!with("").unwrap().enclosing_namespaces());
+        // A package or path model has no namespaces to enclose.
+        let err = with("[module_model]\nkind = \"path\"\nenclosing_namespaces = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("x/plugin.toml") && err.contains("kind 'path'"), "{err}");
+        let roots = "[package_modules]\nsource_roots = [\"src/main/java\"]\n";
+        assert!(
+            with(&format!("[module_model]\nkind = \"package\"\nenclosing_namespaces = true\n{roots}")).is_err()
+        );
+        assert!(with("[module_model]\nkind = \"namespace\"\nenclosing_namespaces = \"yes\"\n").is_err());
     }
 
     /// The path model's data (S-519, FR-RS-14) sits beside `kind` in the one

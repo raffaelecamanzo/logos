@@ -93,6 +93,34 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   a broken one, so it never ships. Each language's first-use compile is reported once
   per process as an `info` event (`RUST_LOG=info`) with its duration. Extraction
   output is unchanged.
+- **A C# namespace sees the types of its enclosing namespaces (CR-192, S-595).**
+  A type in `A.B.C` that names `Base` declared in `A` was left unbound without a
+  `using A;`, though C# resolves it by walking out through `A.B` and `A`. A plugin now
+  declares `enclosing_namespaces = true` under `[module_model]` (the `namespace` model's
+  key, refused under any other), and the C# plugin does. For such a language a simple
+  type name, or the head of a qualified one, that the source's own namespace does not
+  supply is read in each enclosing namespace, nearest first, before any `using`
+  namespace. One type decides a level; two at one level bind nothing (`type-ambiguous`)
+  and the walk never falls through to an outer level; none passes outward. Only the
+  source's own interop family is read, and the global namespace is never a level. A
+  single-type `using` stays final for the name it imports. No language id is named in the
+  resolver; PHP, Kotlin, Scala and Java bind exactly as before. Two ceilings, both
+  shared with the same-namespace rung: types are indexed by name, so a generic `Result<T>`
+  in an enclosing namespace is taken for a non-generic `Result`; and a `using` written
+  inside a namespace block is read after the enclosing namespaces, where C# reads it
+  before them. A qualified head (`Result.Inner`) whose enclosing type lacks the member
+  still reaches the `using` that has it.
+- **Measured** on Newtonsoft.Json at `52fa3aef`, indexed by the parent commit's build and
+  by this build over identical trees: C# `Extends`/`Implements` ledger rows bound 263 / 886 → 290
+  / 886 (+22 `Extends` edges, +5 `Implements` edges, none removed), and incoming `Extends`
+  on `JsonReader` 2 → 10 of its 10 subclasses. All 27 added type edges were re-judged
+  against the source and are correct: each source sits in a namespace under
+  `Newtonsoft.Json`, and each target is the one type of its name in the repository. The
+  newly bound supertypes also let 54 `base.X()` calls climb to their inherited method
+  (cross-file C# `Calls` edges 56 → 110); 81 ledger rows flipped to resolved in all, and
+  none flipped back. The Java, PHP, Kotlin and Scala fixtures and this repository (147,528
+  edge and ledger rows) are byte-identical before and after, and so is the C# fixture.
+  The C# `[reach]` table is unchanged: the measured relation classes did not change.
 
 ### Upgrade
 

@@ -583,3 +583,66 @@ fn sync_equals_a_full_reindex_after_a_file_loses_its_one_namespace() {
     );
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(fixtures::C_SHARP)));
 }
+
+// ── A namespace sees its enclosing namespaces' types (S-595, FR-RS-45) ───────
+
+const BASE: &str = "src/Base.cs";
+const WIDGET: &str = "src/Impl/Widget.cs";
+const CLOSER: &str = "src/Core/Base.cs";
+
+/// `Acme.Base`, and a `Widget` in `Acme.Core.Impl` that names it without a
+/// `using` — the shape Newtonsoft's `JsonReader` subclasses take.
+fn enclosing_tree() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), BASE, "namespace Acme\n{\n    public class Base { }\n}\n");
+    write(
+        tmp.path(),
+        WIDGET,
+        "namespace Acme.Core.Impl\n{\n    public class Widget : Base { }\n}\n",
+    );
+    tmp
+}
+
+/// A C# type names its base class in an enclosing namespace without a
+/// `using`; a nearer declaration of the name takes it over, and two in one
+/// namespace bind nothing and never fall through to the outer one — each state
+/// reached by a sync equals a cold index of the same tree (NFR-RA-06).
+#[test]
+fn a_csharp_base_class_binds_from_an_enclosing_namespace_and_sync_equals_reindex() {
+    let tmp = enclosing_tree();
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let files = [BASE, WIDGET, CLOSER, "src/Core/Other.cs"];
+    let extends = |rt: &Runtime| edges_from(rt, WIDGET, EdgeKind::Extends);
+    assert_eq!(extends(rt), strings(&["src/Base.cs:Base:class"]));
+
+    // A `Base` in `Acme.Core` is nearer.
+    write(tmp.path(), CLOSER, "namespace Acme.Core\n{\n    public class Base { }\n}\n");
+    engine.sync(&[CLOSER.into()]);
+    assert_eq!(extends(rt), strings(&["src/Core/Base.cs:Base:class"]));
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
+
+    // A second `Base` in `Acme.Core` is an ambiguity the walk stops at.
+    let other = "src/Core/Other.cs";
+    write(tmp.path(), other, "namespace Acme.Core\n{\n    public class Base { }\n}\n");
+    engine.sync(&[other.into()]);
+    assert!(extends(rt).is_empty(), "two candidates at one level bind nothing");
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
+
+    // Removing both returns the name to the outer namespace's.
+    for path in [CLOSER, other] {
+        fs::remove_file(tmp.path().join(path)).unwrap();
+        engine.sync(&[path.into()]);
+    }
+    assert_eq!(extends(rt), strings(&["src/Base.cs:Base:class"]));
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
+}
+
+/// A type of the global namespace is never an enclosing level's.
+#[test]
+fn a_csharp_global_namespace_type_is_not_bound_from_a_namespace() {
+    let tmp = enclosing_tree();
+    write(tmp.path(), BASE, "public class Base { }\n");
+    let engine = index(&tmp);
+    assert!(edges_from(engine.runtime().unwrap(), WIDGET, EdgeKind::Extends).is_empty());
+}

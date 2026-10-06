@@ -86,6 +86,11 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     kind_following_supertypes: HashSet<String>,
+    /// Normalised extensions whose language declares that a namespace sees the
+    /// types of its enclosing namespaces (S-595, [FR-RS-45]).
+    ///
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+    enclosing_namespace_exts: HashSet<String>,
 }
 
 /// One language's path-model data in a layout (S-519).
@@ -164,6 +169,18 @@ impl PackageLayout {
             .with_families(registry.families())
             .with_call_targets(registry.call_targets())
             .with_kind_following_supertypes(registry.supertype_kind_follows_target())
+            .with_enclosing_namespaces(registry.enclosing_namespace_extensions())
+    }
+
+    /// This layout, with the extensions whose namespace sees its enclosing
+    /// namespaces' types (S-595; the set
+    /// [`LanguageRegistry::enclosing_namespace_extensions`] returns).
+    pub fn with_enclosing_namespaces(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        self.enclosing_namespace_exts.extend(
+            exts.into_iter()
+                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
+        );
+        self
     }
 
     /// This layout, with each extension's path-model data (S-519; the shape
@@ -371,6 +388,16 @@ impl PackageLayout {
         Some(self.families.get(&ext).cloned().unwrap_or(ext))
     }
 
+    /// Whether a type name written in the file at `path` is also looked up in
+    /// each enclosing namespace of the namespace that file declares (S-595,
+    /// [FR-RS-45]): its language's declaration. The global namespace is never
+    /// one of those levels.
+    ///
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+    pub fn sees_enclosing_namespaces(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.enclosing_namespace_exts.contains(&ext))
+    }
+
     /// What a call written in the file at `path` may bind besides a callable
     /// (S-521, [FR-RS-16]): its language's declaration, or none.
     ///
@@ -471,6 +498,7 @@ impl PackageLayout {
             .with_kind_following_supertypes(
                 exts().filter(|_| semantics.supertype_kind_follows_target),
             )
+            .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
     }
 
     /// `true` when the file at `path` takes the package rungs: its language
@@ -1213,5 +1241,29 @@ mod call_target_tests {
             }
         }
         assert!(declaring > 0, "some shipped plugin declares the supertype key");
+    }
+
+    /// The same parity for the enclosing-namespace key (S-595): the
+    /// single-plugin layout answers every extension as the registry's does,
+    /// over a set some shipped plugin is in — and a plugin that does not
+    /// declare the key is out of it.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_enclosing_namespace_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let (mut declaring, mut silent) = (0, 0);
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                let sees = own.sees_enclosing_namespaces(&path);
+                assert_eq!(sees, full.sees_enclosing_namespaces(&path), "{path}");
+                declaring += usize::from(sees);
+                silent += usize::from(!sees);
+            }
+        }
+        assert!(declaring > 0, "some shipped plugin declares the enclosing-namespace key");
+        assert!(silent > 0, "a plugin that does not declare it binds as before");
     }
 }

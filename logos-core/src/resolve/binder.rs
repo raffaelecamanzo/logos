@@ -34,8 +34,10 @@
 //! package, and one of a **declared-namespace** language (PHP, C#, Kotlin,
 //! Scala; S-518, [FR-RS-13]) by the namespace it declares ([`PackageLayout`]).
 //! Either, after the lexical chain, takes its own rungs instead of 2–5: its
-//! single-type/static imports, the top-level types of its own package, what its
-//! wildcards bring into view, then a path read as a fully-qualified name
+//! single-type/static imports, the top-level types of its own package, those of
+//! each namespace enclosing it when its plugin declares them (S-595,
+//! [FR-RS-45]), what its wildcards bring into view, then a path read as a
+//! fully-qualified name
 //! ([`Ctx::resolve_package_name`], [`Ctx::resolve_package_path`]). An import
 //! binds to the type or member it names — a declared-namespace wildcard, which
 //! names no type, to the files declaring the namespace
@@ -45,6 +47,7 @@
 //!
 //! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 //! [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+//! [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
 //!
 //! A file of an **import-root** language (Python; S-519, [FR-RS-14]) keeps
 //! rungs 1–5, keyed under its family's own crate: a relative import reads its
@@ -2083,6 +2086,7 @@ fn bind_traced(
     let source_file = source_info.and_then(|i| i.file_path.as_deref());
     let source_package = source_file.and_then(|p| ix.layout.package_of(p));
     let source_family = source_file.and_then(|p| ix.layout.family(p));
+    let enclosing_namespaces = source_file.is_some_and(|p| ix.layout.sees_enclosing_namespaces(p));
     let relation = relation_want_of(r, source_info, &ix.layout);
     let ctx = Ctx {
         source,
@@ -2090,6 +2094,7 @@ fn bind_traced(
         ix,
         source_package,
         source_family,
+        enclosing_namespaces,
         policy,
         in_glob_resolution: Cell::new(false),
         in_rival_expansion: Cell::new(false),
@@ -2473,6 +2478,13 @@ struct Ctx<'a> {
     /// S-519) — the partition of the type and namespace indexes its package
     /// rungs read. `None` for a source with no file.
     source_family: Option<String>,
+    /// Whether the source's language declares that a namespace sees the types
+    /// of its enclosing namespaces ([`PackageLayout::sees_enclosing_namespaces`],
+    /// S-595, [FR-RS-45]) — what turns on the
+    /// [`enclosing_levels`](Ctx::enclosing_levels) rung.
+    ///
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+    enclosing_namespaces: bool,
     policy: BindingPolicy,
     /// Re-entrancy guard for [`through_globs`](Ctx::through_globs): set while a
     /// glob's own module path is being resolved, so that resolution cannot fan
@@ -2726,8 +2738,8 @@ impl Ctx<'_> {
         }
         // 4) A package-shaped source (CR-149): the rest of the path is decided
         //    by the package rungs alone, in the language's own order — its
-        //    lexical, imported, same-package and on-demand heads, then the
-        //    fully-qualified name. The module tree below names no package
+        //    lexical, imported, same-package, enclosing-namespace (S-595) and
+        //    on-demand heads, then the fully-qualified name. The module tree below names no package
         //    directory, and the workspace suffix match would read a
         //    fully-qualified name as a guess.
         if let Some(package) = &self.source_package {
@@ -3900,9 +3912,14 @@ impl Ctx<'_> {
     ///    reaching a same-package or wildcard type of that name (S-466 review);
     /// 2. **same package** — a top-level type of the source's own package,
     ///    visible without an import;
-    /// 3. **on-demand** — a member of a type, or a type of a package, the file
+    /// 3. **enclosing namespaces** — only for a language that declares them
+    ///    (S-595, [FR-RS-45]): a top-level type of each namespace enclosing the
+    ///    source's own, nearest first ([`enclosing_levels`](Ctx::enclosing_levels)),
+    ///    exactly one per level — two at one level are
+    ///    [`Residue::TypeAmbiguous`] and stop the walk, none passes outward;
+    /// 4. **on-demand** — a member of a type, or a type of a package, the file
     ///    imports with a wildcard ([`glob_members`](Ctx::glob_members));
-    /// 4. the policy-gated workspace name fallback, as for every other
+    /// 5. the policy-gated workspace name fallback, as for every other
     ///    language — except for a type relation, which binds by scope and
     ///    package key only ([`scope_only`](Ctx::scope_only)).
     ///
@@ -3947,6 +3964,24 @@ impl Ctx<'_> {
             Res::NotFound => {}
             decided => return decided,
         }
+        for level in self.enclosing_levels(package) {
+            let found: Vec<NodeId> = self
+                .package_type(level, name)
+                .iter()
+                .copied()
+                .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind)))
+                .collect();
+            match exactly_one(&found) {
+                Res::NotFound => {}
+                Res::Ambiguous => {
+                    // Two types of one name at the nearest level that has any:
+                    // the walk stops, never reaching a level further out.
+                    self.note(want, || Residue::TypeAmbiguous);
+                    return Res::Ambiguous;
+                }
+                decided => return decided,
+            }
+        }
         match self.glob_members(name, want, false) {
             Some(found) => match exactly_one(&found) {
                 Res::NotFound => {}
@@ -3981,14 +4016,21 @@ impl Ctx<'_> {
     /// they reach one declaration and are [`Res::Ambiguous`] where they reach
     /// two, never the first import's alone (a rival head met while another's
     /// rivals are being read binds nothing, [`in_rival_expansion`]); else a type
-    /// of the source's own package; else one a wildcard brings into view; else
-    /// the whole path read as a fully-qualified name
-    /// ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung whose head names a
+    /// of the source's own package; else, for a language that declares them
+    /// (S-595, [FR-RS-45]), the path read under each namespace enclosing the
+    /// source's own, nearest first
+    /// ([`resolve_fqn_under`](Ctx::resolve_fqn_under)) — two types at one level
+    /// are [`Res::Ambiguous`], never a pick of an outer level, and a level
+    /// whose type has no such member ends that walk but not the rungs below it;
+    /// else one a
+    /// wildcard brings into view; else the whole path read as a fully-qualified
+    /// name ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung whose head names a
     /// type decides — a simple type name obscures a package of the same
     /// spelling, as the language rules it.
     ///
     /// [`in_rival_expansion`]: Ctx::in_rival_expansion
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     fn resolve_package_path(&self, package: &[String], segs: &[String], want: Want, depth: u8) -> Res {
         let Some((head, rest)) = segs.split_first() else {
             return Res::NotFound;
@@ -4025,6 +4067,18 @@ impl Ctx<'_> {
         if let Some(decided) = self.walk_from(self.package_type(package, head), rest, want) {
             return decided;
         }
+        for level in self.enclosing_levels(package) {
+            match self.resolve_fqn_under(level, segs, want) {
+                None => {}
+                // A nearer level that reached a type hides the outer levels,
+                // but one whose walk then found no such member supplies
+                // nothing: the wildcards and the fully-qualified read decide,
+                // as they did before this rung existed — never a guess past
+                // the level (NFR-RA-05).
+                Some(Res::NotFound) => break,
+                Some(decided) => return decided,
+            }
+        }
         match self.glob_members(head, Want::Any, true) {
             Some(found) => {
                 if let Some(decided) = self.walk_from(&found, rest, want) {
@@ -4050,7 +4104,8 @@ impl Ctx<'_> {
 
     /// The fully-qualified names the type of a call `segs` (the receiver type
     /// segments, then the member) could be, in the order the source's scope
-    /// reads them: the source's own package, each non-static wildcard, then the
+    /// reads them: the source's own package, each enclosing namespace of it for
+    /// a language that declares them (S-595), each non-static wildcard, then the
     /// path as written when it is qualified. Its single-type import never
     /// appears here — an imported head is expanded and resolved as the path
     /// written. A simple name as written would name a type of the default
@@ -4069,6 +4124,9 @@ impl Ctx<'_> {
             }
         };
         push(package);
+        for level in self.enclosing_levels(package) {
+            push(level);
+        }
         if let Some(scope) = self.scope() {
             for glob in &scope.globs {
                 push(glob);
@@ -4091,17 +4149,41 @@ impl Ctx<'_> {
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn resolve_fqn(&self, segs: &[String], want: Want) -> Res {
-        let Some(family_types) = self.family_types() else {
-            return Res::NotFound;
-        };
-        for split_at in (1..=segs.len()).rev() {
-            if let Some(types) = family_types.get(&segs[..split_at]) {
-                return self
-                    .walk_from(types, &segs[split_at..], want)
-                    .unwrap_or(Res::NotFound);
+        self.resolve_fqn_under(&[], segs, want)
+            .unwrap_or(Res::NotFound)
+    }
+
+    /// `segs` read as a name relative to the namespace `prefix` (S-595): the
+    /// longest `prefix` + leading-`segs` that names a top-level type of the
+    /// source's family — at least the head of `segs` — then the rest as that
+    /// type's nested members, the walk [`resolve_fqn`](Ctx::resolve_fqn) takes
+    /// (which is this with an empty `prefix`). `None` when no such type exists,
+    /// so the caller's next rung decides; else the walk's result, where two
+    /// types under the prefix are [`Res::Ambiguous`].
+    fn resolve_fqn_under(&self, prefix: &[String], segs: &[String], want: Want) -> Option<Res> {
+        let family_types = self.family_types()?;
+        let mut fqn = prefix.to_vec();
+        fqn.extend_from_slice(segs);
+        for split_at in (prefix.len() + 1..=fqn.len()).rev() {
+            if let Some(types) = family_types.get(&fqn[..split_at]) {
+                return self.walk_from(types, &fqn[split_at..], want);
             }
         }
-        Res::NotFound
+        None
+    }
+
+    /// The namespaces enclosing the source's own `package`, nearest first
+    /// (S-595, [FR-RS-45]): `A.B.C` → `A.B`, `A`. Empty unless the source's
+    /// language declares the key, and never the global namespace — a package of
+    /// one segment, or none, has no enclosing level. A rung reads each level
+    /// for exactly one type; two stop the walk unbound, none passes outward
+    /// ([NFR-RA-05]).
+    ///
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn enclosing_levels<'p>(&self, package: &'p [String]) -> impl Iterator<Item = &'p [String]> {
+        let depth = if self.enclosing_namespaces { package.len() } else { 0 };
+        (1..depth).rev().map(move |len| &package[..len])
     }
 
     /// The files a declared-namespace source's namespace wildcard names (S-518,

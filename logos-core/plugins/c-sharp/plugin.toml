@@ -89,8 +89,21 @@ http_client_detectors = ["System::Net::Http"]
 # declared twice under one name binds neither (NFR-RA-05). No `family` is
 # declared, so the language is its own interop family (S-519): its imports reach
 # only its own types and namespaces.
+#
+# A namespace sees the types of the namespaces that enclose it (S-595, CR-192,
+# FR-RS-45): code in `A.B.C` names a type of `A.B` or `A` without a `using`, the
+# nearest namespace first and never the global one, before any `using` namespace
+# is read. Two types of one name in one enclosing namespace bind nothing.
+#
+# Stated ceilings, shared with the same-namespace rung it extends: types are
+# indexed by name, so `Result<T>` and a non-generic `Result` are one name (C#
+# tells them apart by arity), and a `using` written inside a namespace block is
+# read like a file-level one — after the enclosing namespaces, where C# reads it
+# before the enclosing namespace it sits in. Where either decides the other way,
+# a name an enclosing namespace spells wins over the `using` that C# would pick.
 [module_model]
 kind = "namespace"
+enclosing_namespaces = true
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
 # files through the declared namespace (S-518), and so do a type's supertypes

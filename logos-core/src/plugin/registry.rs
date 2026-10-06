@@ -435,6 +435,23 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a namespace sees the types of its enclosing namespaces
+    /// (S-595, [FR-RS-45]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+    pub fn enclosing_namespace_extensions(&self) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| p.semantics().enclosing_namespaces)
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
     /// Grammars skipped at load due to an ABI mismatch ([FR-PL-03]).
     pub fn skipped(&self) -> &[SkippedGrammar] {
         &self.skipped
@@ -1097,6 +1114,21 @@ mod tests {
         }
         for ext in ["rs", "java", "php", "py", "scala", "ts", "go", "rb", "c", "cpp", "md"] {
             assert!(!declaring.contains(ext), "`{ext}` spells each supertype's kind");
+        }
+    }
+
+    /// The enclosing-namespace key (S-595, FR-RS-45): C# alone declares it.
+    /// PHP, Kotlin, Scala and Java — whose namespaces and packages do not nest
+    /// their types' visibility this way — are absent.
+    #[test]
+    fn enclosing_namespace_extensions_collect_only_the_declaring_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.enclosing_namespace_extensions();
+        #[cfg(feature = "lang-c-sharp")]
+        assert!(declaring.contains("cs"), "`cs` sees its enclosing namespaces");
+        for ext in ["rs", "java", "kt", "kts", "php", "py", "scala", "ts", "go", "rb", "c", "cpp", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
         }
     }
 

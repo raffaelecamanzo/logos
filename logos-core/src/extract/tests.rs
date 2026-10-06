@@ -45,6 +45,7 @@ impl NoSymbolsPlugin {
                 module_model: crate::plugin::ModuleModelKind::Path,
                 package_stems: Vec::new(),
                 import_roots: None,
+                enclosing_namespaces: false,
                 family: "mock".to_string(),
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
