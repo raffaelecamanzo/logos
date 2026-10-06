@@ -7,9 +7,10 @@
 //! from the plugin query's `@symbol.self_type` capture); a `self.m()` inside it
 //! is recorded as the Path-form `Self::m`, the row a written `Self::m()`
 //! records; the binder binds it to the one `m` recorded for the caller's self
-//! type in the caller's crate. Zero or two candidates stay unbound. Calls on any
-//! other receiver, and calls inside a trait's default method, are recorded and
-//! resolved exactly as before.
+//! type in the caller's crate. Zero or two candidates stay unbound. Calls inside
+//! a trait's default method are recorded and resolved exactly as before; a call
+//! on any other receiver never binds through the self type (where the file
+//! proves the receiver's type, S-587 and S-588 type and bind it).
 //!
 //! Fixtures are written inline into temp directories, like every sibling binding
 //! suite here: a `.rs` fixture tree checked into this repository would be indexed
