@@ -405,6 +405,105 @@ mod tests {
     );
 }
 
+// ── The `"none"` languages: a method `f` calling an imported `f` ─────────────
+//
+// The scope walk passes over the method and reaches the file's import of the
+// free `f` in another file. Go has no bare imported function (a dot import
+// aside), and a PHP `use function` import binds nothing yet from any caller,
+// so neither has a case here.
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn python_a_bare_call_inside_a_same_named_method_binds_the_imported_function() {
+    let edges = edges_of(&[
+        ("pkg/__init__.py", ""),
+        ("pkg/util.py", "def f():\n    return 0\n"),
+        (
+            "pkg/app.py",
+            "\
+from pkg.util import f
+
+
+class A:
+    def f(self):
+        return f()
+",
+        ),
+    ]);
+    assert_eq!(edges, expect(&[("pkg/app.py:f@5", "pkg/util.py:f@1")]));
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn rust_a_bare_call_inside_a_same_named_method_binds_the_imported_function() {
+    let edges = edges_of(&[
+        ("src/lib.rs", "pub mod util;\npub mod t;\n"),
+        ("src/util.rs", "pub fn f() -> i32 {\n    0\n}\n"),
+        (
+            "src/t.rs",
+            "\
+use crate::util::f;
+
+pub struct T;
+
+impl T {
+    pub fn f(&self) -> i32 {
+        f()
+    }
+}
+",
+        ),
+    ]);
+    assert_eq!(edges, expect(&[("src/t.rs:f@6", "src/util.rs:f@1")]));
+}
+
+/// A TS-family file importing `f`, whose class declares a method `f` that
+/// calls it, beside a free caller of it. The method never shadows the import.
+const TS_IMPORTED: &str = "\
+import { f } from './util';
+
+function g() {
+  return f();
+}
+
+class A {
+  f() {
+    return f();
+  }
+}
+";
+
+#[cfg(feature = "lang-typescript")]
+fn assert_ts_family_imported(ext: &str) {
+    let file = format!("src/a.{ext}");
+    let util = format!("src/util.{ext}");
+    let edges = edges_of(&[(&util, "export function f() {\n  return 0;\n}\n"), (&file, TS_IMPORTED)]);
+    let free = format!("{util}:f@1");
+    assert_eq!(
+        edges,
+        expect(&[(&format!("{file}:f@8"), &free), (&format!("{file}:g@3"), &free)]),
+        "{ext}"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn typescript_a_bare_call_inside_a_same_named_method_binds_the_imported_function() {
+    assert_ts_family_imported("ts");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn javascript_a_bare_call_inside_a_same_named_method_binds_the_imported_function() {
+    assert_ts_family_imported("js");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn tsx_a_bare_call_inside_a_same_named_method_binds_the_imported_function() {
+    assert_ts_family_imported("tsx");
+}
+
 // ── Sync ≡ reindex ───────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
@@ -667,3 +766,4 @@ end
             ("lib/a.rb:run@6", "lib/a.rb:helper@2"),
         ]), "{edges:?}");
 }
+

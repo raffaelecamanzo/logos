@@ -3036,7 +3036,10 @@ fn rust_impl_trait_name(method: Node<'_>, source: &[u8]) -> Option<String> {
 /// and its calls keep their bare form); a default import is not read (the name
 /// it was exported under is not in the importing file); a Go dot or blank
 /// import binds no qualifier. A local name the file also **declares** is
-/// dropped, and so is one a function scope enclosing the call **binds** — a
+/// dropped — a member of a class-like container excepted, which a bare name
+/// never reaches in these languages (S-590, [FR-RS-07]): a method `f` beside
+/// `import { f }` leaves the import in force — and so is one a function scope
+/// enclosing the call **binds** — a
 /// parameter, a local, a destructured prop, a Go `:=` ([`local_bindings`]):
 /// `func handle(admin *admin.Server) { admin.Reload() }` calls a method on the
 /// parameter, not the package. The shadowed call keeps its bare form — a
@@ -3052,6 +3055,7 @@ fn rust_impl_trait_name(method: Node<'_>, source: &[u8]) -> Option<String> {
 /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
 /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
 /// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
+/// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[derive(Debug, Default)]
 struct ImportBindings {
@@ -3090,7 +3094,12 @@ impl ImportBindings {
                 }
             }
         }
-        let declared: HashSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+        let member = |d: &Decl<'_>| d.parent.is_some_and(|p| crate::resolve::is_class_like(decls[p].kind));
+        let declared: HashSet<&str> = decls
+            .iter()
+            .filter(|d| !member(d))
+            .map(|d| d.name.as_str())
+            .collect();
         let keep = |map: HashMap<String, Option<String>>| -> HashMap<String, String> {
             map.into_iter()
                 .filter(|(local, _)| !declared.contains(local.as_str()))
