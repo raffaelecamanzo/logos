@@ -2911,6 +2911,27 @@ fn an_enclosing_type_without_the_member_leaves_the_wildcards_to_decide() {
     assert_eq!(bind_enclosing(&types, &nested, &[], &extends(2, 2, "Result::Inner")), Outcome::Unbound);
 }
 
+/// A call through a head no rung reaches names, as the candidates for another
+/// workspace member to declare, the types the source's scope would have read —
+/// its enclosing namespaces among them, in the order the rung reads them.
+#[test]
+fn an_unreached_head_lists_the_enclosing_namespaces_among_its_candidates() {
+    let types = [("cs", "A.B.C", "D")];
+    let call = make_ref(1, ty_file(0), ty(0), "Gone::m", None, RefForm::Path, EdgeKind::Calls);
+    let candidates = |enclosing| {
+        let ix = enclosing_index(&types, &[], std::slice::from_ref(&call), enclosing);
+        match super::binder::residue(&call, &ix, BindingPolicy::Balanced) {
+            Some(Residue::ExternalType { candidates }) => candidates,
+            other => panic!("expected an external type, got {other:?}"),
+        }
+    };
+    let name = |ns: &[&str]| -> Vec<String> {
+        ns.iter().chain(&["Gone"]).map(|s| s.to_string()).collect()
+    };
+    assert_eq!(candidates(true), [name(&["A", "B", "C"]), name(&["A", "B"]), name(&["A"])]);
+    assert_eq!(candidates(false), [name(&["A", "B", "C"])]);
+}
+
 /// The global namespace is not an enclosing level, and another interop
 /// family's namespace of the same spelling is never a candidate.
 #[test]

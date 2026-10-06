@@ -4104,7 +4104,8 @@ impl Ctx<'_> {
 
     /// The fully-qualified names the type of a call `segs` (the receiver type
     /// segments, then the member) could be, in the order the source's scope
-    /// reads them: the source's own package, each non-static wildcard, then the
+    /// reads them: the source's own package, each enclosing namespace of it for
+    /// a language that declares them (S-595), each non-static wildcard, then the
     /// path as written when it is qualified. Its single-type import never
     /// appears here — an imported head is expanded and resolved as the path
     /// written. A simple name as written would name a type of the default
@@ -4123,6 +4124,9 @@ impl Ctx<'_> {
             }
         };
         push(package);
+        for level in self.enclosing_levels(package) {
+            push(level);
+        }
         if let Some(scope) = self.scope() {
             for glob in &scope.globs {
                 push(glob);
