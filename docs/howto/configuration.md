@@ -1472,7 +1472,10 @@ Python records one import row per imported name (`from a import b, c` is two
 rows), and its imports reach only Python modules: neither a module path nor a
 fallback crosses into another language's files. An `as` import (`from m import a
 as b`) binds the import but gives the file no name `a`, and a name imported twice
-(a `try`/`except` compat import) binds a call only where both imports agree.
+(a `try`/`except` compat import) binds a call only where both imports agree. Two
+`as` names of one target (`from m import X as A` and `from m import X as B` in one
+scope) both bind, and so do `import numpy` beside `import numpy as np` and the
+Kotlin and Scala `import … as …` twins.
 
 **`family`.** Languages that can name each other's types declare one **interop
 family** (any kind), and the type and namespace lookups never cross it:
@@ -1532,7 +1535,36 @@ With either model:
   file that declares it — by .NET convention the project root;
 - a type declared under one fully-qualified name twice (`src/main` and
   `src/test`, or a Scala class and its companion object) stays unbound rather
-  than being guessed, and so do library imports (JDK, Spring, PSR, `System`).
+  than being guessed, and so do library imports (JDK, Spring, PSR, `System`);
+- two single-type imports of one simple name from different packages
+  (`import a.Helper; import b.Helper;`) make the name ambiguous: a call or
+  `extends` through it (`Helper.util()`, `Helper.Inner`) binds nothing and is
+  recorded as `type-ambiguous`. Imports that reach one declaration, and a verbatim
+  repeat, bind as before, and an import of a name no type in the repository
+  carries never shadows one that does.
+
+**`enclosing_namespaces` (`namespace` model only).** C# resolves a type name by
+walking outward through the namespaces that enclose the one it is written in. A
+plugin opts in, and the C# plugin does:
+
+```toml
+[module_model]
+kind = "namespace"
+enclosing_namespaces = true   # refused under any other kind
+```
+
+A simple type name, or the head of a qualified one, that the file's own namespace
+does not supply is then looked up in each enclosing namespace, nearest first
+(`A.B`, then `A`, for code in `A.B.C`), before any `using` namespace. One type
+decides a level; two at one level bind nothing (`type-ambiguous`) and the walk
+never falls through to an outer level. Only the file's own interop family is
+read, and the global namespace is never a level. Two known limits, shared with
+the same-namespace lookup:
+
+- types are matched by name only, so a generic `Result<T>` in an enclosing
+  namespace is taken for a non-generic `Result` a `using` supplies;
+- a `using` written inside a namespace block is read after the enclosing
+  namespaces, where C# reads it before them.
 
 ### Call targets (`class_call_instantiates`, `macros_callable`)
 

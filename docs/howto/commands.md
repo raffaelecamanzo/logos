@@ -335,6 +335,14 @@ Incremental fold-in of changes — much faster than a full `index` on large
 trees. Deleted files' symbols are captured before removal so inbound
 references degrade gracefully rather than dangle.
 
+A sync leaves the store as a fresh `index` of the same tree would, in every
+language: every reference of each symbol a changed file affects is re-bound, and
+an edge none of those references produces any more is removed in the same
+transaction. A captured reference is deleted once it re-binds; one whose target
+was renamed away stays unresolved. A store synced by an earlier release that
+still holds spent captures loses them on its next `sync`, even one that changes
+nothing.
+
 `sync` reconciles **exactly the paths it is given** and never sweeps the rest of
 the tree. With no path it re-reads no file, so `logos sync` alone does not pick up
 an edit. The paths usually come from somewhere else: the watcher under
@@ -460,6 +468,13 @@ another member's type from a library's, so only the workspace read has a
 
 `call_residue` is computed when `status` runs and never stored, so it costs a
 `status` call a fraction of a second on a Java project and nothing on the others.
+
+Every figure counted over the reference ledger — `refs_total`/`refs_resolved`,
+each language's `references` and `bound`, the per-relation coverage and the
+`call_residue` counts — leaves out the capture-before-delete rows a `sync`
+writes for edges into a re-read file, because each one duplicates a reference
+its source already records. A synced store therefore reads the same figures as
+a fresh `index` of the same tree, on the CLI, `--json`, MCP and HTTP alike.
 
 ## Navigation
 

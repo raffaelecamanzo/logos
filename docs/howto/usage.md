@@ -490,7 +490,11 @@ Server behavior guarantees:
   tree. Watcher registration prunes ignored directories (`target/`, `node_modules/`,
   `dist/`, `build/`, `vendor/`, `.git/`, and anything in `[semantics].ignored_dirs`)
   through the same admission authority that guards `index`/`sync`, so it never walks
-  build output to seed rename tracking.
+  build output to seed rename tracking. A language's tree-sitter queries compile on
+  the first extraction that needs them, once per process, so start-up pays nothing for
+  languages the repository does not use; each first compile is logged once with its
+  duration at `RUST_LOG=info`. An override under `.logos/plugins/<lang>/` still
+  compiles at start-up and fails naming its file.
 - **Stdout purity** — stdout carries only JSON-RPC frames, even at
   `RUST_LOG=trace`; logs go to stderr. A malformed frame gets a structured
   parse error (`-32700`) and the server keeps answering.
