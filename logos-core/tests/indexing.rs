@@ -401,6 +401,13 @@ fn sync_drops_a_captured_edge_when_the_target_symbol_disappears() {
         callees.is_empty(),
         "the unrebindable edge was dropped, leaving the caller with no callees"
     );
+    // CR-187: nothing else in the ledger carries the planted edge (no row of
+    // the caller's names it), so its capture stays, unresolved, awaiting its
+    // target (NFR-RA-05).
+    let captures = capture_rows(rt);
+    assert_eq!(captures.len(), 1, "the capture stays in the ledger: {captures:?}");
+    assert!(captures[0].1.ends_with("callee()."), "it names the old target: {captures:?}");
+    assert!(!captures[0].2, "it stays unresolved: {captures:?}");
 }
 
 #[test]
@@ -1189,34 +1196,6 @@ fn an_edit_and_revert_cycle_leaves_the_ledger_a_fresh_indexs() {
     }
     assert_eq!(graph_fingerprint(rt), cold, "edit → sync → revert → sync equals the cold index");
     assert_eq!(capture_rows(rt), Vec::new());
-}
-
-/// A capture whose target was renamed away cannot re-bind, and nothing else in
-/// the ledger carries its edge (the edge was planted, so no source row names
-/// it): it stays, unresolved, and no edge is invented (NFR-RA-05).
-#[test]
-fn a_capture_whose_target_was_renamed_away_stays_unresolved() {
-    let tmp = TempDir::new().expect("temp root");
-    write(tmp.path(), "caller.rs", "fn caller() {}\n");
-    write(tmp.path(), "callee.rs", "fn callee() {}\n");
-    let engine = Engine::start(tmp.path()).expect("engine starts");
-    let rt = engine.runtime().expect("runtime present");
-    engine.index();
-    let (caller_id, callee_id) = (node_id_of(rt, "caller"), node_id_of(rt, "callee"));
-    rt.submit_write(move |w| w.insert_edge(caller_id, callee_id, EdgeKind::Calls))
-        .expect("plant edge");
-
-    write(tmp.path(), "callee.rs", "fn callee_renamed() {}\n");
-    engine.sync(&[PathBuf::from("callee.rs")]);
-
-    let captures = capture_rows(rt);
-    assert_eq!(captures.len(), 1, "the capture stays in the ledger: {captures:?}");
-    assert!(captures[0].1.ends_with("callee()."), "it names the old target: {captures:?}");
-    assert!(!captures[0].2, "it stays unresolved: {captures:?}");
-    assert!(
-        rt.submit_read(move |s| s.callees(caller_id)).expect("read callees").is_empty(),
-        "no edge is invented for it"
-    );
 }
 
 /// The natural rename: the caller's own row re-binds this sync and decides its
