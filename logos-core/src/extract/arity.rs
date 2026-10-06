@@ -31,9 +31,11 @@
 //! covered by a capture — the child itself, or a node beneath it (Go's
 //! `a, b int` is one child naming two parameters, each name captured) — or the
 //! range is unknown rather than miscounted. Where captures disagree on one
-//! child the strongest wins: `unknown` > `receiver` > `variadic` > `optional` >
+//! child the strongest wins: `unknown` > `variadic` > `receiver` > `optional` >
 //! `skip` > `required`, so a query may capture every parameter `required` and
-//! refine the defaulted ones.
+//! refine the defaulted ones — and a first parameter that is variadic (Python's
+//! `def m(*args: int)`, whose `args` holds `self`) is never mistaken for a lone
+//! receiver.
 //!
 //! # The `references`-query vocabulary — a call's arguments
 //!
@@ -86,8 +88,8 @@ enum Class {
     Required,
     Skip,
     Optional,
-    Variadic,
     Receiver,
+    Variadic,
     Unknown,
 }
 

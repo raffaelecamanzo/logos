@@ -359,7 +359,8 @@ fn python_ranges_and_counts() {
         def gen(): sum(x for x in y)\n\
         class K:\n    if v:\n        def cond(self, x): pass\n    try:\n        @dec\n        def tri(self, y): pass\n\
         \x20   except E:\n        pass\n\
-        def m2(*args: int): pass\n";
+        def m2(*args: int): pass\n\
+        class V:\n    def var(*args: int): pass\n";
     assert_eq!(
         ranges("pkg/a.py", src),
         map(&[
@@ -375,6 +376,9 @@ fn python_ranges_and_counts() {
             ("m2", range(0, None)),
             ("s", range(1, Some(1))),
             ("tri", None),
+            // A method whose first parameter is `*args` receives `self` in it:
+            // variadic, never a lone receiver.
+            ("var", range(0, None)),
         ])
     );
     let counts = counts("pkg/a.py", src);
