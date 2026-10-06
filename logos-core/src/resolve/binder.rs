@@ -4600,7 +4600,13 @@ impl Ctx<'_> {
             let Some(&scope_node) = self.ix.modules.get(&key) else {
                 return Res::NotFound;
             };
-            return exactly_one(&self.ix.members_named(scope_node, seg, want));
+            let mut members = self.ix.members_named(scope_node, seg, want);
+            // A bare call's `use` or glob import reaches the module's free
+            // function, never an associated one collapsed beside it (S-590).
+            if self.bare_path_call.get() {
+                members.retain(|&id| !self.is_unreachable_member(id));
+            }
+            return exactly_one(&members);
         }
         Res::NotFound
     }

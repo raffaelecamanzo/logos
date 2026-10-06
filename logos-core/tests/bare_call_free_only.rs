@@ -504,6 +504,35 @@ fn tsx_a_bare_call_inside_a_same_named_method_binds_the_imported_function() {
     assert_ts_family_imported("tsx");
 }
 
+/// A module declaring a free `helper` and an associated `S::helper`, which
+/// collapses to the same module scope.
+#[cfg(feature = "lang-rust")]
+const UTIL_WITH_TWIN: &str = "\
+pub struct S;
+
+impl S {
+    pub fn helper(&self) -> i32 {
+        1
+    }
+}
+
+pub fn helper() -> i32 {
+    0
+}
+";
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn rust_a_use_or_glob_import_binds_the_free_function_beside_an_associated_twin() {
+    for import in ["use crate::util::helper;", "use crate::util::*;"] {
+        let edges = edges_of(&[
+            ("src/lib.rs", &format!("pub mod util;\n{import}\n\npub fn run() -> i32 {{\n    helper()\n}}\n") as &str),
+            ("src/util.rs", UTIL_WITH_TWIN),
+        ]);
+        assert_eq!(edges, expect(&[("src/lib.rs:run@4", "src/util.rs:helper@9")]), "{import}");
+    }
+}
+
 // ── Sync ≡ reindex ───────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
