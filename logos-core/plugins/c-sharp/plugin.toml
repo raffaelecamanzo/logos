@@ -94,6 +94,13 @@ http_client_detectors = ["System::Net::Http"]
 # FR-RS-45): code in `A.B.C` names a type of `A.B` or `A` without a `using`, the
 # nearest namespace first and never the global one, before any `using` namespace
 # is read. Two types of one name in one enclosing namespace bind nothing.
+#
+# Stated ceilings, shared with the same-namespace rung it extends: types are
+# indexed by name, so `Result<T>` and a non-generic `Result` are one name (C#
+# tells them apart by arity), and a `using` written inside a namespace block is
+# read like a file-level one — after the enclosing namespaces, where C# reads it
+# before the enclosing namespace it sits in. Where either decides the other way,
+# a name an enclosing namespace spells wins over the `using` that C# would pick.
 [module_model]
 kind = "namespace"
 enclosing_namespaces = true

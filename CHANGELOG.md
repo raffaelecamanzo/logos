@@ -89,7 +89,12 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   and the walk never falls through to an outer level; none passes outward. Only the
   source's own interop family is read, and the global namespace is never a level. A
   single-type `using` stays final for the name it imports. No language id is named in the
-  resolver; PHP, Kotlin, Scala and Java bind exactly as before.
+  resolver; PHP, Kotlin, Scala and Java bind exactly as before. Two ceilings, both
+  shared with the same-namespace rung: types are indexed by name, so a generic `Result<T>`
+  in an enclosing namespace is taken for a non-generic `Result`; and a `using` written
+  inside a namespace block is read after the enclosing namespaces, where C# reads it
+  before them. A qualified head (`Result.Inner`) whose enclosing type lacks the member
+  still reaches the `using` that has it.
 - **Measured** on Newtonsoft.Json at `52fa3aef`, indexed by the parent commit's build and
   by this build over identical trees: C# `Extends`/`Implements` ledger rows bound 263 / 886 → 290
   / 886 (+22 `Extends` edges, +5 `Implements` edges, none removed), and incoming `Extends`
