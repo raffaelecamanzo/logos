@@ -533,6 +533,42 @@ fn rust_a_use_or_glob_import_binds_the_free_function_beside_an_associated_twin()
     }
 }
 
+// ── Only a bare call: type relations still read class scope ──────────────────
+
+/// The filter is the bare call's alone. A class body does see its sibling
+/// nested class, so `Sub(Inner)` extends `A.Inner`: a type relation keeps
+/// reading class scope in a language that declares `"none"`.
+#[cfg(feature = "lang-python")]
+#[test]
+fn python_a_nested_class_still_extends_its_sibling_nested_class() {
+    let tmp = tree(&[(
+        "app.py",
+        "\
+class A:
+    class Inner:
+        pass
+
+    class Sub(Inner):
+        pass
+",
+    )]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let label = labels(rt);
+    let mut extends: Vec<(String, String)> = rt
+        .submit_read(|store| store.all_edges())
+        .expect("read runs")
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::Extends)
+        .map(|e| (label[&e.source].clone(), label[&e.target].clone()))
+        .collect();
+    extends.sort();
+    assert_eq!(
+        extends,
+        expect(&[("app.py:Sub@5", "app.py:Inner@2")])
+    );
+}
+
 // ── Sync ≡ reindex ───────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
@@ -638,8 +674,12 @@ class A:
 // ── The languages that reach the instance: unchanged ─────────────────────────
 //
 // Each pin is the edge set the binder produced before S-590 for the same
-// bare-call shapes; a rule that leaked past the explicit `"none"` declaration
-// would drop a member edge here.
+// bare-call shapes. Java's bare in-class call is a Path row and would lose its
+// member edge if the rule reached it (an omitted key read as `"none"` fails
+// the Java pin). The `"self"` languages record that call as a `self` Method
+// row, which never reaches the Path arm the rule lives in, so their pins guard
+// the receiver path; their exclusion from the rule itself is pinned by the
+// registry test `free_only_bare_call_extensions_collect_only_the_explicit_none_grammars`.
 
 #[cfg(feature = "lang-java")]
 #[test]
