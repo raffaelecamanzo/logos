@@ -1239,6 +1239,43 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         });
     }
 
+    /// A layer named after the unbound bare `make()` call the residue counts,
+    /// so a derived policy node that leaked into the walk would move a figure.
+    const LAYER_NAMED_MAKE: &str =
+        "[[layers]]\nname  = \"make\"\npaths = [\"src/*.rs\"]\norder = 1\n";
+
+    /// Whether the store holds the derived `Layer` node `make`.
+    fn has_layer_make(engine: &Engine) -> bool {
+        engine
+            .runtime()
+            .unwrap()
+            .submit_read(|store| {
+                Ok(store
+                    .all_nodes()?
+                    .iter()
+                    .any(|n| n.kind == crate::model::NodeKind::Layer && n.name == "make"))
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_rules_re_materialisation_advances_nothing_and_moves_no_residue_input() {
+        // `check_rules` (and `scan`, `gate`) re-run the annotate pass on the
+        // live engine — clearing and re-deriving `ForbiddenDependency` edges and
+        // policy nodes — after any reconcile, and advance only the in-process
+        // sync stamp. Like the no-op sync's pass below, its output is not a
+        // residue input, so the cached residue stays the fresh one.
+        let (tmp, engine) = lib_only();
+        let before = status_equal_to_fresh(&engine);
+        write(tmp.path(), ".logos/rules.toml", LAYER_NAMED_MAKE);
+        engine.check_rules(None, false).expect("check_rules runs");
+        assert!(has_layer_make(&engine), "check_rules re-materialised the new layer");
+
+        let after = status_equal_to_fresh(&engine);
+        assert_eq!(after.graph_revision, before.graph_revision, "a re-materialisation advances nothing");
+        assert_eq!(engine.call_residue_walks(), 1, "so the memo answers");
+    }
+
     #[test]
     fn a_no_op_sync_advances_nothing_and_its_annotate_pass_moves_no_residue_input() {
         // The one pass that rewrites `edges` without advancing: `annotate`
@@ -1249,24 +1286,10 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         // after the bare `make()` call the residue counts.
         let (tmp, engine) = lib_only();
         let before = status_equal_to_fresh(&engine);
-        write(
-            tmp.path(),
-            ".logos/rules.toml",
-            "[[layers]]\nname  = \"make\"\npaths = [\"src/*.rs\"]\norder = 1\n",
-        );
+        write(tmp.path(), ".logos/rules.toml", LAYER_NAMED_MAKE);
         let noop = engine.sync(&[PathBuf::from("src/lib.rs")]);
         assert_eq!(noop.files_added + noop.files_modified + noop.files_removed, 0);
-        let layer_named_make = engine
-            .runtime()
-            .unwrap()
-            .submit_read(|store| {
-                Ok(store
-                    .all_nodes()?
-                    .iter()
-                    .any(|n| n.kind == crate::model::NodeKind::Layer && n.name == "make"))
-            })
-            .unwrap();
-        assert!(layer_named_make, "the no-op sync's annotate pass wrote the new layer");
+        assert!(has_layer_make(&engine), "the no-op sync's annotate pass wrote the new layer");
 
         let after = status_equal_to_fresh(&engine);
         assert_eq!(after.graph_revision, before.graph_revision, "a no-op sync advances nothing");
