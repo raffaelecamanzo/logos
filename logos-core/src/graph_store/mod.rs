@@ -52,7 +52,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 
-use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ReceiverShape, RefForm};
+use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverShape, RefForm};
 use crate::models::navigation::LanguageCount;
 use crate::models::quality::{Offender, WorstOffenders};
 
@@ -310,6 +310,17 @@ pub struct NewNode<'a> {
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     pub self_type: Option<&'a str>,
+    /// The argument counts a callable admits (S-591, [FR-EX-32]) — the
+    /// `nodes.param_min` / `nodes.param_max` columns, migration 33. `None` for
+    /// an unknown range.
+    ///
+    /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
+    pub params: Option<ParamRange>,
+    /// Whether a Rust `impl` function takes `self` ([CR-200]) — the
+    /// `nodes.takes_self` column, migration 33. `None` for every other node.
+    ///
+    /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
+    pub takes_self: Option<bool>,
 }
 
 impl<'a> NewNode<'a> {
@@ -335,6 +346,8 @@ impl<'a> NewNode<'a> {
             has_body: None,
             body_tokens: None,
             self_type: None,
+            params: None,
+            takes_self: None,
         }
     }
 }
@@ -612,6 +625,12 @@ pub struct UnresolvedRefRow {
     ///
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
     pub peeled: Option<String>,
+    /// How many arguments a `Calls` row's call passes (S-591, [FR-EX-32]; the
+    /// `arg_count` column, migration 33). `None` when it cannot be counted, and
+    /// for every non-call row.
+    ///
+    /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
+    pub arg_count: Option<u32>,
 }
 
 /// One function/method node's metric inputs for the quality metrics engine
@@ -1549,12 +1568,18 @@ pub struct AvroSchemaRow {
     pub detail: Option<String>,
 }
 
+/// One node's arity facts as [`GraphStore::node_arities`] reads them (S-591):
+/// the node, its parameter range and whether it takes `self`, each `None`
+/// where unknown.
+pub type NodeArity = (NodeId, Option<ParamRange>, Option<bool>);
+
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind, payload,
-/// receiver, alias, peeled)` — the ledger's UNIQUE rule absorbs a function
-/// calling the same path twice, and keeps one row per local name an import is
-/// aliased by and per wrapper a proven receiver was peeled of.
+/// receiver, alias, peeled, arg_count)` — the ledger's UNIQUE rule absorbs a
+/// function calling the same path twice, and keeps one row per local name an
+/// import is aliased by, per wrapper a proven receiver was peeled of and per
+/// argument count a call passes.
 #[derive(Debug, Clone, Copy)]
 pub struct NewUnresolvedRef<'a> {
     /// FK into `files(id)` — the file whose extraction produced the ref.
@@ -1582,6 +1607,10 @@ pub struct NewUnresolvedRef<'a> {
     /// The wrappers a proven receiver's declared type was peeled of (S-587,
     /// the `peeled` column, migration 32); `None` for every other row.
     pub peeled: Option<&'a str>,
+    /// How many arguments a call passes (S-591, the `arg_count` column,
+    /// migration 33); `None` when it cannot be counted and for every non-call
+    /// row.
+    pub arg_count: Option<u32>,
 }
 
 /// The point-query read interface over the code graph.
@@ -1837,6 +1866,23 @@ pub trait GraphStore {
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     fn node_self_types(&self) -> Result<Vec<(NodeId, String)>> {
+        Ok(Vec::new())
+    }
+
+    /// The `(node, parameter range, takes self)` of every node carrying either
+    /// fact (S-591, [FR-EX-32], [CR-200]) — the `nodes.param_min`,
+    /// `nodes.param_max` and `nodes.takes_self` columns, ordered by node id. A
+    /// node with neither fact is absent; one with only one carries `None` for
+    /// the other.
+    ///
+    /// The [`node_self_types`](GraphStore::node_self_types) shape: the binder's
+    /// companion read beside [`all_nodes`](GraphStore::all_nodes), empty by
+    /// default — only the SQLite store implements it — so a non-SQLite or test
+    /// store records every fact unknown, and an unknown fact never filters.
+    ///
+    /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
+    /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
+    fn node_arities(&self) -> Result<Vec<NodeArity>> {
         Ok(Vec::new())
     }
 
@@ -3089,6 +3135,41 @@ impl GraphStore for SqliteGraphStore {
         Ok(rows)
     }
 
+    fn node_arities(&self) -> Result<Vec<NodeArity>> {
+        // ORDER BY id keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, param_min, param_max, takes_self FROM nodes \
+             WHERE param_min IS NOT NULL OR takes_self IS NOT NULL ORDER BY id",
+        )?;
+        let raws = stmt
+            .query_map([], |row| {
+                Ok((
+                    NodeId(row.get(0)?),
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting node arities for the binder")?;
+        raws.into_iter()
+            .map(|(id, min, max, takes_self)| {
+                let count = |v: i64| {
+                    u32::try_from(v)
+                        .map_err(|e| anyhow!("corrupt parameter count {v} for node {}: {e}; rebuild advised (NFR-RA-08)", id.0))
+                };
+                let params = match min {
+                    Some(min) => Some(ParamRange {
+                        min: count(min)?,
+                        max: max.map(count).transpose()?,
+                    }),
+                    None => None,
+                };
+                Ok((id, params, takes_self.map(|v| v != 0)))
+            })
+            .collect()
+    }
+
     fn file_namespaces(&self) -> Result<Vec<(String, String)>> {
         // ORDER BY path keeps the read deterministic ([NFR-RA-06]).
         let mut stmt = self.conn.prepare_cached(
@@ -3318,7 +3399,7 @@ impl GraphStore for SqliteGraphStore {
     fn unresolved_refs(&self) -> Result<Vec<UnresolvedRefRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, \
-                    receiver, peeled \
+                    receiver, peeled, arg_count \
              FROM unresolved_refs ORDER BY id",
         )?;
         let raws = stmt
@@ -3336,13 +3417,14 @@ impl GraphStore for SqliteGraphStore {
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<i32>>(10)?,
                     row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting the reference ledger")?;
         raws.into_iter()
             .map(
-                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver, peeled)| {
+                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver, peeled, arg_count)| {
                     let form = RefForm::try_from(form).map_err(|e| {
                         anyhow!("corrupt ref form {form} for ref {id}: {e}; rebuild advised (NFR-RA-08)")
                     })?;
@@ -3355,6 +3437,10 @@ impl GraphStore for SqliteGraphStore {
                         .map_err(|e| {
                             anyhow!("corrupt receiver shape for ref {id}: {e}; rebuild advised (NFR-RA-08)")
                         })?;
+                    let arg_count = arg_count
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(|e| anyhow!("corrupt argument count for ref {id}: {e}; rebuild advised (NFR-RA-08)"))?;
                     Ok(UnresolvedRefRow {
                         id,
                         file_id,
@@ -3368,6 +3454,7 @@ impl GraphStore for SqliteGraphStore {
                         payload,
                         receiver,
                         peeled,
+                        arg_count,
                     })
                 },
             )
@@ -4559,13 +4646,14 @@ impl BatchWriter<'_> {
     // ── Reference-ledger primitives (S-011, [ADR-10]) ────────────────────────
 
     /// Insert a reference-ledger row, idempotently over the relation-,
-    /// receiver-, alias- and wrapper-aware `(source_symbol, target, form, kind,
-    /// COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''),
-    /// COALESCE(peeled, ''))` uniqueness rule (migration 18, [CR-080]; widened
-    /// by the receiver shape in migration 29, S-514, by the import alias in
-    /// migration 31, S-597 — two local names of one target are two rows,
-    /// [FR-DB-07] — and by a proven receiver's peeled wrappers in migration 32,
-    /// S-587).
+    /// receiver-, alias-, wrapper- and argument-count-aware `(source_symbol,
+    /// target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0),
+    /// COALESCE(alias, ''), COALESCE(peeled, ''), COALESCE(arg_count, -1))`
+    /// uniqueness rule (migration 18, [CR-080]; widened by the receiver shape in
+    /// migration 29, S-514, by the import alias in migration 31, S-597 — two
+    /// local names of one target are two rows, [FR-DB-07] — by a proven
+    /// receiver's peeled wrappers in migration 32, S-587, and by a call's
+    /// argument count in migration 33, S-591).
     ///
     /// A duplicate (the same function calling the same path twice, or a
     /// captured edge re-captured on a later sync) is a no-op — the first row's
@@ -4585,10 +4673,11 @@ impl BatchWriter<'_> {
         self.conn
             .execute(
                 "INSERT INTO unresolved_refs \
-                 (file_id, source_symbol, target, alias, form, kind, line, payload, receiver, peeled) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                 (file_id, source_symbol, target, alias, form, kind, line, payload, receiver, peeled, arg_count) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
                  ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
-                             COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, '')) DO NOTHING",
+                             COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, ''), \
+                             COALESCE(arg_count, -1)) DO NOTHING",
                 rusqlite::params![
                     r.file_id,
                     r.source_symbol,
@@ -4600,6 +4689,7 @@ impl BatchWriter<'_> {
                     r.payload,
                     r.receiver.map(ReceiverShape::as_i32),
                     r.peeled,
+                    r.arg_count,
                 ],
             )
             .context("inserting unresolved ref")?;
@@ -5429,8 +5519,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
         "INSERT INTO nodes (symbol_id, kind, name, file_id, start_line, end_line, \
                             derived, exported, cyclomatic_complexity, line_count, fingerprint, \
                             test_evidence, body, max_nesting_depth, has_body, body_tokens, \
-                            self_type) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
+                            self_type, param_min, param_max, takes_self) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20) \
          ON CONFLICT(symbol_id) DO UPDATE SET \
              kind = excluded.kind, \
              name = excluded.name, \
@@ -5447,7 +5537,10 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
              max_nesting_depth = excluded.max_nesting_depth, \
              has_body = excluded.has_body, \
              body_tokens = excluded.body_tokens, \
-             self_type = excluded.self_type",
+             self_type = excluded.self_type, \
+             param_min = excluded.param_min, \
+             param_max = excluded.param_max, \
+             takes_self = excluded.takes_self",
         rusqlite::params![
             node.symbol_id,
             node.kind.as_i32(),
@@ -5466,6 +5559,9 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
             node.has_body.map(i64::from),
             node.body_tokens,
             node.self_type,
+            node.params.map(|p| p.min),
+            node.params.and_then(|p| p.max),
+            node.takes_self.map(i64::from),
         ],
     )
     .context("upserting node")?;

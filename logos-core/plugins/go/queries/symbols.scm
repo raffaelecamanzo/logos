@@ -75,3 +75,21 @@
 (var_declaration
   (var_spec
     name: (identifier) @symbol.variable))
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; A method's receiver sits outside its `parameters` list and is not counted.
+; `a, b int` is one declaration naming two parameters: each name is captured.
+(function_declaration
+  parameters: (parameter_list) @arity.parameters)
+(method_declaration
+  parameters: (parameter_list) @arity.parameters)
+(parameter_list (parameter_declaration name: (_) @arity.required))
+(parameter_list (parameter_declaration !name) @arity.required)
+(parameter_list (variadic_parameter_declaration) @arity.variadic)

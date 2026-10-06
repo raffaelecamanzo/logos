@@ -70,3 +70,22 @@
       (init_declarator
         declarator: (pointer_declarator
           declarator: (identifier) @symbol.variable))]))
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; `...` is variadic and `(void)` declares none. An empty `()` declares
+; unspecified parameters (before C23), so its range is unknown.
+(function_declarator
+  parameters: (parameter_list) @arity.parameters)
+(parameter_list (parameter_declaration) @arity.required)
+(parameter_list (variadic_parameter) @arity.variadic)
+(parameter_list
+  (parameter_declaration type: (primitive_type) @_void !declarator) @arity.skip
+  (#eq? @_void "void"))
+(parameter_list "(" . ")") @arity.unknown

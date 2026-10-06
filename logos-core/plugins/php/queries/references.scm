@@ -112,3 +112,15 @@
 (enum_declaration
   body: (enum_declaration_list
     (use_declaration [(name) (qualified_name)] @ref.implements) @ref.implements.trait))
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; `...$xs` spreads; a call's `object`/`scope` is its receiver, not its callee.
+(arguments) @arity.arguments
+(arguments (argument (variadic_unpacking)) @arity.spread)
+(member_call_expression object: (_) @arity.receiver)
+(nullsafe_member_call_expression object: (_) @arity.receiver)
+(scoped_call_expression scope: (_) @arity.receiver)

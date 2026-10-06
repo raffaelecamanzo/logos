@@ -188,3 +188,12 @@
 (enhanced_for_statement type: (_) @ref.type_use)
 (resource type: (_) @ref.type_use)
 (catch_formal_parameter (catch_type (_) @ref.type_use))
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; A `method_invocation`'s `object` is its receiver, not its callee.
+(argument_list) @arity.arguments
+(method_invocation object: (_) @arity.receiver)

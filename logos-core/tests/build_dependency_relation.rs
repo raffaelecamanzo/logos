@@ -245,12 +245,20 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// the snapshot offender table and its flag column), 27 (S-513, the
 /// persist-failure record), 28 (S-493, the `nodes.self_type` column), 29
 /// (S-514, the ledger's `receiver` column and its identity index), 30
-/// (S-518, the `files.namespace` column) and 31 (S-597, the alias in that
-/// identity index); the next open re-applies all ten, as a real upgrade does. Duplicated from `build_manifest_facts.rs` (no shared test module).
+/// (S-518, the `files.namespace` column), 31 (S-597, the alias in that
+/// identity index), 32 (S-587, the ledger's `peeled` column in it) and 33
+/// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it); the
+/// next open re-applies all twelve, as a real upgrade does. Duplicated from
+/// `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN peeled; \
+        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN arg_count; \
+         CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, \
+         COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, '')); \
+         ALTER TABLE nodes DROP COLUMN takes_self; ALTER TABLE nodes DROP COLUMN param_max; \
+         ALTER TABLE nodes DROP COLUMN param_min; DELETE FROM schema_versions WHERE version = 33; \
+         DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN peeled; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, \
          COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, '')); \
          DELETE FROM schema_versions WHERE version = 32; \
@@ -324,7 +332,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 32, "{name} was opened at the latest version (v32)");
+        assert_eq!(user_version(&root.join(name)), 33, "{name} was opened at the latest version (v33)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

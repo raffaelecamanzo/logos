@@ -134,6 +134,7 @@ fn row(
         payload: None,
         receiver: None,
         peeled: None,
+        arg_count: None,
     }
 }
 

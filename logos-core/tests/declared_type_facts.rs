@@ -143,13 +143,19 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// columns), 26 (S-498, the snapshot offender table and its flag column), 27
 /// (S-513, the persist-failure record), 28 (S-493, the `nodes.self_type`
 /// column), 29 (S-514, the ledger's `receiver` column and its identity
-/// index), 30 (S-518, the `files.namespace` column) and 31 (S-597, the alias in
-/// that identity index) after it; the next [`Engine::start`] re-applies all
-/// eight, as a real upgrade does.
+/// index), 30 (S-518, the `files.namespace` column), 31 (S-597, the alias in
+/// that identity index), 32 (S-587, the ledger's `peeled` column in it) and 33
+/// (S-591, the `nodes` arity columns and the ledger's `arg_count` in it) after
+/// it; the next [`Engine::start`] re-applies all ten, as a real upgrade does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN peeled; \
+        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN arg_count; \
+         CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, \
+         COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, '')); \
+         ALTER TABLE nodes DROP COLUMN takes_self; ALTER TABLE nodes DROP COLUMN param_max; \
+         ALTER TABLE nodes DROP COLUMN param_min; DELETE FROM schema_versions WHERE version = 33; \
+         DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN peeled; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, \
          COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, '')); \
          DELETE FROM schema_versions WHERE version = 32; \

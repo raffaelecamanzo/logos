@@ -91,3 +91,18 @@
 (member_expression
   object: (this)
   property: [(property_identifier) (private_property_identifier)] @ref.access)
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; `...xs` spreads; a tagged template is not counted; `new T` without
+; parentheses passes none.
+(arguments) @arity.arguments
+(arguments (spread_element) @arity.spread)
+(call_expression
+  arguments: (template_string) @arity.opaque)
+(new_expression
+  constructor: (_)
+  !arguments) @arity.none

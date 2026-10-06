@@ -112,3 +112,16 @@
 (class_definition
   superclasses: (argument_list
     (subscript value: [(identifier) (attribute)] @ref.extends)))
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; `*xs` and `**kw` spread; a lone generator (`f(x for x in xs)`) is one
+; argument.
+(argument_list) @arity.arguments
+(argument_list (list_splat) @arity.spread)
+(argument_list (dictionary_splat) @arity.spread)
+(call
+  arguments: (generator_expression) @arity.block)

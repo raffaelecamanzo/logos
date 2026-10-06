@@ -95,3 +95,23 @@
 
 (macro_definition
   name: (identifier) @symbol.macro)
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; A `self` receiver — `self`, `mut self`, `&self`, `&'a mut self`, or a `self`
+; pattern with an explicit type (`self: Box<Self>`, `self: Pin<&mut Self>`) — is
+; not counted, and an impl function writing one takes `self` (CR-200); an extern
+; `...` is variadic; an attribute is no parameter.
+(function_item
+  parameters: (parameters) @arity.parameters)
+(parameters (parameter) @arity.required)
+(parameters (self_parameter) @arity.receiver)
+(parameters (parameter pattern: (self)) @arity.receiver)
+(parameters (variadic_parameter) @arity.variadic)
+(parameters (attribute_item) @arity.skip)

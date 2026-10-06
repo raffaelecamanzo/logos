@@ -219,6 +219,13 @@ pub(crate) struct MacroCall {
     /// (`self.f()`, never `self.x.f()`): the token-tree twin of the
     /// `@ref.method.self` capture, which cannot reach inside a macro (S-514).
     pub self_receiver: bool,
+    /// How many arguments the call passes (S-591, [FR-EX-32]), read from its
+    /// `(`-delimited token tree ([`token_tree_arg_count`]) so a call inside a
+    /// macro records the count the same call records outside one; `None` where
+    /// a token tree cannot be counted reliably.
+    ///
+    /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
+    pub arg_count: Option<u32>,
 }
 
 /// Walk a Rust `macro_invocation`'s token tree(s) for the call-shaped token
@@ -302,6 +309,7 @@ fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
                 form: RefForm::Method,
                 line,
                 self_receiver,
+                arg_count: token_tree_arg_count(next),
             });
             continue;
         }
@@ -312,8 +320,32 @@ fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
             form: RefForm::Path,
             line,
             self_receiver: false,
+            arg_count: token_tree_arg_count(next),
         });
     }
+}
+
+/// The arguments a call's `(`-delimited token tree passes (S-591): its
+/// top-level comma-separated segments, a trailing comma closing none, `0` for
+/// `()`. A nested group (`g(a, b)`, `[a, b]`) is one token tree, so its commas
+/// are not top-level. `None` when a top-level token could carry a comma that
+/// separates no arguments — a closure's `|a, b|`, a generic's `<A, B>`, a
+/// macro metavariable's `$`, an attribute's `#` — since a token tree is never
+/// parsed as expressions.
+fn token_tree_arg_count(args: Node<'_>) -> Option<u32> {
+    let mut cursor = args.walk();
+    let tokens: Vec<Node<'_>> = args.children(&mut cursor).filter(|t| !t.is_extra()).collect();
+    // The delimiters themselves: `(` first, `)` last.
+    let inner = tokens.get(1..tokens.len().saturating_sub(1)).unwrap_or_default();
+    if inner.iter().any(|t| matches!(t.kind(), "|" | "||" | "<" | ">" | "$" | "#")) {
+        return None;
+    }
+    let Some(last) = inner.last() else {
+        return Some(0);
+    };
+    let commas = inner.iter().filter(|t| t.kind() == ",").count();
+    let segments = commas + usize::from(last.kind() != ",");
+    u32::try_from(segments).ok()
 }
 
 /// `true` if `tt`'s first child is an opening parenthesis — the delimiter of a
@@ -825,10 +857,10 @@ mod tree_tests {
     }
 
     fn path(target: &str) -> MacroCall {
-        MacroCall { target: target.to_string(), form: RefForm::Path, line: 1, self_receiver: false }
+        MacroCall { target: target.to_string(), form: RefForm::Path, line: 1, self_receiver: false, arg_count: None }
     }
     fn method(target: &str) -> MacroCall {
-        MacroCall { target: target.to_string(), form: RefForm::Method, line: 1, self_receiver: false }
+        MacroCall { target: target.to_string(), form: RefForm::Method, line: 1, self_receiver: false, arg_count: None }
     }
 
     /// The `(target, form)` pairs, ignoring line (the snippets are one line;
@@ -867,6 +899,29 @@ mod tree_tests {
                 ("label".to_string(), true),
                 ("chip".to_string(), false),
                 ("label".to_string(), false),
+            ]
+        );
+    }
+
+    /// S-591: a call's count is its token tree's top-level comma-separated
+    /// segments — a nested group is one argument, a trailing comma closes none
+    /// — and unknown when a top-level token could hide a non-separating comma.
+    #[test]
+    fn a_macro_call_counts_its_top_level_arguments() {
+        let got = macro_calls(
+            r#"format!("{}", f(), g(a), h(a, b,), n((a, b)), o([a, b], c), k(|x, y| x), m(x as Map<A, B>))"#,
+        );
+        let counts: Vec<(String, Option<u32>)> = got.iter().map(|c| (c.target.clone(), c.arg_count)).collect();
+        assert_eq!(
+            counts,
+            vec![
+                ("f".to_string(), Some(0)),
+                ("g".to_string(), Some(1)),
+                ("h".to_string(), Some(2)),
+                ("n".to_string(), Some(1)),
+                ("o".to_string(), Some(2)),
+                ("k".to_string(), None),
+                ("m".to_string(), None),
             ]
         );
     }

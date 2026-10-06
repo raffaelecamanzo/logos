@@ -129,3 +129,10 @@
   (base_list [(identifier) (qualified_name) (generic_name) (alias_qualified_name)] @ref.extends))
 (record_declaration
   (base_list (primary_constructor_base_type type: (_) @ref.extends)))
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+(argument_list) @arity.arguments

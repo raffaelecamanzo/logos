@@ -59,3 +59,12 @@
 (import_spec
   name: (package_identifier)? @ref.import.alias
   path: (interpreted_string_literal) @ref.import)
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; `xs...` spreads a slice into a variadic call.
+(argument_list) @arity.arguments
+(argument_list (variadic_argument) @arity.spread)

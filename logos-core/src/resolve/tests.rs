@@ -100,6 +100,7 @@ fn make_ref(
         payload: None,
         receiver: None,
         peeled: None,
+        arg_count: None,
     }
 }
 
@@ -832,6 +833,7 @@ fn artifact_ref(target: &str, form: RefForm, relation: ArtifactRelation) -> Unre
         payload: Some(relation.as_str().to_string()),
         receiver: None,
         peeled: None,
+        arg_count: None,
     }
 }
 
@@ -1259,6 +1261,7 @@ fn infra_ref(
         payload: Some(relation.as_str().to_string()),
         receiver: None,
         peeled: None,
+        arg_count: None,
     }
 }
 

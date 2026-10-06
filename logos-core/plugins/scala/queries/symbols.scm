@@ -63,3 +63,26 @@
 ; package plus its own name, whatever directory the file sits in.
 (package_clause
   name: (package_identifier) @module.namespace @module.namespace.chained)
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; A declaration with several lists (`def f(a: Int)(b: Int)`) is admitted by its
+; first, the one a call's first argument list fills: every list is captured
+; (a `parameters:` field pattern would match the first alone) and the engine
+; takes the first. `T*` is variadic; a `using` or `implicit` list is filled by
+; the compiler, so its range is unknown.
+(function_definition
+  (parameters) @arity.parameters)
+(function_declaration
+  (parameters) @arity.parameters)
+(parameters (parameter) @arity.required)
+(parameters (parameter default_value: (_)) @arity.optional)
+(parameters (parameter type: (repeated_parameter_type)) @arity.variadic)
+(parameters "using" @arity.unknown)
+(parameters "implicit" @arity.unknown)

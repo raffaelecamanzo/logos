@@ -12,6 +12,7 @@
 //!   `unresolved_refs` reference ledger (S-011);
 //! - [`ReceiverShape`] (3) — the frozen receiver-shape discriminants a
 //!   method-form ledger row carries (S-514);
+//! - [`ParamRange`] — the argument counts a callable admits (S-591);
 //! - [`ArtifactRelation`] — the cross-artifact edge **payload** vocabulary and
 //!   its deterministic external-target classifier (CR-011, [FR-CG-07]);
 //! - [`Annotations`] — free-form node metadata;
@@ -36,11 +37,13 @@
 mod convert;
 
 mod annotations;
+mod arity;
 mod artifact;
 mod kinds;
 mod symbol;
 
 pub use annotations::Annotations;
+pub use arity::ParamRange;
 pub use artifact::{
     ArtifactRelation, BridgeNamespace, BridgeRole, MatchDiscipline, TargetClass,
 };

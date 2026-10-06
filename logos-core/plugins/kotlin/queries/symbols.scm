@@ -59,3 +59,23 @@
 ; `src/main/java`), so a Multiplatform file's imports bind like a JVM one's.
 (package_header
   (qualified_identifier) @module.namespace)
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; A default value is written beside its parameter (`b: Int = 2`): the parameter
+; before `=` is optional and the value after it no parameter. `vararg` is a
+; modifier written before its parameter.
+(function_declaration
+  (function_value_parameters) @arity.parameters)
+(function_value_parameters (parameter) @arity.required)
+(function_value_parameters (parameter) @arity.optional . "=")
+(function_value_parameters "=" . (_) @arity.skip)
+(function_value_parameters
+  (parameter_modifiers (parameter_modifier "vararg")) . (parameter) @arity.variadic)
+(function_value_parameters (parameter_modifiers) @arity.skip)

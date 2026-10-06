@@ -143,3 +143,14 @@
       [(user_type) @ref.extends
        (constructor_invocation (user_type) @ref.extends)
        (explicit_delegation (user_type) @ref.extends)])))
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; A trailing lambda (`f(1) { … }`, `f { … }`) is one more argument; `*xs`
+; spreads an array into a vararg.
+(value_arguments) @arity.arguments
+(annotated_lambda) @arity.lambda
+(value_arguments (value_argument (spread_expression)) @arity.spread)

@@ -116,3 +116,21 @@
     .
     (string) @ref.import)
   (#match? @_req "^require"))
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; `*xs`, `**h` and `...` spread; a `&block` is no argument; a call written
+; without an argument list (`x.m`) passes none; a call's `receiver` is not its
+; callee.
+(argument_list) @arity.arguments
+(argument_list (splat_argument) @arity.spread)
+(argument_list (hash_splat_argument) @arity.spread)
+(argument_list (forward_argument) @arity.spread)
+(argument_list (block_argument) @arity.skip)
+(call
+  method: (_)
+  !arguments) @arity.none
+(call receiver: (_) @arity.receiver)

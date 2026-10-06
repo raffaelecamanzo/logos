@@ -1144,6 +1144,7 @@ fn a_capture_before_delete_row_awaiting_its_target_is_not_in_the_residue() {
             payload: None,
             receiver: None,
             peeled: None,
+            arg_count: None,
         })
     })
     .expect("plant the awaiting capture");

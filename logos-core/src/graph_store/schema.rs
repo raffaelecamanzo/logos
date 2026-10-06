@@ -65,6 +65,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (30, MIGRATION_30),
     (31, MIGRATION_31),
     (32, MIGRATION_32),
+    (33, MIGRATION_33),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2699,13 +2700,94 @@ CREATE UNIQUE INDEX idx_unresolved_refs_identity
 UPDATE files SET content_hash = NULL;
 ";
 
+/// Migration 33 — a callable's **parameter range**, a call's **argument
+/// count**, and whether a Rust `impl` function **takes `self`** (S-591,
+/// [CR-190], [CR-200], [FR-EX-32]).
+///
+/// Three nullable columns on `nodes` and one on `unresolved_refs`, added **in
+/// place** (the migration-25/28/29 shape — no table rebuilt, every existing row
+/// and id untouched, the FTS index, its triggers and the `annotations` view
+/// unaffected):
+///
+/// - **`nodes.param_min`** / **`nodes.param_max`** — the fewest and the most
+///   arguments a call may pass a `Function`/`Method` node
+///   ([`ParamRange`](crate::model::ParamRange)): a receiver parameter is not
+///   counted, a defaulted one raises only the maximum. Both `NULL` for an
+///   unknown range — every non-callable node, and a callable whose plugin
+///   cannot count its parameters; `param_max` alone `NULL` for an unbounded one
+///   (a variadic parameter). The `CHECK`s refuse a maximum without a minimum or
+///   below it.
+/// - **`nodes.takes_self`** — `1` when a Rust `impl` function's first parameter
+///   is a receiver, `0` for an associated function (`fn new() -> Self`); `NULL`
+///   on every other node.
+/// - **`unresolved_refs.arg_count`** — how many arguments a `Calls` row's call
+///   passes; `NULL` when it cannot be counted (a spread argument, a token tree
+///   whose tokens may hide a comma) and on every non-call row.
+///
+/// **Plugin-agnostic by construction**: no column names a language; a plugin
+/// fills them by declaring `@arity.*` captures in its own queries
+/// (`extract::arity`), and one that declares none records unknown everywhere.
+/// The binder filters candidates on them (S-592, S-604); an unknown fact never
+/// filters.
+///
+/// The argument count joins the ledger identity: a caller's `f(a)` and
+/// `f(a, b)` are two rows a binder admitting by range binds differently, so the
+/// identity index of migration 32 is recreated with `COALESCE(arg_count, -1)`
+/// appended — the `COALESCE` for the reason migration 18 gives for `payload`
+/// (SQLite treats each bare `NULL` as distinct in a UNIQUE key), and `-1`
+/// because `0` is a real count. Every stored row has a `NULL` count, so each is
+/// unique under the wider key exactly as it was under the narrower one.
+///
+/// `NULL` on every row until its file is re-extracted, and **re-extraction is
+/// triggered here** as migrations 25, 28–32 do it: every `files.content_hash`
+/// is cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one and records the facts. No graph row is deleted.
+///
+/// One migration for all three facts, shared by S-591 and S-604 so a store
+/// migrates once. Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a
+/// populated store by
+/// `migration_33_adds_the_arity_facts_and_the_argument_count_to_the_ledger_identity`
+/// in [`super::migrate`].
+///
+/// [CR-190]: ../../../../docs/requests/CR-190-a-self-call-binds-only-a-callable-whose-arity-admits-it.md
+/// [CR-200]: ../../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
+/// [FR-EX-32]: ../../../../docs/specs/requirements/FR-EX-32.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_33: &str = "\
+-- 1. A callable's parameter range (FR-EX-32): the fewest and most arguments a
+-- call may pass. Both NULL for an unknown range, param_max alone for an
+-- unbounded one, and on rows indexed before this migration.
+ALTER TABLE nodes ADD COLUMN param_min INTEGER CHECK (param_min >= 0);
+ALTER TABLE nodes ADD COLUMN param_max INTEGER CHECK (param_max IS NULL OR (param_min IS NOT NULL AND param_max >= param_min));
+
+-- 2. Whether a Rust impl function takes `self` (CR-200). NULL on every other
+-- node.
+ALTER TABLE nodes ADD COLUMN takes_self INTEGER CHECK (takes_self IN (0,1));
+
+-- 3. A call's argument count (FR-EX-32). NULL when it cannot be counted, on
+-- every non-call row, and on rows extracted before this migration.
+ALTER TABLE unresolved_refs ADD COLUMN arg_count INTEGER CHECK (arg_count >= 0);
+
+-- 4. The argument count joins the ledger identity (migration 32's index,
+-- widened): a caller's `f(a)` and `f(a, b)` are two rows. NULL normalised to -1
+-- (0 is a real count) so a row with no count dedups exactly as before.
+DROP INDEX idx_unresolved_refs_identity;
+CREATE UNIQUE INDEX idx_unresolved_refs_identity
+    ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, ''), COALESCE(arg_count, -1));
+
+-- 5. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the columns.
+UPDATE files SET content_hash = NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
         MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_29, MIGRATION_3,
-        MIGRATION_31, MIGRATION_32, MIGRATION_4, MIGRATION_8,
+        MIGRATION_31, MIGRATION_32, MIGRATION_33, MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, ReceiverShape, RefForm};
 
@@ -3992,6 +4074,45 @@ mod tests {
         assert!(
             !MIGRATION_31.contains("peeled"),
             "the peeled wrappers join the identity in migration 32, never by editing migration 31"
+        );
+    }
+
+    /// Migration 33 (S-591) adds the three arity facts in place, rebuilds the
+    /// ledger identity index with the argument count and triggers re-extraction
+    /// — nothing else, and it is its own migration, not an edit of 32.
+    #[test]
+    fn migration_33_adds_the_arity_facts_and_widens_the_ledger_identity_only() {
+        let statements: Vec<String> = MIGRATION_33
+            .split(';')
+            .map(|stmt| {
+                stmt.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|stmt| stmt.trim().to_string())
+            .filter(|stmt| !stmt.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "ALTER TABLE nodes ADD COLUMN param_min INTEGER CHECK (param_min >= 0)",
+                "ALTER TABLE nodes ADD COLUMN param_max INTEGER CHECK (param_max IS NULL OR \
+                 (param_min IS NOT NULL AND param_max >= param_min))",
+                "ALTER TABLE nodes ADD COLUMN takes_self INTEGER CHECK (takes_self IN (0,1))",
+                "ALTER TABLE unresolved_refs ADD COLUMN arg_count INTEGER CHECK (arg_count >= 0)",
+                "DROP INDEX idx_unresolved_refs_identity",
+                "CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, \
+                 target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''), \
+                 COALESCE(peeled, ''), COALESCE(arg_count, -1))",
+                "UPDATE files SET content_hash = NULL",
+            ],
+            "exactly the columns, the widened identity and the re-extraction trigger"
+        );
+        assert!(
+            !MIGRATION_32.contains("arg_count"),
+            "the argument count joins the identity in migration 33, never by editing migration 32"
         );
     }
 }

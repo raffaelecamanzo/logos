@@ -3421,6 +3421,104 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 32");
     }
 
+    /// S-591 / CR-190 / CR-200 / FR-EX-32: a populated v32 store upgrades to v33
+    /// forward only. `nodes` gains `param_min`, `param_max` and `takes_self`,
+    /// and the ledger `arg_count`, in place — `NULL` on every existing row until
+    /// re-extraction — while every pre-existing column, and all of `edges` and
+    /// `shingles`, is byte-for-byte unchanged. The identity index is rebuilt with
+    /// the count and every `files.content_hash` is cleared.
+    #[test]
+    fn migration_33_adds_the_arity_facts_and_the_argument_count_to_the_ledger_identity() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..32]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/lib.rs', 'rust', 'h-rs');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local n'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, self_type) VALUES
+                 (10, 1, 8, 'n', 1, NULL), (11, 2, 8, 'm', 1, 'A');
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 2);
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver, peeled) VALUES
+                 (1, 'local n', 'A::m', NULL, 2, 2, 6, 1, NULL, 3, 'Arc'),
+                 (1, 'local n', 'crate::b::Store', 'Store', 2, 3, 1, 1, NULL, NULL, NULL);",
+        )
+        .unwrap();
+        let (nodes_before, edges_before, shingles_before) = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..33]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 33, "32 → 33, exactly one step");
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        for (old, new) in nodes_before.iter().zip(&nodes_after) {
+            assert_eq!(new.len(), old.len() + 3, "exactly three nodes columns added");
+            assert_eq!(&new[..old.len()], &old[..], "every pre-v33 nodes column is byte-for-byte unchanged");
+            assert_eq!(&new[old.len()..], ["NULL", "NULL", "NULL"], "unknown on every existing row");
+        }
+        assert_eq!(nodes_after.len(), nodes_before.len());
+        let tail: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 3")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(tail, ["takes_self", "param_max", "param_min"], "the appended columns are the S-591 adds");
+        assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
+        assert_eq!(read_ledger(&conn), ledger_before, "every ledger row and id is unchanged");
+        let counts: Vec<Option<i64>> = conn
+            .prepare("SELECT arg_count FROM unresolved_refs ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(counts, vec![None, None], "the count is NULL on every stored row");
+        let hash: Option<String> = conn
+            .query_row("SELECT content_hash FROM files WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash, None, "every hash is cleared so the next scan re-extracts");
+
+        // The widened identity: `f(a)` and `f(a, b)` are two rows, an unknown
+        // count a third, and a repeat of any dedups.
+        let insert = |count: Option<i64>| {
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, arg_count) \
+                 VALUES (1, 'local n', 'f', 2, 2, 9, ?1) \
+                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), \
+                             COALESCE(alias, ''), COALESCE(peeled, ''), COALESCE(arg_count, -1)) DO NOTHING",
+                rusqlite::params![count],
+            )
+        };
+        assert_eq!(insert(Some(1)).unwrap(), 1, "a one-argument call is one row");
+        assert_eq!(insert(Some(2)).unwrap(), 1, "a two-argument call is a second");
+        assert_eq!(insert(Some(0)).unwrap(), 1, "a no-argument call a third");
+        assert_eq!(insert(None).unwrap(), 1, "and an uncountable one a fourth");
+        assert_eq!(insert(Some(1)).unwrap(), 0, "a repeated count dedups");
+        assert_eq!(insert(None).unwrap(), 0, "a repeated unknown count dedups as before");
+
+        // The CHECKs: a count is never negative, a maximum never stands without a
+        // minimum or below it, and takes_self is a boolean.
+        let set = |sql: &str| conn.execute(sql, []);
+        assert!(set("UPDATE nodes SET param_min = 1, param_max = NULL, takes_self = 1 WHERE id = 11").is_ok(), "an unbounded range");
+        assert!(set("UPDATE nodes SET param_min = 1, param_max = 2 WHERE id = 11").is_ok(), "a bounded range");
+        assert!(set("UPDATE nodes SET param_min = 2, param_max = 1 WHERE id = 11").is_err(), "max below min");
+        assert!(set("UPDATE nodes SET param_min = NULL, param_max = 1 WHERE id = 11").is_err(), "max without min");
+        assert!(set("UPDATE nodes SET param_min = -1, param_max = NULL WHERE id = 11").is_err(), "a negative min");
+        assert!(set("UPDATE nodes SET takes_self = 2 WHERE id = 11").is_err(), "takes_self is 0 or 1");
+        assert!(set("UPDATE unresolved_refs SET arg_count = -1 WHERE id = 1").is_err(), "a negative count");
+
+        // Forward-only: re-running the full ledger never re-applies migration 33.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 33", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 33 is recorded once and never re-applied");
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (an in-place ADD COLUMN, NFR-RA-09)");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 33");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

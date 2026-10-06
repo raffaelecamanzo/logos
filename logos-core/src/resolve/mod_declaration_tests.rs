@@ -122,6 +122,7 @@ fn row(id: i64, file_id: i64, source: i64, target: &str, alias: Option<&str>, ki
         payload: None,
         receiver: None,
         peeled: None,
+        arg_count: None,
     }
 }
 

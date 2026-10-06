@@ -78,3 +78,14 @@
 (field_expression
   argument: (this)
   field: (field_identifier) @ref.access)
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; A pack expansion (`xs...`) spreads; a braced `new T{…}` is not counted.
+(argument_list) @arity.arguments
+(argument_list (parameter_pack_expansion) @arity.spread)
+(new_expression
+  arguments: (initializer_list) @arity.opaque)
