@@ -1537,6 +1537,45 @@ fn neighbours_cover_every_edge_kind_with_direction() {
     );
 }
 
+/// `resolve::coverage` — the [FR-RS-04] read-model the global ratio is built
+/// from — reads the population `counts` reads: a capture-before-delete
+/// (`Symbol`-form) row is no reference of it, even one carrying a relation
+/// payload (S-598, CR-195).
+///
+/// [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
+#[test]
+fn coverage_excludes_capture_before_delete_rows() {
+    let mut store = mem();
+    let f = store.insert_file("svc.proto", Some("proto"), None).unwrap();
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                payload: Some("proto-import"),
+                kind: EdgeKind::ArtifactRef,
+                ..path_ref(Some(f), "cfg svc", "common.proto")
+            })?;
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                form: RefForm::Symbol,
+                payload: Some("proto-import"),
+                kind: EdgeKind::ArtifactRef,
+                ..path_ref(Some(f), "cfg svc", "captured")
+            })
+        })
+        .unwrap();
+    let ids: Vec<i64> = store.unresolved_refs().unwrap().iter().map(|r| r.id).collect();
+    store
+        .write_batch(|w| {
+            w.mark_ref_resolved(ids[0], true)?;
+            w.mark_ref_resolved(ids[1], true)
+        })
+        .unwrap();
+
+    let cov = crate::resolve::coverage(&store).unwrap();
+    assert_eq!((cov.refs_total, cov.refs_resolved, cov.refs_unresolved), (1, 1, 0));
+    let imports = &cov.by_relation["proto-import"];
+    assert_eq!((imports.bound, imports.unresolved), (1, 0));
+}
+
 #[test]
 fn counts_reflect_rows_in_every_table() {
     let store = mem();
@@ -2367,6 +2406,103 @@ fn resolution_by_language_reads_the_ledger_numerator_over_its_denominator() {
         (1, 0),
         "the TypeScript call is counted under its own language, unbound"
     );
+}
+
+/// A capture-before-delete row ([ADR-10], `RefForm::Symbol`) is stored under
+/// the *target* file and duplicates a reference its source's own row already
+/// records, so it is no population of the per-language readout (S-598, CR-195):
+/// counting it made a synced store disagree with a cold reindex.
+///
+/// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
+#[test]
+fn resolution_by_language_excludes_capture_before_delete_rows() {
+    let mut store = mem();
+    let go = seed_file(&store, "a/a.go", "go");
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&ref_of(go, "c1", EdgeKind::Calls))?;
+            w.insert_unresolved_ref(&ref_of(go, "i1", EdgeKind::Imports))?;
+            // The capture rows: one bound, one awaiting its target.
+            for (target, kind) in [("cap-bound", EdgeKind::Calls), ("cap-open", EdgeKind::Imports)] {
+                w.insert_unresolved_ref(&NewUnresolvedRef {
+                    form: RefForm::Symbol,
+                    ..ref_of(go, target, kind)
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let ids: Vec<i64> = store.unresolved_refs().unwrap().iter().map(|r| r.id).collect();
+    // Bind the real call and the bound capture row (ids[2]); the real import
+    // and the other capture row stay open.
+    store
+        .write_batch(|w| {
+            w.mark_ref_resolved(ids[0], true)?;
+            w.mark_ref_resolved(ids[2], true)
+        })
+        .unwrap();
+
+    let rows = store.resolution_by_language().unwrap();
+    let go = rows.iter().find(|r| r.language == "go").unwrap();
+    assert_eq!(
+        (go.calls.references, go.calls.bound),
+        (1, 1),
+        "the capture call row is not a reference"
+    );
+    assert_eq!(
+        (go.imports.references, go.imports.bound),
+        (1, 0),
+        "the capture import row is not a reference"
+    );
+}
+
+/// The global [FR-RS-04] ratio reads the same population as the per-language
+/// rows: a `Symbol`-form row moves neither `refs_total` nor `refs_resolved`.
+///
+/// [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
+#[test]
+fn counts_exclude_capture_before_delete_rows() {
+    let mut store = mem();
+    let file_id = store.insert_file("src/lib.rs", Some("rust"), None).unwrap();
+    store
+        .write_batch(|w| {
+            w.insert_unresolved_ref(&ref_of(file_id, "real", EdgeKind::Calls))?;
+            // Every other form still counts: the filter names `Symbol`, not
+            // "anything but `Path`".
+            for (target, form) in [("recv", RefForm::Method), ("glob", RefForm::Glob)] {
+                w.insert_unresolved_ref(&NewUnresolvedRef {
+                    form,
+                    ..ref_of(file_id, target, EdgeKind::Calls)
+                })?;
+            }
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                form: RefForm::Symbol,
+                ..ref_of(file_id, "cap-bound", EdgeKind::Calls)
+            })?;
+            w.insert_unresolved_ref(&NewUnresolvedRef {
+                form: RefForm::Symbol,
+                ..ref_of(file_id, "cap-open", EdgeKind::Calls)
+            })
+        })
+        .unwrap();
+    let ids: Vec<i64> = store.unresolved_refs().unwrap().iter().map(|r| r.id).collect();
+    // Bind the Path row and the bound capture row (ids[3]); the Method and Glob
+    // rows stay open.
+    store
+        .write_batch(|w| {
+            w.mark_ref_resolved(ids[0], true)?;
+            w.mark_ref_resolved(ids[3], true)
+        })
+        .unwrap();
+
+    let counts = store.counts().unwrap();
+    assert_eq!(
+        (counts.refs_total, counts.refs_resolved),
+        (3, 1),
+        "the Path, Method and Glob rows are in the global ratio; the capture rows are not"
+    );
+    // The ledger itself is unchanged: the capture rows are still stored.
+    assert_eq!(store.unresolved_refs().unwrap().len(), 5);
 }
 
 #[test]

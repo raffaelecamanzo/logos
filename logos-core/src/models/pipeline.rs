@@ -48,7 +48,9 @@ pub struct RelationCoverage {
 /// — heuristic binding is never presented as ground truth.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ResolutionStats {
-    /// Every reference in the ledger (calls, method calls, imports, captures).
+    /// Every reference in the ledger (calls, method calls, imports) — less the
+    /// capture-before-delete rows, each a duplicate of a reference its source
+    /// file's own row records (S-598, CR-195).
     pub refs_total: u64,
     /// References currently bound to an edge.
     pub refs_resolved: u64,
