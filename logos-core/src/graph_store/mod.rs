@@ -477,9 +477,15 @@ pub struct StoreCounts {
     pub nodes: u64,
     /// Rows in `edges` — graph relationships.
     pub edges: u64,
-    /// Rows in `unresolved_refs` — the whole reference ledger (S-011).
+    /// Rows in `unresolved_refs` — the reference ledger (S-011) **less its
+    /// capture-before-delete rows** (`RefForm::Symbol`, [ADR-10]), each a
+    /// duplicate of a reference its source file's own row records (S-598,
+    /// [FR-RS-04]).
+    ///
+    /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
+    /// [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
     pub refs_total: u64,
-    /// Ledger rows currently bound to an edge (`resolved = 1`).
+    /// Those ledger rows currently bound to an edge (`resolved = 1`).
     pub refs_resolved: u64,
 }
 
@@ -1707,6 +1713,8 @@ pub trait GraphStore {
     fn neighbours_out(&self, id: NodeId) -> Result<Vec<(EdgeKind, NodeRow)>>;
 
     /// Whole-store row counts for the `status` health snapshot ([FR-NV-07]).
+    /// The ledger figures leave out capture-before-delete (`Symbol`-form) rows,
+    /// so a synced store and a cold reindex report one ratio (S-598).
     ///
     /// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
     fn counts(&self) -> Result<StoreCounts>;
@@ -1736,7 +1744,9 @@ pub trait GraphStore {
     /// join [`language_composition`](Self::language_composition) uses: a
     /// language in the index must never be an absent row here, even one whose
     /// files contributed no node. The ledger half groups `unresolved_refs` by
-    /// its owning file's language; the edge half groups edges by their
+    /// its owning file's language, leaving out capture-before-delete
+    /// (`Symbol`-form) rows — each duplicates a reference its source file's own
+    /// row records (S-598); the edge half groups edges by their
     /// **source** node's file language and splits them on whether the target
     /// node lies in the same file. An edge whose source or target lies in no
     /// indexed file is attributable to no language and no locality, and is
@@ -2789,14 +2799,18 @@ impl GraphStore for SqliteGraphStore {
     }
 
     fn counts(&self) -> Result<StoreCounts> {
+        // The reference ledger is counted without its capture-before-delete
+        // rows (`form <> ?1`, [`RefForm::Symbol`]): each duplicates a reference
+        // its source file's own row records, so counting it made a synced store
+        // report figures a cold reindex does not (S-598, CR-195, [NFR-RA-06]).
         let mut stmt = self.conn.prepare_cached(
             "SELECT (SELECT COUNT(*) FROM files), \
                     (SELECT COUNT(*) FROM nodes), \
                     (SELECT COUNT(*) FROM edges), \
-                    (SELECT COUNT(*) FROM unresolved_refs), \
-                    (SELECT COUNT(*) FROM unresolved_refs WHERE resolved = 1)",
+                    (SELECT COUNT(*) FROM unresolved_refs WHERE form <> ?1), \
+                    (SELECT COUNT(*) FROM unresolved_refs WHERE resolved = 1 AND form <> ?1)",
         )?;
-        stmt.query_row([], |row| {
+        stmt.query_row([RefForm::Symbol.as_i32()], |row| {
             Ok(StoreCounts {
                 files: row.get::<_, i64>(0)? as u64,
                 nodes: row.get::<_, i64>(1)? as u64,
@@ -2880,15 +2894,18 @@ impl GraphStore for SqliteGraphStore {
                 },
             );
         }
-        // The ledger half: the numerator over its denominator.
+        // The ledger half: the numerator over its denominator. A
+        // capture-before-delete row (`RefForm::Symbol`) sits under its *target*
+        // file and duplicates a reference its source's own row records, so it is
+        // no reference of this readout (S-598, CR-195, [NFR-RA-06]).
         let mut ledger = self.conn.prepare_cached(
             "SELECT f.language, r.kind, COUNT(*), COALESCE(SUM(r.resolved), 0) \
              FROM unresolved_refs r JOIN files f ON f.id = r.file_id \
-             WHERE f.language IS NOT NULL AND r.kind IN (?1, ?2) \
+             WHERE f.language IS NOT NULL AND r.kind IN (?1, ?2) AND r.form <> ?3 \
              GROUP BY f.language, r.kind",
         )?;
         let ledger_rows = ledger
-            .query_map([calls, imports], |row| {
+            .query_map([calls, imports, i64::from(RefForm::Symbol.as_i32())], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,

@@ -1008,9 +1008,10 @@ pub struct StatusInfo {
     /// the native wiki tier consumes — readable by a second process opening the
     /// same `logos.db`.
     pub graph_revision: u64,
-    /// Whole reference ledger size (S-011).
+    /// Reference ledger size (S-011), less its capture-before-delete rows — each
+    /// a duplicate of a reference its source file's own row records (S-598).
     pub refs_total: u64,
-    /// Ledger rows currently bound to an edge.
+    /// Those ledger rows currently bound to an edge.
     pub refs_resolved: u64,
     /// Ledger rows persisted for retry — never fabricated (NFR-RA-05).
     pub refs_unresolved: u64,
@@ -1135,10 +1136,11 @@ pub struct CallResidue {
     /// Rows per reason; every reason of the scope is present, a `0` included —
     /// each is a count the classification made.
     pub reasons: std::collections::BTreeMap<CallResidueReason, u64>,
-    /// Unbound rows no reason is assigned to: a capture-before-delete row
-    /// awaiting its target, or a row the ledger holds unbound that the binder
-    /// binds now (a graph bound by an older binary, or a sync that did not
-    /// re-select it). `0` on a graph freshly indexed by this binary.
+    /// Unbound rows no reason is assigned to: a row the ledger holds unbound
+    /// that the binder binds now (a graph bound by an older binary, or a sync
+    /// that did not re-select it). A capture-before-delete row is no call site
+    /// and is not counted (S-598). `0` on a graph freshly indexed by this
+    /// binary.
     pub unclassified: u64,
     /// Over what the external/other-member split was decided.
     pub scope: ResidueScope,

@@ -43,6 +43,22 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   heads met inside one another's expansions bind nothing, which keeps the work flat as
   imports multiply (a re-entrancy guard, as for globs). The same head in an
   `extends` clause (`Helper.Inner`) binds nothing under rival imports.
+- **`status` resolution figures exclude capture-before-delete rows (CR-195, S-598).**
+  Syncing a file writes a capture-before-delete row for each edge pointing into it,
+  stored under the *target* file and duplicating a reference its source's own row
+  already records. `status` counted both, so a synced store read higher than a cold
+  reindex of the same tree: a two-file Go module read calls and imports 1/1, then 2/2
+  after `sync a/a.go`, then 1/1 again after a reindex. Those rows are now left out of
+  every figure counted over the ledger — the per-language `references` and `bound`, the
+  global `refs_total`/`refs_resolved` ratio and the per-relation-class coverage, the
+  call residue's `unbound`, per-reason and `unclassified` counts, and the global ratio a
+  `sync` itself reports — on the CLI, `--json`, MCP and HTTP alike. The ledger is
+  unchanged: the rows are still written and re-bound. `same_file_edges` and
+  `cross_file_edges` were never affected. On a freshly indexed store there are no such
+  rows, so every figure is byte-identical to the last release.
+  **Measured** on monolog at `d7059e4c` after `sync src/Monolog/Logger.php`: PHP
+  imports 448/585 → 431/568 and the global ratio 2,678/7,228 → 2,650/7,200, equal to a
+  cold reindex's (PHP calls 1,034/5,189 throughout).
 
 ### Changed
 
@@ -81,6 +97,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ### Upgrade
 
+- A store that was synced reads **lower** after upgrading: the capture-before-delete rows it
+  already holds stop counting (CR-195). That is the figure a cold reindex reports, not a
+  loss of references; no migration or re-index is needed for it.
 - One forward-only store migration, **31** (the alias joins the ledger identity index).
   It changes no row, id or column and clears every file's content hash, so run **one
   `logos scan` or `logos index`** after upgrading — a bare `logos sync` re-reads nothing

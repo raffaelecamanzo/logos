@@ -360,15 +360,20 @@ pub fn run(
     let final_bound =
         |r: &UnresolvedRefRow| -> bool { bound_now.get(&r.id).copied().unwrap_or(r.resolved) };
 
-    let refs_total = snap.refs.len() as u64;
-    let refs_resolved = snap.refs.iter().filter(|&r| final_bound(r)).count() as u64;
+    // The reported population leaves out the capture-before-delete rows (S-598,
+    // CR-195): each duplicates a reference its source file's own row records, so
+    // counting it made a synced store's ratio differ from a cold reindex's. The
+    // same population `GraphStore::counts` and `coverage` read.
+    let reported = || snap.refs.iter().filter(|r| r.form != RefForm::Symbol);
+    let refs_total = reported().count() as u64;
+    let refs_resolved = reported().filter(|&r| final_bound(r)).count() as u64;
 
     // Per-relation-class coverage for the cross-artifact references (CR-011,
     // FR-CG-11): the relation token rides on each ledger row's payload; group by
     // it on the row's final bound state. Computed before `outcomes` moves into
     // the write batch below.
     let by_relation =
-        relation_coverage(snap.refs.iter().map(|r| (r.payload.as_deref(), final_bound(r))));
+        relation_coverage(reported().map(|r| (r.payload.as_deref(), final_bound(r))));
 
     // Serial commit: one transaction through the writer actor (ADR-02).
     let edges_created = runtime.submit_write(move |w| {
@@ -758,7 +763,14 @@ pub(crate) fn relation_coverage<'a>(
 /// [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
 /// [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
 pub fn coverage(store: &dyn GraphStore) -> Result<ResolutionStats> {
-    let refs = store.unresolved_refs()?;
+    // Capture-before-delete (`Symbol`-form) rows are no reference of the
+    // readout — each duplicates its source file's own row (S-598, CR-195) — so
+    // this reads the population `GraphStore::counts` does.
+    let refs: Vec<_> = store
+        .unresolved_refs()?
+        .into_iter()
+        .filter(|r| r.form != RefForm::Symbol)
+        .collect();
     let total = refs.len() as u64;
     let resolved = refs.iter().filter(|r| r.resolved).count() as u64;
     let by_relation = relation_coverage(refs.iter().map(|r| (r.payload.as_deref(), r.resolved)));
@@ -820,8 +832,11 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 /// path-specifier and imported-binding scopes `run` chains on: those are read
 /// only for a path-grammar (TypeScript, JavaScript, Go) file, never for a
 /// package-shaped row. The population is
-/// the per-language ledger's: rows of a file that records a language, so
-/// `unbound` equals the row's `calls.references − calls.bound`.
+/// the per-language ledger's: rows of a file that records a language, less the
+/// capture-before-delete (`Symbol`-form) rows ([ADR-10], S-598), so `unbound`
+/// equals the row's `calls.references − calls.bound`.
+///
+/// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
 ///
 /// Empty — and nothing is read beyond one ledger scan — when no file is
 /// package-shaped, so a Rust-only graph pays for none of it. A pure read that
@@ -890,7 +905,11 @@ pub(crate) fn call_residue_by_language(
         });
     }
     for r in &refs {
-        if r.kind != EdgeKind::Calls || r.resolved {
+        // A capture-before-delete row sits under its target file and duplicates
+        // a call its source's own row records: it is no call site, so it is
+        // neither unbound nor unclassified here (S-598, CR-195) — the same
+        // population `resolution_by_language` counts.
+        if r.kind != EdgeKind::Calls || r.resolved || r.form == RefForm::Symbol {
             continue;
         }
         let Some(language) = r
