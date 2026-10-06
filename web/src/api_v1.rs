@@ -1392,7 +1392,13 @@ pub(crate) async fn wiki_page(
     Path(slug): Path<String>,
 ) -> Response {
     let model = bridge(engine, "api_v1_wiki_page", Surface::Web, move |e| -> anyhow::Result<WikiPageOutcome> {
-        let current_revision = e.status().graph_revision;
+        // Only the revision is needed, so it is read directly: `status()` would
+        // also re-walk every unbound call for its per-language residue (S-589).
+        // `0` when it cannot be read, as `status()`'s degraded read-model says.
+        let current_revision = e
+            .runtime()
+            .and_then(|rt| rt.submit_read(|store| store.graph_revision()).ok())
+            .unwrap_or(0);
         match e.wiki_read(&slug)? {
             Some(page) => {
                 let regen_pending =
