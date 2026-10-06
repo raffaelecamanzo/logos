@@ -156,7 +156,16 @@ pub enum ImportSpecifier {
 /// `@ref.call` rows that S-467's receiver typing already qualifies by the
 /// enclosing class.
 ///
+/// An **explicit** `"none"` says more than the absent default, and the binder
+/// reads the difference (S-590, [FR-RS-07]): it declares a language whose bare
+/// call can never reach an instance member — Go, Rust, Python, PHP, TypeScript
+/// and TSX — so a bare `f()` binds free callables only
+/// ([`PluginManifest::bare_calls_free_only`]). Extraction reads the two alike.
+/// Java declares nothing: its bare in-class call does mean `this.m()`, and keeps
+/// reaching a member through the scope walk.
+///
 /// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
+/// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
 /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub enum ImplicitReceiver {
@@ -590,10 +599,12 @@ pub struct PluginManifest {
     #[serde(default)]
     pub specifier_extensions: Vec<String>,
     /// What an unqualified call inside a class body means
-    /// ([`ImplicitReceiver`], S-514). Defaults to [`ImplicitReceiver::None`]
-    /// when omitted.
+    /// ([`ImplicitReceiver`], S-514), as declared: `None` when the key is
+    /// omitted. Read through [`implicit_receiver`](Self::implicit_receiver),
+    /// which defaults it, and [`bare_calls_free_only`](Self::bare_calls_free_only),
+    /// which tells an explicit `"none"` from the omission (S-590).
     #[serde(default)]
-    pub implicit_receiver: ImplicitReceiver,
+    pub implicit_receiver: Option<ImplicitReceiver>,
     /// Whether calling a class constructs it (S-521, [FR-RS-16]): a call whose
     /// one candidate is a `Class` records `Instantiates` to it. For the
     /// languages where `Foo()` builds a `Foo` — Python, Kotlin, Scala. Defaults
@@ -1074,6 +1085,24 @@ impl PluginManifest {
     /// unless the descriptor declares it.
     pub fn enclosing_namespaces(&self) -> bool {
         self.module_model.as_ref().is_some_and(|m| m.enclosing_namespaces)
+    }
+
+    /// What an unqualified call inside a class body means ([`ImplicitReceiver`],
+    /// S-514): the declared policy, else [`ImplicitReceiver::None`].
+    pub fn implicit_receiver(&self) -> ImplicitReceiver {
+        self.implicit_receiver.unwrap_or_default()
+    }
+
+    /// Whether a bare call of this language binds free callables only (S-590,
+    /// [FR-RS-07]): `true` only when the descriptor **explicitly** declares
+    /// `implicit_receiver = "none"`. An omitted key — Java's — is `false`, so a
+    /// language that says nothing keeps reaching a member through the scope
+    /// walk exactly as before ([NFR-MA-01]).
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    pub fn bare_calls_free_only(&self) -> bool {
+        self.implicit_receiver == Some(ImplicitReceiver::None)
     }
 
     /// The call targets this descriptor declares beyond a callable
@@ -1924,19 +1953,19 @@ mod tests {
     #[test]
     fn the_implicit_receiver_policy_defaults_to_none_and_parses_self() {
         let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
-        assert_eq!(m.implicit_receiver, ImplicitReceiver::None);
+        assert_eq!(m.implicit_receiver(), ImplicitReceiver::None);
         let declared = GOOD.replace(
             "module_separator = \"::\"",
             "module_separator = \"::\"\nimplicit_receiver = \"self\"",
         );
         let m = PluginManifest::parse("kotlin/plugin.toml", &declared).unwrap();
-        assert_eq!(m.implicit_receiver, ImplicitReceiver::SelfInstance);
+        assert_eq!(m.implicit_receiver(), ImplicitReceiver::SelfInstance);
         let explicit_none = GOOD.replace(
             "module_separator = \"::\"",
             "module_separator = \"::\"\nimplicit_receiver = \"none\"",
         );
         let m = PluginManifest::parse("kotlin/plugin.toml", &explicit_none).unwrap();
-        assert_eq!(m.implicit_receiver, ImplicitReceiver::None);
+        assert_eq!(m.implicit_receiver(), ImplicitReceiver::None);
         for bad in ["\"this\"", "\"Self\"", "\"\"", "true"] {
             let text = GOOD.replace(
                 "module_separator = \"::\"",
@@ -1944,6 +1973,28 @@ mod tests {
             );
             assert!(PluginManifest::parse("x/plugin.toml", &text).is_err(), "{bad}");
         }
+    }
+
+    /// An explicit `implicit_receiver = "none"` (S-590) is told apart from the
+    /// omitted key, though extraction reads both as `none`: only the explicit
+    /// declaration makes a bare call bind free callables only, and `"self"`
+    /// never does. Java omits the key, so it must stay `false`.
+    #[test]
+    fn an_explicit_none_is_told_apart_from_the_omitted_default() {
+        let with = |line: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{line}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text).unwrap()
+        };
+        let omitted = PluginManifest::parse("java/plugin.toml", GOOD).unwrap();
+        let explicit = with("implicit_receiver = \"none\"");
+        let instance = with("implicit_receiver = \"self\"");
+        assert_eq!(omitted.implicit_receiver(), explicit.implicit_receiver());
+        assert!(!omitted.bare_calls_free_only(), "an omitted key is the default");
+        assert!(explicit.bare_calls_free_only(), "an explicit `none` is declared");
+        assert!(!instance.bare_calls_free_only(), "`self` reaches the instance");
     }
 
     /// The two call-target keys (S-521) default to `false` — a callable only —

@@ -15,7 +15,9 @@
 //!   receiver (`other.f()`, `self.field.f()`) is `other` and binds nowhere.
 //!
 //! A bare call (`F()`, `helper()`) is a free call in both languages and keeps
-//! binding through the scope walk: neither plugin declares an implicit receiver.
+//! binding through the scope walk: both plugins declare `implicit_receiver =
+//! "none"`, so it binds free functions only — never a method that shares its
+//! name (S-590, pinned in `bare_call_free_only.rs`).
 //!
 //! The reason a shape-`other` call stays unbound (`no-receiver-evidence`) is a
 //! fixed function of the shape, pinned by the binder's unit tests; a fixture of a

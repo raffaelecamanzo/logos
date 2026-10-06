@@ -1532,6 +1532,8 @@ fn bare_call_to_a_lone_method_still_binds_the_method_monotonic() {
     // candidate is an associated method still binds it — no previously-resolved
     // edge is lost (monotonic, [NFR-RA-05]). This is also what keeps a language
     // whose free callables are `Method` (e.g. a Ruby top-level `def`) unaffected.
+    // It holds for a language that does not declare `implicit_receiver = "none"`
+    // — this layout declares nothing; S-590's filter is pinned below.
     for policy in [
         BindingPolicy::Strict,
         BindingPolicy::Balanced,
@@ -1577,6 +1579,154 @@ fn receiver_method_call_does_not_apply_the_free_function_tiebreak() {
         Outcome::Unbound,
         "a receiver call with a free-fn + method of the same name must stay ambiguous"
     );
+}
+
+// ── S-590: a bare call reaches no instance member (FR-RS-07 as amended) ──────
+//
+// The method cluster again, under a layout whose `.rs` language declares
+// `implicit_receiver = "none"` explicitly, and with the self type the Rust
+// plugin records for each `impl` member: `ins` (3), `make` (5), `dup` (9) and
+// `only_m` (10) are methods of `Store`. A bare call drops them from its
+// candidates on every rung; a path-qualified call still reaches them.
+
+/// The self types of the cluster's associated methods.
+fn cluster_self_types() -> Vec<(NodeId, String)> {
+    [3, 5, 9, 10]
+        .into_iter()
+        .map(|id| (NodeId(id), "Store".to_string()))
+        .collect()
+}
+
+/// [`bind_cluster`] with the self types recorded, under a layout that declares
+/// the free-only bare call for `.rs` when `free_only` holds, and nothing else.
+fn bind_cluster_declared(r: &UnresolvedRefRow, policy: BindingPolicy, free_only: bool) -> Outcome {
+    let (nodes, edges) = method_cluster();
+    let layout = super::package_key::PackageLayout::default()
+        .with_free_only_bare_calls(free_only.then(|| "rs".to_string()));
+    let ix = Index::build_with_layout(&nodes, &edges, std::slice::from_ref(r), layout)
+        .with_self_types(cluster_self_types());
+    bind(r, &ix, policy)
+}
+
+#[test]
+fn a_bare_call_to_a_lone_method_binds_nothing_where_the_language_declares_none() {
+    // No free `only_m`: the scope walk passes over the method, and so does the
+    // aggressive workspace fallback that would otherwise find it by name.
+    for policy in POLICIES {
+        let r = call(100, LIB_RS, 6, "only_m");
+        assert_eq!(
+            bind_cluster_declared(&r, policy, true),
+            Outcome::Unbound,
+            "a bare call never reaches a self-typed method ({policy:?})"
+        );
+    }
+}
+
+#[test]
+fn an_omitted_declaration_keeps_binding_the_lone_method() {
+    // The same graph, self types and all, under a layout that declares nothing
+    // — Java's case: the bare call binds the method exactly as before.
+    for policy in POLICIES {
+        let r = call(100, LIB_RS, 6, "only_m");
+        bound_to(bind_cluster_declared(&r, policy, false), 6, 10, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn a_declared_none_bare_call_still_binds_the_free_function() {
+    // `ins`: the free function binds; `dup`: two free functions stay ambiguous
+    // once the method is gone, never a guess between them.
+    for policy in POLICIES {
+        bound_to(
+            bind_cluster_declared(&call(100, LIB_RS, 6, "ins"), policy, true),
+            6,
+            2,
+            EdgeKind::Calls,
+        );
+        assert_eq!(
+            bind_cluster_declared(&call(101, LIB_RS, 6, "dup"), policy, true),
+            Outcome::Unbound,
+            "{policy:?}"
+        );
+    }
+}
+
+#[test]
+fn a_declared_none_path_qualified_call_still_binds_the_associated_method() {
+    let r = call(100, LIB_RS, 6, "Store::make");
+    bound_to(bind_cluster_declared(&r, BindingPolicy::Strict, true), 6, 5, EdgeKind::Calls);
+}
+
+// A Python-shaped graph for (a), a member of a class-like container:
+//
+// ```text
+// module 1 (app.py)
+// ├── fn f        (2)  Function   (free; present only in `with_free`)
+// ├── class A     (3)  Class
+// │   ├── fn f    (4)  Function   (the method — a Python method is a Function)
+// │   │   └── fn g (5) Function   (nested in the method)
+// │   └── class Inner (6) Class   (nested in the class; a call constructs it)
+// ```
+
+fn class_member_index(r: &UnresolvedRefRow, with_free: bool, free_only: bool) -> Index {
+    let mut nodes = vec![
+        node(1, "app", NodeKind::Module, "app.py"),
+        node(3, "A", NodeKind::Class, "app.py"),
+        node(4, "f", NodeKind::Function, "app.py"),
+        node(5, "g", NodeKind::Function, "app.py"),
+        node(6, "Inner", NodeKind::Class, "app.py"),
+    ];
+    let mut edges = vec![contains(1, 3), contains(3, 4), contains(4, 5), contains(3, 6)];
+    if with_free {
+        nodes.push(node(2, "f", NodeKind::Function, "app.py"));
+        edges.push(contains(1, 2));
+    }
+    let layout = super::package_key::PackageLayout::default()
+        .with_call_targets(std::collections::HashMap::from([(
+            "py".to_string(),
+            crate::plugin::CallTargets {
+                classes: true,
+                macros: false,
+            },
+        )]))
+        .with_free_only_bare_calls(free_only.then(|| "py".to_string()));
+    Index::build_with_layout(&nodes, &edges, std::slice::from_ref(r), layout)
+}
+
+#[test]
+fn a_bare_call_inside_a_same_named_class_member_makes_no_self_loop() {
+    let r = call(100, PY_FILE, 4, "f");
+    let ix = class_member_index(&r, false, true);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    // Undeclared, the class's own member is the one candidate: the self-loop
+    // the Sprint 87 review found.
+    let ix = class_member_index(&r, false, false);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 4, 4, EdgeKind::Calls);
+}
+
+#[test]
+fn a_bare_call_passes_over_the_class_member_to_the_free_function_further_out() {
+    let r = call(100, PY_FILE, 4, "f");
+    let ix = class_member_index(&r, true, true);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 4, 2, EdgeKind::Calls);
+}
+
+#[test]
+fn a_bare_call_never_constructs_a_class_its_class_nests() {
+    // A Python method's bare name never sees class scope: `Inner()` inside
+    // `A.f` is a NameError, not `A.Inner`. Undeclared, it constructs it.
+    let r = call(100, PY_FILE, 4, "Inner");
+    let ix = class_member_index(&r, false, true);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    let ix = class_member_index(&r, false, false);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 4, 6, EdgeKind::Instantiates);
+}
+
+#[test]
+fn a_bare_call_to_a_function_nested_in_a_method_still_binds() {
+    let r = call(100, PY_FILE, 4, "g");
+    let ix = class_member_index(&r, false, true);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 4, 5, EdgeKind::Calls);
 }
 
 // ── Trait-object dynamic-dispatch fan-out (S-281, CR-073 Part C, FR-RS-08) ───

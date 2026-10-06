@@ -42,6 +42,13 @@ pub struct Semantics {
     /// [`PluginManifest::implicit_receiver`]) — consumed by reference
     /// extraction's receiver-shape pass.
     pub implicit_receiver: ImplicitReceiver,
+    /// Whether a bare call binds free callables only (S-590, [FR-RS-07]; see
+    /// [`PluginManifest::bare_calls_free_only`]): the descriptor declares
+    /// `implicit_receiver = "none"` explicitly — consumed by the binder's
+    /// bare-path rung through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    pub bare_calls_free_only: bool,
     /// What a call may bind besides a callable (S-521, [FR-RS-16]; see
     /// [`PluginManifest::call_targets`]) — consumed by the binder's call
     /// admission through [`crate::resolve::package_key`].
@@ -315,6 +322,8 @@ impl CompiledPlugin {
         let module_model = manifest.module_model_kind();
         let family = manifest.module_family();
         let call_targets = manifest.call_targets();
+        let implicit_receiver = manifest.implicit_receiver();
+        let bare_calls_free_only = manifest.bare_calls_free_only();
         let enclosing_namespaces = manifest.enclosing_namespaces();
         let (package_stems, import_roots) = manifest
             .module_model
@@ -325,7 +334,8 @@ impl CompiledPlugin {
             module_separator: manifest.module_separator,
             import_specifier: manifest.import_specifier,
             specifier_extensions: manifest.specifier_extensions,
-            implicit_receiver: manifest.implicit_receiver,
+            implicit_receiver,
+            bare_calls_free_only,
             call_targets,
             supertype_kind_follows_target: manifest.supertype_kind_follows_target,
             package_modules: manifest.package_modules,

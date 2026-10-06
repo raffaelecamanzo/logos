@@ -2089,6 +2089,7 @@ fn bind_traced(
     let source_package = source_file.and_then(|p| ix.layout.package_of(p));
     let source_family = source_file.and_then(|p| ix.layout.family(p));
     let enclosing_namespaces = source_file.is_some_and(|p| ix.layout.sees_enclosing_namespaces(p));
+    let bare_calls_free_only = source_file.is_some_and(|p| ix.layout.bare_calls_free_only(p));
     let relation = relation_want_of(r, source_info, &ix.layout);
     let ctx = Ctx {
         source,
@@ -2097,6 +2098,7 @@ fn bind_traced(
         source_package,
         source_family,
         enclosing_namespaces,
+        bare_calls_free_only,
         policy,
         in_glob_resolution: Cell::new(false),
         in_rival_expansion: Cell::new(false),
@@ -2281,11 +2283,18 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // path-qualified call (`Type::f`, routed through `descend`) and for an
             // import (`Want::Any`); scoped to this resolution. A receiver-method
             // call never reaches it: it binds by its receiver's shape (S-514).
-            ctx.bare_path_call
-                .set(r.kind == EdgeKind::Calls && segs.len() == 1);
+            let bare = r.kind == EdgeKind::Calls && segs.len() == 1;
+            ctx.bare_path_call.set(bare);
             let resolved = ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
             ctx.bare_path_call.set(false);
             match resolved {
+                // An instance member a bare call of its language cannot reach
+                // (S-590, [FR-RS-07]), whichever rung found it: a `use` or glob
+                // import naming an associated function, the package or the
+                // workspace fallback. The scope walk already passed over one
+                // ([`Ctx::prefer_free_functions`]), to reach a free function
+                // further out.
+                Res::Found(target) if bare && ctx.is_unreachable_member(target) => Outcome::Unbound,
                 // A class a declared call constructs (S-521, [FR-RS-16]) —
                 // unless a factory function of its name rivals it.
                 Res::Found(target) if ctx.constructs(want, target) => {
@@ -2500,6 +2509,13 @@ struct Ctx<'a> {
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     enclosing_namespaces: bool,
+    /// Whether the source's language declares `implicit_receiver = "none"`
+    /// explicitly ([`PackageLayout::bare_calls_free_only`], S-590, [FR-RS-07]):
+    /// its bare call reaches no instance member, so
+    /// [`is_unreachable_member`](Ctx::is_unreachable_member) holds for one.
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    bare_calls_free_only: bool,
     policy: BindingPolicy,
     /// Re-entrancy guard for [`through_globs`](Ctx::through_globs): set while a
     /// glob's own module path is being resolved, so that resolution cannot fan
@@ -3800,8 +3816,9 @@ impl Ctx<'_> {
     /// `graph_store` `insert_node`/`insert_edge`/`upsert_symbol` cluster the graph
     /// previously left [`Res::Ambiguous`].
     ///
-    /// A **tie-break, not a filter**: methods are dropped only when a free
-    /// function is actually present. So it is strictly monotonic and
+    /// In a language that does not declare `implicit_receiver = "none"`, a
+    /// **tie-break, not a filter**: methods are dropped only when a free
+    /// function is actually present. So there it is strictly monotonic and
     /// never-fabricate ([NFR-RA-05]):
     /// - one free fn + same-named methods → binds the free fn (the recovery);
     /// - two-or-more free fns → still ambiguous, stays unresolved;
@@ -3820,17 +3837,57 @@ impl Ctx<'_> {
     /// never reaches the scope walk at all — it binds by its receiver's shape
     /// (S-514). The step is gated on [`bare_path_call`](Ctx::bare_path_call).
     ///
+    /// In a language that declares `implicit_receiver = "none"` explicitly
+    /// (S-590), the step is first a **filter**: every
+    /// [unreachable member](Ctx::is_unreachable_member) is dropped, so a scope
+    /// holding only the method(s) contributes nothing and the walk goes on
+    /// outward to a free function — or ends unbound. A bare `f()` inside a method
+    /// `f` then makes no self-loop. Java declares nothing, and keeps the
+    /// tie-break alone: its bare in-class call does mean `this.m()`.
+    ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn prefer_free_functions(&self, mut candidates: Vec<NodeId>) -> Vec<NodeId> {
         if !self.bare_path_call.get() {
             return candidates;
         }
+        candidates.retain(|&id| !self.is_unreachable_member(id));
         let kind = |id: &NodeId| self.ix.info.get(id).map(|i| i.kind);
         if candidates.iter().any(|id| kind(id) == Some(NodeKind::Function)) {
             candidates.retain(|id| kind(id) != Some(NodeKind::Method));
         }
         candidates
+    }
+
+    /// Whether `id` is a declaration a bare call written in the source's
+    /// language can never reach (S-590, [FR-RS-07], [FR-RS-12]): the language
+    /// declares `implicit_receiver = "none"` explicitly, and the candidate is an
+    /// instance member — either
+    /// - (a) a member of a class-like container ([`is_class_like`]): a Python
+    ///   or PHP method, a JS/TS class member, a class a Python class nests (a
+    ///   method's bare name never sees class scope); or
+    /// - (b) a declaration with a recorded self type
+    ///   ([`Index::with_self_types`], [FR-RS-11] / [FR-EX-12]): a Go or Rust
+    ///   method, which sits at module scope beside the free functions.
+    ///
+    /// A free function, a function nested in another, and a module-level class
+    /// a Python call constructs are never one.
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+    /// [FR-EX-12]: ../../../docs/specs/requirements/FR-EX-12.md
+    fn is_unreachable_member(&self, id: NodeId) -> bool {
+        if !self.bare_calls_free_only {
+            return false;
+        }
+        self.ix.self_types.contains_key(&id)
+            || self
+                .ix
+                .parent
+                .get(&id)
+                .and_then(|p| self.ix.info.get(p))
+                .is_some_and(|p| is_class_like(p.kind))
     }
 
     /// Resolve a bare name by the scope hierarchy (function-local outward).
@@ -4558,7 +4615,13 @@ impl Ctx<'_> {
             let Some(&scope_node) = self.ix.modules.get(&key) else {
                 return Res::NotFound;
             };
-            return exactly_one(&self.ix.members_named(scope_node, seg, want));
+            let mut members = self.ix.members_named(scope_node, seg, want);
+            // A bare call's `use` or glob import reaches the module's free
+            // function, never an associated one collapsed beside it (S-590).
+            if self.bare_path_call.get() {
+                members.retain(|&id| !self.is_unreachable_member(id));
+            }
+            return exactly_one(&members);
         }
         Res::NotFound
     }
