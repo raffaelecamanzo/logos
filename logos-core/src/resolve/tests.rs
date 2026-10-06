@@ -2918,3 +2918,34 @@ fn a_capture_row_never_restores_an_edge_its_source_no_longer_produces() {
     assert_eq!(outcomes[2].2, bound(2, 3, EdgeKind::Calls));
     assert_eq!(outcomes[3].2, bound(3, 5, EdgeKind::Calls));
 }
+
+/// A capture row is spent once it binds — this run, or as a resolved row an
+/// earlier version kept — or once its source's own rows were re-bound; one
+/// that cannot bind for an unswept source stays. Only capture rows are ever
+/// spent (CR-187).
+#[test]
+fn a_capture_row_is_spent_once_it_binds_or_its_source_is_re_bound() {
+    let capture = |id: i64, source_node: i64, resolved: bool| UnresolvedRefRow {
+        resolved,
+        ..make_ref(id, 1, source_node, "local sym5", None, RefForm::Symbol, EdgeKind::Calls)
+    };
+    let refs = [
+        capture(1, 2, false), // binds this run
+        capture(2, 3, true),  // a stale resolved capture, not re-bound
+        capture(3, 4, false), // unbound, its source swept
+        capture(4, 6, false), // unbound, its source not swept: stays
+        UnresolvedRefRow {
+            resolved: true,
+            ..make_ref(5, 1, 4, "run", None, RefForm::Path, EdgeKind::Calls)
+        },
+    ];
+    let swept = ["local sym4"].into_iter().collect();
+    let bound_now: std::collections::HashMap<i64, bool> =
+        [(1, true), (3, false), (4, false), (5, true)].into();
+    let spent = super::spent_captures(&refs, &swept, |r| {
+        bound_now.get(&r.id).copied().unwrap_or(r.resolved)
+    });
+    let mut spent: Vec<i64> = spent.into_iter().collect();
+    spent.sort_unstable();
+    assert_eq!(spent, [1, 2, 3]);
+}

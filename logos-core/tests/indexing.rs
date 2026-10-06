@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use logos_core::model::{EdgeKind, NodeId, NodeKind};
+use logos_core::model::{EdgeKind, NodeId, NodeKind, RefForm};
 use logos_core::{Engine, Runtime};
 
 #[path = "support/graph_fingerprint.rs"]
@@ -286,6 +286,9 @@ fn capture_before_delete_preserves_a_cross_file_edge() {
         "the cross-file caller→callee edge must survive the sync \
          (ADR-10 capture-before-delete)"
     );
+    // CR-187: the capture row is spent once it re-binds, although no row of
+    // the caller's was re-bound (the edge is planted, so none names it).
+    assert_eq!(capture_rows(rt), Vec::new(), "the re-bound capture row is deleted");
 }
 
 #[test]
@@ -619,8 +622,11 @@ enum Edit<'a> {
 }
 
 /// The CR-015 invariant: applying `edits` to `initial` via `sync` yields a graph
-/// identical to a full `index` of the post-edit tree.
-fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) {
+/// identical to a full `index` of the post-edit tree — the whole reference
+/// ledger included, so `status` reports the same `refs_total`/`refs_resolved`
+/// (FR-SY-10 as amended by CR-187). Returns the synced arm for any further
+/// assertion.
+fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) -> (TempDir, Engine) {
     // Arm A — index the initial tree, then sync exactly the edited paths.
     let tmp_a = TempDir::new().expect("temp a");
     for (rel, body) in initial {
@@ -677,6 +683,57 @@ fn assert_sync_matches_reindex(initial: &[(&str, &str)], edits: &[Edit]) {
         fp_sync, fp_reindex,
         "sync-to-state must equal index-of-state (CR-015 equivalence invariant)"
     );
+    assert_eq!(
+        status_ref_counts(engine_a.runtime().expect("runtime a")),
+        status_ref_counts(engine_b.runtime().expect("runtime b")),
+        "a synced store reports the ledger counts a fresh index reports (CR-187)"
+    );
+    (tmp_a, engine_a)
+}
+
+/// The `(refs_total, refs_resolved)` pair `status` reports, read from the
+/// same store counters it renders.
+fn status_ref_counts(rt: &Runtime) -> (u64, u64) {
+    let counts = rt.submit_read(|store| store.counts()).expect("counts read runs");
+    (counts.refs_total, counts.refs_resolved)
+}
+
+/// Every capture-before-delete row (`RefForm::Symbol`, ADR-10) in the ledger,
+/// as `(source, target, resolved)`.
+fn capture_rows(rt: &Runtime) -> Vec<(String, String, bool)> {
+    rt.submit_read(|store| {
+        Ok(store
+            .unresolved_refs()?
+            .into_iter()
+            .filter(|r| r.form == RefForm::Symbol)
+            .map(|r| (r.source_symbol, r.target, r.resolved))
+            .collect())
+    })
+    .expect("ledger read runs")
+}
+
+/// Whether an edge of `kind` runs from the node named `from` to the one named
+/// `to` — each the one non-module node of that name in the fixture.
+fn has_edge(rt: &Runtime, from: &str, to: &str, kind: EdgeKind) -> bool {
+    let (from, to) = (from.to_string(), to.to_string());
+    rt.submit_read(move |store| {
+        let nodes = store.all_nodes()?;
+        let id = |name: &str| {
+            let mut ids = nodes
+                .iter()
+                .filter(|n| n.name == name && n.kind != NodeKind::Module)
+                .map(|n| n.id);
+            let id = ids.next().unwrap_or_else(|| panic!("no node named {name}"));
+            assert!(ids.next().is_none(), "two nodes named {name}");
+            id
+        };
+        let (from, to) = (id(&from), id(&to));
+        Ok(store
+            .all_edges()?
+            .iter()
+            .any(|e| e.source == from && e.target == to && e.kind == kind))
+    })
+    .expect("edge read runs")
 }
 
 #[test]
@@ -1055,6 +1112,200 @@ fn sync_equiv_a_rival_type_arriving_unbinds_a_type_use() {
             ),
         ],
         &[Edit::Put("src/test/java/com/z/Bar.java", "package com.z;\n\npublic class Bar {}\n")],
+    );
+}
+
+// ── S-586 / CR-187: sync leaves no stale rows in the reference ledger ───────
+//
+// Capture-before-delete (ADR-10) saves each inbound cross-file edge of a
+// re-extracted file as a `Symbol` row in that file. A fresh index never holds
+// one, so the row lives only until it re-binds: the edge it restored stays, the
+// row goes. `assert_sync_matches_reindex` compares the whole ledger, so each
+// fixture below fails on a leftover capture row.
+
+/// A cross-file call survives a sync of its callee's file, and the capture row
+/// that carried it across the delete is gone once it re-binds.
+#[test]
+fn a_rebound_call_capture_leaves_no_ledger_row() {
+    let (_tmp, engine) = assert_sync_matches_reindex(
+        &[
+            ("a.rs", "use crate::b::target;\nfn a() { target(); }\n"),
+            ("b.rs", "pub fn target() {}\n"),
+        ],
+        &[Edit::Put("b.rs", "// touched\npub fn target() {}\n")],
+    );
+    let rt = engine.runtime().expect("runtime");
+    assert!(
+        has_edge(rt, "a", "target", EdgeKind::Calls),
+        "the cross-file call edge survives the sync (NFR-RA-04)"
+    );
+    assert_eq!(capture_rows(rt), Vec::new(), "no capture row outlives its re-bind");
+}
+
+/// The doc→code shape CR-187 found on nlohmann/json: a Markdown section's
+/// mention of a code symbol survives a sync of the code file, with no capture
+/// row left behind.
+#[cfg(feature = "lang-markdown")]
+#[test]
+fn a_rebound_doc_mention_capture_leaves_no_ledger_row() {
+    let (_tmp, engine) = assert_sync_matches_reindex(
+        &[
+            ("src/lib.rs", "pub fn extract_files() {}\n"),
+            ("docs/guide.md", "# Guide\n\nCall `extract_files` to walk the tree.\n"),
+        ],
+        &[Edit::Put("src/lib.rs", "// touched\npub fn extract_files() {}\n")],
+    );
+    let rt = engine.runtime().expect("runtime");
+    assert!(
+        has_edge(rt, "Guide", "extract_files", EdgeKind::DocReference),
+        "the doc→code edge survives the sync (NFR-RA-04)"
+    );
+    assert_eq!(capture_rows(rt), Vec::new(), "no capture row outlives its re-bind");
+}
+
+/// Edit → sync → revert → sync, the nlohmann/json cycle: each sync leaves the
+/// ledger a fresh index's, with both the call and the doc mention captured.
+#[cfg(feature = "lang-markdown")]
+#[test]
+fn an_edit_and_revert_cycle_leaves_the_ledger_a_fresh_indexs() {
+    let initial = [
+        ("a.rs", "use crate::b::target;\nfn a() { target(); }\n"),
+        ("b.rs", "pub fn target() {}\n"),
+        ("docs/guide.md", "# Guide\n\nCall `target` to aim.\n"),
+    ];
+    let edited = "pub fn target() {}\n// appended\n";
+    let tmp = TempDir::new().expect("temp");
+    for (rel, body) in &initial {
+        write(tmp.path(), rel, body);
+    }
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let rt = engine.runtime().expect("runtime");
+    let cold = graph_fingerprint(rt);
+    let root = tmp.path().canonicalize().expect("canonicalize root");
+    for body in [edited, initial[1].1] {
+        write(tmp.path(), "b.rs", body);
+        engine.sync(&[root.join("b.rs")]);
+    }
+    assert_eq!(graph_fingerprint(rt), cold, "edit → sync → revert → sync equals the cold index");
+    assert_eq!(capture_rows(rt), Vec::new());
+}
+
+/// A capture whose target was renamed away cannot re-bind, and nothing else in
+/// the ledger carries its edge (the edge was planted, so no source row names
+/// it): it stays, unresolved, and no edge is invented (NFR-RA-05).
+#[test]
+fn a_capture_whose_target_was_renamed_away_stays_unresolved() {
+    let tmp = TempDir::new().expect("temp root");
+    write(tmp.path(), "caller.rs", "fn caller() {}\n");
+    write(tmp.path(), "callee.rs", "fn callee() {}\n");
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().expect("runtime present");
+    engine.index();
+    let (caller_id, callee_id) = (node_id_of(rt, "caller"), node_id_of(rt, "callee"));
+    rt.submit_write(move |w| w.insert_edge(caller_id, callee_id, EdgeKind::Calls))
+        .expect("plant edge");
+
+    write(tmp.path(), "callee.rs", "fn callee_renamed() {}\n");
+    engine.sync(&[PathBuf::from("callee.rs")]);
+
+    let captures = capture_rows(rt);
+    assert_eq!(captures.len(), 1, "the capture stays in the ledger: {captures:?}");
+    assert!(captures[0].1.ends_with("callee()."), "it names the old target: {captures:?}");
+    assert!(!captures[0].2, "it stays unresolved: {captures:?}");
+    assert!(
+        rt.submit_read(move |s| s.callees(caller_id)).expect("read callees").is_empty(),
+        "no edge is invented for it"
+    );
+}
+
+/// The natural rename: the caller's own row re-binds this sync and decides its
+/// edges, as on a fresh index, so the unbindable capture of its old edge is
+/// spent with it rather than kept beside it.
+#[test]
+fn a_capture_spent_with_its_rebound_source_leaves_no_row() {
+    let (_tmp, engine) = assert_sync_matches_reindex(
+        &[
+            ("a.rs", "use crate::b::target;\nfn a() { target(); }\n"),
+            ("b.rs", "pub fn target() {}\n"),
+        ],
+        &[Edit::Put("b.rs", "pub fn renamed() {}\n")],
+    );
+    assert_eq!(capture_rows(engine.runtime().expect("runtime")), Vec::new());
+}
+
+/// A store an earlier binary synced carries resolved capture rows. Its next
+/// sync deletes them and keeps their edges — even a sync that changes nothing,
+/// which re-binds no row, so the stale row is met only in the snapshot.
+#[test]
+fn the_next_sync_heals_stale_resolved_capture_rows() {
+    let initial = [
+        ("a.rs", "use crate::b::target;\nfn a() { target(); }\n"),
+        ("b.rs", "pub fn target() {}\n"),
+        ("c.rs", "fn c() {}\n"),
+    ];
+    let tmp = TempDir::new().expect("temp");
+    for (rel, body) in &initial {
+        write(tmp.path(), rel, body);
+    }
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.index();
+    let rt = engine.runtime().expect("runtime");
+    let cold = graph_fingerprint(rt);
+    // What the pre-CR-187 binary left after a sync of b.rs: the call's capture
+    // row, filed under b.rs, resolved.
+    let (source, target) = rt
+        .submit_read(|store| {
+            let nodes = store.all_nodes()?;
+            let sym = |name: &str| {
+                nodes
+                    .iter()
+                    .find(|n| n.name == name && n.kind == NodeKind::Function)
+                    .map(|n| n.symbol.as_str().to_string())
+                    .expect("fixture node")
+            };
+            Ok((sym("a"), sym("target")))
+        })
+        .expect("symbol read runs");
+    rt.submit_write(move |w| {
+        let file_id = w.file_id("b.rs")?;
+        w.insert_unresolved_ref(&logos_core::graph_store::NewUnresolvedRef {
+            file_id,
+            source_symbol: &source,
+            target: &target,
+            alias: None,
+            form: RefForm::Symbol,
+            kind: EdgeKind::Calls,
+            line: None,
+            payload: None,
+            receiver: None,
+        })
+    })
+    .expect("plant capture row");
+    let planted = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .find(|r| r.form == RefForm::Symbol)
+                .map(|r| r.id)
+                .expect("planted row"))
+        })
+        .expect("ledger read runs");
+    rt.submit_write(move |w| w.mark_ref_resolved(planted, true))
+        .expect("mark the stale row resolved");
+    assert_eq!(capture_rows(rt).len(), 1, "the store carries one stale capture");
+
+    let root = tmp.path().canonicalize().expect("canonicalize root");
+    let synced = engine.sync(&[root.join("c.rs")]);
+
+    assert_eq!(capture_rows(rt), Vec::new(), "the next sync deleted the stale capture");
+    assert!(has_edge(rt, "a", "target", EdgeKind::Calls), "its edge stays");
+    assert_eq!(graph_fingerprint(rt), cold, "the healed store equals a fresh index");
+    assert_eq!(
+        (synced.resolution.refs_total, synced.resolution.refs_resolved),
+        status_ref_counts(rt),
+        "the sync's figures count the ledger it committed"
     );
 }
 

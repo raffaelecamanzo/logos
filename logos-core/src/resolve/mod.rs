@@ -12,8 +12,10 @@
 //! 3. **Serial commit** (one writer-actor batch, [ADR-02]): bound rows become
 //!    edges (idempotently) and are flagged `resolved`; rows that no longer
 //!    bind flip back to retry state, and on an incremental run the edges a
-//!    re-bound source no longer produces are deleted ([FR-SY-12]). One
-//!    transaction, atomic rollback ([NFR-RA-07]).
+//!    re-bound source no longer produces are deleted ([FR-SY-12]). A
+//!    capture-before-delete row is deleted once it is spent — bound, or its
+//!    source's own rows re-bound — so the ledger stays a fresh index's
+//!    ([FR-SY-10]). One transaction, atomic rollback ([NFR-RA-07]).
 //!
 //! Re-evaluating everything — not just the unresolved tail — is what makes
 //! the pass self-healing: a deferred reference binds on the sync that indexes
@@ -41,6 +43,7 @@
 //! [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 //! [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
 //! [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+//! [FR-SY-10]: ../../../docs/specs/requirements/FR-SY-10.md
 //! [FR-SY-12]: ../../../docs/specs/requirements/FR-SY-12.md
 //! [UAT-RS-01]: ../../../docs/specs/requirements/UAT-RS-01.md
 
@@ -360,15 +363,19 @@ pub fn run(
     let final_bound =
         |r: &UnresolvedRefRow| -> bool { bound_now.get(&r.id).copied().unwrap_or(r.resolved) };
 
-    let refs_total = snap.refs.len() as u64;
-    let refs_resolved = snap.refs.iter().filter(|&r| final_bound(r)).count() as u64;
+    // The capture rows this run deletes, so the committed ledger is a fresh
+    // index's (CR-187, FR-SY-10) — and the stats count only what stays.
+    let spent = spent_captures(&snap.refs, &swept, final_bound);
+    let kept = || snap.refs.iter().filter(|r| !spent.contains(&r.id));
+
+    let refs_total = kept().count() as u64;
+    let refs_resolved = kept().filter(|&r| final_bound(r)).count() as u64;
 
     // Per-relation-class coverage for the cross-artifact references (CR-011,
     // FR-CG-11): the relation token rides on each ledger row's payload; group by
     // it on the row's final bound state. Computed before `outcomes` moves into
     // the write batch below.
-    let by_relation =
-        relation_coverage(snap.refs.iter().map(|r| (r.payload.as_deref(), final_bound(r))));
+    let by_relation = relation_coverage(kept().map(|r| (r.payload.as_deref(), final_bound(r))));
 
     // Serial commit: one transaction through the writer actor (ADR-02).
     let edges_created = runtime.submit_write(move |w| {
@@ -396,7 +403,7 @@ pub fn run(
                     )? {
                         created += 1;
                     }
-                    if !was_resolved {
+                    if !was_resolved && !spent.contains(ref_id) {
                         w.mark_ref_resolved(*ref_id, true)?;
                     }
                 }
@@ -421,18 +428,23 @@ pub fn run(
                             created += 1;
                         }
                     }
-                    if !was_resolved {
+                    if !was_resolved && !spent.contains(ref_id) {
                         w.mark_ref_resolved(*ref_id, true)?;
                     }
                 }
                 binder::Outcome::Unbound => {
                     // A previously bound row whose target vanished flips back
                     // to retry state — the ledger never lies (NFR-CC-04).
-                    if *was_resolved {
+                    if *was_resolved && !spent.contains(ref_id) {
                         w.mark_ref_resolved(*ref_id, false)?;
                     }
                 }
             }
+        }
+        // After the edges they restored are written, in the same transaction
+        // (a spent capture's edge is never lost with its row).
+        for ref_id in &spent {
+            w.delete_unresolved_ref(*ref_id)?;
         }
         Ok(created)
     })?;
@@ -568,6 +580,42 @@ fn retract_unproduced(
                     | EdgeKind::TypeUses
             ) && stale(edge)
         })
+        .collect()
+}
+
+/// The capture-before-delete rows ([ADR-10]) a run deletes — every one that is
+/// **spent** (CR-187, [FR-SY-10]):
+///
+/// - it binds (`final_bound`): the edge it carried across the delete is
+///   restored, or already present, and a fresh index never holds the row.
+///   That includes a resolved capture an earlier version kept in the ledger,
+///   so a store synced before this rule heals on its next run;
+/// - or its source is `swept`: every row of that source was re-bound this run
+///   and decides its edges alone, as on a fresh index ([`retract_unproduced`]
+///   has already turned the capture `Unbound` if it would restore an edge
+///   they no longer produce).
+///
+/// A capture that cannot bind and whose source was not re-bound stays,
+/// unresolved: nothing else in the ledger may carry its edge, and it binds
+/// again if its target returns — never invented ([NFR-RA-05]).
+///
+/// A capture is told by its form: only capture-before-delete writes
+/// [`RefForm::Symbol`].
+///
+/// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
+/// [FR-SY-10]: ../../../docs/specs/requirements/FR-SY-10.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn spent_captures(
+    refs: &[UnresolvedRefRow],
+    swept: &HashSet<&str>,
+    final_bound: impl Fn(&UnresolvedRefRow) -> bool,
+) -> HashSet<i64> {
+    refs.iter()
+        .filter(|r| {
+            r.form == RefForm::Symbol
+                && (final_bound(r) || swept.contains(r.source_symbol.as_str()))
+        })
+        .map(|r| r.id)
         .collect()
 }
 

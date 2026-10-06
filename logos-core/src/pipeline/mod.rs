@@ -27,7 +27,10 @@
 //! resolution pass rebinds them in the same sync (the captured symbol of an
 //! unchanged declaration is invariant, so the edge re-binds to the fresh node
 //! id), and a capture whose target was renamed away simply stays unresolved —
-//! never invented.
+//! never invented. A capture row lives only until it is spent: once it re-binds,
+//! or its source's own rows re-bind and decide its edges, the resolution pass
+//! deletes it, keeping the edge it restored, so the synced ledger equals a fresh
+//! index's ([FR-SY-10], CR-187).
 //!
 //! # Passes 2 & 3
 //!
@@ -55,6 +58,7 @@
 //! [FR-IX-02]: ../../../docs/specs/requirements/FR-IX-02.md
 //! [FR-IX-03]: ../../../docs/specs/requirements/FR-IX-03.md
 //! [FR-SY-03]: ../../../docs/specs/requirements/FR-SY-03.md
+//! [FR-SY-10]: ../../../docs/specs/requirements/FR-SY-10.md
 //! [NFR-RA-04]: ../../../docs/specs/requirements/NFR-RA-04.md
 //! [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
 //! [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
