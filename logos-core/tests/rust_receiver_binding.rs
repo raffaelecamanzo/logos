@@ -376,11 +376,13 @@ fn a_re_export_retargeted_on_sync_rebinds_the_importing_crates_call() {
     let retargeted = ("app-core/src/lib.rs", "pub mod a;\npub mod b;\npub use b::Store;\n");
     let edges = synced_equals_reindexed(&initial, &[retargeted]);
     assert_eq!(targets(&edges, "cli/src/main.rs:run@2"), ["app-core/src/b.rs:get@3"]);
-    // …and through a glob of the re-exporting crate.
+    // A glob of another crate's root reads none of its imports — the graph
+    // cannot tell its `pub use`s from its private ones — so the call stays
+    // unbound before and after, and sync still equals a cold index.
     let mut globbed = initial;
     globbed[4] = ("cli/src/main.rs", "use app_core::*;\npub fn run(x: &Store) -> u8 { x.get() }\n");
     let edges = synced_equals_reindexed(&globbed, &[retargeted]);
-    assert_eq!(targets(&edges, "cli/src/main.rs:run@2"), ["app-core/src/b.rs:get@3"]);
+    assert!(targets(&edges, "cli/src/main.rs:run@2").is_empty(), "{edges:#?}");
 }
 
 #[test]
@@ -395,4 +397,18 @@ fn a_parent_import_retargeted_on_sync_rebinds_its_glob_test_modules_call() {
     let edited = ("app/src/user.rs", "use crate::b::Store;\npub fn keep() {}\n#[cfg(test)]\nmod tests;\n");
     let edges = synced_equals_reindexed(&initial, &[edited]);
     assert_eq!(targets(&edges, "app/src/user/tests.rs:probe@2"), ["app/src/b.rs:get@3"]);
+}
+
+#[test]
+fn a_glob_of_a_non_ancestor_module_never_brings_in_its_private_import() {
+    // `helpers` imports a crate `String` privately; a glob of `helpers` does
+    // not bring that import in, so `String` in `caller.rs` is the prelude's
+    // and `x.len()` never reaches the crate type's `len`.
+    let edges = edges_by_source(&[
+        ("app/src/lib.rs", "pub mod text;\npub mod helpers;\npub mod caller;\n"),
+        ("app/src/text.rs", "pub struct String;\nimpl String {\n    pub fn len(&self) -> usize { 0 }\n}\n"),
+        ("app/src/helpers.rs", "use crate::text::String;\npub fn noop(_: &String) {}\n"),
+        ("app/src/caller.rs", "use crate::helpers::*;\npub fn run(x: &String) -> usize { x.len() }\n"),
+    ]);
+    assert!(targets(&edges, "app/src/caller.rs:run@2").is_empty(), "{edges:#?}");
 }

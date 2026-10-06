@@ -2558,10 +2558,11 @@ fn a_type_another_crate_re_exports_is_followed_to_its_declaration() {
     let ix = index(&r, std::slice::from_ref(&import));
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::ExternalType { candidates: Vec::new() }));
-    // A glob of the re-exporting module brings the name in too, and so does a
-    // `crate::` path written inside the re-exporting crate.
+    // A glob of the re-exporting crate's root reads none of its imports (only
+    // an ancestor's glob does: the graph cannot tell a `pub use` from a
+    // private one), while a `crate::` path written inside that crate does.
     let ix = index(&r, &[lib_glob(91, "other"), reexport("engine::Engine")]);
-    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 415, EdgeKind::Calls);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     let own_crate = UnresolvedRefRow {
         receiver: Some(ReceiverShape::Other),
         ..call(102, OTHER_LIB_RS, 21, "crate::Engine::start")

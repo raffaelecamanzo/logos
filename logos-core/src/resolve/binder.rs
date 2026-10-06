@@ -3186,9 +3186,11 @@ impl Ctx<'_> {
     /// `pub use engine::Engine;` in that crate's root; `crate::Runtime`) is
     /// followed through the re-export ([`reexported_type`](Ctx::reexported_type)):
     /// it names the declaration the re-export names, which the module walk
-    /// alone cannot see. So is a name a glob of the file brings in from its
-    /// module's own imports (`use super::*` in a test module whose parent
-    /// imports `Runtime`), exactly one across the globs.
+    /// alone cannot see. So is a name a glob of an **ancestor** module brings
+    /// in from that module's own imports (`use super::*` in a test module whose
+    /// parent imports `Runtime`), exactly one across the globs; a glob of any
+    /// other module brings in only its `pub` imports, which the graph cannot
+    /// tell apart, so none is read.
     fn resolve_receiver_type(&self, segs: &[String]) -> Res {
         let head = segs[0].as_str();
         let imported = (!matches!(head, "crate" | "self" | "super"))
@@ -3212,10 +3214,21 @@ impl Ctx<'_> {
                 None => Res::NotFound,
             };
         }
+        // Only an ancestor's glob brings its private imports in: a module's
+        // `use` is private to it and its descendants, and the graph does not
+        // record which imports are `pub` (a sibling's private `use` of a crate
+        // `String` must never shadow the prelude's).
         let globs = self.scope().map_or(&[][..], |s| s.globs.as_slice());
+        let own = self.source_module();
         let mut found: Vec<NodeId> = Vec::new();
         for glob in globs {
             let Some(key) = self.module_key_of(glob, depth) else { continue };
+            let ancestor = own
+                .as_ref()
+                .is_some_and(|(krate, mods)| *krate == key.0 && mods.starts_with(&key.1));
+            if !ancestor {
+                continue;
+            }
             match self.reexported_type(&key, name, MAX_ALIAS_DEPTH) {
                 Res::Found(id) => found.push(id),
                 Res::Ambiguous => return Res::Ambiguous,
@@ -3253,7 +3266,9 @@ impl Ctx<'_> {
     /// a type the target module declares, or, failing that, re-exports in
     /// turn, `depth` hops at most (an import cycle ends as not found). A glob
     /// re-export is not followed. A module's private `use` reads alike: a
-    /// path through one does not compile, so no call site spells one.
+    /// written path through one does not compile, so no call site spells one —
+    /// and only an ancestor's glob is read through it
+    /// ([`resolve_receiver_type`](Ctx::resolve_receiver_type)).
     fn reexported_type(&self, key: &ModKey, name: &str, depth: u8) -> Res {
         if depth == 0 {
             return Res::NotFound;
