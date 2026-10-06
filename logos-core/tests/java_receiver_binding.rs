@@ -920,8 +920,8 @@ fn the_residue_is_on_the_serialised_status_and_its_internals_are_not() {
 
 // ── sync ≡ reindex ─────────────────────────────────────────────────────────
 
-/// Every edge and every non-Symbol ledger row, by symbol — the store's whole
-/// binding state.
+/// Every edge and every ledger row, capture-before-delete rows included, by
+/// symbol — the store's whole binding state (CR-187).
 fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
     rt.submit_read(|store| {
         let sym: HashMap<NodeId, String> = store
@@ -944,7 +944,6 @@ fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
         let mut refs: Vec<String> = store
             .unresolved_refs()?
             .into_iter()
-            .filter(|r| r.form != RefForm::Symbol)
             .map(|r| {
                 format!(
                     "{} {} {:?} {:?} {}",
