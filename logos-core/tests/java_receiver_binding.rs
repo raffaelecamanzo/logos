@@ -825,10 +825,12 @@ fn a_same_package_or_wildcard_type_of_another_member_moves() {
     assert_eq!(nonzero(&ws), reasons(&[(R::TypeInAnotherMember, 2)]));
 }
 
-// ── the readout: Java only, and deterministic ─────────────────────────────
+// ── the readout: each row its own language's, and deterministic ──────────
 
+/// A package-shaped language's row and the Rust row (S-589) each state the
+/// residue of their own language's calls; a row of neither — Go — states none.
 #[test]
-fn only_a_package_shaped_language_row_carries_a_residue_and_it_is_deterministic() {
+fn each_residue_row_counts_its_own_languages_calls_and_it_is_deterministic() {
     let mut files: Vec<(&str, &str)> = vec![
         (BASE_FILE, BASE),
         (MID_FILE, MID),
@@ -839,6 +841,8 @@ fn only_a_package_shaped_language_row_carries_a_residue_and_it_is_deterministic(
         (CLIENT_FILE, CLIENT),
     ];
     files.push(("src/lib.rs", "pub fn f() { g(); }\npub fn g() { x.h(); }\n"));
+    files.push(("go.mod", "module example.com/m\n\ngo 1.22\n"));
+    files.push(("m.go", "package m\n\nfunc F() { G() }\n"));
     let first = tree(&files);
     let second = tree(&files);
     let a = index(first.path());
@@ -846,7 +850,13 @@ fn only_a_package_shaped_language_row_carries_a_residue_and_it_is_deterministic(
 
     let rows = a.status().resolution_by_language;
     let rust = rows.iter().find(|r| r.language == "rust").expect("a rust row");
-    assert!(rust.call_residue.is_none(), "Rust states no Java residue");
+    // `g()` binds; `x.h()` proves no receiver. No Java row reaches Rust's.
+    let rust_residue = rust.call_residue.as_ref().expect("the rust row states its own residue");
+    assert_eq!(rust_residue.unbound, 1);
+    assert_eq!(nonzero(rust_residue), reasons(&[(R::NoReceiverEvidence, 1)]));
+    assert_eq!(rust_residue.unclassified, 0);
+    let go = rows.iter().find(|r| r.language == "go").expect("a go row");
+    assert!(go.call_residue.is_none(), "Go states no residue");
     assert_eq!(java_residue(&a), java_residue(&b));
     assert_eq!(binding_facts(a.runtime().unwrap()), binding_facts(b.runtime().unwrap()));
     // The residue's denominator is the ledger's own unbound count.

@@ -48,6 +48,19 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   row; nodes and symbols are unchanged, and 153 functions reported dead are
   now reached. Run `logos scan` or `logos index` to bind them.
 
+- **`status` says why Rust calls stay unbound (CR-188, S-589).** The Rust row of
+  `resolution_by_language` now carries `call_residue`, as the Java row does, in
+  `status --json` and the MCP `status` tool: `unbound` (the row's
+  `calls.references − calls.bound`), the count per reason and `unclassified`.
+  `external-type` counts a proven receiver whose type the repository does not
+  declare, or a method the peeled `Arc`/`Rc`/`Box` provides itself;
+  `no-receiver-evidence` counts a method call whose receiver is not proven. A
+  Rust path or bare call that does not bind takes no receiver walk, so it is
+  counted in `unclassified` instead of being given a reason. Capture-before-delete
+  rows are left out, as in every other figure. On this repository the Rust row
+  reads 68,279 unbound: 47,278 `no-receiver-evidence`, 4,774 `external-type`,
+  146 `supertype-unreached` and 16,081 `unclassified`.
+
 ### Fixed
 
 - **A bare call never binds a method in a language where it cannot reach one

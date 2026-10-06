@@ -449,13 +449,21 @@ as a `0` that would read as a measurement:
 A global coverage number cannot express a per-language zero — that is why this
 row set exists. Read it before trusting a relational answer on a given language.
 
-**Java rows also say why a call stays unbound.** The Java row carries a
-`call_residue` object: `unbound` (the row's `calls.references − calls.bound`),
-the count per reason below, and `unclassified` — so `unbound` equals the sum of
-the reasons plus `unclassified`. Its `scope` is `"repository"` for a plain
-`status` and `"workspace"` for `workspace status`: one repository cannot tell
-another member's type from a library's, so only the workspace read has a
+**Java and Rust rows also say why a call stays unbound.** The Java row (and
+the PHP, C#, Kotlin and Scala rows) and the Rust row carry a `call_residue`
+object: `unbound` (the row's `calls.references − calls.bound`), the count per
+reason below, and `unclassified` — so `unbound` equals the sum of the reasons
+plus `unclassified`. Its `scope` is `"repository"` for a plain `status` and
+`"workspace"` for `workspace status`: one repository cannot tell another
+member's type from a library's, so only the workspace read has a
 `type-in-another-member` count.
+
+```jsonc
+"call_residue": { "unbound": 4,
+  "reasons": { "external-type": 1, "no-receiver-evidence": 1,
+               "overload-ambiguous": 0, "supertype-unreached": 1, "type-ambiguous": 0 },
+  "unclassified": 1, "scope": "repository" }
+```
 
 | `call_residue` reason | The call stays unbound because |
 |---|---|
@@ -466,8 +474,20 @@ another member's type from a library's, so only the workspace read has a
 | `type-ambiguous` | the type's name reaches two declarations (a `src/main` and a `src/test` class of one name) |
 | `supertype-unreached` | neither the type nor any supertype reached in the repository declares the name: the chain leaves the repository, stops at an interface, or cycles |
 
-`call_residue` is computed when `status` runs and never stored, so it costs a
-`status` call a fraction of a second on a Java project and nothing on the others.
+On the Rust row the reasons describe the calls Rust's receiver typing
+([FR-RS-42](../specs/requirements/FR-RS-42.md)) decides: a method call whose
+receiver's type is proven (`external-type` for `String`, `Vec`, an external
+crate's type or a method the peeled `Arc`/`Rc`/`Box` provides itself, such as
+`clone`), an unproven receiver (`no-receiver-evidence`), and `Self::m` calls.
+Every other unbound Rust call — a path call such as `Vec::new()` or
+`serde_json::to_string(…)`, or a bare call — takes no receiver walk, so it is
+counted in `unclassified` rather than given a reason. In `workspace status` the
+Rust row's `type-in-another-member` stays `0`: a type of another member is not
+resolved, and is counted `external-type`.
+
+`call_residue` is computed when `status` runs and never stored. It costs a
+`status` call a fraction of a second on a Java project, about 0.4 s on a Rust
+project of ~90,000 calls, and nothing on a project of other languages only.
 
 Every figure counted over the reference ledger — `refs_total`/`refs_resolved`,
 each language's `references` and `bound`, the per-relation coverage and the

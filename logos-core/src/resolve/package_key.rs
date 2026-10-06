@@ -447,6 +447,16 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.free_only_bare_call_exts.contains(&ext))
     }
 
+    /// Whether the file at `path`'s language proves a receiver's declared type
+    /// through peeled wrappers (S-588, [FR-RS-42]): it declares a
+    /// `[wrapper_methods]` table. Such a language records proven `T::m` rows,
+    /// and `status` reports why its calls stay unbound (S-589).
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    pub fn peels_receivers(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.wrapper_methods.contains_key(&ext))
+    }
+
     /// Whether `wrapper`, peeled from a receiver in the file at `path`, provides
     /// `method` itself (S-588, [FR-RS-42]): its language declares it so. A call
     /// through `Arc<T>` naming `clone` calls `Arc::clone`, never `T`'s.
@@ -1381,5 +1391,29 @@ mod call_target_tests {
         }
         assert!(declaring > 0, "Rust declares the wrapper methods");
         assert!(silent > 0, "a plugin that does not declare them peels nothing");
+    }
+
+    /// A file peels receivers exactly when its language declares a
+    /// `[wrapper_methods]` table (S-589): the shipped Rust plugin does, and no
+    /// other shipped language — package-shaped Java included — does.
+    #[test]
+    fn only_a_language_declaring_wrapper_methods_peels_receivers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let layout = PackageLayout::from_registry(&registry);
+        let peeling: Vec<&str> = registry
+            .iter()
+            .filter(|plugin| {
+                plugin.extensions().iter().any(|ext| {
+                    layout.peels_receivers(&format!("dir/file.{}", ext.trim_start_matches('.')))
+                })
+            })
+            .map(|plugin| plugin.name())
+            .collect();
+        assert_eq!(peeling, ["rust"]);
+        assert!(layout.peels_receivers("crates/a/src/lib.rs"));
+        assert!(!layout.peels_receivers("crates/a/src/lib.rsx"), "an extension one letter off");
+        assert!(!layout.peels_receivers("src/main/java/a/A.java"));
+        assert!(!layout.peels_receivers("Makefile"), "a path with no extension");
     }
 }
