@@ -1085,10 +1085,11 @@ fn sync_equals_a_full_reindex_when_a_call_target_gains_an_overload() {
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 }
 
-/// A capture-before-delete `Symbol` row ([ADR-10]) is counted in the ledger's
-/// unbound figure but is no call site — it waits for its exact target symbol to
-/// return. It is reported apart, as `unclassified`, so the reasons still
-/// partition the denominator.
+/// A capture-before-delete `Symbol` row ([ADR-10]) is no call site — it waits for
+/// its exact target symbol to return, and its source file's own row already
+/// records the call. It is no population of the residue (S-598, CR-195): the
+/// reasons partition a denominator that does not hold it, so a one-file sync
+/// reads the residue a cold index of the same tree reads.
 ///
 /// Since CR-187 a capture is deleted once it is spent, so a rename that its
 /// callers' own re-bound rows answer leaves none, and the residue equals a cold
@@ -1097,11 +1098,12 @@ fn sync_equals_a_full_reindex_when_a_call_target_gains_an_overload() {
 ///
 /// [ADR-10]: ../../docs/specs/architecture/decisions/ADR-10.md
 #[test]
-fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
+fn a_capture_before_delete_row_awaiting_its_target_is_not_in_the_residue() {
     let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     let engine = index(tmp.path());
     // `Mailer.send` becomes `Mailer.post`: the two edges into `send` are
-    // captured before the node goes, and spent with their callers' rows.
+    // captured as `Symbol` rows before the node goes, and spent with their
+    // callers' rows.
     let renamed = "package com.x.mail;\n\npublic class Mailer {\n    public void post() {}\n}\n";
     write(tmp.path(), MAILER_FILE, renamed);
     engine.sync(&[MAILER_FILE.into()]);
@@ -1136,8 +1138,25 @@ fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
     })
     .expect("plant the awaiting capture");
     engine.sync(&[]);
+
+    // The fixture now holds exactly that one awaiting capture: the two
+    // spent ones were deleted (CR-187).
+    let awaiting = engine
+        .runtime()
+        .unwrap()
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .iter()
+                .filter(|r| r.form == RefForm::Symbol && !r.resolved)
+                .count())
+        })
+        .unwrap();
+    assert_eq!(awaiting, 1, "the fixture really holds one unbound capture row");
+
     let residue = java_residue(&engine);
-    assert_eq!(residue.unclassified, 1, "{residue:?}");
+    // It is no population of the residue (S-598, CR-195).
+    assert_eq!(residue.unclassified, 0, "{residue:?}");
     assert_eq!(
         nonzero(&residue),
         reasons(&[(R::NoReceiverEvidence, 1), (R::SupertypeUnreached, 2)])
@@ -1150,6 +1169,49 @@ fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
         .find(|row| row.language == "java")
         .expect("a java row");
     assert_eq!(residue.unbound, java.calls.references - java.calls.bound);
+
+    // The sync-versus-reindex acceptance: the whole Java row, residue included.
+    let cold = TempDir::new().unwrap();
+    for (rel, text) in [(MAILER_FILE, renamed), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)] {
+        write(cold.path(), rel, text);
+    }
+    let cold_engine = index(cold.path());
+    let java_row = |e: &Engine| {
+        e.status()
+            .resolution_by_language
+            .into_iter()
+            .find(|row| row.language == "java")
+            .expect("a java row")
+    };
+    assert_eq!(java_row(&engine), java_row(&cold_engine));
+}
+
+/// A one-file sync of a file with inbound calls whose target survives: every
+/// inbound edge is captured and rebound by symbol, and the residue — with the
+/// whole Java row — reads what a cold index of the same tree reads.
+#[test]
+fn a_synced_file_with_inbound_calls_reports_the_residue_a_reindex_reports() {
+    let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
+    let engine = index(tmp.path());
+    let before = engine
+        .status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "java")
+        .expect("a java row");
+    // Touch `Mailer.java` so it is re-extracted; `send` keeps its symbol.
+    write(tmp.path(), MAILER_FILE, &format!("// touched\n{MAILER}"));
+    let result = engine.sync(&[MAILER_FILE.into()]);
+    assert_eq!(result.files_modified, 1);
+
+    let after = engine
+        .status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "java")
+        .expect("a java row");
+    assert_eq!(before, after, "a sync that changes no reference moves no figure");
+    assert!(after.call_residue.is_some());
 }
 
 /// A sync that moves the hierarchy re-selects every package-shaped call
