@@ -270,12 +270,12 @@ pub fn run(
     // shingle index, computed beside — never inside — exact-duplicate detection
     // (ADR-21), so the `is_duplicate` set above is unaffected. CR-013: the
     // similarity threshold and token floor come from the effective set above.
-    // Near-clone clustering is the dominant annotation cost on a real repo
-    // (S-229): its O(Σ|posting|²) counting fans out across the core-owned shared
-    // worker pool. Running it inside `worker_pool().install(…)` pins the rayon
-    // parallelism to that one pool — exactly as extraction and file-load do
-    // (AQ-04) — rather than spawning a competing global pool. The verdicts stay
-    // byte-identical across worker counts (NFR-RA-06, see [`clone`]).
+    // Its probe-and-verify step (prefix-filtered since CR-198) fans out across
+    // the core-owned shared worker pool. Running it inside
+    // `worker_pool().install(…)` pins the rayon parallelism to that one pool —
+    // exactly as extraction and file-load do (AQ-04) — rather than spawning a
+    // competing global pool. The verdicts stay byte-identical across worker
+    // counts (NFR-RA-06, see [`clone`]).
     let clone_clusters = runtime.worker_pool().install(|| {
         clone::cluster(
             &snap.shingles,
