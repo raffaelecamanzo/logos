@@ -1184,15 +1184,16 @@ mod tests {
     }
 
     /// The hub-shingle table: `n` functions with distinct 40-shingle bodies, all
-    /// carrying one hub shingle, and every tenth function followed by a copy of
-    /// its body (a genuine clone pair), so the run has real work to verify.
-    fn hub_table(n: i64) -> Vec<(NodeId, u64)> {
-        const HUB: u64 = 7_777_777_777;
+    /// carrying the one `hub` shingle, and every tenth function followed by a
+    /// copy of its body (a genuine clone pair), so the run has real work to
+    /// verify. Body hashes sit in `1_000_000..`, so a `hub` of 0 ranks below every
+    /// body by hash value and only its document frequency can sort it last.
+    fn hub_table(n: i64, hub: u64) -> Vec<(NodeId, u64)> {
         let mut rows: Vec<(i64, Vec<u64>)> = Vec::new();
         for id in 1..=n {
             let body_of = if id % 10 == 0 { id - 1 } else { id };
             let mut hashes = set(1_000_000 + body_of as u64 * 100, 40);
-            hashes.push(HUB);
+            hashes.push(hub);
             rows.push((id, hashes));
         }
         let refs: Vec<(i64, &[u64])> = rows.iter().map(|(id, hs)| (*id, hs.as_slice())).collect();
@@ -1204,31 +1205,42 @@ mod tests {
     /// linear budget and grows by well under the 4× a doubling costs a quadratic
     /// counter, with the verdicts the all-pairs oracle gives. The oracle's own
     /// work — every pair of the hub posting — breaks both bounds, so the bounds
-    /// discriminate: the pre-change algorithm fails this test.
+    /// discriminate: the pre-change algorithm fails this test. The hub is run at
+    /// the lowest and the highest hash value, so it is the document-frequency
+    /// half of the global order — not where the hub's hash happens to sort —
+    /// that keeps it out of the prefixes.
     ///
     /// [FR-AN-06]: ../../../docs/specs/requirements/FR-AN-06.md
     #[test]
     fn a_hub_shingle_grows_candidate_work_sub_quadratically() {
+        for hub in [0, u64::MAX] {
+            assert_hub_work_is_sub_quadratic(hub);
+        }
+    }
+
+    /// The body of [`a_hub_shingle_grows_candidate_work_sub_quadratically`] for
+    /// one `hub` hash.
+    fn assert_hub_work_is_sub_quadratic(hub: u64) {
         let budget = |n: i64| 4 * n as u64;
         let mut work = Vec::new();
         let mut oracle_work = Vec::new();
         for n in [1_000, 2_000] {
-            let idx = hub_table(n);
+            let idx = hub_table(n, hub);
             let (got, done) = cluster_counted(&idx, DEFAULT_CLONE_SIMILARITY, MIN_CLONE_SHINGLES);
             let (expected, visits) = all_pairs_oracle(&idx, DEFAULT_CLONE_SIMILARITY, MIN_CLONE_SHINGLES);
-            assert_eq!(got, expected, "n = {n}: verdicts equal all-pairs");
-            assert_eq!(got.group_count(), n as u64 / 10, "n = {n}: one group per planted pair");
+            assert_eq!(got, expected, "hub {hub}, n = {n}: verdicts equal all-pairs");
+            assert_eq!(got.group_count(), n as u64 / 10, "hub {hub}, n = {n}: one group per pair");
             let total = done.probes + done.verified;
-            assert!(total > 0, "n = {n}: the planted pairs are real work");
-            assert!(total <= budget(n), "n = {n}: work {total} ({done:?}) exceeds 4n");
-            assert!(visits > budget(n), "n = {n}: the all-pairs work {visits} breaks the budget");
+            assert!(total > 0, "hub {hub}, n = {n}: the planted pairs are real work");
+            assert!(total <= budget(n), "hub {hub}, n = {n}: work {total} ({done:?}) exceeds 4n");
+            assert!(visits > budget(n), "hub {hub}, n = {n}: all-pairs work {visits} breaks the budget");
             work.push(total);
             oracle_work.push(visits);
         }
         // Doubling n: linear work doubles, quadratic work quadruples.
         assert!(
             work[1] * 10 <= work[0] * 25,
-            "work grew {} → {} on doubling n: not sub-quadratic",
+            "hub {hub}: work grew {} → {} on doubling n: not sub-quadratic",
             work[0],
             work[1]
         );
