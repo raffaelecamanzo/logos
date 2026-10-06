@@ -2778,12 +2778,25 @@ fn enclosing_index(
     refs: &[UnresolvedRefRow],
     enclosing: bool,
 ) -> Index {
+    enclosing_index_of_kinds(types, &[], nested, refs, enclosing)
+}
+
+/// [`enclosing_index`] where the types at the indexes of `kinds` are of that
+/// kind rather than a class.
+fn enclosing_index_of_kinds(
+    types: &[(&str, &str, &str)],
+    kinds: &[(i64, NodeKind)],
+    nested: &[(i64, &str, i64)],
+    refs: &[UnresolvedRefRow],
+    enclosing: bool,
+) -> Index {
     let (mut nodes, mut edges, mut declared) = (Vec::new(), Vec::new(), Vec::new());
     for (i, (ext, namespace, name)) in types.iter().enumerate() {
         let i = i as i64;
         let file = format!("src/t{i}.{ext}");
+        let kind = kinds.iter().find(|(at, _)| *at == i).map_or(NodeKind::Class, |(_, k)| *k);
         nodes.push(node(1000 + 10 * i, &format!("t{i}"), NodeKind::Module, &file));
-        nodes.push(node(ty(i), name, NodeKind::Class, &file));
+        nodes.push(node(ty(i), name, kind, &file));
         edges.push(contains(1000 + 10 * i, ty(i)));
         declared.push((file, namespace.to_string()));
     }
@@ -2909,6 +2922,55 @@ fn an_enclosing_type_without_the_member_leaves_the_wildcards_to_decide() {
     let types = [("cs", "A", "Result"), ("cs", "A.B", "Result"), ("cs", "A.B.C", "Impl")];
     let nested = [(900, "Inner", 0)];
     assert_eq!(bind_enclosing(&types, &nested, &[], &extends(2, 2, "Result::Inner")), Outcome::Unbound);
+}
+
+/// A level holds exactly one *admitted* type (FR-RS-45): an enum a supertype
+/// cannot name is skipped for the class of an outer level, and a bare call never
+/// binds a class of an enclosing namespace.
+#[test]
+fn only_a_type_the_lookup_admits_decides_an_enclosing_level() {
+    let types = [("cs", "A", "Base"), ("cs", "A.B", "Base"), ("cs", "A.B.C", "D")];
+    let kinds = [(1, NodeKind::Enum)];
+    let r = extends(1, 2, "Base");
+    let ix = enclosing_index_of_kinds(&types, &kinds, &[], std::slice::from_ref(&r), true);
+    for policy in POLICIES {
+        bound_to(bind(&r, &ix, policy), ty(2), ty(0), EdgeKind::Extends);
+    }
+    let call = make_ref(2, ty_file(2), ty(2), "Base", None, RefForm::Path, EdgeKind::Calls);
+    let ix = enclosing_index(&types[..1].iter().chain(&types[2..]).copied().collect::<Vec<_>>(), &[], std::slice::from_ref(&call), true);
+    for policy in POLICIES {
+        assert_eq!(bind(&call, &ix, policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// The qualified-head rung keeps the name rung's order: the source's own
+/// namespace first, then each enclosing one, then the wildcards.
+#[test]
+fn a_qualified_head_reads_its_own_namespace_then_the_enclosing_ones_then_the_wildcards() {
+    // `Outer.Inner` from `A.B.C`: `A.B.C.Outer` shadows `A.B.Outer`, which
+    // shadows `A.Outer` — each with an `Inner` of its own.
+    let types = [("cs", "A", "Outer"), ("cs", "A.B", "Outer"), ("cs", "A.B.C", "Outer"), ("cs", "A.B.C", "D")];
+    let nested = [(900, "Inner", 0), (901, "Inner", 1), (902, "Inner", 2)];
+    let r = extends(1, 3, "Outer::Inner");
+    bound_to(bind_enclosing(&types, &nested, &[], &r), ty(3), 902, EdgeKind::Extends);
+    let types = [("cs", "A", "Outer"), ("cs", "A.B", "Outer"), ("cs", "A.B.C", "D")];
+    bound_to(bind_enclosing(&types, &nested[..2], &[], &extends(2, 2, "Outer::Inner")), ty(2), 901, EdgeKind::Extends);
+    // An enclosing `A.Outer` is read before `using X;`'s `X.Outer`.
+    let types = [("cs", "A", "Outer"), ("cs", "X", "Outer"), ("cs", "A.B", "D")];
+    let nested = [(900, "Inner", 0), (901, "Inner", 1)];
+    let glob = make_ref(10, ty_file(2), ty(2), "X", None, RefForm::Glob, EdgeKind::Imports);
+    let r = extends(2, 2, "Outer::Inner");
+    bound_to(bind_enclosing(&types, &nested, &[glob], &r), ty(2), 900, EdgeKind::Extends);
+}
+
+/// A type spelled like an enclosing namespace is not the owner of a path read
+/// under it: `A.B` the class does not make `Thing.Inner` of `A.B.C` anything but
+/// `A.Thing`'s.
+#[test]
+fn a_type_named_like_an_enclosing_namespace_does_not_own_the_path() {
+    let types = [("cs", "A", "B"), ("cs", "A", "Thing"), ("cs", "A.B.C", "D")];
+    let nested = [(900, "Inner", 1)];
+    bound_to(bind_enclosing(&types, &nested, &[], &extends(1, 2, "Thing::Inner")), ty(2), 900, EdgeKind::Extends);
 }
 
 /// A call through a head no rung reaches names, as the candidates for another
