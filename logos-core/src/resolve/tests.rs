@@ -2577,6 +2577,63 @@ fn a_type_another_crate_re_exports_is_followed_to_its_declaration() {
     }
 }
 
+/// Crate `other` declares `Deep` (431, `run` 432) in `other/src/deep.rs`
+/// (module 30). `mid.rs` (module 31) and `mid/sub.rs` (module 33) sit in that
+/// crate, and a crate `facade` (module 35) beside it; `reexports` gives each
+/// file's `use` of `Deep` as `(file id, source module, path)`, and `imports`
+/// the caller's own.
+fn reexport_chain_index(r: &UnresolvedRefRow, reexports: &[(i64, i64, &str)], imports: &[UnresolvedRefRow]) -> Index {
+    let (mut nodes, mut edges, mut self_types, mut refs) = receiver_fixture();
+    nodes.extend([
+        node(30, "deep", NodeKind::Module, "other/src/deep.rs"),
+        node(31, "mid", NodeKind::Module, "other/src/mid.rs"),
+        node(33, "sub", NodeKind::Module, "other/src/mid/sub.rs"),
+        node(35, "facade", NodeKind::Module, "facade/src/lib.rs"),
+        node(431, "Deep", NodeKind::Struct, "other/src/deep.rs"),
+        node(432, "run", NodeKind::Method, "other/src/deep.rs"),
+    ]);
+    edges.extend([contains(30, 431), contains(30, 432)]);
+    self_types.push((NodeId(432), "Deep".to_string()));
+    for (i, (file, module, path)) in reexports.iter().enumerate() {
+        refs.push(make_ref(60 + i as i64, *file, *module, path, Some("Deep"), RefForm::Path, EdgeKind::Imports));
+    }
+    refs.extend(imports.iter().cloned());
+    refs.push(r.clone());
+    Index::build(&nodes, &edges, &refs).with_self_types(self_types)
+}
+
+#[test]
+fn a_re_export_chain_of_two_hops_is_followed_and_a_cycle_ends() {
+    // `other`'s root re-exports `mid::Deep`, which `mid` re-exports from
+    // `deep`: two hops to the declaration.
+    let r = proven(100, "Deep::run", None);
+    let import = [lib_use(90, "other::Deep", "Deep")];
+    let ix = reexport_chain_index(&r, &[(OTHER_LIB_RS, 20, "mid::Deep"), (40, 31, "crate::deep::Deep")], &import);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 432, EdgeKind::Calls);
+    // Two modules re-exporting each other end as not found: external.
+    let ix = reexport_chain_index(&r, &[(OTHER_LIB_RS, 20, "mid::Deep"), (40, 31, "crate::Deep")], &import);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::ExternalType { candidates: Vec::new() }));
+}
+
+#[test]
+fn a_facade_crate_re_exporting_another_crates_type_is_followed() {
+    // `facade`'s root: `pub use other::deep::Deep;` — an anchor on another
+    // crate's name.
+    let r = proven(100, "Deep::run", None);
+    let ix = reexport_chain_index(&r, &[(41, 35, "other::deep::Deep")], &[lib_use(90, "facade::Deep", "Deep")]);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 432, EdgeKind::Calls);
+}
+
+#[test]
+fn a_super_re_export_is_followed() {
+    // `other::mid::sub` re-exports `super::super::deep::Deep`; the caller
+    // writes the path through `sub`.
+    let r = proven(100, "other::mid::sub::Deep::run", None);
+    let ix = reexport_chain_index(&r, &[(42, 33, "super::super::deep::Deep")], &[]);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 432, EdgeKind::Calls);
+}
+
 #[test]
 fn an_inherent_method_outranks_a_trait_impls_and_two_of_one_rank_bind_nothing() {
     let store = [lib_use(90, "crate::util::Store", "Store")];
