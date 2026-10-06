@@ -2035,21 +2035,21 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
     // Why a package-shaped language's — or Rust's (S-589) — calls stay unbound,
     // by reason (FR-RS-10, S-468): a re-walk of the unbound rows under the
     // policy the resolution pass binds with. Only a graph holding a
-    // package-shaped or Rust file pays for it.
+    // package-shaped or Rust file pays for it, and only once per graph revision
+    // and `[resolution]` section: the engine memoizes the walk (CR-201), so a
+    // web navigation's repeated `status` is a point read.
     // An additive readout degrades on the ADR-14 channel, never the status
     // around it: an unreadable config or a failed read states no residue — not
-    // one decided under the wrong policy — and says why. A registry-less engine
-    // states none silently; it warned when it started without its registry,
-    // and it knows no package-shaped language to state one for.
-    if let Some(registry) = engine.registry() {
+    // one decided under the wrong policy — says why, and caches nothing. A
+    // registry-less engine states none silently; it warned when it started
+    // without its registry, and it knows no package-shaped language to state
+    // one for.
+    if engine.registry().is_some() {
         let residues = crate::config::load_config_from_root(engine.root())
             .map_err(|err| format!("the configuration could not be read ({err})"))
             .and_then(|config| {
-                let policy = config.resolution.policy;
-                runtime
-                    .submit_read(move |store| {
-                        crate::resolve::call_residue_by_language(store, registry, policy)
-                    })
+                engine
+                    .call_residue(&config.resolution)
                     .map_err(|err| format!("the graph could not be read ({err})"))
             });
         match residues {

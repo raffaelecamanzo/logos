@@ -43,19 +43,29 @@ async fn the_status_tool_carries_the_rust_rows_call_residue() {
         }
     });
     let client = ().serve(client_io).await.expect("client initialize");
-    let result = client
-        .call_tool(CallToolRequestParams::new("status"))
-        .await
-        .expect("status answers");
-    assert_ne!(result.is_error, Some(true), "status reported a tool error");
-    let text = result
-        .content
-        .first()
-        .and_then(|c| c.as_text())
-        .expect("status returns JSON text");
-    let status: Value = serde_json::from_str(&text.text).expect("status content is JSON");
+    let mut answers = Vec::new();
+    // Twice over one engine: the second call is answered from the residue
+    // memo (S-605, CR-201) and must state what the walk stated.
+    for _ in 0..2 {
+        let result = client
+            .call_tool(CallToolRequestParams::new("status"))
+            .await
+            .expect("status answers");
+        assert_ne!(result.is_error, Some(true), "status reported a tool error");
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .expect("status returns JSON text");
+        answers.push(serde_json::from_str::<Value>(&text.text).expect("status content is JSON"));
+    }
     drop(client);
     server.abort();
+    assert_eq!(
+        answers[0]["resolution_by_language"], answers[1]["resolution_by_language"],
+        "a memo hit states the walk's figures"
+    );
+    let status = &answers[1];
 
     let rust = status["resolution_by_language"]
         .as_array()

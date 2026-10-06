@@ -13,6 +13,27 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Changed
+
+- **`status` computes the call residue once per graph revision (CR-201,
+  S-605).** A long-lived engine keeps each language's `call_residue` until the
+  graph revision, the schema version or the `[resolution]` section changes, so
+  the web dashboard's header and page models stop re-walking every unbound call
+  on each navigation. On this repository (release build) a repeated
+  `GET /api/v1/status` falls from about 0.41 s to about 0.09 s; the first call
+  still walks. The figures are unchanged on the CLI, MCP and HTTP alike, and a
+  config or graph read that fails still states no residue and caches nothing.
+
+### Fixed
+
+- **A config-narrowing purge advances the graph revision (CR-201, S-605).**
+  The reconcile an evaluation tool runs first (`logos scan`, `gate` and the
+  others), and the first navigation after an `exclude` edit, removed the newly
+  excluded files without advancing the graph revision when nothing else
+  changed. A reader keyed on the revision — the native wiki tier, and now the
+  call residue — kept serving the purged graph until the next graph-changing
+  `sync`. Both purges now advance it once they have committed.
+
 ## [1.12.0] — 2026-10-06
 
 ### Added
