@@ -177,9 +177,9 @@ by each relation's payload token), read live from the graph.
 >   itself, and never to a same-named function beside it
 >   ([FR-RS-06](../specs/requirements/FR-RS-06.md)). Such calls stay in
 >   `unresolved_refs`; `logos status` counts them under `no-receiver-evidence`
->   in the `call_residue` of the languages that carry one (Java's and Rust's
->   rows, see [commands](commands.md)), and every other language's row counts
->   them among its unbound calls without a reason. A language whose
+>   in the `call_residue` of the languages that carry one (the Java, PHP, C#,
+>   Kotlin, Scala and Rust rows, see [commands](commands.md)), and every other
+>   language's row counts them among its unbound calls without a reason. A language whose
 >   plugin does not record receiver shapes yet leaves all its method calls
 >   unbound rather than guess. In TypeScript, JavaScript, Python, PHP and Ruby
 >   the `self` forms are `this.foo()`; `self.foo()` and `cls.foo()`;
