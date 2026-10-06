@@ -13,6 +13,25 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **A Rust call records its receiver's type where the file proves it (CR-188,
+  S-587).** A call `x.f()` is now recorded as `T::f` when exactly one binding
+  of `x` in scope at the call proves `T`: a typed parameter, a typed `let`, a
+  constructor `let x = T::new(…)` when every `new` the caller's module declares
+  on `T` returns `Self` or `T` (any associated function, by the same rule), a
+  one-segment struct literal `let x = T { … }`, or `self.field` declared on the
+  caller's own struct in the caller's module. `&`, `&mut`, `Box`, `Arc` and `Rc` are peeled to `T`,
+  and the row records which wrappers it peeled; `Option`, `Vec`, `Mutex` and
+  every other wrapper are the receiver's type themselves. A shadowed, re-bound
+  or two-typed name, a generic parameter, `impl Trait` and a chained call keep
+  the `other` row they had. Nothing binds through these rows yet, so every
+  node, symbol and edge is unchanged; on this repository 5,855 of the 52,526
+  Rust receiver-call rows are retyped. Store migration 32 adds the ledger's
+  `peeled` column to its identity and clears every content hash, so the first
+  `logos scan` (or `logos index`) after upgrading re-reads every file. A bare
+  `logos sync` reads no file.
+
 ## [1.11.1] — 2026-10-06
 
 ### Fixed

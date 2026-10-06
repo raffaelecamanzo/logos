@@ -597,8 +597,10 @@ pub struct UnresolvedRefRow {
     pub payload: Option<String>,
     /// The receiver shape of a Method-form call (S-514, [FR-EX-13]; the
     /// `receiver` column, migration 29) — what the binder dispatches the row
-    /// on ([FR-RS-12]). `None` for every other row, and for a call its plugin
-    /// marks no receiver of, which binds as `other`.
+    /// on ([FR-RS-12]) — and `other` on a Path-form row retyped from a proven
+    /// Rust receiver (S-587), which binds nothing yet. `None` for every other
+    /// row, and for a call its plugin marks no receiver of, which binds as
+    /// `other`.
     ///
     /// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
     /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
@@ -1543,8 +1545,9 @@ pub struct AvroSchemaRow {
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind, payload,
-/// receiver, alias)` — the ledger's UNIQUE rule absorbs a function calling the
-/// same path twice, and keeps one row per local name an import is aliased by.
+/// receiver, alias, peeled)` — the ledger's UNIQUE rule absorbs a function
+/// calling the same path twice, and keeps one row per local name an import is
+/// aliased by and per wrapper a proven receiver was peeled of.
 #[derive(Debug, Clone, Copy)]
 pub struct NewUnresolvedRef<'a> {
     /// FK into `files(id)` — the file whose extraction produced the ref.
@@ -1565,9 +1568,13 @@ pub struct NewUnresolvedRef<'a> {
     /// wire token) for an `ArtifactRef`/`ArtifactBinding` ref (CR-011); `None` for
     /// every code/doc/access ref.
     pub payload: Option<&'a str>,
-    /// The receiver shape of a Method-form call (S-514); `None` for every other
+    /// The receiver shape of a Method-form call (S-514), and of a Path-form
+    /// call retyped from its proven receiver (S-587); `None` for every other
     /// row.
     pub receiver: Option<ReceiverShape>,
+    /// The wrappers a proven receiver's declared type was peeled of (S-587,
+    /// the `peeled` column, migration 32); `None` for every other row.
+    pub peeled: Option<&'a str>,
 }
 
 /// The point-query read interface over the code graph.
@@ -4516,11 +4523,13 @@ impl BatchWriter<'_> {
     // ── Reference-ledger primitives (S-011, [ADR-10]) ────────────────────────
 
     /// Insert a reference-ledger row, idempotently over the relation-,
-    /// receiver- and alias-aware `(source_symbol, target, form, kind,
-    /// COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''))`
-    /// uniqueness rule (migration 18, [CR-080]; widened by the receiver shape in
-    /// migration 29, S-514, and by the import alias in migration 31, S-597 — two
-    /// local names of one target are two rows, [FR-DB-07]).
+    /// receiver-, alias- and wrapper-aware `(source_symbol, target, form, kind,
+    /// COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''),
+    /// COALESCE(peeled, ''))` uniqueness rule (migration 18, [CR-080]; widened
+    /// by the receiver shape in migration 29, S-514, by the import alias in
+    /// migration 31, S-597 — two local names of one target are two rows,
+    /// [FR-DB-07] — and by a proven receiver's peeled wrappers in migration 32,
+    /// S-587).
     ///
     /// A duplicate (the same function calling the same path twice, or a
     /// captured edge re-captured on a later sync) is a no-op — the first row's
@@ -4540,10 +4549,10 @@ impl BatchWriter<'_> {
         self.conn
             .execute(
                 "INSERT INTO unresolved_refs \
-                 (file_id, source_symbol, target, alias, form, kind, line, payload, receiver) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 (file_id, source_symbol, target, alias, form, kind, line, payload, receiver, peeled) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
                  ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
-                             COALESCE(receiver, 0), COALESCE(alias, '')) DO NOTHING",
+                             COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, '')) DO NOTHING",
                 rusqlite::params![
                     r.file_id,
                     r.source_symbol,
@@ -4554,6 +4563,7 @@ impl BatchWriter<'_> {
                     r.line,
                     r.payload,
                     r.receiver.map(ReceiverShape::as_i32),
+                    r.peeled,
                 ],
             )
             .context("inserting unresolved ref")?;

@@ -64,6 +64,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (29, MIGRATION_29),
     (30, MIGRATION_30),
     (31, MIGRATION_31),
+    (32, MIGRATION_32),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2635,13 +2636,76 @@ CREATE UNIQUE INDEX idx_unresolved_refs_identity
 UPDATE files SET content_hash = NULL;
 ";
 
+/// Migration 32 — the wrappers a proven receiver was **peeled** of, recorded on
+/// its ledger row, and joining the ledger identity (S-587, [CR-188],
+/// [FR-RS-42]).
+///
+/// A Rust call `x.m()` whose receiver's declared type the file proves is
+/// retyped to the Path-form `T::m` of shape `other` (migration 29's `receiver`
+/// column, `3`). Reaching `T` may peel `&`, `&mut`, `Box`, `Arc` or `Rc` off the
+/// declared type, and a method the wrapper itself provides (`Arc::clone`) is not
+/// `T`'s — so which wrappers were peeled is part of the proof the binder reads.
+/// No existing column can hold it: `payload` is a relation class that rides
+/// onto the bound edge and keys per-relation coverage, and `alias` is the local
+/// name an import binds.
+///
+/// **`unresolved_refs.peeled`** — the peeled wrappers, outermost first and
+/// space-joined (`&`, `&mut`, `Box`, `Arc`, `Rc`; `& Arc` for `&Arc<T>`).
+/// `NULL` on every other row, and on a proven receiver declared `T` itself. One
+/// nullable column added **in place** (the migration-25/28/29 shape): every
+/// existing row and id is untouched. Free text with a closed vocabulary the
+/// extractor writes, rather than a `CHECK`: a nested peel is a sequence.
+///
+/// It joins the ledger identity: a caller's `a.m()` with `a: Arc<T>` and `b.m()`
+/// with `b: T` both record `T::m` and bind differently, so the identity index of
+/// migration 31 is recreated with `COALESCE(peeled, '')` appended — the
+/// `COALESCE` for the reason migration 18 gives for `payload`. Every stored row
+/// has a `NULL` value, so each is unique under the wider key exactly as it was
+/// under the narrower one. Only an index is dropped and recreated: no table is
+/// rebuilt, so `nodes`, `edges`, the FTS index and the `annotations` view are
+/// byte-for-byte unaffected.
+///
+/// **Re-extraction is triggered here** as migrations 25, 28–31 do it: every
+/// `files.content_hash` is cleared, so the next scan, index or full-walk sync
+/// re-extracts each file like a modified one and records the retyped rows.
+/// Until then a store keeps the `other` Method rows it had.
+///
+/// Its own migration, not an edit of 29 or 31: those are recorded once on every
+/// store that applied them, so changing their text would reach no upgrader.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_32_adds_the_peeled_wrappers_to_the_ledger_identity_and_triggers_reextraction`
+/// in [`super::migrate`].
+///
+/// [CR-188]: ../../../../docs/requests/CR-188-rust-receiver-typing.md
+/// [FR-RS-42]: ../../../../docs/specs/requirements/FR-RS-42.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_32: &str = "\
+-- 1. The wrappers a proven receiver was peeled of (FR-RS-42): outermost first,
+-- space-joined. NULL on every other row, and on rows extracted before this
+-- migration.
+ALTER TABLE unresolved_refs ADD COLUMN peeled TEXT;
+
+-- 2. The peeled wrappers join the ledger identity (migration 31's index,
+-- widened): a call through `Arc<T>` and one through `T` are two rows. NULL
+-- normalised to '' so a row that peeled nothing dedups exactly as before.
+DROP INDEX idx_unresolved_refs_identity;
+CREATE UNIQUE INDEX idx_unresolved_refs_identity
+    ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, ''));
+
+-- 3. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, recording the retyped rows.
+UPDATE files SET content_hash = NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
         MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_29, MIGRATION_3,
-        MIGRATION_31, MIGRATION_4, MIGRATION_8,
+        MIGRATION_31, MIGRATION_32, MIGRATION_4, MIGRATION_8,
     };
     use crate::model::{EdgeKind, NodeKind, ReceiverShape, RefForm};
 
@@ -3893,6 +3957,41 @@ mod tests {
         assert!(
             !MIGRATION_29.contains("COALESCE(alias"),
             "the alias joins the identity in migration 31, never by editing migration 29"
+        );
+    }
+
+    /// Migration 32 (S-587) adds the `peeled` column in place, rebuilds the
+    /// ledger identity index with it and triggers re-extraction — nothing
+    /// else, and it is its own migration, not an edit of 31.
+    #[test]
+    fn migration_32_adds_the_peeled_wrappers_and_widens_the_ledger_identity_only() {
+        let statements: Vec<String> = MIGRATION_32
+            .split(';')
+            .map(|stmt| {
+                stmt.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|stmt| stmt.trim().to_string())
+            .filter(|stmt| !stmt.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "ALTER TABLE unresolved_refs ADD COLUMN peeled TEXT",
+                "DROP INDEX idx_unresolved_refs_identity",
+                "CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, \
+                 target, form, kind, COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, ''), \
+                 COALESCE(peeled, ''))",
+                "UPDATE files SET content_hash = NULL",
+            ],
+            "exactly the column, the widened identity and the re-extraction trigger"
+        );
+        assert!(
+            !MIGRATION_31.contains("peeled"),
+            "the peeled wrappers join the identity in migration 32, never by editing migration 31"
         );
     }
 }

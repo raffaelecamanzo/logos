@@ -360,17 +360,19 @@ fn a_rust_self_call_binds_through_the_impl_and_every_other_receiver_is_unbound()
     assert_eq!(
         call_rows(rt, RS_FILE),
         sorted(vec![
+            // Every receiver here has a proven type, so each `other` call is
+            // retyped to its type's `T::m` (S-587) — and still binds nothing.
             // `other.helper()` inside `A::helper`: another object, no self-loop.
-            row(&a(5, "helper"), "helper", RefForm::Method, OTHER, false),
+            row(&a(5, "helper"), "B::helper", RefForm::Path, OTHER, false),
             // `self.helper(..)` is S-493's `Self::helper`; `other.helper()` beside
             // it is `other` — neither the caller's own `helper` nor `B`'s.
+            row(&a(8, "run"), "B::helper", RefForm::Path, OTHER, false),
             row(&a(8, "run"), "Self::helper", RefForm::Path, None, true),
-            row(&a(8, "run"), "helper", RefForm::Method, OTHER, false),
             // Genuine recursion binds; a call on `self.peer` does not.
+            row(&a(12, "again"), "B::again", RefForm::Path, OTHER, false),
             row(&a(12, "again"), "Self::again", RefForm::Path, None, true),
-            row(&a(12, "again"), "again", RefForm::Method, OTHER, false),
             // `x.helper()` in a free function: not the free `helper` beside it.
-            row(&a(24, "free"), "helper", RefForm::Method, OTHER, false),
+            row(&a(24, "free"), "A::helper", RefForm::Path, OTHER, false),
             row(&a(24, "free"), "helper", RefForm::Path, None, true),
         ])
     );
@@ -395,7 +397,7 @@ impl B {
     fn helper(&self) -> u32 { 0 }
 }
 
-fn free(x: &B) {
+fn free(x: &B) { let x = x;
     println!(\"{}\", x.helper());
     x.helper();
     println!(\"{}\", double());
@@ -407,7 +409,8 @@ fn double() -> u32 { 0 }
 
 /// The macro token-tree walk and the query record one call between them: a
 /// non-`self` method call inside a macro argument is `other` like the same call
-/// outside it, so the two are one ledger row — not an `other` row beside a
+/// outside it — `x` is re-bound, so no receiver typing (S-587) retypes the call
+/// outside (the macro walk records no proof) — so the two are one ledger row — not an `other` row beside a
 /// shapeless twin the shape-keyed dedup would no longer merge. Only a **method**
 /// call takes a shape: a free call in a macro argument stays shapeless, as the
 /// same call outside one is.

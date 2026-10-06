@@ -149,7 +149,11 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DELETE FROM schema_versions WHERE version = 31; \
+        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN peeled; \
+         CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, \
+         COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, '')); \
+         DELETE FROM schema_versions WHERE version = 32; \
+         DELETE FROM schema_versions WHERE version = 31; \
          ALTER TABLE files DROP COLUMN namespace; DELETE FROM schema_versions WHERE version = 30; \
          DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN receiver; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, '')); \

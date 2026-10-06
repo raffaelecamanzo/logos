@@ -250,7 +250,11 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DELETE FROM schema_versions WHERE version = 31; \
+        "DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN peeled; \
+         CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, \
+         COALESCE(payload, ''), COALESCE(receiver, 0), COALESCE(alias, '')); \
+         DELETE FROM schema_versions WHERE version = 32; \
+         DELETE FROM schema_versions WHERE version = 31; \
          ALTER TABLE files DROP COLUMN namespace; DELETE FROM schema_versions WHERE version = 30; \
          DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN receiver; \
          CREATE UNIQUE INDEX idx_unresolved_refs_identity ON unresolved_refs(source_symbol, target, form, kind, COALESCE(payload, '')); \
@@ -320,7 +324,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 31, "{name} was opened at the latest version (v31)");
+        assert_eq!(user_version(&root.join(name)), 32, "{name} was opened at the latest version (v32)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

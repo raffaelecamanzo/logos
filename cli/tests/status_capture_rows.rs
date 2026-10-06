@@ -142,6 +142,7 @@ fn plant_awaiting_capture(project: &Path) {
             line: None,
             payload: None,
             receiver: None,
+            peeled: None,
         })
     })
     .expect("plant the awaiting capture");

@@ -2050,8 +2050,9 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
         .and_then(|i| i.file_path.as_deref())?;
     if !ix.layout.is_package_shaped(source_file) {
         // Outside a package-shaped language only a call through the caller's
-        // own type (S-493, [`Ctx::resolve_self_type_call`]) and a receiver
-        // call (S-514, the `RefForm::Method` arm) record a reason.
+        // own type (S-493, [`Ctx::resolve_self_type_call`]), a receiver call
+        // (S-514, the `RefForm::Method` arm) and a Rust call retyped from its
+        // proven receiver (S-587, the `RefForm::Path` arm) record a reason.
         return miss;
     }
     Some(miss.unwrap_or(match r.form {
@@ -2068,8 +2069,9 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
 
 /// [`bind`], and the [`Residue`] the first package-shaped call lookup that gave
 /// up recorded — `None` when none did (outside a package-shaped language, every
-/// row but a `Self::m` call through the caller's own type, S-493, and a
-/// receiver call, S-514). Meaningful only for an
+/// row but a `Self::m` call through the caller's own type, S-493, a receiver
+/// call, S-514, and a Rust call retyped from its proven receiver, S-587).
+/// Meaningful only for an
 /// [`Outcome::Unbound`]: a row that binds may still carry the miss of a rung it
 /// tried first (one of two static imports naming an external type).
 fn bind_traced(
@@ -2231,6 +2233,18 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
                     return outcome;
                 }
             }
+            // A Rust call on a receiver whose declared type the file proves
+            // (S-587, [FR-RS-42]): `x.m()` retyped to `T::m`, its `other` shape
+            // kept. It is not a written `T::m()` — the path rungs below would
+            // read it as one — so it binds nothing yet and stays the
+            // `no-receiver-evidence` row the `other` Method row it replaced
+            // was. Binding it among `T`'s methods is S-588's.
+            //
+            // [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+            if r.kind == EdgeKind::Calls && r.receiver == Some(ReceiverShape::Other) {
+                ctx.note(Want::Callable, || Residue::NoReceiverEvidence);
+                return Outcome::Unbound;
+            }
             // A call through the caller's own type (S-493, [FR-RS-11]):
             // `self.m()` / `Self::m()` inside a method with a recorded self
             // type binds only among that type's methods in the caller's crate,
@@ -2321,7 +2335,8 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             }
             // A receiver call (`x.f()` → `f`): extraction records the bare
             // method name and its receiver's SHAPE, never its type ([FR-EX-13];
-            // a typed receiver is a `RefForm::Path` row bound above). The shape
+            // a typed receiver is a `RefForm::Path` row bound above — a Rust one
+            // refused there, S-587). The shape
             // decides where `f` may be found ([FR-RS-12]):
             //
             // - `self` — among the caller's own class's members, then up its

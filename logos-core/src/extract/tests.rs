@@ -529,8 +529,10 @@ fn helper() {}
 
 #[test]
 fn method_calls_record_only_the_name_as_method_form() {
+    // An untyped `let`: no receiver typing (S-587) proves `v`'s type.
     let src = "\
-fn alpha(v: Vec<u32>) {
+fn alpha() {
+    let v = make_vec();
     v.clear();
 }
 ";
@@ -1158,17 +1160,23 @@ fn scoped_dyn_trait_takes_its_last_segment() {
 
 #[test]
 fn non_dyn_receiver_method_call_stays_a_bare_name() {
-    // A concrete-typed receiver is NOT a provable trait object: the call stays a
-    // bare `run` and never fans out (the CR-066 guard, FR-RS-06). An inferred
-    // closure/unknown receiver likewise stays bare.
+    // A concrete-typed receiver is NOT a provable trait object: the call never
+    // becomes the Method-form `T::run` row that fans out (the CR-066 guard,
+    // FR-RS-06). Its proven type retypes it to the Path-form `CompiledPlugin::run`
+    // of shape `other` instead (S-587), which no dispatch branch reads. An
+    // inferred closure/unknown receiver stays bare.
     let concrete = extract_src("src/lib.rs", "fn f(p: &CompiledPlugin) { p.run(); }");
     assert!(
-        method_call_targets(&concrete).contains(&"run")
-            && !method_call_targets(&concrete)
-                .iter()
-                .any(|t| t.contains("::")),
-        "a concrete receiver stays bare, got {:?}",
+        !method_call_targets(&concrete).iter().any(|t| t.contains("::")),
+        "a concrete receiver never fans out, got {:?}",
         method_call_targets(&concrete)
+    );
+    assert!(
+        concrete.refs.iter().any(|r| r.target == "CompiledPlugin::run"
+            && r.form == RefForm::Path
+            && r.receiver == Some(crate::model::ReceiverShape::Other)),
+        "a concrete receiver is retyped, got {:?}",
+        concrete.refs
     );
     let inferred = extract_src("src/lib.rs", "fn f(xs: X) { xs.iter().map(|p| p.run()); }");
     assert!(
@@ -5209,10 +5217,11 @@ func main() {\n\tadmin.Register()\n\tadm.Log()\n\tfmt.Println()\n\ts := admin.Se
 fn a_rust_call_is_recorded_exactly_as_before_s440() {
     // Rust declares name-grammar imports: no import is read for qualification,
     // so `use a::helper; helper()` and `m.run()` record what they always did.
+    // `m` is a loop variable, whose type no receiver typing proves (S-587).
     let facts = extract_lang(
         "rs",
         "src/lib.rs",
-        "use crate::a::helper;\nfn f(m: M) { helper(); m.run(); util::go(); }\n",
+        "use crate::a::helper;\nfn f(ms: Ms) { helper(); for m in ms { m.run(); } util::go(); }\n",
     );
     assert_eq!(
         call_targets(&facts),
@@ -6131,7 +6140,8 @@ fn a_rust_self_call_without_a_self_type_records_the_self_shape() {
     // S-493's `@ref.method.self` is a `self`-marked `@ref.method`: inside an
     // impl it is the `Self::` row; in a trait's default body, which records no
     // self type, a Method-form row of shape `self`. A call on any other receiver
-    // records the `other` shape (S-517).
+    // records the `other` shape (S-517) — retyped to `A::go` where the file
+    // proves the receiver's type (S-587), and `other` still.
     let src = "\
 pub struct A;
 impl A {
@@ -6148,7 +6158,7 @@ trait T {
         shape_rows(&facts),
         vec![
             ("go".to_string(), "Self::go2".to_string(), RefForm::Path, None),
-            ("run".to_string(), "go".to_string(), RefForm::Method, Some(Other)),
+            ("run".to_string(), "A::go".to_string(), RefForm::Path, Some(Other)),
             ("run".to_string(), "helper".to_string(), RefForm::Method, Some(SelfInstance)),
         ]
     );
@@ -6439,6 +6449,7 @@ fn dedup_sort_refs_keys_on_the_alias_with_a_missing_alias_normalised() {
         line,
         relation: None,
         receiver: None,
+        peeled: None,
     };
     let mut refs = vec![
         row(Some("B"), 1),
