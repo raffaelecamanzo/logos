@@ -539,11 +539,9 @@ fn a_doc_link_to_a_java_file_reaches_that_file_even_when_its_package_key_is_shar
 /// symbol, kind)` edges and `(source, target, form, kind, resolved)` ledger rows
 /// — for the sync ≡ reindex comparison (NFR-RA-06).
 ///
-/// Capture-before-delete rows (`RefForm::Symbol`, ADR-10) are excluded: a
-/// sync-only bookkeeping artifact a cold index never produces. The edges they
-/// preserve are compared, so a mis-bound capture still fails the edge half; a
-/// capture row left in the ledger is the CR-015 net's to catch, which compares
-/// the whole ledger since CR-187 (`tests/support/graph_fingerprint.rs`).
+/// Every ledger row is compared, capture-before-delete rows (`RefForm::Symbol`,
+/// ADR-10) included: a capture lives only until it is spent (CR-187), so one
+/// left behind is a row a cold index never holds.
 fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
     rt.submit_read(|store| {
         let sym: HashMap<NodeId, String> = store
@@ -566,7 +564,6 @@ fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
         let mut refs: Vec<String> = store
             .unresolved_refs()?
             .into_iter()
-            .filter(|r| r.form != RefForm::Symbol)
             .map(|r| {
                 format!(
                     "{} {} {:?} {:?} {}",

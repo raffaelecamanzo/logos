@@ -410,7 +410,6 @@ fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
         let mut refs: Vec<String> = store
             .unresolved_refs()?
             .into_iter()
-            .filter(|r| r.form != RefForm::Symbol)
             .map(|r| format!("{} {} {:?} {:?} {}", r.source_symbol, r.target, r.form, r.kind, r.resolved))
             .collect();
         refs.sort();

@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use logos_core::model::{EdgeKind, NodeId, RefForm};
+use logos_core::model::{EdgeKind, NodeId};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
@@ -110,7 +110,6 @@ fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
         let mut refs: Vec<String> = store
             .unresolved_refs()?
             .into_iter()
-            .filter(|r| r.form != RefForm::Symbol)
             .map(|r| format!("{} {} {:?} {:?} {}", r.source_symbol, r.target, r.form, r.kind, r.resolved))
             .collect();
         refs.sort();
