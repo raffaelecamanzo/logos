@@ -219,25 +219,37 @@ enum Scope<'tree> {
     Callable,
 }
 
-/// One name a pattern binds (S-587).
-struct Binding<'tree> {
-    /// The pattern leaf that spells the name.
-    leaf: Node<'tree>,
-    scope: Scope<'tree>,
+/// Where one name a pattern binds is in scope (S-587), resolved once when
+/// the binding is recorded, so a call's test is a comparison.
+#[derive(Clone, Copy)]
+enum Binding {
+    /// The calls whose bytes lie in `start..=end`: [`Scope::Whole`]'s node,
+    /// or [`Scope::After`]'s parent from where its node ends.
+    Bytes { start: usize, end: usize },
+    /// The calls in the outermost callable with this node id (`None`: at a
+    /// field position).
+    Callable(Option<usize>),
 }
 
-impl Binding<'_> {
-    /// Whether this binding is in scope at `invocation`.
-    fn in_scope(&self, invocation: Node<'_>) -> bool {
-        let inside = |n: Node<'_>| n.start_byte() <= invocation.start_byte() && invocation.end_byte() <= n.end_byte();
-        match self.scope {
-            Scope::Whole(node) => inside(node),
-            Scope::After(node) => {
-                node.parent().is_some_and(inside) && invocation.start_byte() >= node.end_byte()
-            }
-            Scope::Callable => {
-                outermost_callable(self.leaf).map(|n| n.id()) == outermost_callable(invocation).map(|n| n.id())
-            }
+impl Binding {
+    /// The binding `scope` gives the pattern leaf `leaf`.
+    fn new(leaf: Node<'_>, scope: Scope<'_>) -> Self {
+        match scope {
+            Scope::Whole(node) => Binding::Bytes { start: node.start_byte(), end: node.end_byte() },
+            Scope::After(node) => Binding::Bytes {
+                start: node.end_byte(),
+                end: node.parent().map_or(node.end_byte(), |p| p.end_byte()),
+            },
+            Scope::Callable => Binding::Callable(outermost_callable(leaf).map(|n| n.id())),
+        }
+    }
+
+    /// Whether this binding is in scope at `invocation`, the outermost
+    /// callable around which has node id `callable`.
+    fn in_scope(self, invocation: Node<'_>, callable: Option<usize>) -> bool {
+        match self {
+            Binding::Bytes { start, end } => start <= invocation.start_byte() && invocation.end_byte() <= end,
+            Binding::Callable(c) => c == callable,
         }
     }
 }
@@ -308,7 +320,7 @@ pub(super) struct Receivers<'tree> {
     /// Every name a `binding` marker's pattern binds (S-587): name → pattern
     /// leaf id → the binding. Keyed by leaf so two captures of one pattern
     /// count it once.
-    bindings: HashMap<String, BTreeMap<usize, Binding<'tree>>>,
+    bindings: HashMap<String, BTreeMap<usize, Binding>>,
     /// Pattern leaf id → the type its `proof` marker proves.
     proofs: HashMap<usize, Proof<'tree>>,
     /// `(impl type's last segment, function name)` → the function's
@@ -396,7 +408,7 @@ impl<'tree> Receivers<'tree> {
                             .entry(name)
                             .or_default()
                             .entry(leaf.id())
-                            .or_insert(Binding { leaf, scope });
+                            .or_insert_with(|| Binding::new(leaf, scope));
                     }
                 }
                 return;
@@ -766,12 +778,13 @@ impl<'tree> Receivers<'tree> {
         file: &FileDecls<'_, '_>,
     ) -> Option<Proven> {
         let source = file.source;
-        let mut in_scope = self.bindings.get(x)?.values().filter(|b| b.in_scope(invocation));
-        let (Some(binding), None) = (in_scope.next(), in_scope.next()) else {
+        let callable = outermost_callable(invocation).map(|n| n.id());
+        let mut in_scope = self.bindings.get(x)?.iter().filter(|(_, b)| b.in_scope(invocation, callable));
+        let (Some((&leaf, _)), None) = (in_scope.next(), in_scope.next()) else {
             return None;
         };
         let text = |n: Node<'_>| n.utf8_text(source).ok().map(str::trim);
-        match *self.proofs.get(&binding.leaf.id())? {
+        match *self.proofs.get(&leaf)? {
             Proof::Declared(declared) => declared_type(text(declared)?, declared, own_type, source),
             // One segment only: `E::V { … }` builds an `E`, and its text is
             // the shape of a module-qualified `m::S { … }`.
