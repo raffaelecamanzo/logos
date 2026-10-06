@@ -361,3 +361,38 @@ fn a_capture_row_never_lends_its_file_to_the_re_exporting_module() {
     let edges = synced_equals_reindexed(&initial, &[edited]);
     assert_eq!(targets(&edges, "app/src/user.rs:run@2"), ["app/src/config/settings.rs:get@3"]);
 }
+
+#[test]
+fn a_re_export_retargeted_on_sync_rebinds_the_importing_crates_call() {
+    // The re-export names a module unrelated to the type, so no node the sync
+    // touches spells `Store`: only the import's own name selects the row.
+    let initial = [
+        ("Cargo.toml", "[workspace]\nmembers = [\"app-core\", \"cli\"]\n"),
+        ("app-core/src/lib.rs", "pub mod a;\npub mod b;\npub use a::Store;\n"),
+        ("app-core/src/a.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) -> u8 { 0 }\n}\n"),
+        ("app-core/src/b.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) -> u8 { 1 }\n}\n"),
+        ("cli/src/main.rs", "use app_core::Store;\npub fn run(x: &Store) -> u8 { x.get() }\n"),
+    ];
+    let retargeted = ("app-core/src/lib.rs", "pub mod a;\npub mod b;\npub use b::Store;\n");
+    let edges = synced_equals_reindexed(&initial, &[retargeted]);
+    assert_eq!(targets(&edges, "cli/src/main.rs:run@2"), ["app-core/src/b.rs:get@3"]);
+    // …and through a glob of the re-exporting crate.
+    let mut globbed = initial;
+    globbed[4] = ("cli/src/main.rs", "use app_core::*;\npub fn run(x: &Store) -> u8 { x.get() }\n");
+    let edges = synced_equals_reindexed(&globbed, &[retargeted]);
+    assert_eq!(targets(&edges, "cli/src/main.rs:run@2"), ["app-core/src/b.rs:get@3"]);
+}
+
+#[test]
+fn a_parent_import_retargeted_on_sync_rebinds_its_glob_test_modules_call() {
+    let initial = [
+        ("app/src/lib.rs", "pub mod a;\npub mod b;\npub mod user;\n"),
+        ("app/src/a.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n"),
+        ("app/src/b.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n"),
+        ("app/src/user.rs", "use crate::a::Store;\npub fn keep() {}\n#[cfg(test)]\nmod tests;\n"),
+        ("app/src/user/tests.rs", "use super::*;\nfn probe(x: &Store) { x.get(); }\n"),
+    ];
+    let edited = ("app/src/user.rs", "use crate::b::Store;\npub fn keep() {}\n#[cfg(test)]\nmod tests;\n");
+    let edges = synced_equals_reindexed(&initial, &[edited]);
+    assert_eq!(targets(&edges, "app/src/user/tests.rs:probe@2"), ["app/src/b.rs:get@3"]);
+}

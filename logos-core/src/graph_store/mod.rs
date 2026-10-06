@@ -1645,6 +1645,18 @@ pub trait GraphStore {
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     fn node_names_for_path(&self, path: &str) -> Result<Vec<String>>;
 
+    /// The local names the file at `path` imports — the `alias` of each of its
+    /// `Imports` ledger rows (S-588).
+    ///
+    /// The incremental resolver's twin of
+    /// [`node_names_for_path`](GraphStore::node_names_for_path), read for each
+    /// changed file before persist replaces its ledger rows: a proven Rust
+    /// receiver's type is read through another file's `use` — a crate root's
+    /// `pub use`, a parent module's import a `use super::*` brings in — so a
+    /// sync that retargets one moves a row in an untouched file that spells
+    /// only the imported name.
+    fn import_aliases_for_path(&self, path: &str) -> Result<Vec<String>>;
+
     /// Whether the file at `path` records a **global** namespace wildcard — a
     /// C# `global using N;`, an `Imports` `Glob` row carrying
     /// `resolve::GLOBAL_WILDCARD_ALIAS` (S-518).
@@ -2660,6 +2672,21 @@ impl GraphStore for SqliteGraphStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting node names for path")?;
         Ok(names)
+    }
+
+    fn import_aliases_for_path(&self, path: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.alias FROM unresolved_refs r \
+             JOIN files f ON f.id = r.file_id \
+             WHERE f.path = ?1 AND r.kind = ?2 AND r.alias IS NOT NULL",
+        )?;
+        let aliases = stmt
+            .query_map(rusqlite::params![path, EdgeKind::Imports as i64], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting import aliases for path")?;
+        Ok(aliases)
     }
 
     fn file_namespace(&self, path: &str) -> Result<Option<String>> {

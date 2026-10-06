@@ -697,8 +697,9 @@ pub fn sync(
         .chain(removals.iter().cloned())
         .chain(module_descriptors)
         .collect();
-    // With them, the namespace each declared (S-518): a file that changes it
-    // renames no node, so its segments are the keys that move. And whether one
+    // With them, the names each imported (S-588) and the namespace each
+    // declared (S-518): a file that changes either renames no node, so those
+    // are the keys that move. And whether one
     // of them declared a global namespace wildcard, read here for the same
     // reason: the re-extract replaces its ledger rows.
     let (old_names, old_global_imports): (Vec<String>, bool) = if changed_paths.is_empty() {
@@ -709,6 +710,7 @@ pub fn sync(
             let mut global_imports = false;
             for path in &changed_paths {
                 names.extend(store.node_names_for_path(path)?);
+                names.extend(store.import_aliases_for_path(path)?);
                 names.extend(store.file_namespace(path)?);
                 global_imports |= store.declares_global_import(path)?;
             }
@@ -2023,8 +2025,8 @@ fn persist_failure_warning(failure: &PersistFailure, stale: bool) -> String {
 
 /// A sync's CR-015 incremental resolution change-set (part 2 of 2): union the
 /// names that entered the changed files (this sync's freshly extracted facts,
-/// with the namespaces they declare, S-518) with those that left them
-/// (`old_names`) and the changed paths, tokenized. The
+/// with the namespaces they declare, S-518, and the names they import, S-588)
+/// with those that left them (`old_names`) and the changed paths, tokenized. The
 /// resolve pass re-binds exactly the rows these can move and skips the rest —
 /// the same result as retrying the whole ledger (FR-RS-03), a fraction of the
 /// cost.
@@ -2044,6 +2046,12 @@ fn sync_delta(
         }
         if let Some(namespace) = &f.namespace {
             dirty_tokens.extend(crate::resolve::tokens(namespace));
+        }
+        // The names the file imports (S-588): another file's proven receiver
+        // may read its type through this file's `use` (a re-export, a parent's
+        // import behind `use super::*`), spelling only the imported name.
+        for alias in f.refs.iter().filter(|r| r.kind == EdgeKind::Imports).filter_map(|r| r.alias.as_deref()) {
+            dirty_tokens.extend(crate::resolve::tokens(alias));
         }
     }
     for path in &changed_paths {
