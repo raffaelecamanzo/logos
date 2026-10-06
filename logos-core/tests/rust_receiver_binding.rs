@@ -655,3 +655,94 @@ fn a_rust_rows_external_type_stays_external_in_a_workspace() {
     assert_eq!(residue.reasons[&R::ExternalType], alone.reasons[&R::ExternalType]);
     assert_eq!(residue.unbound, alone.unbound);
 }
+
+// ── A renamed re-export: the row spells the new name, the binding reads the old ──
+//
+// `pub use crate::inner::Store as Db;` makes a proven `x.get()` on `x: &Db` the
+// row `Db::get`, which binds through the re-export to `inner::Store`'s method.
+// A change that spells only `Store` — a second `Store` in the crate, or the
+// re-export chain's next hop retargeted — still moves that binding.
+
+const RENAMED_LIB: (&str, &str) = (
+    "src/lib.rs",
+    "pub mod inner;\npub mod imp;\npub mod facade;\npub mod other;\npub mod caller;\n",
+);
+const RENAMED_INNER: (&str, &str) = ("src/inner.rs", "pub struct Store;\n");
+/// `Store`'s only `get` lives outside `Store`'s module: it is `Store`'s while
+/// the crate declares one `Store`, and `type-ambiguous` once it declares two.
+const RENAMED_IMP: (&str, &str) = (
+    "src/imp.rs",
+    "use crate::inner::Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n",
+);
+const RENAMED_FACADE: (&str, &str) = ("src/facade.rs", "pub use crate::inner::Store as Db;\n");
+const RENAMED_CALLER: (&str, &str) = ("src/caller.rs", "use crate::facade::Db;\npub fn run(x: &Db) { x.get(); }\n");
+const OTHER_PLAIN: (&str, &str) = ("src/other.rs", "pub fn unrelated() {}\n");
+const OTHER_STORE: (&str, &str) = ("src/other.rs", "pub fn unrelated() {}\npub struct Store;\n");
+
+#[test]
+fn a_second_same_named_type_behind_a_renamed_re_export_unbinds_on_sync() {
+    let initial = [RENAMED_LIB, RENAMED_INNER, RENAMED_IMP, RENAMED_FACADE, RENAMED_CALLER, OTHER_PLAIN];
+    let before = edges_by_source(&initial);
+    assert_eq!(targets(&before, "src/caller.rs:run@2"), ["src/imp.rs:get@3"], "{before:#?}");
+    let edges = synced_equals_reindexed(&initial, &[OTHER_STORE]);
+    assert!(targets(&edges, "src/caller.rs:run@2").is_empty(), "{edges:#?}");
+}
+
+#[test]
+fn removing_the_second_same_named_type_behind_a_renamed_re_export_binds_on_sync() {
+    let initial = [RENAMED_LIB, RENAMED_INNER, RENAMED_IMP, RENAMED_FACADE, RENAMED_CALLER, OTHER_STORE];
+    let before = edges_by_source(&initial);
+    assert!(targets(&before, "src/caller.rs:run@2").is_empty(), "{before:#?}");
+    let edges = synced_equals_reindexed(&initial, &[OTHER_PLAIN]);
+    assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/imp.rs:get@3"]);
+}
+
+#[test]
+fn the_second_hop_of_a_renamed_re_export_retargeted_on_sync_rebinds_the_call() {
+    let initial = [
+        ("src/lib.rs", "pub mod deep;\npub mod deep2;\npub mod inner;\npub mod facade;\npub mod caller;\n"),
+        ("src/deep.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n"),
+        ("src/deep2.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n"),
+        ("src/inner.rs", "pub use crate::deep::Store;\n"),
+        RENAMED_FACADE,
+        RENAMED_CALLER,
+    ];
+    let before = edges_by_source(&initial);
+    assert_eq!(targets(&before, "src/caller.rs:run@2"), ["src/deep.rs:get@3"], "{before:#?}");
+    let edges = synced_equals_reindexed(&initial, &[("src/inner.rs", "pub use crate::deep2::Store;\n")]);
+    assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/deep2.rs:get@3"]);
+}
+
+// ── An inline module's re-export, in a file that also imports the name ──────
+//
+// One file holds one import scope: `a.rs`'s top-level `use crate::b::Store`
+// and its inline `mod inner { pub use crate::c::Store; }` are both "the
+// import of `Store`" there, and which one `a::inner` holds is unknown. So
+// `use crate::a::inner::Store` binds nothing — never `b`'s method, whichever
+// import comes first. Without the top-level one, `inner`'s re-export binds.
+
+const INLINE_LIB: &str = "pub mod a;\npub mod b;\npub mod c;\npub mod user;\n";
+const INLINE_STORE: &str = "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n";
+const INLINE_USER: &str = "use crate::a::inner::Store;\npub fn run(x: &Store) { x.get(); }\n";
+
+fn inline_reexport_edges(a: &str) -> BTreeMap<String, Vec<String>> {
+    edges_by_source(&[
+        ("src/lib.rs", INLINE_LIB),
+        ("src/a.rs", a),
+        ("src/b.rs", INLINE_STORE),
+        ("src/c.rs", INLINE_STORE),
+        ("src/user.rs", INLINE_USER),
+    ])
+}
+
+#[test]
+fn an_inline_modules_re_export_beside_a_top_level_import_of_the_name_binds_nothing() {
+    let top_first = "use crate::b::Store;\npub fn keep(_: &Store) {}\npub mod inner {\n    pub use crate::c::Store;\n}\n";
+    let inner_first = "pub mod inner {\n    pub use crate::c::Store;\n}\nuse crate::b::Store;\npub fn keep(_: &Store) {}\n";
+    for (order, a) in [("top-level use first", top_first), ("inline module first", inner_first)] {
+        let edges = inline_reexport_edges(a);
+        assert!(targets(&edges, "src/user.rs:run@2").is_empty(), "{order}: {edges:#?}");
+    }
+    let alone = inline_reexport_edges("pub mod inner {\n    pub use crate::c::Store;\n}\n");
+    assert_eq!(targets(&alone, "src/user.rs:run@2"), ["src/c.rs:get@3"], "{alone:#?}");
+}

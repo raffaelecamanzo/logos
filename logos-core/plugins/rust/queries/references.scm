@@ -86,9 +86,10 @@
 ;                 parent — the `field_expression` — with the call's name node,
 ;                 which is how the engine pairs them. `self.f()` carries the
 ;                 `self` mark too (`@ref.method.self` above) and `self` outranks
-;                 `other`, so it still reads `self`. An `other` call binds
-;                 nowhere: never a same-named free `fn`, never the caller's own
-;                 method.
+;                 `other`, so it still reads `self`. An unproven `other` call
+;                 binds nowhere, and no `other` call ever binds a same-named
+;                 free `fn` or the caller's own method; a proven one is retyped
+;                 below.
 (field_expression
   value: (_) @ref.receiver.other)
 

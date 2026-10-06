@@ -310,9 +310,17 @@ pub fn run(
                 hierarchy: index.hierarchy_touched(&d.dirty_tokens),
                 import_roots: roots_moved,
             };
+            // …and the names a renaming import elsewhere gives a dirty name,
+            // which a proven Rust receiver's type is read through (S-588).
+            let renamed = index.renamed_import_tokens(&d.dirty_tokens);
             snap.refs
                 .iter()
-                .filter(|&r| is_affected(r, d, &snap.file_paths, &index, moved))
+                .filter(|&r| {
+                    is_affected(r, d, &snap.file_paths, &index, moved)
+                        || (!renamed.is_empty()
+                            && binder::is_proven_receiver_call(r)
+                            && index.ref_affected(r, &renamed))
+                })
                 .collect()
         }
     };

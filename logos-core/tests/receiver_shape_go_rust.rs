@@ -12,7 +12,10 @@
 //!   parameter that merely shares the receiver's name in another function) is
 //!   `other` and binds nowhere — never the same-named free `func F`.
 //! - **Rust** — `self.f()` is `self` (S-493's binding, unchanged); every other
-//!   receiver (`other.f()`, `self.field.f()`) is `other` and binds nowhere.
+//!   receiver (`other.f()`, `self.field.f()`) is `other`. Unproven, it binds
+//!   nowhere; where the file proves its type, it is retyped to `T::f` (S-587)
+//!   and binds among `T`'s methods (S-588) — never the caller's own method or
+//!   a same-named free `fn`.
 //!
 //! A bare call (`F()`, `helper()`) is a free call in both languages and keeps
 //! binding through the scope walk: both plugins declare `implicit_receiver =
