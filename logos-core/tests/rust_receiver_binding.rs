@@ -22,7 +22,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use logos_core::federation::{discover, workspace_status, EngineRegistry, RegistryMode};
 use logos_core::graph_store::NewUnresolvedRef;
 use logos_core::model::{EdgeKind, NodeId, RefForm};
 use logos_core::models::{CallResidueReason as R, LanguageResolution, ResidueScope};
@@ -594,4 +596,62 @@ fn a_capture_before_delete_row_is_in_no_figure_of_the_rust_residue() {
     let after = rust_row(&engine);
     assert_eq!(after, before);
     assert!(after.call_residue.is_some_and(|r| r.unbound == 8));
+}
+
+fn git_init(dir: &Path) {
+    fs::create_dir_all(dir).expect("mkdir member");
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git init {}", dir.display());
+}
+
+/// In `workspace status` the Rust row is workspace-scoped like every residue
+/// row, yet none of its `external-type` rows moves: a Rust row names no
+/// candidate type, so a receiver typed with another member's `Store` reads
+/// `external-type` there exactly as it does alone, beside std's `String`.
+#[test]
+fn a_rust_rows_external_type_stays_external_in_a_workspace() {
+    let ws = TempDir::new().unwrap();
+    let lib = ws.path().join("lib");
+    let app = ws.path().join("app");
+    git_init(&lib);
+    git_init(&app);
+    write(&lib, "src/lib.rs", "pub struct Store;\nimpl Store {\n    pub fn len(&self) -> usize { 0 }\n}\n");
+    write(
+        &app,
+        "src/lib.rs",
+        "use lib::Store;\npub fn other_member(x: &Store) { x.len(); }\npub fn std_type(s: &String) { s.len(); }\n",
+    );
+    for member in [&lib, &app] {
+        let _ = index(member).sync(&[] as &[PathBuf]);
+    }
+    let alone = rust_row(&Engine::start(&app).expect("engine starts"))
+        .call_residue
+        .expect("the rust row states its call residue");
+    assert_eq!(alone.scope, ResidueScope::Repository);
+    assert_eq!(alone.reasons[&R::ExternalType], 2, "{alone:#?}");
+    assert!(!alone.reasons.contains_key(&R::TypeInAnotherMember));
+
+    write(ws.path(), "logos.workspace.toml", "[workspace]\nname = \"w\"\nmembers = [\"lib\", \"app\"]\n");
+    let federation = discover(ws.path()).expect("discovers").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
+    let residue = workspace_status(&registry)
+        .members
+        .iter()
+        .find(|m| m.status.member == "app")
+        .and_then(|m| m.status.result.as_ref())
+        .and_then(|info| {
+            info.resolution_by_language
+                .iter()
+                .find(|row| row.language == "rust")
+                .and_then(|row| row.call_residue.clone())
+        })
+        .expect("app's rust residue");
+    assert_eq!(residue.scope, ResidueScope::Workspace);
+    assert_eq!(residue.reasons[&R::TypeInAnotherMember], 0, "{residue:#?}");
+    assert_eq!(residue.reasons[&R::ExternalType], alone.reasons[&R::ExternalType]);
+    assert_eq!(residue.unbound, alone.unbound);
 }
