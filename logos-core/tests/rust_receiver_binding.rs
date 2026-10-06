@@ -412,3 +412,24 @@ fn a_glob_of_a_non_ancestor_module_never_brings_in_its_private_import() {
     ]);
     assert!(targets(&edges, "app/src/caller.rs:run@2").is_empty(), "{edges:#?}");
 }
+
+#[test]
+fn an_inline_modules_use_never_retargets_the_files_own_type() {
+    // `a.rs` declares `Store`; its inline test module imports `b`'s. The
+    // file's ledger holds one scope for both, so the top-level `run` must read
+    // its own module's declaration, and the test module's `probe` — whose
+    // module declares none — the import.
+    let a = "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\npub fn run(x: &Store) { x.get(); }\n\
+             #[cfg(test)]\nmod tests {\n    use crate::b::Store;\n    fn probe(x: &Store) { x.get(); }\n}\n";
+    let b = "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n";
+    let edges = edges_by_source(&[("src/lib.rs", "pub mod a;\npub mod b;\n"), ("src/a.rs", a), ("src/b.rs", b)]);
+    assert_eq!(targets(&edges, "src/a.rs:run@5"), ["src/a.rs:get@3"]);
+    assert_eq!(targets(&edges, "src/a.rs:probe@9"), ["src/b.rs:get@3"]);
+    // Two imports of one name in the file (top level and an inline module):
+    // the scope cannot tell which is the caller's, so neither binds.
+    let c = "use crate::b::Store;\npub fn run(x: &Store) { x.get(); }\n\
+             #[cfg(test)]\nmod tests {\n    use crate::a::Store;\n    fn probe(x: &Store) { x.get(); }\n}\n";
+    let edges = edges_by_source(&[("src/lib.rs", "pub mod a;\npub mod b;\npub mod c;\n"), ("src/a.rs", a), ("src/b.rs", b), ("src/c.rs", c)]);
+    assert!(targets(&edges, "src/c.rs:run@2").is_empty(), "{edges:#?}");
+    assert!(targets(&edges, "src/c.rs:probe@6").is_empty(), "{edges:#?}");
+}

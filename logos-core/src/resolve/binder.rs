@@ -3176,7 +3176,10 @@ impl Ctx<'_> {
 
     /// The one in-repository type a proven receiver's type path names (S-588):
     /// the module tree's rungs ([`resolve_path`](Ctx::resolve_path)) for a type
-    /// ([`Want::Type`]), except that a head the file imports by `use` is read
+    /// ([`Want::Type`]), except that a type the caller's own module declares
+    /// is read first ([`own_module_type`](Ctx::own_module_type)), a name the
+    /// file imports twice (a top-level and an inline module's `use`) is
+    /// [`Res::Ambiguous`], and a head the file imports by `use` is read
     /// through that import **alone**. Rust's explicit `use` shadows a glob and
     /// the prelude, so `use std::fmt::Error` names std's `Error` even where a
     /// glob or the crate root brings a crate `Error` into view — and an import
@@ -3193,6 +3196,22 @@ impl Ctx<'_> {
     /// tell apart, so none is read.
     fn resolve_receiver_type(&self, segs: &[String]) -> Res {
         let head = segs[0].as_str();
+        if let [name] = segs {
+            match self.own_module_type(name) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+        }
+        // One file holds one import scope, its inline modules' `use`s
+        // included: two imports of the name may belong to two modules, and
+        // which is the caller's is unknown.
+        if self
+            .scope()
+            .and_then(|s| s.alias_expansions.get(head))
+            .is_some_and(|all| all.len() > 1)
+        {
+            return Res::Ambiguous;
+        }
         let imported = (!matches!(head, "crate" | "self" | "super"))
             .then(|| self.scope().and_then(|s| s.aliases.get(head)))
             .flatten();
@@ -3238,6 +3257,27 @@ impl Ctx<'_> {
         found.sort();
         found.dedup();
         exactly_one(&found)
+    }
+
+    /// A type named `name` declared in the caller's own module (S-588): the
+    /// caller's `Contains` chain up to and including its nearest module, never
+    /// beyond it. Rust's `use` in an inline module cannot shadow a declaration
+    /// of the module enclosing it, and the file's single import scope cannot
+    /// say which module a `use` sits in — so a declaration in the caller's own
+    /// module is read first, and an enclosing module's is not read here at all.
+    fn own_module_type(&self, name: &str) -> Res {
+        let mut cursor = Some(self.source);
+        while let Some(scope) = cursor {
+            match exactly_one(&self.ix.members_named(scope, name, Want::Type)) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+            if self.ix.info.get(&scope).is_some_and(|i| i.kind == NodeKind::Module) {
+                break;
+            }
+            cursor = self.ix.parent.get(&scope).copied();
+        }
+        Res::NotFound
     }
 
     /// The module a path names, read from the source (S-588): `crate`, `self`
