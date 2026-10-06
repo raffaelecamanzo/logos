@@ -24,14 +24,18 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   a Go method of that name drew a self-loop instead of staying unresolved. Now,
   in a plugin that explicitly declares `implicit_receiver = "none"`, a
   single-segment bare call never binds a member of a class-like container or a
-  callable with a recorded self type (a Go or Rust method). It binds the free
-  function when there is one, a nested function still binds, and otherwise the
-  call stays unresolved. The Go and Rust plugins now declare the key; Python,
-  PHP, TypeScript and TSX already did. Java declares nothing, so its bare
-  in-class calls bind as before. C#, Kotlin, Scala, C++ and Ruby are unchanged.
-  Expect fewer `Calls` edges in those six languages after the next `logos scan`
-  or `logos index`, and possibly some methods newly reported dead that were
-  reached only through such a call.
+  callable with a recorded self type (a Go or Rust method of a named type). It
+  binds the free or imported function when there is one, a nested function
+  still binds, and otherwise the call stays unresolved. A Rust `use` or glob
+  import of a free function now binds it even when its module also has an
+  associated function of that name. A TypeScript or JavaScript class method
+  named `f` no longer hides the file's `import { f }`, so a bare `f()` in that
+  file binds the imported function. The Go and Rust plugins now declare the
+  key; Python, PHP, TypeScript and TSX already did. Java declares nothing, so
+  its bare in-class calls bind as before. C#, Kotlin, Scala, C++ and Ruby are
+  unchanged. Expect fewer `Calls` edges in those six languages after the next
+  `logos scan` or `logos index`, and possibly some methods newly reported dead
+  that were reached only through such a call.
 
 ## [1.11.1] — 2026-10-06
 
