@@ -35,12 +35,14 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   saves each cross-file edge into a re-extracted file as a capture-before-delete
   row so the edge survives the delete. That row stayed in the ledger after it
   re-bound, so `status` counted refs a fresh index of the same tree does not
-  have. Now the resolution pass deletes a capture row once it re-binds, or once
-  its source's own rows are re-bound and decide its edges, in the same
-  transaction that restores the edge. The edge stays. A capture whose target was
-  renamed away, and whose edge no other row carries, stays unresolved as before.
-  A store synced by an earlier version heals on its next `sync`, even one that
-  changes nothing; no migration. After any sequence of syncs the ledger now
+  have. Now the resolution pass deletes a capture row once it re-binds, once
+  its source's own rows are re-bound and decide its edges, or once its source
+  is gone, in the same transaction that restores the edge. The edge stays. A
+  capture whose target was renamed away, and whose edge no other row carries,
+  stays unresolved as before. In a store synced by an earlier version, the
+  stale resolved captures go on the next `sync`, even one that changes
+  nothing; an unresolved one goes when its source is next re-bound, or on
+  `logos index`. No migration. After any sequence of syncs the ledger now
   equals a fresh index's row for row, so `refs_total` and `refs_resolved` agree.
   On nlohmann/json, an edit → sync → revert → sync cycle left 47 extra resolved
   doc→code rows; it now leaves none.
