@@ -247,26 +247,21 @@ fn a_binding_out_of_scope_at_the_call_does_not_shadow_the_one_in_scope() {
 
 #[test]
 fn a_reference_box_arc_or_rc_is_peeled_and_the_wrapper_recorded() {
-    let src = with_types(
-        "fn a(x: &A) { x.f(); }\n\
-         fn b(x: &mut A) { x.f(); }\n\
-         fn c<'l>(x: &'l mut A) { x.f(); }\n\
-         fn d(x: Box<A>) { x.f(); }\n\
-         fn e(x: std::sync::Arc<A>) { x.f(); }\n\
-         fn g(x: Rc<A>) { x.f(); }\n\
-         fn h(x: &Arc<A>) { x.f(); }\n",
-    );
-    assert_eq!(
-        calls_of_f(&src),
-        vec![
-            typed("A", Some("&")),
-            typed("A", Some("& Arc")),
-            typed("A", Some("&mut")),
-            typed("A", Some("Arc")),
-            typed("A", Some("Box")),
-            typed("A", Some("Rc")),
-        ]
-    );
+    // One fixture per form: the deduping `calls_of_f` must never let one
+    // form's row stand in for another's.
+    for (declared, peeled) in [
+        ("&A", "&"),
+        ("&mut A", "&mut"),
+        ("&'l mut A", "&mut"),
+        ("&'l A", "&"),
+        ("Box<A>", "Box"),
+        ("std::sync::Arc<A>", "Arc"),
+        ("Rc<A>", "Rc"),
+        ("&Arc<A>", "& Arc"),
+    ] {
+        let src = with_types(&format!("fn g<'l>(x: {declared}) {{ x.f(); }}"));
+        assert_eq!(calls_of_f(&src), vec![typed("A", Some(peeled))], "{declared}");
+    }
 }
 
 #[test]
