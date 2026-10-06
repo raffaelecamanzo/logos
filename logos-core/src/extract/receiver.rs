@@ -814,9 +814,8 @@ impl<'tree> Receivers<'tree> {
     /// may be another `T`'s. Read from this file alone: a `T` whose impls sit
     /// in another file or module proves nothing here.
     fn constructed(&self, head: &str, function: &str, module: Option<usize>, decls: &[Decl<'_>]) -> Option<Vec<&'static str>> {
-        if !is_identifier(head) {
-            return None;
-        }
+        // Keyed by the impl type's last segment, and matched against its whole
+        // one-segment text: a qualified `head` finds no entry.
         let declared = self.constructors.get(&(head.to_string(), function.to_string()))?;
         let in_module = declared.iter().filter(|(&f, _)| {
             module_of(decls, f) == module && self.impl_owners.get(&f).is_some_and(|o| strip_generics(o).trim() == head)
