@@ -79,6 +79,14 @@ pub struct Semantics {
     /// [`ModuleModel::import_roots`](super::ModuleModel::import_roots)), `None`
     /// when the language keeps the default model's `src/` crate rule.
     pub import_roots: Option<Vec<String>>,
+    /// Whether a namespace of this language sees the types of its enclosing
+    /// namespaces (S-595, [FR-RS-45]; see
+    /// [`ModuleModel::enclosing_namespaces`](super::ModuleModel::enclosing_namespaces))
+    /// — consumed by the binder's package rungs through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+    pub enclosing_namespaces: bool,
     /// The interop family this language binds within, resolved (S-519; see
     /// [`PluginManifest::module_family`]): the declared one, else the plugin's
     /// own name.
@@ -307,6 +315,7 @@ impl CompiledPlugin {
         let module_model = manifest.module_model_kind();
         let family = manifest.module_family();
         let call_targets = manifest.call_targets();
+        let enclosing_namespaces = manifest.enclosing_namespaces();
         let (package_stems, import_roots) = manifest
             .module_model
             .as_ref()
@@ -323,6 +332,7 @@ impl CompiledPlugin {
             module_model,
             package_stems,
             import_roots,
+            enclosing_namespaces,
             family,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,
