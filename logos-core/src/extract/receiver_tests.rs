@@ -463,3 +463,17 @@ fn an_associated_type_of_self_proves_nothing_inside_an_impl() {
     );
     assert_eq!(calls_of_f(&src), vec![other()]);
 }
+
+/// Extraction's peeled wrappers and the Rust plugin's `[wrapper_methods]` table
+/// (S-588) name the same wrappers: a wrapper peeled with no table entry would
+/// let `x.clone()` through it bind `T::clone`, and a table key no extraction
+/// peels never matches a row's `peeled`.
+#[test]
+fn every_peeled_wrapper_has_a_wrapper_methods_entry_and_no_other_does() {
+    let declared = registry().wrapper_methods();
+    let mut keys: Vec<&str> = declared["rs"].keys().map(String::as_str).collect();
+    let mut peeled = super::PEELED_WRAPPERS.to_vec();
+    keys.sort_unstable();
+    peeled.sort_unstable();
+    assert_eq!(keys, peeled);
+}
