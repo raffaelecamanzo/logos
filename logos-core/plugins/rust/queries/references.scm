@@ -148,8 +148,9 @@
 ;   @ref.receiver.proof — a binding of one plain name that proves its type:
 ;                 `.type`, a declared type (a parameter, a typed `let`);
 ;                 `.constructor`, the callee `T::g` of `let x = T::g(…)`,
-;                 proven only when every `g` the file declares on `T` returns
-;                 `Self` or `T`; `.literal`, the type of `let x = T { … }`
+;                 proven only when `T` is one segment and every `g` the
+;                 caller's module declares on an impl of `T` returns `Self` or
+;                 `T`; `.literal`, the type of `let x = T { … }`
 ;                 when it is one segment (`E::V { … }` builds an `E`).
 (parameter
   pattern: (identifier) @ref.receiver.proof

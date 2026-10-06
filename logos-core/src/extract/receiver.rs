@@ -55,8 +55,8 @@
 //!
 //! | marker | receiver | `T` |
 //! |---|---|---|
-//! | `variable` | `x.send()` | the one `binding` of `x` in scope at the call, when it carries a `proof`: a declared type (`x: T`, `let x: T`), a constructor `let x = T::g(…)` whose every `g` the file declares on `T` returns `Self` or `T`, or a struct literal `let x = T { … }` of one segment (`E::V { … }` builds an `E`) |
-//! | `self_field` | `self.x.send()` | the declared type of the field `x` of the caller's own struct — the struct the file declares under the caller's self type (S-493) |
+//! | `variable` | `x.send()` | the one `binding` of `x` in scope at the call, when it carries a `proof`: a declared type (`x: T`, `let x: T`), a constructor `let x = T::g(…)`, `T` one segment, whose every `g` declared in the caller's module on an impl naming `T` returns `Self` or `T`, or a struct literal `let x = T { … }` of one segment (`E::V { … }` builds an `E`) |
+//! | `self_field` | `self.x.send()` | the declared type of the field `x` of the caller's own struct — the struct the caller's module declares under the caller's self type (S-493) |
 //!
 //! A `binding` marker's pattern binds every name it spells; its companion
 //! `.scope` or `.after` says where (a parameter's callable, a `let`'s block
@@ -65,7 +65,8 @@
 //! nothing, and neither does a generic parameter, `impl Trait`, a slice, tuple,
 //! pointer or `fn` type, an associated type, a chain, or `Self` outside an impl.
 //! `T` is written as the file names it (`Store`, `crate::db::Store`), its
-//! generic arguments dropped; `Self` is the caller's self type.
+//! generic arguments dropped; `Self` is the caller's self type where its impl
+//! names it by one segment (`impl crate::m::S` may name another `S`).
 //!
 //! **2. Shape (S-514, every language).** Every Method-form row typing left
 //! bare records one shape from a closed lexicon ([`ReceiverShape`]), which the
@@ -252,6 +253,9 @@ enum Proof<'tree> {
     Literal(Node<'tree>),
 }
 
+/// A struct field's declared type, and the struct's declaration index.
+type Member<'tree> = (Node<'tree>, Option<usize>);
+
 /// A receiver's proven type: its head as the file writes it, and the wrappers
 /// peeled off to reach it, outermost first.
 struct Proven {
@@ -307,13 +311,17 @@ pub(super) struct Receivers<'tree> {
     bindings: HashMap<String, BTreeMap<usize, Binding<'tree>>>,
     /// Pattern leaf id → the type its `proof` marker proves.
     proofs: HashMap<usize, Proof<'tree>>,
-    /// `(impl type, function name)` → the function's node id → its declared
-    /// return type's text (`None`: it declares none) — every associated
-    /// function the file declares, read by a `.constructor` proof.
+    /// `(impl type's last segment, function name)` → the function's
+    /// declaration index → its declared return type's text (`None`: it
+    /// declares none) — every associated function the file declares, read by a
+    /// `.constructor` proof.
     constructors: HashMap<(String, String), BTreeMap<usize, Option<String>>>,
-    /// `(struct name, field name)` → the field's node id → its declared type —
-    /// read by a `self_field` receiver.
-    members: HashMap<(String, String), BTreeMap<usize, Node<'tree>>>,
+    /// An associated function's declaration index → its impl's type as
+    /// written (`S`, `S<T>`, `crate::m::S`) — what its `Self` names.
+    impl_owners: HashMap<usize, String>,
+    /// `(struct name, field name)` → the field's node id → its declared type
+    /// and the struct's declaration index — read by a `self_field` receiver.
+    members: HashMap<(String, String), BTreeMap<usize, Member<'tree>>>,
 }
 
 /// What a file's declarations say, for the receiver passes.
@@ -354,6 +362,7 @@ impl<'tree> Receivers<'tree> {
                 bindings: HashMap::new(),
                 proofs: HashMap::new(),
                 constructors: HashMap::new(),
+                impl_owners: HashMap::new(),
                 members: HashMap::new(),
             })
     }
@@ -402,22 +411,26 @@ impl<'tree> Receivers<'tree> {
                 }
                 return;
             }
+            // The function's own declaration encloses its name.
             "ref.receiver.constructor" => {
                 let owner = companion("ref.receiver.constructor.owner").and_then(read);
-                if let (Some(owner), Some(name), Some(function)) = (owner, text(), node.parent()) {
+                if let (Some(owner), Some(name), Some(function)) = (owner, text(), declaration()) {
                     let returns = companion("ref.receiver.constructor.returns").and_then(read);
                     self.constructors
                         .entry((base_name(&owner).to_string(), name))
                         .or_default()
-                        .insert(function.id(), returns);
+                        .insert(function, returns);
+                    self.impl_owners.insert(function, owner);
                 }
                 return;
             }
+            // The struct's declaration encloses its field's name.
             "ref.receiver.member" => {
                 let owner = companion("ref.receiver.member.owner").and_then(read);
                 let declared = companion("ref.receiver.member.type");
                 if let (Some(owner), Some(name), Some(declared), Some(field)) = (owner, text(), declared, node.parent()) {
-                    self.members.entry((owner, name)).or_default().insert(field.id(), declared);
+                    let entry = (declared, declaration());
+                    self.members.entry((owner, name)).or_default().insert(field.id(), entry);
                 }
                 return;
             }
@@ -658,10 +671,17 @@ impl<'tree> Receivers<'tree> {
                 if refs[row].form != RefForm::Method {
                     continue;
                 }
-                let own_type = site.caller.and_then(|c| file.decls[c].self_type.as_deref());
+                // `Self` is the caller's self type only where its impl names
+                // it by one segment, which the caller's module scope resolves
+                // as the call's does; `impl crate::m::S` may name another `S`.
+                let own_type = site
+                    .caller
+                    .filter(|c| self.impl_owners.get(c).is_some_and(|o| is_identifier(strip_generics(o).trim())))
+                    .and_then(|c| file.decls[c].self_type.as_deref());
+                let module = site.caller.and_then(|c| module_of(file.decls, c));
                 let found = match receiver {
-                    Typed::Variable(x) => self.variable_type(x, invocation, own_type, file.source),
-                    Typed::SelfField(x) => own_type.and_then(|own| self.member_type(own, x, file.source)),
+                    Typed::Variable(x) => self.variable_type(x, invocation, own_type, module, file),
+                    Typed::SelfField(x) => own_type.and_then(|own| self.member_type(own, x, module, file)),
                     _ => None,
                 };
                 if let Some(Proven { head, peeled }) = found {
@@ -737,7 +757,15 @@ impl<'tree> Receivers<'tree> {
     /// no binding in scope (a `static`, a binding a macro introduced), or with
     /// two (shadowed, re-bound, two-typed), proves nothing. `own_type` is the
     /// caller's self type, what `Self` names.
-    fn variable_type(&self, x: &str, invocation: Node<'_>, own_type: Option<&str>, source: &[u8]) -> Option<Proven> {
+    fn variable_type(
+        &self,
+        x: &str,
+        invocation: Node<'_>,
+        own_type: Option<&str>,
+        module: Option<usize>,
+        file: &FileDecls<'_, '_>,
+    ) -> Option<Proven> {
+        let source = file.source;
         let mut in_scope = self.bindings.get(x)?.values().filter(|b| b.in_scope(invocation));
         let (Some(binding), None) = (in_scope.next(), in_scope.next()) else {
             return None;
@@ -758,26 +786,34 @@ impl<'tree> Receivers<'tree> {
             Proof::Constructor(callee) => {
                 let (owner, function) = strip_generics(text(callee)?).rsplit_once("::").map(|(o, f)| (o.to_string(), f.to_string()))?;
                 let head = type_head(&owner, callee, own_type, source)?;
-                self.constructed(&head, &function).map(|peeled| Proven { head, peeled })
+                self.constructed(&head, &function, module, file.decls)
+                    .map(|peeled| Proven { head, peeled })
             }
         }
     }
 
     /// The wrappers a value `T::function(…)` is wrapped in, when every
-    /// `function` the file declares on `T` returns `Self` or `T` under the
-    /// same wrappers — `None` when the file declares none, or one returning
-    /// anything else (`Result<Self, E>`, `()`, another type, `Self::Output`).
-    /// Read from this file alone: a `T` whose impls sit in another file
-    /// proves nothing here.
-    fn constructed(&self, head: &str, function: &str) -> Option<Vec<&'static str>> {
-        let owner = base_name(head);
-        let declared = self.constructors.get(&(owner.to_string(), function.to_string()))?;
+    /// `function` the file declares in `module` (the caller's) on an impl
+    /// naming `T` by its one segment returns `Self` or `T` under the same
+    /// wrappers — `None` when it declares none, or one returning anything else
+    /// (`Result<Self, E>`, `()`, another type, `Self::Output`). A qualified
+    /// `a::T::function` is never proven: the impl that names `T` in this module
+    /// may be another `T`'s. Read from this file alone: a `T` whose impls sit
+    /// in another file or module proves nothing here.
+    fn constructed(&self, head: &str, function: &str, module: Option<usize>, decls: &[Decl<'_>]) -> Option<Vec<&'static str>> {
+        if !is_identifier(head) {
+            return None;
+        }
+        let declared = self.constructors.get(&(head.to_string(), function.to_string()))?;
+        let in_module = declared.iter().filter(|(&f, _)| {
+            module_of(decls, f) == module && self.impl_owners.get(&f).is_some_and(|o| strip_generics(o).trim() == head)
+        });
         let mut agreed: Option<Vec<&'static str>> = None;
-        for returns in declared.values() {
+        for (_, returns) in in_module {
             let (rest, peeled) = peel(returns.as_deref()?);
             let returned = strip_generics(rest);
             let returned = returned.trim();
-            if !(returned == "Self" || base_name(returned) == owner) || agreed.as_ref().is_some_and(|a| *a != peeled) {
+            if !(returned == "Self" || base_name(returned) == head) || agreed.as_ref().is_some_and(|a| *a != peeled) {
                 return None;
             }
             agreed = Some(peeled);
@@ -786,16 +822,32 @@ impl<'tree> Receivers<'tree> {
     }
 
     /// The type of `self.field` for a caller whose self type is `own` (S-587):
-    /// the one field `field` the file's struct `own` declares, by its declared
-    /// type.
-    fn member_type(&self, own: &str, field: &str, source: &[u8]) -> Option<Proven> {
+    /// the one field `field` that the struct `own` declared in `module` — the
+    /// caller's, whose scope its field types are written in — declares, by its
+    /// declared type.
+    fn member_type(&self, own: &str, field: &str, module: Option<usize>, file: &FileDecls<'_, '_>) -> Option<Proven> {
         let declared = self.members.get(&(own.to_string(), field.to_string()))?;
-        let mut fields = declared.values();
-        let (Some(&declared), None) = (fields.next(), fields.next()) else {
+        let mut fields = declared
+            .values()
+            .filter(|(_, owner)| owner.is_some_and(|o| module_of(file.decls, o) == module));
+        let (Some(&(declared, _)), None) = (fields.next(), fields.next()) else {
             return None;
         };
-        declared_type(declared.utf8_text(source).ok()?.trim(), declared, Some(own), source)
+        declared_type(declared.utf8_text(file.source).ok()?.trim(), declared, Some(own), file.source)
     }
+}
+
+/// The module a declaration sits in: the nearest enclosing module
+/// declaration (an inline `mod m { … }`), `None` for the file's own.
+fn module_of(decls: &[Decl<'_>], decl: usize) -> Option<usize> {
+    let mut at = decls[decl].parent;
+    while let Some(i) = at {
+        if decls[i].kind == NodeKind::Module {
+            return Some(i);
+        }
+        at = decls[i].parent;
+    }
+    None
 }
 
 /// Every pattern leaf `pattern` binds a name with — each named leaf under it.

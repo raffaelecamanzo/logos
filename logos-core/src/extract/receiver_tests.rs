@@ -358,3 +358,54 @@ fn h() { let y = m::S {}; y.f(); }
 ";
     assert_eq!(calls_of_f(src), vec![other()]);
 }
+
+#[test]
+fn a_constructor_proves_only_through_an_impl_of_the_same_name_in_the_callers_module() {
+    // Another module's `A`, or a qualified `elsewhere::A`, is not the `A` the
+    // local impl declares: neither proves the call's type.
+    let qualified = "\
+mod support { pub struct A; impl A { pub fn new() -> Self { A } pub fn f(&self) {} } }
+fn g() { let x = elsewhere::A::new(); x.f(); }
+";
+    let imported = "\
+use crate::model::A;
+mod tests { pub struct A; impl A { pub fn new() -> Self { A } pub fn f(&self) {} } }
+fn g() { let x = A::new(); x.f(); }
+";
+    assert_eq!(calls_of_f(qualified), vec![other()]);
+    assert_eq!(calls_of_f(imported), vec![other()]);
+}
+
+#[test]
+fn an_own_field_or_self_proves_only_through_the_callers_own_module() {
+    // `impl S` names the imported `S`, not `tests::S`, whose field type is
+    // written relative to `tests`; `impl crate::other::S` is not the `S` this
+    // file's scope names, so its `Self` proves nothing either.
+    let field = "\
+use crate::model::S;
+pub struct B;
+impl B { pub fn f(&self) {} }
+mod tests { pub struct S { pub x: super::B } }
+impl S { fn g(&self) { self.x.f(); } }
+";
+    let self_type = "\
+mod inner { pub struct S; }
+use inner::S;
+impl crate::other::S { fn g(x: &Self) { x.f(); } }
+";
+    assert_eq!(calls_of_f(field), vec![other()]);
+    assert_eq!(calls_of_f(self_type), vec![other()]);
+}
+
+#[test]
+fn a_constructor_and_a_field_inside_one_inline_module_still_prove() {
+    let src = "\
+mod m {
+    pub struct A;
+    impl A { pub fn new() -> Self { A } pub fn f(&self) {} }
+    pub struct H { a: A }
+    impl H { fn g(&self) { let x = A::new(); x.f(); self.a.f(); } }
+}
+";
+    assert_eq!(calls_of_f(src), vec![typed("A", None)]);
+}
