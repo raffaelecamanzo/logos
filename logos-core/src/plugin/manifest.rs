@@ -1428,7 +1428,9 @@ fn validate_module_model(
 /// `import_roots` are the `path` model's data, and nothing else reads them; a
 /// stem is a bare file stem, a root a relative `/`-separated directory, and the
 /// family a bare token — an entry that could never match is a descriptor bug,
-/// not data that silently matches nothing.
+/// not data that silently matches nothing. `enclosing_namespaces` (S-595) is
+/// the `namespace` model's data, and is refused under any other kind for the
+/// same reason.
 fn validate_path_model_data(m: &ModuleModel) -> Result<(), String> {
     if m.enclosing_namespaces && m.kind != ModuleModelKind::Namespace {
         return Err(format!(
