@@ -1232,6 +1232,14 @@ pub fn chain(x: &S) { x.run(); make().run(); }
     }
 
     #[test]
+    fn a_reconcile_that_purges_nothing_advances_nothing() {
+        let (tmp, engine) = lib_only();
+        assert_empty_purge_advances_nothing(&engine, tmp.path(), || {
+            assert_eq!(engine.run_reconcile().expect("reconcile runs").reconciled_files, 0);
+        });
+    }
+
+    #[test]
     fn a_no_op_sync_advances_nothing_and_its_annotate_pass_moves_no_residue_input() {
         // The one pass that rewrites `edges` without advancing: `annotate`
         // re-derives its `ForbiddenDependency` edges and policy nodes on every
