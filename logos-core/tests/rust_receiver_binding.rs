@@ -304,6 +304,25 @@ fn the_callers_use_changing_type_rebinds_on_sync() {
 }
 
 #[test]
+fn a_test_module_reaches_its_parents_imported_type_through_its_glob() {
+    // `use super::*` in a test module of its own file brings in what the
+    // parent module imports — the shape of this repository's
+    // `#[cfg(test)] mod tests;` — and `crate::Store` reads the root's
+    // re-export.
+    let edges = edges_by_source(&[
+        ("src/lib.rs", "pub mod store;\npub mod user;\npub use store::Store;\n"),
+        ("src/store.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n"),
+        (
+            "src/user.rs",
+            "use crate::store::Store;\npub fn by_root(x: &crate::Store) { x.get(); }\n#[cfg(test)]\nmod tests;\n",
+        ),
+        ("src/user/tests.rs", "use super::*;\nfn probe(x: &Store) { x.get(); }\n"),
+    ]);
+    assert_eq!(targets(&edges, "src/user.rs:by_root@2"), ["src/store.rs:get@3"]);
+    assert_eq!(targets(&edges, "src/user/tests.rs:probe@2"), ["src/store.rs:get@3"]);
+}
+
+#[test]
 fn a_re_export_added_or_removed_on_sync_rebinds_the_importing_crates_call() {
     let files = workspace("use app_core::Store;\npub fn run(x: &Store) -> u8 { x.get() }\n");
     let initial: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();

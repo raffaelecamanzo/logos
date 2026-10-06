@@ -3175,9 +3175,12 @@ impl Ctx<'_> {
     /// that reaches no in-repository declaration names an external type.
     ///
     /// A path whose module re-exports the name (`use logos_core::Engine`, with
-    /// `pub use engine::Engine;` in that crate's root) is followed through the
-    /// re-export ([`reexported_type`](Ctx::reexported_type)): it names the
-    /// declaration the re-export names, which the module walk alone cannot see.
+    /// `pub use engine::Engine;` in that crate's root; `crate::Runtime`) is
+    /// followed through the re-export ([`reexported_type`](Ctx::reexported_type)):
+    /// it names the declaration the re-export names, which the module walk
+    /// alone cannot see. So is a name a glob of the file brings in from its
+    /// module's own imports (`use super::*` in a test module whose parent
+    /// imports `Runtime`), exactly one across the globs.
     fn resolve_receiver_type(&self, segs: &[String]) -> Res {
         let head = segs[0].as_str();
         let imported = (!matches!(head, "crate" | "self" | "super"))
@@ -3192,15 +3195,47 @@ impl Ctx<'_> {
             Res::NotFound => {}
             decided => return decided,
         }
-        let Some((name, prefix)) = path.split_last().filter(|(_, prefix)| !prefix.is_empty()) else {
+        let Some((name, prefix)) = path.split_last() else {
             return Res::NotFound;
         };
-        match self.resolve_path(prefix, Want::Module, depth) {
-            Res::Found(module) => match self.ix.module_key.get(&module) {
-                Some(key) => self.reexported_type(key, name, MAX_ALIAS_DEPTH),
+        if !prefix.is_empty() {
+            return match self.module_key_of(prefix, depth) {
+                Some(key) => self.reexported_type(&key, name, MAX_ALIAS_DEPTH),
                 None => Res::NotFound,
+            };
+        }
+        let globs = self.scope().map_or(&[][..], |s| s.globs.as_slice());
+        let mut found: Vec<NodeId> = Vec::new();
+        for glob in globs {
+            let Some(key) = self.module_key_of(glob, depth) else { continue };
+            match self.reexported_type(&key, name, MAX_ALIAS_DEPTH) {
+                Res::Found(id) => found.push(id),
+                Res::Ambiguous => return Res::Ambiguous,
+                Res::NotFound => {}
+            }
+        }
+        found.sort();
+        found.dedup();
+        exactly_one(&found)
+    }
+
+    /// The module a path names, read from the source (S-588): `crate`, `self`
+    /// and `super` alone name the source's crate root, own module and parent,
+    /// which a path lookup for a member does not; any longer path is resolved
+    /// as a [`Want::Module`].
+    fn module_key_of(&self, segs: &[String], depth: u8) -> Option<ModKey> {
+        let (krate, mods) = self.source_module()?;
+        let supers = segs.iter().take_while(|s| s.as_str() == "super").count();
+        match segs {
+            [head] if head == "crate" => Some((krate, Vec::new())),
+            [head] if head == "self" => Some((krate, mods)),
+            _ if supers == segs.len() && supers <= mods.len() => {
+                Some((krate, mods[..mods.len() - supers].to_vec()))
+            }
+            _ => match self.resolve_path(segs, Want::Module, depth) {
+                Res::Found(module) => self.ix.module_key.get(&module).cloned(),
+                _ => None,
             },
-            _ => Res::NotFound,
         }
     }
 

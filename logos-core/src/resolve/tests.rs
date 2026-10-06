@@ -2558,6 +2558,16 @@ fn a_type_another_crate_re_exports_is_followed_to_its_declaration() {
     let ix = index(&r, std::slice::from_ref(&import));
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::ExternalType { candidates: Vec::new() }));
+    // A glob of the re-exporting module brings the name in too, and so does a
+    // `crate::` path written inside the re-exporting crate.
+    let ix = index(&r, &[lib_glob(91, "other"), reexport("engine::Engine")]);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 415, EdgeKind::Calls);
+    let own_crate = UnresolvedRefRow {
+        receiver: Some(ReceiverShape::Other),
+        ..call(102, OTHER_LIB_RS, 21, "crate::Engine::start")
+    };
+    let ix = index(&own_crate, &[reexport("engine::Engine")]);
+    bound_to(bind(&own_crate, &ix, BindingPolicy::Strict), 21, 415, EdgeKind::Calls);
     // A re-export of something the repository does not declare is external too,
     // and a re-export naming itself ends.
     for written in ["std::x::Engine", "Engine"] {
