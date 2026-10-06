@@ -868,21 +868,10 @@ fn extract_one(
                 Vec::new()
             },
             self_type: decl.self_type.clone(),
-            // S-591 / FR-EX-32: the range a callable admits; unknown on every
-            // other node.
-            params: if is_callable {
-                decl.params.and_then(|p| p.range)
-            } else {
-                None
-            },
-            // CR-200: whether a Rust impl function takes `self` — its list
-            // writes a receiver. Unknown on every other node, and on one whose
-            // plugin captured no list for it.
-            takes_self: if is_rust_method {
-                decl.params.map(|p| p.receiver)
-            } else {
-                None
-            },
+            // S-591 / FR-EX-32: the range a callable admits; CR-200: whether a
+            // Rust impl function's list writes a receiver. Unknown elsewhere.
+            params: decl.params.filter(|_| is_callable).and_then(|p| p.range),
+            takes_self: decl.params.filter(|_| is_rust_method).map(|p| p.receiver),
         });
 
         // A Contains edge links the enclosing scope to this declaration; both
@@ -1667,10 +1656,8 @@ fn collect_refs(
             let capture = capture_names[cap.index as usize];
             // A `_`-prefixed capture is a predicate operand (`@_receiver`),
             // never a reference.
-            if capture.starts_with('_') {
-                continue;
-            }
-            if arguments.note(capture, node) {
+            // An `@arity.*` capture records no row of its own either (S-591).
+            if capture.starts_with('_') || arguments.note(capture, node) {
                 continue;
             }
             // A receiver marker records no row of its own: it is read before
@@ -1872,45 +1859,11 @@ fn collect_refs(
                     });
                 }
                 // Calls nested inside a macro invocation's token tree (S-162,
-                // CR-043): tree-sitter does not parse a macro body as
-                // expressions, so the call/method-call query patterns cannot
-                // match inside it. Walk the token tree in code and emit the same
-                // `Calls` path/method RefFacts, attributed to the macro's
-                // enclosing declaration — so a callee whose only call site is a
-                // macro argument (`format!("{x}", x = activity_card(s))`,
-                // `self.state.chip_class()`) is bound, or stays honestly
-                // unresolved, exactly like any other call ([NFR-RA-05]).
+                // CR-043), attributed to the macro's enclosing declaration —
+                // see [`macro_rows`].
                 "ref.macro" => {
                     let caller = enclosing_decl(node).map(|i| &decls[i]);
-                    for call in macro_call_refs(node, source) {
-                        if call.target.is_empty() {
-                            continue;
-                        }
-                        // `self.f()` in a macro argument: the row the same call
-                        // records outside one (S-493, S-514). Any other method
-                        // call is `other`, as outside one (S-517): a shapeless
-                        // row would no longer merge with the query's `other`
-                        // row of the same call, which the shape-keyed dedup
-                        // keeps apart.
-                        let (target, form, receiver) = if call.self_receiver {
-                            receiver::self_call(caller, &call.target)
-                        } else {
-                            let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
-                            (call.target, call.form, shape)
-                        };
-                        out.push(RefFact {
-                            source: source_symbol.clone(),
-                            target,
-                            alias: None,
-                            form,
-                            kind: EdgeKind::Calls,
-                            line: call.line,
-                            relation: None,
-                            receiver,
-                            peeled: None,
-                            arg_count: call.arg_count,
-                        });
-                    }
+                    out.extend(macro_rows(node, source, caller, &source_symbol));
                 }
                 // A type relation (S-466, CR-149 §3.2 B, FR-EX-10): the captured
                 // node is a TYPE, recorded as a Path-form row of the capture's
@@ -1953,6 +1906,51 @@ fn collect_refs(
 
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
     dedup_sort_refs(&mut out);
+    out
+}
+
+/// The `Calls` rows of the calls nested inside one macro invocation's token
+/// tree (S-162, CR-043): tree-sitter does not parse a macro body as
+/// expressions, so the call/method-call query patterns cannot match inside it.
+/// The token tree is walked in code ([`macro_call_refs`]) and each call emits
+/// the same `Calls` path/method row it would outside the macro, attributed to
+/// the macro's enclosing declaration `caller` — so a callee whose only call
+/// site is a macro argument (`format!("{x}", x = activity_card(s))`,
+/// `self.state.chip_class()`) is bound, or stays honestly unresolved, exactly
+/// like any other call ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, source_symbol: &LogosSymbol) -> Vec<RefFact> {
+    let mut out = Vec::new();
+    for call in macro_call_refs(macro_node, source) {
+        if call.target.is_empty() {
+            continue;
+        }
+        // `self.f()` in a macro argument: the row the same call records
+        // outside one (S-493, S-514). Any other method call is `other`, as
+        // outside one (S-517): a shapeless row would no longer merge with the
+        // query's `other` row of the same call, which the shape-keyed dedup
+        // keeps apart. Its argument count (S-591) is the token tree's, for the
+        // same reason.
+        let (target, form, receiver) = if call.self_receiver {
+            receiver::self_call(caller, &call.target)
+        } else {
+            let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
+            (call.target, call.form, shape)
+        };
+        out.push(RefFact {
+            source: source_symbol.clone(),
+            target,
+            alias: None,
+            form,
+            kind: EdgeKind::Calls,
+            line: call.line,
+            relation: None,
+            receiver,
+            peeled: None,
+            arg_count: call.arg_count,
+        });
+    }
     out
 }
 

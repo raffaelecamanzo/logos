@@ -442,6 +442,28 @@ fn ruby_ranges_and_counts() {
     assert_eq!(counts["User"], vec![None], "the receiver row is no callee");
 }
 
+/// Only a callable records a range: a droppable Java override that captures a
+/// `record`'s component list still leaves the record's class node unknown.
+#[test]
+fn a_list_a_non_callable_owns_records_no_range() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join(".logos/plugins/java/queries");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("symbols.scm"),
+        "(record_declaration name: (identifier) @symbol.class)\n\
+         (record_declaration parameters: (formal_parameters) @arity.parameters)\n\
+         (formal_parameters (formal_parameter) @arity.required)\n",
+    )
+    .unwrap();
+    let registry = LanguageRegistry::load(tmp.path()).expect("override loads");
+    let plugin = registry.for_extension("java").expect("java grammar");
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let facts = extract(&FileInput::new("src/R.java", "record R(int a, int b) {}\n"), plugin, &ctx);
+    let record = facts.nodes.iter().find(|n| n.kind == NodeKind::Class).expect("the record's class node");
+    assert_eq!((record.name.as_str(), record.params), ("R", None));
+}
+
 /// A list child no capture covers makes the range unknown rather than
 /// miscounted: a Rust `fn` with a parameter the query does not classify (here a
 /// droppable override that captures the list and no parameter).
