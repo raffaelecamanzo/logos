@@ -482,9 +482,11 @@ crate's type or a method the peeled `Arc`/`Rc`/`Box` provides itself, such as
 inside an `impl`. Every other unbound Rust call — a path call such as
 `Vec::new()` or `serde_json::to_string(…)`, a bare call, or a `Self::m` call in
 a trait's default body — takes no receiver walk, so it is counted in
-`unclassified` rather than given a reason. In `workspace status` the
-Rust row's `type-in-another-member` stays `0`: a type of another member is not
-resolved, and is counted `external-type`.
+`unclassified` rather than given a reason. A required trait method — a
+signature with no body — is not recorded as a declaration, so a `self.m()` call
+to one from the trait's default body reads `supertype-unreached`. In
+`workspace status` the Rust row's `type-in-another-member` stays `0`: a type of
+another member is not resolved, and is counted `external-type`.
 
 `call_residue` is computed when `status` runs and never stored. It costs a
 `status` call a fraction of a second on a Java project, about 0.4 s on a Rust
