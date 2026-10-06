@@ -1069,6 +1069,8 @@ pub fn chain(x: &S) { x.run(); make().run(); }
     #[test]
     fn an_unreadable_configuration_states_no_residue_walks_nothing_and_caches_nothing() {
         let (tmp, engine) = lib_only();
+        // Primed first, so a cached residue exists that a failure could serve.
+        status_equal_to_fresh(&engine);
         write(tmp.path(), ".logos/config.toml", "[resolution\npolicy = ");
 
         let status = engine.status();
@@ -1080,11 +1082,12 @@ pub fn chain(x: &S) { x.run(); make().run(); }
             "{:?}",
             status.warnings
         );
-        assert_eq!(engine.call_residue_walks(), 0, "nothing walked, so nothing cached");
+        assert_eq!(engine.call_residue_walks(), 1, "the unread config walked nothing");
 
+        // The readable config is the primed key again: a hit, never a walk.
         fs::remove_file(tmp.path().join(".logos/config.toml")).unwrap();
         status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 1, "the readable config walks once");
+        assert_eq!(engine.call_residue_walks(), 1, "the failure displaced nothing");
     }
 
     #[test]
