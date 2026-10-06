@@ -27,12 +27,13 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 ### Fixed
 
 - **A config-narrowing purge advances the graph revision (CR-201, S-605).**
-  The reconcile an evaluation tool runs first (`logos scan`, `gate` and the
-  others), and the first navigation after an `exclude` edit, removed the newly
-  excluded files without advancing the graph revision when nothing else
-  changed. A reader keyed on the revision — the native wiki tier, and now the
-  call residue — kept serving the purged graph until the next graph-changing
-  `sync`. Both purges now advance it once they have committed.
+  When an `exclude` edit narrowed the configuration, two paths removed the
+  newly excluded files without advancing the graph revision if nothing else
+  changed: the reconcile an evaluation tool runs first (`logos scan`, `gate`
+  and the others), and the navigation prologue, which runs once at an engine's
+  first navigation. A reader keyed on the revision — the native wiki tier, and
+  now the call residue — kept serving the purged graph until the next
+  graph-changing `sync`. Both purges now advance it once they have committed.
 
 ## [1.12.0] — 2026-10-06
 
