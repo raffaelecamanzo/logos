@@ -422,3 +422,9 @@ fn a_comma_inside_a_nested_argument_list_still_peels_its_wrapper() {
     let src = "fn g(x: Arc<HashMap<K, V>>) { x.f(); }\n";
     assert_eq!(calls_of_f(src), vec![typed("HashMap", Some("Arc"))]);
 }
+
+#[test]
+fn a_reference_to_a_path_starting_with_mut_is_not_a_mutable_reference() {
+    let src = "fn g(x: &mutation::A) { x.f(); }\n";
+    assert_eq!(calls_of_f(src), vec![typed("mutation::A", Some("&"))]);
+}
