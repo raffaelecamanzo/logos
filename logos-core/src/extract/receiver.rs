@@ -55,7 +55,7 @@
 //!
 //! | marker | receiver | `T` |
 //! |---|---|---|
-//! | `variable` | `x.send()` | the one `binding` of `x` in scope at the call, when it carries a `proof`: a declared type (`x: T`, `let x: T`), a constructor `let x = T::g(…)` whose every `g` the file declares on `T` returns `Self` or `T`, or a struct literal `let x = T { … }` |
+//! | `variable` | `x.send()` | the one `binding` of `x` in scope at the call, when it carries a `proof`: a declared type (`x: T`, `let x: T`), a constructor `let x = T::g(…)` whose every `g` the file declares on `T` returns `Self` or `T`, or a struct literal `let x = T { … }` of one segment (`E::V { … }` builds an `E`) |
 //! | `self_field` | `self.x.send()` | the declared type of the field `x` of the caller's own struct — the struct the file declares under the caller's self type (S-493) |
 //!
 //! A `binding` marker's pattern binds every name it spells; its companion
@@ -745,8 +745,14 @@ impl<'tree> Receivers<'tree> {
         let text = |n: Node<'_>| n.utf8_text(source).ok().map(str::trim);
         match *self.proofs.get(&binding.leaf.id())? {
             Proof::Declared(declared) => declared_type(text(declared)?, declared, own_type, source),
+            // One segment only: `E::V { … }` builds an `E`, and its text is
+            // the shape of a module-qualified `m::S { … }`.
             Proof::Literal(literal) => {
-                let head = type_head(text(literal)?, literal, own_type, source)?;
+                let written = strip_generics(text(literal)?);
+                if written.trim().trim_end_matches("::").contains("::") {
+                    return None;
+                }
+                let head = type_head(&written, literal, own_type, source)?;
                 Some(Proven { head, peeled: Vec::new() })
             }
             Proof::Constructor(callee) => {

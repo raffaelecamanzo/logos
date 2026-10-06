@@ -149,7 +149,8 @@
 ;                 `.type`, a declared type (a parameter, a typed `let`);
 ;                 `.constructor`, the callee `T::g` of `let x = T::g(…)`,
 ;                 proven only when every `g` the file declares on `T` returns
-;                 `Self` or `T`; `.literal`, the type of `let x = T { … }`.
+;                 `Self` or `T`; `.literal`, the type of `let x = T { … }`
+;                 when it is one segment (`E::V { … }` builds an `E`).
 (parameter
   pattern: (identifier) @ref.receiver.proof
   type: (_) @ref.receiver.proof.type)

@@ -343,3 +343,18 @@ fn one_caller_calling_through_a_wrapper_and_through_the_type_records_two_rows() 
     let src = with_types("fn g(a: Arc<A>, b: A) { a.f(); b.f(); }");
     assert_eq!(calls_of_f(&src), vec![typed("A", None), typed("A", Some("Arc"))]);
 }
+
+#[test]
+fn a_qualified_struct_literal_proves_nothing() {
+    // `E::V { … }` builds an `E`, not an `E::V`: from the text a variant
+    // literal and a module-qualified struct literal are the same shape, so
+    // neither proves a type.
+    let src = "\
+pub enum E { V { n: u32 } }
+impl E { pub fn f(&self) {} }
+pub mod m { pub struct S; impl S { pub fn f(&self) {} } }
+fn g() { let x = E::V { n: 1 }; x.f(); }
+fn h() { let y = m::S {}; y.f(); }
+";
+    assert_eq!(calls_of_f(src), vec![other()]);
+}
