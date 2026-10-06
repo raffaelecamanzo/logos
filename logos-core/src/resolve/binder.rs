@@ -2090,7 +2090,7 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
 /// [`bind`], and the [`Residue`] the first package-shaped call lookup that gave
 /// up recorded — `None` when none did (outside a package-shaped language, every
 /// row but a `Self::m` call through the caller's own type, S-493, a receiver
-/// call, S-514, and a Rust call retyped from its proven receiver, S-587).
+/// call, S-514, and a Rust call retyped from its proven receiver, S-588).
 /// Meaningful only for an
 /// [`Outcome::Unbound`]: a row that binds may still carry the miss of a rung it
 /// tried first (one of two static imports naming an external type).
