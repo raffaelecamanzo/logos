@@ -56,6 +56,20 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   `logos scan` or `logos index`, and possibly some methods newly reported dead
   that were reached only through such a call.
 
+- **Near-clone clustering no longer counts every pair of a shingle posting
+  (CR-198, S-601).** Clustering counted the shared shingles of every pair of
+  functions that carry a common shingle, so its memory and time grew with the
+  square of how many functions share the commonest shingles. On this
+  repository, every one-file `sync` peaked at about 2.4 GB, and a long-running
+  `serve --mcp` paid that on every watcher-triggered sync. Clustering now orders
+  shingles rarest-first and indexes only a short prefix of each function's
+  shingles. It keeps only pairs whose sizes can reach the threshold and checks
+  each remaining pair's similarity exactly. A shingle carried by thousands of
+  functions sorts last and drops out of almost every prefix. The thresholds,
+  the eligibility floor and the group identifiers are unchanged, so every
+  `clone_group` verdict is byte-identical to before. The prefix bound uses the
+  verdict's own comparison, so no rounding can drop a pair.
+
 ## [1.11.1] — 2026-10-06
 
 ### Fixed

@@ -1689,12 +1689,12 @@ fn is_test_recomputation_is_idempotent() {
 // ── S-229: the parallel annotation compute is byte-identical across workers ──
 
 /// Seed a graph exercising every verdict class, with a near-clone structure big
-/// enough to drive the parallel keyspace-sharded clustering (S-229): a live
-/// exported root calling a helper, a dead function, an exact-duplicate pair, a
-/// test-named function, two 12-member near-clone groups (identical 40-shingle
+/// enough to drive the parallel prefix-filtered clustering (S-229, CR-198): a
+/// live exported root calling a helper, a dead function, an exact-duplicate pair,
+/// a test-named function, two 12-member near-clone groups (identical 40-shingle
 /// sets), 8 solo functions with distinct sets, and a "hub" shingle every clustered
-/// function shares (a large posting → many candidate pairs across shards). Seed
-/// order is fixed, so a fresh store always assigns identical rowids — the verdict
+/// function shares (a large posting that sorts last and falls out of every
+/// prefix). Seed order is fixed, so a fresh store always assigns identical rowids — the verdict
 /// tuples (which include the `NodeId`) are comparable across runtimes.
 fn seed_annotate_fixture(rt: &Runtime) {
     const HUB: u64 = 9_000_000;
@@ -1740,8 +1740,8 @@ fn seed_annotate_fixture(rt: &Runtime) {
 /// S-229 / [NFR-RA-06]: the full annotation pass — near-clone clustering **and**
 /// the per-node verdict loop, both now on the shared worker pool — produces
 /// byte-identical verdicts across worker counts. The same fixture is annotated on
-/// runtimes with 1, 2, 4, and 8 worker threads (so the clustering shards the pair
-/// keyspace differently each time); the complete id-ordered verdict tuple must
+/// runtimes with 1, 2, 4, and 8 worker threads (so the clustering divides its
+/// probe-and-verify step differently each time); the complete id-ordered verdict tuple must
 /// equal the single-worker baseline exactly.
 ///
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
