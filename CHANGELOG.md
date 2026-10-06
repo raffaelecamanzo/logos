@@ -42,9 +42,11 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   `std::io::Error`, an external crate's type), when a peeled `Arc`, `Rc` or
   `Box` provides the method itself (`x.clone()` on an `Arc<T>` is
   `Arc::clone`; the list is the Rust plugin's new `[wrapper_methods]` table),
-  when a same-named type is one the file never imports, or when the type has
-  no such method or two of one rank. On this repository, against the same tree,
-  1,060 `Calls` edges are added (292 across crates), every one from such a
+  when a same-named type is one the file never imports, when the file
+  re-exporting `T` also imports its name elsewhere (a top-level `use` beside an
+  inline `mod`'s `pub use`), or when the type has no such method or two of one
+  rank. On this repository, against the same tree,
+  1,077 `Calls` edges are added (292 across crates), every one from such a
   row; nodes and symbols are unchanged, and 153 functions reported dead are
   now reached. Run `logos scan` or `logos index` to bind them.
 
