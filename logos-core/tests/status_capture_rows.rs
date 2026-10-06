@@ -21,7 +21,8 @@
 use std::fs;
 use std::path::Path;
 
-use logos_core::model::RefForm;
+use logos_core::graph_store::NewUnresolvedRef;
+use logos_core::model::{EdgeKind, RefForm};
 use logos_core::models::LanguageResolution;
 use logos_core::Engine;
 use tempfile::TempDir;
@@ -156,7 +157,6 @@ fn a_freshly_indexed_store_reports_every_ledger_row() {
         .runtime()
         .unwrap()
         .submit_read(|store| {
-            use logos_core::model::EdgeKind;
             let rows = store.unresolved_refs()?;
             let tally = |kind: EdgeKind| {
                 let of_kind: Vec<_> = rows.iter().filter(|r| r.kind == kind).collect();
@@ -187,4 +187,53 @@ fn an_unbound_capture_row_awaiting_a_renamed_target_moves_no_figure() {
     let (_cold_dir, cold) = cold_index(&tmp);
     assert_eq!(go_row(&engine), go_row(&cold));
     assert_eq!(global(&engine), global(&cold));
+}
+
+/// The per-relation-class coverage `index` and `sync` return reads the same
+/// population: a capture row keeps its relation `payload`, so an unbound one
+/// planted beside a real row of the class must not move the class's counts.
+/// (No default-feature plugin binds an artifact relation across files, so the
+/// rows are planted: the pass reads every ledger row for its `by_relation`,
+/// selected or not.)
+#[test]
+fn a_syncs_per_relation_coverage_leaves_out_capture_rows() {
+    let tmp = module();
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let b_id = rt
+        .submit_read(|store| {
+            Ok(store
+                .indexed_files()?
+                .into_iter()
+                .find(|f| f.path == B_FILE)
+                .expect("b/b.go is indexed")
+                .id)
+        })
+        .expect("read runs");
+    rt.submit_write(move |w| {
+            for (form, target) in [(RefForm::Path, "real.proto"), (RefForm::Symbol, "captured")] {
+                w.insert_unresolved_ref(&NewUnresolvedRef {
+                    file_id: Some(b_id),
+                    source_symbol: "cfg b",
+                    target,
+                    alias: None,
+                    form,
+                    kind: EdgeKind::ArtifactRef,
+                    line: Some(1),
+                    payload: Some("proto-import"),
+                    receiver: None,
+                })?;
+            }
+            Ok(())
+        })
+        .expect("rows planted");
+
+    write(tmp.path(), A_FILE, &format!("// touched\n{A_GO}"));
+    let result = engine.sync(&[A_FILE.into()]);
+    let class = &result.resolution.by_relation["proto-import"];
+    assert_eq!(
+        (class.bound, class.unresolved),
+        (0, 1),
+        "only the Path-form row is a reference of the class: {class:?}"
+    );
 }
