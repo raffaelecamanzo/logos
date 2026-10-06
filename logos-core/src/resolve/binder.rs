@@ -1210,6 +1210,40 @@ impl Index {
         }
         false
     }
+
+    /// The tokens a proven Rust receiver's row (S-588) can read through
+    /// another module's renaming import, beyond `dirty`: the name of every
+    /// `use … as N` (in any file) whose imported name a token of `dirty` — or
+    /// of a rename already added — spells, [`MAX_ALIAS_DEPTH`] hops at most.
+    ///
+    /// [`Ctx::reexported_type`] follows any module's import, so with
+    /// `pub use crate::inner::Store as Db;` a proven `Db::get` row binds to
+    /// `Store`'s method, and a change that spells only `Store` — a second
+    /// `Store` in the crate, the next re-export hop retargeted — moves it.
+    /// Neither the row's target nor its own file's imports spell `store`, so
+    /// [`ref_affected`](Index::ref_affected) alone would not select it. Read
+    /// only for those rows (`resolve::run`): every other row's selection is
+    /// unchanged.
+    pub(crate) fn renamed_import_tokens(&self, dirty: &HashSet<String>) -> HashSet<String> {
+        let mut extra: HashSet<String> = HashSet::new();
+        for _ in 0..MAX_ALIAS_DEPTH {
+            let before = extra.len();
+            for (name, paths) in self.file_scopes.values().flat_map(|s| &s.alias_expansions) {
+                for imported in paths.iter().filter_map(|p| p.last()).filter(|last| *last != name) {
+                    if super::tokens(imported)
+                        .iter()
+                        .any(|t| dirty.contains(t) || extra.contains(t))
+                    {
+                        extra.extend(super::tokens(name).into_iter().filter(|t| !dirty.contains(t)));
+                    }
+                }
+            }
+            if extra.len() == before {
+                break;
+            }
+        }
+        extra
+    }
 }
 
 /// `Contains` topology: child→parent, and scope→name→members with each member
@@ -2137,7 +2171,7 @@ fn bind_traced(
 /// [`Ctx::resolve_proven_receiver_call`]), and `T` is read by scope and module
 /// model only ([`Ctx::scope_only`]): a same-named type the file does not import
 /// is not the type it proved.
-fn is_proven_receiver_call(r: &UnresolvedRefRow) -> bool {
+pub(crate) fn is_proven_receiver_call(r: &UnresolvedRefRow) -> bool {
     r.kind == EdgeKind::Calls && r.form == RefForm::Path && r.receiver == Some(ReceiverShape::Other)
 }
 
