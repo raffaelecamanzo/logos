@@ -1,0 +1,345 @@
+//! Unit tests for Rust receiver typing (S-587, [CR-188], [FR-RS-42]).
+//!
+//! In their own file, the `declared_types_tests.rs` shape. One fixture per proof
+//! form, one per non-proof, and one per wrapper, each read off the rows the real
+//! Rust plugin's `references` query records. A proven `x.f()` is the Path-form
+//! `T::f` of shape `other`, with the wrappers peeled to reach `T`; everything
+//! else keeps the `other` Method row it recorded before.
+//!
+//! [CR-188]: ../../../docs/requests/CR-188-rust-receiver-typing.md
+//! [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+
+use crate::extract::{extract, Facts, FileInput, SymbolContext};
+use crate::model::{EdgeKind, ReceiverShape, RefForm};
+use crate::plugin::LanguageRegistry;
+
+/// The loaded registry, built once per test binary.
+fn registry() -> &'static LanguageRegistry {
+    static ONCE: std::sync::OnceLock<LanguageRegistry> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        LanguageRegistry::load(tmp.path()).expect("registry loads")
+    })
+}
+
+fn extract_rust(source: &str) -> Facts {
+    let plugin = registry().for_extension("rs").expect("rust grammar");
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    extract(&FileInput::new("src/lib.rs", source), plugin, &ctx)
+}
+
+/// One `Calls` row: `(target, form, receiver, peeled)`.
+type Row = (String, RefForm, Option<ReceiverShape>, Option<String>);
+
+/// The distinct `Calls` rows whose target is `f` or ends in `::f` — the calls
+/// of `f` the fixture's callers make — sorted. Distinct, so a fixture that
+/// repeats one shape in several callers reads as that shape once.
+fn calls_of_f(source: &str) -> Vec<Row> {
+    let key = |r: &Row| (r.0.clone(), r.1.as_i32(), r.2.map(ReceiverShape::as_i32), r.3.clone());
+    let mut rows: Vec<Row> = extract_rust(source)
+        .refs
+        .into_iter()
+        .filter(|r| r.kind == EdgeKind::Calls && (r.target == "f" || r.target.ends_with("::f")))
+        .map(|r| (r.target, r.form, r.receiver, r.peeled))
+        .collect();
+    rows.sort_by_key(key);
+    rows.dedup_by_key(|r| key(r));
+    rows
+}
+
+/// The retyped row `T::f`, peeling `peeled`.
+fn typed(head: &str, peeled: Option<&str>) -> Row {
+    (format!("{head}::f"), RefForm::Path, Some(ReceiverShape::Other), peeled.map(str::to_string))
+}
+
+/// The `other` Method row an unproven `x.f()` keeps.
+fn other() -> Row {
+    ("f".to_string(), RefForm::Method, Some(ReceiverShape::Other), None)
+}
+
+/// Two types that both define `f` — every fixture's receiver is one of them.
+const TYPES: &str = "\
+pub struct A { n: u32 }
+pub struct B;
+impl A { pub fn f(&self) {} }
+impl B { pub fn f(&self) {} }
+";
+
+fn with_types(body: &str) -> String {
+    format!("{TYPES}{body}")
+}
+
+// ── The five proof forms ─────────────────────────────────────────────────────
+
+#[test]
+fn a_typed_parameter_proves_its_receiver() {
+    assert_eq!(calls_of_f(&with_types("fn g(x: A) { x.f(); }")), vec![typed("A", None)]);
+}
+
+#[test]
+fn a_typed_let_proves_its_receiver() {
+    assert_eq!(calls_of_f(&with_types("fn g() { let x: B = make(); x.f(); }")), vec![typed("B", None)]);
+}
+
+#[test]
+fn a_constructor_whose_declared_return_is_self_or_the_type_proves_its_receiver() {
+    let src = "\
+pub struct A;
+pub struct B;
+impl A { pub fn new() -> Self { A } pub fn f(&self) {} }
+impl B { pub fn make(n: u32) -> B { B } pub fn f(&self) {} }
+fn g() { let x = A::new(); x.f(); }
+fn h() { let y = B::make(1); y.f(); }
+";
+    assert_eq!(calls_of_f(src), vec![typed("A", None), typed("B", None)]);
+}
+
+#[test]
+fn a_constructor_returning_anything_but_the_type_proves_nothing() {
+    // `Result<Self, E>`, `()` and another type are no proof; neither is a type
+    // whose `new` the file never declares, nor a `new` declared on two impls
+    // that disagree.
+    let src = "\
+pub struct A;
+pub struct B;
+pub struct C;
+pub struct D;
+impl A { pub fn new() -> Result<Self, String> { Ok(A) } pub fn f(&self) {} }
+impl B { pub fn new() {} pub fn f(&self) {} }
+impl C { pub fn new() -> A { A } pub fn f(&self) {} }
+impl D { pub fn new() -> Self { D } }
+impl Default for D { fn default() -> Self { D } }
+impl D { pub fn new() -> Box<Self> { Box::new(D) } }
+fn g() { let a = A::new(); a.f(); let b = B::new(); b.f(); let c = C::new(); c.f(); }
+fn h() { let e = Elsewhere::new(); e.f(); let d = D::new(); d.f(); }
+";
+    assert_eq!(calls_of_f(src), vec![other()]);
+}
+
+#[test]
+fn a_struct_literal_proves_its_receiver() {
+    assert_eq!(calls_of_f(&with_types("fn g() { let x = A { n: 1 }; x.f(); }")), vec![typed("A", None)]);
+}
+
+#[test]
+fn an_own_field_proves_its_receiver_through_the_callers_self_type() {
+    let src = "\
+pub struct A;
+impl A { pub fn f(&self) {} }
+pub struct Holder { inner: A, shared: std::sync::Arc<A> }
+impl Holder {
+    fn g(&self) { self.inner.f(); }
+    fn h(&self) { self.shared.f(); }
+}
+";
+    assert_eq!(calls_of_f(src), vec![typed("A", None), typed("A", Some("Arc"))]);
+}
+
+#[test]
+fn a_field_of_another_struct_or_of_no_struct_the_file_declares_proves_nothing() {
+    // `self.inner` in `Other`'s impl names `Other`'s field, which the file never
+    // declares; a trait's default body has no self type at all.
+    let src = "\
+pub struct A;
+impl A { pub fn f(&self) {} }
+pub struct Holder { inner: A }
+impl Other { fn g(&self) { self.inner.f(); } }
+trait T { fn h(&self) { self.inner.f(); } }
+";
+    assert_eq!(calls_of_f(src), vec![other()]);
+}
+
+#[test]
+fn self_names_the_callers_own_type() {
+    let src = "\
+pub struct A;
+impl A {
+    pub fn f(&self) {}
+    fn merge(&self, other: &Self) { other.f(); }
+    fn make() -> Self { let x = Self::make(); x.f(); A }
+}
+trait T { fn g(&self, other: &Self) { other.f(); } }
+";
+    assert_eq!(calls_of_f(src), vec![typed("A", None), typed("A", Some("&")), other()]);
+}
+
+// ── Non-proofs ───────────────────────────────────────────────────────────────
+
+#[test]
+fn a_shadowed_name_proves_nothing() {
+    // A typed `let` shadowed by an untyped one: two bindings in scope.
+    assert_eq!(
+        calls_of_f(&with_types("fn g() { let x: A = make(); let x = convert(x); x.f(); }")),
+        vec![other()]
+    );
+}
+
+#[test]
+fn a_re_bound_name_proves_nothing() {
+    // A typed parameter re-bound by a pattern in scope at the call.
+    let src = with_types(
+        "fn g(x: A, xs: Vec<A>) { for x in xs { x.f(); } }\n\
+         fn h(x: A, o: Option<A>) { if let Some(x) = o { x.f(); } }\n\
+         fn k(x: A, o: Option<B>) { match o { Some(x) => x.f(), None => {} } }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
+
+#[test]
+fn a_two_typed_name_proves_nothing() {
+    assert_eq!(
+        calls_of_f(&with_types("fn g() { let x: A = make(); let x: B = make(); x.f(); }")),
+        vec![other()]
+    );
+}
+
+#[test]
+fn a_generic_parameter_proves_nothing() {
+    let src = with_types(
+        "fn g<G: Tr>(x: G) { x.f(); }\n\
+         fn h<G: Tr>(x: &G) { x.f(); }\n\
+         pub struct S<T> { t: T }\n\
+         impl<T: Tr> S<T> { fn k(&self, x: T) { x.f(); self.t.f(); } }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
+
+#[test]
+fn an_impl_trait_or_a_dyn_receiver_proves_nothing_here() {
+    // `impl Trait` names no type; `dyn Trait` is FR-RS-08's dispatch row.
+    let src = with_types("fn g(x: impl Tr) { x.f(); }\nfn h(x: &dyn Tr) { x.f(); }\n");
+    assert_eq!(
+        calls_of_f(&src),
+        vec![("Tr::f".to_string(), RefForm::Method, None, None), other()]
+    );
+}
+
+#[test]
+fn a_chain_result_proves_nothing() {
+    assert_eq!(calls_of_f(&with_types("fn g(a: A) { a.b().f(); }")), vec![other()]);
+}
+
+#[test]
+fn a_name_bound_only_where_the_call_cannot_see_it_proves_nothing() {
+    // A `let` in a sibling block, a closure's parameter outside the closure,
+    // and a `let` after the call: none is in scope at the call.
+    let src = with_types(
+        "fn g() { { let x: A = make(); } x.f(); }\n\
+         fn h() { let c = |x: A| 0; x.f(); }\n\
+         fn k() { x.f(); let x: A = make(); }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
+
+#[test]
+fn a_binding_out_of_scope_at_the_call_does_not_shadow_the_one_in_scope() {
+    // The sibling block's `x` and the closure's `x` are not in scope at the
+    // call; the parameter is the one binding there. A `let`'s own initializer
+    // still sees the binding before it.
+    let src = with_types(
+        "fn g(x: A) { { let x: B = make(); } let c = |x: B| 0; x.f(); }\n\
+         fn h(x: B) { let x = x.f(); }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![typed("A", None), typed("B", None)]);
+}
+
+// ── Wrappers ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_reference_box_arc_or_rc_is_peeled_and_the_wrapper_recorded() {
+    let src = with_types(
+        "fn a(x: &A) { x.f(); }\n\
+         fn b(x: &mut A) { x.f(); }\n\
+         fn c<'l>(x: &'l mut A) { x.f(); }\n\
+         fn d(x: Box<A>) { x.f(); }\n\
+         fn e(x: std::sync::Arc<A>) { x.f(); }\n\
+         fn g(x: Rc<A>) { x.f(); }\n\
+         fn h(x: &Arc<A>) { x.f(); }\n",
+    );
+    assert_eq!(
+        calls_of_f(&src),
+        vec![
+            typed("A", Some("&")),
+            typed("A", Some("& Arc")),
+            typed("A", Some("&mut")),
+            typed("A", Some("Arc")),
+            typed("A", Some("Box")),
+            typed("A", Some("Rc")),
+        ]
+    );
+}
+
+#[test]
+fn option_vec_and_mutex_are_not_peeled() {
+    // The receiver's type is the wrapper itself, which the binder resolves (or
+    // finds external) on its own — never the type inside it.
+    let src = with_types(
+        "fn a(x: Option<A>) { x.f(); }\n\
+         fn b(x: Vec<A>) { x.f(); }\n\
+         fn c(x: std::sync::Mutex<A>) { x.f(); }\n\
+         fn d(x: Arc<Mutex<A>>) { x.f(); }\n\
+         fn e(x: ArcSwap<A>) { x.f(); }\n",
+    );
+    // `ArcSwap` is one character class from `Arc`, and no wrapper this rule
+    // peels.
+    assert_eq!(
+        calls_of_f(&src),
+        vec![
+            typed("ArcSwap", None),
+            typed("Mutex", Some("Arc")),
+            typed("Option", None),
+            typed("Vec", None),
+            typed("std::sync::Mutex", None),
+        ]
+    );
+}
+
+#[test]
+fn a_constructor_returning_a_wrapped_self_records_the_wrapper() {
+    let src = "\
+pub struct A;
+impl A { pub fn shared() -> std::sync::Arc<Self> { todo!() } pub fn f(&self) {} }
+fn g() { let x = A::shared(); x.f(); }
+";
+    assert_eq!(calls_of_f(src), vec![typed("A", Some("Arc"))]);
+}
+
+#[test]
+fn a_qualified_declared_type_is_written_as_the_file_names_it() {
+    let src = "fn g(x: crate::store::A<u8>) { x.f(); }\n";
+    assert_eq!(calls_of_f(src), vec![typed("crate::store::A", None)]);
+}
+
+#[test]
+fn a_type_that_names_no_single_type_proves_nothing() {
+    let src = "\
+fn a(x: [A; 2]) { x.f(); }
+fn b(x: (A, B)) { x.f(); }
+fn c(x: *const A) { x.f(); }
+fn d(x: fn() -> A) { x.f(); }
+fn e(x: &[A]) { x.f(); }
+fn g(x: Box<A, Alloc>) { x.f(); }
+fn h(x: <A as Tr>::Out) { x.f(); }
+fn k(x: Self::Item) { x.f(); }
+";
+    assert_eq!(calls_of_f(src), vec![("Box::f".to_string(), RefForm::Path, Some(ReceiverShape::Other), None), other()]);
+}
+
+#[test]
+fn a_written_path_call_and_a_proven_receiver_call_are_two_rows() {
+    // `A::f(&x)` is the call a programmer wrote; `x.f()` is a proven receiver.
+    // They share a target and differ in shape, so both reach the ledger.
+    let src = with_types("fn g(x: A) { A::f(&x); x.f(); }");
+    assert_eq!(
+        calls_of_f(&src),
+        vec![("A::f".to_string(), RefForm::Path, None, None), typed("A", None)]
+    );
+}
+
+#[test]
+fn one_caller_calling_through_a_wrapper_and_through_the_type_records_two_rows() {
+    // The peeled wrappers are part of the row's identity: `a.f()` through
+    // `Arc<A>` may reach a method the `Arc` provides, `b.f()` cannot.
+    let src = with_types("fn g(a: Arc<A>, b: A) { a.f(); b.f(); }");
+    assert_eq!(calls_of_f(&src), vec![typed("A", None), typed("A", Some("Arc"))]);
+}

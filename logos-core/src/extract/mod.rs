@@ -360,6 +360,15 @@ pub struct RefFact {
     ///
     /// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
     pub receiver: Option<ReceiverShape>,
+    /// The wrappers a proven receiver's declared type was peeled of to reach
+    /// the type its Path-form `T::m` row names (S-587, [FR-RS-42]), outermost
+    /// first and space-joined (`&`, `&mut`, `Box`, `Arc`, `Rc`: `"& Arc"` for
+    /// `&Arc<T>`); `None` for every other row, and for a receiver declared `T`
+    /// itself. Part of the ledger identity: a call through `Arc<T>` and one
+    /// through `T` bind differently.
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    pub peeled: Option<String>,
 }
 
 /// The extraction result for a single file.
@@ -778,6 +787,7 @@ fn extract_one(
                     line: decl.start_line,
                     relation: None,
                     receiver: None,
+                    peeled: None,
                 });
             }
         }
@@ -1374,7 +1384,7 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 }
 
 /// Deduplicate references on the ledger's uniqueness key
-/// `(source, target, form, kind, relation, receiver, alias)` — the same reference
+/// `(source, target, form, kind, relation, receiver, alias, peeled)` — the same reference
 /// on two lines is one ref, first wins — then sort into that canonical order
 /// ([NFR-RA-06]).
 ///
@@ -1394,12 +1404,17 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 /// caller's `this.m()` and `x.m()` share every other component and bind
 /// differently. A row with no shape keys exactly as before.
 ///
-/// The import alias (S-597, [FR-DB-07]) completes the identity: `from m import X
+/// The import alias (S-597, [FR-DB-07]) is part of it too: `from m import X
 /// as A` and `… as B` share every other component and bind through different
 /// local names, so both must reach the ledger. A row with no alias keys exactly
-/// as before. The key, the writer's `ON CONFLICT` target
-/// (`insert_unresolved_ref`) and the unique index of migration 31 name the same
-/// seven components.
+/// as before.
+///
+/// The peeled wrappers (S-587) complete the identity: a caller's `a.m()` with
+/// `a: Arc<T>` and `b.m()` with `b: T` both record `T::m`, and a method the
+/// wrapper itself provides binds through one and not the other. A row that
+/// peeled nothing keys exactly as before. The key, the writer's `ON CONFLICT`
+/// target (`insert_unresolved_ref`) and the unique index of migration 32 name
+/// the same eight components.
 ///
 /// Shared by the code [`collect_refs`] and the documentation extractor
 /// ([`doc`], S-035) so both passes produce byte-identical, order-independent
@@ -1417,8 +1432,10 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
     // missing alias and an empty one are one identity here exactly as in the
     // ledger.
     let alias_token = |r: &RefFact| -> String { r.alias.clone().unwrap_or_default() };
-    // `(source, target, form, kind, relation, receiver, alias)`.
-    type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>, String);
+    // The peeled wrappers likewise (`COALESCE(peeled, '')`, S-587).
+    let peeled_token = |r: &RefFact| -> String { r.peeled.clone().unwrap_or_default() };
+    // `(source, target, form, kind, relation, receiver, alias, peeled)`.
+    type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>, String, String);
     let mut seen: HashSet<LedgerKey> = HashSet::new();
     refs.retain(|r| {
         seen.insert((
@@ -1429,6 +1446,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             relation_token(r),
             r.receiver.map(ReceiverShape::as_i32),
             alias_token(r),
+            peeled_token(r),
         ))
     });
     refs.sort_by(|a, b| {
@@ -1440,6 +1458,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             relation_token(a),
             a.receiver.map(ReceiverShape::as_i32),
             a.alias.as_deref().unwrap_or_default(),
+            a.peeled.as_deref().unwrap_or_default(),
         )
             .cmp(&(
                 b.source.as_str(),
@@ -1449,6 +1468,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
                 relation_token(b),
                 b.receiver.map(ReceiverShape::as_i32),
                 b.alias.as_deref().unwrap_or_default(),
+                b.peeled.as_deref().unwrap_or_default(),
             ))
     });
 }
@@ -1496,8 +1516,9 @@ fn file_module_name(path_segments: &[&str], package_stems: &[String]) -> String 
 /// a language whose query marks its receivers (`@ref.receiver.*`), the receiver
 /// pass ([`receiver`]) then rewrites what the markers prove: a call whose
 /// receiver's type the file proves is recorded type-qualified, `T::<name>` in
-/// Path form, in place of its bare row (S-467, Java), and every Method-form row
-/// left bare records its receiver's shape (S-514, [FR-EX-13]).
+/// Path form, in place of its bare row (S-467, Java; S-587, Rust, which keeps
+/// the `other` shape and records the wrappers it peeled), and every Method-form
+/// row left bare records its receiver's shape (S-514, [FR-EX-13]).
 ///
 /// A method call the query captures as [`SELF_RECEIVER_METHOD_CAPTURE`] is a
 /// `self`-marked `@ref.method`: recorded as the Path-form `Self::m` when its
@@ -1587,7 +1608,15 @@ fn collect_refs(
             // enclosing declaration).
             if receiver::is_marker(capture) {
                 if let Some(receivers) = receivers.as_mut() {
-                    receivers.mark(capture, node, source, || enclosing_decl(node));
+                    // An anchor marker reads its companions from its own match
+                    // (S-587).
+                    let companion = |name: &str| {
+                        m.captures
+                            .iter()
+                            .find(|c| capture_names[c.index as usize] == name)
+                            .map(|c| c.node)
+                    };
+                    receivers.mark(capture, node, source, || enclosing_decl(node), companion);
                 }
                 continue;
             }
@@ -1629,6 +1658,7 @@ fn collect_refs(
                         line,
                         relation: None,
                         receiver: None,
+                        peeled: None,
                     });
                 }
                 "ref.method" | SELF_RECEIVER_METHOD_CAPTURE => {
@@ -1654,6 +1684,7 @@ fn collect_refs(
                             line,
                             relation: None,
                             receiver: None,
+                            peeled: None,
                         });
                         continue;
                     }
@@ -1683,6 +1714,7 @@ fn collect_refs(
                         line,
                         relation: None,
                         receiver: None,
+                        peeled: None,
                     });
                 }
                 // The language-agnostic import capture (S-015): the captured
@@ -1733,6 +1765,7 @@ fn collect_refs(
                         line,
                         relation: None,
                         receiver: None,
+                        peeled: None,
                     });
                 }
                 // A member-access fact (S-042, CR-005, FR-EX-08): a method body
@@ -1758,6 +1791,7 @@ fn collect_refs(
                         line,
                         relation: None,
                         receiver: None,
+                        peeled: None,
                     });
                 }
                 // Calls nested inside a macro invocation's token tree (S-162,
@@ -1796,6 +1830,7 @@ fn collect_refs(
                             line: call.line,
                             relation: None,
                             receiver,
+                            peeled: None,
                         });
                     }
                 }
@@ -1936,6 +1971,7 @@ fn tree_import_rows(
                 line,
                 relation: None,
                 receiver: None,
+                peeled: None,
             }
         })
         .collect()
@@ -1979,6 +2015,7 @@ fn type_relation_rows(
                 line,
                 relation: None,
                 receiver: None,
+                peeled: None,
             });
         }
     }

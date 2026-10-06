@@ -3354,6 +3354,73 @@ mod tests {
         assert!(check.is_empty(), "PRAGMA foreign_key_check is clean: {check:?}");
     }
 
+    /// S-587 / CR-188 / FR-RS-42: a populated v31 store upgrades to v32 forward
+    /// only. The `peeled` column is added `NULL` on every row, the identity
+    /// index is rebuilt with it, no row, id or other column changes, and every
+    /// `files.content_hash` is cleared so the next scan records the retyped
+    /// rows.
+    #[test]
+    fn migration_32_adds_the_peeled_wrappers_to_the_ledger_identity_and_triggers_reextraction() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..31]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/lib.rs', 'rust', 'h-rs');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local n'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES
+                 (10, 1, 8, 'n', 1), (11, 2, 8, 'm', 1);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 2);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver) VALUES
+                 (1, 'local n', 'run', NULL, 3, 2, 6, 0, NULL, 3),
+                 (1, 'local n', 'crate::b::Store', 'Store', 2, 3, 1, 1, NULL, NULL);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_ledger(&conn);
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..32]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 32, "31 → 32, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are untouched");
+        assert_eq!(read_ledger(&conn), ledger_before, "every row and id is unchanged");
+        let peeled: Vec<Option<String>> = conn
+            .prepare("SELECT peeled FROM unresolved_refs ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(peeled, vec![None, None], "the column is NULL on every stored row");
+        let hash: Option<String> = conn
+            .query_row("SELECT content_hash FROM files WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash, None, "every hash is cleared so the next scan re-extracts");
+
+        // The widened identity: a proven receiver's row through `Arc<T>` and
+        // through `T` are two rows; a repeat of either dedups.
+        let insert = |peeled: Option<&str>| {
+            conn.execute(
+                "INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, receiver, peeled) \
+                 VALUES (1, 'local n', 'Store::get', 2, 2, 9, 3, ?1) \
+                 ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
+                             COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, '')) DO NOTHING",
+                rusqlite::params![peeled],
+            )
+        };
+        assert_eq!(insert(None).unwrap(), 1, "a receiver declared `Store` is one row");
+        assert_eq!(insert(Some("Arc")).unwrap(), 1, "one through `Arc<Store>` is a second");
+        assert_eq!(insert(Some("& Arc")).unwrap(), 1, "and one through `&Arc<Store>` a third");
+        assert_eq!(insert(Some("Arc")).unwrap(), 0, "a repeated wrapper dedups");
+        assert_eq!(insert(None).unwrap(), 0, "a repeat that peeled nothing dedups as before");
+
+        // Forward-only: re-running the full ledger never re-applies migration 32.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 32", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 32 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 32");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

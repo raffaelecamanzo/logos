@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        31,
-        "v31 = migration 31 (S-597 CR-194 alias in the ledger identity)"
+        32,
+        "v32 = migration 32 (S-587 CR-188 peeled wrappers in the ledger identity)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 31,
+        recorded, 32,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 31);
+        assert_eq!(store.schema_version().unwrap(), 32);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 31);
+    assert_eq!(store.schema_version().unwrap(), 32);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 31, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 32, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -528,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 31);
+    assert_eq!(reopened.schema_version().unwrap(), 32);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1073,6 +1073,7 @@ fn path_ref<'a>(
         line: Some(3),
         payload: None,
         receiver: None,
+        peeled: None,
     }
 }
 
@@ -1095,11 +1096,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v31 forward-only).
+    // data (the runner applies v2..v32 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        31,
+        32,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -1124,6 +1125,7 @@ fn ledger_roundtrips_a_row_through_model_types() {
                 line: Some(7),
                 payload: None,
                 receiver: None,
+                peeled: None,
             })
         })
         .unwrap();
@@ -1349,6 +1351,7 @@ fn coverage_surfaces_per_relation_class_counts_from_the_ledger() {
                 line: Some(1),
                 payload: Some("proto-import"),
                 receiver: None,
+                peeled: None,
             })?;
             w.insert_unresolved_ref(&NewUnresolvedRef {
                 file_id: Some(f),
@@ -1360,6 +1363,7 @@ fn coverage_surfaces_per_relation_class_counts_from_the_ledger() {
                 line: Some(2),
                 payload: Some("proto-import"),
                 receiver: None,
+                peeled: None,
             })?;
             w.insert_unresolved_ref(&NewUnresolvedRef {
                 file_id: Some(f),
@@ -1371,6 +1375,7 @@ fn coverage_surfaces_per_relation_class_counts_from_the_ledger() {
                 line: Some(3),
                 payload: Some("proto-type"),
                 receiver: None,
+                peeled: None,
             })?;
             // A payloadless code ref must not appear in the artifact breakdown.
             w.insert_unresolved_ref(&path_ref(Some(f), "cfg svc", "helper"))
@@ -1609,6 +1614,7 @@ fn counts_reflect_rows_in_every_table() {
                 line: Some(1),
                 payload: None,
                 receiver: None,
+                peeled: None,
             })
         })
         .unwrap();
@@ -2777,6 +2783,7 @@ fn broker_ref<'a>(source_symbol: &'a str, topic: &'a str, payload: &'a str) -> N
         line: Some(7),
         payload: Some(payload),
         receiver: None,
+        peeled: None,
     }
 }
 

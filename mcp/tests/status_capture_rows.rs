@@ -140,6 +140,7 @@ async fn a_synced_store_and_a_cold_reindex_report_the_same_figures_through_mcp()
                 line: None,
                 payload: None,
                 receiver: None,
+                peeled: None,
             })
         })
         .expect("plant the awaiting capture");

@@ -583,6 +583,7 @@ fn emit_link_ref(dest: &str, source_symbol: &LogosSymbol, line: u32, facts: &mut
         line,
         relation: None,
         receiver: None,
+        peeled: None,
     });
 }
 
@@ -632,6 +633,7 @@ fn emit_code_token_ref(raw: &str, source_symbol: &LogosSymbol, line: u32, facts:
             line,
             relation: None,
             receiver: None,
+            peeled: None,
         });
         return;
     }
@@ -654,6 +656,7 @@ fn emit_code_token_ref(raw: &str, source_symbol: &LogosSymbol, line: u32, facts:
             line,
             relation: None,
             receiver: None,
+            peeled: None,
         });
     }
 }

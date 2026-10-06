@@ -2223,6 +2223,7 @@ fn persist_file(
                     // is re-extracted, so the capture row carries none.
                     payload: None,
                     receiver: None,
+                    peeled: None,
                 })?;
             }
             return Ok(PersistCounts {
@@ -2736,6 +2737,8 @@ fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
             payload: r.relation.map(|rel| rel.as_str()),
             // A Method-form call's receiver shape (S-514); `None` otherwise.
             receiver: r.receiver,
+            // A proven receiver's peeled wrappers (S-587); `None` otherwise.
+            peeled: r.peeled.as_deref(),
         })?;
     }
     Ok(())

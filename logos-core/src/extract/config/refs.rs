@@ -131,6 +131,7 @@ pub(in crate::extract) fn push_artifact_ref(
         line,
         relation: Some(relation),
         receiver: None,
+        peeled: None,
     });
     true
 }
