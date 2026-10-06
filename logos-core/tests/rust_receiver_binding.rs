@@ -433,3 +433,14 @@ fn an_inline_modules_use_never_retargets_the_files_own_type() {
     assert!(targets(&edges, "src/c.rs:run@2").is_empty(), "{edges:#?}");
     assert!(targets(&edges, "src/c.rs:probe@6").is_empty(), "{edges:#?}");
 }
+
+#[test]
+fn a_wrapper_associated_function_is_no_method_of_the_wrapper() {
+    // `Arc::downgrade(&a)` takes no `self`, so `a.downgrade()` autoderefs to
+    // `P`'s own method.
+    let edges = edges_by_source(&[
+        ("src/lib.rs", "pub mod p;\n"),
+        ("src/p.rs", "use std::sync::Arc;\npub struct P;\nimpl P {\n    pub fn downgrade(&self) {}\n}\npub fn call(a: Arc<P>) { a.downgrade(); }\n"),
+    ]);
+    assert_eq!(targets(&edges, "src/p.rs:call@6"), ["src/p.rs:downgrade@4"]);
+}

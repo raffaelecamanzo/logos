@@ -644,7 +644,7 @@ pub struct PluginManifest {
     ///
     /// ```toml
     /// [wrapper_methods]
-    /// Arc = ["clone", "as_ref", "borrow", "downgrade"]
+    /// Arc = ["clone", "as_ref", "borrow"]
     /// ```
     ///
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
