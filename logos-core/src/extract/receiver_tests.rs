@@ -459,3 +459,12 @@ fn a_closure_parameter_shadows_the_callers_parameter_inside_the_closure() {
 fn an_inferred_let_type_proves_nothing() {
     assert_eq!(calls_of_f(&with_types("fn g() { let x: _ = make(); x.f(); }")), vec![other()]);
 }
+
+#[test]
+fn an_associated_type_of_self_proves_nothing_inside_an_impl() {
+    let src = with_types(
+        "impl Iterator for A { type Item = B; \
+         fn next(&mut self) -> Option<B> { let x: Self::Item = make(); x.f(); None } }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
