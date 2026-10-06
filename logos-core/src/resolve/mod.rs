@@ -365,7 +365,8 @@ pub fn run(
 
     // The capture rows this run deletes, so the committed ledger is a fresh
     // index's (CR-187, FR-SY-10) — and the stats count only what stays.
-    let spent = spent_captures(&snap.refs, &swept, final_bound);
+    let live: HashSet<&str> = snap.nodes.iter().map(|n| n.symbol.as_str()).collect();
+    let spent = spent_captures(&snap.refs, &swept, &live, final_bound);
     let kept = || snap.refs.iter().filter(|r| !spent.contains(&r.id));
 
     let refs_total = kept().count() as u64;
@@ -593,11 +594,14 @@ fn retract_unproduced(
 /// - or its source is `swept`: every row of that source was re-bound this run
 ///   and decides its edges alone, as on a fresh index ([`retract_unproduced`]
 ///   has already turned the capture `Unbound` if it would restore an edge
-///   they no longer produce).
+///   they no longer produce);
+/// - or its source is no `live` node: the sync deleted or renamed it (its
+///   file removed, or re-extracted without it), so no edge leaves it, and a
+///   source that returns brings fresh rows of its own.
 ///
-/// A capture that cannot bind and whose source was not re-bound stays,
-/// unresolved: nothing else in the ledger may carry its edge, and it binds
-/// again if its target returns — never invented ([NFR-RA-05]).
+/// A capture that cannot bind, from a live source that was not re-bound,
+/// stays unresolved: nothing else in the ledger may carry its edge, and it
+/// binds again if its target returns — never invented ([NFR-RA-05]).
 ///
 /// A capture is told by its form: only capture-before-delete writes
 /// [`RefForm::Symbol`].
@@ -608,12 +612,14 @@ fn retract_unproduced(
 fn spent_captures(
     refs: &[UnresolvedRefRow],
     swept: &HashSet<&str>,
+    live: &HashSet<&str>,
     final_bound: impl Fn(&UnresolvedRefRow) -> bool,
 ) -> HashSet<i64> {
     refs.iter()
         .filter(|r| {
+            let source = r.source_symbol.as_str();
             r.form == RefForm::Symbol
-                && (final_bound(r) || swept.contains(r.source_symbol.as_str()))
+                && (final_bound(r) || swept.contains(source) || !live.contains(source))
         })
         .map(|r| r.id)
         .collect()

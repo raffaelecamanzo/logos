@@ -1234,6 +1234,38 @@ fn a_capture_spent_with_its_rebound_source_leaves_no_row() {
     assert_eq!(capture_rows(engine.runtime().expect("runtime")), Vec::new());
 }
 
+/// A capture whose source goes in the same sync — its file deleted — cannot
+/// bind and has no source to re-bind; no edge leaves a node that is gone, so
+/// the row goes too, as on a fresh index.
+#[test]
+fn a_capture_from_a_deleted_source_file_leaves_no_row() {
+    let (_tmp, engine) = assert_sync_matches_reindex(
+        &[
+            ("a.rs", "use crate::b::target;\nfn a() { target(); }\n"),
+            ("b.rs", "pub fn target() {}\n"),
+        ],
+        &[Edit::Put("b.rs", "// touched\npub fn target() {}\n"), Edit::Del("a.rs")],
+    );
+    assert_eq!(capture_rows(engine.runtime().expect("runtime")), Vec::new());
+}
+
+/// The same, with the source renamed in a file the sync re-extracts after
+/// the target's.
+#[test]
+fn a_capture_from_a_renamed_source_leaves_no_row() {
+    let (_tmp, engine) = assert_sync_matches_reindex(
+        &[
+            ("a.rs", "pub fn target() {}\n"),
+            ("b.rs", "use crate::a::target;\nfn caller() { target(); }\n"),
+        ],
+        &[
+            Edit::Put("a.rs", "// touched\npub fn target() {}\n"),
+            Edit::Put("b.rs", "use crate::a::target;\nfn caller2() { target(); }\n"),
+        ],
+    );
+    assert_eq!(capture_rows(engine.runtime().expect("runtime")), Vec::new());
+}
+
 /// A store an earlier binary synced carries resolved capture rows. Its next
 /// sync deletes them and keeps their edges — even a sync that changes nothing,
 /// which re-binds no row, so the stale row is met only in the snapshot.

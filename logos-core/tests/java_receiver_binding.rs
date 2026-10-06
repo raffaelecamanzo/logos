@@ -1108,12 +1108,23 @@ fn a_capture_before_delete_row_awaiting_its_target_is_unclassified() {
     let cold = tree(&[(MAILER_FILE, renamed), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     assert_eq!(java_residue(&engine), java_residue(&index(cold.path())));
 
-    // A capture awaiting a target nothing else names stays, unbound.
+    // A capture from a live caller, awaiting a target nothing else names,
+    // stays, unbound.
     let rt = engine.runtime().unwrap();
-    rt.submit_write(|w| {
+    let caller = rt
+        .submit_read(|store| {
+            Ok(store
+                .all_nodes()?
+                .into_iter()
+                .find(|n| n.name == "viaMailer")
+                .map(|n| n.symbol.as_str().to_string())
+                .expect("the viaMailer node"))
+        })
+        .unwrap();
+    rt.submit_write(move |w| {
         w.insert_unresolved_ref(&logos_core::graph_store::NewUnresolvedRef {
             file_id: w.file_id(MAILER_FILE)?,
-            source_symbol: "planted caller",
+            source_symbol: &caller,
             target: "planted vanished target",
             alias: None,
             form: RefForm::Symbol,
