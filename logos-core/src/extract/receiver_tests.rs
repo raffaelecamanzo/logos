@@ -428,3 +428,15 @@ fn a_reference_to_a_path_starting_with_mut_is_not_a_mutable_reference() {
     let src = "fn g(x: &mutation::A) { x.f(); }\n";
     assert_eq!(calls_of_f(src), vec![typed("mutation::A", Some("&"))]);
 }
+
+#[test]
+fn a_struct_declared_twice_in_one_module_proves_no_field() {
+    // Not valid Rust, but parsed: two `Holder`s in the caller's module, whose
+    // `inner` disagree, prove neither.
+    let src = with_types(
+        "pub struct Holder { inner: A }\n\
+         pub struct Holder { inner: B }\n\
+         impl Holder { fn g(&self) { self.inner.f(); } }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
