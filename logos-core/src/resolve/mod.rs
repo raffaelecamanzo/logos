@@ -354,10 +354,11 @@ pub fn run(
         .collect();
     let stale = retract_unproduced(&snap.nodes, &snap.edges, &swept, &captures, &mut outcomes);
 
-    // Stats are over the WHOLE ledger, not just the re-bound subset: a row this
-    // run touched uses its fresh outcome, an untouched row reads through to its
-    // snapshot resolved flag (equal, by the invariant above, to what a re-bind
-    // would compute). `bound_now` indexes the touched rows; `final_bound` merges.
+    // Stats are over the whole committed ledger (the capture rows spent below
+    // excluded), not just the re-bound subset: a row this run touched uses its
+    // fresh outcome, an untouched row reads through to its snapshot resolved
+    // flag (equal, by the invariant above, to what a re-bind would compute).
+    // `bound_now` indexes the touched rows; `final_bound` merges.
     let bound_now: HashMap<i64, bool> =
         outcomes.iter().map(|(id, _, o)| (*id, is_bound(o))).collect();
     let final_bound =
