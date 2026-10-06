@@ -1211,6 +1211,26 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         assert_eq!(rust_unbound(&after), 4);
     }
 
+    /// A narrowing that admits every stored file still arms the purge, which
+    /// then removes nothing: no graph change, so no advance (FR-SY-09) and the
+    /// memo answers.
+    fn assert_empty_purge_advances_nothing(engine: &Engine, root: &Path, purge: impl FnOnce()) {
+        let before = status_equal_to_fresh(engine);
+        write(root, ".logos/config.toml", "exclude = [\"**/*.snap\"]\n");
+        purge();
+        let after = status_equal_to_fresh(engine);
+        assert_eq!(after.graph_revision, before.graph_revision, "nothing purged, nothing advanced");
+        assert_eq!(engine.call_residue_walks(), 1, "so the memo answers");
+    }
+
+    #[test]
+    fn a_navigation_prologue_that_purges_nothing_advances_nothing() {
+        let (tmp, engine) = lib_only();
+        assert_empty_purge_advances_nothing(&engine, tmp.path(), || {
+            let _ = engine.search("run", None, None);
+        });
+    }
+
     #[test]
     fn a_no_op_sync_advances_nothing_and_its_annotate_pass_moves_no_residue_input() {
         // The one pass that rewrites `edges` without advancing: `annotate`
