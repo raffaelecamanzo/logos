@@ -310,15 +310,17 @@ fn a_test_module_reaches_its_parents_imported_type_through_its_glob() {
     // `#[cfg(test)] mod tests;` — and `crate::Store` reads the root's
     // re-export.
     let edges = edges_by_source(&[
-        ("src/lib.rs", "pub mod store;\npub mod user;\npub use store::Store;\n"),
+        ("src/lib.rs", "pub mod store;\npub mod user;\npub mod root_user;\npub use store::Store;\n"),
         ("src/store.rs", "pub struct Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n"),
         (
             "src/user.rs",
-            "use crate::store::Store;\npub fn by_root(x: &crate::Store) { x.get(); }\n#[cfg(test)]\nmod tests;\n",
+            "use crate::store::Store;\npub fn by_parent(x: &Store) { x.get(); }\n#[cfg(test)]\nmod tests;\n",
         ),
+        ("src/root_user.rs", "pub fn by_root(x: &crate::Store) { x.get(); }\n"),
         ("src/user/tests.rs", "use super::*;\nfn probe(x: &Store) { x.get(); }\n"),
     ]);
-    assert_eq!(targets(&edges, "src/user.rs:by_root@2"), ["src/store.rs:get@3"]);
+    assert_eq!(targets(&edges, "src/user.rs:by_parent@2"), ["src/store.rs:get@3"]);
+    assert_eq!(targets(&edges, "src/root_user.rs:by_root@1"), ["src/store.rs:get@3"]);
     assert_eq!(targets(&edges, "src/user/tests.rs:probe@2"), ["src/store.rs:get@3"]);
 }
 
