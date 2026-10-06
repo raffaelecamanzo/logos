@@ -195,6 +195,18 @@ fn an_inherent_method_outranks_a_trait_impls_and_wrapper_and_std_methods_bind_no
     }
 }
 
+#[test]
+fn a_method_whose_impl_sits_in_another_module_binds() {
+    // The common split layout: `X` declared in `a.rs`, its methods in `c.rs`.
+    let edges = edges_by_source(&[
+        ("src/lib.rs", "pub mod a;\npub mod c;\npub mod user;\n"),
+        ("src/a.rs", "pub struct X;\n"),
+        ("src/c.rs", "impl crate::a::X {\n    pub fn m(&self) {}\n}\n"),
+        ("src/user.rs", "use crate::a::X;\npub fn f(x: &X) { x.m(); }\n"),
+    ]);
+    assert_eq!(targets(&edges, "src/user.rs:f@2"), ["src/c.rs:m@2"]);
+}
+
 // ── Across crates, through `use` ────────────────────────────────────────────
 
 /// A `cli` crate over an `app-core` crate, and a third crate declaring a

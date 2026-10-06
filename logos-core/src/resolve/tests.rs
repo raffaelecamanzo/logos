@@ -2647,6 +2647,22 @@ fn a_receiver_type_the_repository_does_not_declare_never_binds() {
 }
 
 #[test]
+fn a_type_declared_once_binds_a_method_whose_impl_sits_in_another_module() {
+    // `Store` is declared once in crate `crate` (in `util`); an impl block in
+    // `lib.rs` adds `scan` (416). Its name denotes the one `Store`, so the
+    // method binds wherever its impl sits.
+    let (mut nodes, mut edges, mut self_types, implements) = receiver_fixture();
+    nodes.push(node(416, "scan", NodeKind::Method, "src/lib.rs"));
+    edges.push(contains(1, 416));
+    self_types.push((NodeId(416), "Store".to_string()));
+    let r = proven(100, "Store::scan", None);
+    let mut refs = implements;
+    refs.extend([lib_use(90, "crate::util::Store", "Store"), r.clone()]);
+    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 416, EdgeKind::Calls);
+}
+
+#[test]
 fn a_same_named_type_of_another_module_is_told_apart_by_its_own_module() {
     // A second `Store` in `mod inner` (412) with its own `get` (413): the
     // crate now names two `Store`s, so a `get` binds only from the impls in
