@@ -447,3 +447,10 @@ fn a_match_guard_is_not_a_binding() {
     let src = with_types("fn k(x: A, o: Option<B>) { match o { Some(y) if x.ready() => x.f(), _ => {} } }");
     assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
 }
+
+#[test]
+fn a_closure_parameter_shadows_the_callers_parameter_inside_the_closure() {
+    // Two bindings of `x` are in scope inside the closure: no proof.
+    let src = with_types("fn g(x: A) { let c = |x: B| x.f(); }");
+    assert_eq!(calls_of_f(&src), vec![other()]);
+}
