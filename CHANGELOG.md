@@ -55,8 +55,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   `external-type` counts a proven receiver whose type the repository does not
   declare, or a method the peeled `Arc`/`Rc`/`Box` provides itself;
   `no-receiver-evidence` counts a method call whose receiver is not proven. A
-  Rust path or bare call that does not bind takes no receiver walk, so it is
-  counted in `unclassified` instead of being given a reason. Capture-before-delete
+  Rust path call (other than `Self::m` inside an `impl`) or bare call that does
+  not bind takes no receiver walk, so it is counted in `unclassified` instead of
+  being given a reason. Capture-before-delete
   rows are left out, as in every other figure. On this repository the Rust row
   reads 68,279 unbound: 47,278 `no-receiver-evidence`, 4,774 `external-type`,
   146 `supertype-unreached` and 16,081 `unclassified`.

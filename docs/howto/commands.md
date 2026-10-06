@@ -478,10 +478,11 @@ On the Rust row the reasons describe the calls Rust's receiver typing
 ([FR-RS-42](../specs/requirements/FR-RS-42.md)) decides: a method call whose
 receiver's type is proven (`external-type` for `String`, `Vec`, an external
 crate's type or a method the peeled `Arc`/`Rc`/`Box` provides itself, such as
-`clone`), an unproven receiver (`no-receiver-evidence`), and `Self::m` calls.
-Every other unbound Rust call — a path call such as `Vec::new()` or
-`serde_json::to_string(…)`, or a bare call — takes no receiver walk, so it is
-counted in `unclassified` rather than given a reason. In `workspace status` the
+`clone`), an unproven receiver (`no-receiver-evidence`), and `Self::m` calls
+inside an `impl`. Every other unbound Rust call — a path call such as
+`Vec::new()` or `serde_json::to_string(…)`, a bare call, or a `Self::m` call in
+a trait's default body — takes no receiver walk, so it is counted in
+`unclassified` rather than given a reason. In `workspace status` the
 Rust row's `type-in-another-member` stays `0`: a type of another member is not
 resolved, and is counted `external-type`.
 

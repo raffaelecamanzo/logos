@@ -1151,8 +1151,9 @@ pub struct CallResidue {
     /// walk records no reason for — a path call (`Vec::new()`,
     /// `serde_json::to_string(…)`) or a bare call with no in-repository target
     /// — since the binder gives a Rust row a reason only for a receiver call, a
-    /// `Self::m` call or a proven `T::m` call. They are never given a reason
-    /// for a path the bind did not take.
+    /// `Self::m` call inside an `impl` or a proven `T::m` call (a `Self::m` in a
+    /// trait's default body has no recorded self type, so it is unclassified
+    /// too). They are never given a reason for a path the bind did not take.
     pub unclassified: u64,
     /// Over what the external/other-member split was decided.
     pub scope: ResidueScope,

@@ -892,8 +892,9 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 /// ([`PackageLayout::peels_receivers`]: Rust), is re-walked by the binder
 /// under `policy` and counted under the reason the walk gave up with
 /// ([`binder::residue`]), so a reason can never describe a path the bind did not
-/// take. A Rust row the walk records no reason for — anything but a receiver,
-/// `Self::m` or proven `T::m` call — is `unclassified`.
+/// take. A Rust row the walk records no reason for — anything but a receiver
+/// call, a `Self::m` call inside an `impl` or a proven `T::m` call — is
+/// `unclassified`.
 /// The index is [`run`]'s, built with the same package layout, minus the
 /// path-specifier and imported-binding scopes `run` chains on: those are read
 /// only for a path-grammar (TypeScript, JavaScript, Go) file, never for a
