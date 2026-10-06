@@ -208,7 +208,10 @@ by each relation's payload token), read live from the graph.
 >   A Rust call on any other receiver binds when the file proves the
 >   receiver's type `T` — a typed parameter or `let`, `let x = T::new(…)` whose
 >   `new` returns `Self`, a struct literal `T { … }`, or `self.field` of the
->   caller's own struct — after peeling `&`, `&mut`, `Box`, `Arc` and `Rc`
+>   caller's own struct — after peeling `&`, `&mut`, `Box`, `Arc` and `Rc`.
+>   The constructor proof holds only for a `T` the caller's own module
+>   declares, so `let e = Engine::new(); e.run()` in another module stays
+>   unbound; a typed `let e: Engine = Engine::new();` binds it
 >   ([FR-RS-42](../specs/requirements/FR-RS-42.md)). `T` is read through the
 >   file's `use` declarations (and a `pub use` re-export, so `cli` code's
 >   `engine.runtime()` reaches `logos_core`'s `Engine::runtime`) to one type
