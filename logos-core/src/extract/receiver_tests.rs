@@ -440,3 +440,10 @@ fn a_struct_declared_twice_in_one_module_proves_no_field() {
     );
     assert_eq!(calls_of_f(&src), vec![other()]);
 }
+
+#[test]
+fn a_match_guard_is_not_a_binding() {
+    // Only an arm's pattern binds; the guard reads `x`, the parameter.
+    let src = with_types("fn k(x: A, o: Option<B>) { match o { Some(y) if x.ready() => x.f(), _ => {} } }");
+    assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
+}
