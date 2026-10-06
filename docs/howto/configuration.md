@@ -1643,6 +1643,41 @@ starting point and stay unbound. A class's header never names the class itself:
 A PHP `namespace\X` supertype is not captured. Rust's `impl Trait for X` methods
 bind their trait as before.
 
+### Receivers (`implicit_receiver`, `[wrapper_methods]`)
+
+`implicit_receiver` says what a bare call (`f()`, no receiver written) can
+mean inside a method. Omitting the key and writing `"none"` read the same for
+extraction, but only an explicit `"none"` also tells the binder that a bare
+call never reaches an instance member:
+
+```toml
+# Go, Rust, Python, PHP, TypeScript (and its .js files), TSX: a method is reached only through a
+# receiver, so a bare `f()` binds a free or imported `f`, never a method `f`.
+implicit_receiver = "none"
+```
+
+With it, a bare `f()` skips every member of a class-like container and every
+callable with a recorded self type (a Go or Rust method). It binds the free,
+imported or nested function `f` when there is one, and otherwise stays unbound —
+never a self-loop to the method it sits in. Java declares nothing, so its bare
+in-class call still binds the method it means (`this.m()`).
+
+`[wrapper_methods]` is for a language whose receiver typing peels wrappers off a
+declared type (Rust: `x: Arc<T>` proves `T`). It names, per wrapper, the
+methods the wrapper provides itself:
+
+```toml
+[wrapper_methods]
+Arc = ["clone", "as_ref", "borrow"]
+```
+
+A call through that wrapper to one of these methods (`x.clone()` on an
+`Arc<T>`) binds nothing — it is `Arc::clone`, whatever `T` defines — and is
+counted `external-type`. A wrapper with no entry provides nothing. The keys are
+the wrappers extraction peels (`Box`, `Arc`, `Rc`); another key never matches.
+Declaring the table also makes `status` report the language's `call_residue`
+([Commands](commands.md)). It defaults to empty.
+
 ### Outbound HTTP client calls (`invocations`)
 
 `invocations.scm` is the **consumer** side of cross-service coupling: it captures
