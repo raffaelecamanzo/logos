@@ -758,12 +758,9 @@ fn sync_re_decides_a_qualified_call_when_a_second_import_of_its_head_gains_and_l
     );
     write(tmp.path(), b, &helper("org.y.b"));
     engine.sync(&[b.into()]);
-    // A row that flips to unbound keeps the edge it committed (the resolution
-    // pass's commit semantics, as in the tests above), so the ledger is compared.
-    assert_eq!(
-        binding_facts(rt).1,
-        cold_facts(&tmp, &[a, b, CTL_FILE]).1
-    );
+    // The row that turns ambiguous takes its edge with it (S-596), so edges and
+    // ledger both equal a cold index's.
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &[a, b, CTL_FILE]));
     let call_row = |facts: &(Vec<(String, String, String)>, Vec<String>)| {
         facts.1.iter().filter(|r| r.contains(" Helper::util ")).cloned().collect::<Vec<_>>()
     };

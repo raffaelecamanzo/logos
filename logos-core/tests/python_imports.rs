@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use logos_core::model::{EdgeKind, NodeId, NodeKind, RefForm};
+use logos_core::model::{EdgeKind, NodeId, NodeKind};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
@@ -419,7 +419,8 @@ fn a_family_keeps_jvm_binding_and_keeps_csharp_off_php() {
 // ── sync ≡ reindex ───────────────────────────────────────────────────────────
 
 /// Every binding fact of the graph in an id-free form, capture-before-delete
-/// rows excluded — `namespace_imports.rs`'s comparison (NFR-RA-06).
+/// rows included — `namespace_imports.rs`'s comparison (NFR-RA-06), so a
+/// capture a sync leaves behind fails it (CR-187).
 fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
     rt.submit_read(|store| {
         let sym: HashMap<NodeId, String> = store
@@ -436,7 +437,6 @@ fn binding_facts(rt: &Runtime) -> (Vec<(String, String, String)>, Vec<String>) {
         let mut refs: Vec<String> = store
             .unresolved_refs()?
             .into_iter()
-            .filter(|r| r.form != RefForm::Symbol)
             .map(|r| {
                 format!(
                     "{} {} {:?} {:?} {:?} {}",

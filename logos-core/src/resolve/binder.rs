@@ -4017,8 +4017,8 @@ impl Ctx<'_> {
     /// two, never the first import's alone (a rival head met while another's
     /// rivals are being read binds nothing, [`in_rival_expansion`]); else a type
     /// of the source's own package; else, for a language that declares them
-    /// (S-595, [FR-RS-45]), the path read under each namespace enclosing the
-    /// source's own, nearest first
+    /// (S-595, [FR-RS-45]), the path read under the source's own namespace and
+    /// then each namespace enclosing it, nearest first
     /// ([`resolve_fqn_under`](Ctx::resolve_fqn_under)) — two types at one level
     /// are [`Res::Ambiguous`], never a pick of an outer level, and a level
     /// whose type has no such member ends that walk but not the rungs below it;
@@ -4067,7 +4067,10 @@ impl Ctx<'_> {
         if let Some(decided) = self.walk_from(self.package_type(package, head), rest, want) {
             return decided;
         }
-        for level in self.enclosing_levels(package) {
+        // The source's own namespace is the first prefix (`B.Thing` in `A.X` is
+        // `A.X.B.Thing`), as in `type_candidates`, then each enclosing one.
+        let own = self.enclosing_namespaces.then_some(package);
+        for level in own.into_iter().chain(self.enclosing_levels(package)) {
             match self.resolve_fqn_under(level, segs, want) {
                 None => {}
                 // A nearer level that reached a type hides the outer levels,
