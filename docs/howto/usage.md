@@ -170,7 +170,8 @@ by each relation's payload token), read live from the graph.
 >   one `foo` of the caller's own class (or the nearest proven base class that
 >   has one), a `super` call only through a proven base class, and a call on
 >   any other receiver binds **nowhere** unless the receiver's type is proven
->   (Java's typed receivers, [FR-RS-10](../specs/requirements/FR-RS-10.md)).
+>   (Java's typed receivers, [FR-RS-10](../specs/requirements/FR-RS-10.md);
+>   Rust's, [FR-RS-42](../specs/requirements/FR-RS-42.md), below).
 >   Where the caller sits — its file, class or module — is not evidence of what
 >   `x` is: an `other.foo()` inside a method `foo` never binds to that method
 >   itself, and never to a same-named function beside it
@@ -203,8 +204,21 @@ by each relation's payload token), read live from the graph.
 >   crate — and stays unbound, retried on sync, when that type defines none or
 >   two ([FR-RS-11](../specs/requirements/FR-RS-11.md)). A `self.helper()` in a
 >   trait's default method binds to a `helper` the trait itself provides (a
->   required, bodiless one has no node, so the call stays unbound);
->   `self.field.helper()` and `other.helper()` stay unbound. Go reads the
+>   required, bodiless one has no node, so the call stays unbound).
+>   A Rust call on any other receiver binds when the file proves the
+>   receiver's type `T` — a typed parameter or `let`, `let x = T::new(…)` whose
+>   `new` returns `Self`, a struct literal `T { … }`, or `self.field` of the
+>   caller's own struct — after peeling `&`, `&mut`, `Box`, `Arc` and `Rc`
+>   ([FR-RS-42](../specs/requirements/FR-RS-42.md)). `T` is read through the
+>   file's `use` declarations (and a `pub use` re-export, so `cli` code's
+>   `engine.runtime()` reaches `logos_core`'s `Engine::runtime`) to one type
+>   declared in the repository, and the call binds that type's one `helper`,
+>   an inherent method before a trait impl's. It stays unbound when `T` is not
+>   declared in the repository (`String`, `Vec`, `str`, `std::io::Error`, an
+>   external crate's type), when the wrapper provides the method itself
+>   (`x.clone()` on an `Arc<T>` is `Arc::clone`), when no `use` names a
+>   same-named type, and when `T` has no such method or two of one rank.
+>   Chained calls, closure parameters and untyped `let`s prove nothing. Go reads the
 >   receiver the same way, by name: inside `func (s *Svc) Run()` a call on `s`
 >   (`s.Work()`) is `self` and binds to the one `Work` declared on `Svc`;
 >   `x.Work()`, `s.next.Work()` and a parameter that merely shares the

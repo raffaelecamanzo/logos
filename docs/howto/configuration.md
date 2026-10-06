@@ -558,7 +558,9 @@ The policy widens the search, never the acceptance rule.
 No policy changes how a receiver-method call (`x.f()`) binds: it binds by its
 receiver's shape — `this.f()` / `self.f()` to the caller's own class, `super.f()`
 through a proven base class, a call on any other receiver nowhere
-([FR-RS-12](../specs/requirements/FR-RS-12.md)).
+([FR-RS-12](../specs/requirements/FR-RS-12.md)) unless its file proves the
+receiver's type (Java, [FR-RS-10](../specs/requirements/FR-RS-10.md); Rust,
+[FR-RS-42](../specs/requirements/FR-RS-42.md)), which no policy widens either.
 
 Changing the policy needs no migration — resolution re-evaluates the whole
 unresolved-reference ledger on every run, so just `logos index` again. The same
