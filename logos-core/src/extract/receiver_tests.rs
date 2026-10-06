@@ -454,3 +454,8 @@ fn a_closure_parameter_shadows_the_callers_parameter_inside_the_closure() {
     let src = with_types("fn g(x: A) { let c = |x: B| x.f(); }");
     assert_eq!(calls_of_f(&src), vec![other()]);
 }
+
+#[test]
+fn an_inferred_let_type_proves_nothing() {
+    assert_eq!(calls_of_f(&with_types("fn g() { let x: _ = make(); x.f(); }")), vec![other()]);
+}
