@@ -2963,6 +2963,19 @@ fn a_qualified_head_reads_its_own_namespace_then_the_enclosing_ones_then_the_wil
     bound_to(bind_enclosing(&types, &nested, &[glob], &r), ty(2), 900, EdgeKind::Extends);
 }
 
+/// The source's own namespace is the first prefix a qualified head is read
+/// under: `B.Thing` written in `A.X` is `A.X.B.Thing` when that type exists, and
+/// `A.B.Thing` of the enclosing `A` is never bound past it (NFR-RA-05).
+#[test]
+fn a_qualified_head_is_read_under_the_sources_own_namespace_first() {
+    let types = [("cs", "A.X.B", "Thing"), ("cs", "A.B", "Thing"), ("cs", "A.X", "User")];
+    let r = extends(1, 2, "B::Thing");
+    bound_to(bind_enclosing(&types, &[], &[], &r), ty(2), ty(0), EdgeKind::Extends);
+    // Alone, the nested namespace's type binds too.
+    let types = [("cs", "A.X.B", "Thing"), ("cs", "A.X", "User")];
+    bound_to(bind_enclosing(&types, &[], &[], &extends(2, 1, "B::Thing")), ty(1), ty(0), EdgeKind::Extends);
+}
+
 /// A type spelled like an enclosing namespace is not the owner of a path read
 /// under it: `A.B` the class does not make `Thing.Inner` of `A.B.C` anything but
 /// `A.Thing`'s.
