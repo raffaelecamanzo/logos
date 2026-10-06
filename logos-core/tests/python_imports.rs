@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use logos_core::model::{EdgeKind, NodeId, NodeKind, RefForm};
+use logos_core::model::{EdgeKind, NodeId, NodeKind};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
