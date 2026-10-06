@@ -22,7 +22,7 @@
 //! The reason a shape-`other` call stays unbound (`no-receiver-evidence`) is a
 //! fixed function of the shape, pinned by the binder's unit tests; a fixture of a
 //! non-package-shaped language reads the shape and `resolved == false` instead
-//! (`logos status` reports `call_residue` for Java and Kotlin rows only).
+//! (`logos status` reports `call_residue` for package-shaped rows and Rust's only).
 //!
 //! Fixtures are written inline into temp directories, like every sibling binding
 //! suite: a fixture tree checked into this repository would be indexed into its

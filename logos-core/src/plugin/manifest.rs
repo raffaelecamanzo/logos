@@ -640,7 +640,9 @@ pub struct PluginManifest {
     /// never binds one of these among `T`'s methods: `x.clone()` calls
     /// `Arc::clone`, whatever `T` defines. A wrapper with no entry — a
     /// reference — provides none. Defaults to empty: no language but Rust
-    /// peels a receiver ([NFR-MA-01]).
+    /// peels a receiver ([NFR-MA-01]). Declaring a non-empty table also marks
+    /// the language as one that proves receivers, so `status` reports its
+    /// `call_residue` (S-589, `PackageLayout::peels_receivers`).
     ///
     /// ```toml
     /// [wrapper_methods]

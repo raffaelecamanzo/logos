@@ -1091,7 +1091,9 @@ pub struct LanguageResolution {
     /// Why this language's unbound `Calls` rows stay unbound, by reason (S-468,
     /// [FR-RS-10], [CR-150] §3.2 C) — present on the `status` row of a
     /// **package-shaped** language (Java) or declared-namespace one (PHP, C#,
-    /// Kotlin and Scala, S-518) and absent from every other row.
+    /// Kotlin and Scala, S-518), and of a language that proves a receiver's
+    /// declared type through peeled wrappers (Rust, S-589, [FR-RS-42]); absent
+    /// from every other row.
     ///
     /// A status-only extension: the reasons are decided by re-walking each
     /// unbound row through the binder, which needs the whole graph, so the
@@ -1099,15 +1101,17 @@ pub struct LanguageResolution {
     /// reads alone ([S-442]) — carry the counts above and not this.
     ///
     /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
     /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
     /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_residue: Option<CallResidue>,
 }
 
-/// The reasons a package-shaped language's unbound `Calls` rows stay unbound
-/// (S-468, [FR-RS-10], [CR-150] §3.2 C), each counted over one denominator —
-/// [`unbound`](Self::unbound), the language's `calls.references − calls.bound`.
+/// The reasons a package-shaped language's — or Rust's (S-589) — unbound
+/// `Calls` rows stay unbound (S-468, [FR-RS-10], [CR-150] §3.2 C), each counted
+/// over one denominator — [`unbound`](Self::unbound), the language's
+/// `calls.references − calls.bound`.
 ///
 /// The reasons partition the denominator: `unbound = Σ reasons + unclassified`.
 ///
@@ -1124,7 +1128,8 @@ pub struct LanguageResolution {
 /// library's, so a `status` read outside a workspace has `scope: "repository"`
 /// and no `type-in-another-member` entry — its `external-type` includes them.
 /// A workspace `status` compares every member's declared types and moves those
-/// rows to `type-in-another-member`, with `scope: "workspace"`.
+/// rows to `type-in-another-member`, with `scope: "workspace"`. A Rust
+/// `external-type` row names no candidate type, so none of Rust's moves.
 ///
 /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
 /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
@@ -1139,8 +1144,16 @@ pub struct CallResidue {
     /// Unbound rows no reason is assigned to: a row the ledger holds unbound
     /// that the binder binds now (a graph bound by an older binary, or a sync
     /// that did not re-select it). A capture-before-delete row is no call site
-    /// and is not counted (S-598). `0` on a graph freshly indexed by this
-    /// binary.
+    /// and is not counted (S-598). `0` on a package-shaped row of a graph
+    /// freshly indexed by this binary.
+    ///
+    /// On the Rust row (S-589) it also holds every unbound call the receiver
+    /// walk records no reason for — a path call (`Vec::new()`,
+    /// `serde_json::to_string(…)`) or a bare call with no in-repository target
+    /// — since the binder gives a Rust row a reason only for a receiver call, a
+    /// `Self::m` call inside an `impl` or a proven `T::m` call (a `Self::m` in a
+    /// trait's default body has no recorded self type, so it is unclassified
+    /// too). They are never given a reason for a path the bind did not take.
     pub unclassified: u64,
     /// Over what the external/other-member split was decided.
     pub scope: ResidueScope,
@@ -1155,7 +1168,7 @@ pub struct CallResidue {
     pub(crate) declared_types: Vec<Vec<String>>,
 }
 
-/// Why a package-shaped `Calls` row stays unbound — a key of
+/// Why a package-shaped or Rust `Calls` row stays unbound — a key of
 /// [`CallResidue::reasons`], serialised as its kebab-case token (S-468,
 /// [FR-RS-10]). Declared in token order, so the map's order is the tokens'.
 ///

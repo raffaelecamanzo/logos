@@ -22,8 +22,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use logos_core::model::{EdgeKind, NodeId};
+use logos_core::federation::{discover, workspace_status, EngineRegistry, RegistryMode};
+use logos_core::graph_store::NewUnresolvedRef;
+use logos_core::model::{EdgeKind, NodeId, RefForm};
+use logos_core::models::{CallResidueReason as R, LanguageResolution, ResidueScope};
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
@@ -455,4 +459,199 @@ fn a_wrapper_associated_function_is_no_method_of_the_wrapper() {
         ("src/p.rs", "use std::sync::Arc;\npub struct P;\nimpl P {\n    pub fn downgrade(&self) {}\n}\npub fn call(a: Arc<P>) { a.downgrade(); }\n"),
     ]);
     assert_eq!(targets(&edges, "src/p.rs:call@6"), ["src/p.rs:downgrade@4"]);
+}
+
+// ── The Rust row's call residue (S-589) ─────────────────────────────────────
+
+/// One unbound proven call per reason S-588 records, beside one that binds:
+/// `String` and the `Arc`-own `clone` are `external-type`, a chain receiver
+/// proves nothing, two trait impls' `twice` tie, `Solo` declares no `absent`,
+/// and `m` sits only on `b::A`'s impl while the caller's `A` is `a::A`, a name
+/// the crate declares twice. `plain` makes an unproven path call and a bare
+/// call, neither of which binds.
+const RESIDUE: [(&str, &str); 4] = [
+    (
+        "src/lib.rs",
+        "use std::sync::Arc;
+use crate::a::A;
+pub mod a;
+pub mod b;
+pub mod c;
+pub struct Solo;
+impl Solo { pub fn run(&self) {} pub fn me(&self) -> &Solo { self } }
+pub trait P { fn twice(&self); }
+pub trait Q { fn twice(&self); }
+impl P for Solo { fn twice(&self) {} }
+impl Q for Solo { fn twice(&self) {} }
+pub fn bound(x: &Solo) { x.run(); }
+pub fn external(s: &String) { s.len(); }
+pub fn wrapper(x: Arc<Solo>) { x.clone(); }
+pub fn chain(x: &Solo) { x.me().run(); }
+pub fn overload(x: &Solo) { x.twice(); }
+pub fn missing(x: &Solo) { x.absent(); }
+pub fn ambiguous(x: &A) { x.m(); }
+pub fn plain() { Vec::<u8>::new(); nowhere(); }
+",
+    ),
+    ("src/a.rs", "pub struct A;\n"),
+    ("src/b.rs", "pub struct A;\n"),
+    ("src/c.rs", "impl crate::b::A {\n    pub fn m(&self) {}\n}\n"),
+];
+
+/// The Rust row of `status`.
+fn rust_row(engine: &Engine) -> LanguageResolution {
+    engine
+        .status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "rust")
+        .expect("a rust row")
+}
+
+#[test]
+fn the_rust_row_states_its_call_residue_by_reason_over_its_unbound_calls() {
+    let tmp = tree(&RESIDUE);
+    let engine = index(tmp.path());
+    let row = rust_row(&engine);
+    let residue = row.call_residue.expect("the rust row states its call residue");
+
+    assert_eq!(
+        residue.unbound,
+        row.calls.references - row.calls.bound,
+        "the denominator is the row's own unbound count"
+    );
+    let expected: BTreeMap<R, u64> = [
+        (R::ExternalType, 2),
+        (R::NoReceiverEvidence, 1),
+        (R::OverloadAmbiguous, 1),
+        (R::SupertypeUnreached, 1),
+        (R::TypeAmbiguous, 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(residue.reasons, expected, "{residue:#?}");
+    assert_eq!(
+        residue.unbound,
+        residue.reasons.values().sum::<u64>() + residue.unclassified,
+        "the reasons and `unclassified` partition the denominator"
+    );
+    // An unproven path call and a bare call take no receiver walk, so the
+    // binder records no reason for them: they are `unclassified`, never a
+    // reason guessed for a path the bind did not take.
+    assert_eq!(residue.unclassified, 2, "{residue:#?}");
+    assert_eq!(residue.scope, ResidueScope::Repository);
+    // The one bound call is in no figure of the residue.
+    assert_eq!(
+        targets(&by_source(call_edges(engine.runtime().unwrap())), "src/lib.rs:bound@12"),
+        ["src/lib.rs:run@7"]
+    );
+}
+
+/// A capture-before-delete row (`RefForm::Symbol`) sits under its target's file
+/// and duplicates a call its source's own row records, so it is no call site:
+/// planted unbound under a Rust file, it moves neither the row's counts nor any
+/// figure of its residue (S-598).
+#[test]
+fn a_capture_before_delete_row_is_in_no_figure_of_the_rust_residue() {
+    let tmp = tree(&RESIDUE);
+    let engine = index(tmp.path());
+    let before = rust_row(&engine);
+    let rt = engine.runtime().unwrap();
+    let caller = rt
+        .submit_read(|store| {
+            Ok(store
+                .all_nodes()?
+                .into_iter()
+                .find(|n| n.name == "missing")
+                .map(|n| n.symbol.as_str().to_string())
+                .expect("the missing node"))
+        })
+        .unwrap();
+    rt.submit_write(move |w| {
+        w.insert_unresolved_ref(&NewUnresolvedRef {
+            file_id: w.file_id("src/a.rs")?,
+            source_symbol: &caller,
+            target: "planted vanished target",
+            alias: None,
+            form: RefForm::Symbol,
+            kind: EdgeKind::Calls,
+            line: None,
+            payload: None,
+            receiver: None,
+            peeled: None,
+        })
+    })
+    .expect("plant the capture");
+    let planted = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .iter()
+                .filter(|r| r.form == RefForm::Symbol && !r.resolved)
+                .count())
+        })
+        .unwrap();
+    assert_eq!(planted, 1, "the capture is in the ledger, or this pins nothing");
+
+    let after = rust_row(&engine);
+    assert_eq!(after, before);
+    assert!(after.call_residue.is_some_and(|r| r.unbound == 8));
+}
+
+fn git_init(dir: &Path) {
+    fs::create_dir_all(dir).expect("mkdir member");
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git init {}", dir.display());
+}
+
+/// In `workspace status` the Rust row is workspace-scoped like every residue
+/// row, yet none of its `external-type` rows moves: a Rust row names no
+/// candidate type, so a receiver typed with another member's `Store` reads
+/// `external-type` there exactly as it does alone, beside std's `String`.
+#[test]
+fn a_rust_rows_external_type_stays_external_in_a_workspace() {
+    let ws = TempDir::new().unwrap();
+    let lib = ws.path().join("lib");
+    let app = ws.path().join("app");
+    git_init(&lib);
+    git_init(&app);
+    write(&lib, "src/lib.rs", "pub struct Store;\nimpl Store {\n    pub fn len(&self) -> usize { 0 }\n}\n");
+    write(
+        &app,
+        "src/lib.rs",
+        "use lib::Store;\npub fn other_member(x: &Store) { x.len(); }\npub fn std_type(s: &String) { s.len(); }\n",
+    );
+    for member in [&lib, &app] {
+        let _ = index(member).sync(&[] as &[PathBuf]);
+    }
+    let alone = rust_row(&Engine::start(&app).expect("engine starts"))
+        .call_residue
+        .expect("the rust row states its call residue");
+    assert_eq!(alone.scope, ResidueScope::Repository);
+    assert_eq!(alone.reasons[&R::ExternalType], 2, "{alone:#?}");
+    assert!(!alone.reasons.contains_key(&R::TypeInAnotherMember));
+
+    write(ws.path(), "logos.workspace.toml", "[workspace]\nname = \"w\"\nmembers = [\"lib\", \"app\"]\n");
+    let federation = discover(ws.path()).expect("discovers").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
+    let residue = workspace_status(&registry)
+        .members
+        .iter()
+        .find(|m| m.status.member == "app")
+        .and_then(|m| m.status.result.as_ref())
+        .and_then(|info| {
+            info.resolution_by_language
+                .iter()
+                .find(|row| row.language == "rust")
+                .and_then(|row| row.call_residue.clone())
+        })
+        .expect("app's rust residue");
+    assert_eq!(residue.scope, ResidueScope::Workspace);
+    assert_eq!(residue.reasons[&R::TypeInAnotherMember], 0, "{residue:#?}");
+    assert_eq!(residue.reasons[&R::ExternalType], alone.reasons[&R::ExternalType]);
+    assert_eq!(residue.unbound, alone.unbound);
 }

@@ -275,6 +275,41 @@ fn a_workspace_without_declarations_or_candidates_renders_status_byte_for_byte_a
         .expect("api declares an external, so the join is published (S-459)");
     assert_eq!(join["headline"]["bound_external"], 0);
     assert_eq!(join["headline"]["no_provider_rows"], 0);
+    // S-589's Rust `call_residue` rides on each member's Rust row: taken out
+    // and checked the same way — its denominator is the row's own unbound
+    // count, the reasons and `unclassified` partition it, and the workspace
+    // read scopes it with no row moved to another member.
+    let mut rust_residues = 0;
+    for member in value["members"].as_array_mut().expect("a member array") {
+        let Some(rows) = member["result"]["resolution_by_language"].as_array_mut() else {
+            continue;
+        };
+        for row in rows.iter_mut().filter(|row| row["language"] == "rust") {
+            let residue = row
+                .as_object_mut()
+                .expect("a row object")
+                .remove("call_residue")
+                .expect("a Rust row states its call residue (S-589)");
+            let calls = &row["calls"];
+            let unbound = residue["unbound"].as_u64().expect("a count");
+            assert_eq!(
+                unbound,
+                calls["references"].as_u64().unwrap() - calls["bound"].as_u64().unwrap(),
+                "{residue}"
+            );
+            let reasons: u64 = residue["reasons"]
+                .as_object()
+                .expect("a reason map")
+                .values()
+                .map(|n| n.as_u64().unwrap())
+                .sum();
+            assert_eq!(unbound, reasons + residue["unclassified"].as_u64().unwrap(), "{residue}");
+            assert_eq!(residue["scope"], "workspace", "{residue}");
+            assert_eq!(residue["reasons"]["type-in-another-member"], 0, "{residue}");
+            rust_residues += 1;
+        }
+    }
+    assert!(rust_residues > 0, "the fixture has a Rust row, or this pins nothing");
     let status = masked(value);
     assert_eq!(
         status,

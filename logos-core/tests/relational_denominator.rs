@@ -139,14 +139,19 @@ fn indexed(tmp: &TempDir) -> Engine {
     engine
 }
 
-/// The row `status` reports for `language` — the one each answer must carry.
+/// The row `status` reports for `language` — the one each answer must carry —
+/// less its `call_residue`. That is a status-only extension (the package-shaped
+/// rows', and Rust's since S-589): the relational answers attach their rows
+/// from the aggregate reads alone and never carry it (S-442).
 fn status_row(engine: &Engine, language: &str) -> LanguageResolution {
-    engine
+    let mut row = engine
         .status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == language)
-        .unwrap_or_else(|| panic!("status reports a {language} row"))
+        .unwrap_or_else(|| panic!("status reports a {language} row"));
+    row.call_residue = None;
+    row
 }
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -200,6 +205,14 @@ fn a_non_empty_rust_answer_carries_its_denominator_on_every_relational_tool() {
     assert!(
         rust.calls.cross_file_edges.is_some(),
         "the fixture's Rust row has a cross-file Calls figure: {rust:#?}"
+    );
+    assert!(
+        engine
+            .status()
+            .resolution_by_language
+            .iter()
+            .any(|row| row.language == "rust" && row.call_residue.is_some()),
+        "status itself states the Rust residue the answers leave out"
     );
 
     // `run` is called across a file by `alpha`; `alpha` calls it; changing

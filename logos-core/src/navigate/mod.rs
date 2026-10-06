@@ -2032,9 +2032,10 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
     let mut resolution_by_language =
         runtime.submit_read(|store| crate::resolve::coverage_by_language(store))?;
 
-    // Why a package-shaped language's calls stay unbound, by reason (FR-RS-10,
-    // S-468): a re-walk of the unbound rows under the policy the resolution
-    // pass binds with. Only a graph holding a package-shaped file pays for it.
+    // Why a package-shaped language's — or Rust's (S-589) — calls stay unbound,
+    // by reason (FR-RS-10, S-468): a re-walk of the unbound rows under the
+    // policy the resolution pass binds with. Only a graph holding a
+    // package-shaped or Rust file pays for it.
     // An additive readout degrades on the ADR-14 channel, never the status
     // around it: an unreadable config or a failed read states no residue — not
     // one decided under the wrong policy — and says why. A registry-less engine

@@ -883,13 +883,19 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 }
 
 /// Why each package-shaped language's unbound `Calls` rows stay unbound, by
-/// reason ([FR-RS-10], [S-468], [CR-150] §3.2 C) — the `call_residue` of the
-/// `status` row ([`LanguageResolution::call_residue`]), keyed by `files.language`.
+/// reason ([FR-RS-10], [S-468], [CR-150] §3.2 C) — and Rust's ([FR-RS-42],
+/// S-589) — the `call_residue` of the `status` row
+/// ([`LanguageResolution::call_residue`]), keyed by `files.language`.
 ///
-/// Each unbound `Calls` row of a package-shaped file is re-walked by the binder
+/// Each unbound `Calls` row of a package-shaped file, or of a file whose
+/// language proves receivers through peeled wrappers
+/// ([`PackageLayout::peels_receivers`]: Rust), is re-walked by the binder
 /// under `policy` and counted under the reason the walk gave up with
 /// ([`binder::residue`]), so a reason can never describe a path the bind did not
-/// take. The index is [`run`]'s, built with the same package layout, minus the
+/// take. A Rust row the walk records no reason for — anything but a receiver
+/// call, a `Self::m` call inside an `impl` or a proven `T::m` call — is
+/// `unclassified`.
+/// The index is [`run`]'s, built with the same package layout, minus the
 /// path-specifier and imported-binding scopes `run` chains on: those are read
 /// only for a path-grammar (TypeScript, JavaScript, Go) file, never for a
 /// package-shaped row. The population is
@@ -899,10 +905,11 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 ///
 /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
 ///
-/// Empty — and nothing is read beyond one ledger scan — when no file is
-/// package-shaped, so a Rust-only graph pays for none of it. A pure read that
-/// persists nothing ([ADR-28]); it is `status`'s alone, because the relational
-/// answers attach their rows from the aggregate reads and must stay cheap.
+/// Empty — and nothing is read beyond the file listing and its declared
+/// namespaces — when no file is package-shaped or Rust, so a graph of
+/// path-grammar languages alone pays for none of it. A pure read that persists
+/// nothing ([ADR-28]); it is `status`'s alone, because the relational answers
+/// attach their rows from the aggregate reads and must stay cheap.
 ///
 /// The split between `external-type` and `type-in-another-member` needs the
 /// other members' declared types, so it is decided by the workspace
@@ -913,11 +920,13 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 /// Returns an error if the graph cannot be read.
 ///
 /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
+/// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
 /// [S-468]: ../../../docs/planning/journal.md#s-468-a-type-qualified-java-call-binds-among-its-types-members-and-in-repo-supertypes
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
 /// [`LanguageResolution::call_residue`]: crate::models::LanguageResolution::call_residue
 /// [`CallResidue::split_by_workspace`]: crate::models::CallResidue::split_by_workspace
+/// [`PackageLayout::peels_receivers`]: package_key::PackageLayout::peels_receivers
 pub(crate) fn call_residue_by_language(
     store: &dyn GraphStore,
     registry: &LanguageRegistry,
@@ -928,7 +937,7 @@ pub(crate) fn call_residue_by_language(
     let files: HashMap<i64, String> = store
         .indexed_files()?
         .into_iter()
-        .filter(|f| layout.is_package_shaped(&f.path))
+        .filter(|f| layout.is_package_shaped(&f.path) || layout.peels_receivers(&f.path))
         .map(|f| (f.id, f.path))
         .collect();
     if files.is_empty() {
