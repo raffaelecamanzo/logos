@@ -478,7 +478,12 @@ On the Rust row the reasons describe the calls Rust's receiver typing
 ([FR-RS-42](../specs/requirements/FR-RS-42.md)) decides: a method call whose
 receiver's type is proven (`external-type` for `String`, `Vec`, an external
 crate's type or a method the peeled `Arc`/`Rc`/`Box` provides itself, such as
-`clone`), an unproven receiver (`no-receiver-evidence`), and `Self::m` calls
+`clone`; `supertype-unreached` when `T`'s impls in the repository declare no
+such method — a derive, a trait default or a `Deref` target supplies it;
+`overload-ambiguous` for two trait impls' methods of that name and no inherent
+one; `type-ambiguous` when the file, or the file re-exporting `T`, imports its
+name twice, or the crate declares it for several types and no impl in `T`'s
+module decides), an unproven receiver (`no-receiver-evidence`), and `Self::m` calls
 inside an `impl`. Every other unbound Rust call — a path call such as
 `Vec::new()` or `serde_json::to_string(…)`, a bare call, or a `Self::m` call in
 a trait's default body — takes no receiver walk, so it is counted in
