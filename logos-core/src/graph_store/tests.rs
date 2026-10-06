@@ -2467,6 +2467,14 @@ fn counts_exclude_capture_before_delete_rows() {
     store
         .write_batch(|w| {
             w.insert_unresolved_ref(&ref_of(file_id, "real", EdgeKind::Calls))?;
+            // Every other form still counts: the filter names `Symbol`, not
+            // "anything but `Path`".
+            for (target, form) in [("recv", RefForm::Method), ("glob", RefForm::Glob)] {
+                w.insert_unresolved_ref(&NewUnresolvedRef {
+                    form,
+                    ..ref_of(file_id, target, EdgeKind::Calls)
+                })?;
+            }
             w.insert_unresolved_ref(&NewUnresolvedRef {
                 form: RefForm::Symbol,
                 ..ref_of(file_id, "cap-bound", EdgeKind::Calls)
@@ -2478,21 +2486,23 @@ fn counts_exclude_capture_before_delete_rows() {
         })
         .unwrap();
     let ids: Vec<i64> = store.unresolved_refs().unwrap().iter().map(|r| r.id).collect();
+    // Bind the Path row and the bound capture row (ids[3]); the Method and Glob
+    // rows stay open.
     store
         .write_batch(|w| {
             w.mark_ref_resolved(ids[0], true)?;
-            w.mark_ref_resolved(ids[1], true)
+            w.mark_ref_resolved(ids[3], true)
         })
         .unwrap();
 
     let counts = store.counts().unwrap();
     assert_eq!(
         (counts.refs_total, counts.refs_resolved),
-        (1, 1),
-        "only the Path-form row is in the global ratio"
+        (3, 1),
+        "the Path, Method and Glob rows are in the global ratio; the capture rows are not"
     );
     // The ledger itself is unchanged: the capture rows are still stored.
-    assert_eq!(store.unresolved_refs().unwrap().len(), 3);
+    assert_eq!(store.unresolved_refs().unwrap().len(), 5);
 }
 
 #[test]
