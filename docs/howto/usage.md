@@ -218,7 +218,10 @@ by each relation's payload token), read live from the graph.
 >   external crate's type), when the wrapper provides the method itself
 >   (`x.clone()` on an `Arc<T>` is `Arc::clone`), when no `use` names a
 >   same-named type, and when `T` has no such method or two of one rank.
->   Chained calls, closure parameters and untyped `let`s prove nothing. Go reads the
+>   A glob of another crate or of a sibling module reads none of that module's
+>   imports (the graph cannot tell a `pub use` from a private one), and a name
+>   a file imports twice — at top level and in an inline `mod tests` — binds
+>   nothing. Chained calls, closure parameters and untyped `let`s prove nothing. Go reads the
 >   receiver the same way, by name: inside `func (s *Svc) Run()` a call on `s`
 >   (`s.Work()`) is `self` and binds to the one `Work` declared on `Svc`;
 >   `x.Work()`, `s.next.Work()` and a parameter that merely shares the
