@@ -3493,6 +3493,7 @@ mod tests {
             resolved: false,
             payload: payload.map(str::to_string),
             receiver: None,
+            peeled: None,
         };
 
         let rows = vec![
@@ -4287,6 +4288,7 @@ mod tests {
             resolved: false,
             payload: payload.map(str::to_string),
             receiver: None,
+            peeled: None,
         };
         // A gRPC-call row → a GrpcCall consumer keyed on its target.
         let consumers = invocation_refs_from(vec![row(Some("grpc-call"))]);

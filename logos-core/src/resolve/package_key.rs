@@ -97,6 +97,12 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     free_only_bare_call_exts: HashSet<String>,
+    /// Normalised extension → the methods each peeled receiver wrapper of its
+    /// language provides itself (S-588, [FR-RS-42]). An absent extension, or
+    /// an absent wrapper, provides none.
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    wrapper_methods: HashMap<String, BTreeMap<String, Vec<String>>>,
 }
 
 /// One language's path-model data in a layout (S-519).
@@ -177,6 +183,21 @@ impl PackageLayout {
             .with_kind_following_supertypes(registry.supertype_kind_follows_target())
             .with_enclosing_namespaces(registry.enclosing_namespace_extensions())
             .with_free_only_bare_calls(registry.free_only_bare_call_extensions())
+            .with_wrapper_methods(registry.wrapper_methods())
+    }
+
+    /// This layout, with the methods each extension's peeled receiver wrappers
+    /// provide (S-588; the map [`LanguageRegistry::wrapper_methods`] returns).
+    pub fn with_wrapper_methods(
+        mut self,
+        declared: HashMap<String, BTreeMap<String, Vec<String>>>,
+    ) -> Self {
+        self.wrapper_methods.extend(
+            declared
+                .into_iter()
+                .map(|(ext, w)| (ext.trim_start_matches('.').to_ascii_lowercase(), w)),
+        );
+        self
     }
 
     /// This layout, with the extensions whose bare call binds free callables
@@ -426,6 +447,18 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.free_only_bare_call_exts.contains(&ext))
     }
 
+    /// Whether `wrapper`, peeled from a receiver in the file at `path`, provides
+    /// `method` itself (S-588, [FR-RS-42]): its language declares it so. A call
+    /// through `Arc<T>` naming `clone` calls `Arc::clone`, never `T`'s.
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    pub fn wrapper_provides(&self, path: &str, wrapper: &str, method: &str) -> bool {
+        extension(path)
+            .and_then(|ext| self.wrapper_methods.get(&ext))
+            .and_then(|declared| declared.get(wrapper))
+            .is_some_and(|methods| methods.iter().any(|m| m == method))
+    }
+
     /// What a call written in the file at `path` may bind besides a callable
     /// (S-521, [FR-RS-16]): its language's declaration, or none.
     ///
@@ -528,6 +561,12 @@ impl PackageLayout {
             )
             .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
             .with_free_only_bare_calls(exts().filter(|_| semantics.bare_calls_free_only))
+            .with_wrapper_methods(
+                exts()
+                    .filter(|_| !semantics.wrapper_methods.is_empty())
+                    .map(|ext| (ext, semantics.wrapper_methods.clone()))
+                    .collect(),
+            )
     }
 
     /// `true` when the file at `path` takes the package rungs: its language
@@ -1318,5 +1357,29 @@ mod call_target_tests {
         }
         assert!(declaring > 0, "some shipped plugin declares the free-only key");
         assert!(silent > 0, "a plugin that does not declare it binds as before");
+    }
+
+    /// The same parity for the wrapper-method table (S-588): the single-plugin
+    /// layout answers every extension's `Arc::clone` as the registry's does,
+    /// over a set Rust is in and every other shipped grammar is out of.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_wrapper_methods() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let (mut declaring, mut silent) = (0, 0);
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                let provides = own.wrapper_provides(&path, "Arc", "clone");
+                assert_eq!(provides, full.wrapper_provides(&path, "Arc", "clone"), "{path}");
+                assert!(!own.wrapper_provides(&path, "&", "clone"), "{path}: a reference provides nothing");
+                declaring += usize::from(provides);
+                silent += usize::from(!provides);
+            }
+        }
+        assert!(declaring > 0, "Rust declares the wrapper methods");
+        assert!(silent > 0, "a plugin that does not declare them peels nothing");
     }
 }

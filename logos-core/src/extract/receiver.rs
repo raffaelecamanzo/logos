@@ -48,7 +48,7 @@
 //! markers, and its query states every binding and its scope. A proven call is
 //! retyped to the Path-form `T::send` and **keeps its `other` shape**: it is a
 //! call on another object whose type the file proves, not a written
-//! `T::send()`, and the binder does not bind it yet (S-588 does). The wrappers
+//! `T::send()`, and the binder binds it among `T`'s own methods (S-588). The wrappers
 //! peeled off the declared type to reach `T` — `&`, `&mut`, `Box`, `Arc`, `Rc`
 //! ([`PEELED_WRAPPERS`]), no other — are recorded on the row
 //! (`RefFact::peeled`), outermost first.

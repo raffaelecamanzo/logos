@@ -363,30 +363,36 @@ fn a_rust_self_call_binds_through_the_impl_and_every_other_receiver_is_unbound()
         call_rows(rt, RS_FILE),
         sorted(vec![
             // Every receiver here has a proven type, so each `other` call is
-            // retyped to its type's `T::m` (S-587) — and still binds nothing.
-            // `other.helper()` inside `A::helper`: another object, no self-loop.
-            row(&a(5, "helper"), "B::helper", RefForm::Path, OTHER, false),
+            // retyped to its type's `T::m` (S-587) and binds that type's
+            // method (S-588). `other.helper()` inside `A::helper` binds
+            // `B::helper`: another object, no self-loop.
+            row(&a(5, "helper"), "B::helper", RefForm::Path, OTHER, true),
             // `self.helper(..)` is S-493's `Self::helper`; `other.helper()` beside
-            // it is `other` — neither the caller's own `helper` nor `B`'s.
-            row(&a(8, "run"), "B::helper", RefForm::Path, OTHER, false),
+            // it binds `B`'s, never the caller's own `helper`.
+            row(&a(8, "run"), "B::helper", RefForm::Path, OTHER, true),
             row(&a(8, "run"), "Self::helper", RefForm::Path, None, true),
-            // Genuine recursion binds; a call on `self.peer` does not.
+            // Genuine recursion binds; `self.peer.again(..)` does not — `B`
+            // has no `again`.
             row(&a(12, "again"), "B::again", RefForm::Path, OTHER, false),
             row(&a(12, "again"), "Self::again", RefForm::Path, None, true),
-            // `x.helper()` in a free function: not the free `helper` beside it.
-            row(&a(24, "free"), "A::helper", RefForm::Path, OTHER, false),
+            // `x.helper()` in a free function binds `A::helper`, never the free
+            // `helper` beside it.
+            row(&a(24, "free"), "A::helper", RefForm::Path, OTHER, true),
             row(&a(24, "free"), "helper", RefForm::Path, None, true),
         ])
     );
     assert_eq!(
         call_edges(rt),
         sorted_edges(vec![
+            edge(&a(5, "helper"), &a(19, "helper")),
             edge(&a(8, "run"), &a(5, "helper")),
+            edge(&a(8, "run"), &a(19, "helper")),
             edge(&a(12, "again"), &a(12, "again")),
+            edge(&a(24, "free"), &a(5, "helper")),
             edge(&a(24, "free"), &a(22, "helper")),
         ]),
         "the only self-loop is the genuine `self.again(..)`; `other.helper()` inside `helper` \
-         is not one, and no method-form call reaches the free `fn helper`"
+         binds `B::helper`, and no method-form call reaches the free `fn helper`"
     );
 }
 

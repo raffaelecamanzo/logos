@@ -4,9 +4,9 @@
 //!
 //! Each proof form records the call `x.f()` as the Path-form `T::f` of shape
 //! `other` in the reference ledger, with the wrappers peeled to reach `T` in the
-//! ledger's `peeled` column (migration 32). The binder does not bind such a row
-//! yet — that is S-588 — so the graph's `Calls` edges are exactly what they were:
-//! a written `A::f(&x)` binds, and every receiver call stays unbound.
+//! ledger's `peeled` column (migration 32). S-588 binds such a row among its
+//! type's methods (`rust_receiver_binding.rs` holds its own fixtures); here the
+//! edges only confirm each row binds the type it records.
 //!
 //! [`Engine`]: logos_core::Engine
 
@@ -77,7 +77,7 @@ fn fixture() -> TempDir {
 type CallRow = (String, String, RefForm, Option<ReceiverShape>, Option<String>);
 
 /// The `peeled` column of every ledger row, by id — read from the store file,
-/// as nothing above the store reads the column yet (S-588 will).
+/// independently of the `UnresolvedRefRow` the binder reads it through.
 fn peeled_by_id(tmp: &TempDir) -> HashMap<i64, Option<String>> {
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     let mut stmt = conn.prepare("SELECT id, peeled FROM unresolved_refs").unwrap();
@@ -113,13 +113,17 @@ fn calls_from(tmp: &TempDir, rt: &Runtime, file: &str) -> Vec<CallRow> {
     rows
 }
 
-/// Every bound `Calls` edge as `(source file:name, target file:name)`, sorted.
+/// Every bound `Calls` edge as `(source file:name@line, target file:name@line)`,
+/// sorted.
 fn call_edges(rt: &Runtime) -> Vec<(String, String)> {
     rt.submit_read(move |store| {
         let label: HashMap<NodeId, String> = store
             .all_nodes()?
             .into_iter()
-            .map(|n| (n.id, format!("{}:{}", n.file_path.unwrap_or_default(), n.name)))
+            .map(|n| {
+                let at = n.start_line.unwrap_or(0);
+                (n.id, format!("{}:{}@{at}", n.file_path.unwrap_or_default(), n.name))
+            })
             .collect();
         let mut out: Vec<(String, String)> = store
             .all_edges()?
@@ -172,11 +176,14 @@ fn every_proof_form_records_a_type_qualified_path_row_of_shape_other() {
 }
 
 #[test]
-fn a_retyped_row_binds_nothing_and_the_call_edges_are_what_they_were() {
-    // The caller file's one `Calls` edge is the written `Holder::new()`: every
-    // receiver call — proven or not — stays unbound until S-588. This is the
-    // edge set the 1.11.1 binary binds on this fixture, before any receiver
-    // was typed (checked 2026-10-06).
+fn each_retyped_row_binds_the_method_of_the_type_it_records() {
+    // S-588 binds every retyped row to its recorded type's `f` — `A::f` on
+    // line 3, `B::f` on line 4 — and `Holder::via_field` through the
+    // constructor proof. Before S-588 the caller file's one `Calls` edge was
+    // the written `Holder::new()`. The written `A::f(&x)` still binds nothing:
+    // the module path reads `A::f` as a name of `types`, where `A` and `B`
+    // both declare one (pre-existing, not a receiver row). The unproven
+    // receiver stays unbound.
     let tmp = fixture();
     let engine = index(&tmp);
     let rt = engine.runtime().unwrap();
@@ -184,10 +191,18 @@ fn a_retyped_row_binds_nothing_and_the_call_edges_are_what_they_were() {
         .into_iter()
         .filter(|(s, _)| s.starts_with(CALLER_FILE))
         .collect();
-    assert_eq!(
-        from_caller,
-        vec![(format!("{CALLER_FILE}:via_constructor"), format!("{CALLER_FILE}:new"))]
-    );
+    let (a_f, b_f) = (format!("{TYPES_FILE}:f@3"), format!("{TYPES_FILE}:f@4"));
+    let mut expected = vec![
+        (format!("{CALLER_FILE}:via_constructor@12"), format!("{CALLER_FILE}:new@6")),
+        (format!("{CALLER_FILE}:via_constructor@12"), format!("{CALLER_FILE}:via_field@7")),
+        (format!("{CALLER_FILE}:via_field@7"), a_f.clone()),
+        (format!("{CALLER_FILE}:via_field@7"), b_f.clone()),
+        (format!("{CALLER_FILE}:via_let@11"), b_f),
+        (format!("{CALLER_FILE}:via_literal@13"), a_f.clone()),
+        (format!("{CALLER_FILE}:via_param@10"), a_f),
+    ];
+    expected.sort();
+    assert_eq!(from_caller, expected);
 }
 
 /// Every edge and every non-Symbol ledger row, by symbol — receiver shape and

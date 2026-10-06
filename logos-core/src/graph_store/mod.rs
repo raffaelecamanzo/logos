@@ -598,13 +598,20 @@ pub struct UnresolvedRefRow {
     /// The receiver shape of a Method-form call (S-514, [FR-EX-13]; the
     /// `receiver` column, migration 29) — what the binder dispatches the row
     /// on ([FR-RS-12]) — and `other` on a Path-form row retyped from a proven
-    /// Rust receiver (S-587), which binds nothing yet. `None` for every other
-    /// row, and for a call its plugin marks no receiver of, which binds as
-    /// `other`.
+    /// Rust receiver (S-587), which binds among its type's methods (S-588).
+    /// `None` for every other row, and for a call its plugin marks no receiver
+    /// of, which binds as `other`.
     ///
     /// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
     /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
     pub receiver: Option<ReceiverShape>,
+    /// The wrappers peeled to reach a proven Rust receiver's type (S-587; the
+    /// `peeled` column, migration 32): `&`, `&mut`, `Box`, `Arc`, `Rc`,
+    /// outermost first, space-joined. The binder refuses a method the wrapper
+    /// itself provides (S-588, [FR-RS-42]). `None` for every other row.
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    pub peeled: Option<String>,
 }
 
 /// One function/method node's metric inputs for the quality metrics engine
@@ -3284,7 +3291,7 @@ impl GraphStore for SqliteGraphStore {
     fn unresolved_refs(&self) -> Result<Vec<UnresolvedRefRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, \
-                    receiver \
+                    receiver, peeled \
              FROM unresolved_refs ORDER BY id",
         )?;
         let raws = stmt
@@ -3301,13 +3308,14 @@ impl GraphStore for SqliteGraphStore {
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<i32>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting the reference ledger")?;
         raws.into_iter()
             .map(
-                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver)| {
+                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver, peeled)| {
                     let form = RefForm::try_from(form).map_err(|e| {
                         anyhow!("corrupt ref form {form} for ref {id}: {e}; rebuild advised (NFR-RA-08)")
                     })?;
@@ -3332,6 +3340,7 @@ impl GraphStore for SqliteGraphStore {
                         resolved: resolved != 0,
                         payload,
                         receiver,
+                        peeled,
                     })
                 },
             )

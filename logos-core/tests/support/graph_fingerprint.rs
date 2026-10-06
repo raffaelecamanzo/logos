@@ -59,7 +59,8 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .collect();
         edge_lines.sort();
 
-        // Every ledger row, every column but its rowid (the file by path), so
+        // Every ledger row, every column but its rowid (the file by path) —
+        // the peeled wrappers of a proven Rust receiver (S-587) included — so
         // a synced ledger must equal a fresh index's row for row (FR-SY-10 as
         // amended by CR-187). Capture-before-delete rows (`RefForm::Symbol`,
         // ADR-10) are compared too: one that outlives its sync is a row a fresh
@@ -68,7 +69,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .iter()
             .map(|r| {
                 format!(
-                    "R {}|{}|{}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}",
+                    "R {}|{}|{}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}",
                     r.file_id.and_then(|id| file_of.get(&id)).map_or("", String::as_str),
                     r.source_symbol,
                     r.target,
@@ -78,6 +79,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                     r.resolved,
                     r.payload,
                     r.receiver,
+                    r.peeled,
                     r.line,
                 )
             })

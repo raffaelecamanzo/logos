@@ -634,6 +634,23 @@ pub struct PluginManifest {
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     #[serde(default)]
     pub supertype_kind_follows_target: bool,
+    /// The methods a peeled receiver wrapper provides itself (S-588,
+    /// [FR-RS-42]): wrapper name → method names. A call on a receiver proven
+    /// through such a wrapper (`x: Arc<T>`, recorded with `peeled = "Arc"`)
+    /// never binds one of these among `T`'s methods: `x.clone()` calls
+    /// `Arc::clone`, whatever `T` defines. A wrapper with no entry — a
+    /// reference — provides none. Defaults to empty: no language but Rust
+    /// peels a receiver ([NFR-MA-01]).
+    ///
+    /// ```toml
+    /// [wrapper_methods]
+    /// Arc = ["clone", "as_ref", "borrow", "downgrade"]
+    /// ```
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub wrapper_methods: BTreeMap<String, Vec<String>>,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped ([`PackageModules`], [CR-149]). `None` when the
     /// `[package_modules]` table is omitted — the default module model.
@@ -1162,6 +1179,17 @@ impl PluginManifest {
                 "must claim at least one `extensions` entry or one `filenames` basename"
                     .to_string(),
             );
+        }
+        // A wrapper or method name is matched exactly against one token of a
+        // space-joined `peeled` column and a call's last path segment, so an
+        // empty or space-bearing entry could never match: a descriptor bug.
+        for (wrapper, methods) in &self.wrapper_methods {
+            let bad = |t: &str| t.is_empty() || t.chars().any(char::is_whitespace);
+            if bad(wrapper) || methods.iter().any(|m| bad(m)) {
+                return bail(format!(
+                    "`[wrapper_methods]` entry '{wrapper}' must name non-empty, space-free tokens"
+                ));
+            }
         }
         if self.extensions.iter().any(|e| e.starts_with('.')) {
             return bail(
@@ -1995,6 +2023,21 @@ mod tests {
         assert!(!omitted.bare_calls_free_only(), "an omitted key is the default");
         assert!(explicit.bare_calls_free_only(), "an explicit `none` is declared");
         assert!(!instance.bare_calls_free_only(), "`self` reaches the instance");
+    }
+
+    /// The wrapper-method table (S-588) defaults empty, parses wrapper →
+    /// methods, and refuses an entry that could never match a `peeled` token or
+    /// a call's method name.
+    #[test]
+    fn the_wrapper_methods_table_defaults_empty_and_refuses_unmatchable_entries() {
+        assert!(PluginManifest::parse("x/plugin.toml", GOOD).unwrap().wrapper_methods.is_empty());
+        let with = |table: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n[wrapper_methods]\n{table}\n"));
+        let m = with("Arc = [\"clone\", \"downgrade\"]\nBox = [\"as_mut\"]").unwrap();
+        assert_eq!(m.wrapper_methods["Arc"], ["clone", "downgrade"]);
+        assert_eq!(m.wrapper_methods["Box"], ["as_mut"]);
+        for bad in ["Arc = [\"\"]", "Arc = [\"as ref\"]", "\"\" = [\"clone\"]", "\"Arc Rc\" = [\"clone\"]"] {
+            assert!(with(bad).is_err(), "{bad}");
+        }
     }
 
     /// The two call-target keys (S-521) default to `false` — a callable only —

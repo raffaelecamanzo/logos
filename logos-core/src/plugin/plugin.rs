@@ -49,6 +49,12 @@ pub struct Semantics {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     pub bare_calls_free_only: bool,
+    /// The methods each peeled receiver wrapper provides itself (S-588,
+    /// [FR-RS-42]; see [`PluginManifest::wrapper_methods`]) — consumed by the
+    /// binder's proven-receiver arm through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+    pub wrapper_methods: std::collections::BTreeMap<String, Vec<String>>,
     /// What a call may bind besides a callable (S-521, [FR-RS-16]; see
     /// [`PluginManifest::call_targets`]) — consumed by the binder's call
     /// admission through [`crate::resolve::package_key`].
@@ -336,6 +342,7 @@ impl CompiledPlugin {
             specifier_extensions: manifest.specifier_extensions,
             implicit_receiver,
             bare_calls_free_only,
+            wrapper_methods: manifest.wrapper_methods,
             call_targets,
             supertype_kind_follows_target: manifest.supertype_kind_follows_target,
             package_modules: manifest.package_modules,
