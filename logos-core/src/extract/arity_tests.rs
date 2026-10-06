@@ -346,8 +346,9 @@ fn c_ranges_and_counts() {
 
 /// Python: defaults are optional, keyword-only parameters without one are
 /// required, `*args`/`**kw` are variadic, the `*`/`/` separators are none, and
-/// a method's `self`/`cls` is its receiver unless it is a `@staticmethod`;
-/// `*xs` spreads and a lone generator is one argument.
+/// a method's `self`/`cls` is its receiver unless it is a `@staticmethod`, and
+/// a method defined under an `if`/`try` of its class records unknown; `*xs`
+/// spreads and a lone generator is one argument.
 #[test]
 fn python_ranges_and_counts() {
     let src = "def f(a, b=2, *args, c, d=1, **kw):\n    g(1, 2, *xs); h(x=1); g(1)\n\
@@ -355,16 +356,25 @@ fn python_ranges_and_counts() {
         \x20   @staticmethod\n    def s(a): pass\n\
         \x20   @classmethod\n    def c(cls, a): pass\n\
         def k(*, a): pass\n\
-        def gen(): sum(x for x in y)\n";
+        def gen(): sum(x for x in y)\n\
+        class K:\n    if v:\n        def cond(self, x): pass\n    try:\n        @dec\n        def tri(self, y): pass\n\
+        \x20   except E:\n        pass\n\
+        def m2(*args: int): pass\n";
     assert_eq!(
         ranges("pkg/a.py", src),
         map(&[
             ("c", range(1, Some(1))),
             ("f", range(2, None)),
+            // A method under a compound statement of a class body: whether it
+            // takes `self` is not visible to a query, so unknown, never `self`
+            // counted.
+            ("cond", None),
             ("gen", range(0, Some(0))),
             ("k", range(1, Some(1))),
             ("m", range(1, Some(2))),
+            ("m2", range(0, None)),
             ("s", range(1, Some(1))),
+            ("tri", None),
         ])
     );
     let counts = counts("pkg/a.py", src);

@@ -53,3 +53,39 @@
       definition: (function_definition
         parameters: (parameters . [(identifier) (typed_parameter)] @arity.receiver))
       (#not-eq? @_decorator "staticmethod"))))
+; A method defined under a compound statement of a class body (`if`, `try`,
+; `with`, …) takes `self` too, but a query cannot see whether the compound
+; statement sits in a class body or anywhere else, so a function defined
+; directly in a compound statement's block records an unknown range rather than
+; counting a receiver. One pattern per statement kind: an alternation cannot
+; stand as a parent.
+(if_statement
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(elif_clause
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(else_clause
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(try_statement
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(except_clause
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(finally_clause
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(with_statement
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(for_statement
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(while_statement
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
+(case_clause
+  (block [(function_definition parameters: (parameters) @arity.unknown)
+          (decorated_definition definition: (function_definition parameters: (parameters) @arity.unknown))]))
