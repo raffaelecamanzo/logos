@@ -409,3 +409,10 @@ mod m {
 ";
     assert_eq!(calls_of_f(src), vec![typed("A", None)]);
 }
+
+#[test]
+fn an_if_let_binding_poisons_only_its_own_callable() {
+    // An `if let` binding is scoped to its whole callable, and to no other.
+    let src = with_types("fn g(x: A) { x.f(); }\nfn h(o: Option<B>) { if let Some(x) = o { let _ = x; } }");
+    assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
+}
