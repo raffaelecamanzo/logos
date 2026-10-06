@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-10-06
+
 ### Fixed
 
 - **An incremental re-bind retracts the edges it no longer produces, for every
