@@ -416,3 +416,9 @@ fn an_if_let_binding_poisons_only_its_own_callable() {
     let src = with_types("fn g(x: A) { x.f(); }\nfn h(o: Option<B>) { if let Some(x) = o { let _ = x; } }");
     assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
 }
+
+#[test]
+fn a_comma_inside_a_nested_argument_list_still_peels_its_wrapper() {
+    let src = "fn g(x: Arc<HashMap<K, V>>) { x.f(); }\n";
+    assert_eq!(calls_of_f(src), vec![typed("HashMap", Some("Arc"))]);
+}
