@@ -303,6 +303,14 @@ struct Proven {
     peeled: Vec<&'static str>,
 }
 
+impl Proven {
+    /// The retyped row's target `T::name` and its recorded wrappers.
+    fn into_row(self, name: &str) -> (String, Option<String>) {
+        let peeled = (!self.peeled.is_empty()).then(|| self.peeled.join(" "));
+        (format!("{}::{name}", self.head), peeled)
+    }
+}
+
 /// The wrappers a Rust receiver's declared type is peeled of ([FR-RS-42]):
 /// a call through each reaches the wrapped type's methods. No other wrapper is
 /// peeled — `Option`, `Vec`, `Mutex` are the receiver's type themselves.
@@ -590,11 +598,11 @@ impl<'tree> Receivers<'tree> {
         row: usize,
         invocation: Node<'tree>,
         caller: Option<usize>,
-        receiver: &MacroReceiver,
+        receiver: MacroReceiver,
     ) {
         let receiver = match receiver {
-            MacroReceiver::Name(x) => Typed::Variable(x.clone()),
-            MacroReceiver::OwnField(x) => Typed::SelfField(x.clone()),
+            MacroReceiver::Name(x) => Typed::Variable(x),
+            MacroReceiver::OwnField(x) => Typed::SelfField(x),
         };
         self.macro_sites.push(MacroSite { row, invocation, caller, receiver });
     }
@@ -732,10 +740,9 @@ impl<'tree> Receivers<'tree> {
                 if refs[row].form != RefForm::Method {
                     continue;
                 }
-                let found = self.proven_receiver(receiver, invocation, site.caller, file);
-                if let Some(Proven { head, peeled }) = found {
-                    let peeled = (!peeled.is_empty()).then(|| peeled.join(" "));
-                    proven.push((row, format!("{head}::{name}"), peeled));
+                if let Some(found) = self.proven_receiver(receiver, invocation, site.caller, file) {
+                    let (target, peeled) = found.into_row(name);
+                    proven.push((row, target, peeled));
                 }
                 continue;
             }
@@ -790,9 +797,9 @@ impl<'tree> Receivers<'tree> {
         }
         // A receiver read inside a macro (S-610) is proven the same way.
         for site in &self.macro_sites {
-            if let Some(Proven { head, peeled }) = self.proven_receiver(&site.receiver, site.invocation, site.caller, file) {
-                let peeled = (!peeled.is_empty()).then(|| peeled.join(" "));
-                proven.push((site.row, format!("{head}::{}", refs[site.row].target), peeled));
+            if let Some(found) = self.proven_receiver(&site.receiver, site.invocation, site.caller, file) {
+                let (target, peeled) = found.into_row(&refs[site.row].target);
+                proven.push((site.row, target, peeled));
             }
         }
         for (row, target) in typed {

@@ -1975,8 +1975,7 @@ fn collect_refs(
                 // CR-043), attributed to the macro's enclosing declaration —
                 // see [`macro_rows`].
                 "ref.macro" => {
-                    let caller = enclosing_decl(node);
-                    push_macro_rows(&mut out, receivers.as_mut(), node, source, caller.map(|i| (i, &decls[i])), &source_symbol);
+                    push_macro_rows(&mut out, receivers.as_mut(), node, source, enclosing_decl(node), decls, &source_symbol);
                 }
                 // A type relation (S-466, CR-149 §3.2 B, FR-EX-10): the captured
                 // node is a TYPE, recorded as a Path-form row of the capture's
@@ -2028,19 +2027,20 @@ fn collect_refs(
 
 /// Push one macro invocation's rows onto `out`, each row whose receiver the
 /// walk read registered with `receivers` to be typed after the walk, like a
-/// query-captured one (S-610). `caller` is the enclosing declaration's index
-/// and the declaration itself.
+/// query-captured one (S-610). `caller` is the index of the enclosing
+/// declaration in `decls`.
 fn push_macro_rows<'tree>(
     out: &mut Vec<RefFact>,
     mut receivers: Option<&mut receiver::Receivers<'tree>>,
     macro_node: Node<'tree>,
     source: &[u8],
-    caller: Option<(usize, &Decl<'_>)>,
+    caller: Option<usize>,
+    decls: &[Decl<'_>],
     source_symbol: &LogosSymbol,
 ) {
-    for (fact, read) in macro_rows(macro_node, source, caller.map(|(_, d)| d), source_symbol) {
-        if let (Some(receivers), Some(read)) = (receivers.as_deref_mut(), read.as_ref()) {
-            receivers.macro_site(out.len(), macro_node, caller.map(|(i, _)| i), read);
+    for (fact, read) in macro_rows(macro_node, source, caller.map(|i| &decls[i]), source_symbol) {
+        if let (Some(receivers), Some(read)) = (receivers.as_deref_mut(), read) {
+            receivers.macro_site(out.len(), macro_node, caller, read);
         }
         out.push(fact);
     }
