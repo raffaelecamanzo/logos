@@ -569,7 +569,10 @@ fn opens_with_paren(tt: Node<'_>) -> bool {
 /// Assemble the `ident (:: ident)*` path run ending at child index `call_idx`
 /// into a `::`-joined string (walking left over `identifier`/`::` token pairs).
 /// A turbofish between two segments (`Vec::<u8>::new`) is skipped, as the call
-/// outside a macro records its path without it (S-610).
+/// outside a macro records its path without it (S-610). A qualified self
+/// before the path (`<T as Tr>::m`) records [`qualified_call_target`], as the
+/// call outside a macro does (S-606) — never the bare `m`, which a bare-call
+/// rule could bind to a free `m`.
 fn assemble_path(tt: Node<'_>, call_idx: usize, source: &[u8]) -> String {
     let kind_at = |i: usize| tt.child(i).map(|n| n.kind());
     let mut segs: Vec<&str> = Vec::new();
@@ -588,15 +591,44 @@ fn assemble_path(tt: Node<'_>, call_idx: usize, source: &[u8]) -> String {
         // `a::<T>::b`: the run before this `::` is a turbofish only when a
         // `::` precedes its `<`; the segment it follows is the next one.
         let before = usize::try_from(sep_idx - 1).ok();
-        if before.and_then(kind_at).is_some_and(|k| k == ">" || k == ">>") {
-            let open = before.and_then(|c| angle_open(tt, c));
-            let Some(open) = open.filter(|&o| o > 0 && kind_at(o - 1) == Some("::")) else { break };
+        if let Some(close) = before.filter(|&c| matches!(kind_at(c), Some(">" | ">>"))) {
+            let open = angle_open(tt, close);
+            let Some(open) = open.filter(|&o| o > 0 && kind_at(o - 1) == Some("::")) else {
+                if let Some((ty, tr)) = open.and_then(|o| qualified_self(tt, o, close, source)) {
+                    let segments: Vec<String> = segs.iter().rev().map(|s| s.to_string()).collect();
+                    return qualified_call_target(ty, tr, &segments);
+                }
+                break;
+            };
             sep_idx = open as isize - 1;
         }
         idx = sep_idx - 1;
     }
     segs.reverse();
     segs.join("::")
+}
+
+/// The type and trait text of the qualified self `<T as Tr>` that `tt`'s
+/// children `open..=close` spell, or `None` unless exactly one `as` splits it
+/// at its own depth (`<Vec<u8>>` names no trait). A closing `>>` also closes
+/// the trait's generics (`<X as Tr<u8>>`), so its first `>` is the trait's.
+fn qualified_self<'s>(tt: Node<'_>, open: usize, close: usize, source: &'s [u8]) -> Option<(&'s str, &'s str)> {
+    let mut depth = 0;
+    let mut split = None;
+    for j in open..close {
+        let kind = tt.child(j)?.kind();
+        depth += angle_depth(kind);
+        if kind == "as" && depth == 1 && split.replace(j).is_some() {
+            return None;
+        }
+    }
+    let split = split?;
+    let close_node = tt.child(close)?;
+    let end = close_node.start_byte() + usize::from(close_node.kind() == ">>");
+    let slice = |from: usize, to: usize| std::str::from_utf8(source.get(from..to)?).ok().filter(|s| !s.trim().is_empty());
+    let ty = slice(tt.child(open + 1)?.start_byte(), tt.child(split.checked_sub(1)?)?.end_byte())?;
+    let tr = slice(tt.child(split + 1)?.start_byte(), end)?;
+    Some((ty, tr))
 }
 
 /// Flatten a `use_declaration`'s argument node into [`UseItem`]s.
@@ -1212,6 +1244,31 @@ mod tree_tests {
         }
     }
 
+    /// A fully qualified call inside a macro records the target it records
+    /// outside one (S-606's `<T as Tr>::m`), never the bare `m` a bare-call rule
+    /// could bind to a free `m` (sprint 92 review). A bracket naming no trait
+    /// (`<Vec<u8>>::new`) records what it did before, as outside a macro.
+    #[test]
+    fn a_qualified_call_in_a_macro_records_its_type_and_trait() {
+        for (src, want_path) in [
+            (r#"println!("{}", <X as Tr>::m(x))"#, "<X as Tr>::m"),
+            (r#"assert!(<Self as Tr>::m(self))"#, "<Self as Tr>::m"),
+            (r#"vec![<a::X<u8> as b::Tr<u8>>::m(x)]"#, "<a::X as b::Tr>::m"),
+            (r#"vec![<X as Tr>::m::<u8>(x)]"#, "<X as Tr>::m"),
+            (r#"vec![<X as Tr>::Out::m(x)]"#, "<X as Tr>::Out::m"),
+            (r#"vec![<Vec<u8>>::new()]"#, "new"),
+        ] {
+            let got = macro_calls(src);
+            let paths: Vec<&str> = got.iter().filter(|c| c.form == RefForm::Path).map(|c| c.target.as_str()).collect();
+            assert_eq!(paths, [want_path], "{src}: {got:?}");
+        }
+        assert_eq!(
+            super::qualified_call_target("X", "Tr", &["m".to_string()]),
+            "<X as Tr>::m",
+            "the target outside a macro"
+        );
+    }
+
     /// The type arguments of a turbofish are types, never calls: `Fn(u8)` is a
     /// bound, not a call of a function named `Fn`.
     #[test]
@@ -1308,11 +1365,11 @@ mod tree_tests {
 
     /// A fully qualified path inside a macro is no turbofish: the `<T as Tr>`
     /// before `::m` is not opened by a `::`, so what precedes it (`a,`, `z::y,`)
-    /// is not a path segment of the call.
+    /// is not a path segment of the call: the row is the qualified target alone.
     #[test]
     fn a_qualified_path_after_a_name_is_not_joined_to_it() {
-        assert_eq!(want(&macro_calls("assert_eq!(a, <T as Tr>::m())")), want(&[path("m")]));
-        assert_eq!(want(&macro_calls("assert_eq!(z::y, <T as Tr>::m())")), want(&[path("m")]));
+        assert_eq!(want(&macro_calls("assert_eq!(a, <T as Tr>::m())")), want(&[path("<T as Tr>::m")]));
+        assert_eq!(want(&macro_calls("assert_eq!(z::y, <T as Tr>::m())")), want(&[path("<T as Tr>::m")]));
     }
 
     /// A turbofish call's line is its name token's, wherever its `>` and `(`

@@ -467,6 +467,12 @@ pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
 /// (`queries::check_capture`, S-592).
 pub(crate) const SUPERTYPE_CAPTURE: &str = "ref.extends";
 
+/// The capture a `symbols` query marks an interface member a subtype does not
+/// inherit under (S-609): what a language that declares
+/// [`inherits_interface_bodies`](PluginManifest::inherits_interface_bodies)
+/// must capture, checked when its queries compile (`queries::check_capture`).
+pub(crate) const UNINHERITED_CAPTURE: &str = "item.uninherited";
+
 /// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the
 /// language's bodiless namespace declarations **compose** rather than replace
 /// one another — Scala's chained `package a` / `package b` is `a.b`, where

@@ -784,6 +784,7 @@ fn compile_capabilities(
         entry.manifest_label,
         manifest.module_model_kind() == super::ModuleModelKind::Namespace,
         manifest.implicit_call_falls_through,
+        manifest.inherits_interface_bodies,
         resolved_queries,
         language,
     )?;
@@ -980,6 +981,33 @@ mod tests {
             .to_string();
         assert!(err.contains("toyft/plugin.toml") && err.contains("@ref.extends"), "{err}");
         load("(call_expression function: (identifier) @ref.call)\n(type_identifier) @ref.extends")
+            .compile_all_queries()
+            .expect("the capture satisfies the check");
+    }
+
+    /// S-609: a language declaring `inherits_interface_bodies` must mark the
+    /// interface members a type does not inherit — its `symbols` query
+    /// captures `@item.uninherited` — or its compile is refused naming the
+    /// descriptor, as the fall-through's missing supertype capture is: a
+    /// `static` or `private` interface member would otherwise read as
+    /// inherited (sprint 92 review).
+    #[test]
+    fn an_interface_body_language_without_the_uninherited_capture_fails_its_compile() {
+        fn entry(source: &'static str) -> GrammarEntry {
+            toy_grammar("toyib", "inherits_interface_bodies = true", "", "symbols", source)
+        }
+        let load = |source: &'static str| {
+            let mut entries = grammars::compiled();
+            entries.push(entry(source));
+            LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+                .expect("an embedded query compiles on first use")
+        };
+        let err = load("(function_item name: (identifier) @symbol.function)")
+            .compile_all_queries()
+            .expect_err("no uninherited capture fails the compile")
+            .to_string();
+        assert!(err.contains("toyib/plugin.toml") && err.contains("@item.uninherited"), "{err}");
+        load("(function_item name: (identifier) @symbol.function)\n(function_signature_item) @item.uninherited")
             .compile_all_queries()
             .expect("the capture satisfies the check");
     }
