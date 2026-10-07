@@ -102,6 +102,8 @@ pub fn caller(a: A) {
     m!(free(1, 2));
     m!(free(1, 2, 3,));
     m!(free(|x, y| x + y, 2));
+    commented(1, /* c */ 2);
+    attributed(#[cfg(x)] 1, 2);
 }
 "#;
 
@@ -193,6 +195,9 @@ fn rust_calls_count_their_arguments() {
         map(&[
             ("A::by_ref", vec![Some(1)]),
             ("A::new", vec![Some(0)]),
+            // A comment and an attribute in an argument list are no arguments.
+            ("attributed", vec![Some(2)]),
+            ("commented", vec![Some(2)]),
             ("free", vec![None, Some(2), Some(3)]),
         ])
     );
