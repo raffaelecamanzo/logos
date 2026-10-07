@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use tree_sitter::{Language, Query};
 
 use super::error::PluginError;
-use super::manifest::{NAMESPACE_CAPTURE, SUPERTYPE_CAPTURE};
+use super::manifest::{NAMESPACE_CAPTURE, SUPERTYPE_CAPTURE, UNINHERITED_CAPTURE};
 
 /// A query whose source has been resolved (override-or-embedded), ready to
 /// compile.
@@ -258,6 +258,9 @@ pub(crate) struct LanguageQueries {
     /// Whether the language declares `implicit_call_falls_through` (S-592),
     /// whose `references` query must capture [`SUPERTYPE_CAPTURE`].
     falls_through: bool,
+    /// Whether the language declares `inherits_interface_bodies` (S-609),
+    /// whose `symbols` query must capture [`UNINHERITED_CAPTURE`].
+    interface_bodies: bool,
     /// Every capability's resolved source, in declaration order.
     resolved: Vec<ResolvedQuery>,
     /// The compiled unit — or the error that refused it — once compiled.
@@ -277,6 +280,7 @@ impl LanguageQueries {
         manifest_label: &'static str,
         namespace_model: bool,
         falls_through: bool,
+        interface_bodies: bool,
         resolved: Vec<ResolvedQuery>,
         language: &Language,
     ) -> Result<Self, PluginError> {
@@ -285,6 +289,7 @@ impl LanguageQueries {
             manifest_label,
             namespace_model,
             falls_through,
+            interface_bodies,
             resolved,
             compiled: OnceLock::new(),
         };
@@ -305,6 +310,7 @@ impl LanguageQueries {
             manifest_label: "",
             namespace_model: false,
             falls_through: false,
+            interface_bodies: false,
             resolved: Vec::new(),
             compiled: OnceLock::from(Ok(queries)),
         }
@@ -399,6 +405,9 @@ impl LanguageQueries {
         if self.falls_through {
             check_capture(self.manifest_label, &queries, "references", SUPERTYPE_CAPTURE, SUPERTYPE_REASON)?;
         }
+        if self.interface_bodies {
+            check_capture(self.manifest_label, &queries, "symbols", UNINHERITED_CAPTURE, UNINHERITED_REASON)?;
+        }
         Ok((queries, compiled))
     }
 }
@@ -430,8 +439,21 @@ const SUPERTYPE_REASON: &str =
     "`implicit_call_falls_through` requires the `references` query to capture `@ref.extends`, \
      or no class's supertypes would be seen";
 
+/// A language whose types inherit their interfaces' member bodies (S-609,
+/// [FR-RS-48]) must mark the interface members a type does not inherit: its
+/// compiled `symbols` query captures `@item.uninherited`. The interface level
+/// of the supertype walk drops exactly the members so marked (and the
+/// abstract ones), so a language marking none would bind a call to a `static`
+/// or `private` interface member its class never inherits ([NFR-RA-05]).
+///
+/// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+const UNINHERITED_REASON: &str =
+    "`inherits_interface_bodies` requires the `symbols` query to capture `@item.uninherited`, \
+     or a static or private interface member would read as inherited";
+
 /// A capture a descriptor key depends on ([`NAMESPACE_REASON`],
-/// [`SUPERTYPE_REASON`]): the compiled `capability` query — embedded or an
+/// [`SUPERTYPE_REASON`], [`UNINHERITED_REASON`]): the compiled `capability` query — embedded or an
 /// on-disk override — carries `capture`, or the language's compile is
 /// refused, naming the descriptor and `reason`.
 fn check_capture(
@@ -481,6 +503,7 @@ mod tests {
                     LanguageQueries::new(
                         &grammar,
                         "toyunit/plugin.toml",
+                        false,
                         false,
                         false,
                         resolved,
@@ -544,7 +567,7 @@ mod tests {
                     overridden: false,
                 })
                 .to_vec();
-            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, false, resolved, &language)
+            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, false, false, resolved, &language)
                 .expect("no override, nothing compiles at construction")
         };
         let captured = Captured::default();
