@@ -11,3 +11,10 @@
 ; bindable callee — never fabricated).
 (call_expression
   function: (identifier) @ref.call)
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+(argument_list) @arity.arguments

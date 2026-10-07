@@ -2291,6 +2291,7 @@ fn bind_text(
         payload: None,
         receiver: None,
         peeled: None,
+        arg_count: None,
     };
     match binder::bind(&synthetic, index, policy) {
         binder::Outcome::Bound { target, .. } => Some(target),

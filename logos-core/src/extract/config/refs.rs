@@ -132,6 +132,7 @@ pub(in crate::extract) fn push_artifact_ref(
         relation: Some(relation),
         receiver: None,
         peeled: None,
+        arg_count: None,
     });
     true
 }
@@ -1761,6 +1762,8 @@ mod tests {
             max_nesting_depth: None,
             shingles: Vec::new(),
             self_type: None,
+            params: None,
+            takes_self: None,
         }
     }
 

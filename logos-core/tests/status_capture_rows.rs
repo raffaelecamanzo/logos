@@ -116,6 +116,7 @@ fn plant_awaiting_capture(engine: &Engine) {
                 payload: None,
                 receiver: None,
                 peeled: None,
+                arg_count: None,
             })
         })
         .expect("plant the awaiting capture");
@@ -316,6 +317,7 @@ fn a_syncs_per_relation_coverage_leaves_out_capture_rows() {
                     payload: Some("proto-import"),
                     receiver: None,
                     peeled: None,
+                    arg_count: None,
                 })?;
             }
             Ok(())

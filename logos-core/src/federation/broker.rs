@@ -775,8 +775,9 @@ mod tests {
     /// CR-168's persist-failure record (S-513, migration 27), CR-159's
     /// method self type (S-493, migration 28), CR-169's receiver shape
     /// (S-514, migration 29), CR-170's file namespace (S-518, migration 30),
-    /// CR-194's alias in the ledger identity (S-597, migration 31) and
-    /// CR-188's peeled wrappers in it (S-587, migration 32) — not the
+    /// CR-194's alias in the ledger identity (S-597, migration 31),
+    /// CR-188's peeled wrappers in it (S-587, migration 32) and CR-190/CR-200's
+    /// arity facts and argument count in it (S-591, migration 33) — not the
     /// ledger-only binding
     /// under test here.
     ///
@@ -787,7 +788,7 @@ mod tests {
         let store = SqliteGraphStore::open_in_memory().expect("in-memory store opens");
         assert_eq!(
             store.schema_version().expect("read PRAGMA user_version"),
-            32,
+            33,
             "no migration is added by the ledger-only arm itself — user_version reflects \
              only the later, separate broker-kind widening (migration 17), the \
              relation-aware ledger key (migration 18), the configuration-corpus \
@@ -798,8 +799,9 @@ mod tests {
              snapshot offender lists (migration 26), the persist-failure record \
              (migration 27), the method self type (migration 28), the receiver \
              shape (migration 29), the file namespace (migration 30), the alias in \
-             the ledger identity (migration 31) and the peeled wrappers in it \
-             (migration 32)"
+             the ledger identity (migration 31), the peeled wrappers in it \
+             (migration 32) and the arity facts and argument count in it \
+             (migration 33)"
         );
     }
 }

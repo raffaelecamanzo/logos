@@ -36,6 +36,10 @@
 //! [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 
+// A callable's parameter range and a call's argument count (S-591, CR-190,
+// FR-EX-32), and whether a Rust impl function takes `self` (CR-200): read off
+// the `@arity.*` captures a plugin's queries declare.
+mod arity;
 mod complexity;
 // Per-function max nesting depth (S-042, CR-005, FR-EX-07): a declarative
 // block-kind walk, the structural sibling of `complexity`.
@@ -119,7 +123,7 @@ use std::path::Path;
 use rayon::prelude::*;
 use tree_sitter::{Node, Parser, Query, QueryCapture, QueryCursor, StreamingIterator};
 
-use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, ReceiverShape, RefForm};
+use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, ParamRange, ReceiverShape, RefForm};
 use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, ModuleModelKind, Semantics};
 use crate::resolve::http_client_call::ClientCallRefusal;
 use crate::resolve::package_key::PackageLayout;
@@ -299,6 +303,23 @@ pub struct NodeFact {
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     /// [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
     pub self_type: Option<String>,
+    /// The argument counts this callable admits (S-591, [FR-EX-32]), from its
+    /// plugin's `@arity.*` captures ([`arity`]): a receiver parameter is not
+    /// counted, a defaulted one raises only the maximum, a variadic one makes it
+    /// unbounded. `None` — unknown — for every non-callable node, for a callable
+    /// of a plugin that declares no captures, and for a parameter list holding a
+    /// form the plugin cannot count. Recorded beside the symbol, never in it.
+    ///
+    /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
+    pub params: Option<ParamRange>,
+    /// Whether a Rust `impl` function takes `self` ([CR-200]): `true` when its
+    /// first parameter is a receiver (`self`, `&self`, `&'a mut self`,
+    /// `self: Box<Self>`, …), `false` for an associated function such as
+    /// `fn new() -> Self`. `None` for every other node — a free function, a
+    /// trait's method, every node of another language.
+    ///
+    /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
+    pub takes_self: Option<bool>,
 }
 
 /// A graph relationship produced by extraction.
@@ -369,6 +390,17 @@ pub struct RefFact {
     ///
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
     pub peeled: Option<String>,
+    /// How many arguments a `Calls` row's call passes (S-591, [FR-EX-32]), from
+    /// its plugin's `@arity.*` captures ([`arity`]): a trailing lambda counts as
+    /// one, a Scala call counts its first argument list only. `None` — unknown —
+    /// for a spread argument, a form the plugin cannot count (a call in a
+    /// macro's token tree whose tokens may hide a comma, `refs::macro_call_refs`),
+    /// and every non-call row. Part of the ledger identity:
+    /// `f(a)` and `f(a, b)` from one caller are two rows that may bind
+    /// differently.
+    ///
+    /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
+    pub arg_count: Option<u32>,
 }
 
 /// The extraction result for a single file.
@@ -456,6 +488,9 @@ struct Decl<'tree> {
     /// The self type a `@symbol.self_type` capture in a match naming this
     /// declaration gives it (S-493). Never part of the symbol or the ordinal.
     self_type: Option<String>,
+    /// The parameter list the `@arity.*` captures give this declaration
+    /// (S-591), `None` when they give it none. Never part of the symbol.
+    params: Option<arity::Params>,
 }
 
 /// Extract one file with an explicit plugin, allocating a fresh parser.
@@ -650,7 +685,8 @@ fn extract_one(
     let source = input.source.as_bytes();
 
     // 1) Collect declarations from the query matches.
-    let (mut decls, package_statement, namespaces, damage) = collect_decls(query, tree.root_node(), source);
+    let (mut decls, package_statement, namespaces, damage) =
+        collect_decls(query, tree.root_node(), source, &plugin.semantics().body_node_kinds);
     if let Some(i) = partial_warning {
         damage.annotate(&mut facts.warnings[i]);
     }
@@ -736,6 +772,8 @@ fn extract_one(
                 max_nesting_depth: None,
                 shingles: Vec::new(),
                 self_type: None,
+                params: None,
+                takes_self: None,
             });
             Some(sym)
         }
@@ -788,6 +826,7 @@ fn extract_one(
                     relation: None,
                     receiver: None,
                     peeled: None,
+                    arg_count: None,
                 });
             }
         }
@@ -829,6 +868,10 @@ fn extract_one(
                 Vec::new()
             },
             self_type: decl.self_type.clone(),
+            // S-591 / FR-EX-32: the range a callable admits; CR-200: whether a
+            // Rust impl function's list writes a receiver. Unknown elsewhere.
+            params: decl.params.filter(|_| is_callable).and_then(|p| p.range),
+            takes_self: decl.params.filter(|_| is_rust_method).map(|p| p.receiver),
         });
 
         // A Contains edge links the enclosing scope to this declaration; both
@@ -1384,7 +1427,7 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 }
 
 /// Deduplicate references on the ledger's uniqueness key
-/// `(source, target, form, kind, relation, receiver, alias, peeled)` — the same reference
+/// `(source, target, form, kind, relation, receiver, alias, peeled, args)` — the same reference
 /// on two lines is one ref, first wins — then sort into that canonical order
 /// ([NFR-RA-06]).
 ///
@@ -1412,9 +1455,14 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 /// The peeled wrappers (S-587) complete the identity: a caller's `a.m()` with
 /// `a: Arc<T>` and `b.m()` with `b: T` both record `T::m`, and a method the
 /// wrapper itself provides binds through one and not the other. A row that
-/// peeled nothing keys exactly as before. The key, the writer's `ON CONFLICT`
-/// target (`insert_unresolved_ref`) and the unique index of migration 32 name
-/// the same eight components.
+/// peeled nothing keys exactly as before.
+///
+/// The argument count (S-591, [FR-EX-32]) completes it: a caller's `f(a)` and
+/// `f(a, b)` share every other component, and a binder that admits a candidate
+/// by its parameter range binds them differently. An unknown count keys apart
+/// from every known one. The key, the writer's `ON CONFLICT` target
+/// (`insert_unresolved_ref`) and the unique index of migration 33 name the same
+/// nine components.
 ///
 /// Shared by the code [`collect_refs`] and the documentation extractor
 /// ([`doc`], S-035) so both passes produce byte-identical, order-independent
@@ -1423,6 +1471,7 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [FR-WS-10]: ../../../docs/specs/requirements/FR-WS-10.md
 /// [FR-DB-07]: ../../../docs/specs/requirements/FR-DB-07.md
+/// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
 pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
     // The relation token (`None` for a plain code/doc reference) completes the
     // ledger identity; a `&'static str` keeps the key allocation-free.
@@ -1434,8 +1483,8 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
     let alias_token = |r: &RefFact| -> String { r.alias.clone().unwrap_or_default() };
     // The peeled wrappers likewise (`COALESCE(peeled, '')`, S-587).
     let peeled_token = |r: &RefFact| -> String { r.peeled.clone().unwrap_or_default() };
-    // `(source, target, form, kind, relation, receiver, alias, peeled)`.
-    type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>, String, String);
+    // `(source, target, form, kind, relation, receiver, alias, peeled, args)`.
+    type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>, String, String, Option<u32>);
     let mut seen: HashSet<LedgerKey> = HashSet::new();
     refs.retain(|r| {
         seen.insert((
@@ -1447,6 +1496,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             r.receiver.map(ReceiverShape::as_i32),
             alias_token(r),
             peeled_token(r),
+            r.arg_count,
         ))
     });
     refs.sort_by(|a, b| {
@@ -1459,6 +1509,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
             a.receiver.map(ReceiverShape::as_i32),
             a.alias.as_deref().unwrap_or_default(),
             a.peeled.as_deref().unwrap_or_default(),
+            a.arg_count,
         )
             .cmp(&(
                 b.source.as_str(),
@@ -1469,6 +1520,7 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
                 b.receiver.map(ReceiverShape::as_i32),
                 b.alias.as_deref().unwrap_or_default(),
                 b.peeled.as_deref().unwrap_or_default(),
+                b.arg_count,
             ))
     });
 }
@@ -1592,6 +1644,10 @@ fn collect_refs(
         semantics.module_model == ModuleModelKind::Package,
     );
     let mut out: Vec<RefFact> = Vec::new();
+    // The argument captures (S-591) and each call row's captured callee, read
+    // once the walk ends: a call's arguments may be matched after its callee.
+    let mut arguments = arity::ArgCaptures::default();
+    let mut callees: Vec<(usize, Node<'_>)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
@@ -1600,7 +1656,8 @@ fn collect_refs(
             let capture = capture_names[cap.index as usize];
             // A `_`-prefixed capture is a predicate operand (`@_receiver`),
             // never a reference.
-            if capture.starts_with('_') {
+            // An `@arity.*` capture records no row of its own either (S-591).
+            if capture.starts_with('_') || arguments.note(capture, node) {
                 continue;
             }
             // A receiver marker records no row of its own: it is read before
@@ -1649,6 +1706,7 @@ fn collect_refs(
                     if let Some(receivers) = receivers.as_mut() {
                         receivers.site(out.len(), node.parent(), enclosing_decl(node));
                     }
+                    callees.push((out.len(), node));
                     out.push(RefFact {
                         source: source_symbol,
                         target,
@@ -1659,6 +1717,7 @@ fn collect_refs(
                         relation: None,
                         receiver: None,
                         peeled: None,
+                        arg_count: None,
                     });
                 }
                 "ref.method" | SELF_RECEIVER_METHOD_CAPTURE => {
@@ -1674,6 +1733,7 @@ fn collect_refs(
                     // A member call whose receiver is an imported module — a Go
                     // package, a TS namespace import — is a qualified path, not a
                     // receiver-method call (S-440, `ImportBindings`).
+                    callees.push((out.len(), node));
                     if let Some(module) = imports.qualifier_of(node, source) {
                         out.push(RefFact {
                             source: source_symbol,
@@ -1685,6 +1745,7 @@ fn collect_refs(
                             relation: None,
                             receiver: None,
                             peeled: None,
+                            arg_count: None,
                         });
                         continue;
                     }
@@ -1715,6 +1776,7 @@ fn collect_refs(
                         relation: None,
                         receiver: None,
                         peeled: None,
+                        arg_count: None,
                     });
                 }
                 // The language-agnostic import capture (S-015): the captured
@@ -1766,6 +1828,7 @@ fn collect_refs(
                         relation: None,
                         receiver: None,
                         peeled: None,
+                        arg_count: None,
                     });
                 }
                 // A member-access fact (S-042, CR-005, FR-EX-08): a method body
@@ -1792,47 +1855,15 @@ fn collect_refs(
                         relation: None,
                         receiver: None,
                         peeled: None,
+                        arg_count: None,
                     });
                 }
                 // Calls nested inside a macro invocation's token tree (S-162,
-                // CR-043): tree-sitter does not parse a macro body as
-                // expressions, so the call/method-call query patterns cannot
-                // match inside it. Walk the token tree in code and emit the same
-                // `Calls` path/method RefFacts, attributed to the macro's
-                // enclosing declaration — so a callee whose only call site is a
-                // macro argument (`format!("{x}", x = activity_card(s))`,
-                // `self.state.chip_class()`) is bound, or stays honestly
-                // unresolved, exactly like any other call ([NFR-RA-05]).
+                // CR-043), attributed to the macro's enclosing declaration —
+                // see [`macro_rows`].
                 "ref.macro" => {
                     let caller = enclosing_decl(node).map(|i| &decls[i]);
-                    for call in macro_call_refs(node, source) {
-                        if call.target.is_empty() {
-                            continue;
-                        }
-                        // `self.f()` in a macro argument: the row the same call
-                        // records outside one (S-493, S-514). Any other method
-                        // call is `other`, as outside one (S-517): a shapeless
-                        // row would no longer merge with the query's `other`
-                        // row of the same call, which the shape-keyed dedup
-                        // keeps apart.
-                        let (target, form, receiver) = if call.self_receiver {
-                            receiver::self_call(caller, &call.target)
-                        } else {
-                            let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
-                            (call.target, call.form, shape)
-                        };
-                        out.push(RefFact {
-                            source: source_symbol.clone(),
-                            target,
-                            alias: None,
-                            form,
-                            kind: EdgeKind::Calls,
-                            line: call.line,
-                            relation: None,
-                            receiver,
-                            peeled: None,
-                        });
-                    }
+                    out.extend(macro_rows(node, source, caller, &source_symbol));
                 }
                 // A type relation (S-466, CR-149 §3.2 B, FR-EX-10): the captured
                 // node is a TYPE, recorded as a Path-form row of the capture's
@@ -1856,6 +1887,12 @@ fn collect_refs(
         }
     }
 
+    // Each call row's argument count (S-591). Rows the receiver pass retypes
+    // keep it: the call is the same.
+    for (row, callee) in callees {
+        out[row].arg_count = arguments.count(callee, |n| id_to_idx.contains_key(&n.id()));
+    }
+
     if let Some(receivers) = receivers {
         let file = receiver::FileDecls {
             root,
@@ -1869,6 +1906,51 @@ fn collect_refs(
 
     // Dedup on the ledger's uniqueness key, then canonical sort (NFR-RA-06).
     dedup_sort_refs(&mut out);
+    out
+}
+
+/// The `Calls` rows of the calls nested inside one macro invocation's token
+/// tree (S-162, CR-043): tree-sitter does not parse a macro body as
+/// expressions, so the call/method-call query patterns cannot match inside it.
+/// The token tree is walked in code ([`macro_call_refs`]) and each call emits
+/// the same `Calls` path/method row it would outside the macro, attributed to
+/// the macro's enclosing declaration `caller` — so a callee whose only call
+/// site is a macro argument (`format!("{x}", x = activity_card(s))`,
+/// `self.state.chip_class()`) is bound, or stays honestly unresolved, exactly
+/// like any other call ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, source_symbol: &LogosSymbol) -> Vec<RefFact> {
+    let mut out = Vec::new();
+    for call in macro_call_refs(macro_node, source) {
+        if call.target.is_empty() {
+            continue;
+        }
+        // `self.f()` in a macro argument: the row the same call records
+        // outside one (S-493, S-514). Any other method call is `other`, as
+        // outside one (S-517): a shapeless row would no longer merge with the
+        // query's `other` row of the same call, which the shape-keyed dedup
+        // keeps apart. Its argument count (S-591) is the token tree's, for the
+        // same reason.
+        let (target, form, receiver) = if call.self_receiver {
+            receiver::self_call(caller, &call.target)
+        } else {
+            let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
+            (call.target, call.form, shape)
+        };
+        out.push(RefFact {
+            source: source_symbol.clone(),
+            target,
+            alias: None,
+            form,
+            kind: EdgeKind::Calls,
+            line: call.line,
+            relation: None,
+            receiver,
+            peeled: None,
+            arg_count: call.arg_count,
+        });
+    }
     out
 }
 
@@ -1972,6 +2054,7 @@ fn tree_import_rows(
                 relation: None,
                 receiver: None,
                 peeled: None,
+                arg_count: None,
             }
         })
         .collect()
@@ -2016,6 +2099,7 @@ fn type_relation_rows(
                 relation: None,
                 receiver: None,
                 peeled: None,
+                arg_count: None,
             });
         }
     }
@@ -2714,6 +2798,7 @@ fn collect_decls<'t>(
     query: &Query,
     root: Node<'t>,
     source: &[u8],
+    body_kinds: &[String],
 ) -> (
     Vec<Decl<'t>>,
     Option<String>,
@@ -2736,6 +2821,8 @@ fn collect_decls<'t>(
     let mut namespaces: Vec<declared_types::NamespaceScope> = Vec::new();
     // declaration node id → the self type its match declares (S-493).
     let mut self_types: HashMap<usize, String> = HashMap::new();
+    // The parameter-list captures (S-591), resolved once every declaration is in.
+    let mut params = arity::ParamCaptures::default();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
@@ -2754,6 +2841,7 @@ fn collect_decls<'t>(
             let capture = capture_names[cap.index as usize];
             if declared_types::note_package(&mut package, capture, cap.node, source)
                 || declared_types::note_namespace(&mut namespaces, capture, cap.node, source, chained)
+                || params.note(capture, cap.node)
             {
                 continue;
             }
@@ -2795,11 +2883,16 @@ fn collect_decls<'t>(
                 parent: None,
                 ordinal: 0,
                 self_type: None,
+                params: None,
             });
         }
     }
     for decl in &mut decls {
         decl.self_type = self_types.remove(&decl.node.id());
+    }
+    let own_params = params.per_decl(&decls, body_kinds);
+    for (decl, own) in decls.iter_mut().zip(own_params) {
+        decl.params = own;
     }
     damage.skipped = nameless.difference(&seen_decls).count();
     (decls, package, namespaces, damage)

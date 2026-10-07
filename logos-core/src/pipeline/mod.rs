@@ -2232,6 +2232,7 @@ fn persist_file(
                     payload: None,
                     receiver: None,
                     peeled: None,
+                    arg_count: None,
                 })?;
             }
             return Ok(PersistCounts {
@@ -2747,6 +2748,9 @@ fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
             receiver: r.receiver,
             // A proven receiver's peeled wrappers (S-587); `None` otherwise.
             peeled: r.peeled.as_deref(),
+            // A call's argument count (S-591); `None` when it cannot be
+            // counted and on every non-call row.
+            arg_count: r.arg_count,
         })?;
     }
     Ok(())
@@ -2793,6 +2797,10 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             // The S-493 self type a plugin query declares for a method (FR-RS-11)
             // — NULL on every node with none.
             self_type: n.self_type.as_deref(),
+            // The S-591 parameter range (FR-EX-32) and the CR-200 takes-`self`
+            // fact — NULL wherever unknown.
+            params: n.params,
+            takes_self: n.takes_self,
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
         // The CR-005 winnowed near-clone shingle set (FR-EX-09) — persisted into

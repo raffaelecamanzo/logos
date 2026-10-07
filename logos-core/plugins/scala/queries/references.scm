@@ -87,3 +87,20 @@
 
 ; An import declaration, walked into one row per imported path (S-518).
 (import_declaration) @ref.import.dotted
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; A call counts its first argument list only; a block or case block written as
+; the list (`f { … }`) is one argument. `xs: _*` and `xs*` spread a sequence.
+(arguments) @arity.arguments
+(call_expression
+  arguments: [(block) (case_block)] @arity.block)
+(call_expression
+  arguments: (colon_argument) @arity.opaque)
+(arguments (ascription_expression (repeated_parameter_type)) @arity.spread)
+(arguments
+  (postfix_expression (operator_identifier) @_spread) @arity.spread
+  (#eq? @_spread "*"))

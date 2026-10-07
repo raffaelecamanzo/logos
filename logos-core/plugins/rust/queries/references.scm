@@ -206,3 +206,14 @@
 (field_expression
   value: (self)
   field: (field_identifier) @ref.access)
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; An attribute on an argument is no argument. A call inside a macro's token
+; tree is never parsed: the token-tree walk (`ref.macro`) counts its arguments
+; itself, or records unknown.
+(arguments) @arity.arguments
+(arguments (attribute_item) @arity.skip)

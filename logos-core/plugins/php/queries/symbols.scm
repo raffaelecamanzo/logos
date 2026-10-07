@@ -47,3 +47,25 @@
 ; that namespace plus its own name, whatever directory the file sits in.
 (namespace_definition
   name: (namespace_name) @module.namespace)
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; A parameter with a default is optional; `...$xs` is variadic. A user-defined
+; function accepts more arguments than it declares (`func_get_args()` reads
+; them), so every list is also captured variadic: the minimum is the required
+; parameters, the maximum unbounded.
+(function_definition
+  parameters: (formal_parameters) @arity.parameters @arity.variadic)
+(method_declaration
+  parameters: (formal_parameters) @arity.parameters @arity.variadic)
+(formal_parameters (simple_parameter) @arity.required)
+(formal_parameters (simple_parameter default_value: (_)) @arity.optional)
+(formal_parameters (variadic_parameter) @arity.variadic)
+(formal_parameters (property_promotion_parameter) @arity.required)
+(formal_parameters (property_promotion_parameter default_value: (_)) @arity.optional)

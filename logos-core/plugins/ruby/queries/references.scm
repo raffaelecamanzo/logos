@@ -116,3 +116,26 @@
     .
     (string) @ref.import)
   (#match? @_req "^require"))
+
+; ── Argument count (S-591, CR-190, FR-EX-32) ─────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): every
+; argument list, whose named children a call row counts, and the forms that
+; make a count unknown. Captures record no row of their own, so every ledger
+; target is unchanged.
+; `*xs`, `**h` and `...` spread, and so does a bare `key: value` run; a
+; `&block` is no argument; a call written
+; without an argument list (`x.m`) passes none; a call's `receiver` is not its
+; callee.
+(argument_list) @arity.arguments
+(argument_list (splat_argument) @arity.spread)
+(argument_list (hash_splat_argument) @arity.spread)
+(argument_list (forward_argument) @arity.spread)
+(argument_list (block_argument) @arity.skip)
+; A bare `key: value` run is one positional hash when the callee declares no
+; keyword parameter, and one argument per key when it does — the count depends
+; on the callee, so it is unknown.
+(argument_list (pair) @arity.spread)
+(call
+  method: (_)
+  !arguments) @arity.none
+(call receiver: (_) @arity.receiver)

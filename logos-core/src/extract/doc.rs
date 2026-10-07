@@ -156,6 +156,8 @@ pub(super) fn extract_one_doc(
         max_nesting_depth: None,
         shingles: Vec::new(),
         self_type: None,
+        params: None,
+        takes_self: None,
     });
 
     // A parser bound to the markdown *inline* grammar, for the per-`inline`-block
@@ -299,6 +301,8 @@ fn walk_sections(
             max_nesting_depth: None,
             shingles: Vec::new(),
             self_type: None,
+            params: None,
+            takes_self: None,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),
@@ -584,6 +588,7 @@ fn emit_link_ref(dest: &str, source_symbol: &LogosSymbol, line: u32, facts: &mut
         relation: None,
         receiver: None,
         peeled: None,
+        arg_count: None,
     });
 }
 
@@ -634,6 +639,7 @@ fn emit_code_token_ref(raw: &str, source_symbol: &LogosSymbol, line: u32, facts:
             relation: None,
             receiver: None,
             peeled: None,
+            arg_count: None,
         });
         return;
     }
@@ -657,6 +663,7 @@ fn emit_code_token_ref(raw: &str, source_symbol: &LogosSymbol, line: u32, facts:
             relation: None,
             receiver: None,
             peeled: None,
+            arg_count: None,
         });
     }
 }

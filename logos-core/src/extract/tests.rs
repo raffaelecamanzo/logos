@@ -6452,6 +6452,7 @@ fn dedup_sort_refs_keys_on_the_alias_with_a_missing_alias_normalised() {
         relation: None,
         receiver: None,
         peeled: None,
+        arg_count: None,
     };
     let mut refs = vec![
         row(Some("B"), 1),

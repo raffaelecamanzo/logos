@@ -37,3 +37,27 @@
 
 (singleton_method
   name: (identifier) @symbol.method)
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; A parameter with a default is optional, a keyword without one required;
+; `*args`, `**opts` and `...` are variadic; a `&block` is no parameter.
+(method
+  parameters: (method_parameters) @arity.parameters)
+(singleton_method
+  parameters: (method_parameters) @arity.parameters)
+(method_parameters (identifier) @arity.required)
+(method_parameters (destructured_parameter) @arity.required)
+(method_parameters (optional_parameter) @arity.optional)
+(method_parameters (keyword_parameter) @arity.required)
+(method_parameters (keyword_parameter value: (_)) @arity.optional)
+(method_parameters (splat_parameter) @arity.variadic)
+(method_parameters (hash_splat_parameter) @arity.variadic)
+(method_parameters (forward_parameter) @arity.variadic)
+(method_parameters (block_parameter) @arity.skip)

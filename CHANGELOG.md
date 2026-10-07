@@ -13,6 +13,36 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+### Added
+
+- **A callable records its parameter range and a call records its argument
+  count (CR-190, CR-200, S-591).** Every `Function`/`Method` node of Rust, Go,
+  Java, Kotlin, Scala, C#, C, C++, Python, PHP, Ruby, TypeScript and TSX now
+  records the argument counts it admits: required parameters set the minimum,
+  a defaulted one raises only the maximum, a variadic one (`...`, `params`,
+  `vararg`, `*args`, `**kw`) makes it unbounded, and a receiver parameter
+  (Rust `self`, Python `self`/`cls`, Go's receiver, Java's `C this`) is not
+  counted. A PHP function's maximum is unbounded, since PHP passes surplus
+  arguments through. Every call row records how many arguments it passes: a
+  Kotlin trailing lambda counts as one, a Scala call counts its first argument
+  list, and a spread (`*xs`, `...xs`, `xs: _*`) records unknown, as does any
+  form a plugin cannot count (a Scala `using` list, a C# extension method,
+  C's `()`, a C++ definition outside its class whose defaults may sit on a
+  separate declaration, a Python method under an `if`/`try` of its class, a
+  Ruby call with a bare `key: value` run).
+  Every Rust `impl` function also records whether it takes `self`. The facts
+  come from new `@arity.*` captures in each plugin's queries, so a droppable
+  query override can tune them. Nothing binds on them yet: on this repository
+  symbols and edges are byte-identical, every node is unchanged apart from the
+  new facts, and the quality signal is unchanged. A call's count joins its ledger row's identity, so `f(a)` and
+  `f(a, b)` from one caller are now two rows; on this repository 268 `Calls`
+  rows appear (95,154 → 95,422), which moves the `status` call figures (Rust
+  references 90,125 → 90,234, `no-receiver-evidence` 47,404 → 47,509; Python,
+  TypeScript and TSX likewise) without adding or removing an edge. Store
+  migration 33 adds the columns and clears every content hash, so the first
+  `logos scan` (or `logos index`) after upgrading re-reads every file. A bare
+  `logos sync` reads no file.
+
 ## [1.12.0] — 2026-10-06
 
 ### Added

@@ -51,3 +51,26 @@
 
 (file_scoped_namespace_declaration
   name: (_) @module.namespace)
+
+; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
+; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a
+; callable's parameter list, and each parameter as required, optional (a
+; default value raises only the maximum), variadic (an unbounded maximum), a
+; receiver (not counted) or no parameter at all (skip). A list child no capture
+; covers, or one captured `@arity.unknown`, records the range unknown rather
+; than miscounting it. Captures never name a declaration, so every symbol and
+; node is unchanged.
+; A parameter with `= value` is optional. A `params` array is written on the
+; list itself — the `params` token, then its type and name — and is variadic.
+; An extension method's `this` parameter is its receiver at `x.M()` and an
+; argument at `C.M(x)`, so its range is unknown.
+(method_declaration
+  parameters: (parameter_list) @arity.parameters)
+(parameter_list (parameter) @arity.required)
+(parameter_list (parameter "=") @arity.optional)
+(parameter_list "params" @arity.variadic)
+(parameter_list type: (_) @arity.skip)
+(parameter_list name: (_) @arity.skip)
+(parameter_list
+  (parameter (modifier) @_this) @arity.unknown
+  (#eq? @_this "this"))
