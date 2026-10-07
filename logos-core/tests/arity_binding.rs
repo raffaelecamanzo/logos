@@ -704,6 +704,30 @@ fn a_call_no_member_names_never_falls_through() {
     assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::SupertypeUnreached, 1)]));
 }
 
+/// A fall-through that reaches two free functions the count both admits binds
+/// neither, and says so: `overload-ambiguous`, not `no-applicable-overload`
+/// (S-592).
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn a_fall_through_to_two_applicable_free_functions_is_overload_ambiguous() {
+    let tmp = tree(&[(
+        "src/main/kotlin/app/C.kt",
+        "package app
+
+fun top(a: Int) {}
+fun top(a: String) {}
+
+class C {
+    fun top(a: Int, b: Int) {}
+    fun caller() { top(1) }
+}
+",
+    )]);
+    let engine = index(tmp.path());
+    assert_eq!(calls_from(engine.runtime().unwrap(), "caller@8"), targets(&[]));
+    assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::OverloadAmbiguous, 1)]));
+}
+
 // ── Sync ≡ reindex ────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
