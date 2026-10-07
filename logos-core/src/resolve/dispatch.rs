@@ -204,7 +204,15 @@ pub fn run(
     let (nodes, markers) = match &changed_rs {
         // Full index: every node, and a whole-graph marker scan (within the cold
         // index budget, not the sync hot path).
-        None => runtime.submit_read(|store| Ok((store.all_nodes()?, store.dispatch_markers()?)))?,
+        // A required signature (S-606) holds no code, so it is no dispatch
+        // entry and never a handoff's handler: it is left out, as the sync
+        // read below leaves it out.
+        None => runtime.submit_read(|store| {
+            let signatures = super::signature_nodes(store)?;
+            let mut nodes = store.all_nodes()?;
+            nodes.retain(|n| !signatures.contains(&n.id));
+            Ok((nodes, store.dispatch_markers()?))
+        })?,
         // Sync: only the changed files' callable nodes, and only the markers on
         // *those* nodes (index-served), so the read is O(changed) ([NFR-PE-03]).
         Some(changed) => {

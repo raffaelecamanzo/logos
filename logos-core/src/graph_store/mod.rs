@@ -2034,7 +2034,8 @@ pub trait GraphStore {
     fn dispatch_markers(&self) -> Result<Vec<NodeId>>;
 
     /// The `Function`/`Method` nodes defined in the given project-relative file
-    /// `paths`, ordered by `id`.
+    /// `paths`, ordered by `id` — a required signature (S-606, `nodes.signature`)
+    /// excepted: it holds no code to dispatch to.
     ///
     /// The change-proportional node read the dispatch pass uses on a sync
     /// ([NFR-PE-03], [`crate::resolve::dispatch`]): only the changed files' nodes
@@ -3437,7 +3438,8 @@ impl GraphStore for SqliteGraphStore {
         }
         // Dynamic `IN (?,?,…)` over the (small) changed-file set; `prepare` not
         // `prepare_cached` because the placeholder count varies. `kind IN (7,8)`
-        // is Function/Method (the only nodes that carry a dispatch marker).
+        // is Function/Method (the only nodes that carry a dispatch marker); a
+        // required signature (S-606) carries none and is left out.
         let placeholders = vec!["?"; paths.len()].join(",");
         let func = NodeKind::Function.as_i32();
         let method = NodeKind::Method.as_i32();
@@ -3447,6 +3449,7 @@ impl GraphStore for SqliteGraphStore {
              JOIN symbols s ON s.id = n.symbol_id \
              JOIN files f ON f.id = n.file_id \
              WHERE f.path IN ({placeholders}) AND n.kind IN ({func}, {method}) \
+               AND n.signature IS NULL \
              ORDER BY n.id"
         );
         let mut stmt = self.conn.prepare(&sql)?;

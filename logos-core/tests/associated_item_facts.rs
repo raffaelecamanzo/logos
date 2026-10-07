@@ -359,3 +359,34 @@ fn a_route_never_reaches_a_required_signature() {
         .collect();
     assert!(routes.iter().all(|(_, target)| target != "index@3"), "no route reaches the signature: {routes:?}");
 }
+
+const AXUM_SIGNATURE_AND_HANDLER: &str = "\
+use axum::{routing::get, Router};
+pub trait Api {
+    fn index(&self);
+}
+pub async fn index() {}
+pub fn app() -> Router {
+    Router::new().route(\"/\", get(index))
+}
+";
+
+/// S-606: the dispatch pass's same-file handoff resolves a handler name among
+/// bodied callables only — a trait's same-named required signature neither
+/// makes the free handler ambiguous nor takes its live-root marker — on a cold
+/// index and through sync (the change-proportional read) alike.
+#[test]
+fn a_handoff_beside_a_same_named_signature_roots_the_handler() {
+    let markers = |rt: &Runtime| -> Vec<String> {
+        edges(rt, EdgeKind::RoutesTo).into_iter().filter(|(s, t)| s == t).map(|(s, _)| s).collect()
+    };
+    let tmp = axum_tree(AXUM_SIGNATURE_AND_HANDLER);
+    let engine = index(tmp.path());
+    assert_eq!(markers(engine.runtime().unwrap()), ["index@5"], "the handler, never the signature, is rooted");
+
+    let root = tmp.path().canonicalize().unwrap();
+    let edited = format!("{AXUM_SIGNATURE_AND_HANDLER}pub fn other() {{}}\n");
+    fs::write(tmp.path().join(LIB), &edited).unwrap();
+    engine.sync(&[root.join(LIB)]);
+    assert_eq!(markers(engine.runtime().unwrap()), ["index@5"], "a sync roots the same handler");
+}
