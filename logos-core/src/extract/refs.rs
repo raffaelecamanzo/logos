@@ -356,10 +356,10 @@ fn pattern_idents<'a>(tt: Node<'_>, range: std::ops::Range<usize>, source: &'a [
 
 /// Every name a pattern inside `tt` (recursively) may bind: the parameters
 /// between a closure's `|`s, the pattern after `let` / `for`, and the run
-/// before a match arm's `=>` or a guard's `if` back to the preceding `,`. The
-/// run is over-read — it takes every identifier in it — because the cost of a
-/// name wrongly read as bound is an unproven receiver, and of one wrongly read
-/// as free a wrong type (S-610).
+/// before a match arm's `=>` or a guard's `if` back to the preceding `,`, `;`
+/// or `{ … }` (the previous arm). The run is over-read — it takes every
+/// identifier in it — because the cost of a name wrongly read as bound is an
+/// unproven receiver, and of one wrongly read as free a wrong type (S-610).
 fn bound_names<'a>(tt: Node<'_>, source: &'a [u8], out: &mut HashSet<&'a str>) {
     let kinds: Vec<&str> = (0..tt.child_count()).filter_map(|i| tt.child(i)).map(|c| c.kind()).collect();
     let mut idents = |from: usize, to: usize| pattern_idents(tt, from..to, source, out);
@@ -376,7 +376,9 @@ fn bound_names<'a>(tt: Node<'_>, source: &'a [u8], out: &mut HashSet<&'a str>) {
                 idents(i + 1, end.unwrap_or(kinds.len()));
             }
             "=>" | "if" => {
-                let start = (0..i).rev().find(|&j| kinds[j] == ",").map_or(0, |j| j + 1);
+                // The pattern starts after the previous arm, statement or argument.
+                let ends = |j: usize| matches!(kinds[j], "," | ";") || tt.child(j).is_some_and(|c| c.kind() == "token_tree" && c.child(0).is_some_and(|d| d.kind() == "{"));
+                let start = (0..i).rev().find(|&j| ends(j)).map_or(0, |j| j + 1);
                 idents(start, i);
             }
             _ => {}
@@ -1273,6 +1275,8 @@ mod tree_tests {
             "assert!(matches!(o, Some(y) if y.g()), x.f())",
             // `recv(x)` reads `x`; only `msg` is bound.
             "m!(select! { recv(x) -> msg => { x.f() } })",
+            // An earlier arm's body is no part of a later arm's pattern.
+            "m!(select! { recv(y) -> a => { x.g() } recv(z) -> b => { x.f() } })",
         ] {
             assert_eq!(receiver_of_f(src), name, "{src}");
         }
