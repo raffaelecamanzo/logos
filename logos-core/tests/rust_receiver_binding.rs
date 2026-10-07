@@ -289,6 +289,8 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
 }
 
 const CALLER: &str = "use crate::store::Store;\npub fn run(x: &Store) { x.get(); }\n";
+/// [`CALLER`] importing the trait `G` too, so its method is in scope (S-607).
+const TRAIT_CALLER: &str = "use crate::store::{Store, G};\npub fn run(x: &Store) { x.get(); }\n";
 const WITHOUT_GET: &str = "pub struct Store;\nimpl Store {\n    pub fn put(&self) {}\n}\n";
 const WITH_GET: &str = "pub struct Store;\nimpl Store {\n    pub fn put(&self) {}\n    pub fn get(&self) {}\n}\n";
 const WITH_TRAIT_GET: &str = "pub struct Store;\npub trait G { fn get(&self); }\nimpl G for Store {\n    fn get(&self) {}\n}\n";
@@ -303,9 +305,13 @@ fn the_callees_type_gaining_or_losing_the_method_rebinds_on_sync() {
     // Losing it unbinds the call.
     let edges = synced_equals_reindexed(&[lib, caller, ("src/store.rs", WITH_GET)], &[("src/store.rs", WITHOUT_GET)]);
     assert!(targets(&edges, "src/caller.rs:run@2").is_empty(), "{edges:#?}");
-    // A trait impl's `get` replacing the inherent one binds through the impl.
-    let edges = synced_equals_reindexed(&[lib, caller, ("src/store.rs", WITH_GET)], &[("src/store.rs", WITH_TRAIT_GET)]);
+    // A trait impl's `get` replacing the inherent one binds through the impl
+    // where the caller imports the trait — and nowhere else (S-607).
+    let traited = ("src/caller.rs", TRAIT_CALLER);
+    let edges = synced_equals_reindexed(&[lib, traited, ("src/store.rs", WITH_GET)], &[("src/store.rs", WITH_TRAIT_GET)]);
     assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/store.rs:get@4"]);
+    let edges = synced_equals_reindexed(&[lib, caller, ("src/store.rs", WITH_GET)], &[("src/store.rs", WITH_TRAIT_GET)]);
+    assert!(targets(&edges, "src/caller.rs:run@2").is_empty(), "{edges:#?}");
 }
 
 #[test]
@@ -463,12 +469,14 @@ fn a_wrapper_associated_function_is_no_method_of_the_wrapper() {
 
 // ── The Rust row's call residue (S-589) ─────────────────────────────────────
 
-/// One unbound proven call per reason S-588 records, beside one that binds:
-/// `String` and the `Arc`-own `clone` are `external-type`, a chain receiver
-/// proves nothing, two trait impls' `twice` tie, `Solo` declares no `absent`,
-/// and `m` sits only on `b::A`'s impl while the caller's `A` is `a::A`, a name
-/// the crate declares twice. `plain` makes an unproven path call and a bare
-/// call, neither of which binds.
+/// One unbound proven call per reason, beside one that binds: `String` and the
+/// `Arc`-own `clone` are `external-type`, a chain receiver proves nothing, two
+/// in-scope trait impls' `twice` tie, `Solo` declares no `absent`, and `m` sits
+/// only on `b::A`'s impl while the caller's `A` is `a::A` — another type, so
+/// `a::A` has no `m` (S-607; 1.13.0 read the name the crate declares twice as
+/// `type-ambiguous`). `plain` makes a path call whose head leaves the
+/// repository (`external-type`) and a bare call naming nothing in scope
+/// (`name-not-in-scope`).
 const RESIDUE: [(&str, &str); 4] = [
     (
         "src/lib.rs",
@@ -558,7 +566,7 @@ pub fn param(x: &P) { x.m(); }
     assert_eq!(targets(&edges, "src/forms.rs:param@6"), ["src/forms.rs:m@5"]);
 }
 
-const SELF_CALLER: &str = "use crate::store::Store;\npub fn run(x: &Store) { x.get(); }\n";
+const SELF_CALLER: &str = "use crate::store::{Store, G};\npub fn run(x: &Store) { x.get(); }\n";
 const ASSOC_GET: &str =
     "pub struct Store;\npub trait G { fn get(&self); }\nimpl Store {\n    pub fn get() {}\n}\nimpl G for Store {\n    fn get(&self) {}\n}\n";
 const METHOD_GET: &str =
@@ -600,12 +608,14 @@ fn the_rust_row_states_its_call_residue_by_reason_over_its_unbound_calls() {
         "the denominator is the row's own unbound count"
     );
     let expected: BTreeMap<R, u64> = [
-        (R::ExternalType, 2),
+        (R::ExternalType, 3),
+        (R::NameNotInScope, 1),
         (R::NoApplicableOverload, 0),
         (R::NoReceiverEvidence, 1),
+        (R::NotACallable, 0),
         (R::OverloadAmbiguous, 1),
-        (R::SupertypeUnreached, 1),
-        (R::TypeAmbiguous, 1),
+        (R::SupertypeUnreached, 2),
+        (R::TypeAmbiguous, 0),
     ]
     .into_iter()
     .collect();
@@ -615,10 +625,9 @@ fn the_rust_row_states_its_call_residue_by_reason_over_its_unbound_calls() {
         residue.reasons.values().sum::<u64>() + residue.unclassified,
         "the reasons and `unclassified` partition the denominator"
     );
-    // An unproven path call and a bare call take no receiver walk, so the
-    // binder records no reason for them: they are `unclassified`, never a
-    // reason guessed for a path the bind did not take.
-    assert_eq!(residue.unclassified, 2, "{residue:#?}");
+    // Every unbound Rust call carries a reason (S-607), the path call and the
+    // bare call included: nothing is `unclassified`.
+    assert_eq!(residue.unclassified, 0, "{residue:#?}");
     assert_eq!(residue.scope, ResidueScope::Repository);
     // The one bound call is in no figure of the residue.
     assert_eq!(
@@ -742,16 +751,18 @@ fn a_rust_rows_external_type_stays_external_in_a_workspace() {
 //
 // `pub use crate::inner::Store as Db;` makes a proven `x.get()` on `x: &Db` the
 // row `Db::get`, which binds through the re-export to `inner::Store`'s method.
-// A change that spells only `Store` — a second `Store` in the crate, or the
-// re-export chain's next hop retargeted — still moves that binding.
+// A change that spells only `Store` — the re-export chain's next hop
+// retargeted, the impl header's import retargeted — still moves that binding;
+// a second `Store` elsewhere in the crate does not, as the header names the
+// `Store` it imports (S-607).
 
 const RENAMED_LIB: (&str, &str) = (
     "src/lib.rs",
     "pub mod inner;\npub mod imp;\npub mod facade;\npub mod other;\npub mod caller;\n",
 );
 const RENAMED_INNER: (&str, &str) = ("src/inner.rs", "pub struct Store;\n");
-/// `Store`'s only `get` lives outside `Store`'s module: it is `Store`'s while
-/// the crate declares one `Store`, and `type-ambiguous` once it declares two.
+/// `Store`'s only `get` lives outside `Store`'s module: its header names the
+/// `Store` `imp.rs` imports, however many `Store`s the crate declares.
 const RENAMED_IMP: (&str, &str) = (
     "src/imp.rs",
     "use crate::inner::Store;\nimpl Store {\n    pub fn get(&self) {}\n}\n",
@@ -762,20 +773,32 @@ const OTHER_PLAIN: (&str, &str) = ("src/other.rs", "pub fn unrelated() {}\n");
 const OTHER_STORE: (&str, &str) = ("src/other.rs", "pub fn unrelated() {}\npub struct Store;\n");
 
 #[test]
-fn a_second_same_named_type_behind_a_renamed_re_export_unbinds_on_sync() {
+fn a_second_same_named_type_behind_a_renamed_re_export_keeps_the_binding_on_sync() {
+    // 1.13.0 read `imp.rs`'s header by name, and a second `Store` in the crate
+    // made its `get` `type-ambiguous`; the header resolves to the `Store` it
+    // imports (S-607), so the call stays bound, on sync as on a cold index.
     let initial = [RENAMED_LIB, RENAMED_INNER, RENAMED_IMP, RENAMED_FACADE, RENAMED_CALLER, OTHER_PLAIN];
     let before = edges_by_source(&initial);
     assert_eq!(targets(&before, "src/caller.rs:run@2"), ["src/imp.rs:get@3"], "{before:#?}");
     let edges = synced_equals_reindexed(&initial, &[OTHER_STORE]);
-    assert!(targets(&edges, "src/caller.rs:run@2").is_empty(), "{edges:#?}");
+    assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/imp.rs:get@3"]);
 }
 
 #[test]
-fn removing_the_second_same_named_type_behind_a_renamed_re_export_binds_on_sync() {
+fn the_impl_headers_import_retargeted_on_sync_moves_the_renamed_call() {
+    // `imp.rs` importing `other`'s `Store` instead makes its `get` that type's:
+    // the call through `Db` — `inner`'s `Store` — binds nothing, and binds again
+    // once the import names `inner`'s.
+    let imp_other = ("src/imp.rs", "use crate::other::Store;
+impl Store {
+    pub fn get(&self) {}
+}
+");
     let initial = [RENAMED_LIB, RENAMED_INNER, RENAMED_IMP, RENAMED_FACADE, RENAMED_CALLER, OTHER_STORE];
-    let before = edges_by_source(&initial);
-    assert!(targets(&before, "src/caller.rs:run@2").is_empty(), "{before:#?}");
-    let edges = synced_equals_reindexed(&initial, &[OTHER_PLAIN]);
+    let edges = synced_equals_reindexed(&initial, &[imp_other]);
+    assert!(targets(&edges, "src/caller.rs:run@2").is_empty(), "{edges:#?}");
+    let initial = [RENAMED_LIB, RENAMED_INNER, imp_other, RENAMED_FACADE, RENAMED_CALLER, OTHER_STORE];
+    let edges = synced_equals_reindexed(&initial, &[RENAMED_IMP]);
     assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/imp.rs:get@3"]);
 }
 

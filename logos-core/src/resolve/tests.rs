@@ -21,7 +21,7 @@
 use super::binder::{bind, residue, Index, Outcome, Residue};
 use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
-use crate::graph_store::{EdgeRow, NodeArity, NodeRow, UnresolvedRefRow};
+use crate::graph_store::{EdgeRow, ImplBlockRow, NodeArity, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverShape, RefForm};
 
 /// File ids for the ledger rows.
@@ -47,6 +47,48 @@ fn contains(source: i64, target: i64) -> EdgeRow {
         target: NodeId(target),
         kind: EdgeKind::Contains,
     }
+}
+
+/// `ix` given the impl blocks a Rust extraction records for `self_types`
+/// (S-606), as the one associated-item lookup reads them (S-607): one block per
+/// callable, on that callable's own line (its id), headed by its recorded self
+/// type and — when an `Implements` row of `refs` sources at the callable — by
+/// the trait that row names.
+fn with_impl_blocks(
+    ix: Index,
+    nodes: &[NodeRow],
+    self_types: &[(NodeId, String)],
+    refs: &[UnresolvedRefRow],
+) -> Index {
+    let lined: Vec<NodeRow> = nodes
+        .iter()
+        .map(|n| NodeRow {
+            start_line: Some(n.id.0),
+            end_line: Some(n.id.0),
+            ..n.clone()
+        })
+        .collect();
+    let blocks: Vec<ImplBlockRow> = self_types
+        .iter()
+        .filter_map(|(id, ty)| {
+            let file = nodes.iter().find(|n| n.id == *id)?.file_path.clone()?;
+            let line = u32::try_from(id.0).ok()?;
+            let trait_path = refs
+                .iter()
+                .find(|r| r.kind == EdgeKind::Implements && r.source_symbol == format!("local sym{}", id.0))
+                .map(|r| r.target.clone());
+            Some(ImplBlockRow {
+                file_path: file,
+                start_line: line,
+                end_line: line,
+                self_type: ty.clone(),
+                self_ref: false,
+                trait_path,
+                deref_target: None,
+            })
+        })
+        .collect();
+    ix.with_associated_items(&lined, &blocks, &[])
 }
 
 /// The standard fixture: nodes + Contains edges of the two-crate workspace.
@@ -673,12 +715,13 @@ fn crate_local_candidate_wins_over_a_cross_crate_one() {
     );
 }
 
-// ── The Type::func impl-collapse rule ────────────────────────────────────────
+// ── The Type::func rule: the collapse, and Rust's one lookup ────────────────
 
 #[test]
 fn associated_function_paths_bind_through_the_type_collapse_rule() {
-    // struct Widget + fn new in the same module (impl blocks are not
-    // captured scopes): `Widget::new()` binds to the module's `new`.
+    // struct Widget + fn new in the same module: in a language without impl
+    // blocks the `Type::func` collapse binds `Widget::new()` to the module's
+    // `new`, as it always did.
     let (mut nodes, mut edges) = fixture();
     nodes.push(node(40, "Widget", NodeKind::Struct, "src/util.rs"));
     nodes.push(node(41, "new", NodeKind::Function, "src/util.rs"));
@@ -686,16 +729,17 @@ fn associated_function_paths_bind_through_the_type_collapse_rule() {
     edges.push(contains(4, 41));
     let r = call(100, LIB_RS, 2, "util::Widget::new");
     let all = vec![r.clone()];
+    let ix = Index::build_with_layout(&nodes, &edges, &all, PackageLayout::stems_only_for_tests());
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 41, EdgeKind::Calls);
+    // Rust's call binds through the one lookup (S-607): `new` is no function
+    // of an impl block of `Widget`, so the call binds nothing — 1.13.0 bound
+    // any module-level `new`, `A::default()` → `Bb::default` among them.
     let ix = Index::build(&nodes, &edges, &all);
-    assert_eq!(
-        bind(&r, &ix, BindingPolicy::Strict),
-        Outcome::Bound {
-            source: NodeId(2),
-            target: NodeId(41),
-            kind: EdgeKind::Calls,
-            payload: None,
-        }
-    );
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::SupertypeUnreached));
+    // With `new` recorded in `impl Widget`, it binds.
+    let ix = with_impl_blocks(ix, &nodes, &[(NodeId(41), "Widget".to_string())], &all);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 41, EdgeKind::Calls);
 }
 
 // ── Review round 2: ambiguity across globs, super overflow, policy matrix ────
@@ -1556,11 +1600,18 @@ fn bare_call_to_a_lone_method_still_binds_the_method_monotonic() {
 
 #[test]
 fn path_qualified_call_still_binds_an_associated_method() {
-    // Unchanged: `Store::make()` is a multi-segment path, so the full callable set
-    // (methods included) is used — the `Type::func` collapse binds the associated
-    // `make` method. The exclusion is strictly single-segment.
+    // `Store::make()` is a multi-segment path: it binds the associated `make`
+    // among `Store`'s recorded impl functions, by the one associated-item
+    // lookup (S-607). The bare-call exclusion is strictly single-segment.
     let r = call(100, LIB_RS, 6, "Store::make");
-    bound_to(bind_cluster(&r, BindingPolicy::Strict), 6, 5, EdgeKind::Calls);
+    let (nodes, edges) = method_cluster();
+    let ix = with_impl_blocks(
+        Index::build(&nodes, &edges, std::slice::from_ref(&r)),
+        &nodes,
+        &cluster_self_types(),
+        std::slice::from_ref(&r),
+    );
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 6, 5, EdgeKind::Calls);
 }
 
 #[test]
@@ -2154,9 +2205,11 @@ fn a_rust_qualified_call_never_reaches_the_imported_rung() {
 // ── S-493 / FR-RS-11: `self.m()` / `Self::m()` through the caller's self type ──
 //
 // Extraction records a `self.m()` in an impl method as the Path-form `Self::m`
-// (the row a written `Self::m()` records) and the method's self type beside its
-// node; the binder binds the row among the callables recorded with the caller's
-// self type in the caller's crate, exactly one or nothing.
+// (the row a written `Self::m()` records) and the method's impl block; since
+// S-607 (FR-RS-47) the binder reads `T` from the caller's own block header,
+// resolved to one type node in the block's scope, and binds the row through the
+// one associated-item lookup — exactly one or nothing. The crate rung and the
+// module rung S-493 introduced are gone: a header names its own scope's type.
 
 /// Two impl blocks in `src/lib.rs` — `A` (`run` 70, `helper` 71) and `B` (`run`
 /// 72, `helper` 73) — plus a free `lone` (74, no self type); a second type
@@ -2215,7 +2268,7 @@ fn self_type_index(r: &UnresolvedRefRow, drop: &[i64]) -> Index {
     let (mut nodes, edges, mut self_types) = self_type_fixture();
     nodes.retain(|n| !drop.contains(&n.id.0));
     self_types.retain(|(id, _)| !drop.contains(&id.0));
-    Index::build(&nodes, &edges, std::slice::from_ref(r)).with_self_types(self_types)
+    with_impl_blocks(Index::build(&nodes, &edges, std::slice::from_ref(r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(r))
 }
 
 #[test]
@@ -2241,7 +2294,8 @@ fn a_self_type_call_binds_to_the_callers_own_types_method() {
 #[test]
 fn same_named_types_of_two_modules_are_told_apart_by_the_callers_module() {
     // Three types named `A` in crate `crate` — in the root module, `util` and
-    // `inner` — each defining `helper`: the call binds the one in its own module.
+    // `inner` — each defining `helper`: each header resolves to its own module's
+    // `A`, so the call binds the `helper` of its own type.
     let from_root = call(100, LIB_RS, 70, "Self::helper");
     bound_to(bind(&from_root, &self_type_index(&from_root, &[]), BindingPolicy::Strict), 70, 71, EdgeKind::Calls);
     let from_util = call(101, UTIL_RS, 79, "Self::helper");
@@ -2251,14 +2305,19 @@ fn same_named_types_of_two_modules_are_told_apart_by_the_callers_module() {
 #[test]
 fn a_self_type_call_with_two_or_no_candidates_stays_unbound_with_its_reason() {
     use super::binder::{residue, Residue};
-    // Two: `B` — declared once — has `helper` in `lib.rs` and in `util`, and the
-    // call from `inner` is in neither module.
+    // Two: `util` imports the crate's `B` (`use crate::B`), so its impl's
+    // `helper` (84) is `B`'s as well as `lib.rs`'s (73): two inherent
+    // functions of one type, whichever module calls.
     let two = call(100, LIB_RS, 86, "Self::helper");
-    let ix = self_type_index(&two, &[]);
+    let use_b = make_ref(90, UTIL_RS, 4, "crate::B", Some("B"), RefForm::Path, EdgeKind::Imports);
+    let (nodes, edges, self_types) = self_type_fixture();
+    let refs = [use_b, two.clone()];
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     assert_eq!(bind(&two, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&two, &ix, BindingPolicy::Aggressive), Some(Residue::OverloadAmbiguous));
-    // A type the crate declares once binds a candidate in any of its modules.
-    let ix = self_type_index(&two, &[84]);
+    // Without the import, `util`'s header names no type of its scope: the one
+    // `B::helper` binds, from any module.
+    let ix = self_type_index(&two, &[]);
     bound_to(bind(&two, &ix, BindingPolicy::Strict), 86, 73, EdgeKind::Calls);
     // None: `B` records no `lone` — the free `lone` beside it in the module is
     // no method of `B`, and the row never falls through to a scope walk.
@@ -2280,30 +2339,30 @@ fn a_same_named_type_in_another_crate_is_never_a_candidate() {
 }
 
 #[test]
-fn a_self_call_from_a_caller_with_no_self_type_takes_its_old_path() {
-    use super::binder::residue;
-    // `lone` records no self type (a free function, a trait's default method):
-    // its `Self::helper` is resolved by the path it always took — the scope
-    // hierarchy, which reads `Self` as a name and finds nothing.
+fn a_self_call_from_a_caller_in_no_impl_block_proves_no_receiver() {
+    use super::binder::{residue, Residue};
+    // `lone` is in no impl block (a free function, a trait's default method):
+    // its `Self::helper` proves no type, and never reaches the scope hierarchy
+    // (S-607; a trait body's fan-out is S-608's).
     let r = call(100, LIB_RS, 74, "Self::helper");
     let ix = self_type_index(&r, &[75, 78, 84]);
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
-    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), None, "no self-type reason");
-    // And an index given no self types binds no `Self::` call through one.
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::NoReceiverEvidence));
+    // And an index given no impl blocks binds no `Self::` call through one.
     let (nodes, edges, _) = self_type_fixture();
     let from_a = call(101, LIB_RS, 70, "Self::helper");
     let ix = Index::build(&nodes, &edges, std::slice::from_ref(&from_a));
     assert_eq!(bind(&from_a, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
-    assert_eq!(residue(&from_a, &ix, BindingPolicy::Aggressive), None);
+    assert_eq!(residue(&from_a, &ix, BindingPolicy::Aggressive), Some(Residue::NoReceiverEvidence));
 }
 
 #[test]
-fn the_module_rung_never_picks_a_trait_impl_method_over_an_inherent_one_elsewhere() {
-    use super::binder::{residue, Residue};
+fn an_inherent_function_beats_a_trait_impls_in_any_module() {
     // `E` has an inherent `start` in `lib.rs` (82, called from 83) and a trait
     // impl's `start` in `util.rs` (81, its `Implements` row naming `Member`,
-    // called from 80). Rust resolves `Self::start` to the inherent one even
-    // inside the trait impl, so the module rung must not pick 81 for 80.
+    // called from 80; `util` imports `E`). Rust resolves `Self::start` to the
+    // inherent one even inside the trait impl (S-607: inherent beats trait in
+    // any module — 1.13.0's module rung left 80's call `overload-ambiguous`).
     let (mut nodes, mut edges) = fixture();
     for (id, name, file, module) in [
         (80, "run", "src/util.rs", 4),
@@ -2319,34 +2378,32 @@ fn the_module_rung_never_picks_a_trait_impl_method_over_an_inherent_one_elsewher
     let self_types: Vec<(NodeId, String)> =
         [80, 81, 82, 83].into_iter().map(|id| (NodeId(id), "E".to_string())).collect();
     let implements = make_ref(90, UTIL_RS, 81, "Member", None, RefForm::Path, EdgeKind::Implements);
+    let use_e = make_ref(91, UTIL_RS, 4, "crate::E", Some("E"), RefForm::Path, EdgeKind::Imports);
     let from_trait_impl = call(100, UTIL_RS, 80, "Self::start");
     let from_inherent = call(101, LIB_RS, 83, "Self::start");
-    let refs = [implements, from_trait_impl.clone(), from_inherent.clone()];
-    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    let refs = [implements, use_e, from_trait_impl.clone(), from_inherent.clone()];
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
 
-    assert_eq!(bind(&from_trait_impl, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
-    assert_eq!(
-        residue(&from_trait_impl, &ix, BindingPolicy::Aggressive),
-        Some(Residue::OverloadAmbiguous)
-    );
+    bound_to(bind(&from_trait_impl, &ix, BindingPolicy::Strict), 80, 82, EdgeKind::Calls);
     bound_to(bind(&from_inherent, &ix, BindingPolicy::Strict), 83, 82, EdgeKind::Calls);
 }
 
 #[test]
-fn a_lone_candidate_outside_the_module_binds_only_under_a_type_name_declared_once() {
+fn a_header_names_its_own_scopes_type_never_a_same_named_one_elsewhere() {
     use super::binder::{residue, Residue};
-    // `A` is declared in three modules of crate `crate`. A call on the `A` of
-    // `inner` — whose impl defines no `helper` — must not take `util`'s, even
-    // when that is the crate's only `A::helper`: it may be another type's.
+    // `A` is declared in three modules of crate `crate`. A call on the root's
+    // `A` — whose impl defines no `helper` here — never takes `util`'s, the
+    // crate's only `A::helper`: `util`'s header names `util`'s `A` (1.13.0 read
+    // the name crate-wide and called the pair `type-ambiguous`).
     let r = call(100, LIB_RS, 70, "Self::helper");
     let ix = self_type_index(&r, &[71, 78]);
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
-    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::TypeAmbiguous));
-    // A type the graph does not declare at all (an external `impl Trait for
-    // Vec<T>`) is decided by the caller's module alone too.
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::SupertypeUnreached));
+    // A header naming no type of its scope (an external `impl Trait for
+    // Vec<T>`) contributes no candidate to any type.
     let (mut nodes, edges, self_types) = self_type_fixture();
     nodes.retain(|n| ![61, 62, 63, 71, 78].contains(&n.id.0));
-    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types);
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(&r));
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
 }
 
@@ -2360,26 +2417,26 @@ fn a_self_type_the_crate_does_not_declare_or_imports_from_outside_binds_nothing(
     let r = call(100, LIB_RS, 70, "Self::helper");
     let (mut nodes, edges, self_types) = self_type_fixture();
     nodes.retain(|n| ![61, 62, 63, 75, 78].contains(&n.id.0));
-    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types);
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(&r));
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), external());
 
     // `util.rs` imports a foreign `B` (`use std::x::B`): its `B::helper` (84) is
     // that type's, never a candidate for the crate's `B`, so the call from
-    // `inner` binds the crate's one `B::helper` (73) through the crate rung —
-    // where with 84 counted the module would decide, and find none.
+    // `inner` binds the crate's one `B::helper` (73).
     let import = make_ref(90, UTIL_RS, 4, "std::x::B", Some("B"), RefForm::Path, EdgeKind::Imports);
     let from_inner = call(101, LIB_RS, 86, "Self::helper");
     let (nodes, edges, self_types) = self_type_fixture();
     let refs = [import.clone(), from_inner.clone()];
-    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone());
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     bound_to(bind(&from_inner, &ix, BindingPolicy::Strict), 86, 73, EdgeKind::Calls);
     // And a caller in a file importing its self type's name from outside the
-    // crate binds nothing.
+    // crate — and declaring none of its own — binds nothing.
     let from_util = call(102, UTIL_RS, 79, "Self::helper");
     let lib_import = make_ref(91, UTIL_RS, 4, "std::x::A", Some("A"), RefForm::Path, EdgeKind::Imports);
     let refs = [lib_import, from_util.clone()];
-    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    let nodes: Vec<NodeRow> = nodes.into_iter().filter(|n| n.id.0 != 62).collect();
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     assert_eq!(bind(&from_util, &ix, BindingPolicy::Strict), Outcome::Unbound);
     assert_eq!(residue(&from_util, &ix, BindingPolicy::Strict), external());
 }
@@ -2463,7 +2520,7 @@ fn receiver_index_with(
     self_types.retain(|(id, _)| !drop.contains(&id.0));
     refs.extend(extra.iter().cloned());
     refs.push(r.clone());
-    Index::build_with_layout(&nodes, &edges, &refs, layout).with_self_types(self_types)
+    with_impl_blocks(Index::build_with_layout(&nodes, &edges, &refs, layout).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
 }
 
 /// [`receiver_index_with`] under the layout the Rust plugin declares: its
@@ -2548,7 +2605,7 @@ fn a_type_another_crate_re_exports_is_followed_to_its_declaration() {
         let mut refs = implements.clone();
         refs.extend(extra.iter().cloned());
         refs.push(r.clone());
-        Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone())
+        with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
     };
     let reexport = |path: &str| make_ref(95, OTHER_LIB_RS, 20, path, Some("Engine"), RefForm::Path, EdgeKind::Imports);
     let r = proven(100, "Engine::start", None);
@@ -2605,7 +2662,7 @@ fn reexport_chain_index(r: &UnresolvedRefRow, reexports: &[(i64, i64, &str)], im
     }
     refs.extend(imports.iter().cloned());
     refs.push(r.clone());
-    Index::build(&nodes, &edges, &refs).with_self_types(self_types)
+    with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
 }
 
 #[test]
@@ -2721,15 +2778,15 @@ fn a_type_declared_once_binds_a_method_whose_impl_sits_in_another_module() {
     let r = proven(100, "Store::scan", None);
     let mut refs = implements;
     refs.extend([lib_use(90, "crate::util::Store", "Store"), r.clone()]);
-    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 416, EdgeKind::Calls);
 }
 
 #[test]
 fn a_same_named_type_of_another_module_is_told_apart_by_its_own_module() {
-    // A second `Store` in `mod inner` (412) with its own `get` (413): the
-    // crate now names two `Store`s, so a `get` binds only from the impls in
-    // the proven type's own module.
+    // A second `Store` in `mod inner` (412) with its own `get` (413): each
+    // impl header names its own module's `Store`, so a `get` binds only among
+    // the proven type's own impls.
     let (mut nodes, mut edges, mut self_types, implements) = receiver_fixture();
     nodes.extend([node(412, "Store", NodeKind::Struct, "src/lib.rs"), node(413, "get", NodeKind::Method, "src/lib.rs")]);
     edges.extend([contains(6, 412), contains(6, 413)]);
@@ -2739,24 +2796,26 @@ fn a_same_named_type_of_another_module_is_told_apart_by_its_own_module() {
         refs.extend(extra.iter().cloned());
         refs.push(r.clone());
         let nodes: Vec<NodeRow> = nodes.iter().filter(|n| !drop.contains(&n.id.0)).cloned().collect();
-        Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone())
+        with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
     };
     let r = proven(100, "Store::get", None);
     bound_to(bind(&r, &index(&r, &[lib_use(90, "crate::util::Store", "Store")], &[]), BindingPolicy::Strict), 2, 402, EdgeKind::Calls);
     bound_to(bind(&r, &index(&r, &[lib_use(90, "crate::inner::Store", "Store")], &[]), BindingPolicy::Strict), 2, 413, EdgeKind::Calls);
-    // `inner`'s `Store` with no `get` of its own: `util`'s lone `get` may be
-    // the other type's, so nothing binds.
+    // `inner`'s `Store` with no `get` of its own: `util`'s lone `get` is the
+    // other type's, so nothing binds — the type has no such method (1.13.0
+    // could not tell whose it was: `type-ambiguous`).
     let ix = index(&r, &[lib_use(90, "crate::inner::Store", "Store")], &[413]);
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
-    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::TypeAmbiguous));
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::SupertypeUnreached));
 }
 
 // ── S-604 / CR-200: a Rust method call binds only a callable that takes `self` ──
 //
 // S-591 records whether each Rust `impl` function takes `self`
-// (`nodes.takes_self`). A proven receiver's call drops every candidate
-// recorded as not taking it before the inherent-over-trait rank; an unknown
-// fact keeps the candidate. `Self::m` (S-493) reads no such fact.
+// (`nodes.takes_self`). A method-syntax call — a proven receiver's, a
+// `self.m()` — drops every candidate recorded as not taking it before the
+// inherent-over-trait rank; an unknown fact keeps the candidate. A path call
+// (`Self::m()`, `T::m()`) keeps it (S-607: syntax decides the filter).
 
 /// The receiver fixture plus `Store` methods in `src/util.rs`, each with its
 /// takes-`self` fact: an inherent associated `name()` (420) beside a trait
@@ -2794,7 +2853,7 @@ fn self_fact_index(r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], facts: bool
     }));
     refs.extend(extra.iter().cloned());
     refs.push(r.clone());
-    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     if facts {
         ix.with_arities(&arities)
     } else {
@@ -2863,18 +2922,17 @@ fn a_type_whose_only_m_takes_no_self_leaves_the_method_call_unbound() {
 #[test]
 fn a_candidate_without_self_elsewhere_leaves_nothing_to_tell_apart() {
     // A second `Store` in `mod inner` (412) with no `get`: `util`'s lone `get`
-    // (402) may be the other type's, so the call is type-ambiguous (S-588).
-    // Recorded as taking no `self`, it is no candidate for `x.get()` whichever
-    // type it belongs to: nothing is left to tell apart, and the type has no
-    // such method.
+    // (402) is `util`'s `Store`'s (S-607), so `inner`'s type has no such
+    // method — and recorded as taking no `self`, it would be no candidate for
+    // `x.get()` either way.
     let (mut nodes, mut edges, self_types, implements) = receiver_fixture();
     nodes.push(node(412, "Store", NodeKind::Struct, "src/lib.rs"));
     edges.push(contains(6, 412));
     let r = proven(100, "Store::get", None);
     let mut refs = implements;
     refs.extend([lib_use(90, "crate::inner::Store", "Store"), r.clone()]);
-    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
-    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::TypeAmbiguous));
+    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::SupertypeUnreached));
     let ix = ix.with_arities(&[(NodeId(402), Some(ParamRange { min: 0, max: Some(0) }), Some(false))]);
     for policy in POLICIES {
         assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{policy:?}");
@@ -2894,31 +2952,56 @@ fn an_unknown_takes_self_fact_never_filters_a_candidate() {
 }
 
 #[test]
-fn a_self_type_call_reads_no_takes_self_fact() {
-    // S-493's `Self::m` arm is unchanged: from `caller` (427), a `Self::m`
-    // row — and a `self.m()` row extracted without that rewrite, which takes
-    // the same arm — binds alike whether or not the index holds the facts, and
-    // `Self::make` binds the associated function, as `Self::make()` calls it.
-    for name in ["name", "make", "pair", "vague"] {
-        let path = call(100, UTIL_RS, 427, &format!("Self::{name}"));
-        let method = UnresolvedRefRow {
-            receiver: Some(ReceiverShape::SelfInstance),
-            ..make_ref(100, UTIL_RS, 427, name, None, RefForm::Method, EdgeKind::Calls)
-        };
-        for r in [path, method] {
-            let (with, without) = (self_fact_index(&r, &[], true), self_fact_index(&r, &[], false));
-            for policy in POLICIES {
-                assert_eq!(bind(&r, &with, policy), bind(&r, &without, policy), "{} at {policy:?}", r.target);
-            }
-            assert_eq!(residue(&r, &with, BindingPolicy::Aggressive), residue(&r, &without, BindingPolicy::Aggressive), "{}", r.target);
+fn an_unknown_fact_never_filters_a_path_call() {
+    // FR-RS-47 rule 2: `vague` (425) records no takes-`self` fact, so a path
+    // call passing one argument keeps it — neither counted as a receiver nor
+    // dropped — and as the inherent one it binds. With no facts at all, no
+    // range filters: `make` (424) takes any count.
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    let counted = |target: &str, args: u32| UnresolvedRefRow {
+        arg_count: Some(args),
+        ..call(100, LIB_RS, 2, target)
+    };
+    for policy in POLICIES {
+        let r = counted("Store::vague", 1);
+        bound_to(bind(&r, &self_fact_index(&r, &store, true), policy), 2, 425, EdgeKind::Calls);
+        let r = counted("Store::make", 5);
+        bound_to(bind(&r, &self_fact_index(&r, &store, false), policy), 2, 424, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn a_self_call_reads_the_takes_self_fact_by_its_syntax() {
+    // From `caller` (427), S-607: a written `Self::m()` is path syntax and keeps
+    // an associated function; a `self.m()` — the `Self::m` row of shape `self`
+    // extraction records, or a Method-form row extracted without that rewrite —
+    // is method syntax and drops it. 1.13.0's `Self::m` arm read no fact: the
+    // two `name`s were `overload-ambiguous` whatever the syntax.
+    let path = |name: &str| call(100, UTIL_RS, 427, &format!("Self::{name}"));
+    let rewritten = |name: &str| UnresolvedRefRow {
+        receiver: Some(ReceiverShape::SelfInstance),
+        ..path(name)
+    };
+    let unrewritten = |name: &str| UnresolvedRefRow {
+        receiver: Some(ReceiverShape::SelfInstance),
+        ..make_ref(100, UTIL_RS, 427, name, None, RefForm::Method, EdgeKind::Calls)
+    };
+    for policy in POLICIES {
+        let r = path("name");
+        bound_to(bind(&r, &self_fact_index(&r, &[], true), policy), 427, 420, EdgeKind::Calls);
+        let r = path("make");
+        bound_to(bind(&r, &self_fact_index(&r, &[], true), policy), 427, 424, EdgeKind::Calls);
+        for r in [rewritten("name"), unrewritten("name")] {
+            bound_to(bind(&r, &self_fact_index(&r, &[], true), policy), 427, 421, EdgeKind::Calls);
+            // Without the facts nothing is dropped: the inherent one outranks.
+            bound_to(bind(&r, &self_fact_index(&r, &[], false), policy), 427, 420, EdgeKind::Calls);
+        }
+        for r in [rewritten("make"), unrewritten("make")] {
+            let ix = self_fact_index(&r, &[], true);
+            assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{policy:?}");
+            assert_eq!(residue(&r, &ix, policy), Some(Residue::SupertypeUnreached));
         }
     }
-    // `Self::name` sees both `name`s of the one module: the facts would leave
-    // one, so the arm reading them would bind the trait impl's.
-    let name = call(101, UTIL_RS, 427, "Self::name");
-    assert_eq!(bind(&name, &self_fact_index(&name, &[], true), BindingPolicy::Aggressive), Outcome::Unbound);
-    let make = call(101, UTIL_RS, 427, "Self::make");
-    bound_to(bind(&make, &self_fact_index(&make, &[], true), BindingPolicy::Strict), 427, 424, EdgeKind::Calls);
 }
 
 // ── S-514 / FR-RS-12: a receiver call binds by its receiver's shape ─────────

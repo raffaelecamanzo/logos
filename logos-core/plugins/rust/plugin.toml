@@ -35,6 +35,14 @@ abi_version = 15
 # method that merely shares its name (S-590, CR-189, FR-RS-07).
 implicit_receiver = "none"
 
+# A call to a type's method — `Self::m()`, `self.m()`, a proven `x.m()`, a
+# written `T::m()` — binds through one associated-item lookup (S-607, CR-202,
+# FR-RS-47): among the functions of every `impl` block (the symbols query's
+# `@item.impl` captures) whose self type resolves to `T`, from any crate and
+# through `pub use` re-exports, inherent before trait, only traits in scope, and
+# filtered by syntax (`takes_self`, arity). Every unbound call carries a reason.
+impl_block_lookup = true
+
 # Extraction capabilities this descriptor provides queries for. Surfaced by
 # `logos languages` (FR-PL-06) and gates which `.scm` queries the registry
 # requires. `symbols` captures declarations (S-007); `references` captures

@@ -459,42 +459,52 @@ member's type from a library's, so only the workspace read has a
 `type-in-another-member` count.
 
 ```jsonc
-"call_residue": { "unbound": 4,
-  "reasons": { "external-type": 1, "no-applicable-overload": 0, "no-receiver-evidence": 1,
-               "overload-ambiguous": 0, "supertype-unreached": 1, "type-ambiguous": 0 },
-  "unclassified": 1, "scope": "repository" }
+"call_residue": { "unbound": 5,
+  "reasons": { "external-type": 1, "name-not-in-scope": 1, "no-applicable-overload": 0,
+               "no-receiver-evidence": 1, "not-a-callable": 1, "overload-ambiguous": 0,
+               "supertype-unreached": 1, "type-ambiguous": 0 },
+  "unclassified": 0, "scope": "repository" }
 ```
 
 | `call_residue` reason | The call stays unbound because |
 |---|---|
 | `no-receiver-evidence` | the file proves no receiver type (a chained call, an untyped lambda parameter, a generic type variable, a bare call naming no import) |
-| `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member |
+| `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member — or, for a Rust path call, the path's head leaves the repository (`Vec::new()`, `serde_json::to_string(…)`) |
 | `type-in-another-member` | another workspace member declares the receiver's type (`workspace status` only) |
 | `overload-ambiguous` | the type, or the nearest supertype level holding an applicable method, declares two or more methods of that name whose parameter count admits the call, or two static imports each supply one — no argument type is read |
 | `no-applicable-overload` | methods of that name were found, and none admits the call's argument count — at no supertype level, and in no free function or import the language goes on to |
 | `type-ambiguous` | the type's name reaches two declarations (a `src/main` and a `src/test` class of one name) |
 | `supertype-unreached` | neither the type nor any supertype reached in the repository declares the name: the chain leaves the repository, stops at an interface, or cycles |
+| `not-a-callable` | the call names a repository declaration that is not a callable: an enum variant (`E::A(1)`) or a tuple-struct constructor (`W(1)`, `Self(1)`) — Rust |
+| `name-not-in-scope` | no rung reaches a repository callable of the name: a prelude or std function reached by a bare name (`drop`, `Some`), a closure or a local, an item the file does not import, a module that declares no such item — Rust |
 
-On the Rust row the reasons describe the calls Rust's receiver typing
-([FR-RS-42](../specs/requirements/FR-RS-42.md)) decides: a method call whose
-receiver's type is proven (`external-type` for `String`, `Vec`, an external
-crate's type or a method the peeled `Arc`/`Rc`/`Box` provides itself, such as
-`clone`; `supertype-unreached` when `T`'s impls in the repository declare no
-such method taking `self` — a derive, a trait default or a `Deref` target
-supplies it, or the only one is an associated function `x.m()` cannot call;
-`overload-ambiguous` for two trait impls' methods of that name and no inherent
-one; `no-applicable-overload` when every such method's parameters exclude the
-call's argument count; `type-ambiguous` when the file, or the file re-exporting `T`, imports its
-name twice, or the crate declares it for several types and no impl in `T`'s
-module decides), an unproven receiver (`no-receiver-evidence`), and `Self::m` calls
-inside an `impl`. Every other unbound Rust call — a path call such as
-`Vec::new()` or `serde_json::to_string(…)`, a bare call, or a `Self::m` call in
-a trait's default body — takes no receiver walk, so it is counted in
-`unclassified` rather than given a reason. A required trait method — a
-signature with no body — is not recorded as a declaration, so a `self.m()` call
-to one from the trait's default body reads `supertype-unreached`. In
-`workspace status` the Rust row's `type-in-another-member` stays `0`: a type of
-another member is not resolved, and is counted `external-type`.
+On the Rust row every unbound call carries a reason, so `unclassified` reads `0`
+on a fresh index. A call to a type's method — `self.m()`, `Self::m()`, a method
+call on a proven receiver ([FR-RS-42](../specs/requirements/FR-RS-42.md)), a
+written `T::m()` — binds through one associated-item lookup
+([FR-RS-47](../specs/requirements/FR-RS-47.md)) among the functions of every
+`impl` block whose self type resolves to `T`, from any crate and through `pub
+use` re-exports: `external-type` when `T` is no repository type (`String`,
+`Vec`, an external crate's, an `impl` for a primitive or a generic parameter, or
+a method the peeled `Arc`/`Rc`/`Box` provides itself, such as `clone`);
+`supertype-unreached` when `T`'s impls declare no such function the call can
+reach — a derive, a trait default or a `Deref` target supplies it, method syntax
+met only an associated function, or the trait is not in scope at the call;
+`overload-ambiguous` for two functions of one rank, or an inherent `&self`
+method beside a trait's by-value `self` one; `no-applicable-overload` when every
+such function's parameters exclude the call's argument count (a path call to a
+`self`-taking function counts its receiver); `type-ambiguous` when the file, or
+the file re-exporting `T`, imports its name twice; `not-a-callable` for an enum
+variant. A `Self::m` call in a trait's default body, and an unproven receiver,
+are `no-receiver-evidence`. Any other path call is `external-type` when its head
+leaves the repository (`Vec::new()`, `serde_json::to_string(…)`) and
+`name-not-in-scope` when it reaches a repository module that declares no such
+item; a bare call is `name-not-in-scope` unless it names a type or a variant
+(`not-a-callable`). A required trait method — a signature with no body — is
+recorded but bound by no call yet, so a `self.m()` call to one from the trait's
+default body reads `supertype-unreached`. In `workspace status` the Rust row's
+`type-in-another-member` stays `0`: a type of another member is not resolved,
+and is counted `external-type`.
 
 `call_residue` is never stored. A long-lived engine — `logos serve`, its web
 dashboard and MCP server — computes it once per graph revision and `[resolution]`

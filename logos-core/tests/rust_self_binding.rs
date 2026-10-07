@@ -478,11 +478,14 @@ fn sync_equals_a_full_reindex_when_a_self_call_type_name_gains_a_twin() {
     let fresh = index(fresh_tmp.path());
     let fresh_rt = fresh.runtime().unwrap();
 
-    // The selection: the row is re-bound on sync and reads as a cold index's.
-    let unbound = vec![("src/c.rs:go@2".to_string(), "Self::m".to_string(), RefForm::Path, false)];
-    assert_eq!(call_rows(fresh_rt, "src/c.rs"), unbound, "two `X`s: the caller's module decides, and it holds no `m`");
-    assert_eq!(call_rows(rt, "src/c.rs"), unbound, "sync re-selects the row and re-binds it to nothing");
-    assert!(!call_edges(fresh_rt).contains(&bound), "a cold index binds no edge");
+    // S-607: the header `impl crate::a::X` resolves to `a`'s `X`, so a second
+    // `X` elsewhere moves nothing (1.13.0 read the name crate-wide, and two
+    // `X`s left the call to the caller's module, which holds no `m`). The
+    // synced row reads as a cold index's.
+    let still = vec![("src/c.rs:go@2".to_string(), "Self::m".to_string(), RefForm::Path, true)];
+    assert_eq!(call_rows(fresh_rt, "src/c.rs"), still, "the header names `a`'s `X`");
+    assert_eq!(call_rows(rt, "src/c.rs"), still, "sync keeps the row bound");
+    assert!(call_edges(fresh_rt).contains(&bound), "a cold index keeps the edge");
     assert_eq!(call_edges(rt), call_edges(fresh_rt));
 }
 

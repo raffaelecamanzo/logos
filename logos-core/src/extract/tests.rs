@@ -41,6 +41,7 @@ impl NoSymbolsPlugin {
                 implicit_receiver: crate::plugin::ImplicitReceiver::None,
                 bare_calls_free_only: false,
                 overloaded_calls: false,
+                impl_block_lookup: false,
                 arity_unchecked_extensions: Vec::new(),
                 implicit_call_falls_through: false,
                 implicit_root_members: Vec::new(),

@@ -68,10 +68,21 @@
 //!
 //! [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
 //!
+//! A file of an **impl-block** language (Rust; S-607, [FR-RS-47]) decides a
+//! call to a type's method — `Self::m()`, `self.m()`, a proven `x.m()`, a
+//! written `T::m()` — by one associated-item lookup ([`Ctx::lookup`]) among
+//! the functions of every `impl` block whose header resolves to `T`
+//! ([`Index::assoc_items`]). Once a path's type segment is reached the lookup
+//! decides the call, whatever it found: no wider rung reads the path again
+//! ([`Ctx::type_reached`]).
+//!
+//! [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+//!
 //! # Never fabricate ([NFR-RA-05])
 //!
 //! Every level ends in the same acceptance rule: bind **iff the candidate set
-//! has exactly one element**. Zero candidates falls through to the next level;
+//! has exactly one element**. Zero candidates falls through to the next level
+//! (except where a path's type was reached, above);
 //! two or more is [`Res::Ambiguous`] and aborts the whole attempt — escalating
 //! past a *known* ambiguity is how mis-binds happen ([AR-05]). The policy knob
 //! widens the search, never the acceptance rule.
@@ -91,9 +102,9 @@ use std::path::Path;
 
 use crate::config::BindingPolicy;
 use crate::extract::doc::heading_slug;
-use crate::graph_store::{EdgeRow, NodeArity, NodeRow, UnresolvedRefRow};
+use crate::graph_store::{EdgeRow, ImplBlockRow, NodeArity, NodeItemFacts, NodeRow, UnresolvedRefRow};
 use crate::model::{
-    ArtifactRelation, EdgeKind, NodeId, NodeKind, ParamRange, ReceiverShape, RefForm,
+    ArtifactRelation, EdgeKind, NodeId, NodeKind, ParamRange, ReceiverMode, ReceiverShape, RefForm,
 };
 use crate::plugin::CallTargets;
 
@@ -182,6 +193,20 @@ enum Res {
     Ambiguous,
 }
 
+/// How a call to a type's method is written (S-607, [FR-RS-47]) — what decides
+/// the one lookup's `takes_self` and arity filters ([`Ctx::lookup`]).
+///
+/// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Syntax {
+    /// `self.m()`, a proven `x.m()`: the receiver is passed outside the
+    /// argument list, and only a callable taking `self` is reached.
+    Method,
+    /// `Self::m()`, `T::m()`: every associated callable is reached, a
+    /// self-taking one with its receiver as the first argument.
+    Path,
+}
+
 /// Why a package-shaped `Calls` row stays unbound (S-468, [CR-150] §3.2 C,
 /// [FR-RS-10]) — the reason the per-language readout counts it under
 /// ([FR-RS-09]). Recorded by the lookup that gave up, on the same walk that
@@ -207,37 +232,43 @@ pub(crate) enum Residue {
     /// them; a type nested under an in-graph type that does not declare it has
     /// none.
     ///
-    /// Also a `Self::m` call whose self type the crate declares no type of, or
-    /// whose caller's file imports it from outside the crate (S-493), and a
-    /// Rust call on a proven receiver whose type the file's scope reaches no
-    /// in-repository declaration of — `String`, `Vec`, `std::io::Error` — or
-    /// whose method its peeled wrapper provides (`Arc::clone`, S-588); all
-    /// with no candidates.
+    /// Also a recorded-self-type `Self::m` call (S-493) whose self type the
+    /// crate declares no type of, or whose caller's file imports it from
+    /// outside the crate; and in an impl-block language (S-607) a call whose
+    /// `T` — an impl header's, a proven receiver's — is no repository type
+    /// (`String`, `Vec`, `std::io::Error`, an `impl` for a primitive or a
+    /// generic parameter), a method a peeled wrapper provides (`Arc::clone`,
+    /// S-588), a dyn call's external trait, and a path whose head leaves the
+    /// repository (`Vec::new()`, `serde_json::to_string`); all with no
+    /// candidates.
     ExternalType { candidates: Vec<Vec<String>> },
     /// The type (or the nearest supertype level holding the name) declares two
     /// or more callables of that name whose parameter range admits the call
     /// (S-592: no argument type is read), or two static imports each supply
     /// one.
-    /// Also a `Self::m` call whose self type — a name the crate declares for
-    /// one type — records several `m` that the caller's module does not narrow
-    /// to one (S-493), and a proven Rust receiver's type with two methods `m`
-    /// of one rank — two trait impls', with no inherent one (S-588).
+    /// Also a recorded-self-type `Self::m` call whose self type — a name the
+    /// crate declares for one type — records several `m` that the caller's
+    /// module does not narrow to one (S-493, Go); and in an impl-block language
+    /// two functions `m` of the deciding rank of the lookup's `T`, or an
+    /// inherent `&self` method beside a trait's by-value one (S-607), and a
+    /// bare call reaching two callables.
     OverloadAmbiguous,
     /// The type's name reaches two in-graph declarations (a `src/main` and a
-    /// `src/test` class of one fully-qualified name). Also a `Self::m` call
-    /// whose self type's base name the crate declares for several types, when
-    /// the caller's module does not decide the candidate (S-493). Also a proven
-    /// Rust receiver's type the file's scope names twice (two globs), or whose
-    /// name the crate declares for several types while no impl in its own
-    /// module records `m` (S-588).
+    /// `src/test` class of one fully-qualified name). Also a recorded-self-type
+    /// `Self::m` call whose self type's base name the crate declares for
+    /// several types, when the caller's module does not decide the candidate
+    /// (S-493, Go). Also a Rust `T` — a proven receiver's, an impl header's, a
+    /// written path's — the scope names twice (two globs, two imports; S-588,
+    /// S-607).
     TypeAmbiguous,
     /// The type is in the graph, and neither it nor any in-graph supertype
     /// declares the name: the chain leaves the graph (a JDK, library or
     /// other-member superclass, the implicit `Object`), stops at an interface,
-    /// or cycles. Also a `Self::m` call whose self type records no `m` in its
-    /// crate — a trait default, an external trait or a `Deref` target supplies
-    /// it, none of which the graph records for that type (S-493) — and the same
-    /// for a proven Rust receiver's type (S-588).
+    /// or cycles. Also a recorded-self-type `Self::m` call whose self type
+    /// records no `m` in its crate (S-493, Go), and in an impl-block language
+    /// a `T` whose impls hold no function `m` the call can reach — a trait
+    /// default, a derive or a `Deref` target supplies it, method syntax met
+    /// only an associated function, or the trait is not in scope (S-607).
     SupertypeUnreached,
     /// Callables of the name were found, and none admits the call's argument
     /// count (S-592, [FR-RS-43]): every level of the walk holding the name
@@ -246,6 +277,19 @@ pub(crate) enum Residue {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     NoApplicableOverload,
+    /// The call names a repository declaration that is not a callable (S-607,
+    /// [FR-RS-47]): an enum variant (`E::A(1)`, `Self::A`), or a tuple-struct
+    /// constructor (`W(1)`, `Self(1)`).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    NotACallable,
+    /// No rung reaches a repository callable of the name (S-607, [FR-RS-47]): a
+    /// prelude or std function reached by a bare name (`drop`, `Some`), a
+    /// closure or a local, an item the file does not import, or a repository
+    /// module that declares no such item.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    NameNotInScope,
 }
 
 /// Which node kinds satisfy a lookup.
@@ -425,6 +469,11 @@ struct FileScope {
     /// **types** into scope only — the file's own, then the global ones in force
     /// over it ([`Index::apply_global_globs`], S-518).
     globs: Vec<Vec<String>>,
+    /// The globs among [`globs`](FileScope::globs) the file re-exports — a Rust
+    /// `pub use inner::*;` (S-606's `exported` mark) — which a path through
+    /// the file's module follows to a type the glob's module holds (S-607,
+    /// [`Ctx::reexported_type`]).
+    exported_globs: Vec<Vec<String>>,
     /// A package-shaped file's **static** wildcards (`import static a.b.C.*`,
     /// recorded with the alias `*`, [`STATIC_WILDCARD_ALIAS`]): every static
     /// member of the named type comes into scope, methods and fields included.
@@ -514,6 +563,27 @@ pub(crate) fn bindable<'a>(
         .cloned()
         .collect();
     (Cow::Owned(nodes), Cow::Owned(edges))
+}
+
+/// One recorded `impl` block's header, resolved once (S-607,
+/// [`Index::with_associated_items`]).
+#[derive(Debug)]
+struct ImplHeader {
+    /// The one repository type the self-type path resolves to in the block's
+    /// own scope — [`Res::NotFound`] for an external type, a primitive, a
+    /// generic parameter or a reference header, [`Res::Ambiguous`] when the
+    /// scope names two.
+    self_type: Res,
+    /// The self-type path as written, generics stripped — whose tokens a sync
+    /// watches for a `Self::m` call ([`Index::ref_affected`]).
+    self_path: String,
+    /// The trait a trait impl implements, as written; `None` for an inherent
+    /// impl.
+    trait_path: Option<String>,
+    /// That trait's repository node, when the block's scope resolves it to one
+    /// — `None` for an inherent impl and for an external trait (`Display`,
+    /// `Default`), which the graph cannot place in or out of scope.
+    trait_node: Option<NodeId>,
 }
 
 /// The immutable lookup index one resolution run binds against.
@@ -676,42 +746,68 @@ pub(crate) struct Index {
     trait_users: HashSet<NodeId>,
     /// node → the self type its plugin query recorded for it (S-493,
     /// [FR-RS-11]; the `nodes.self_type` column). Empty unless the run was given
-    /// the store's self types ([`Index::with_self_types`]); empty binds no call
-    /// through a self type, and every `Self::m` row takes the path it took
-    /// before.
+    /// the store's self types ([`Index::with_self_types`]). What a Go `Self::m`
+    /// row binds through, and what marks a method no bare call reaches; an
+    /// impl-block language's call reads its impl header instead (S-607).
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     self_types: HashMap<NodeId, String>,
     /// `(crate, self type, name)` → the callables recorded with that self type,
-    /// id-sorted — the universe a `Self::m` call binds within
-    /// ([`Ctx::resolve_self_type_call`]), and a call on a proven Rust receiver
-    /// (S-588, [`Ctx::type_method`]). Across a type's inherent and trait
-    /// impls and every file of its crate; a same-named type of another crate is
-    /// another key, never a candidate. Same-named types of two modules of one
-    /// crate share a key, and the call's own module tells them apart.
+    /// id-sorted — the universe a `Self::m` call binds within in a language
+    /// that records a method's receiver type name but no `impl` block (Go,
+    /// S-509; [`Ctx::resolve_recorded_self_type_call`]). Across every file of
+    /// the crate; a same-named type of another crate is another key, never a
+    /// candidate. Same-named types of two modules of one crate share a key,
+    /// and the call's own module tells them apart. A file of an
+    /// impl-block language ([`PackageLayout::looks_up_impl_blocks`]: Rust)
+    /// contributes nothing: its calls bind through the one associated-item
+    /// lookup ([`Ctx::lookup`], S-607).
     methods_by_self_type: HashMap<(String, String, String), Vec<NodeId>>,
     /// `(crate, name)` → how many type-like nodes ([`is_type_like`]) the crate
     /// declares under that name — whether a self type's base name denotes one
     /// type of the crate, which is what lets a candidate outside the caller's
-    /// module (or, for a proven receiver, the type's module) be that type's
-    /// method.
+    /// module be that type's method.
     type_names: HashMap<(String, String), usize>,
+    /// `(type node, name)` → the functions of every recorded `impl` block whose
+    /// self type **resolves** to that type node, id-sorted (S-607, [FR-RS-47];
+    /// the `impl_blocks` table of migration 34) — the one universe
+    /// [`Ctx::lookup`] binds a call to a type's method within. From any
+    /// repository crate and any file, the header's path resolved in its own
+    /// file's scope ([`Index::with_associated_items`]); a header naming no
+    /// repository type (`impl Display for Vec<X>`, `impl Tr for ()`, a generic
+    /// parameter) contributes no key.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    assoc_items: HashMap<(NodeId, String), Vec<NodeId>>,
+    /// impl function → the index of its block in [`impl_headers`](Index::impl_headers):
+    /// what a `Self::m` / `self.m()` call reads its `T` from, and whether a
+    /// candidate is a trait impl's.
+    assoc_owner: HashMap<NodeId, usize>,
+    /// Every recorded `impl` block holding at least one function, with its
+    /// header resolved once ([`ImplHeader`]).
+    impl_headers: Vec<ImplHeader>,
+    /// The callables recorded as taking `self` (S-604; the `nodes.takes_self`
+    /// column, true) — the ones a path call `T::m(x, …)` passes the receiver
+    /// to as its first argument (S-607). Empty unless the run was given the
+    /// store's facts ([`Index::with_arities`]).
+    with_self: HashSet<NodeId>,
+    /// How each callable writes its receiver (S-606; `nodes.receiver_mode`) —
+    /// what tells an inherent `&self` method from a trait's by-value one
+    /// ([`Ctx::lookup`]).
+    receiver_modes: HashMap<NodeId, ReceiverMode>,
+    /// An enum node → its variant names (S-606; `nodes.variants`) — what makes
+    /// `E::A(1)` a call of no callable ([`Residue::NotACallable`]).
+    variants: HashMap<NodeId, Vec<String>>,
     /// project-relative path → file id, for the files whose own ledger rows
     /// name a source node of the snapshot — how a node reaches its file's
     /// [`FileScope`] (S-493: whether its file imports its self type's name;
     /// S-588: what a module re-exports). A capture-before-delete row is filed
     /// under another file than its source's, so it is never read here.
     file_ids: HashMap<String, i64>,
-    /// Every method of an `impl Trait for X` block — the source of an
-    /// `Implements` ledger row outside a package-shaped language (S-281's rows,
-    /// whatever their trait resolves to). Read by the self-type call's module
-    /// rung (S-493) and a proven receiver's call (S-588, [`Ctx::type_method`]):
-    /// Rust resolves a method to an inherent `m` before a trait's.
-    trait_impl_methods: HashSet<NodeId>,
     /// The callables recorded as **not** taking `self` (S-604, [CR-200]; the
     /// `nodes.takes_self` column, false) — a Rust associated function such as
     /// `fn new() -> Self`, which a method call `x.m()` can never invoke. A
-    /// proven receiver's call ([`Ctx::type_method`]) drops them before any
+    /// method-syntax lookup ([`Ctx::lookup`], S-607) drops them before any
     /// rank; a callable whose fact is unknown is not here, so it is never
     /// dropped. Empty unless the run was given the store's facts
     /// ([`Index::with_arities`]).
@@ -830,8 +926,13 @@ impl Index {
             self_types: HashMap::new(),
             methods_by_self_type: HashMap::new(),
             type_names: HashMap::new(),
+            assoc_items: HashMap::new(),
+            assoc_owner: HashMap::new(),
+            impl_headers: Vec::new(),
+            with_self: HashSet::new(),
+            receiver_modes: HashMap::new(),
+            variants: HashMap::new(),
             file_ids: HashMap::new(),
-            trait_impl_methods: HashSet::new(),
             without_self: HashSet::new(),
             arities: HashMap::new(),
             open_types: HashSet::new(),
@@ -842,7 +943,6 @@ impl Index {
         index.hierarchy_families = hierarchy.families;
         index.trait_users = hierarchy.trait_users;
         index.open_types = hierarchy.open;
-        index.trait_impl_methods = build_trait_impl_methods(refs, &index);
         // A capture-before-delete row (`Symbol`) is filed under its *target's*
         // file while its source sits in another (ADR-10): it never says which
         // file its source's path is, or a sync would read that file's scope
@@ -947,8 +1047,11 @@ impl Index {
 
     /// Give the index the self types the store records per node (S-493,
     /// [FR-RS-11]; [`GraphStore::node_self_types`]) — what a `self.m()` /
-    /// `Self::m()` call binds through. Rows naming a node the snapshot does not
-    /// hold, and non-callables, contribute no candidate.
+    /// `Self::m()` call binds through in a language without impl blocks (Go),
+    /// and what marks a method no bare call reaches. Rows naming a node the
+    /// snapshot does not hold, non-callables, and the functions of an
+    /// impl-block language (which bind through [`Index::with_associated_items`])
+    /// contribute no candidate.
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     /// [`GraphStore::node_self_types`]: crate::graph_store::GraphStore::node_self_types
@@ -957,8 +1060,13 @@ impl Index {
         for (id, self_type) in &self_types {
             let Some(info) = self.info.get(id) else { continue };
             // A method of a type its file imports from outside the crate is a
-            // foreign type's: never a candidate for a call on a crate type.
-            if !Want::Callable.admits(info.kind) || self.imports_foreign(info, self_type) {
+            // foreign type's: never a candidate for a call on a crate type. A
+            // method of an impl-block language binds through the one lookup
+            // instead (S-607, [`Index::with_associated_items`]).
+            if !Want::Callable.admits(info.kind)
+                || info.file_path.as_deref().is_some_and(|p| self.layout.looks_up_impl_blocks(p))
+                || self.imports_foreign(info, self_type)
+            {
                 continue;
             }
             by_type
@@ -984,10 +1092,12 @@ impl Index {
 
     /// Give the index the arity facts the store records per node (S-604,
     /// [CR-200]; [`GraphStore::node_arities`]): the callables recorded as not
-    /// taking `self`, which a proven receiver's method call never binds
-    /// ([`Index::without_self`]), and each callable's parameter range, which a
-    /// call's argument count must fit (S-592, [`Index::arities`]). A fact that
-    /// is unknown records nothing.
+    /// taking `self`, which a method-syntax call never binds
+    /// ([`Index::without_self`]), those recorded as taking it, to which a path
+    /// call passes its receiver as the first argument ([`Index::with_self`],
+    /// S-607), and each callable's parameter range, which a call's argument
+    /// count must fit (S-592, [`Index::arities`]). A fact that is unknown
+    /// records nothing.
     ///
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     /// [`GraphStore::node_arities`]: crate::graph_store::GraphStore::node_arities
@@ -997,10 +1107,144 @@ impl Index {
             .filter(|(_, _, takes_self)| *takes_self == Some(false))
             .map(|(id, _, _)| *id)
             .collect();
+        self.with_self = arities
+            .iter()
+            .filter(|(_, _, takes_self)| *takes_self == Some(true))
+            .map(|(id, _, _)| *id)
+            .collect();
         self.arities = arities
             .iter()
             .filter_map(|(id, range, _)| Some((*id, (*range)?)))
             .collect();
+        self
+    }
+
+    /// Give the index the `impl` blocks and item facts the store records
+    /// (S-606, [FR-EX-34]; [`GraphStore::impl_blocks`],
+    /// [`GraphStore::node_item_facts`]) — the universe of the one
+    /// associated-item lookup (S-607, [FR-RS-47], [`Ctx::lookup`]).
+    ///
+    /// Each block's functions are the callables of its file whose first line
+    /// it holds — the innermost such block, and none when two blocks of one
+    /// span hold it (two `impl`s on one line) — less a function nested in one
+    /// of the block's own functions. A block holding none (an empty
+    /// `impl Greet for X {}`) records nothing here. Its header is resolved
+    /// **once**, in its own file's scope, as a proven receiver's type is
+    /// ([`Ctx::resolve_receiver_type`]): its `use` declarations, its module,
+    /// its crate and the re-exports they follow, never a workspace guess. A
+    /// header that resolves to one repository type adds the block's functions
+    /// to that type's candidates ([`Index::assoc_items`]); a reference header
+    /// (`impl Tr for &X`), a primitive, tuple or slice, a generic parameter and
+    /// an external type add none. Its trait, when the repository declares it,
+    /// is resolved the same way ([`ImplHeader::trait_node`]).
+    ///
+    /// Read only for the files of an impl-block language
+    /// ([`PackageLayout::looks_up_impl_blocks`]). Reads no arity fact: the
+    /// facts [`with_arities`](Index::with_arities) gives only sharpen the
+    /// bind-time filters, which an index given none (the framework pass) skips.
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    /// [`GraphStore::impl_blocks`]: crate::graph_store::GraphStore::impl_blocks
+    /// [`GraphStore::node_item_facts`]: crate::graph_store::GraphStore::node_item_facts
+    pub(crate) fn with_associated_items(
+        mut self,
+        nodes: &[NodeRow],
+        blocks: &[ImplBlockRow],
+        facts: &[NodeItemFacts],
+    ) -> Index {
+        self.receiver_modes = facts
+            .iter()
+            .filter_map(|f| Some((f.id, f.receiver_mode?)))
+            .collect();
+        self.variants = facts
+            .iter()
+            .filter_map(|f| Some((f.id, f.variants.as_deref()?.split_whitespace().map(str::to_string).collect())))
+            .collect();
+        let lines: HashMap<NodeId, (i64, i64)> = nodes
+            .iter()
+            .filter_map(|n| Some((n.id, (n.start_line?, n.end_line.or(n.start_line)?))))
+            .collect();
+        let mut by_file: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, b) in blocks.iter().enumerate() {
+            if self.layout.looks_up_impl_blocks(&b.file_path) {
+                by_file.entry(b.file_path.as_str()).or_default().push(i);
+            }
+        }
+        let mut members: Vec<Vec<NodeId>> = vec![Vec::new(); blocks.len()];
+        for n in nodes {
+            let (Some(path), Some(line)) = (n.file_path.as_deref(), n.start_line) else { continue };
+            if !Want::Callable.admits(n.kind) || !self.info.contains_key(&n.id) {
+                continue;
+            }
+            let Some(candidates) = by_file.get(path) else { continue };
+            let holding: Vec<usize> = candidates
+                .iter()
+                .copied()
+                .filter(|&i| i64::from(blocks[i].start_line) <= line && line <= i64::from(blocks[i].end_line))
+                .collect();
+            let span = |i: usize| blocks[i].end_line - blocks[i].start_line;
+            let Some(narrowest) = holding.iter().map(|&i| span(i)).min() else { continue };
+            // Two blocks of one span holding the line (`impl A { … } impl B {
+            // … }` on one line): which holds the function is unknown, so
+            // neither does — no candidate rather than a guess.
+            let [i] = holding.iter().copied().filter(|&i| span(i) == narrowest).collect::<Vec<_>>()[..] else {
+                continue;
+            };
+            // A function nested in one of the block's own functions, or in a
+            // trait the block's function declares, is no associated item.
+            let nested = self.parent.get(&n.id).is_some_and(|p| {
+                self.info.get(p).is_some_and(|pi| pi.kind != NodeKind::Module)
+                    && lines.get(p).is_none_or(|&(start, _)| start >= i64::from(blocks[i].start_line))
+            });
+            if !nested {
+                members[i].push(n.id);
+            }
+        }
+        let resolved: Vec<(Vec<NodeId>, ImplHeader)> = blocks
+            .iter()
+            .zip(members)
+            .filter_map(|(block, mut fns)| {
+                let &first = fns.first()?;
+                fns.sort_unstable();
+                // The header is read where it is written: the scope holding
+                // the block's first function.
+                let scope = self.parent.get(&first).copied().unwrap_or(first);
+                let ctx = Ctx::for_scope(&self, scope, self.file_ids.get(&block.file_path).copied());
+                let self_type = if block.self_ref {
+                    Res::NotFound
+                } else {
+                    ctx.header_type(&block.self_type)
+                };
+                let trait_node = block.trait_path.as_deref().and_then(|t| match ctx.header_type(t) {
+                    Res::Found(id) if self.info.get(&id).is_some_and(|i| i.kind == NodeKind::Trait) => Some(id),
+                    _ => None,
+                });
+                let header = ImplHeader {
+                    self_type,
+                    self_path: block.self_type.clone(),
+                    trait_path: block.trait_path.clone(),
+                    trait_node,
+                };
+                Some((fns, header))
+            })
+            .collect();
+        let mut assoc: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
+        for (fns, header) in resolved {
+            let at = self.impl_headers.len();
+            for &f in &fns {
+                self.assoc_owner.insert(f, at);
+                if let (Res::Found(ty), Some(info)) = (header.self_type, self.info.get(&f)) {
+                    assoc.entry((ty, info.name.clone())).or_default().push(f);
+                }
+            }
+            self.impl_headers.push(header);
+        }
+        for ids in assoc.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        self.assoc_items = assoc;
         self
     }
 
@@ -1228,8 +1472,10 @@ impl Index {
     ///
     /// A `Self::m` row (S-493) is also affected when a token of its caller's
     /// self type is dirty: a second type of that name elsewhere in the crate
-    /// moves its binding to the caller's module ([`Ctx::resolve_self_type_call`])
-    /// without touching `m`.
+    /// moves its binding to the caller's module
+    /// ([`Ctx::resolve_recorded_self_type_call`]) without touching `m` — and,
+    /// in an impl-block language, so are it and a `self.m()` row when a token
+    /// of its caller's impl header is (S-607, [`Ctx::self_type_call`]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub(crate) fn ref_affected(&self, r: &UnresolvedRefRow, dirty: &HashSet<String>) -> bool {
@@ -1237,13 +1483,23 @@ impl Index {
             return true;
         }
         // A `Self::m` call (S-493) also reads how many types its caller's self
-        // type names in the crate, a name its target does not spell.
-        if r.target.split_once("::").is_some_and(|(head, _)| head == SELF_TYPE_HEAD) {
-            let self_type = self
-                .by_symbol
-                .get(&r.source_symbol)
-                .and_then(|id| self.self_types.get(id));
-            if self_type.is_some_and(|ty| super::tokens(ty).iter().any(|t| dirty.contains(t))) {
+        // type names in the crate, a name its target does not spell — and, in
+        // an impl-block language, what its caller's impl header resolves to
+        // (S-607): the header's self type and trait, which a `self.m()` left
+        // unrewritten spells no more than `Self::m` does.
+        let through_self = r.target.split_once("::").is_some_and(|(head, _)| head == SELF_TYPE_HEAD)
+            || (r.form == RefForm::Method && r.receiver == Some(ReceiverShape::SelfInstance));
+        if through_self {
+            let source = self.by_symbol.get(&r.source_symbol);
+            let self_type = source.and_then(|id| self.self_types.get(id));
+            let header = source
+                .and_then(|id| self.assoc_owner.get(id))
+                .map(|&h| &self.impl_headers[h]);
+            let spelt = self_type
+                .into_iter()
+                .chain(header.map(|h| &h.self_path))
+                .chain(header.and_then(|h| h.trait_path.as_ref()));
+            if spelt.flat_map(|text| super::tokens(text)).any(|t| dirty.contains(&t)) {
                 return true;
             }
         }
@@ -1316,6 +1572,40 @@ impl Index {
             head = next.clone();
         }
         false
+    }
+
+    /// The names of the impl functions whose block header a token of `dirty`
+    /// spells — its self type or its trait, as written, or its trait's name —
+    /// beyond `dirty` (S-607). Which calls such a function answers moves with
+    /// what its header resolves to, and with where its trait is in scope, both
+    /// read through other files' `use`s: a `pub use` retargeted or removed in a
+    /// third file spells the header's name and never the call's. Read beside
+    /// [`ref_affected`](Index::ref_affected) for every `Calls` row
+    /// (`resolve::run`), as the [`renamed_import_tokens`](Index::renamed_import_tokens)
+    /// precedent is.
+    pub(crate) fn impl_header_tokens(&self, dirty: &HashSet<String>) -> HashSet<String> {
+        let spells = |text: &str| super::tokens(text).iter().any(|t| dirty.contains(t));
+        let moved: HashSet<usize> = self
+            .impl_headers
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| {
+                spells(&h.self_path)
+                    || h.trait_path.as_deref().is_some_and(spells)
+                    || h.trait_node.and_then(|t| self.info.get(&t)).is_some_and(|i| spells(&i.name))
+            })
+            .map(|(at, _)| at)
+            .collect();
+        if moved.is_empty() {
+            return HashSet::new();
+        }
+        self.assoc_owner
+            .iter()
+            .filter(|(_, at)| moved.contains(at))
+            .filter_map(|(f, _)| self.info.get(f))
+            .flat_map(|i| super::tokens(&i.name))
+            .filter(|t| !dirty.contains(t))
+            .collect()
     }
 
     /// The tokens a proven Rust receiver's row (S-588) can read through
@@ -1840,7 +2130,12 @@ fn build_file_scopes(refs: &[UnresolvedRefRow]) -> HashMap<i64, FileScope> {
             RefForm::Glob if r.alias.as_deref() == Some(STATIC_WILDCARD_ALIAS) => {
                 scope.static_globs.push(path)
             }
-            RefForm::Glob => scope.globs.push(path),
+            RefForm::Glob => {
+                if r.exported == Some(true) {
+                    scope.exported_globs.push(path.clone());
+                }
+                scope.globs.push(path);
+            }
             _ => {
                 if let Some(alias) = &r.alias {
                     // An identical import is one expansion, not a rival
@@ -1915,26 +2210,6 @@ fn build_impls_by_trait_method(
         ids.dedup();
     }
     map
-}
-
-/// The methods of `impl Trait for X` blocks ([`Index::trait_impl_methods`]):
-/// the sources of the `Implements` rows extraction emits per such method
-/// (S-281), outside a package-shaped language, whose `Implements` row is a
-/// class's.
-fn build_trait_impl_methods(refs: &[UnresolvedRefRow], ix: &Index) -> HashSet<NodeId> {
-    refs.iter()
-        .filter(|r| r.kind == EdgeKind::Implements)
-        .filter_map(|r| ix.by_symbol.get(&r.source_symbol).copied())
-        .filter(|id| {
-            ix.info.get(id).is_some_and(|i| {
-                Want::Callable.admits(i.kind)
-                    && !i
-                        .file_path
-                        .as_deref()
-                        .is_some_and(|p| ix.layout.is_package_shaped(p))
-            })
-        })
-        .collect()
 }
 
 /// The type hierarchy (S-468, [CR-150] §3.2 B; S-522): each type's
@@ -2196,10 +2471,11 @@ pub(crate) fn bind_counting_path_visits(r: &UnresolvedRefRow, ix: &Index, policy
     (outcome, PATH_VISITS.with(Cell::get))
 }
 
-/// Why `r` — a `Calls` row from a package-shaped source, or in any language a
-/// `Self::m` call through the caller's own type (S-493) or a receiver call
-/// bound by its shape (S-514) — stays unbound (S-468, [CR-150] §3.2 C), or
-/// `None` when it is no such row, or when it binds
+/// Why `r` — a `Calls` row from a package-shaped source or an impl-block
+/// language (every one of its rows, S-607), or in any other language a
+/// `Self::m` call through the caller's recorded self type (S-493) or a
+/// receiver call bound by its shape (S-514) — stays unbound (S-468, [CR-150]
+/// §3.2 C), or `None` when it is no such row, or when it binds
 /// now: a capture-before-delete `Symbol` row, or a row the ledger holds unbound
 /// that this binder binds (a graph bound by an older binary, or a sync that did
 /// not re-select it). The readout counts those apart as unclassified.
@@ -2218,12 +2494,22 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
         .get(&r.source_symbol)
         .and_then(|id| ix.info.get(id))
         .and_then(|i| i.file_path.as_deref())?;
+    if ix.layout.looks_up_impl_blocks(source_file) {
+        // Every unbound call of an impl-block language carries a reason
+        // (S-607, [FR-RS-47]): the lookup's own, else the one its path's
+        // resolution gave up with ([`Ctx::unbound_reason`]).
+        //
+        // [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+        return Some(miss.unwrap_or_else(|| {
+            let source = ix.by_symbol[&r.source_symbol];
+            Ctx::for_row(r, ix, source, policy).unbound_reason(r)
+        }));
+    }
     if !ix.layout.is_package_shaped(source_file) {
         // Outside a package-shaped language only a call through the caller's
-        // own type (S-493, [`Ctx::resolve_self_type_call`]), a receiver call
-        // (S-514, the `RefForm::Method` arm) and a Rust call retyped from its
-        // proven receiver (S-588, [`Ctx::resolve_proven_receiver_call`])
-        // record a reason.
+        // recorded self type (S-493, Go's S-509,
+        // [`Ctx::resolve_recorded_self_type_call`]) and a receiver call
+        // (S-514, the `RefForm::Method` arm) record a reason.
         return miss;
     }
     Some(miss.unwrap_or(match r.form {
@@ -2241,7 +2527,7 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
 /// [`bind`], and the [`Residue`] the first package-shaped call lookup that gave
 /// up recorded — `None` when none did (outside a package-shaped language, every
 /// row but a `Self::m` call through the caller's own type, S-493, a receiver
-/// call, S-514, and a Rust call retyped from its proven receiver, S-588).
+/// call, S-514, and a call the associated-item lookup decided, S-607).
 /// Meaningful only for an
 /// [`Outcome::Unbound`]: a row that binds may still carry the miss of a rung it
 /// tried first (one of two static imports naming an external type).
@@ -2256,32 +2542,9 @@ fn bind_traced(
         return (Outcome::Unbound, None);
     };
     let source_info = ix.info.get(&source);
-    let source_file = source_info.and_then(|i| i.file_path.as_deref());
-    let source_package = source_file.and_then(|p| ix.layout.package_of(p));
-    let source_family = source_file.and_then(|p| ix.layout.family(p));
-    let enclosing_namespaces = source_file.is_some_and(|p| ix.layout.sees_enclosing_namespaces(p));
-    let bare_calls_free_only = source_file.is_some_and(|p| ix.layout.bare_calls_free_only(p));
-    let falls_through = source_file.is_some_and(|p| ix.layout.falls_through_to_free_calls(p, &r.target));
     let relation = relation_want_of(r, source_info, &ix.layout);
-    let ctx = Ctx {
-        source,
-        file_id: r.file_id,
-        ix,
-        source_package,
-        source_family,
-        enclosing_namespaces,
-        bare_calls_free_only,
-        falls_through,
-        arg_count: filtered_count(r, source_file, &ix.layout),
-        passed_over: Cell::new(false),
-        policy,
-        in_glob_resolution: Cell::new(false),
-        in_rival_expansion: Cell::new(false),
-        bare_path_call: Cell::new(false),
-        scope_only: Cell::new(relation.is_some() || is_proven_receiver_call(r)),
-        lexical_start: Cell::new(source),
-        miss: RefCell::new(None),
-    };
+    let ctx = Ctx::for_row(r, ix, source, policy);
+    ctx.scope_only.set(relation.is_some() || is_proven_receiver_call(r));
     let outcome = bind_in(&ctx, r, relation);
     (outcome, ctx.miss.into_inner())
 }
@@ -2293,13 +2556,15 @@ fn bind_traced(
 /// among same-named callables by their arguments.
 ///
 /// The arms that do: a receiver call of shape `self` or `super` ([FR-RS-12]),
-/// in every language; a Rust call on a proven receiver (S-588); and every
-/// Path-form call — bare, or typed `T::m` — of a language that overloads
-/// callables ([`PackageLayout::overloads_calls`]: Java, Kotlin, Scala, C#,
-/// C++). None of those counts an explicit receiver among its arguments. A
-/// path a language without overloading writes — Python's `Base.__init__(self,
-/// x)`, Rust's `S::c(&self, 6)`, which pass the receiver as the first argument
-/// — and a `Self::m` call (S-493) keep binding by name, as before.
+/// in every language, and every Path-form call — bare, or typed `T::m` — of a
+/// language that overloads callables ([`PackageLayout::overloads_calls`]:
+/// Java, Kotlin, Scala, C#, C++). None of those counts an explicit receiver
+/// among its arguments. A path a language without overloading writes —
+/// Python's `Base.__init__(self, x)` — and a Go `Self::m` call (S-493) keep
+/// binding by name, as before. An impl-block language's call to a type's
+/// method (Rust's `Self::m`, a proven `x.m()`, `S::c(&self, 6)`) is filtered
+/// by its own syntax-aware count instead ([`Ctx::call_args`],
+/// [`Ctx::admitted_by_count`], S-607).
 ///
 /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
 /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
@@ -2313,7 +2578,7 @@ fn filtered_count(r: &UnresolvedRefRow, source_file: Option<&str>, layout: &Pack
     let receiver_shaped = r.form == RefForm::Method
         && matches!(r.receiver, Some(ReceiverShape::SelfInstance | ReceiverShape::Super));
     let overloaded_path = r.form == RefForm::Path && layout.overloads_calls(file);
-    (receiver_shaped || is_proven_receiver_call(r) || overloaded_path)
+    (receiver_shaped || overloaded_path)
         .then_some(r.arg_count)
         .flatten()
 }
@@ -2454,9 +2719,8 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             }
             // A Rust call on a receiver whose declared type the file proves
             // (S-587, [FR-RS-42]): `x.m()` retyped to `T::m`, its `other` shape
-            // kept. It is not a written `T::m()` — the path rungs below would
-            // read it as one, and find `m` among every type of `T`'s module —
-            // so it binds only among `T`'s own methods (S-588,
+            // kept. It is not a written `T::m()` — it is method syntax — so it
+            // binds through the one lookup with method syntax (S-607,
             // [`Ctx::resolve_proven_receiver_call`]), never through a scope.
             //
             // [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
@@ -2467,11 +2731,18 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
                 };
             }
             // A call through the caller's own type (S-493, [FR-RS-11]):
-            // `self.m()` / `Self::m()` inside a method with a recorded self
-            // type binds only among that type's methods in the caller's crate,
-            // never through the scope hierarchy.
+            // `self.m()` / `Self::m()` binds only among that type's methods,
+            // never through the scope hierarchy — through the one lookup in an
+            // impl-block language (S-607, [`Ctx::resolve_self_path_call`]),
+            // else among the methods recorded with the caller's self type
+            // ([`Ctx::resolve_recorded_self_type_call`], Go).
             if r.kind == EdgeKind::Calls {
-                if let Some(resolved) = ctx.resolve_self_type_call(&r.target) {
+                let resolved = if ctx.impl_blocks {
+                    ctx.resolve_self_path_call(r)
+                } else {
+                    ctx.resolve_recorded_self_type_call(&r.target)
+                };
+                if let Some(resolved) = resolved {
                     return match resolved {
                         Res::Found(target) => bound(target),
                         _ => Outcome::Unbound,
@@ -2575,8 +2846,10 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // where `f` may be found ([FR-RS-12]):
             //
             // - `self` — among the caller's own class's members, then up its
-            //   proven `Extends` chain; for a caller with a recorded self type,
-            //   through that type ([`Ctx::resolve_self_receiver`]);
+            //   proven `Extends` chain; for a function of an `impl` block,
+            //   through its header's type by the one lookup (S-607), and for a
+            //   Go method through its recorded self type
+            //   ([`Ctx::resolve_self_receiver`]);
             // - `super` — only up that chain, never the caller's own class
             //   ([`Ctx::resolve_super_receiver`]);
             // - `other`, or no shape at all — nowhere. The caller's lexical,
@@ -2754,6 +3027,22 @@ struct Ctx<'a> {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     arg_count: Option<u32>,
+    /// The call's argument count as written, for the associated-item lookup's
+    /// syntax-aware arity filter ([`lookup`](Ctx::lookup), S-607) — `None`
+    /// when unknown, or when the source's language enforces no arity.
+    call_args: Option<u32>,
+    /// Whether the source's language decides a call to a type's method by the
+    /// one associated-item lookup over recorded `impl` blocks
+    /// ([`PackageLayout::looks_up_impl_blocks`], S-607, [FR-RS-47]).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    impl_blocks: bool,
+    /// Set once a path's type segment was reached and the lookup decided the
+    /// call ([`descend`](Ctx::descend), S-607): Rust resolves `T` in the
+    /// path's own scope and looks `m` up among `T`'s items alone, so no wider
+    /// rung may read the path again — a same-named `T` at the crate root, a
+    /// glob's, a workspace suffix match is another type.
+    type_reached: Cell<bool>,
     /// Set when [`applicable`](Ctx::applicable) dropped every candidate of a
     /// non-empty set: some rung found callables of the name, and none admitted
     /// the call — the [`Residue::NoApplicableOverload`] a row that stays
@@ -2820,6 +3109,57 @@ struct Ctx<'a> {
     /// lost. Read by [`residue`] alone, and only for a row that stays unbound;
     /// binding never consults it.
     miss: RefCell<Option<Residue>>,
+}
+
+impl<'a> Ctx<'a> {
+    /// A context reading names from `source`'s scope, in file `file_id`, under
+    /// `policy` — the file-derived facts read once here, every per-row knob
+    /// at its default: no argument count, every workspace rung open.
+    fn at(ix: &'a Index, source: NodeId, file_id: Option<i64>, policy: BindingPolicy, target: &str) -> Ctx<'a> {
+        let source_file = ix.info.get(&source).and_then(|i| i.file_path.as_deref());
+        Ctx {
+            source,
+            file_id,
+            ix,
+            source_package: source_file.and_then(|p| ix.layout.package_of(p)),
+            source_family: source_file.and_then(|p| ix.layout.family(p)),
+            enclosing_namespaces: source_file.is_some_and(|p| ix.layout.sees_enclosing_namespaces(p)),
+            bare_calls_free_only: source_file.is_some_and(|p| ix.layout.bare_calls_free_only(p)),
+            falls_through: source_file.is_some_and(|p| ix.layout.falls_through_to_free_calls(p, target)),
+            arg_count: None,
+            call_args: None,
+            impl_blocks: source_file.is_some_and(|p| ix.layout.looks_up_impl_blocks(p)),
+            type_reached: Cell::new(false),
+            passed_over: Cell::new(false),
+            policy,
+            in_glob_resolution: Cell::new(false),
+            in_rival_expansion: Cell::new(false),
+            bare_path_call: Cell::new(false),
+            scope_only: Cell::new(false),
+            lexical_start: Cell::new(source),
+            miss: RefCell::new(None),
+        }
+    }
+
+    /// The context `r` binds in, from its source node `source`: its file's
+    /// facts, and the argument counts its arms filter by.
+    fn for_row(r: &UnresolvedRefRow, ix: &'a Index, source: NodeId, policy: BindingPolicy) -> Ctx<'a> {
+        let mut ctx = Ctx::at(ix, source, r.file_id, policy, &r.target);
+        let source_file = ix.info.get(&source).and_then(|i| i.file_path.as_deref());
+        ctx.arg_count = filtered_count(r, source_file, &ix.layout);
+        ctx.call_args = r
+            .arg_count
+            .filter(|_| r.kind == EdgeKind::Calls && source_file.is_some_and(|p| ix.layout.checks_arity(p)));
+        ctx
+    }
+
+    /// The context an `impl` header is read in ([`Index::with_associated_items`]):
+    /// `scope`, by scope and module model only — never a workspace guess.
+    fn for_scope(ix: &'a Index, scope: NodeId, file_id: Option<i64>) -> Ctx<'a> {
+        let ctx = Ctx::at(ix, scope, file_id, BindingPolicy::Strict, "");
+        ctx.scope_only.set(true);
+        ctx
+    }
 }
 
 impl Ctx<'_> {
@@ -3054,14 +3394,14 @@ impl Ctx<'_> {
         //     import-root file importing the head twice reads every import.
         if let Some(rivals) = self.rival_expansions(head) {
             match self.resolve_expansions(rivals, rest, want, depth) {
-                Res::NotFound => {}
+                Res::NotFound if !self.type_reached.get() => {}
                 decided => return decided,
             }
         } else if let Some(alias_path) = self.scope().and_then(|s| s.aliases.get(head)) {
             let mut expanded = alias_path.clone();
             expanded.extend(rest.iter().cloned());
             match self.resolve_path(&expanded, want, depth - 1) {
-                Res::NotFound => {} // fall through to wider scopes
+                Res::NotFound if !self.type_reached.get() => {} // fall through to wider scopes
                 decided => return decided,
             }
         }
@@ -3070,7 +3410,7 @@ impl Ctx<'_> {
         let norm = normalize_crate(head);
         if self.ix.crates.contains(&norm) && !self.in_family_crate() {
             match self.descend(&norm, &[], rest, want) {
-                Res::NotFound => {} // a same-named module may still match below
+                Res::NotFound if !self.type_reached.get() => {} // a same-named module may still match below
                 decided => return decided,
             }
         }
@@ -3078,18 +3418,18 @@ impl Ctx<'_> {
         //    crate root.
         if let Some((krate, mods)) = &source_mod {
             match self.descend(krate, mods, segs, want) {
-                Res::NotFound => {}
+                Res::NotFound if !self.type_reached.get() => {}
                 decided => return decided,
             }
             match self.descend(krate, &[], segs, want) {
-                Res::NotFound => {}
+                Res::NotFound if !self.type_reached.get() => {}
                 decided => return decided,
             }
         }
         // 7) Through the file's glob imports: candidates across every glob
         //    module, exactly-one overall.
         match self.through_globs(segs, want, depth) {
-            Res::NotFound => {}
+            Res::NotFound if !self.type_reached.get() => {}
             decided => return decided,
         }
         // 8) Policy-gated workspace fallback: unique module-path-suffix match —
@@ -3249,53 +3589,43 @@ impl Ctx<'_> {
         }
     }
 
-    /// Resolve `Self::m` — a `self.m()` or `Self::m()` call (S-493, [FR-RS-11])
-    /// — among the callables recorded with the **caller's** self type in the
-    /// caller's crate ([`Index::methods_by_self_type`]), or `None` when this is
-    /// no such call: a target of any other shape, or a caller with no recorded
-    /// self type (a trait's default method, a free function), whose row takes
-    /// the path it always took.
+    /// Resolve `Self::m` — a call through the caller's own receiver in a
+    /// language that records a method's receiver type **name** but no `impl`
+    /// block (Go's `s.F()`, S-509; [FR-RS-11]) — among the callables recorded
+    /// with the caller's self type in the caller's crate
+    /// ([`Index::methods_by_self_type`]), or `None` when this is no such call:
+    /// a target of any other shape, or a caller with no recorded self type,
+    /// whose row takes the path it always took. An impl-block language (Rust)
+    /// never reaches here: its calls bind through [`lookup`](Ctx::lookup)
+    /// (S-607).
     ///
     /// The one acceptance rule ([`exactly_one`], [NFR-RA-05]), on two rungs.
     ///
     /// 1. **The crate** — when the crate declares exactly one type of the self
-    ///    type's base name, every candidate is a method of the caller's type,
-    ///    wherever in the crate its impl block is: exactly one binds.
-    /// 2. **The caller's module** — where the impl header's name denotes the
+    ///    type's name, every candidate is a method of the caller's type: exactly
+    ///    one binds.
+    /// 2. **The caller's module** — where the receiver's type name denotes the
     ///    caller's own type. Taken when the crate declares that name for several
-    ///    types — a lone candidate elsewhere may then be another type's method,
-    ///    so only the module decides — and when rung 1 found several: one type's
-    ///    inherent `m` beside a trait impl's `m` (`Engine::start`), or two
-    ///    impl blocks both defining it. Exactly one module-local candidate
-    ///    binds, unless it is a trait-impl method while an inherent candidate
-    ///    lies outside the module: Rust resolves `Self::m` to the inherent one
-    ///    wherever it is written, so the module cannot decide that pair.
+    ///    types, and when rung 1 found several: exactly one module-local
+    ///    candidate binds.
     ///
-    /// A self type the crate declares no type of (a library type, a generic
-    /// parameter), or one the caller's file imports from outside the crate,
-    /// binds nothing: [`Residue::ExternalType`]. Its inherent methods are not
-    /// in the graph and Rust prefers them to any trait method recorded here, so
-    /// no candidate is evidence — and a same-named crate type is another type.
-    /// Its query records no self type at all for a header path-qualified
-    /// outside the crate (`impl Ext for std::io::Error`).
-    ///
-    /// Zero candidates — the method comes from a trait's default body, an
-    /// external trait or a `Deref` target, none of which records this self type
-    /// — is [`Residue::SupertypeUnreached`]. Candidates the module does not
-    /// narrow to one are [`Residue::OverloadAmbiguous`] under a type name the
-    /// crate declares once, [`Residue::TypeAmbiguous`] otherwise. Either stays
-    /// unbound and never falls through to a wider scope: the receiver's type is
-    /// known, and a same-named callable elsewhere is not its method.
+    /// A self type the crate declares no type of, or one the caller's file
+    /// imports from outside the crate, binds nothing: [`Residue::ExternalType`].
+    /// Zero candidates is [`Residue::SupertypeUnreached`]; candidates the
+    /// module does not narrow to one are [`Residue::OverloadAmbiguous`] under a
+    /// type name the crate declares once, [`Residue::TypeAmbiguous`] otherwise.
+    /// Either stays unbound and never falls through to a wider scope.
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    fn resolve_self_type_call(&self, target: &str) -> Option<Res> {
+    fn resolve_recorded_self_type_call(&self, target: &str) -> Option<Res> {
         let (head, name) = target.split_once("::")?;
         if head != SELF_TYPE_HEAD || name.is_empty() || name.contains("::") {
             return None;
         }
         let self_type = self.ix.self_types.get(&self.source)?;
-        let krate = &self.ix.info.get(&self.source)?.crate_name;
+        let caller = self.ix.info.get(&self.source)?;
+        let krate = &caller.crate_name;
         let key = (krate.clone(), self_type.clone(), name.to_string());
         let candidates = self
             .ix
@@ -3303,11 +3633,7 @@ impl Ctx<'_> {
             .get(&key)
             .map_or(&[][..], Vec::as_slice);
         let declared = self.ix.type_names.get(&(krate.clone(), self_type.clone()));
-        let caller = self.ix.info.get(&self.source)?;
         if declared.is_none() || self.ix.imports_foreign(caller, self_type) {
-            // A type the crate does not declare — a library type, a generic
-            // parameter — has inherent methods the graph cannot see, which
-            // Rust prefers to any trait method recorded here.
             self.note(Want::Callable, || Residue::ExternalType {
                 candidates: Vec::new(),
             });
@@ -3320,40 +3646,404 @@ impl Ctx<'_> {
                 Res::NotFound
             }
             found @ Res::Found(_) if one_type => found,
-            _ => match self.module_candidate(candidates) {
-                Some(found) => Res::Found(found),
-                None => {
-                    self.note(Want::Callable, || {
-                        if one_type {
-                            Residue::OverloadAmbiguous
-                        } else {
-                            Residue::TypeAmbiguous
-                        }
-                    });
-                    Res::Ambiguous
+            _ => {
+                let own = self.ix.nearest_module(self.source);
+                let local: Vec<NodeId> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&c| own.is_some() && self.ix.nearest_module(c) == own)
+                    .collect();
+                match exactly_one(&local) {
+                    found @ Res::Found(_) => found,
+                    _ => {
+                        self.note(Want::Callable, || {
+                            if one_type {
+                                Residue::OverloadAmbiguous
+                            } else {
+                                Residue::TypeAmbiguous
+                            }
+                        });
+                        Res::Ambiguous
+                    }
                 }
-            },
+            }
         };
         Some(res)
     }
 
-    /// Rung 2 of [`resolve_self_type_call`](Ctx::resolve_self_type_call): the
-    /// one of `candidates` in the caller's own module, unless it is a trait-impl
-    /// method while an inherent candidate lies outside the module.
-    fn module_candidate(&self, candidates: &[NodeId]) -> Option<NodeId> {
-        let own = self.ix.nearest_module(self.source)?;
-        let local: Vec<NodeId> = candidates
+    /// Resolve `Self::m` in an impl-block language (S-607, [FR-RS-47]) — a
+    /// written `Self::m()`, path syntax, or the `Self::m` row extraction
+    /// records for a `self.m()`, which carries receiver shape `self` (S-606)
+    /// and is method syntax — through [`self_type_call`](Ctx::self_type_call).
+    /// `None` for a target of any other shape.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn resolve_self_path_call(&self, r: &UnresolvedRefRow) -> Option<Res> {
+        let (head, name) = r.target.split_once("::")?;
+        if head != SELF_TYPE_HEAD || name.is_empty() || name.contains("::") {
+            return None;
+        }
+        let syntax = if r.receiver == Some(ReceiverShape::SelfInstance) {
+            Syntax::Method
+        } else {
+            Syntax::Path
+        };
+        Some(self.self_type_call(name, syntax))
+    }
+
+    /// Why the impl-block-language call `r` stays unbound, when no rung its
+    /// bind took recorded a reason (S-607, [FR-RS-47], [`residue`]) — read
+    /// off the path's own resolution, by scope and module model only:
+    ///
+    /// - `<T as Tr>::m` — [`Residue::ExternalType`] when `T` is no repository
+    ///   type, else [`Residue::SupertypeUnreached`] (no lookup reads a
+    ///   qualified path yet; [`Residue::TypeAmbiguous`] when two);
+    /// - a bare name — [`Residue::OverloadAmbiguous`] when it reaches two
+    ///   callables; [`Residue::NotACallable`] when it reaches a type (`W(1)`,
+    ///   `Self(1)`) or an enum variant a `use` or glob brings in; else
+    ///   [`Residue::NameNotInScope`];
+    /// - a path — its prefix resolved: a repository module that declares no
+    ///   callable of the name is [`Residue::NameNotInScope`] (or
+    ///   [`Residue::NotACallable`] for a type of the name), a repository type
+    ///   [`Residue::NotACallable`] for one of its variants, else
+    ///   [`Residue::SupertypeUnreached`]; two of them
+    ///   [`Residue::TypeAmbiguous`]; none — `std::…`, an external crate — is
+    ///   [`Residue::ExternalType`];
+    /// - a receiver call — [`Residue::NoReceiverEvidence`].
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn unbound_reason(&self, r: &UnresolvedRefRow) -> Residue {
+        let external = || Residue::ExternalType {
+            candidates: Vec::new(),
+        };
+        if r.form != RefForm::Path {
+            return Residue::NoReceiverEvidence;
+        }
+        self.scope_only.set(true);
+        if let Some(qualified) = r.target.strip_prefix('<') {
+            let ty = qualified.split_once(" as ").map_or(qualified, |(ty, _)| ty);
+            return match self.header_type(ty) {
+                Res::Found(_) => Residue::SupertypeUnreached,
+                Res::Ambiguous => Residue::TypeAmbiguous,
+                Res::NotFound => external(),
+            };
+        }
+        let segs = split(&r.target);
+        let Some((name, prefix)) = segs.split_last() else {
+            return Residue::NameNotInScope;
+        };
+        if prefix.is_empty() {
+            return self.bare_reason(name);
+        }
+        match self.resolve_path(prefix, Want::Any, MAX_ALIAS_DEPTH) {
+            Res::Found(id) => match self.ix.info.get(&id).map(|i| i.kind) {
+                Some(NodeKind::Module) => {
+                    let typed = self.ix.members_named(id, name, Want::Any).into_iter().any(|m| {
+                        self.ix.info.get(&m).is_some_and(|i| is_type_like(i.kind))
+                    });
+                    if typed {
+                        Residue::NotACallable
+                    } else {
+                        Residue::NameNotInScope
+                    }
+                }
+                _ if self.is_variant(id, name) => Residue::NotACallable,
+                _ => Residue::SupertypeUnreached,
+            },
+            Res::Ambiguous => Residue::TypeAmbiguous,
+            Res::NotFound => external(),
+        }
+    }
+
+    /// [`unbound_reason`](Ctx::unbound_reason) for a bare name.
+    fn bare_reason(&self, name: &str) -> Residue {
+        if name == SELF_TYPE_HEAD {
+            return Residue::NotACallable;
+        }
+        let single = [name.to_string()];
+        if self.resolve_path(&single, Want::Callable, MAX_ALIAS_DEPTH) == Res::Ambiguous {
+            return Residue::OverloadAmbiguous;
+        }
+        if matches!(self.resolve_path(&single, Want::Type, MAX_ALIAS_DEPTH), Res::Found(_)) {
+            return Residue::NotACallable;
+        }
+        // A variant a `use E::A` or a `use E::*` brings into scope.
+        let scope = self.scope();
+        let imported = scope
+            .and_then(|s| s.aliases.get(name))
+            .and_then(|path| path.split_last())
+            .is_some_and(|(_, enum_path)| !enum_path.is_empty() && self.names_variant(enum_path, name));
+        let globbed = scope.is_some_and(|s| s.globs.iter().any(|g| self.names_variant(g, name)));
+        if imported || globbed {
+            Residue::NotACallable
+        } else {
+            Residue::NameNotInScope
+        }
+    }
+
+    /// Whether `path` names a repository enum with a variant `name`.
+    fn names_variant(&self, path: &[String], name: &str) -> bool {
+        matches!(self.resolve_path(path, Want::Type, MAX_ALIAS_DEPTH), Res::Found(ty) if self.is_variant(ty, name))
+    }
+
+    /// Whether the node `ty` is an enum recording a variant `name` (S-606).
+    fn is_variant(&self, ty: NodeId, name: &str) -> bool {
+        self.ix.variants.get(&ty).is_some_and(|v| v.iter().any(|x| x == name))
+    }
+
+    /// The header of the `impl` block the source is a function of (S-607), if
+    /// any.
+    fn own_header(&self) -> Option<&ImplHeader> {
+        self.ix.assoc_owner.get(&self.source).map(|&h| &self.ix.impl_headers[h])
+    }
+
+    /// `name` called through the caller's own type, `T` being the self type of
+    /// the `impl` block the caller is a function of ([`lookup`](Ctx::lookup)
+    /// with `syntax`; S-607, [FR-RS-11] as amended by [FR-RS-47]) — in any
+    /// crate, inherent before trait in any module.
+    ///
+    /// A caller in no impl block — a trait's default body, a free function —
+    /// proves no type: [`Residue::NoReceiverEvidence`] (a trait body's
+    /// fan-out is S-608's). A header naming no repository type (`impl Tr for
+    /// Vec<X>`, `for u8`, a generic parameter) is [`Residue::ExternalType`]:
+    /// the type's own methods are not in the graph. One its scope names twice
+    /// is [`Residue::TypeAmbiguous`].
+    ///
+    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn self_type_call(&self, name: &str, syntax: Syntax) -> Res {
+        let Some(header) = self.own_header() else {
+            self.note(Want::Callable, || Residue::NoReceiverEvidence);
+            return Res::NotFound;
+        };
+        match header.self_type {
+            Res::Found(ty) => self.lookup(ty, name, syntax),
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                Res::Ambiguous
+            }
+            Res::NotFound => {
+                self.note(Want::Callable, || Residue::ExternalType {
+                    candidates: Vec::new(),
+                });
+                Res::NotFound
+            }
+        }
+    }
+
+    /// The one associated-item lookup (S-607, [FR-RS-47]): the one callable
+    /// `name` among the type `ty`'s items, as `syntax` calls it — `self.m()`,
+    /// `Self::m()`, a proven `x.m()` and a written `T::m()` alike.
+    ///
+    /// 1. **Universe** — the functions of every recorded `impl` block whose
+    ///    self type resolves to `ty` ([`Index::assoc_items`]), from any crate
+    ///    and any file. None at all is [`Residue::SupertypeUnreached`] — a
+    ///    trait default, a derive, a `Deref` target supplies it, none of which
+    ///    this lookup reads yet — or [`Residue::NotACallable`] when `name` is
+    ///    one of `ty`'s enum variants.
+    /// 2. **Syntax** — method syntax drops every candidate recorded as not
+    ///    taking `self` ([`Index::without_self`]); path syntax keeps it. An
+    ///    unknown fact never filters.
+    /// 3. **Scope** — a trait impl's function is no candidate where its trait
+    ///    is not in scope ([`trait_in_scope`](Ctx::trait_in_scope)). Nothing
+    ///    left after 2 and 3 is [`Residue::SupertypeUnreached`].
+    /// 4. **Arity** — the argument count as the syntax passes it
+    ///    ([`admitted_by_count`](Ctx::admitted_by_count)); nothing left is
+    ///    [`Residue::NoApplicableOverload`].
+    /// 5. **Precedence** — an inherent candidate beats a trait's, in any
+    ///    module. A repository trait's function left out by 3 beside external
+    ///    traits' functions alone binds nothing: an external trait, never
+    ///    placed in or out of scope, does not win by default. With method
+    ///    syntax, inherent candidates that all take `&self`/`&mut self` beside
+    ///    a trait's taking `self` by value bind nothing: rustc's by-value probe
+    ///    may pick the trait's, and which is
+    ///    not decided here ([`Residue::OverloadAmbiguous`]).
+    /// 6. **Exactly one** — two of the deciding rank are
+    ///    [`Residue::OverloadAmbiguous`] ([NFR-RA-05]).
+    ///
+    /// A trait as `ty` (`Tr::m(x)`) is dispatched on its first argument, which
+    /// nothing proves: [`Residue::NoReceiverEvidence`].
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn lookup(&self, ty: NodeId, name: &str, syntax: Syntax) -> Res {
+        let ix = self.ix;
+        if ix.info.get(&ty).is_some_and(|i| i.kind == NodeKind::Trait) {
+            self.note(Want::Callable, || Residue::NoReceiverEvidence);
+            return Res::NotFound;
+        }
+        let named = ix.assoc_items.get(&(ty, name.to_string())).map_or(&[][..], Vec::as_slice);
+        let reachable: Vec<NodeId> = named
             .iter()
             .copied()
-            .filter(|&c| self.ix.nearest_module(c) == Some(own))
+            .filter(|c| syntax == Syntax::Path || !ix.without_self.contains(c))
             .collect();
-        let Res::Found(one) = exactly_one(&local) else {
-            return None;
+        let mut candidates: Vec<NodeId> = reachable.iter().copied().filter(|&c| self.trait_in_scope(c)).collect();
+        let scoped_out = candidates.len() < reachable.len();
+        if candidates.is_empty() {
+            let variant = named.is_empty() && self.is_variant(ty, name);
+            self.note(Want::Callable, || {
+                if variant {
+                    Residue::NotACallable
+                } else {
+                    Residue::SupertypeUnreached
+                }
+            });
+            return Res::NotFound;
+        }
+        candidates = self.admitted_by_count(candidates, syntax);
+        if candidates.is_empty() {
+            self.note(Want::Callable, || Residue::NoApplicableOverload);
+            return Res::NotFound;
+        }
+        let of_trait = |c: &NodeId| {
+            ix.assoc_owner
+                .get(c)
+                .is_some_and(|&h| ix.impl_headers[h].trait_path.is_some())
         };
-        let inherent_elsewhere = candidates
+        let (traits, inherent): (Vec<NodeId>, Vec<NodeId>) = candidates.into_iter().partition(of_trait);
+        let mode = |c: &NodeId| ix.receiver_modes.get(c).copied();
+        let by_value_rival = syntax == Syntax::Method
+            && !inherent.is_empty()
+            && inherent.iter().all(|c| matches!(mode(c), Some(ReceiverMode::Ref | ReceiverMode::RefMut)))
+            && traits.iter().any(|c| mode(c) == Some(ReceiverMode::Value));
+        // A repository trait's function left out of scope, beside external
+        // traits' alone: the scope read may have missed a form that brings the
+        // repository trait in, and the external one is unplaced — never let it
+        // win by default.
+        let unplaced_only = scoped_out
+            && inherent.is_empty()
+            && traits
+                .iter()
+                .all(|c| ix.assoc_owner.get(c).is_some_and(|&h| ix.impl_headers[h].trait_node.is_none()));
+        let res = if by_value_rival || unplaced_only {
+            Res::Ambiguous
+        } else {
+            exactly_one(if inherent.is_empty() { &traits } else { &inherent })
+        };
+        if res == Res::Ambiguous {
+            self.note(Want::Callable, || Residue::OverloadAmbiguous);
+        }
+        res
+    }
+
+    /// `candidates` less every one whose parameter range excludes the call's
+    /// argument count as `syntax` passes it (S-607, [FR-RS-43] as amended by
+    /// [FR-RS-47]): method syntax passes the receiver outside the count, which
+    /// the range already excludes; path syntax passes it as the first
+    /// argument to a candidate that takes `self` (`T::m(&x, 1)` calls
+    /// `fn m(&self, a)`), and none to one that does not. An unknown count,
+    /// range or `takes_self` fact never drops a candidate.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn admitted_by_count(&self, mut candidates: Vec<NodeId>, syntax: Syntax) -> Vec<NodeId> {
+        let Some(count) = self.call_args else {
+            return candidates;
+        };
+        let ix = self.ix;
+        candidates.retain(|c| {
+            let Some(range) = ix.arities.get(c) else { return true };
+            match syntax {
+                Syntax::Method => range.admits(count),
+                Syntax::Path if ix.with_self.contains(c) => count.checked_sub(1).is_some_and(|n| range.admits(n)),
+                Syntax::Path if ix.without_self.contains(c) => range.admits(count),
+                Syntax::Path => true,
+            }
+        });
+        candidates
+    }
+
+    /// Whether the trait impl'd function `candidate` may be called here (S-607,
+    /// [FR-RS-47]): an inherent function, and one of a trait the graph cannot
+    /// place (an external trait — `Default`, `Display` — which the prelude or
+    /// an import may bring), always may. A repository trait is in scope when
+    /// it is the trait of the caller's own impl (CRA-02), the caller's module
+    /// declares it, or the caller's file imports it — by name, renamed,
+    /// `as _`, or through a glob, following `pub use` re-exports
+    /// ([`imports_trait`](Ctx::imports_trait)).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn trait_in_scope(&self, candidate: NodeId) -> bool {
+        let Some(tr) = self
+            .ix
+            .assoc_owner
+            .get(&candidate)
+            .and_then(|&h| self.ix.impl_headers[h].trait_node)
+        else {
+            return true;
+        };
+        self.own_header().is_some_and(|own| own.trait_node == Some(tr))
+            || self.ix.nearest_module(tr).is_some_and(|m| Some(m) == self.ix.nearest_module(self.source))
+            || self.imports_trait(tr)
+    }
+
+    /// Whether the source's file brings the trait `tr` into scope (S-607): a
+    /// `use` whose path ends in its name and resolves to it (`use a::Tr`,
+    /// `use a::Tr as T2`, `use a::Tr as _`), or a glob whose module declares
+    /// or re-exports it ([`type_in_module`](Ctx::type_in_module)) — and a glob
+    /// of an **ancestor** module (`use super::*`) also brings in what that
+    /// module's own globs do, private ones included, as Rust's glob of a parent
+    /// brings in its imports ([`resolve_receiver_type`](Ctx::resolve_receiver_type)
+    /// reads an ancestor's glob alike). One file holds one import scope, its
+    /// inline modules' included.
+    fn imports_trait(&self, tr: NodeId) -> bool {
+        let Some(name) = self.ix.info.get(&tr).map(|i| i.name.as_str()) else {
+            return false;
+        };
+        let Some(scope) = self.scope() else {
+            return false;
+        };
+        let named = scope
+            .alias_expansions
+            .values()
+            .flatten()
+            .filter(|path| path.last().is_some_and(|last| last == name))
+            .any(|path| self.resolve_receiver_type(path) == Res::Found(tr));
+        let own = self.source_module();
+        let ancestor = |(krate, mods): &ModKey| {
+            own.as_ref().is_some_and(|(k, m)| k == krate && m.starts_with(mods))
+        };
+        named
+            || scope.globs.iter().any(|glob| {
+                self.module_key_of(glob, MAX_ALIAS_DEPTH).is_some_and(|key| {
+                    self.type_in_module(&key, name, MAX_ALIAS_DEPTH) == Res::Found(tr)
+                        || (ancestor(&key)
+                            && self.module_scope(&key).is_some_and(|parent| {
+                                self.through_reexported_globs(&key, &parent.globs, name, MAX_ALIAS_DEPTH)
+                                    == Res::Found(tr)
+                            }))
+                })
+            })
+    }
+
+    /// The one type `name` the module `key` holds (S-607): a type-like member
+    /// it declares, else one it re-exports — by a named `use`, or a `pub use`
+    /// glob ([`reexported_type`](Ctx::reexported_type)), `depth` hops at most.
+    fn type_in_module(&self, key: &ModKey, name: &str, depth: u8) -> Res {
+        let Some(&module) = self.ix.modules.get(key) else {
+            return Res::NotFound;
+        };
+        match exactly_one(&self.member_types(module, name)) {
+            Res::NotFound => self.reexported_type(key, name, depth),
+            decided => decided,
+        }
+    }
+
+    /// The text of an `impl` header's path (S-606: generics stripped) resolved
+    /// to the one repository type it names, from the header's own scope
+    /// ([`resolve_receiver_type`](Ctx::resolve_receiver_type), S-607). A
+    /// header of any other shape — `()`, `[u8]`, `dyn Tr`, `fn(u8)` — names no
+    /// repository type.
+    fn header_type(&self, text: &str) -> Res {
+        let segs = split(text);
+        let path_like = segs
             .iter()
-            .any(|c| !local.contains(c) && !self.ix.trait_impl_methods.contains(c));
-        (!(self.ix.trait_impl_methods.contains(&one) && inherent_elsewhere)).then_some(one)
+            .all(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'));
+        if segs.is_empty() || !path_like {
+            return Res::NotFound;
+        }
+        self.resolve_receiver_type(&segs)
     }
 
     /// Resolve a Rust call retyped from its proven receiver (S-587) — `x.m()`
@@ -3372,13 +4062,11 @@ impl Ctx<'_> {
     ///    repository does not declare — `String`, `Vec`, `std::io::Error`, an
     ///    external crate's — binds nothing: [`Residue::ExternalType`]; one the
     ///    file's scope names twice is [`Residue::TypeAmbiguous`].
-    /// 3. **`m` is exactly one of `T`'s methods**
-    ///    ([`type_method`](Ctx::type_method)), from the impls recorded with its
-    ///    name — [S-493]'s universe, [`Index::methods_by_self_type`] — an
-    ///    inherent method outranking a trait impl's.
+    /// 3. **`m` is `T`'s one method of the name**, by the one associated-item
+    ///    lookup with method syntax ([`lookup`](Ctx::lookup), S-607): an
+    ///    associated function never, an inherent method before a trait impl's.
     ///
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
-    /// [S-493]: ../../../docs/planning/journal.md#s-493-rust-self-and-self-method-calls-bind-through-the-enclosing-impl
     /// [`PackageLayout::wrapper_provides`]: crate::resolve::package_key::PackageLayout::wrapper_provides
     fn resolve_proven_receiver_call(&self, r: &UnresolvedRefRow) -> Res {
         let external = || Residue::ExternalType {
@@ -3403,7 +4091,7 @@ impl Ctx<'_> {
             return Res::NotFound;
         }
         match self.resolve_receiver_type(type_path) {
-            Res::Found(ty) => self.type_method(ty, name),
+            Res::Found(ty) => self.lookup(ty, name, Syntax::Method),
             Res::Ambiguous => {
                 self.note(Want::Callable, || Residue::TypeAmbiguous);
                 Res::Ambiguous
@@ -3541,28 +4229,86 @@ impl Ctx<'_> {
         }
     }
 
-    /// The type the module `key` re-exports as `name` (S-588): its file's
-    /// `use` of that name, read from the module itself — `crate::`, `self::`,
-    /// `super::`, a path relative to the module, or another crate's name — to
-    /// a type the target module declares, or, failing that, re-exports in
-    /// turn, `depth` hops at most (an import cycle ends as not found). A glob
-    /// re-export is not followed. A module's private `use` reads alike: a
-    /// written path through one does not compile, so no call site spells one —
-    /// and only an ancestor's glob is read through it
-    /// ([`resolve_receiver_type`](Ctx::resolve_receiver_type)).
-    fn reexported_type(&self, key: &ModKey, name: &str, depth: u8) -> Res {
-        if depth == 0 {
-            return Res::NotFound;
-        }
-        let Some(scope) = self
-            .ix
+    /// The import scope of the file that holds the module `key` — one file
+    /// holds one scope, its inline modules' `use`s included.
+    fn module_scope(&self, key: &ModKey) -> Option<&FileScope> {
+        self.ix
             .modules
             .get(key)
             .and_then(|m| self.ix.info.get(m))
             .and_then(|i| i.file_path.as_deref())
             .and_then(|p| self.ix.file_ids.get(p))
             .and_then(|id| self.ix.file_scopes.get(id))
-        else {
+    }
+
+    /// Where a `use` path written in the module `key` may start (S-588):
+    /// `crate::`, `self::` and `super::` from the module, a bare head from the
+    /// module itself and — when it names another repository crate — from that
+    /// crate's root. Each anchor is `(crate, module path, the rest)`.
+    fn anchors<'p>(&self, key: &ModKey, path: &'p [String]) -> Vec<(String, Vec<String>, &'p [String])> {
+        let (krate, mods) = key;
+        let supers = path.iter().take_while(|s| s.as_str() == "super").count();
+        let mut anchors: Vec<(String, Vec<String>, &[String])> = Vec::new();
+        match path.first().map(String::as_str) {
+            Some("crate") => anchors.push((krate.clone(), Vec::new(), &path[1..])),
+            Some("self") => anchors.push((krate.clone(), mods.clone(), &path[1..])),
+            Some("super") if supers <= mods.len() => {
+                anchors.push((krate.clone(), mods[..mods.len() - supers].to_vec(), &path[supers..]));
+            }
+            Some("super") | None => {}
+            Some(head) => {
+                anchors.push((krate.clone(), mods.clone(), path));
+                let norm = normalize_crate(head);
+                if self.ix.crates.contains(&norm) && norm != *krate {
+                    anchors.push((norm, Vec::new(), &path[1..]));
+                }
+            }
+        }
+        anchors
+    }
+
+    /// The type `name` the module `key` brings in through its `pub use` globs
+    /// (S-607, [FR-RS-47]): each glob's module, read from `key` as a `use`
+    /// path is ([`anchors`](Ctx::anchors)), declares it or re-exports it in
+    /// turn ([`reexported_type`](Ctx::reexported_type)), `depth` hops at most.
+    /// Exactly one across the globs; two are [`Res::Ambiguous`].
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    fn through_reexported_globs(&self, key: &ModKey, globs: &[Vec<String>], name: &str, depth: u8) -> Res {
+        let mut found: Vec<NodeId> = Vec::new();
+        for glob in globs {
+            for (krate, mut base, rest) in self.anchors(key, glob) {
+                base.extend(rest.iter().cloned());
+                match self.type_in_module(&(krate, base), name, depth - 1) {
+                    Res::Found(id) => {
+                        found.push(id);
+                        break;
+                    }
+                    Res::Ambiguous => return Res::Ambiguous,
+                    Res::NotFound => {}
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        exactly_one(&found)
+    }
+
+    /// The type the module `key` re-exports as `name` (S-588): its file's
+    /// `use` of that name, read from the module itself — `crate::`, `self::`,
+    /// `super::`, a path relative to the module, or another crate's name — to
+    /// a type the target module declares, or, failing that, re-exports in
+    /// turn, `depth` hops at most (an import cycle ends as not found). With no
+    /// `use` of the name, its `pub use` globs are followed (S-607,
+    /// [`through_reexported_globs`](Ctx::through_reexported_globs)). A
+    /// module's private `use` reads alike: a written path through one does not
+    /// compile, so no call site spells one — and only an ancestor's glob is
+    /// read through it ([`resolve_receiver_type`](Ctx::resolve_receiver_type)).
+    fn reexported_type(&self, key: &ModKey, name: &str, depth: u8) -> Res {
+        if depth == 0 {
+            return Res::NotFound;
+        }
+        let Some(scope) = self.module_scope(key) else {
             return Res::NotFound;
         };
         // One file holds one import scope, its inline modules' `use`s
@@ -3574,27 +4320,9 @@ impl Ctx<'_> {
             return Res::Ambiguous;
         }
         let Some(alias) = scope.aliases.get(name) else {
-            return Res::NotFound;
+            return self.through_reexported_globs(key, &scope.exported_globs, name, depth);
         };
-        let (krate, mods) = key;
-        let supers = alias.iter().take_while(|s| s.as_str() == "super").count();
-        let mut anchors: Vec<(String, Vec<String>, &[String])> = Vec::new();
-        match alias.first().map(String::as_str) {
-            Some("crate") => anchors.push((krate.clone(), Vec::new(), &alias[1..])),
-            Some("self") => anchors.push((krate.clone(), mods.clone(), &alias[1..])),
-            Some("super") if supers <= mods.len() => {
-                anchors.push((krate.clone(), mods[..mods.len() - supers].to_vec(), &alias[supers..]));
-            }
-            Some("super") | None => {}
-            Some(head) => {
-                anchors.push((krate.clone(), mods.clone(), &alias[..]));
-                let norm = normalize_crate(head);
-                if self.ix.crates.contains(&norm) && norm != *krate {
-                    anchors.push((norm, Vec::new(), &alias[1..]));
-                }
-            }
-        }
-        for (krate, base, rest) in anchors {
+        for (krate, base, rest) in self.anchors(key, alias) {
             let Some((last, prefix)) = rest.split_last() else { continue };
             match self.descend(&krate, &base, rest, Want::Type) {
                 Res::NotFound => {}
@@ -3610,79 +4338,6 @@ impl Ctx<'_> {
             }
         }
         Res::NotFound
-    }
-
-    /// The one callable `name` among the in-repository type `ty`'s methods
-    /// (S-588, [FR-RS-42]) — those recorded with its name as their self type in
-    /// its crate ([`Index::methods_by_self_type`], [S-493]'s universe), less
-    /// every one recorded as not taking `self` ([`Index::without_self`],
-    /// S-604): `x.m()` can never call an associated function, so one never
-    /// outranks — or ties with — the method rustc calls. A candidate whose fact
-    /// is unknown stays. Then, after that filter, every one whose parameter
-    /// range excludes the call's argument count ([`applicable`](Ctx::applicable),
-    /// S-592): none left of a name `T` records is
-    /// [`Residue::NoApplicableOverload`].
-    ///
-    /// When the crate declares that name for one type, every candidate is
-    /// `ty`'s, wherever its impl block sits. Otherwise only the impls in `ty`'s
-    /// own module are — the impl header's name denotes `ty` there — and a
-    /// candidate elsewhere may be the other type's, so a call none of them
-    /// decides is [`Residue::TypeAmbiguous`]. Among `ty`'s candidates an
-    /// inherent method outranks a trait impl's, as Rust's method lookup does
-    /// ([FR-RS-11]); two of one rank are [`Residue::OverloadAmbiguous`], and
-    /// none — a trait default, a derive, a `Deref` target supplies it, or the
-    /// type's only `m` takes no `self` — is [`Residue::SupertypeUnreached`].
-    ///
-    /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
-    /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
-    /// [S-493]: ../../../docs/planning/journal.md#s-493-rust-self-and-self-method-calls-bind-through-the-enclosing-impl
-    fn type_method(&self, ty: NodeId, name: &str) -> Res {
-        let Some(info) = self.ix.info.get(&ty) else {
-            return Res::NotFound;
-        };
-        let key = (info.crate_name.clone(), info.name.clone(), name.to_string());
-        let takes_self: Vec<NodeId> = self
-            .ix
-            .methods_by_self_type
-            .get(&key)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .copied()
-            .filter(|c| !self.ix.without_self.contains(c))
-            .collect();
-        let held = !takes_self.is_empty();
-        let candidates = self.applicable(takes_self);
-        if held && candidates.is_empty() {
-            self.note(Want::Callable, || Residue::NoApplicableOverload);
-            return Res::NotFound;
-        }
-        let one_type = self.ix.type_names.get(&(info.crate_name.clone(), info.name.clone())) == Some(&1);
-        let own: Vec<NodeId> = if one_type {
-            candidates.clone()
-        } else {
-            let home = self.ix.nearest_module(ty);
-            candidates
-                .iter()
-                .copied()
-                .filter(|&c| self.ix.nearest_module(c) == home)
-                .collect()
-        };
-        if own.is_empty() && !candidates.is_empty() {
-            self.note(Want::Callable, || Residue::TypeAmbiguous);
-            return Res::Ambiguous;
-        }
-        let inherent: Vec<NodeId> = own
-            .iter()
-            .copied()
-            .filter(|c| !self.ix.trait_impl_methods.contains(c))
-            .collect();
-        let res = exactly_one(if inherent.is_empty() { &own } else { &inherent });
-        match res {
-            Res::NotFound => self.note(Want::Callable, || Residue::SupertypeUnreached),
-            Res::Ambiguous => self.note(Want::Callable, || Residue::OverloadAmbiguous),
-            Res::Found(_) => {}
-        }
-        res
     }
 
     /// Resolve a member-access fact to the one `Field` of the source method's
@@ -3729,9 +4384,13 @@ impl Ctx<'_> {
     /// or a module-level sibling is never a candidate: only the class's own
     /// `Contains` children are.
     ///
-    /// A caller with a recorded self type (Rust, Go: a method at module level)
-    /// binds through it instead — the one self-type arm,
-    /// [`resolve_self_type_call`](Ctx::resolve_self_type_call), never a second.
+    /// A caller that is a function of a recorded `impl` block (Rust) binds
+    /// through its block's self type, by the one lookup with method syntax
+    /// ([`self_type_call`](Ctx::self_type_call), S-607) — the shape a
+    /// `self.m()` keeps when its header recorded no self type (`impl a::X`,
+    /// `impl Tr for std::io::Error`). A caller with a recorded self type in a
+    /// language without impl blocks (Go: a method at module level) binds
+    /// through it ([`resolve_recorded_self_type_call`](Ctx::resolve_recorded_self_type_call)).
     /// Extraction records such a call as `Self::name` already, so this reaches
     /// it only for a row extracted without that rewrite.
     ///
@@ -3757,8 +4416,11 @@ impl Ctx<'_> {
     /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     fn resolve_self_receiver(&self, name: &str) -> Res {
+        if self.impl_blocks && self.own_header().is_some() {
+            return self.self_type_call(name, Syntax::Method);
+        }
         if self.ix.self_types.contains_key(&self.source) {
-            if let Some(res) = self.resolve_self_type_call(&format!("{SELF_TYPE_HEAD}::{name}")) {
+            if let Some(res) = self.resolve_recorded_self_type_call(&format!("{SELF_TYPE_HEAD}::{name}")) {
                 return res;
             }
         }
@@ -3857,13 +4519,18 @@ impl Ctx<'_> {
             return Outcome::Unbound;
         };
         let Some(trait_node) = self.ix.trait_by_name(trait_name) else {
-            return Outcome::Unbound; // external / ambiguous trait — honest miss
+            // External / ambiguous trait — honest miss.
+            self.note(Want::Callable, || Residue::ExternalType {
+                candidates: Vec::new(),
+            });
+            return Outcome::Unbound;
         };
         let mut targets = self.ix.members_named(trait_node, method, Want::Callable);
         targets.extend_from_slice(self.ix.impls_of(trait_node, method));
         targets.sort_unstable();
         targets.dedup();
         if targets.is_empty() {
+            self.note(Want::Callable, || Residue::SupertypeUnreached);
             return Outcome::Unbound;
         }
         Outcome::BoundMany {
@@ -4514,7 +5181,9 @@ impl Ctx<'_> {
     ///   method's bare name never sees class scope); or
     /// - (b) a declaration with a recorded self type
     ///   ([`Index::with_self_types`], [FR-RS-11] / [FR-EX-12]): a Go or Rust
-    ///   method, which sits at module scope beside the free functions.
+    ///   method, which sits at module scope beside the free functions — or,
+    ///   in an impl-block language, any function of a recorded `impl` block
+    ///   (S-607, [`Index::assoc_owner`]), whatever its header.
     ///
     /// A free function, a function nested in another, and a module-level class
     /// a Python call constructs are never one.
@@ -4528,6 +5197,7 @@ impl Ctx<'_> {
             return false;
         }
         self.ix.self_types.contains_key(&id)
+            || self.ix.assoc_owner.contains_key(&id)
             || self
                 .ix
                 .parent
@@ -5240,6 +5910,7 @@ impl Ctx<'_> {
             match self.descend(&key.0, &key.1, segs, want) {
                 Res::Found(id) => found.push(id),
                 Res::Ambiguous => return Res::Ambiguous,
+                Res::NotFound if self.type_reached.get() => return Res::NotFound,
                 Res::NotFound => {}
             }
         }
@@ -5264,8 +5935,33 @@ impl Ctx<'_> {
                     continue;
                 }
                 key.1.pop();
-                // The `Type::func` collapse: associated items live at module
-                // scope (S-007 does not capture `impl`), so when the
+                // A written `T::m()` in an impl-block language (S-607,
+                // [FR-RS-47]): the next-to-last segment names a type the
+                // module declares or re-exports, and the call binds among
+                // that type's items alone, by the one lookup with path syntax
+                // — decided here, whatever it found ([`Ctx::type_reached`]).
+                // Nothing else (an import of `T::m`) names an associated item.
+                //
+                // [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+                if self.impl_blocks && i == segs.len() - 2 {
+                    if !want.is_call() {
+                        return Res::NotFound;
+                    }
+                    return match self.type_in_module(&key, seg, MAX_ALIAS_DEPTH) {
+                        Res::Found(ty) => {
+                            self.type_reached.set(true);
+                            self.lookup(ty, &segs[i + 1], Syntax::Path)
+                        }
+                        Res::Ambiguous => {
+                            self.type_reached.set(true);
+                            self.note(want, || Residue::TypeAmbiguous);
+                            Res::Ambiguous
+                        }
+                        Res::NotFound => Res::NotFound,
+                    };
+                }
+                // The `Type::func` collapse of every other language:
+                // associated items live at module scope, so when the
                 // next-to-last segment names a type in the current module,
                 // the final segment is looked up among the module's
                 // functions.
@@ -5626,5 +6322,32 @@ mod tests {
         assert_eq!(exactly_one(&[]), Res::NotFound);
         assert_eq!(exactly_one(&[NodeId(1)]), Res::Found(NodeId(1)));
         assert_eq!(exactly_one(&[NodeId(1), NodeId(2)]), Res::Ambiguous);
+    }
+
+    /// S-607 ([FR-RS-47]): one associated-item lookup replaced the Rust
+    /// `Self::m` arm, its module rung, the proven-receiver arm and the
+    /// `Type::func` collapse — and no twin of them survives in this file. The
+    /// names are spelt in pieces so this test's own text never matches.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    #[test]
+    fn the_replaced_rust_arms_are_gone_and_every_route_reaches_the_one_lookup() {
+        let src = include_str!("binder.rs");
+        for gone in [
+            concat!("fn resolve_self", "_type_call("),
+            concat!("fn module", "_candidate("),
+            concat!("fn type", "_method("),
+            concat!("trait_impl", "_methods"),
+        ] {
+            assert!(!src.contains(gone), "`{gone}` survives");
+        }
+        // The collapse is reached only by a language without impl blocks: the
+        // impl-block branch returns before it.
+        let branch = src.find(concat!("if self.impl_blocks && i == segs", ".len() - 2")).expect("the Rust branch");
+        let collapse = src.find(concat!("// The `Type::func` collapse of every", " other language")).expect("the collapse");
+        assert!(branch < collapse, "the impl-block branch must decide first");
+        // `Self::m`/`self.m()`, a proven `x.m()` and a written `T::m()`: three
+        // call sites of the one lookup, no fourth rule.
+        assert_eq!(src.matches(concat!("self.look", "up(")).count(), 3);
     }
 }

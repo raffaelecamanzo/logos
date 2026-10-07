@@ -16,14 +16,17 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 /// `x.run()` binds. `s.len()` is on a std type, `x.absent()` names a method
-/// `S` lacks, the chained `.run()` proves no receiver, and the bare `make()`
-/// takes no receiver walk at all, so it is unclassified.
+/// `S` lacks, the chained `.run()` proves no receiver, the bare `make()` names
+/// nothing in scope, and `W(1)` constructs a tuple struct — so nothing is
+/// unclassified (S-607: every unbound Rust call carries a reason).
 const LIB_RS: &str = "\
 pub struct S;
 impl S { pub fn run(&self) {} }
+pub struct W(u8);
 pub fn external(s: &String) { s.len(); }
 pub fn missing(x: &S) { x.absent(); }
 pub fn chain(x: &S) { x.run(); make().run(); }
+pub fn wrap() -> W { W(1) }
 ";
 
 fn logos_json(project: &Path, args: &[&str]) -> Value {
@@ -62,16 +65,18 @@ fn status_json_carries_the_rust_rows_call_residue() {
     assert_eq!(
         rust["call_residue"],
         json!({
-            "unbound": 4,
+            "unbound": 5,
             "reasons": {
                 "external-type": 1,
+                "name-not-in-scope": 1,
                 "no-applicable-overload": 0,
                 "no-receiver-evidence": 1,
+                "not-a-callable": 1,
                 "overload-ambiguous": 0,
                 "supertype-unreached": 1,
                 "type-ambiguous": 0
             },
-            "unclassified": 1,
+            "unclassified": 0,
             "scope": "repository"
         }),
         "{rust}"
@@ -79,7 +84,7 @@ fn status_json_carries_the_rust_rows_call_residue() {
     let calls = &rust["calls"];
     assert_eq!(
         calls["references"].as_u64().unwrap() - calls["bound"].as_u64().unwrap(),
-        4,
+        5,
         "the denominator is the row's own unbound count: {calls}"
     );
 }

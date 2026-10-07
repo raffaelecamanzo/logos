@@ -55,6 +55,13 @@ pub struct Semantics {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     pub overloaded_calls: bool,
+    /// Whether a call to a type's method binds through the one associated-item
+    /// lookup over recorded `impl` blocks (S-607, [FR-RS-47]; see
+    /// [`PluginManifest::impl_block_lookup`]) — consumed by the binder through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    pub impl_block_lookup: bool,
     /// The extensions of this plugin whose language enforces no arity (S-592,
     /// [FR-RS-43]; see [`PluginManifest::arity_unchecked_extensions`]) —
     /// consumed by the binder's arity filter through
@@ -367,6 +374,7 @@ impl CompiledPlugin {
             implicit_receiver,
             bare_calls_free_only,
             overloaded_calls: manifest.overloaded_calls,
+            impl_block_lookup: manifest.impl_block_lookup,
             arity_unchecked_extensions: manifest.arity_unchecked_extensions,
             implicit_call_falls_through: manifest.implicit_call_falls_through,
             implicit_root_members: manifest.implicit_root_members,

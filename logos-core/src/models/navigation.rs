@@ -1118,9 +1118,11 @@ pub struct LanguageResolution {
 /// | reason | the row stays unbound because |
 /// |---|---|
 /// | `no-receiver-evidence` | the file proves no receiver type (a bare Method-form row, or a bare call naming no import) — every receiver call whose shape is `other` or absent (S-514, [FR-RS-12]) |
-/// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member |
+/// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member; for a Rust path call, the path's head leaves the repository (std, an external crate) |
+/// | `name-not-in-scope` | no rung reaches a repository callable of the name — a prelude or std function reached by a bare name, a closure or a local, an item the file does not import (Rust, S-607) |
 /// | `no-applicable-overload` | callables of the name were found, and none admits the call's argument count — no free function or import the language goes on to admits it either (S-592) |
 /// | `type-in-another-member` | the receiver's type is declared by another workspace member (workspace scope only) |
+/// | `not-a-callable` | the call names a repository declaration that is not a callable — an enum variant or a tuple-struct constructor (Rust, S-607) |
 /// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name — or two static imports each supply one |
 /// | `type-ambiguous` | the type's name reaches two declarations here (a `src/main` and a `src/test` class of one name) |
 /// | `supertype-unreached` | the type is here, and neither it nor any supertype reached here declares the name — the chain leaves the repository, stops at an interface, or cycles |
@@ -1148,13 +1150,13 @@ pub struct CallResidue {
     /// and is not counted (S-598). `0` on a package-shaped row of a graph
     /// freshly indexed by this binary.
     ///
-    /// On the Rust row (S-589) it also holds every unbound call the receiver
-    /// walk records no reason for — a path call (`Vec::new()`,
-    /// `serde_json::to_string(…)`) or a bare call with no in-repository target
-    /// — since the binder gives a Rust row a reason only for a receiver call, a
-    /// `Self::m` call inside an `impl` or a proven `T::m` call (a `Self::m` in a
-    /// trait's default body has no recorded self type, so it is unclassified
-    /// too). They are never given a reason for a path the bind did not take.
+    /// `0` on the Rust row of a fresh index too (S-607, [FR-RS-47]): every
+    /// unbound Rust call carries a reason — a path whose head leaves the
+    /// repository is `external-type`, a name no rung reaches
+    /// `name-not-in-scope`, an enum variant or a tuple-struct constructor
+    /// `not-a-callable`.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     pub unclassified: u64,
     /// Over what the external/other-member split was decided.
     pub scope: ResidueScope,
@@ -1177,8 +1179,17 @@ pub struct CallResidue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CallResidueReason {
-    /// The receiver's type is declared by no file of this repository.
+    /// The receiver's type is declared by no file of this repository — or, for
+    /// a Rust path call, the path's head leaves the repository (std, an
+    /// external crate; S-607).
     ExternalType,
+    /// No rung reaches a repository callable of the name (S-607, [FR-RS-47]):
+    /// a prelude or std function reached by a bare name, a closure or a local,
+    /// an item the file does not import, or a module that declares no such
+    /// item.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    NameNotInScope,
     /// Callables of the name were found, and none admits the call's argument
     /// count (S-592, [FR-RS-43]).
     ///
@@ -1187,6 +1198,11 @@ pub enum CallResidueReason {
     /// The file proves no receiver type — a receiver call whose shape is
     /// `other` or absent (S-514), or a bare call naming no import.
     NoReceiverEvidence,
+    /// The call names a repository declaration that is not a callable: an enum
+    /// variant or a tuple-struct constructor (S-607, [FR-RS-47]).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    NotACallable,
     /// The deciding level declares two or more callables of that name, or two
     /// imports each supply one.
     OverloadAmbiguous,
@@ -1211,10 +1227,12 @@ pub enum ResidueScope {
 
 impl CallResidue {
     /// The reasons a repository-scoped readout counts, in token order.
-    pub const REPOSITORY_REASONS: [CallResidueReason; 6] = [
+    pub const REPOSITORY_REASONS: [CallResidueReason; 8] = [
         CallResidueReason::ExternalType,
+        CallResidueReason::NameNotInScope,
         CallResidueReason::NoApplicableOverload,
         CallResidueReason::NoReceiverEvidence,
+        CallResidueReason::NotACallable,
         CallResidueReason::OverloadAmbiguous,
         CallResidueReason::SupertypeUnreached,
         CallResidueReason::TypeAmbiguous,
