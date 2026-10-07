@@ -422,6 +422,29 @@ fn a_bound_is_the_trait_the_caller_names_never_a_same_named_repository_one() {
     assert_eq!(residue(&engine), reasons(&[(R::ExternalType, 3)]));
 }
 
+/// A bound whose name two repository traits share may be either, and either
+/// may supply the method: beside another providing bound it binds nothing
+/// (`overload-ambiguous`), and alone it is `type-ambiguous` — never the other
+/// bound's set, and never an `external-type`.
+#[test]
+fn a_bound_two_repository_traits_name_is_ambiguous() {
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod walk;\npub mod callers;\n"),
+        ("src/a.rs", "pub trait Run { fn go(&self) {} }\n"),
+        ("src/b.rs", "pub trait Run { fn go(&self) {} }\n"),
+        ("src/walk.rs", "pub trait Walk { fn go(&self) {} }\n"),
+        (
+            "src/callers.rs",
+            "use crate::walk::Walk;\npub fn both<T: a::b::Run + Walk>(t: &T) { t.go(); }\npub fn alone(t: &dyn x::Run) { t.go(); }\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert!(from(&edges, "src/callers.rs:both@2").is_empty(), "{edges:?}");
+    assert!(from(&edges, "src/callers.rs:alone@3").is_empty(), "{edges:?}");
+    assert_eq!(residue(&engine), reasons(&[(R::OverloadAmbiguous, 1), (R::TypeAmbiguous, 1)]));
+}
+
 // ── Qualified paths ────────────────────────────────────────────────────────
 
 /// `<Q as Run>::go(q)` binds `Q`'s impl of `Run::go`, `<P as Run>::go(p)` the

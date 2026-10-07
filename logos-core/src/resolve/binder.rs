@@ -4909,9 +4909,11 @@ impl Ctx<'_> {
     /// nothing it can see. The one bound whose set
     /// ([`fan_out`](Ctx::fan_out)) is not empty decides the call. Two such
     /// bounds bind nothing ([`Residue::OverloadAmbiguous`]): rustc rejects the
-    /// call as ambiguous. None is [`Residue::ExternalType`] beside an unplaced
-    /// bound — whose method it may be — and [`Residue::SupertypeUnreached`]
-    /// otherwise.
+    /// call as ambiguous. So does one beside a bound whose name reaches two
+    /// repository traits, which may provide the method too; alone, such a
+    /// bound is [`Residue::TypeAmbiguous`]. No provider is
+    /// [`Residue::ExternalType`] beside an unplaced bound — whose method it
+    /// may be — and [`Residue::SupertypeUnreached`] otherwise.
     ///
     /// Never fabricate ([NFR-RA-05]): every target is a real indexed node reached
     /// through the **proven** trait `T`, so no same-named method on an unrelated
@@ -4928,21 +4930,26 @@ impl Ctx<'_> {
         let Some((head, method)) = target.rsplit_once("::") else {
             return Res::NotFound;
         };
-        let mut unplaced = false;
+        let (mut unplaced, mut undecided) = (false, false);
         let mut providers: Vec<Vec<NodeId>> = Vec::new();
         for bound in head.split('+') {
             match self.bound_trait(bound) {
-                Some(tr) => {
+                Res::Found(tr) => {
                     let set = self.fan_out(tr, method);
                     if !set.is_empty() {
                         providers.push(set);
                     }
                 }
-                None => unplaced = true,
+                Res::NotFound => unplaced = true,
+                Res::Ambiguous => undecided = true,
             }
         }
         match <[Vec<NodeId>; 1]>::try_from(providers) {
-            Ok([set]) => self.fan_out_to(set),
+            Ok([set]) if !undecided => self.fan_out_to(set),
+            Err(providers) if providers.is_empty() && undecided => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                Res::Ambiguous
+            }
             Err(providers) if providers.is_empty() => {
                 self.note(Want::Callable, || {
                     if unplaced {
@@ -4955,7 +4962,7 @@ impl Ctx<'_> {
                 });
                 Res::NotFound
             }
-            Err(_) => {
+            _ => {
                 self.note(Want::Callable, || Residue::OverloadAmbiguous);
                 Res::Ambiguous
             }
@@ -4966,18 +4973,31 @@ impl Ctx<'_> {
     /// (S-281, S-608) — denotes at the caller: the one its scope names
     /// ([`header_type`](Ctx::header_type), by scope and module model only),
     /// else, where the caller's file imports no item of that name, the one
-    /// repository trait of the name ([`Index::trait_by_name`]: a bound written
-    /// as a path, `&dyn a::b::Tr`, records its last segment). An import that
-    /// names an item outside the repository (`use std::io::Write;`) shadows a
-    /// repository trait of the same name, as Rust's own `use` does: `None`.
-    fn bound_trait(&self, name: &str) -> Option<NodeId> {
+    /// repository trait of the name (a bound written as a path,
+    /// `&dyn a::b::Tr`, records its last segment) — [`Res::Ambiguous`] when
+    /// the scope, or the repository, names two. An import that names an item
+    /// outside the repository (`use std::io::Write;`) shadows a repository
+    /// trait of the same name, as Rust's own `use` does: [`Res::NotFound`].
+    fn bound_trait(&self, name: &str) -> Res {
         let scoped = self.scope_only.replace(true);
         let res = self.header_type(name);
         self.scope_only.set(scoped);
         match res {
-            Res::Found(id) => self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Trait).then_some(id),
-            Res::NotFound if !self.scope().is_some_and(|s| s.aliases.contains_key(name)) => self.ix.trait_by_name(name),
-            Res::NotFound | Res::Ambiguous => None,
+            Res::Found(id) if self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Trait) => res,
+            Res::NotFound if !self.scope().is_some_and(|s| s.aliases.contains_key(name)) => {
+                let traits: Vec<NodeId> = self
+                    .ix
+                    .by_name
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|id| self.ix.info.get(id).is_some_and(|i| i.kind == NodeKind::Trait))
+                    .collect();
+                exactly_one(&traits)
+            }
+            Res::Ambiguous => Res::Ambiguous,
+            Res::Found(_) | Res::NotFound => Res::NotFound,
         }
     }
 
