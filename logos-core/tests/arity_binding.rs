@@ -689,6 +689,21 @@ class C : B() {
     assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]));
 }
 
+/// Only a call whose same-named members all mismatch falls through (S-592):
+/// one the class declares no member of — a `this.helper(1)` beside a
+/// top-level `helper` — stays the receiver call it is, `supertype-unreached`.
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn a_call_no_member_names_never_falls_through() {
+    let tmp = tree(&[(
+        "src/main/kotlin/app/C.kt",
+        "package app\n\nfun helper(a: Int) {}\n\nclass C {\n    fun caller() { this.helper(1) }\n}\n",
+    )]);
+    let engine = index(tmp.path());
+    assert_eq!(calls_from(engine.runtime().unwrap(), "caller@6"), targets(&[]));
+    assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::SupertypeUnreached, 1)]));
+}
+
 // ── Sync ≡ reindex ────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
