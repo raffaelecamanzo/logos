@@ -42,7 +42,6 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   migration 33 adds the columns and clears every content hash, so the first
   `logos scan` (or `logos index`) after upgrading re-reads every file. A bare
   `logos sync` reads no file.
-||||||| 1459ddea
 
 ### Changed
 
