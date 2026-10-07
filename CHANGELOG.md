@@ -110,14 +110,15 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   `Tr`'s default. A sync now also re-binds the calls an `impl` block's header
   can move — an empty impl or a `Deref` impl added or removed — as a fresh
   index would. On a full-indexed export of this repository, the previous
-  build vs this one: `Calls` edges 26,681 → 26,710 (36 added: `&impl
-  EventSink`, `Arc<E: MemberEngine>` and three `GraphStore` default bodies
-  fanning out to their impls; 7 removed: `&dyn GraphStore` calls to defaults
-  the one impl overrides); every delta checked against the source; non-Rust
-  graphs byte-identical; 70 bare receiver calls become trait-qualified (65 now
-  `external-type`); Rust `unclassified` stays 0; cold index time unchanged
-  within noise. The quality signal reads 8126 → 8162 on that export (dependency
-  depth 15 → 14, raw modularity 0.7254 → 0.7261). Run `logos scan` (or
+  build vs this one: `Calls` edges 26,681 → 26,717 (36 added, none removed:
+  `&impl EventSink`, `Arc<E: MemberEngine>` and three `GraphStore` default
+  bodies fanning out to their impls), every delta checked against the source;
+  non-Rust graphs byte-identical; 66 bare receiver calls become
+  trait-qualified (62 now `external-type`); Rust `unclassified` stays 0; cold
+  index time unchanged within noise. The quality signal reads 8126 → 8162 on
+  that export (dependency depth 15 → 14). A bound is read as the caller names
+  it, so an imported `std::io::Write` never reaches a repository trait called
+  `Write`. Run `logos scan` (or
   `logos index`) to re-bind an existing graph.
 
 ### Fixed
