@@ -236,9 +236,15 @@ fn owning_decl(node: Node<'_>, decl_at: &HashMap<usize, usize>) -> Option<usize>
 /// A type path as recorded ([module docs](self)): a path's `::` segments as
 /// written, generic arguments stripped and whitespace dropped
 /// (`crate :: a :: A < M >` → `crate::a::A`, `::std::io::Error` kept global);
-/// anything that is not a path — `()`, `[u8]`, `&str`, `dyn Tr`, `(A, B)` — as
-/// written, each run of whitespace collapsed to one space.
+/// anything that is not a path — `()`, `[u8]`, `&str`, `dyn Tr`, `(A, B)`, a
+/// qualified `<T as A>::Out`, whose bracket heads the path rather than
+/// following a segment — as written, each run of whitespace collapsed to one
+/// space.
 pub(crate) fn item_path(text: &str) -> String {
+    let as_written = || text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.trim_start().starts_with('<') {
+        return as_written();
+    }
     let mut stripped = String::with_capacity(text.len());
     let mut depth = 0usize;
     let mut prev = ' ';
@@ -262,7 +268,7 @@ pub(crate) fn item_path(text: &str) -> String {
     if depth == 0 && !rest.is_empty() && rest.iter().all(|s| is_ident(s)) {
         return segments.join("::");
     }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    as_written()
 }
 
 #[cfg(test)]
@@ -293,6 +299,9 @@ mod tests {
             ("1X", "1X"),
             ("a::", "a::"),
             ("Vec<u8", "Vec<u8"),
+            ("<T as A>::Out", "<T as A>::Out"),
+            ("< T  as A >::Out", "< T as A >::Out"),
+            ("<Vec<u8>>::Item", "<Vec<u8>>::Item"),
         ];
         for (text, want) in cases {
             assert_eq!(item_path(text), want, "{text:?}");

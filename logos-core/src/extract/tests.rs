@@ -6826,9 +6826,9 @@ impl A {
 }
 
 /// S-606 / FR-EX-34: a fully qualified call `<T as Tr>::m(…)` records its type
-/// and trait — generics stripped, a turbofish or a path type alike — never the
-/// bare `m`; a bracketed type with no trait (`<Vec<u8>>::new()`) records what
-/// it did before.
+/// and trait — generics stripped, a turbofish or a path type alike, a
+/// qualified type kept as written — never the bare `m`; a bracketed type with
+/// no trait (`<Vec<u8>>::new()`) records what it did before.
 #[test]
 fn a_fully_qualified_rust_call_records_its_type_and_trait() {
     let src = "\
@@ -6837,6 +6837,7 @@ pub trait Run { fn go(&self); }
 fn f(q: Q) {
     <Q as Run>::go(&q);
     <a::Q<u8> as b::Run<u8>>::go::<u8>(&q);
+    <<Q as Run>::Out as Run>::go(&q);
     <Vec<u8>>::new();
 }
 ";
@@ -6851,6 +6852,7 @@ fn f(q: Q) {
     assert_eq!(
         calls,
         vec![
+            ("<<Q as Run>::Out as Run>::go".to_string(), Some(1)),
             ("<Q as Run>::go".to_string(), Some(1)),
             ("<a::Q as b::Run>::go".to_string(), Some(1)),
             ("new".to_string(), Some(0)),
