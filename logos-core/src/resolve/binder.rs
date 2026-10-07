@@ -2249,7 +2249,7 @@ fn bind_traced(
         in_glob_resolution: Cell::new(false),
         in_rival_expansion: Cell::new(false),
         bare_path_call: Cell::new(false),
-        scope_only: relation.is_some() || is_proven_receiver_call(r),
+        scope_only: Cell::new(relation.is_some() || is_proven_receiver_call(r)),
         lexical_start: Cell::new(source),
         miss: RefCell::new(None),
     };
@@ -2768,9 +2768,14 @@ struct Ctx<'a> {
     /// hierarchy is built under the strict policy ([`build_supertypes`]), so the
     /// edge and the supertype walk agree under every policy.
     ///
+    /// Also set while a receiver call falls through to the free functions in
+    /// scope ([`free_call`](Ctx::free_call), S-592): a receiver call never
+    /// reaches a workspace guess, so a same-named method of an unrelated class
+    /// is never what `this.m(1)` meant.
+    ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    scope_only: bool,
+    scope_only: Cell<bool>,
     /// Where [`resolve_name`](Ctx::resolve_name)'s lexical chain — and a
     /// package-shaped path's lexical head — starts: the source itself, except
     /// while a type relation is read in its declaration's **header** (S-466;
@@ -3061,7 +3066,7 @@ impl Ctx<'_> {
         // 8) Policy-gated workspace fallback: unique module-path-suffix match —
         //    never for a type relation ([`scope_only`](Ctx::scope_only)). A
         //    receiver-method call never reaches here (S-514, CR-066).
-        if self.policy != BindingPolicy::Strict && !self.scope_only {
+        if self.policy != BindingPolicy::Strict && !self.scope_only.get() {
             return self.suffix_match(segs, want);
         }
         Res::NotFound
@@ -3753,10 +3758,14 @@ impl Ctx<'_> {
     /// bare Path call takes, from the caller outward — the class's own members
     /// are passed over again by their ranges — then the file's imports. A
     /// callable only: a class of that name is not what `name()` on the instance
-    /// fell through to.
+    /// fell through to. By scope and imports only ([`scope_only`](Ctx::scope_only)):
+    /// the aggressive policy's workspace name match would bind a same-named
+    /// method of an unrelated class once the caller's own one is filtered out.
     fn free_call(&self, name: &str) -> Res {
         self.bare_path_call.set(true);
+        let scoped = self.scope_only.replace(true);
         let res = self.resolve_path(&[name.to_string()], Want::Callable, MAX_ALIAS_DEPTH);
+        self.scope_only.set(scoped);
         self.bare_path_call.set(false);
         res
     }
@@ -4576,7 +4585,7 @@ impl Ctx<'_> {
         // 5) Workspace unique-name fallback — aggressive only for bare names,
         //    never for a type relation ([`scope_only`](Ctx::scope_only)). A
         //    receiver-method call never reaches here (S-514, CR-066).
-        if self.policy == BindingPolicy::Aggressive && !self.scope_only {
+        if self.policy == BindingPolicy::Aggressive && !self.scope_only.get() {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
@@ -4682,7 +4691,7 @@ impl Ctx<'_> {
                 return Res::Ambiguous;
             }
         }
-        if self.policy == BindingPolicy::Aggressive && !self.scope_only {
+        if self.policy == BindingPolicy::Aggressive && !self.scope_only.get() {
             return self.unique_by_name(name, want);
         }
         Res::NotFound

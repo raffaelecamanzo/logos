@@ -612,6 +612,30 @@ class A {
     assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]));
 }
 
+/// The fall-through is by scope and imports only (S-592): under the
+/// `aggressive` policy the workspace name match would otherwise bind
+/// `this.foo(1)` — whose own `foo(a, b)` cannot take it — to the one `foo` of
+/// an unrelated class in another package. A receiver call never reaches that
+/// guess.
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn a_fall_through_never_reaches_the_workspace_name_match() {
+    let tmp = tree(&[
+        (".logos/config.toml", "[resolution]\npolicy = \"aggressive\"\n"),
+        (
+            "src/main/kotlin/app/A.kt",
+            "package app\n\nclass A {\n    fun foo(a: Int, b: Int) {}\n    fun caller() { this.foo(1) }\n}\n",
+        ),
+        (
+            "src/main/kotlin/other/B.kt",
+            "package other\n\nclass B {\n    fun pad() {}\n    fun pad2() {}\n    fun pad3() {}\n    fun foo(a: Int) {}\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(calls_from(engine.runtime().unwrap(), "caller@5"), targets(&[]));
+    assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]));
+}
+
 // ── Sync ≡ reindex ────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
