@@ -1769,16 +1769,40 @@ impl Index {
     /// the change — a `Deref` impl added or removed — may now reach, or no
     /// longer reach, a method of a type further down that neither the call nor
     /// the change spells.
+    ///
+    /// And the names of every type whose `Deref` chain reaches a type the
+    /// change spells: a removed hop or a removed impl further down leaves
+    /// nothing in this (post-change) index that lends the method, so the call
+    /// on the type at the top of the chain is selected by that type's name.
     pub(crate) fn impl_header_tokens(&self, dirty: &HashSet<String>) -> HashSet<String> {
         let spells = |text: &str| super::tokens(text).iter().any(|t| dirty.contains(t));
-        let mut downstream: HashSet<NodeId> = HashSet::new();
-        let mut level: Vec<NodeId> = self
+        let seed: Vec<NodeId> = self
             .deref_targets
             .iter()
             .flat_map(|(&ty, target)| [Some(ty), if let Res::Found(t) = target { Some(*t) } else { None }])
             .flatten()
             .filter(|ty| self.info.get(ty).is_some_and(|i| spells(&i.name)))
             .collect();
+        let mut upstream: HashSet<NodeId> = seed.iter().copied().collect();
+        for _ in 0..=MAX_DEREF_DEPTH {
+            let next: Vec<NodeId> = self
+                .deref_targets
+                .iter()
+                .filter(|(ty, t)| !upstream.contains(*ty) && matches!(t, Res::Found(x) if upstream.contains(x)))
+                .map(|(&ty, _)| ty)
+                .collect();
+            if next.is_empty() {
+                break;
+            }
+            upstream.extend(next);
+        }
+        let upstream_names = upstream
+            .iter()
+            .filter_map(|ty| self.info.get(ty).map(|i| i.name.clone()))
+            .flat_map(|name| super::tokens(&name))
+            .filter(|t| !dirty.contains(t));
+        let mut downstream: HashSet<NodeId> = HashSet::new();
+        let mut level = seed;
         for _ in 0..=MAX_DEREF_DEPTH {
             level.retain(|&ty| downstream.insert(ty));
             level = level
@@ -1802,7 +1826,7 @@ impl Index {
             .map(|(at, _)| at)
             .collect();
         if moved.is_empty() {
-            return HashSet::new();
+            return upstream_names.collect();
         }
         let lent = moved
             .iter()
@@ -1816,6 +1840,7 @@ impl Index {
             .chain(lent)
             .flat_map(|name| super::tokens(name))
             .filter(|t| !dirty.contains(t))
+            .chain(upstream_names)
             .collect()
     }
 

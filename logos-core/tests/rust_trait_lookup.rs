@@ -709,20 +709,65 @@ fn a_purged_empty_impl_takes_its_default_back() {
 
 /// An empty impl added for a `Deref` target lends its default to the outer
 /// type's method calls on sync, although neither the calls nor the change
-/// spell the outer type.
+/// spell the outer type — and removed, it takes the default back, although
+/// nothing left in the graph lends it (sprint 92 review).
 #[test]
 fn an_empty_impl_on_a_deref_target_rebinds_on_sync() {
-    let initial = [
+    let base = [
         ("src/lib.rs", "pub mod t;\npub mod d;\npub mod callers;\n"),
         (
             "src/t.rs",
             "pub trait Greet { fn hello(&self) {} }\npub struct Inner;\npub struct Outer;\nimpl std::ops::Deref for Outer {\n    type Target = Inner;\n    fn deref(&self) -> &Inner { &Inner }\n}\n",
         ),
         ("src/callers.rs", "use crate::t::{Greet, Outer};\npub fn o(x: &Outer) { x.hello(); }\n"),
-        ("src/d.rs", "\n"),
     ];
-    let added = synced_equals_reindexed(&initial, &[("src/d.rs", "use super::t::*;\nimpl Greet for Inner {}\n")]);
+    let imp = "use super::t::*;\nimpl Greet for Inner {}\n";
+    let mut without = base.to_vec();
+    without.push(("src/d.rs", "\n"));
+    let added = synced_equals_reindexed(&without, &[("src/d.rs", imp)]);
     assert_eq!(from(&added, "src/callers.rs:o@2"), targets(&["src/t.rs:hello@1"]));
+    let mut with = base.to_vec();
+    with.push(("src/d.rs", imp));
+    let removed = synced_equals_reindexed(&with, &[("src/d.rs", "\n")]);
+    assert!(from(&removed, "src/callers.rs:o@2").is_empty(), "{removed:?}");
+}
+
+/// The last hop of a `Deref` chain removed takes back the default a type
+/// past it lends, although the change spells neither the caller's type nor
+/// the method, and nothing left in the graph reaches the lending type from
+/// the caller's (sprint 92 review).
+#[test]
+fn removing_the_last_deref_hop_takes_back_a_lent_default_on_sync() {
+    let initial = [
+        ("src/lib.rs", "pub mod t;\npub mod d;\npub mod callers;\n"),
+        (
+            "src/t.rs",
+            "\
+pub trait Greet { fn hello(&self) {} }
+pub struct Inner;
+impl Greet for Inner {}
+pub struct Mid;
+pub struct Outer;
+impl std::ops::Deref for Outer {
+    type Target = Mid;
+    fn deref(&self) -> &Mid { &Mid }
+}
+",
+        ),
+        ("src/callers.rs", "use crate::t::{Greet, Outer};\npub fn o(x: &Outer) { x.hello(); }\n"),
+        (
+            "src/d.rs",
+            "use super::t::*;\nimpl std::ops::Deref for Mid {\n    type Target = Inner;\n    fn deref(&self) -> &Inner { &Inner }\n}\n",
+        ),
+    ];
+    let index_before = tree(&initial);
+    let before = index(index_before.path());
+    assert_eq!(
+        from(&call_edges(before.runtime().unwrap()), "src/callers.rs:o@2"),
+        targets(&["src/t.rs:hello@1"])
+    );
+    let removed = synced_equals_reindexed(&initial, &[("src/d.rs", "\n")]);
+    assert!(from(&removed, "src/callers.rs:o@2").is_empty(), "{removed:?}");
 }
 
 /// A `Deref` impl added in a file of its own makes the outer types' callers
