@@ -147,6 +147,18 @@ pub fn written(x: &X) { X::hello(x); }
     }
 }
 
+/// An empty impl inside an inline module reads its header there: `super::Greet`
+/// and `X` are that module's names.
+#[test]
+fn an_empty_impl_in_an_inline_module_reads_its_header_there() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "pub trait Greet { fn hello(&self) {} }\npub mod inner { pub struct X; impl super::Greet for X {} }\npub fn f(x: &inner::X) { x.hello(); }\n",
+    )]);
+    let engine = index(tmp.path());
+    assert_eq!(from(&call_edges(engine.runtime().unwrap()), "src/lib.rs:f@3"), targets(&["src/lib.rs:hello@1"]));
+}
+
 /// An impl's own method beats the trait default it overrides.
 #[test]
 fn an_impls_override_beats_the_trait_default() {
