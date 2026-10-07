@@ -133,8 +133,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   calls no `Fn`). A method call on a plain name or an own field (`x.f()`,
   `self.x.f()`) inside a macro is handed to the same receiver proof as one
   outside it, so `format!("{}", m.f())` with `m: &M` in scope records `M::f`;
-  an unproven receiver (a chain, a path, a shadowed or generic name) stays the
-  `other` row it was. A turbofish method call (`x.f::<T>()`) still records no
+  an unproven receiver (a chain, a path, a shadowed name, a generic one no
+  trait bounds) stays the `other` row it was, and a trait-typed one records
+  the same trait-qualified row as outside a macro (S-608, above). A turbofish method call (`x.f::<T>()`) still records no
   row, inside or outside a macro. A name a pattern inside the macro binds (a
   closure parameter, `let`, `for`, a match arm or `matches!` guard) is not the
   caller's: its receiver stays `other`. A binding form of a user macro is not
