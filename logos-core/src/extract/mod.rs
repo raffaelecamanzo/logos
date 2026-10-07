@@ -1535,6 +1535,11 @@ pub(super) fn sort_facts(facts: &mut Facts) {
 /// (`insert_unresolved_ref`) and the unique index of migration 33 name the same
 /// nine components.
 ///
+/// The export mark of an import (S-606) is outside the identity, so two rows
+/// that differ only by it are one row — exported when either is: a module that
+/// writes both `use m::*;` and `pub use m::*;` (or a `pub use` and a `use` of
+/// one path under two `#[cfg]`s) re-exports it, whichever comes first.
+///
 /// Shared by the code [`collect_refs`] and the documentation extractor
 /// ([`doc`], S-035) so both passes produce byte-identical, order-independent
 /// ledger input.
@@ -1556,20 +1561,35 @@ pub(super) fn dedup_sort_refs(refs: &mut Vec<RefFact>) {
     let peeled_token = |r: &RefFact| -> String { r.peeled.clone().unwrap_or_default() };
     // `(source, target, form, kind, relation, receiver, alias, peeled, args)`.
     type LedgerKey = (String, String, i32, i32, Option<&'static str>, Option<i32>, String, String, Option<u32>);
-    let mut seen: HashSet<LedgerKey> = HashSet::new();
-    refs.retain(|r| {
-        seen.insert((
+    let mut kept: HashMap<LedgerKey, usize> = HashMap::new();
+    let mut deduped: Vec<RefFact> = Vec::with_capacity(refs.len());
+    for r in refs.drain(..) {
+        let key = (
             r.source.as_str().to_string(),
             r.target.clone(),
             r.form.as_i32(),
             r.kind.as_i32(),
-            relation_token(r),
+            relation_token(&r),
             r.receiver.map(ReceiverShape::as_i32),
-            alias_token(r),
-            peeled_token(r),
+            alias_token(&r),
+            peeled_token(&r),
             r.arg_count,
-        ))
-    });
+        );
+        match kept.get(&key) {
+            Some(&at) => {
+                let first = &mut deduped[at].exported;
+                *first = match (*first, r.exported) {
+                    (None, mark) | (mark, None) => mark,
+                    (Some(a), Some(b)) => Some(a || b),
+                };
+            }
+            None => {
+                kept.insert(key, deduped.len());
+                deduped.push(r);
+            }
+        }
+    }
+    *refs = deduped;
     refs.sort_by(|a, b| {
         (
             a.source.as_str(),

@@ -6745,6 +6745,36 @@ fn f() { fmt::format(); }
     assert!(facts.refs.iter().filter(|r| r.kind != EdgeKind::Imports).all(|r| r.exported.is_none()));
 }
 
+/// S-606: a module writing one import both privately and as a re-export —
+/// two glob `use`s, or a `use` and a `pub use` of one path under two `#[cfg]`s
+/// — records one row, exported, whichever declaration comes first.
+#[test]
+fn a_rust_import_written_both_private_and_pub_records_one_exported_row() {
+    let exports = |src: &str| -> Vec<(String, Option<bool>)> {
+        let mut rows: Vec<(String, Option<bool>)> = extract_src("src/lib.rs", src)
+            .refs
+            .into_iter()
+            .filter(|r| r.kind == EdgeKind::Imports)
+            .map(|r| (r.target, r.exported))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let private_first = "\
+pub mod prelude { pub struct A; }
+use crate::prelude::*;
+pub use crate::prelude::*;
+#[cfg(feature = \"x\")]
+use crate::prelude::A;
+#[cfg(not(feature = \"x\"))]
+pub use crate::prelude::A;
+";
+    let want = vec![("crate::prelude".to_string(), Some(true)), ("crate::prelude::A".to_string(), Some(true))];
+    assert_eq!(exports(private_first), want);
+    let pub_first = private_first.replace("use crate::prelude::*;\npub use", "pub use crate::prelude::*;\nuse");
+    assert_eq!(exports(&pub_first), want, "the order of the two declarations does not matter");
+}
+
 /// S-606 / FR-EX-34: an enum records its variant names in declaration order —
 /// unit, tuple, struct and discriminant variants alike — and an enum with none
 /// records none; no other node records any.
