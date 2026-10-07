@@ -1213,6 +1213,7 @@ fn generic_bound_and_impl_trait_receivers_are_trait_qualified() {
         ("fn f<F: Fn(u8) + Run>(t: F) { t.go(); }", "Run::go"),
         ("struct H<T>(T);\nimpl<T: Run> H<T> { fn f(&self, t: &T) { t.go(); } }", "Run::go"),
         ("trait Tr<T: Run> { fn f(&self, t: &T) { t.go(); } }", "Run::go"),
+        ("struct H<T>(T);\nimpl<T> H<T> where T: Run { fn f(&self, t: &T) { t.go(); } }", "Run::go"),
     ];
     for (src, want) in cases {
         let facts = extract_src("src/lib.rs", src);
