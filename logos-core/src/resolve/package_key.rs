@@ -229,10 +229,7 @@ impl PackageLayout {
     /// only (S-590; the set
     /// [`LanguageRegistry::free_only_bare_call_extensions`] returns).
     pub fn with_free_only_bare_calls(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.free_only_bare_call_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.free_only_bare_call_exts, exts);
         self
     }
 
@@ -240,10 +237,7 @@ impl PackageLayout {
     /// through to a free function (S-592; the set
     /// [`LanguageRegistry::free_call_fallthrough_extensions`] returns).
     pub fn with_free_call_fallthrough(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.free_call_fallthrough_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.free_call_fallthrough_exts, exts);
         self
     }
 
@@ -262,10 +256,7 @@ impl PackageLayout {
     /// name (S-592; the set [`LanguageRegistry::overloaded_call_extensions`]
     /// returns).
     pub fn with_overloaded_calls(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.overloaded_call_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.overloaded_call_exts, exts);
         self
     }
 
@@ -273,10 +264,7 @@ impl PackageLayout {
     /// (S-592; the set [`LanguageRegistry::arity_unchecked_extensions`]
     /// returns).
     pub fn with_arity_unchecked(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.arity_unchecked_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.arity_unchecked_exts, exts);
         self
     }
 
@@ -284,10 +272,7 @@ impl PackageLayout {
     /// namespaces' types (S-595; the set
     /// [`LanguageRegistry::enclosing_namespace_extensions`] returns).
     pub fn with_enclosing_namespaces(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.enclosing_namespace_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.enclosing_namespace_exts, exts);
         self
     }
 
@@ -346,10 +331,7 @@ impl PackageLayout {
     /// its target (S-522; the set
     /// [`LanguageRegistry::supertype_kind_follows_target`] returns).
     pub fn with_kind_following_supertypes(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.kind_following_supertypes.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.kind_following_supertypes, exts);
         self
     }
 
@@ -619,10 +601,7 @@ impl PackageLayout {
     /// This layout, with the files of `exts` (extensions, with or without a
     /// leading dot) keyed by the namespace they declare.
     pub fn with_namespace_extensions(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.namespace_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.namespace_exts, exts);
         self
     }
 
@@ -845,6 +824,13 @@ fn under_import_root(path: &str, roots: &ImportRoots) -> (String, Vec<String>, O
         .unwrap_or(0);
     let mods = dirs[skip..].iter().map(|s| (*s).to_string()).collect();
     (roots.crate_name.clone(), mods, Some(file_stem(file)))
+}
+
+/// Add `exts` to `set`, each normalised as every extension key here is —
+/// without a leading dot, lower-cased — the one body of the per-key `with_*`
+/// set builders (S-592: written once, not once per key).
+fn extend_normalised(set: &mut HashSet<String>, exts: impl IntoIterator<Item = String>) {
+    set.extend(exts.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()));
 }
 
 /// `path`'s extension, lower-cased — the key both models are declared under.

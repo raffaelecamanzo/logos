@@ -41,7 +41,7 @@ use super::abi::{assert_abi, AbiRange};
 use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
 use super::manifest::{CallTargets, PluginManifest};
-use super::plugin::{CompiledPlugin, LanguagePlugin};
+use super::plugin::{CompiledPlugin, LanguagePlugin, Semantics};
 use super::queries::{self, LanguageQueries};
 
 /// One language's path-model declaration (S-519, [FR-RS-14]), as
@@ -375,6 +375,31 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The normalised extensions of every code plugin whose semantics
+    /// `declares` — the one shape of the per-key extension sets the binder's
+    /// [`PackageLayout`](crate::resolve::package_key::PackageLayout) reads
+    /// (S-592: written once, not once per key).
+    fn code_extensions_where(&self, declares: impl Fn(&Semantics) -> bool) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| declares(p.semantics()))
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
+    /// Each normalised extension of every code plugin for which `value` gives
+    /// a value, mapped to it — the per-key extension maps' one shape, as
+    /// [`code_extensions_where`](Self::code_extensions_where) is the sets'.
+    fn code_extension_map<V: Clone>(&self, value: impl Fn(&Semantics) -> Option<V>) -> HashMap<String, V> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter_map(|p| Some((p, value(p.semantics())?)))
+            .flat_map(|(p, v)| p.extensions().iter().map(move |e| (normalize_ext(e), v.clone())))
+            .collect()
+    }
+
     /// Every code plugin's file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)), each mapped to the
     /// interop family its plugin binds within (S-519, [NFR-RA-05]) — the
@@ -384,16 +409,7 @@ impl LanguageRegistry {
     ///
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     pub fn families(&self) -> HashMap<String, String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .flat_map(|p| {
-                let family = p.semantics().family.clone();
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), family.clone()))
-            })
-            .collect()
+        self.code_extension_map(|s| Some(s.family.clone()))
     }
 
     /// The file extensions (normalised as in
@@ -405,17 +421,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
     pub fn call_targets(&self) -> HashMap<String, CallTargets> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().call_targets.any())
-            .flat_map(|p| {
-                let targets = p.semantics().call_targets;
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), targets))
-            })
-            .collect()
+        self.code_extension_map(|s| s.call_targets.any().then_some(s.call_targets))
     }
 
     /// The file extensions (normalised as in
@@ -427,12 +433,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     pub fn supertype_kind_follows_target(&self) -> HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().supertype_kind_follows_target)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.code_extensions_where(|s| s.supertype_kind_follows_target)
     }
 
     /// The file extensions (normalised as in
@@ -444,12 +445,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     pub fn enclosing_namespace_extensions(&self) -> HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().enclosing_namespaces)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.code_extensions_where(|s| s.enclosing_namespaces)
     }
 
     /// The file extensions (normalised as in
@@ -461,12 +457,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     pub fn free_only_bare_call_extensions(&self) -> HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().bare_calls_free_only)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.code_extensions_where(|s| s.bare_calls_free_only)
     }
 
     /// The file extensions (normalised as in
@@ -482,12 +473,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     pub fn free_call_fallthrough_extensions(&self) -> HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().implicit_call_falls_through)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.code_extensions_where(|s| s.implicit_call_falls_through)
     }
 
     /// The file extensions (normalised as in
@@ -496,15 +482,9 @@ impl LanguageRegistry {
     /// call of one never falls through, as the root every class inherits may
     /// hold it. Consumed through [`crate::resolve::package_key::PackageLayout`].
     pub fn implicit_root_members(&self) -> HashMap<String, Vec<String>> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| !p.semantics().implicit_root_members.is_empty())
-            .flat_map(|p| {
-                let members = p.semantics().implicit_root_members.clone();
-                p.extensions().iter().map(move |e| (normalize_ext(e), members.clone()))
-            })
-            .collect()
+        self.code_extension_map(|s| {
+            (!s.implicit_root_members.is_empty()).then(|| s.implicit_root_members.clone())
+        })
     }
 
     /// The file extensions (normalised as in
@@ -516,12 +496,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     pub fn overloaded_call_extensions(&self) -> HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().overloaded_calls)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.code_extensions_where(|s| s.overloaded_calls)
     }
 
     /// The file extensions (normalised as in
@@ -548,17 +523,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
     pub fn wrapper_methods(&self) -> HashMap<String, BTreeMap<String, Vec<String>>> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| !p.semantics().wrapper_methods.is_empty())
-            .flat_map(|p| {
-                let declared = &p.semantics().wrapper_methods;
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), declared.clone()))
-            })
-            .collect()
+        self.code_extension_map(|s| (!s.wrapper_methods.is_empty()).then(|| s.wrapper_methods.clone()))
     }
 
     /// Grammars skipped at load due to an ABI mismatch ([FR-PL-03]).
@@ -927,27 +892,7 @@ mod tests {
     #[test]
     fn a_namespace_model_without_the_namespace_capture_fails_its_compile() {
         fn entry(source: &'static str) -> GrammarEntry {
-            GrammarEntry {
-                manifest_label: "toyns/plugin.toml",
-                manifest_toml: r#"
-                    name = "toyns"
-                    extensions = ["toyns"]
-                    module_separator = "."
-                    abi_version = 15
-                    capabilities = ["symbols"]
-                    [module_model]
-                    kind = "namespace"
-                    [queries]
-                    symbols = "queries/symbols.scm"
-                "#,
-                language: tree_sitter_rust::LANGUAGE,
-                embedded_queries: vec![grammars::EmbeddedQuery {
-                    relative_path: "queries/symbols.scm",
-                    label: "toyns/queries/symbols.scm",
-                    source,
-                }]
-                .leak(),
-            }
+            toy_grammar("toyns", "", "[module_model]\nkind = \"namespace\"", "symbols", source)
         }
         let load = |source: &'static str, root: Option<&Path>| {
             let mut entries = grammars::compiled();
@@ -995,27 +940,8 @@ mod tests {
     #[test]
     fn a_fall_through_language_without_the_supertype_capture_fails_its_compile() {
         fn entry(source: &'static str) -> GrammarEntry {
-            GrammarEntry {
-                manifest_label: "toyft/plugin.toml",
-                manifest_toml: r#"
-                    name = "toyft"
-                    extensions = ["toyft"]
-                    module_separator = "."
-                    abi_version = 15
-                    implicit_receiver = "self"
-                    implicit_call_falls_through = true
-                    capabilities = ["references"]
-                    [queries]
-                    references = "queries/references.scm"
-                "#,
-                language: tree_sitter_rust::LANGUAGE,
-                embedded_queries: vec![grammars::EmbeddedQuery {
-                    relative_path: "queries/references.scm",
-                    label: "toyft/queries/references.scm",
-                    source,
-                }]
-                .leak(),
-            }
+            let keys = "implicit_receiver = \"self\"\nimplicit_call_falls_through = true";
+            toy_grammar("toyft", keys, "", "references", source)
         }
         let load = |source: &'static str| {
             let mut entries = grammars::compiled();
@@ -1804,6 +1730,20 @@ mod tests {
     /// language per call site, so its compiles and first-use reports are its
     /// own however the test binary interleaves.
     fn toy_entry(name: &'static str, source: &'static str) -> GrammarEntry {
+        toy_grammar(name, "", "", "symbols", source)
+    }
+
+    /// A language entry over the Rust grammar whose one query serves
+    /// `capability` with `source`, its descriptor carrying `top_keys` and then
+    /// `tables` (the descriptor checks' fixtures: a namespace model, a
+    /// fall-through key).
+    fn toy_grammar(
+        name: &'static str,
+        top_keys: &str,
+        tables: &str,
+        capability: &str,
+        source: &'static str,
+    ) -> GrammarEntry {
         GrammarEntry {
             manifest_label: format!("{name}/plugin.toml").leak(),
             manifest_toml: format!(
@@ -1812,16 +1752,18 @@ mod tests {
                 extensions = ["{name}"]
                 module_separator = "."
                 abi_version = 15
-                capabilities = ["symbols"]
+                {top_keys}
+                capabilities = ["{capability}"]
+                {tables}
                 [queries]
-                symbols = "queries/symbols.scm"
+                {capability} = "queries/{capability}.scm"
                 "#
             )
             .leak(),
             language: tree_sitter_rust::LANGUAGE,
             embedded_queries: vec![grammars::EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: format!("{name}/queries/symbols.scm").leak(),
+                relative_path: format!("queries/{capability}.scm").leak(),
+                label: format!("{name}/queries/{capability}.scm").leak(),
                 source,
             }]
             .leak(),

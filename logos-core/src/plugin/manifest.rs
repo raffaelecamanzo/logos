@@ -455,7 +455,7 @@ pub enum ModuleModelKind {
 /// Scala's `package`. Its group is `module`, not the declaration group
 /// `symbol`, so extraction's declaration walk never reads it as a node; a
 /// namespace-model plugin whose `symbols` query lacks it fails to load
-/// (`registry::check_namespace_capture`).
+/// (`queries::check_capture`).
 ///
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
@@ -464,7 +464,7 @@ pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
 /// what a language that declares
 /// [`implicit_call_falls_through`](PluginManifest::implicit_call_falls_through)
 /// must capture, checked when its queries compile
-/// (`queries::check_supertype_capture`, S-592).
+/// (`queries::check_capture`, S-592).
 pub(crate) const SUPERTYPE_CAPTURE: &str = "ref.extends";
 
 /// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the

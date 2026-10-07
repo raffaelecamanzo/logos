@@ -394,10 +394,10 @@ impl LanguageQueries {
             queries.insert(resolved.capability.clone(), query);
         }
         if self.namespace_model {
-            check_namespace_capture(self.manifest_label, &queries)?;
+            check_capture(self.manifest_label, &queries, "symbols", NAMESPACE_CAPTURE, NAMESPACE_REASON)?;
         }
         if self.falls_through {
-            check_supertype_capture(self.manifest_label, &queries)?;
+            check_capture(self.manifest_label, &queries, "references", SUPERTYPE_CAPTURE, SUPERTYPE_REASON)?;
         }
         Ok((queries, compiled))
     }
@@ -408,54 +408,45 @@ impl LanguageQueries {
 /// — carries the `@module.namespace` capture. Without it every file of the
 /// language would read as the global namespace, and every type of the
 /// repository would be visible to every other without an import — honest
-/// absence at the query becoming a fabricated binding ([NFR-RA-05]). Refused
-/// with the language's compile instead, naming the descriptor.
+/// absence at the query becoming a fabricated binding ([NFR-RA-05]).
 ///
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn check_namespace_capture(
-    manifest_label: &str,
-    compiled: &CompiledQueries,
-) -> Result<(), PluginError> {
-    let captures = compiled
-        .get("symbols")
-        .is_some_and(|q| q.capture_names().contains(&NAMESPACE_CAPTURE));
-    if captures {
-        return Ok(());
-    }
-    Err(PluginError::Manifest {
-        file: manifest_label.to_string(),
-        detail: format!(
-            "`[module_model]` kind 'namespace' requires the `symbols` query to capture \
-             `@{NAMESPACE_CAPTURE}`, or every file would read as the global namespace"
-        ),
-    })
-}
+const NAMESPACE_REASON: &str =
+    "`[module_model]` kind 'namespace' requires the `symbols` query to capture `@module.namespace`, \
+     or every file would read as the global namespace";
 
 /// A language whose unqualified call falls through to a free function (S-592,
 /// [FR-RS-43]) must record its classes' supertypes: its compiled `references`
-/// query — embedded or an on-disk override — captures `@ref.extends`. The
-/// fall-through is taken only when the class walk saw every supertype, and a
-/// language recording none would read every class as having none, binding a
-/// free function where an unseen base holds the overload ([NFR-RA-05]).
-/// Checked at compile, beside [`check_namespace_capture`], so deciding the
-/// key never compiles a language nobody asked about (CR-197).
+/// query captures `@ref.extends`. The fall-through is taken only when the
+/// class walk saw every supertype, and a language recording none would read
+/// every class as having none, binding a free function where an unseen base
+/// holds the overload ([NFR-RA-05]). Checked at compile, so deciding the key
+/// never compiles a language nobody asked about (CR-197).
 ///
 /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn check_supertype_capture(manifest_label: &str, compiled: &CompiledQueries) -> Result<(), PluginError> {
-    let captures = compiled
-        .get("references")
-        .is_some_and(|q| q.capture_names().contains(&SUPERTYPE_CAPTURE));
-    if captures {
+const SUPERTYPE_REASON: &str =
+    "`implicit_call_falls_through` requires the `references` query to capture `@ref.extends`, \
+     or no class's supertypes would be seen";
+
+/// A capture a descriptor key depends on ([`NAMESPACE_REASON`],
+/// [`SUPERTYPE_REASON`]): the compiled `capability` query — embedded or an
+/// on-disk override — carries `capture`, or the language's compile is
+/// refused, naming the descriptor and `reason`.
+fn check_capture(
+    manifest_label: &str,
+    compiled: &CompiledQueries,
+    capability: &str,
+    capture: &str,
+    reason: &str,
+) -> Result<(), PluginError> {
+    if compiled.get(capability).is_some_and(|q| q.capture_names().contains(&capture)) {
         return Ok(());
     }
     Err(PluginError::Manifest {
         file: manifest_label.to_string(),
-        detail: format!(
-            "`implicit_call_falls_through` requires the `references` query to capture \
-             `@{SUPERTYPE_CAPTURE}`, or no class's supertypes would be seen"
-        ),
+        detail: reason.to_string(),
     })
 }
 
