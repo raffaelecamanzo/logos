@@ -6,9 +6,10 @@
 //! The facts ride beside the node (`nodes.param_min`, `param_max`,
 //! `takes_self`) and on the ledger row (`unresolved_refs.arg_count`, part of the
 //! row's identity), all added by migration 33. No range or count binds on them
-//! yet, so every edge here is the one their absence produced; the takes-`self`
-//! fact is bound on by a proven Rust receiver's call (S-604,
-//! `rust_receiver_binding.rs`), which no fixture here makes. A one-file edit
+//! yet. The takes-`self` fact filters a proven Rust receiver's candidates
+//! (S-604, `rust_receiver_binding.rs`), but changes no edge here: the fixture's
+//! one proven call, `a.by_ref(1)`, has a single candidate, which takes `self`.
+//! So every edge here is the one the facts' absence produced. A one-file edit
 //! re-derives them through sync to exactly what a fresh index of the edited
 //! tree records.
 //!
