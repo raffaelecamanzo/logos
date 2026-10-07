@@ -2881,14 +2881,6 @@ struct CapturedCall {
     operand: std::ops::Range<usize>,
 }
 
-/// The [`FunctionMetrics`] of one callable declaration, captured while its AST
-/// is in hand: complexity and line count ([FR-EX-03], [FR-EX-04]), and the
-/// has-body fact with its body's token count (S-500, [FR-EX-11]) from the
-/// language's declared `body_kinds`.
-///
-/// [FR-EX-03]: ../../../docs/specs/requirements/FR-EX-03.md
-/// [FR-EX-04]: ../../../docs/specs/requirements/FR-EX-04.md
-/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 /// Whether a declaration takes `self` and how (CR-200, S-606 / [FR-EX-34]):
 /// recorded for a Rust impl function (`is_rust_method`) and a callable required
 /// signature, from its parameter list — the mode [`ReceiverMode::None`]
@@ -2918,6 +2910,14 @@ fn qualified_call(captures: &[QueryCapture<'_>], capture_names: &[&str], source:
     Some(qualified_call_target(ty, tr, segments))
 }
 
+/// The [`FunctionMetrics`] of one callable declaration, captured while its AST
+/// is in hand: complexity and line count ([FR-EX-03], [FR-EX-04]), and the
+/// has-body fact with its body's token count (S-500, [FR-EX-11]) from the
+/// language's declared `body_kinds`.
+///
+/// [FR-EX-03]: ../../../docs/specs/requirements/FR-EX-03.md
+/// [FR-EX-04]: ../../../docs/specs/requirements/FR-EX-04.md
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String]) -> FunctionMetrics {
     let body = shape::callable_body(decl.node, body_kinds);
     FunctionMetrics {
