@@ -68,6 +68,17 @@
 //! generic arguments dropped; `Self` is the caller's self type where its impl
 //! names it by one segment (`impl crate::m::S` may name another `S`).
 //!
+//! **1c. A receiver inside a macro (S-610).** A macro's token tree is never
+//! parsed as expressions, so the query marks no receiver there. The token-tree
+//! walk ([`macro_call_refs`](super::refs::macro_call_refs)) reads the two
+//! receivers a proof form can type — `x.f()`'s plain `x` and `self.x.f()`'s
+//! field — and hands each to [`Receivers::macro_site`], whose row [`Receivers::finish`]
+//! proves by the same `variable` / `self_field` rules, at the macro's own
+//! position: no scope boundary lies inside a token tree, so the macro sees the
+//! bindings its call sees. A name the macro itself binds
+//! (`matches!(o, Some(m) if m.f())`) is not told apart from the caller's own.
+//! A chain, a path, a literal or a call result is no receiver and stays `other`.
+//!
 //! **2. Shape (S-514, every language).** Every Method-form row typing left
 //! bare records one shape from a closed lexicon ([`ReceiverShape`]), which the
 //! binder dispatches on ([FR-RS-12]): `self` binds among the caller's own
@@ -114,6 +125,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use tree_sitter::Node;
 
 use super::config::accessor::{outermost_callable, DeclaredTypes};
+use super::refs::MacroReceiver;
 use super::{
     declared_superclass, type_parameters_in_scope, Decl, RefFact, SELF_RECEIVER_METHOD_CAPTURE,
 };
@@ -204,6 +216,20 @@ struct Site<'tree> {
     invocation: Node<'tree>,
     /// The innermost declaration enclosing the call, if any.
     caller: Option<usize>,
+}
+
+/// A row the macro walk pushed for a method call inside a macro's token tree
+/// (S-610), whose receiver it read in code: no query marks a receiver there.
+struct MacroSite<'tree> {
+    /// The row's index in the file's refs.
+    row: usize,
+    /// The macro invocation: no node inside its token tree is a binding's scope,
+    /// so every call in it sees the bindings the invocation sees.
+    invocation: Node<'tree>,
+    /// The innermost declaration enclosing the macro, if any.
+    caller: Option<usize>,
+    /// The receiver the walk read: `Variable` or `SelfField`.
+    receiver: Typed,
 }
 
 /// Where a binding a `binding` marker records is in scope (S-587).
@@ -308,6 +334,8 @@ pub(super) struct Receivers<'tree> {
     self_names: HashMap<usize, Option<String>>,
     /// Every row a receiver could retype or shape.
     sites: Vec<Site<'tree>>,
+    /// Every method-call row inside a macro whose receiver a proof may type.
+    macro_sites: Vec<MacroSite<'tree>>,
     /// What an unqualified call inside a class body means here.
     implicit_receiver: ImplicitReceiver,
     /// Whether a `super` call is typed by its class's one `Extends` row
@@ -370,6 +398,7 @@ impl<'tree> Receivers<'tree> {
                 anonymous: HashSet::new(),
                 self_names: HashMap::new(),
                 sites: Vec::new(),
+                macro_sites: Vec::new(),
                 implicit_receiver,
                 types_super,
                 bindings: HashMap::new(),
@@ -551,6 +580,24 @@ impl<'tree> Receivers<'tree> {
         }
     }
 
+    /// Note that the row about to be pushed at `row` is a method call written
+    /// inside the token tree of `invocation`, made by the declaration at
+    /// `caller`, whose `receiver` the walk read (S-610): it is proven by the
+    /// forms [`Receivers::retype`] reads for a call outside a macro.
+    pub(super) fn macro_site(
+        &mut self,
+        row: usize,
+        invocation: Node<'tree>,
+        caller: Option<usize>,
+        receiver: &MacroReceiver,
+    ) {
+        let receiver = match receiver {
+            MacroReceiver::Name(x) => Typed::Variable(x.clone()),
+            MacroReceiver::OwnField(x) => Typed::SelfField(x.clone()),
+        };
+        self.macro_sites.push(MacroSite { row, invocation, caller, receiver });
+    }
+
     /// Note a non-static single-type import's name.
     pub(super) fn type_import(&mut self, name: &str) {
         self.type_imports.insert(name.to_string());
@@ -561,7 +608,7 @@ impl<'tree> Receivers<'tree> {
     /// match: a `super` receiver reads the `Extends` rows this same pass
     /// recorded, and a bare call the file's imports.
     pub(super) fn finish(self, refs: &mut [RefFact], file: &FileDecls<'_, 'tree>) {
-        if self.sites.is_empty() {
+        if self.sites.is_empty() && self.macro_sites.is_empty() {
             return;
         }
         // A row typing retyped is Path form now: only bare Method rows remain.
@@ -684,19 +731,7 @@ impl<'tree> Receivers<'tree> {
                 if refs[row].form != RefForm::Method {
                     continue;
                 }
-                // `Self` is the caller's self type only where its impl names
-                // it by one segment, which the caller's module scope resolves
-                // as the call's does; `impl crate::m::S` may name another `S`.
-                let own_type = site
-                    .caller
-                    .filter(|c| self.impl_owners.get(c).is_some_and(|o| is_identifier(strip_generics(o).trim())))
-                    .and_then(|c| file.decls[c].self_type.as_deref());
-                let module = site.caller.and_then(|c| module_of(file.decls, c));
-                let found = match receiver {
-                    Typed::Variable(x) => self.variable_type(x, invocation, own_type, module, file),
-                    Typed::SelfField(x) => own_type.and_then(|own| self.member_type(own, x, module, file)),
-                    _ => None,
-                };
+                let found = self.proven_receiver(receiver, invocation, site.caller, file);
                 if let Some(Proven { head, peeled }) = found {
                     let peeled = (!peeled.is_empty()).then(|| peeled.join(" "));
                     proven.push((row, format!("{head}::{name}"), peeled));
@@ -752,6 +787,13 @@ impl<'tree> Receivers<'tree> {
                 typed.push((row, format!("{head}::{name}")));
             }
         }
+        // A receiver read inside a macro (S-610) is proven the same way.
+        for site in &self.macro_sites {
+            if let Some(Proven { head, peeled }) = self.proven_receiver(&site.receiver, site.invocation, site.caller, file) {
+                let peeled = (!peeled.is_empty()).then(|| peeled.join(" "));
+                proven.push((site.row, format!("{head}::{}", refs[site.row].target), peeled));
+            }
+        }
         for (row, target) in typed {
             refs[row].target = target;
             refs[row].form = RefForm::Path;
@@ -762,6 +804,30 @@ impl<'tree> Receivers<'tree> {
             row.form = RefForm::Path;
             row.receiver = Some(ReceiverShape::Other);
             row.peeled = peeled;
+        }
+    }
+
+    /// The type a Rust receiver the file may prove has at `invocation`, a call
+    /// made by the declaration at `caller` (S-587, S-610): `x.f()`'s `x`, or
+    /// `self.x.f()`'s field `x`.
+    fn proven_receiver(
+        &self,
+        receiver: &Typed,
+        invocation: Node<'_>,
+        caller: Option<usize>,
+        file: &FileDecls<'_, '_>,
+    ) -> Option<Proven> {
+        // `Self` is the caller's self type only where its impl names it by one
+        // segment, which the caller's module scope resolves as the call's does;
+        // `impl crate::m::S` may name another `S`.
+        let own_type = caller
+            .filter(|c| self.impl_owners.get(c).is_some_and(|o| is_identifier(strip_generics(o).trim())))
+            .and_then(|c| file.decls[c].self_type.as_deref());
+        let module = caller.and_then(|c| module_of(file.decls, c));
+        match receiver {
+            Typed::Variable(x) => self.variable_type(x, invocation, own_type, module, file),
+            Typed::SelfField(x) => own_type.and_then(|own| self.member_type(own, x, module, file)),
+            _ => None,
         }
     }
 

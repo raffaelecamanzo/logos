@@ -139,6 +139,7 @@ use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 use refs::{
     flatten_dotted_import, flatten_use_tree, from_module_segments, import_segments,
     is_relative_head, macro_call_refs, qualified_call_target, specifier_segments, split_path_text,
+    MacroReceiver,
 };
 use symbol::{build_symbol, descriptor_family, descriptor_for, path_segments, DescriptorFamily};
 
@@ -1974,8 +1975,19 @@ fn collect_refs(
                 // CR-043), attributed to the macro's enclosing declaration —
                 // see [`macro_rows`].
                 "ref.macro" => {
-                    let caller = enclosing_decl(node).map(|i| &decls[i]);
-                    out.extend(macro_rows(node, source, caller, &source_symbol));
+                    let caller_idx = enclosing_decl(node);
+                    let caller = caller_idx.map(|i| &decls[i]);
+                    let rows = macro_rows(node, source, caller, &source_symbol);
+                    // A receiver the walk read is typed after it, like a
+                    // query-captured one (S-610).
+                    if let Some(receivers) = receivers.as_mut() {
+                        for (offset, (_, receiver)) in rows.iter().enumerate() {
+                            if let Some(receiver) = receiver {
+                                receivers.macro_site(out.len() + offset, node, caller_idx, receiver);
+                            }
+                        }
+                    }
+                    out.extend(rows.into_iter().map(|(row, _)| row));
                 }
                 // A type relation (S-466, CR-149 §3.2 B, FR-EX-10): the captured
                 // node is a TYPE, recorded as a Path-form row of the capture's
@@ -2035,8 +2047,16 @@ fn collect_refs(
 /// `self.state.chip_class()`) is bound, or stays honestly unresolved, exactly
 /// like any other call ([NFR-RA-05]).
 ///
+/// Each row comes with the receiver the walk read for it, if any, for
+/// [`receiver::Receivers::macro_site`] to prove (S-610).
+///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, source_symbol: &LogosSymbol) -> Vec<RefFact> {
+fn macro_rows(
+    macro_node: Node<'_>,
+    source: &[u8],
+    caller: Option<&Decl<'_>>,
+    source_symbol: &LogosSymbol,
+) -> Vec<(RefFact, Option<MacroReceiver>)> {
     let mut out = Vec::new();
     for call in macro_call_refs(macro_node, source) {
         if call.target.is_empty() {
@@ -2054,7 +2074,7 @@ fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, so
             let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
             (call.target, call.form, shape)
         };
-        out.push(RefFact {
+        let fact = RefFact {
             source: source_symbol.clone(),
             target,
             alias: None,
@@ -2066,7 +2086,8 @@ fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, so
             peeled: None,
             arg_count: call.arg_count,
             exported: None,
-        });
+        };
+        out.push((fact, call.receiver));
     }
     out
 }
