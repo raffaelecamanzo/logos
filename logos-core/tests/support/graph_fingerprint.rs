@@ -6,9 +6,9 @@
 
 use logos_core::Runtime;
 
-/// A rowid-independent fingerprint of the whole graph (nodes, edges, the
-/// whole reference ledger, annotation verdicts), each section a sorted multiset
-/// of lines. `clone_group` is deliberately excluded: its representative is the
+/// A rowid-independent fingerprint of the whole graph (nodes with their arity
+/// facts, edges, the whole reference ledger, annotation verdicts), each section
+/// a sorted multiset of lines. `clone_group` is deliberately excluded: its representative is the
 /// component's minimum rowid, which is insertion-order-sensitive and so differs
 /// between two independently built stores even for identical clusters — and
 /// near-clone clustering is orthogonal to (and unchanged by) CR-015.
@@ -37,17 +37,27 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                 .unwrap_or_else(|| format!("<unknown:{id}>"))
         };
 
+        // Each node's arity facts (S-591, migration 33): its parameter range
+        // and whether it takes `self` — inputs the binder filters candidates by
+        // (S-604, S-592), so a synced node must carry a fresh index's facts.
+        let arity_of: std::collections::BTreeMap<i64, String> = store
+            .node_arities()?
+            .into_iter()
+            .map(|(id, range, takes_self)| (id.0, format!("{range:?}|{takes_self:?}")))
+            .collect();
+
         let mut node_lines: Vec<String> = nodes
             .iter()
             .map(|n| {
                 format!(
-                    "N {}|{:?}|{}|{}|{:?}|{:?}",
+                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}",
                     n.symbol.as_str(),
                     n.kind,
                     n.name,
                     n.file_path.as_deref().unwrap_or(""),
                     n.start_line,
                     n.end_line,
+                    arity_of.get(&n.id.0).map_or("None|None", String::as_str),
                 )
             })
             .collect();
@@ -60,7 +70,8 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
         edge_lines.sort();
 
         // Every ledger row, every column but its rowid (the file by path) —
-        // the peeled wrappers of a proven Rust receiver (S-587) included — so
+        // the peeled wrappers of a proven Rust receiver (S-587) and a call's
+        // argument count (S-591) included — so
         // a synced ledger must equal a fresh index's row for row (FR-SY-10 as
         // amended by CR-187). Capture-before-delete rows (`RefForm::Symbol`,
         // ADR-10) are compared too: one that outlives its sync is a row a fresh
@@ -69,7 +80,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .iter()
             .map(|r| {
                 format!(
-                    "R {}|{}|{}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}",
+                    "R {}|{}|{}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
                     r.file_id.and_then(|id| file_of.get(&id)).map_or("", String::as_str),
                     r.source_symbol,
                     r.target,
@@ -80,6 +91,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                     r.payload,
                     r.receiver,
                     r.peeled,
+                    r.arg_count,
                     r.line,
                 )
             })
