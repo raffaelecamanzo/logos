@@ -636,6 +636,34 @@ fn a_fall_through_never_reaches_the_workspace_name_match() {
     assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]));
 }
 
+/// A static wildcard brings each imported type's members into view, and the
+/// count chooses among them (S-592): `top(1)` binds `U1.top(a)` beside
+/// `U2.top(a, b)`, and `two(1)`, which only `U2.two(a, b)` names, binds
+/// nothing — `no-applicable-overload`.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_static_wildcards_members_are_filtered_by_the_count() {
+    let tmp = tree(&[
+        (
+            "src/main/java/com/u/U1.java",
+            "package com.u;\n\npublic class U1 {\n    public static void top(int a) {}\n}\n",
+        ),
+        (
+            "src/main/java/com/u/U2.java",
+            "package com.u;\n\npublic class U2 {\n    public static void top(int a, int b) {}\n    \
+             public static void two(int a, int b) {}\n}\n",
+        ),
+        (
+            "src/main/java/com/x/C.java",
+            "package com.x;\n\nimport static com.u.U1.*;\nimport static com.u.U2.*;\n\n\
+             public class C {\n    public void caller() { top(1); two(1); }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(calls_from(engine.runtime().unwrap(), "caller@7"), targets(&["top@4"]));
+    assert_eq!(residue(&engine, "java"), reasons(&[(R::NoApplicableOverload, 1)]));
+}
+
 // ── Sync ≡ reindex ────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
