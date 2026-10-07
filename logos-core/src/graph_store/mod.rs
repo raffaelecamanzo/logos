@@ -1875,9 +1875,9 @@ pub trait GraphStore {
     /// node with neither fact is absent; one with only one carries `None` for
     /// the other.
     ///
-    /// The [`node_self_types`](GraphStore::node_self_types) shape: the binder's
-    /// companion read beside [`all_nodes`](GraphStore::all_nodes), empty by
-    /// default — only the SQLite store implements it — so a non-SQLite or test
+    /// The [`node_self_types`](GraphStore::node_self_types) shape: the
+    /// companion read beside [`all_nodes`](GraphStore::all_nodes) for the
+    /// binder's candidate filters (S-604, S-592), empty by default — only the SQLite store implements it — so a non-SQLite or test
     /// store records every fact unknown, and an unknown fact never filters.
     ///
     /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md

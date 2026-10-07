@@ -2727,8 +2727,8 @@ UPDATE files SET content_hash = NULL;
 /// **Plugin-agnostic by construction**: no column names a language; a plugin
 /// fills them by declaring `@arity.*` captures in its own queries
 /// (`extract::arity`), and one that declares none records unknown everywhere.
-/// The binder filters candidates on them (S-592, S-604); an unknown fact never
-/// filters.
+/// They are the input to the binder's candidate filters (S-604, S-592); an
+/// unknown fact never filters.
 ///
 /// The argument count joins the ledger identity: a caller's `f(a)` and
 /// `f(a, b)` are two rows a binder admitting by range binds differently, so the
