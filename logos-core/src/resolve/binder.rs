@@ -3820,7 +3820,10 @@ impl Ctx<'_> {
     ///    the argument count ([`admitted_by_count`](Ctx::admitted_by_count)).
     ///    An unknown fact never filters.
     /// 3. **Scope** — a trait impl's function is no candidate where its trait
-    ///    is not in scope ([`trait_in_scope`](Ctx::trait_in_scope)).
+    ///    is not in scope ([`trait_in_scope`](Ctx::trait_in_scope)). One left
+    ///    out beside external traits' functions alone binds nothing
+    ///    ([`Residue::OverloadAmbiguous`]): an external trait, never placed in
+    ///    or out of scope, does not win by default.
     /// 4. **Precedence** — an inherent candidate beats a trait's, in any
     ///    module. With method syntax, inherent candidates that all take
     ///    `&self`/`&mut self` beside a trait's taking `self` by value bind
@@ -3841,12 +3844,13 @@ impl Ctx<'_> {
             return Res::NotFound;
         }
         let named = ix.assoc_items.get(&(ty, name.to_string())).map_or(&[][..], Vec::as_slice);
-        let mut candidates: Vec<NodeId> = named
+        let reachable: Vec<NodeId> = named
             .iter()
             .copied()
             .filter(|c| syntax == Syntax::Path || !ix.without_self.contains(c))
-            .filter(|&c| self.trait_in_scope(c))
             .collect();
+        let mut candidates: Vec<NodeId> = reachable.iter().copied().filter(|&c| self.trait_in_scope(c)).collect();
+        let scoped_out = candidates.len() < reachable.len();
         if candidates.is_empty() {
             let variant = named.is_empty() && ix.variants.get(&ty).is_some_and(|v| v.iter().any(|x| x == name));
             self.note(Want::Callable, || {
@@ -3874,7 +3878,16 @@ impl Ctx<'_> {
             && !inherent.is_empty()
             && inherent.iter().all(|c| matches!(mode(c), Some(ReceiverMode::Ref | ReceiverMode::RefMut)))
             && traits.iter().any(|c| mode(c) == Some(ReceiverMode::Value));
-        let res = if by_value_rival {
+        // A repository trait's function left out of scope, beside external
+        // traits' alone: the scope read may have missed a form that brings the
+        // repository trait in, and the external one is unplaced — never let it
+        // win by default.
+        let unplaced_only = scoped_out
+            && inherent.is_empty()
+            && traits
+                .iter()
+                .all(|c| ix.assoc_owner.get(c).is_some_and(|&h| ix.impl_headers[h].trait_node.is_none()));
+        let res = if by_value_rival || unplaced_only {
             Res::Ambiguous
         } else {
             exactly_one(if inherent.is_empty() { &traits } else { &inherent })
@@ -3939,8 +3952,12 @@ impl Ctx<'_> {
     /// Whether the source's file brings the trait `tr` into scope (S-607): a
     /// `use` whose path ends in its name and resolves to it (`use a::Tr`,
     /// `use a::Tr as T2`, `use a::Tr as _`), or a glob whose module declares
-    /// or re-exports it ([`type_in_module`](Ctx::type_in_module)). One file
-    /// holds one import scope, its inline modules' included.
+    /// or re-exports it ([`type_in_module`](Ctx::type_in_module)) — and a glob
+    /// of an **ancestor** module (`use super::*`) also brings in what that
+    /// module's own globs do, private ones included, as Rust's glob of a parent
+    /// brings in its imports ([`resolve_receiver_type`](Ctx::resolve_receiver_type)
+    /// reads an ancestor's glob alike). One file holds one import scope, its
+    /// inline modules' included.
     fn imports_trait(&self, tr: NodeId) -> bool {
         let Some(name) = self.ix.info.get(&tr).map(|i| i.name.as_str()) else {
             return false;
@@ -3954,10 +3971,20 @@ impl Ctx<'_> {
             .flatten()
             .filter(|path| path.last().is_some_and(|last| last == name))
             .any(|path| self.resolve_receiver_type(path) == Res::Found(tr));
+        let own = self.source_module();
+        let ancestor = |(krate, mods): &ModKey| {
+            own.as_ref().is_some_and(|(k, m)| k == krate && m.starts_with(mods))
+        };
         named
             || scope.globs.iter().any(|glob| {
-                self.module_key_of(glob, MAX_ALIAS_DEPTH)
-                    .is_some_and(|key| self.type_in_module(&key, name) == Res::Found(tr))
+                self.module_key_of(glob, MAX_ALIAS_DEPTH).is_some_and(|key| {
+                    self.type_in_module(&key, name) == Res::Found(tr)
+                        || (ancestor(&key)
+                            && self.module_scope(&key).is_some_and(|parent| {
+                                self.through_reexported_globs(&key, &parent.globs, name, MAX_ALIAS_DEPTH)
+                                    == Res::Found(tr)
+                            }))
+                })
             })
     }
 
@@ -4173,6 +4200,18 @@ impl Ctx<'_> {
         }
     }
 
+    /// The import scope of the file that holds the module `key` — one file
+    /// holds one scope, its inline modules' `use`s included.
+    fn module_scope(&self, key: &ModKey) -> Option<&FileScope> {
+        self.ix
+            .modules
+            .get(key)
+            .and_then(|m| self.ix.info.get(m))
+            .and_then(|i| i.file_path.as_deref())
+            .and_then(|p| self.ix.file_ids.get(p))
+            .and_then(|id| self.ix.file_scopes.get(id))
+    }
+
     /// Where a `use` path written in the module `key` may start (S-588):
     /// `crate::`, `self::` and `super::` from the module, a bare head from the
     /// module itself and — when it names another repository crate — from that
@@ -4246,15 +4285,7 @@ impl Ctx<'_> {
         if depth == 0 {
             return Res::NotFound;
         }
-        let Some(scope) = self
-            .ix
-            .modules
-            .get(key)
-            .and_then(|m| self.ix.info.get(m))
-            .and_then(|i| i.file_path.as_deref())
-            .and_then(|p| self.ix.file_ids.get(p))
-            .and_then(|id| self.ix.file_scopes.get(id))
-        else {
+        let Some(scope) = self.module_scope(key) else {
             return Res::NotFound;
         };
         // One file holds one import scope, its inline modules' `use`s

@@ -620,3 +620,37 @@ fn an_impl_header_read_through_a_retargeted_re_export_rebinds_written_calls_on_s
     assert!(from(&edges, "src/user.rs:z@3").is_empty(), "{edges:?}");
     assert_eq!(from(&edges, "src/user.rs:y@4"), targets(&["src/w.rs:mk@2"]));
 }
+
+/// A repository trait reached through an ancestor's glob (`use super::*` in
+/// a module whose parent globs `crate::traits::*`) is in scope: `w.fmt(f)`
+/// binds `Show::fmt`.
+#[test]
+fn a_trait_an_ancestors_private_glob_brings_in_is_in_scope() {
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod traits;\npub mod outer;\npub struct W;\nimpl traits::Show for W { fn fmt(&self) {} }\n"),
+        ("src/traits.rs", "pub trait Show { fn fmt(&self); }\n"),
+        ("src/outer.rs", "use crate::traits::*;\npub mod inner;\n"),
+        ("src/outer/inner.rs", "use super::*;\npub fn call(w: &crate::W) { w.fmt(); }\n"),
+    ]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert_eq!(from(&edges, "src/outer/inner.rs:call@2"), targets(&["src/lib.rs:fmt@4"]));
+}
+
+/// A repository trait left out of scope beside an external trait of the same
+/// method: the external one, which the graph never places in or out of scope,
+/// does not win by default — `w.fmt(f)` binds nothing (`overload-ambiguous`),
+/// never `Display::fmt` (rustc calls `Show::fmt` where `Show` is in scope).
+#[test]
+fn an_external_trait_never_wins_where_a_repository_trait_is_left_out_of_scope() {
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod traits;\npub mod user;\npub struct W;\nimpl std::fmt::Display for W { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) } }\nimpl traits::Show for W { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) } }\n"),
+        ("src/traits.rs", "pub trait Show { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result; }\n"),
+        ("src/user.rs", "pub fn call(w: &crate::W, f: &mut std::fmt::Formatter) { let _ = w.fmt(f); }\n"),
+    ]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert!(from(&edges, "src/user.rs:call@1").is_empty(), "{edges:?}");
+    // The two `Ok(())` name a prelude variant: `name-not-in-scope`.
+    assert_eq!(residue(&engine), reasons(&[(R::OverloadAmbiguous, 1), (R::NameNotInScope, 2)]));
+}
