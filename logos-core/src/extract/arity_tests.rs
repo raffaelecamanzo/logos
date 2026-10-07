@@ -519,6 +519,44 @@ fn python_ranges_and_counts() {
     assert_eq!((&counts["g2"], &counts["g3"]), (&vec![None], &vec![None]), "`**kw` spreads");
 }
 
+/// A comment opening a Python method's parameter list (`def update(  # type:
+/// ignore[override]`) does not hide its receiver: `self` is still not counted
+/// (S-592; werkzeug's `MultiDict.update` read `[2, 2]` before).
+#[test]
+fn a_python_receiver_behind_a_comment_is_still_the_receiver() {
+    let src = "class C:\n    def m(  # type: ignore[override]\n        self,\n        a,\n    ):\n        pass\n\n\
+        \x20   @dec\n    def d(  # note\n        self, a, b=1\n    ):\n        pass\n\n\
+        \x20   @staticmethod\n    def s(  # note\n        a\n    ):\n        pass\n";
+    assert_eq!(
+        ranges("pkg/a.py", src),
+        map(&[("d", range(1, Some(2))), ("m", range(1, Some(1))), ("s", range(1, Some(1)))])
+    );
+}
+
+/// A Kotlin `override fun` or Scala `override def` inherits the default values
+/// of what it overrides, which its own list never writes (S-592; koin's
+/// `SingleInstanceFactory.drop(scope: Scope?)` read `[1, 1]` under
+/// `abstract fun drop(scope: Scope? = null)`): its range is unknown.
+#[test]
+fn an_override_inherits_defaults_so_its_range_is_unknown() {
+    let kt = "abstract class B {\n    abstract fun drop(scope: Int? = null)\n}\n\
+        class C : B() {\n    override fun drop(scope: Int?) {}\n    fun keep(a: Int) {}\n}\n";
+    assert_eq!(ranges("src/a.kt", kt), map(&[("drop", None), ("keep", range(1, Some(1)))]));
+    let scala = "class C extends B {\n  override def drop(scope: Int): Unit = ()\n  \
+        def keep(a: Int): Unit = ()\n}\n";
+    assert_eq!(ranges("src/a.scala", scala), map(&[("drop", None), ("keep", range(1, Some(1)))]));
+}
+
+/// PHP's first-class callable `f(...)` (S-592) makes a closure and passes no
+/// argument, so its count is unknown, not one.
+#[test]
+fn a_php_first_class_callable_records_an_unknown_argument_count() {
+    let src = "<?php\nclass C { public function h($a, $b) {}\n\
+        public function r() { set_error_handler($this->h(...)); $this->h(1, 2); } }\n";
+    let counts = counts("src/a.php", src);
+    assert_eq!(counts["h"], vec![None, Some(2)]);
+}
+
 /// Python's `cls.m(…)` (S-592): it may call a class method, whose `cls` is
 /// implicit, or an instance method, to which it passes the instance itself —
 /// so its count is unknown, never the explicit instance counted against `m`'s

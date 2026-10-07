@@ -121,6 +121,9 @@
 ; `...$xs` spreads; a call's `object`/`scope` is its receiver, not its callee.
 (arguments) @arity.arguments
 (arguments (argument (variadic_unpacking)) @arity.spread)
+; A first-class callable `f(...)` makes a closure and passes no argument: its
+; count says nothing about `f`'s parameters (S-592).
+(arguments (variadic_placeholder) @arity.spread)
 (member_call_expression object: (_) @arity.receiver)
 (nullsafe_member_call_expression object: (_) @arity.receiver)
 (scoped_call_expression scope: (_) @arity.receiver)

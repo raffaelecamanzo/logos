@@ -53,6 +53,20 @@
       definition: (function_definition
         parameters: (parameters . [(identifier) (typed_parameter)] @arity.receiver))
       (#not-eq? @_decorator "staticmethod"))))
+; The same receiver behind a comment opening the list — `def update(  # type:
+; ignore[override]` puts the comment first, which the anchor would otherwise
+; stop at, so `self` was counted (S-592).
+(class_definition
+  body: (block
+    (function_definition
+      parameters: (parameters . (comment) . [(identifier) (typed_parameter)] @arity.receiver))))
+(class_definition
+  body: (block
+    (decorated_definition
+      (decorator (identifier) @_decorator)*
+      definition: (function_definition
+        parameters: (parameters . (comment) . [(identifier) (typed_parameter)] @arity.receiver))
+      (#not-eq? @_decorator "staticmethod"))))
 ; A method defined under a compound statement of a class body (`if`, `try`,
 ; `with`, …) takes `self` too, but a query cannot see whether the compound
 ; statement sits in a class body or anywhere else, so a function defined
