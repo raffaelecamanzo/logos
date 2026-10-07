@@ -542,6 +542,22 @@ fn every_proof_form_binds_the_trait_method_over_an_associated_function_and_the_i
     assert_eq!(residue.reasons.get(&R::SupertypeUnreached), Some(&1), "{residue:#?}");
 }
 
+#[test]
+fn a_trait_impls_associated_function_never_takes_a_method_call() {
+    // `Build::m` is an associated function, `Use::m` a method: `x.m()` calls
+    // `Use`'s, which is no longer tied with the other trait impl's.
+    let forms = "\
+pub struct P;
+pub trait Build { fn m() -> Self; }
+pub trait Use { fn m(&self); }
+impl Build for P { fn m() -> Self { P } }
+impl Use for P { fn m(&self) {} }
+pub fn param(x: &P) { x.m(); }
+";
+    let edges = edges_by_source(&[("src/lib.rs", "pub mod forms;\n"), ("src/forms.rs", forms)]);
+    assert_eq!(targets(&edges, "src/forms.rs:param@6"), ["src/forms.rs:m@5"]);
+}
+
 const SELF_CALLER: &str = "use crate::store::Store;\npub fn run(x: &Store) { x.get(); }\n";
 const ASSOC_GET: &str =
     "pub struct Store;\npub trait G { fn get(&self); }\nimpl Store {\n    pub fn get() {}\n}\nimpl G for Store {\n    fn get(&self) {}\n}\n";

@@ -2759,9 +2759,11 @@ fn a_same_named_type_of_another_module_is_told_apart_by_its_own_module() {
 /// takes-`self` fact: an inherent associated `name()` (420) beside a trait
 /// impl's `name(&self)` (421); two genuine `pair`s, inherent (422) and a trait
 /// impl's (423); an associated `make()` (424) alone; an inherent `vague` whose
-/// fact is unknown (425) beside a trait impl's `vague(&self)` (426); and an
-/// inherent method `caller(&self)` (427) for `Self::m` calls. `facts` is
-/// whether the index is given the facts at all.
+/// fact is unknown (425) beside a trait impl's `vague(&self)` (426); an
+/// inherent method `caller(&self)` (427) for `Self::m` calls; and two trait
+/// impls' `build`, `Build`'s associated `fn build() -> Self` (428) beside
+/// `Use`'s `build(&self)` (429). `facts` is whether the index is given the
+/// facts at all.
 fn self_fact_index(r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], facts: bool) -> Index {
     let (mut nodes, mut edges, mut self_types, mut refs) = receiver_fixture();
     let mut arities: Vec<NodeArity> = Vec::new();
@@ -2774,6 +2776,8 @@ fn self_fact_index(r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], facts: bool
         (425, "vague", None),
         (426, "vague", Some(true)),
         (427, "caller", Some(true)),
+        (428, "build", Some(false)),
+        (429, "build", Some(true)),
     ] {
         nodes.push(node(id, name, NodeKind::Method, "src/util.rs"));
         edges.push(contains(4, id));
@@ -2782,7 +2786,7 @@ fn self_fact_index(r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], facts: bool
         // takes-`self` fact is unknown is still a row.
         arities.push((NodeId(id), Some(ParamRange { min: 0, max: Some(0) }), takes_self));
     }
-    refs.extend([(421, "Named"), (423, "Pair"), (426, "Vague")].into_iter().enumerate().map(|(i, (id, tr))| {
+    refs.extend([(421, "Named"), (423, "Pair"), (426, "Vague"), (428, "Build"), (429, "Use")].into_iter().enumerate().map(|(i, (id, tr))| {
         make_ref(310 + i as i64, UTIL_RS, id, tr, None, RefForm::Path, EdgeKind::Implements)
     }));
     refs.extend(extra.iter().cloned());
@@ -2809,6 +2813,21 @@ fn a_method_call_binds_the_trait_method_over_an_inherent_associated_function() {
     }
     let r = proven(100, "Store::name", None);
     bound_to(bind(&r, &self_fact_index(&r, &store, false), BindingPolicy::Strict), 2, 420, EdgeKind::Calls);
+}
+
+#[test]
+fn a_trait_impls_associated_function_is_no_candidate_either() {
+    // Two trait impls' `build`, one an associated function: without the facts
+    // they are two of one rank (`overload-ambiguous`); with them, the one that
+    // takes `self` is the call's. The filter is not inherent-only.
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    let r = proven(100, "Store::build", None);
+    for policy in POLICIES {
+        bound_to(bind(&r, &self_fact_index(&r, &store, true), policy), 2, 429, EdgeKind::Calls);
+    }
+    let ix = self_fact_index(&r, &store, false);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::OverloadAmbiguous));
 }
 
 #[test]
