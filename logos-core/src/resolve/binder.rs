@@ -3714,7 +3714,7 @@ impl Ctx<'_> {
     /// over for an inherited overload. When the class and its supertypes hold
     /// the name but none applicable, a language whose unqualified in-class call
     /// is on the instance, and which records its classes' supertypes
-    /// ([`falls_through`](Ctx::falls_through): C#, Kotlin), goes on to the free
+    /// ([`falls_through`](Ctx::falls_through): Kotlin), goes on to the free
     /// functions and imports in scope, as its own lookup does — Kotlin's
     /// `module { }` inside a class whose `module(a, b)` cannot take it calls
     /// the imported `module`. The ledger does not tell `m()` from `this.m()`,
