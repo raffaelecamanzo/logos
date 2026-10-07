@@ -78,7 +78,7 @@
 //! it found: no wider rung reads the path again ([`Ctx::type_reached`]). A
 //! trait-typed call — a trait body's `self.m()`, a `dyn`/`impl`/bound-typed
 //! receiver, a written `Tr::m(x)` — fans out to every impl of the method and
-//! the default where an impl does not override it ([`Ctx::fan_out`]).
+//! the trait's default body ([`Ctx::fan_out`]).
 //!
 //! [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
 //!
@@ -882,11 +882,6 @@ pub(crate) struct Index {
     ///
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     trait_impls: HashMap<NodeId, Vec<usize>>,
-    /// A trait's simple name → every trait impl block naming a trait of that
-    /// name, as indexes into [`impl_headers`](Index::impl_headers) (S-608) —
-    /// the implementors whose overrides decide whether a trait's default body
-    /// is a fan-out target ([`Index::overridden_everywhere`]).
-    impls_by_trait_name: HashMap<String, Vec<usize>>,
     /// A type node → the one type its `impl Deref` names as `Target`, resolved
     /// in the block's scope (S-608, [FR-RS-47] rule 4): [`Res::NotFound`] for a
     /// type the repository does not declare, [`Res::Ambiguous`] when two
@@ -1043,7 +1038,6 @@ impl Index {
             assoc_owner: HashMap::new(),
             impl_headers: Vec::new(),
             trait_impls: HashMap::new(),
-            impls_by_trait_name: HashMap::new(),
             deref_targets: HashMap::new(),
             with_self: HashSet::new(),
             receiver_modes: HashMap::new(),
@@ -1393,10 +1387,6 @@ impl Index {
                     assoc.entry((ty, info.name.clone())).or_default().push(f);
                 }
             }
-            if let Some(path) = &header.trait_path {
-                let simple = path.rsplit("::").next().unwrap_or(path);
-                self.impls_by_trait_name.entry(simple.to_string()).or_default().push(at);
-            }
             if let (Res::Found(ty), Some(_)) = (header.self_type, header.trait_node) {
                 self.trait_impls.entry(ty).or_default().push(at);
             }
@@ -1612,30 +1602,6 @@ impl Index {
             .fns
             .iter()
             .any(|f| self.info.get(f).is_some_and(|i| i.name == name))
-    }
-
-    /// Whether every implementor of the trait `tr` overrides its method `name`
-    /// (S-608, [FR-RS-08] as amended by [FR-RS-47]) — so that its default body
-    /// is no dispatch target: at least one impl block of `tr`, each declaring
-    /// `name`. A block naming a trait of `tr`'s name that its scope does not
-    /// place may be one of `tr`'s implementors, so the default is not proven
-    /// overridden past it.
-    ///
-    /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
-    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
-    fn overridden_everywhere(&self, tr: NodeId, name: &str) -> bool {
-        let Some(blocks) = self.info.get(&tr).and_then(|i| self.impls_by_trait_name.get(&i.name)) else {
-            return false;
-        };
-        let mut any = false;
-        for &at in blocks {
-            match self.impl_headers[at].trait_node {
-                Some(other) if other != tr => {}
-                Some(_) if self.block_overrides(at, name) => any = true,
-                _ => return false,
-            }
-        }
-        any
     }
 
     /// Members of `scope` named `name`, filtered by `want`.
@@ -4998,10 +4964,12 @@ impl Ctx<'_> {
     /// The SET a call through the trait `tr` fans out to (S-281, [FR-RS-08] as
     /// amended by [FR-RS-47]; S-608): every concrete repository impl of its
     /// method `name` ([`Index::impls_of`]), plus the trait's own default body
-    /// (a [`Want::Callable`] member of the trait node) unless every
-    /// implementor overrides it ([`Index::overridden_everywhere`]). Union
-    /// reachability: any impl — or the default, for an impl that does not
-    /// override — is a legitimate runtime dispatch target ([FR-AN-01]). A
+    /// (a [`Want::Callable`] member of the trait node). Union reachability:
+    /// any impl — or the default, for an impl that does not override, an
+    /// implementor outside the repository included — is a legitimate runtime
+    /// dispatch target ([FR-AN-01]); the default stays in the set even where
+    /// every repository impl overrides it, as FR-RS-08's set always held it
+    /// (its "zero loss of a previously-resolved edge"). A
     /// required signature binds nothing: it is no node of the index
     /// ([`bindable`]). Id-sorted and deduped for a deterministic edge order
     /// ([NFR-RA-06]).
@@ -5012,9 +4980,7 @@ impl Ctx<'_> {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn fan_out(&self, tr: NodeId, name: &str) -> Vec<NodeId> {
         let mut targets = self.ix.impls_of(tr, name).to_vec();
-        if !self.ix.overridden_everywhere(tr, name) {
-            targets.extend(self.ix.members_named(tr, name, Want::Callable));
-        }
+        targets.extend(self.ix.members_named(tr, name, Want::Callable));
         targets.sort_unstable();
         targets.dedup();
         targets

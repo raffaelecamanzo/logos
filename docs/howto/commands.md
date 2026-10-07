@@ -504,7 +504,7 @@ the file re-exporting `T`, imports its name twice; `not-a-callable` for an enum
 variant. A trait-typed call — `self.m()` / `Self::m()` in a trait's default
 body, a receiver typed `&dyn Tr`, `impl Tr` or a generic parameter bounded by
 `Tr` (inline or in a `where` clause), a written `Tr::m(x)` — binds every impl
-of `Tr::m` plus the default body unless every impl overrides it; two bounds
+of `Tr::m` plus the trait's default body; two bounds
 that each supply the method are `overload-ambiguous`, a method only a bound
 outside the repository (`Clone`, `Send`) can supply is `external-type`, and a
 trait with neither an impl nor a default of it is `supertype-unreached`. An

@@ -103,10 +103,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   receiver typed `impl Tr` or by a generic parameter bounded by `Tr` (inline,
   in a `where` clause, or on the enclosing `impl`), and a written `Tr::m(x)`
   now fan out as a `&dyn Tr` call does (a trait-typed receiver also inside a
-  macro's arguments) to every impl of the method plus the default body; for
-  every such call,
-  `&dyn Tr` included, the default is no longer a target when every impl
-  overrides it. Two bounds that each supply the method bind nothing, and a
+  macro's arguments) to every impl of the method plus the default body. Two
+  bounds that each supply the method bind nothing, and a
   method only a bound outside the repository (`Clone`, `Iterator`) supplies
   reads `external-type`. `<T as Tr>::m()` binds `T`'s impl of `Tr::m`, or
   `Tr`'s default. A sync now also re-binds the calls an `impl` block's header

@@ -346,10 +346,12 @@ pub fn path(q: &Q) { Run::go(q); }
     }
 }
 
-/// A default every impl overrides is no dispatch target; with no impl at all
-/// the default is the only one.
+/// A default body stays a dispatch target where every repository impl
+/// overrides it — an implementor outside the repository may not, and
+/// FR-RS-08's set never lost an edge it held — and with no impl at all it is
+/// the only one.
 #[test]
-fn a_default_every_impl_overrides_is_no_fan_out_target() {
+fn a_default_stays_a_fan_out_target_beside_overriding_impls() {
     let tmp = tree(&[(
         "src/lib.rs",
         "\
@@ -365,7 +367,7 @@ pub fn b(i: &dyn Idle) { i.rest(); }
     )]);
     let engine = index(tmp.path());
     let edges = call_edges(engine.runtime().unwrap());
-    assert_eq!(from(&edges, "src/lib.rs:a@7"), targets(&["src/lib.rs:go@5"]));
+    assert_eq!(from(&edges, "src/lib.rs:a@7"), targets(&["src/lib.rs:go@1", "src/lib.rs:go@5"]));
     assert_eq!(from(&edges, "src/lib.rs:b@8"), targets(&["src/lib.rs:rest@2"]));
 }
 
@@ -457,8 +459,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
 /// impl, a `dyn` call and a trait body's `self` call.
 fn greet_tree(imp: &str) -> Vec<(&'static str, String)> {
     vec![
-        ("src/lib.rs", "pub mod greet;\npub mod x;\npub mod imp;\npub mod y;\npub mod callers;\n".to_string()),
-        ("src/y.rs", "pub struct Y;\n".to_string()),
+        ("src/lib.rs", "pub mod greet;\npub mod x;\npub mod imp;\npub mod callers;\n".to_string()),
         (
             "src/greet.rs",
             "pub trait Greet {\n    fn hello(&self) {}\n    fn twice(&self) { self.hello(); }\n}\n".to_string(),
@@ -504,30 +505,11 @@ fn an_empty_impl_added_or_removed_rebinds_on_sync() {
 
 /// An override added or removed moves the type's callers between the default
 /// and the override, and the fan-out set of a `dyn` call and of the trait
-/// body's `self` call with them.
+/// body's `self` call gains or loses it beside the default.
 #[test]
 fn an_override_added_or_removed_rebinds_on_sync() {
     let added = sync_case(EMPTY_IMPL, OVERRIDE);
     assert_eq!(from(&added, "src/callers.rs:f@3"), targets(&["src/imp.rs:hello@2"]));
-    for caller in ["src/callers.rs:g@4", "src/greet.rs:twice@3"] {
-        assert_eq!(from(&added, caller), targets(&["src/imp.rs:hello@2"]), "{caller}: {added:?}");
-    }
-    let removed = sync_case(OVERRIDE, EMPTY_IMPL);
-    for caller in ["src/callers.rs:f@3", "src/callers.rs:g@4", "src/greet.rs:twice@3"] {
-        assert_eq!(from(&removed, caller), targets(&["src/greet.rs:hello@2"]), "{caller}: {removed:?}");
-    }
-}
-
-/// Beside an impl that overrides `hello`, an empty impl added for another type
-/// makes the default a dispatch target again on sync — for the `dyn` call and
-/// for the trait body's `self` call, whose row spells neither type — and
-/// removed, it takes it back.
-#[test]
-fn an_empty_impl_beside_an_override_moves_the_fan_out_set_on_sync() {
-    let initial = greet_tree(OVERRIDE);
-    let initial: Vec<(&str, &str)> = initial.iter().map(|(p, s)| (*p, s.as_str())).collect();
-    let with_y = "pub struct Y;\nimpl crate::greet::Greet for Y {}\n";
-    let added = synced_equals_reindexed(&initial, &[("src/y.rs", with_y)]);
     for caller in ["src/callers.rs:g@4", "src/greet.rs:twice@3"] {
         assert_eq!(
             from(&added, caller),
@@ -535,12 +517,9 @@ fn an_empty_impl_beside_an_override_moves_the_fan_out_set_on_sync() {
             "{caller}: {added:?}"
         );
     }
-    let mut both: BTreeMap<&str, &str> = initial.iter().copied().collect();
-    both.insert("src/y.rs", with_y);
-    let both: Vec<(&str, &str)> = both.into_iter().collect();
-    let removed = synced_equals_reindexed(&both, &[("src/y.rs", "pub struct Y;\n")]);
-    for caller in ["src/callers.rs:g@4", "src/greet.rs:twice@3"] {
-        assert_eq!(from(&removed, caller), targets(&["src/imp.rs:hello@2"]), "{caller}: {removed:?}");
+    let removed = sync_case(OVERRIDE, EMPTY_IMPL);
+    for caller in ["src/callers.rs:f@3", "src/callers.rs:g@4", "src/greet.rs:twice@3"] {
+        assert_eq!(from(&removed, caller), targets(&["src/greet.rs:hello@2"]), "{caller}: {removed:?}");
     }
 }
 
