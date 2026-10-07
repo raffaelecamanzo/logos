@@ -559,6 +559,16 @@ pub fn b(e: &std::io::Error) { <std::io::Error as Run>::go(e); }
     assert_eq!(residue(&engine), reasons(&[(R::SupertypeUnreached, 1), (R::ExternalType, 1)]));
 }
 
+/// A qualified path names its trait, so it binds whether or not the file
+/// imports it.
+#[test]
+fn a_qualified_path_binds_without_its_trait_in_scope() {
+    let callers = "use crate::run::Q;\npub fn q(q: &Q) { <Q as crate::run::Run>::go(q); }\n";
+    let tmp = tree(&[("src/lib.rs", "pub mod run;\npub mod callers;\n"), ("src/run.rs", RUN), ("src/callers.rs", callers)]);
+    let engine = index(tmp.path());
+    assert_eq!(from(&call_edges(engine.runtime().unwrap()), "src/callers.rs:q@2"), targets(&["src/run.rs:go@9"]));
+}
+
 // ── Sync ≡ reindex ─────────────────────────────────────────────────────────
 
 /// A synced edit equals a fresh index of the edited tree.
