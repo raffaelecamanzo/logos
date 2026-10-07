@@ -292,6 +292,7 @@ fn scala_ranges_and_counts() {
         def d(a: Int, b: Int = 2): Int = 1\n\
         def p: Int = 1\n\
         def r(using x: Int): Int = 1\n\
+        def i(implicit x: Int): Int = 1\n\
         def caller(xs: Seq[Int]): Unit = { g(1, 2); h { x => x }; k(1)(2); m(xs: _*); n(1) { 2 }; o(xs*) }\n\
         }\n";
     assert_eq!(
@@ -300,6 +301,7 @@ fn scala_ranges_and_counts() {
             ("caller", range(1, Some(1))),
             ("d", range(1, Some(2))),
             ("f", range(1, None)),
+            ("i", None),
             ("p", None),
             ("q", range(0, Some(0))),
             ("r", None),
