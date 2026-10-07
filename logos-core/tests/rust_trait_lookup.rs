@@ -581,6 +581,37 @@ fn a_qualified_path_binds_without_its_trait_in_scope() {
     assert_eq!(from(&call_edges(engine.runtime().unwrap()), "src/callers.rs:q@2"), targets(&["src/run.rs:go@9"]));
 }
 
+/// A qualified path inside a macro binds what it binds outside one, and never
+/// a same-named free function: the macro walk once recorded the bare `m`
+/// (sprint 92 review).
+#[test]
+fn a_qualified_path_inside_a_macro_binds_as_outside_and_never_the_free_fn() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "\
+pub trait Tr { fn m(&self) -> i32 { 0 } }
+pub struct X;
+impl Tr for X {}
+pub fn m(_x: &X) -> i32 { 7 }
+pub fn q_out(x: &X) { <X as Tr>::m(x); }
+pub fn q_in(x: &X) { println!(\"{}\", <X as Tr>::m(x)); }
+pub trait Tr2 {
+    fn m(&self) -> i32 { 0 }
+    fn s_out(&self) { <Self as Tr2>::m(self); }
+    fn s_in(&self) { println!(\"{}\", <Self as Tr2>::m(self)); }
+}
+",
+    )]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    for caller in ["src/lib.rs:q_out@5", "src/lib.rs:q_in@6"] {
+        assert_eq!(from(&edges, caller), targets(&["src/lib.rs:m@1"]), "{caller}: {edges:?}");
+    }
+    for caller in ["src/lib.rs:s_out@9", "src/lib.rs:s_in@10"] {
+        assert_eq!(from(&edges, caller), targets(&["src/lib.rs:m@8"]), "{caller}: {edges:?}");
+    }
+}
+
 // ── Sync ≡ reindex ─────────────────────────────────────────────────────────
 
 /// A synced edit equals a fresh index of the edited tree.
