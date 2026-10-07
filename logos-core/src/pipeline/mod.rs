@@ -79,7 +79,7 @@ use crate::extract::build_manifest::{self, ManifestFacts};
 use crate::extract::declared_types::{self, SchemaFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
-    BatchWriter, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType, NewImplBlock,
+    BatchWriter, GraphStore, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType, NewImplBlock,
     NewNode, NewUnresolvedRef, StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY,
     DECLARED_TYPES_EXTRACTED_KEY, LAST_FULL_INDEX_AT_KEY,
 };
@@ -706,23 +706,7 @@ pub fn sync(
     let (old_names, old_global_imports): (Vec<String>, bool) = if changed_paths.is_empty() {
         (Vec::new(), false)
     } else {
-        runtime.submit_read(|store| {
-            let mut names: Vec<String> = store
-                .impl_blocks()?
-                .into_iter()
-                .filter(|b| changed_paths.contains(&b.file_path))
-                .flat_map(|b| [Some(b.self_type), b.trait_path, b.deref_target])
-                .flatten()
-                .collect();
-            let mut global_imports = false;
-            for path in &changed_paths {
-                names.extend(store.node_names_for_path(path)?);
-                names.extend(store.import_aliases_for_path(path)?);
-                names.extend(store.file_namespace(path)?);
-                global_imports |= store.declares_global_import(path)?;
-            }
-            Ok((names, global_imports))
-        })?
+        runtime.submit_read(|store| departing_names(store, &changed_paths))?
     };
 
     let mut result = SyncResult::default();
@@ -1129,23 +1113,13 @@ fn purge_unadmitted(runtime: &Runtime, admitted: &HashSet<&str>) -> Result<Purge
     if paths.is_empty() {
         return Ok(PurgeOutcome::default());
     }
-    // Capture the node names of the files about to be purged BEFORE the delete
+    // Capture the names of the files about to be purged BEFORE the delete
     // cascades them away, so the caller can re-resolve the inbound cross-file
-    // references that targeted them ([NFR-RA-05]).
+    // references that targeted them ([NFR-RA-05]) — the same capture a sync
+    // takes of the files it re-extracts ([`departing_names`]).
     let (names, global_imports) = {
-        let paths = paths.clone();
-        runtime.submit_read(move |store| {
-            let mut names = Vec::new();
-            let mut global_imports = false;
-            for p in &paths {
-                names.extend(store.node_names_for_path(p)?);
-                // The namespace it declared (S-518): a wildcard that bound to
-                // the file spells that, not a node name.
-                names.extend(store.file_namespace(p)?);
-                global_imports |= store.declares_global_import(p)?;
-            }
-            Ok((names, global_imports))
-        })?
+        let departing: HashSet<String> = paths.iter().cloned().collect();
+        runtime.submit_read(move |store| departing_names(store, &departing))?
     };
     for path in &paths {
         remove_file(runtime, path.clone())?;
@@ -1156,6 +1130,32 @@ fn purge_unadmitted(runtime: &Runtime, admitted: &HashSet<&str>) -> Result<Purge
         names,
         global_imports,
     })
+}
+
+/// The names the stored facts of `paths` carry that a change to those files —
+/// a re-extract on sync, a removal by a config-narrowing purge — can move,
+/// before the change replaces them, and whether one of them declared a global
+/// namespace wildcard (S-518). Its nodes' names; the names it imports (S-588)
+/// and the namespace it declares (S-518), which rename no node; and the names
+/// its `impl` headers spell (S-608): an empty `impl Greet for X {}` declares no
+/// node, yet lends `X` its trait's defaults, and a `Deref` impl moves every
+/// method call on its type.
+fn departing_names(store: &dyn GraphStore, paths: &HashSet<String>) -> Result<(Vec<String>, bool)> {
+    let mut names: Vec<String> = store
+        .impl_blocks()?
+        .into_iter()
+        .filter(|b| paths.contains(&b.file_path))
+        .flat_map(|b| [Some(b.self_type), b.trait_path, b.deref_target])
+        .flatten()
+        .collect();
+    let mut global_imports = false;
+    for path in paths {
+        names.extend(store.node_names_for_path(path)?);
+        names.extend(store.import_aliases_for_path(path)?);
+        names.extend(store.file_namespace(path)?);
+        global_imports |= store.declares_global_import(path)?;
+    }
+    Ok((names, global_imports))
 }
 
 /// Record the admission-config fingerprint in `project_metadata` ([ADR-20]).

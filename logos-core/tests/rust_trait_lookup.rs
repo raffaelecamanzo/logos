@@ -596,6 +596,35 @@ fn an_override_added_or_removed_rebinds_on_sync() {
     }
 }
 
+/// A config change that stops admitting the file holding only an empty impl
+/// takes the lent default back, as a fresh index of the narrowed project
+/// would: the purge's change-set carries the impl header's names too.
+#[test]
+fn a_purged_empty_impl_takes_its_default_back() {
+    let files = greet_tree(EMPTY_IMPL);
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, s)| (*p, s.as_str())).collect();
+    let tmp = tree(&files);
+    let engine = index(tmp.path());
+    assert_eq!(
+        from(&call_edges(engine.runtime().unwrap()), "src/callers.rs:f@3"),
+        targets(&["src/greet.rs:hello@2"])
+    );
+    let narrowed = "exclude = [\"src/imp.rs\"]\n";
+    write(tmp.path(), ".logos/config.toml", narrowed);
+    engine.scan(true).expect("scan reconciles");
+    let rt = engine.runtime().unwrap();
+
+    let fresh = tree(&files);
+    write(fresh.path(), ".logos/config.toml", narrowed);
+    let reindexed = index(fresh.path());
+    assert_eq!(
+        graph_fingerprint(rt),
+        graph_fingerprint(reindexed.runtime().unwrap()),
+        "purge-to-state must equal index-of-state"
+    );
+    assert!(from(&call_edges(rt), "src/callers.rs:f@3").is_empty());
+}
+
 /// A `Deref` impl added in a file of its own makes the outer types' callers
 /// reach the methods along the whole chain on sync — the target's own, a
 /// method and a trait default of a type further down the chain that the
