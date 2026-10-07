@@ -298,6 +298,35 @@ pub fn size(b: &Buf) -> usize { b.len() }
     assert_eq!(residue(&engine), reasons(&[(R::ExternalType, 1)]));
 }
 
+/// Two `Deref` impls of one type (generics stripped) naming two targets
+/// decide no retry: `type-ambiguous`, never the first target's method.
+#[test]
+fn two_deref_impls_naming_two_targets_decide_no_retry() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "\
+use std::ops::Deref;
+pub struct A;
+impl A { pub fn a(&self) {} }
+pub struct B;
+impl B { pub fn a(&self) {} }
+pub struct W<T>(T);
+impl Deref for W<u8> {
+    type Target = A;
+    fn deref(&self) -> &A { &A }
+}
+impl Deref for W<u16> {
+    type Target = B;
+    fn deref(&self) -> &B { &B }
+}
+pub fn f(w: &W<u8>) { w.a(); }
+",
+    )]);
+    let engine = index(tmp.path());
+    assert!(from(&call_edges(engine.runtime().unwrap()), "src/lib.rs:f@15").is_empty());
+    assert_eq!(residue(&engine), reasons(&[(R::TypeAmbiguous, 1)]));
+}
+
 // ── Trait-typed receivers fan out ──────────────────────────────────────────
 
 const RUN: &str = "\
