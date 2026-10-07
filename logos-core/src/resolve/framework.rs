@@ -444,13 +444,14 @@ pub fn run(
 
     // Snapshot (one reader-pool read): the same consistent basis the
     // resolution pass binds against.
-    let (files, nodes, edges, refs, namespaces) = runtime.submit_read(|store| {
+    let (files, nodes, edges, refs, namespaces, signatures) = runtime.submit_read(|store| {
         Ok((
             store.indexed_files()?,
             store.all_nodes()?,
             store.all_edges()?,
             store.unresolved_refs()?,
             store.file_namespaces()?,
+            super::signature_nodes(store)?,
         ))
     })?;
 
@@ -514,7 +515,9 @@ pub fn run(
     let layout = PackageLayout::from_registry(registry)
         .with_declared_namespaces(namespaces)
         .with_import_root_overrides(&resolution.import_roots);
-    let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout.clone());
+    // A required signature binds nothing (S-606).
+    let (bind_nodes, bind_edges) = binder::bindable(&nodes, &edges, &signatures);
+    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone());
     let member = MemberConstants {
         root,
         registry,
@@ -2292,6 +2295,7 @@ fn bind_text(
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     };
     match binder::bind(&synthetic, index, policy) {
         binder::Outcome::Bound { target, .. } => Some(target),

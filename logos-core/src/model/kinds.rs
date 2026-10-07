@@ -923,6 +923,83 @@ impl TryFrom<i32> for ReceiverShape {
     }
 }
 
+/// How a callable's parameter list writes its **receiver** (S-606, [FR-EX-34]):
+/// a Rust `impl` function's or required trait signature's `self` parameter, by
+/// value, by reference, by mutable reference, or typed — or none, for an
+/// associated function such as `fn new() -> Self`. It is the input rustc's
+/// method probe orders candidates by; [`ReceiverMode::None`] is exactly a
+/// callable recorded `takes_self = false`.
+///
+/// Like [`ReceiverShape`], the discriminants are a frozen part of the on-disk
+/// contract: the `nodes.receiver_mode` column is guarded by
+/// `CHECK (receiver_mode IN (0,1,2,3,4))` (migration 34), and `NULL` is
+/// "not recorded".
+///
+/// [FR-EX-34]: ../../../../docs/specs/requirements/FR-EX-34.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum ReceiverMode {
+    /// No receiver: an associated function (`fn new() -> Self`).
+    #[serde(rename = "none")]
+    None = 0,
+    /// By value: `self`, `mut self`.
+    #[serde(rename = "value")]
+    Value = 1,
+    /// By shared reference: `&self`, `&'a self`.
+    #[serde(rename = "ref")]
+    Ref = 2,
+    /// By mutable reference: `&mut self`, `&'a mut self`.
+    #[serde(rename = "mut")]
+    RefMut = 3,
+    /// Typed: `self: Box<Self>`, `self: Pin<&mut Self>`.
+    #[serde(rename = "typed")]
+    Typed = 4,
+}
+
+impl ReceiverMode {
+    /// Every mode, in declaration (discriminant) order — the list the
+    /// migration-34 `CHECK (receiver_mode IN (…))` clause must equal.
+    pub const ALL: [ReceiverMode; 5] = [
+        ReceiverMode::None,
+        ReceiverMode::Value,
+        ReceiverMode::Ref,
+        ReceiverMode::RefMut,
+        ReceiverMode::Typed,
+    ];
+
+    /// The stable integer discriminant written to `nodes.receiver_mode`.
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// The lexicon token (matches the `serde` representation), and the
+    /// capture-name suffix a plugin's `@receiver.<mode>` capture spells.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReceiverMode::None => "none",
+            ReceiverMode::Value => "value",
+            ReceiverMode::Ref => "ref",
+            ReceiverMode::RefMut => "mut",
+            ReceiverMode::Typed => "typed",
+        }
+    }
+}
+
+impl TryFrom<i32> for ReceiverMode {
+    type Error = UnknownKind;
+
+    /// Recover a [`ReceiverMode`] from its stored discriminant.
+    ///
+    /// # Errors
+    /// Returns [`UnknownKind`] if `value` is not a known mode discriminant.
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        ReceiverMode::ALL
+            .into_iter()
+            .find(|m| m.as_i32() == value)
+            .ok_or(UnknownKind(value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,6 +1053,18 @@ mod tests {
         }
         assert_eq!(ReceiverShape::try_from(0), Err(UnknownKind(0)));
         assert_eq!(ReceiverShape::try_from(4), Err(UnknownKind(4)));
+    }
+
+    #[test]
+    fn receiver_mode_discriminants_are_frozen_and_roundtrip() {
+        for (idx, mode) in ReceiverMode::ALL.iter().enumerate() {
+            assert_eq!(mode.as_i32(), idx as i32, "{mode:?} discriminant drifted");
+            assert_eq!(ReceiverMode::try_from(mode.as_i32()), Ok(*mode));
+            let json = serde_json::to_string(mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.as_str()));
+        }
+        assert_eq!(ReceiverMode::try_from(-1), Err(UnknownKind(-1)));
+        assert_eq!(ReceiverMode::try_from(5), Err(UnknownKind(5)));
     }
 
     #[test]

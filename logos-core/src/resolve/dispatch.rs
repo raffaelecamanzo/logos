@@ -23,8 +23,9 @@
 //!   (the `LanguagePlugin` cluster: `is_documentation`, `is_artifact`,
 //!   `filenames`, `config_extraction`, `overridden_capabilities`,
 //!   `supports_reachability`). A bodyless signature (`fn f(&self);`) is a
-//!   `function_signature_item`, never extracted as a node, so only default
-//!   *bodies* are rooted.
+//!   `function_signature_item`: a node since S-606, but no dispatch entry —
+//!   it holds no code, and the annotation pass keeps it live as a bodyless
+//!   callable — so only default *bodies* are rooted.
 //! - **closure-argument tool dispatch** — a method carrying a dispatch
 //!   attribute ([`RUST_DISPATCH_ATTRS`], rmcp's `#[tool]`). The attribute macro
 //!   generates the router that dispatches it; the body is a

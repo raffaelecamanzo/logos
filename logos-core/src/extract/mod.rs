@@ -40,6 +40,10 @@
 // FR-EX-32), and whether a Rust impl function takes `self` (CR-200): read off
 // the `@arity.*` captures a plugin's queries declare.
 mod arity;
+// The facts one associated-item lookup reads (S-606, CR-202, FR-EX-34): impl
+// block headers, receiver modes, enum variant names and required signatures,
+// read off the `@item.*` captures a plugin's `symbols` query declares.
+mod assoc;
 mod complexity;
 // Per-function max nesting depth (S-042, CR-005, FR-EX-07): a declarative
 // block-kind walk, the structural sibling of `complexity`.
@@ -113,6 +117,7 @@ pub(crate) mod symbol;
 /// `rules.toml` always assemble into a valid symbol.
 ///
 /// [FR-AN-03]: ../../../docs/specs/requirements/FR-AN-03.md
+pub use assoc::ImplBlockFact;
 pub(crate) use symbol::escape_name;
 pub use symbol::SymbolContext;
 
@@ -123,7 +128,7 @@ use std::path::Path;
 use rayon::prelude::*;
 use tree_sitter::{Node, Parser, Query, QueryCapture, QueryCursor, StreamingIterator};
 
-use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, ParamRange, ReceiverShape, RefForm};
+use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeKind, ParamRange, ReceiverMode, ReceiverShape, RefForm};
 use crate::plugin::{ImportSpecifier, LanguagePlugin, LanguageRegistry, ModuleModelKind, Semantics};
 use crate::resolve::http_client_call::ClientCallRefusal;
 use crate::resolve::package_key::PackageLayout;
@@ -133,7 +138,7 @@ use config::binding::{PropertiesIndex, MEMBER_SCOPE};
 
 use refs::{
     flatten_dotted_import, flatten_use_tree, from_module_segments, import_segments,
-    is_relative_head, macro_call_refs, specifier_segments, split_path_text,
+    is_relative_head, macro_call_refs, qualified_call_target, specifier_segments, split_path_text,
 };
 use symbol::{build_symbol, descriptor_family, descriptor_for, path_segments, DescriptorFamily};
 
@@ -160,6 +165,23 @@ const SELF_TYPE_CAPTURE: &str = "symbol.self_type";
 ///
 /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
 const SELF_RECEIVER_METHOD_CAPTURE: &str = "ref.method.self";
+
+/// The `references`-query companions of a `@ref.call` naming the **type** and
+/// the **trait** of a fully qualified call `<T as Tr>::m()` (S-606, [CR-202]):
+/// the row records both ([`qualified_call_target`]) where the plain path rules
+/// would strip the bracket and record the bare `m`.
+///
+/// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+const QUALIFIED_TYPE_CAPTURE: &str = "ref.call.qualified.type";
+/// See [`QUALIFIED_TYPE_CAPTURE`].
+const QUALIFIED_TRAIT_CAPTURE: &str = "ref.call.qualified.trait";
+
+/// The `references`-query marker, in a `@ref.use` match, of a `use` that is
+/// **exported** — a Rust `pub use`, any `pub(…)` included (S-606, [CR-202]):
+/// each row of the declaration records [`RefFact::exported`].
+///
+/// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+const USE_EXPORTED_CAPTURE: &str = "ref.use.exported";
 
 /// The `references`-query marker naming the module of a `from m import a`
 /// (S-519, [FR-RS-14]): it records no row of its own, and each `@ref.import`
@@ -320,6 +342,26 @@ pub struct NodeFact {
     ///
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     pub takes_self: Option<bool>,
+    /// How the callable writes its receiver (S-606, [FR-EX-34]), recorded
+    /// wherever [`takes_self`](Self::takes_self) is: [`ReceiverMode::None`]
+    /// exactly when it is `false`, the mode its plugin's `@item.receiver.*`
+    /// capture names when `true` — `None` (unknown) when no capture names one.
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    pub receiver_mode: Option<ReceiverMode>,
+    /// An enum's variant names in declaration order, space-joined (S-606,
+    /// [FR-EX-34]); `Some("")` for an enum with none, `None` for every other
+    /// node and for an enum whose plugin captures no `@item.variants`.
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    pub variants: Option<String>,
+    /// `true` for a **required signature** (S-606, [CR-202] F3): a member its
+    /// container's implementors supply, with no body of its own — a Rust
+    /// trait's `fn m(&self);`, marked by an `@item.signature` capture. Its
+    /// node records `has_body = false`, its range and whether it takes `self`.
+    ///
+    /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+    pub signature: bool,
 }
 
 /// A graph relationship produced by extraction.
@@ -401,6 +443,15 @@ pub struct RefFact {
     ///
     /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
     pub arg_count: Option<u32>,
+    /// Whether an `Imports` row's declaration is exported — a Rust `pub use`,
+    /// any `pub(…)` visibility included (S-606, [FR-EX-34]): the re-export a
+    /// path through this module may follow. `Some(false)` for a private one,
+    /// `None` for every other row and for an import whose plugin marks no
+    /// `@ref.use.exported`. Not part of the ledger identity: one declaration
+    /// is either exported or not.
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    pub exported: Option<bool>,
 }
 
 /// The extraction result for a single file.
@@ -467,6 +518,13 @@ pub struct Facts {
     ///
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
     pub namespace: Option<String>,
+    /// Every impl block this file declares, an empty one included, in source
+    /// order (S-606, [CR-202] F1): its self type, reference flag, trait and
+    /// `Deref` target ([`ImplBlockFact`]). Empty for a file whose plugin
+    /// captures no `@item.impl`.
+    ///
+    /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+    pub impl_blocks: Vec<ImplBlockFact>,
 }
 
 /// One captured declaration, retained with its tree-sitter node for the metrics
@@ -491,6 +549,9 @@ struct Decl<'tree> {
     /// The parameter list the `@arity.*` captures give this declaration
     /// (S-591), `None` when they give it none. Never part of the symbol.
     params: Option<arity::Params>,
+    /// The receiver mode, variant names and signature marker the `@item.*`
+    /// captures give this declaration (S-606). Never part of the symbol.
+    item: assoc::DeclItemFacts,
 }
 
 /// Extract one file with an explicit plugin, allocating a fresh parser.
@@ -648,6 +709,7 @@ fn extract_one(
         forwarding: Vec::new(),
         declared_types: Vec::new(),
         namespace: None,
+        impl_blocks: Vec::new(),
     };
 
     // A grammar that fails to bind (ABI skew) is skipped-and-warned, never fatal.
@@ -685,8 +747,9 @@ fn extract_one(
     let source = input.source.as_bytes();
 
     // 1) Collect declarations from the query matches.
-    let (mut decls, package_statement, namespaces, damage) =
+    let (mut decls, package_statement, namespaces, damage, impl_blocks) =
         collect_decls(query, tree.root_node(), source, &plugin.semantics().body_node_kinds);
+    facts.impl_blocks = impl_blocks;
     if let Some(i) = partial_warning {
         damage.annotate(&mut facts.warnings[i]);
     }
@@ -774,6 +837,9 @@ fn extract_one(
                 self_type: None,
                 params: None,
                 takes_self: None,
+                receiver_mode: None,
+                variants: None,
+                signature: false,
             });
             Some(sym)
         }
@@ -827,11 +893,13 @@ fn extract_one(
                     receiver: None,
                     peeled: None,
                     arg_count: None,
+                    exported: None,
                 });
             }
         }
         let is_callable = matches!(node_kind, NodeKind::Function | NodeKind::Method);
         let metrics = is_callable.then(|| function_metrics(decl, keywords, body_kinds));
+        let (takes_self, receiver_mode) = receiver_facts(decl, is_rust_method, is_callable);
         facts.nodes.push(NodeFact {
             symbol: symbol.clone(),
             kind: node_kind,
@@ -868,10 +936,13 @@ fn extract_one(
                 Vec::new()
             },
             self_type: decl.self_type.clone(),
-            // S-591 / FR-EX-32: the range a callable admits; CR-200: whether a
-            // Rust impl function's list writes a receiver. Unknown elsewhere.
+            // S-591 / FR-EX-32: the range a callable admits; CR-200 / S-606:
+            // whether it takes `self`, and how ([`receiver_facts`]).
             params: decl.params.filter(|_| is_callable).and_then(|p| p.range),
-            takes_self: decl.params.filter(|_| is_rust_method).map(|p| p.receiver),
+            takes_self,
+            receiver_mode,
+            variants: decl.item.variants.clone(),
+            signature: decl.item.signature,
         });
 
         // A Contains edge links the enclosing scope to this declaration; both
@@ -1573,10 +1644,16 @@ fn file_module_name(path_segments: &[&str], package_stems: &[String]) -> String 
 /// row left bare records its receiver's shape (S-514, [FR-EX-13]).
 ///
 /// A method call the query captures as [`SELF_RECEIVER_METHOD_CAPTURE`] is a
-/// `self`-marked `@ref.method`: recorded as the Path-form `Self::m` when its
-/// enclosing declaration has a recorded self type ([`Decl::self_type`], S-493)
-/// — the same row a written `Self::m()` records, which the binder resolves
-/// through that self type — and otherwise as a Method-form row of shape `self`.
+/// `self`-marked `@ref.method`: recorded as the Path-form `Self::m` of shape
+/// `self` when its enclosing declaration has a recorded self type
+/// ([`Decl::self_type`], S-493) — the target a written `Self::m()` records,
+/// which the binder resolves through that self type, the shape keeping the
+/// method syntax a written one lacks (S-606) — and otherwise as a Method-form
+/// row of shape `self`.
+///
+/// A fully qualified call `<T as Tr>::m()` whose query marks its type and trait
+/// (`@ref.call.qualified.type` / `.trait` beside its `@ref.call`) is recorded
+/// with both (S-606, [`qualified_call_target`]), never as the bare `m`.
 ///
 /// [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
 fn collect_refs(
@@ -1648,6 +1725,12 @@ fn collect_refs(
     // once the walk ends: a call's arguments may be matched after its callee.
     let mut arguments = arity::ArgCaptures::default();
     let mut callees: Vec<(usize, Node<'_>)> = Vec::new();
+    // Each `@ref.call` node's row: a call two patterns capture — a fully
+    // qualified `<T as Tr>::m()` (S-606) is also a plain path call — is one
+    // row, whichever match comes first.
+    let mut call_rows: HashMap<usize, usize> = HashMap::new();
+    // A query that never marks an exported `use` says nothing of any (S-606).
+    let marks_exports = capture_names.contains(&USE_EXPORTED_CAPTURE);
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
@@ -1667,12 +1750,7 @@ fn collect_refs(
                 if let Some(receivers) = receivers.as_mut() {
                     // An anchor marker reads its companions from its own match
                     // (S-587).
-                    let companion = |name: &str| {
-                        m.captures
-                            .iter()
-                            .find(|c| capture_names[c.index as usize] == name)
-                            .map(|c| c.node)
-                    };
+                    let companion = |name: &str| match_capture(m.captures, capture_names, name);
                     receivers.mark(capture, node, source, || enclosing_decl(node), companion);
                 }
                 continue;
@@ -1690,7 +1768,16 @@ fn collect_refs(
                     if segments.is_empty() {
                         continue;
                     }
-                    let target = segments.join("::");
+                    // A fully qualified call records its type and trait (S-606).
+                    let qualified = qualified_call(m.captures, capture_names, source, &segments);
+                    if let Some(&row) = call_rows.get(&node.id()) {
+                        if let Some(qualified) = qualified {
+                            out[row].target = qualified;
+                        }
+                        continue;
+                    }
+                    call_rows.insert(node.id(), out.len());
+                    let target = qualified.unwrap_or_else(|| segments.join("::"));
                     // A JSX tag naming a local value (`const Icon = icons[k];
                     // <Icon />`) renders that value: it calls no component
                     // (S-440), so it records no reference at all.
@@ -1718,6 +1805,7 @@ fn collect_refs(
                         receiver: None,
                         peeled: None,
                         arg_count: None,
+                        exported: None,
                     });
                 }
                 "ref.method" | SELF_RECEIVER_METHOD_CAPTURE => {
@@ -1746,6 +1834,7 @@ fn collect_refs(
                             receiver: None,
                             peeled: None,
                             arg_count: None,
+                            exported: None,
                         });
                         continue;
                     }
@@ -1777,6 +1866,7 @@ fn collect_refs(
                         receiver: None,
                         peeled: None,
                         arg_count: None,
+                        exported: None,
                     });
                 }
                 // The language-agnostic import capture (S-015): the captured
@@ -1829,6 +1919,7 @@ fn collect_refs(
                         receiver: None,
                         peeled: None,
                         arg_count: None,
+                        exported: None,
                     });
                 }
                 // A member-access fact (S-042, CR-005, FR-EX-08): a method body
@@ -1856,6 +1947,7 @@ fn collect_refs(
                         receiver: None,
                         peeled: None,
                         arg_count: None,
+                        exported: None,
                     });
                 }
                 // Calls nested inside a macro invocation's token tree (S-162,
@@ -1879,8 +1971,12 @@ fn collect_refs(
                 // An import whose paths no single node spans (S-518; Scala's
                 // `import_declaration`): the declaration is walked like a Rust
                 // use-tree, one row per imported path.
+                // A Rust `use` records whether it is a re-export (S-606): its
+                // match carries `ref.use.exported` for a `pub use`.
                 name @ ("ref.use" | "ref.import.dotted") => {
-                    out.extend(tree_import_rows(name, node, source, &source_symbol, line));
+                    let exported = (name == "ref.use" && marks_exports)
+                        .then(|| match_capture(m.captures, capture_names, USE_EXPORTED_CAPTURE).is_some());
+                    out.extend(tree_import_rows(name, node, source, &source_symbol, line, exported));
                 }
                 _ => {} // a capture this pass does not consume
             }
@@ -1933,7 +2029,7 @@ fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, so
         // keeps apart. Its argument count (S-591) is the token tree's, for the
         // same reason.
         let (target, form, receiver) = if call.self_receiver {
-            receiver::self_call(caller, &call.target)
+            receiver::self_call(caller, &call.target, true)
         } else {
             let shape = (call.form == RefForm::Method).then_some(ReceiverShape::Other);
             (call.target, call.form, shape)
@@ -1949,6 +2045,7 @@ fn macro_rows(macro_node: Node<'_>, source: &[u8], caller: Option<&Decl<'_>>, so
             receiver,
             peeled: None,
             arg_count: call.arg_count,
+            exported: None,
         });
     }
     out
@@ -2022,13 +2119,15 @@ fn import_form(marked: &impl Fn(&str) -> bool, segments: &[String]) -> (RefForm,
 /// The `Imports` rows of an import whose paths a structural walk recovers —
 /// Rust's use-tree (`capture` = `ref.use`) or Scala's `import_declaration`
 /// (`ref.import.dotted`, S-518): one row per imported path, a glob a `Glob`
-/// row with no alias.
+/// row with no alias, each recording the declaration's `exported` mark
+/// (S-606; `None` where the query marks none).
 fn tree_import_rows(
     capture: &str,
     node: Node<'_>,
     source: &[u8],
     source_symbol: &LogosSymbol,
     line: u32,
+    exported: Option<bool>,
 ) -> Vec<RefFact> {
     let mut items = Vec::new();
     if capture == "ref.use" {
@@ -2055,6 +2154,7 @@ fn tree_import_rows(
                 receiver: None,
                 peeled: None,
                 arg_count: None,
+                exported,
             }
         })
         .collect()
@@ -2100,6 +2200,7 @@ fn type_relation_rows(
                 receiver: None,
                 peeled: None,
                 arg_count: None,
+                exported: None,
             });
         }
     }
@@ -2768,6 +2869,35 @@ struct CapturedCall {
 /// [FR-EX-03]: ../../../docs/specs/requirements/FR-EX-03.md
 /// [FR-EX-04]: ../../../docs/specs/requirements/FR-EX-04.md
 /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+/// Whether a declaration takes `self` and how (CR-200, S-606 / [FR-EX-34]):
+/// recorded for a Rust impl function (`is_rust_method`) and a callable required
+/// signature, from its parameter list — the mode [`ReceiverMode::None`]
+/// exactly when it takes none, the `@item.receiver.*` capture's when it does.
+/// `(None, None)` for every other declaration.
+///
+/// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+fn receiver_facts(decl: &Decl<'_>, is_rust_method: bool, is_callable: bool) -> (Option<bool>, Option<ReceiverMode>) {
+    let takes_self = decl
+        .params
+        .filter(|_| is_rust_method || (is_callable && decl.item.signature))
+        .map(|p| p.receiver);
+    let mode = takes_self.and_then(|takes| if takes { decl.item.receiver } else { Some(ReceiverMode::None) });
+    (takes_self, mode)
+}
+
+/// The node of the capture named `name` in one match, if the match has one.
+fn match_capture<'t>(captures: &[QueryCapture<'t>], capture_names: &[&str], name: &str) -> Option<Node<'t>> {
+    captures.iter().find(|c| capture_names[c.index as usize] == name).map(|c| c.node)
+}
+
+/// The target a fully qualified call `<T as Tr>::m()` records (S-606), when
+/// its match carries the type and trait companions of its `@ref.call`.
+fn qualified_call(captures: &[QueryCapture<'_>], capture_names: &[&str], source: &[u8], segments: &[String]) -> Option<String> {
+    let text = |name| match_capture(captures, capture_names, name).and_then(|n| n.utf8_text(source).ok());
+    let (ty, tr) = text(QUALIFIED_TYPE_CAPTURE).zip(text(QUALIFIED_TRAIT_CAPTURE))?;
+    Some(qualified_call_target(ty, tr, segments))
+}
+
 fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String]) -> FunctionMetrics {
     let body = shape::callable_body(decl.node, body_kinds);
     FunctionMetrics {
@@ -2783,7 +2913,9 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
 /// Step 1 of [`extract_one`]: the declarations the `symbols` query captures,
 /// the file's `package` statement when its grammar's query names one (S-472),
 /// the namespace declarations it names (S-518, [`declared_types::NAMESPACE_CAPTURE`]),
-/// and the declarations a parse-error region cost the file ([FR-EX-30]).
+/// the declarations a parse-error region cost the file ([FR-EX-30]), and the
+/// file's impl blocks (S-606, the [`assoc`] `@item.*` vocabulary, which also
+/// gives each declaration its receiver mode, variants and signature marker).
 ///
 /// A [`SELF_TYPE_CAPTURE`] gives its text to every declaration captured in the
 /// **same match** (S-493). It is gathered by declaration node and applied after
@@ -2804,6 +2936,7 @@ fn collect_decls<'t>(
     Option<String>,
     Vec<declared_types::NamespaceScope>,
     ParseDamage,
+    Vec<ImplBlockFact>,
 ) {
     let capture_names = query.capture_names();
     let mut decls: Vec<Decl<'t>> = Vec::new();
@@ -2823,6 +2956,8 @@ fn collect_decls<'t>(
     let mut self_types: HashMap<usize, String> = HashMap::new();
     // The parameter-list captures (S-591), resolved once every declaration is in.
     let mut params = arity::ParamCaptures::default();
+    // The impl-block, receiver-mode, variant and signature captures (S-606).
+    let mut items = assoc::AssocCaptures::default();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
@@ -2839,9 +2974,11 @@ fn collect_decls<'t>(
             .any(|c| capture_names[c.index as usize] == declared_types::NAMESPACE_CHAINED_CAPTURE);
         for cap in m.captures {
             let capture = capture_names[cap.index as usize];
+            let companion = |name: &str| match_capture(m.captures, capture_names, name);
             if declared_types::note_package(&mut package, capture, cap.node, source)
                 || declared_types::note_namespace(&mut namespaces, capture, cap.node, source, chained)
                 || params.note(capture, cap.node)
+                || items.note(capture, cap.node, companion)
             {
                 continue;
             }
@@ -2884,6 +3021,7 @@ fn collect_decls<'t>(
                 ordinal: 0,
                 self_type: None,
                 params: None,
+                item: assoc::DeclItemFacts::default(),
             });
         }
     }
@@ -2894,8 +3032,12 @@ fn collect_decls<'t>(
     for (decl, own) in decls.iter_mut().zip(own_params) {
         decl.params = own;
     }
+    let own_items = items.per_decl(&decls, source);
+    for (decl, own) in decls.iter_mut().zip(own_items) {
+        decl.item = own;
+    }
     damage.skipped = nameless.difference(&seen_decls).count();
-    (decls, package, namespaces, damage)
+    (decls, package, namespaces, damage, items.impl_blocks(source))
 }
 
 /// The declarations a parse-error region cost one file ([FR-EX-30]), counted

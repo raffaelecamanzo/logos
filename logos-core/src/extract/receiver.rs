@@ -87,9 +87,10 @@
 //! Java's typing markers map onto the lexicon: `this` is `self`; `name`,
 //! `field` and `refused` are `other`. A `self` call whose caller declares a
 //! self type (S-493, `@symbol.self_type`) is recorded as the Path-form
-//! `Self::send` — the row a written `Self::send()` records, bound through that
-//! type ([FR-RS-11]); the S-493 capture `@ref.method.self` is a `self`-marked
-//! `@ref.method`.
+//! `Self::send` — the target a written `Self::send()` records, bound through
+//! that type ([FR-RS-11]) — keeping the shape `self`, which a written one never
+//! carries, when the call wrote the `self` keyword (S-606, [`self_call`]); the
+//! S-493 capture `@ref.method.self` is a `self`-marked `@ref.method`.
 //!
 //! **How a marker finds its call.** The captured node's parent is the node the
 //! call's `@ref.method` / `@ref.call` capture also has for parent — the member
@@ -576,7 +577,7 @@ impl<'tree> Receivers<'tree> {
             match self.shape(marks, site, file, &row.target) {
                 Recorded::Shape(ReceiverShape::SelfInstance) => {
                     let caller = site.caller.map(|c| &file.decls[c]);
-                    (row.target, row.form, row.receiver) = self_call(caller, &row.target);
+                    (row.target, row.form, row.receiver) = self_call(caller, &row.target, marks.own);
                 }
                 Recorded::Shape(shape) => row.receiver = Some(shape),
                 Recorded::FreeCall => row.form = RefForm::Path,
@@ -1005,12 +1006,23 @@ fn base_name(path: &str) -> &str {
 
 /// What a call to `name` on the caller's own instance records, made by the
 /// declaration `caller`: through its recorded self type (S-493), the Path-form
-/// `Self::name` — the row a written `Self::name()` records; otherwise the
-/// Method-form `name` of shape `self`. The one spelling of that rule, shared
-/// by the shape pass and Rust's macro-argument walker.
-pub(super) fn self_call(caller: Option<&Decl<'_>>, name: &str) -> (String, RefForm, Option<ReceiverShape>) {
+/// `Self::name`; otherwise the Method-form `name` of shape `self`. The one
+/// spelling of that rule, shared by the shape pass and Rust's macro-argument
+/// walker.
+///
+/// The `Self::name` row keeps the shape `self` when the call wrote the `self`
+/// keyword (`keyword`: the query captured it `@ref.method.self`, or the macro
+/// walker read `self.f()`) — a language whose path twin `Self::name()` can be
+/// written too, and records no shape, so the method syntax stays readable
+/// (S-606, [CR-202] F2) and a caller writing both has two rows. A call shaped
+/// `self` by a named receiver (Go's `s.m()`, S-509) has no path twin and
+/// records the shapeless row it did before.
+///
+/// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+pub(super) fn self_call(caller: Option<&Decl<'_>>, name: &str, keyword: bool) -> (String, RefForm, Option<ReceiverShape>) {
     if caller.is_some_and(|d| d.self_type.is_some()) {
-        (format!("{SELF_TYPE_HEAD}::{name}"), RefForm::Path, None)
+        let shape = keyword.then_some(ReceiverShape::SelfInstance);
+        (format!("{SELF_TYPE_HEAD}::{name}"), RefForm::Path, shape)
     } else {
         (name.to_string(), RefForm::Method, Some(ReceiverShape::SelfInstance))
     }

@@ -17,7 +17,8 @@
 //!    from the live root set: every *exported* declaration (exported-is-live),
 //!    every framework `route` node, every `[semantics].entry_points` name, and
 //!    every `is_test = true` node (a test is a live root by construction, so an
-//!    unreferenced test helper is never `is_dead`, [FR-AN-01]/[CR-001]).
+//!    unreferenced test helper is never `is_dead`, [FR-AN-01]/[CR-001]), and
+//!    every bodyless callable (a Rust trait's required signature, S-606).
 //!    A `function`/`method` outside the live set is `is_dead = true` — **but
 //!    only for a language that declares the reachability capability** ([CR-043],
 //!    [ADR-39]). A callable whose language does not declare it (its binder
@@ -434,7 +435,10 @@ pub fn run(
 /// by definition), every framework `route` node (an entry point by
 /// construction), every node whose *name* appears in `[semantics].entry_points`,
 /// every node in `test_ids` (a test is a live root by construction, so an
-/// unreferenced test helper is never `is_dead` — [FR-AN-01], [CR-001]), and
+/// unreferenced test helper is never `is_dead` — [FR-AN-01], [CR-001]), every
+/// **bodyless callable** (a recorded `has_body` false, [FR-EX-11]: a Rust
+/// trait's required signature, S-606 — it holds no code of its own to be dead,
+/// only the contract its implementors fulfil), and
 /// every node carrying a **framework-dispatch live-root marker** — a
 /// `RoutesTo` self-edge planted by the dispatch pass ([`crate::resolve::dispatch`],
 /// [CR-043], [ADR-39]) on a method invoked only through an external framework
@@ -444,6 +448,7 @@ pub fn run(
 ///
 /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
 /// [CR-001]: ../../../docs/requests/CR-001-test-aware-quality-metrics.md
+/// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
 /// [CR-043]: ../../../docs/requests/CR-043-dead-code-detector-precision.md
 /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -476,6 +481,7 @@ fn live_set(
             || node.kind == NodeKind::Route
             || entry_names.contains(node.name.as_str())
             || test_ids.contains(&node.id)
+            || node.has_body == Some(false)
             || dispatch_roots.contains(&node.id);
         if is_root && live.insert(node.id) {
             queue.push_back(node.id);
@@ -586,7 +592,8 @@ fn is_file_module(node: &AnnotationNodeRow) -> bool {
 /// false`, or a recorded count under the floor, excludes.
 ///
 /// The floor is a *proxy* for a body in a language that declares no body kind
-/// (Rust, Go, Python, C): there a callable with no `body` field (a Go
+/// (Go, Python, C; Rust declares `block` since S-606): there a callable with no
+/// `body` field (a Go
 /// assembly-backed `func nanotime() int64`) records as bodied with its whole
 /// declaration counted, so it is excluded only while that declaration is under
 /// `min_tokens` — true of any ordinary signature at the default of 50.

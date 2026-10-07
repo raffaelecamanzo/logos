@@ -79,7 +79,7 @@ use crate::extract::build_manifest::{self, ManifestFacts};
 use crate::extract::declared_types::{self, SchemaFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
-    BatchWriter, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType,
+    BatchWriter, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType, NewImplBlock,
     NewNode, NewUnresolvedRef, StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY,
     DECLARED_TYPES_EXTRACTED_KEY, LAST_FULL_INDEX_AT_KEY,
 };
@@ -2232,6 +2232,7 @@ fn persist_file(
             insert_refs(w, facts, file_id)?;
             persist_config_source(w, facts, file_id)?;
             persist_declared_types(w, facts, file_id)?;
+            persist_impl_blocks(w, facts, file_id)?;
             for cap in &captured {
                 let kind = EdgeKind::try_from(cap.kind)
                     .with_context(|| format!("captured edge has an unknown kind {}", cap.kind))?;
@@ -2253,6 +2254,7 @@ fn persist_file(
                     receiver: None,
                     peeled: None,
                     arg_count: None,
+                    exported: None,
                 })?;
             }
             return Ok(PersistCounts {
@@ -2274,6 +2276,9 @@ fn persist_file(
     // The file's declared types (S-472): replace-wholesale per file, so an
     // empty set on a file that never declared one writes nothing.
     persist_declared_types(w, facts, file_id)?;
+    // The file's impl blocks (S-606): replace-wholesale per file, like the
+    // declared types.
+    persist_impl_blocks(w, facts, file_id)?;
     Ok(PersistCounts {
         nodes: counts.nodes,
         edges: counts.edges,
@@ -2749,6 +2754,24 @@ fn persist_declared_types(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> R
     w.replace_file_declared_types(file_id, &rows)
 }
 
+/// Persist a file's impl-block headers (S-606, CR-202 F1), replacing whatever
+/// the file recorded before — the [`persist_declared_types`] shape.
+fn persist_impl_blocks(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
+    let rows: Vec<NewImplBlock<'_>> = facts
+        .impl_blocks
+        .iter()
+        .map(|b| NewImplBlock {
+            start_line: b.start_line,
+            end_line: b.end_line,
+            self_type: &b.self_type,
+            self_ref: b.self_ref,
+            trait_path: b.trait_path.as_deref(),
+            deref_target: b.deref_target.as_deref(),
+        })
+        .collect();
+    w.replace_file_impl_blocks(file_id, &rows)
+}
+
 /// Persist a file's extracted references into the `unresolved_refs` ledger
 /// (S-011). Insertion is idempotent over the ledger's uniqueness rule.
 fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
@@ -2771,6 +2794,9 @@ fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
             // A call's argument count (S-591); `None` when it cannot be
             // counted and on every non-call row.
             arg_count: r.arg_count,
+            // Whether an import is a re-export (S-606); `None` on every
+            // non-import row.
+            exported: r.exported,
         })?;
     }
     Ok(())
@@ -2821,6 +2847,11 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             // fact — NULL wherever unknown.
             params: n.params,
             takes_self: n.takes_self,
+            // The S-606 receiver mode, variant names and signature marker
+            // (FR-EX-34) — NULL wherever not recorded.
+            receiver_mode: n.receiver_mode,
+            variants: n.variants.as_deref(),
+            signature: n.signature,
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
         // The CR-005 winnowed near-clone shingle set (FR-EX-09) — persisted into

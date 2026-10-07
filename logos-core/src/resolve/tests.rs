@@ -101,6 +101,7 @@ fn make_ref(
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     }
 }
 
@@ -834,6 +835,7 @@ fn artifact_ref(target: &str, form: RefForm, relation: ArtifactRelation) -> Unre
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     }
 }
 
@@ -1262,6 +1264,7 @@ fn infra_ref(
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     }
 }
 

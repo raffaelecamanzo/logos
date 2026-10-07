@@ -58,6 +58,13 @@ complexity_keywords = ["if", "else", "match", "while", "for", "loop", "&&", "||"
 # via its descriptor only, no core change (NFR-MA-01).
 nesting_block_kinds = ["if_expression", "match_expression", "while_expression", "loop_expression", "for_expression"]
 
+# The node kind of a callable's implementation body (S-500, FR-EX-11), declared
+# by S-606 (CR-202 F3): every `function_item` has a `block` body, so each keeps
+# `has_body` 1 and its body token count exactly as before, and a trait's
+# required signature (`fn m(&self);`, a `function_signature_item`) — the one
+# bodyless Rust callable the symbols query captures — records `has_body` 0.
+body_node_kinds = ["block"]
+
 # How Rust marks a declaration exported (S-015, FR-AN-01): a
 # `visibility_modifier` child (`pub`, `pub(crate)`, …) — the dead-code root set.
 export_convention = "visibility-modifier"

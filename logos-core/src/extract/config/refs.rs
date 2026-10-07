@@ -133,6 +133,7 @@ pub(in crate::extract) fn push_artifact_ref(
         receiver: None,
         peeled: None,
         arg_count: None,
+        exported: None,
     });
     true
 }
@@ -1439,6 +1440,7 @@ mod tests {
             forwarding: Vec::new(),
             declared_types: Vec::new(),
             namespace: None,
+            impl_blocks: Vec::new(),
         }
     }
 
@@ -1764,6 +1766,9 @@ mod tests {
             self_type: None,
             params: None,
             takes_self: None,
+            receiver_mode: None,
+            variants: None,
+            signature: false,
         }
     }
 
@@ -1877,6 +1882,7 @@ mod infra_tests {
             forwarding: Vec::new(),
             declared_types: Vec::new(),
             namespace: None,
+            impl_blocks: Vec::new(),
         }
     }
 

@@ -81,8 +81,9 @@ trait Plugin {
 #[test]
 fn bodyless_trait_method_is_not_an_entry() {
     // A trait method *signature* with no default body is a `function_signature_item`,
-    // not a `function_item`: it is not even extracted as a node, so it is not a
-    // dispatch entry. Only default *bodies* are rooted.
+    // not a `function_item`: a bodyless node since S-606, which the annotation
+    // pass keeps live itself, so it is not a dispatch entry. Only default
+    // *bodies* are rooted.
     let got = entries(
         "\
 trait Plugin {

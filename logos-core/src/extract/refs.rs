@@ -89,6 +89,23 @@ pub(crate) fn split_path_text(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The ledger target of a **fully qualified call** `<T as Tr>::m()` (S-606,
+/// [CR-202]): `<T as Tr>::m`, its type `ty` and trait `tr` recorded as type
+/// paths ([`item_path`](super::assoc::item_path) — generics stripped) and
+/// `segments` the call's path past the bracket, as [`split_path_text`] reads it
+/// (`["m"]`). [`split_path_text`] alone strips the whole bracket and records
+/// the bare `m`, which names neither the type nor the trait.
+///
+/// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+pub(crate) fn qualified_call_target(ty: &str, tr: &str, segments: &[String]) -> String {
+    format!(
+        "<{} as {}>::{}",
+        super::assoc::item_path(ty),
+        super::assoc::item_path(tr),
+        segments.join("::")
+    )
+}
+
 /// Canonicalise one captured `@ref.import` node's text into path segments, for
 /// a language whose specifiers are **names** ([`ImportSpecifier::Name`]).
 ///

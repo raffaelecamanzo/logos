@@ -117,6 +117,7 @@ fn plant_awaiting_capture(engine: &Engine) {
                 receiver: None,
                 peeled: None,
                 arg_count: None,
+                exported: None,
             })
         })
         .expect("plant the awaiting capture");
@@ -318,6 +319,7 @@ fn a_syncs_per_relation_coverage_leaves_out_capture_rows() {
                     receiver: None,
                     peeled: None,
                     arg_count: None,
+                    exported: None,
                 })?;
             }
             Ok(())

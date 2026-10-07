@@ -52,7 +52,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 
-use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverShape, RefForm};
+use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverMode, ReceiverShape, RefForm};
 use crate::models::navigation::LanguageCount;
 use crate::models::quality::{Offender, WorstOffenders};
 
@@ -321,6 +321,20 @@ pub struct NewNode<'a> {
     ///
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     pub takes_self: Option<bool>,
+    /// How the callable writes its receiver (S-606, [FR-EX-34]) — the
+    /// `nodes.receiver_mode` column, migration 34. `None` wherever `takes_self`
+    /// is, or the mode is unknown.
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    pub receiver_mode: Option<ReceiverMode>,
+    /// An enum's variant names, space-joined (S-606) — the `nodes.variants`
+    /// column, migration 34. `None` for every other node.
+    pub variants: Option<&'a str>,
+    /// `true` for a required signature (S-606, [CR-202] F3) — the
+    /// `nodes.signature` column, migration 34.
+    ///
+    /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+    pub signature: bool,
 }
 
 impl<'a> NewNode<'a> {
@@ -348,6 +362,9 @@ impl<'a> NewNode<'a> {
             self_type: None,
             params: None,
             takes_self: None,
+            receiver_mode: None,
+            variants: None,
+            signature: false,
         }
     }
 }
@@ -631,6 +648,12 @@ pub struct UnresolvedRefRow {
     ///
     /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
     pub arg_count: Option<u32>,
+    /// Whether an import row's declaration is a re-export — a Rust `pub use`
+    /// (S-606, [FR-EX-34]; the `exported` column, migration 34). `None` for
+    /// every other row.
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    pub exported: Option<bool>,
 }
 
 /// One function/method node's metric inputs for the quality metrics engine
@@ -1573,6 +1596,64 @@ pub struct AvroSchemaRow {
 /// where unknown.
 pub type NodeArity = (NodeId, Option<ParamRange>, Option<bool>);
 
+/// One node's associated-item facts as [`GraphStore::node_item_facts`] reads
+/// them (S-606, [FR-EX-34]): each `None`/`false` where not recorded.
+///
+/// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeItemFacts {
+    /// The node.
+    pub id: NodeId,
+    /// How the callable writes its receiver (`nodes.receiver_mode`).
+    pub receiver_mode: Option<ReceiverMode>,
+    /// An enum's variant names, space-joined (`nodes.variants`).
+    pub variants: Option<String>,
+    /// Whether the node is a required signature (`nodes.signature`).
+    pub signature: bool,
+}
+
+/// The fields needed to record one impl block's header (S-606, [CR-202] F1;
+/// the `impl_blocks` table, migration 34).
+///
+/// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+#[derive(Debug, Clone, Copy)]
+pub struct NewImplBlock<'a> {
+    /// 1-based first line of the block.
+    pub start_line: u32,
+    /// 1-based last line of the block.
+    pub end_line: u32,
+    /// The self type as written, generics stripped; a reference's referent.
+    pub self_type: &'a str,
+    /// Whether the self type is a reference (`&T`, `&mut T`).
+    pub self_ref: bool,
+    /// The trait a trait impl implements; `None` for an inherent impl.
+    pub trait_path: Option<&'a str>,
+    /// An `impl Deref`'s `type Target`; `None` otherwise.
+    pub deref_target: Option<&'a str>,
+}
+
+/// One recorded impl block as [`GraphStore::impl_blocks`] reads it (S-606,
+/// [CR-202] F1): the [`NewImplBlock`] fields and the declaring file's path.
+///
+/// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplBlockRow {
+    /// The declaring file's project-relative path.
+    pub file_path: String,
+    /// 1-based first line of the block.
+    pub start_line: u32,
+    /// 1-based last line of the block.
+    pub end_line: u32,
+    /// The self type as written, generics stripped; a reference's referent.
+    pub self_type: String,
+    /// Whether the self type is a reference (`&T`, `&mut T`).
+    pub self_ref: bool,
+    /// The trait a trait impl implements; `None` for an inherent impl.
+    pub trait_path: Option<String>,
+    /// An `impl Deref`'s `type Target`; `None` otherwise.
+    pub deref_target: Option<String>,
+}
+
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind, payload,
@@ -1611,6 +1692,10 @@ pub struct NewUnresolvedRef<'a> {
     /// migration 33); `None` when it cannot be counted and for every non-call
     /// row.
     pub arg_count: Option<u32>,
+    /// Whether an import row's declaration is a re-export (S-606, the
+    /// `exported` column, migration 34); `None` for every other row. Outside
+    /// the identity: a duplicate keeps the first row's mark.
+    pub exported: Option<bool>,
 }
 
 /// The point-query read interface over the code graph.
@@ -1883,6 +1968,26 @@ pub trait GraphStore {
     /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     fn node_arities(&self) -> Result<Vec<NodeArity>> {
+        Ok(Vec::new())
+    }
+
+    /// The associated-item facts of every node carrying any (S-606,
+    /// [FR-EX-34]) — the `nodes.receiver_mode`, `nodes.variants` and
+    /// `nodes.signature` columns, ordered by node id. The
+    /// [`node_arities`](GraphStore::node_arities) shape, empty by default — only
+    /// the SQLite store implements it — so a non-SQLite or test store records
+    /// none.
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    fn node_item_facts(&self) -> Result<Vec<NodeItemFacts>> {
+        Ok(Vec::new())
+    }
+
+    /// Every recorded impl block (S-606, [CR-202] F1), ordered by file path
+    /// and line — empty by default, as [`node_item_facts`](GraphStore::node_item_facts).
+    ///
+    /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+    fn impl_blocks(&self) -> Result<Vec<ImplBlockRow>> {
         Ok(Vec::new())
     }
 
@@ -3170,6 +3275,78 @@ impl GraphStore for SqliteGraphStore {
             .collect()
     }
 
+    fn node_item_facts(&self) -> Result<Vec<NodeItemFacts>> {
+        // ORDER BY id keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, receiver_mode, variants, signature FROM nodes \
+             WHERE receiver_mode IS NOT NULL OR variants IS NOT NULL OR signature IS NOT NULL ORDER BY id",
+        )?;
+        let raws = stmt
+            .query_map([], |row| {
+                Ok((
+                    NodeId(row.get(0)?),
+                    row.get::<_, Option<i32>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting node item facts")?;
+        raws.into_iter()
+            .map(|(id, mode, variants, signature)| {
+                let receiver_mode = mode.map(ReceiverMode::try_from).transpose().map_err(|e| {
+                    anyhow!("corrupt receiver mode for node {}: {e}; rebuild advised (NFR-RA-08)", id.0)
+                })?;
+                Ok(NodeItemFacts {
+                    id,
+                    receiver_mode,
+                    variants,
+                    signature: signature.is_some(),
+                })
+            })
+            .collect()
+    }
+
+    fn impl_blocks(&self) -> Result<Vec<ImplBlockRow>> {
+        // ORDER BY path, line keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path, b.start_line, b.end_line, b.self_type, b.self_ref, b.trait_path, b.deref_target \
+             FROM impl_blocks b JOIN files f ON f.id = b.file_id \
+             ORDER BY f.path, b.start_line, b.end_line, b.self_type, b.id",
+        )?;
+        let raws = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting impl blocks")?;
+        raws.into_iter()
+            .map(|(file_path, start, end, self_type, self_ref, trait_path, deref_target)| {
+                let line = |v: i64| {
+                    u32::try_from(v)
+                        .map_err(|e| anyhow!("corrupt impl-block line {v} in {file_path}: {e}; rebuild advised (NFR-RA-08)"))
+                };
+                Ok(ImplBlockRow {
+                    start_line: line(start)?,
+                    end_line: line(end)?,
+                    file_path: file_path.clone(),
+                    self_type,
+                    self_ref: self_ref != 0,
+                    trait_path,
+                    deref_target,
+                })
+            })
+            .collect()
+    }
+
     fn file_namespaces(&self) -> Result<Vec<(String, String)>> {
         // ORDER BY path keeps the read deterministic ([NFR-RA-06]).
         let mut stmt = self.conn.prepare_cached(
@@ -3399,7 +3576,7 @@ impl GraphStore for SqliteGraphStore {
     fn unresolved_refs(&self) -> Result<Vec<UnresolvedRefRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, \
-                    receiver, peeled, arg_count \
+                    receiver, peeled, arg_count, exported \
              FROM unresolved_refs ORDER BY id",
         )?;
         let raws = stmt
@@ -3418,13 +3595,14 @@ impl GraphStore for SqliteGraphStore {
                     row.get::<_, Option<i32>>(10)?,
                     row.get::<_, Option<String>>(11)?,
                     row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<i64>>(13)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting the reference ledger")?;
         raws.into_iter()
             .map(
-                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver, peeled, arg_count)| {
+                |(id, file_id, source_symbol, target, alias, form, kind, line, resolved, payload, receiver, peeled, arg_count, exported)| {
                     let form = RefForm::try_from(form).map_err(|e| {
                         anyhow!("corrupt ref form {form} for ref {id}: {e}; rebuild advised (NFR-RA-08)")
                     })?;
@@ -3455,6 +3633,7 @@ impl GraphStore for SqliteGraphStore {
                         receiver,
                         peeled,
                         arg_count,
+                        exported: exported.map(|v| v != 0),
                     })
                 },
             )
@@ -4673,8 +4852,8 @@ impl BatchWriter<'_> {
         self.conn
             .execute(
                 "INSERT INTO unresolved_refs \
-                 (file_id, source_symbol, target, alias, form, kind, line, payload, receiver, peeled, arg_count) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+                 (file_id, source_symbol, target, alias, form, kind, line, payload, receiver, peeled, arg_count, exported) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                  ON CONFLICT(source_symbol, target, form, kind, COALESCE(payload, ''), \
                              COALESCE(receiver, 0), COALESCE(alias, ''), COALESCE(peeled, ''), \
                              COALESCE(arg_count, -1)) DO NOTHING",
@@ -4690,6 +4869,7 @@ impl BatchWriter<'_> {
                     r.receiver.map(ReceiverShape::as_i32),
                     r.peeled,
                     r.arg_count,
+                    r.exported.map(i64::from),
                 ],
             )
             .context("inserting unresolved ref")?;
@@ -4847,6 +5027,41 @@ impl BatchWriter<'_> {
                 t.reason
             ])
             .with_context(|| format!("inserting declared type {}", t.name))?;
+        }
+        Ok(())
+    }
+
+    /// Replace the impl blocks a source file declares (S-606, [CR-202] F1):
+    /// delete the file's previous blocks, then record `blocks` — the
+    /// [`replace_file_declared_types`](Self::replace_file_declared_types)
+    /// per-file contract, so a re-extract moves only that file's blocks, and a
+    /// file declaring none writes none. Removing the file cascades its blocks
+    /// away (migration 34's FK).
+    ///
+    /// # Errors
+    /// Returns an error if a constraint fires (an empty self type, a `Deref`
+    /// target without a trait) or I/O fails.
+    ///
+    /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+    pub fn replace_file_impl_blocks(&self, file_id: i64, blocks: &[NewImplBlock<'_>]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM impl_blocks WHERE file_id = ?1", [file_id])
+            .context("deleting the previous impl blocks of a file")?;
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO impl_blocks (file_id, start_line, end_line, self_type, self_ref, trait_path, deref_target) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for b in blocks {
+            stmt.execute(rusqlite::params![
+                file_id,
+                b.start_line,
+                b.end_line,
+                b.self_type,
+                i64::from(b.self_ref),
+                b.trait_path,
+                b.deref_target,
+            ])
+            .with_context(|| format!("inserting the impl block of {} at line {}", b.self_type, b.start_line))?;
         }
         Ok(())
     }
@@ -5519,8 +5734,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
         "INSERT INTO nodes (symbol_id, kind, name, file_id, start_line, end_line, \
                             derived, exported, cyclomatic_complexity, line_count, fingerprint, \
                             test_evidence, body, max_nesting_depth, has_body, body_tokens, \
-                            self_type, param_min, param_max, takes_self) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20) \
+                            self_type, param_min, param_max, takes_self, receiver_mode, variants, signature) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23) \
          ON CONFLICT(symbol_id) DO UPDATE SET \
              kind = excluded.kind, \
              name = excluded.name, \
@@ -5540,7 +5755,10 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
              self_type = excluded.self_type, \
              param_min = excluded.param_min, \
              param_max = excluded.param_max, \
-             takes_self = excluded.takes_self",
+             takes_self = excluded.takes_self, \
+             receiver_mode = excluded.receiver_mode, \
+             variants = excluded.variants, \
+             signature = excluded.signature",
         rusqlite::params![
             node.symbol_id,
             node.kind.as_i32(),
@@ -5562,6 +5780,9 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
             node.params.map(|p| p.min),
             node.params.and_then(|p| p.max),
             node.takes_self.map(i64::from),
+            node.receiver_mode.map(ReceiverMode::as_i32),
+            node.variants,
+            node.signature.then_some(1i64),
         ],
     )
     .context("upserting node")?;
