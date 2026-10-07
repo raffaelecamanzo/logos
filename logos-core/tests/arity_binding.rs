@@ -664,6 +664,31 @@ fn a_static_wildcards_members_are_filtered_by_the_count() {
     assert_eq!(residue(&engine, "java"), reasons(&[(R::NoApplicableOverload, 1)]));
 }
 
+/// The fall-through's guard reads every level the walk crosses (S-592): a
+/// base two levels up that the graph cannot see still keeps a Kotlin call from
+/// falling through, as one at the first level does.
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn an_unseen_supertype_above_the_first_level_keeps_the_call_from_falling_through() {
+    let tmp = tree(&[(
+        "src/main/kotlin/app/C.kt",
+        "package app
+
+fun top(a: Int) {}
+
+open class B : External()
+
+class C : B() {
+    fun top(a: Int, b: Int) {}
+    fun caller() { top(1) }
+}
+",
+    )]);
+    let engine = index(tmp.path());
+    assert_eq!(calls_from(engine.runtime().unwrap(), "caller@9"), targets(&[]));
+    assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]));
+}
+
 // ── Sync ≡ reindex ────────────────────────────────────────────────────────
 
 /// Index `initial`, overwrite `edits` and sync them; then index the post-edit
