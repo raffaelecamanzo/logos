@@ -40,6 +40,27 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   unchanged. Store migration 34 adds the columns and an `impl_blocks` table and
   clears every content hash, so the first `logos scan` (or `logos index`) after
   upgrading re-reads every file. A bare `logos sync` reads no file.
+- **A Java or Kotlin call reaches an implemented interface's `default` body
+  (CR-202, S-609).** When no class of a class's `extends` chain has an
+  applicable method, a call on the instance (`m(1)`, `this.m(1)`) or on a
+  proven receiver (`c.m(1)`) now goes on to the interfaces that chain
+  implements, then their super-interfaces, nearest first. It binds a Java
+  `default` method or a Kotlin interface `fun` with a body. A superclass
+  method still beats an interface default. Abstract, `static` and `private`
+  interface members are never bound this way. Two unrelated defaults of one
+  name bind nothing (`overload-ambiguous`), arity applies, and a chain that
+  crosses a superclass the graph does not hold reaches no interface. Plugins
+  opt in with the new `inherits_interface_bodies` key (Java and Kotlin
+  declare it; C#, whose default interface member is not inherited, does not)
+  and mark `static`/`private` interface members (and a Kotlin interface's
+  `companion object` functions) with `@item.uninherited`.
+  On the pec-services estate (60 Java members, 48,073 Java call rows), bound
+  Java calls go from 7,128 to 7,568: 440 gained, 0 lost. Among them are the
+  7 `MailboxControllerV1` → `verifyUserRetailOrPix` calls 1.13.0 left
+  `no-applicable-overload`. Rust, Go, PHP, C# and Scala graphs are
+  byte-identical. Store migration 35 adds a `nodes.uninherited` column and
+  clears every content hash, so the first `logos scan` (or `logos index`)
+  after upgrading re-reads every file. A bare `logos sync` reads no file.
 
 ### Changed
 

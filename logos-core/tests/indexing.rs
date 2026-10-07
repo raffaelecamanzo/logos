@@ -2114,8 +2114,8 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migrations 34 (S-606, the associated-item columns and the impl-block
-    // table), 33 (S-591, the `nodes` arity columns and the ledger's
+    // Migrations 35 (S-609, the `nodes.uninherited` column), 34 (S-606, the
+    // associated-item columns and the impl-block table), 33 (S-591, the `nodes` arity columns and the ledger's
     // `arg_count` in its identity index), 32 (S-587, the ledger's `peeled`
     // column and its identity index), 31 (S-597, the alias in the ledger identity index), 30 (S-518,
     // the `files.namespace` column), 29 (S-514, the
@@ -2124,7 +2124,8 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
     // its flag column) are inverted first, since the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
+        "ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
+         DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
          ALTER TABLE nodes DROP COLUMN signature; ALTER TABLE nodes DROP COLUMN variants; \
          ALTER TABLE nodes DROP COLUMN receiver_mode; DELETE FROM schema_versions WHERE version = 34; \
          DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN arg_count; \

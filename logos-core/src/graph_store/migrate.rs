@@ -3645,6 +3645,64 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 34");
     }
 
+    /// S-609 / CR-202 / FR-RS-48: a populated v34 store upgrades to v35 forward
+    /// only. `nodes` gains `uninherited` in place — `NULL` on every existing
+    /// row until re-extraction — while every pre-existing column, and all of
+    /// `edges`, `shingles` and the ledger, is byte-for-byte unchanged, and
+    /// every `files.content_hash` is cleared.
+    #[test]
+    fn migration_35_adds_the_uninherited_marker() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..34]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/main/java/com/x/I.java', 'java', 'h-i');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local i'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, has_body, param_min, param_max, signature) VALUES
+                 (10, 1, 6, 'I', 1, NULL, NULL, NULL, NULL), (11, 2, 8, 'm', 1, 1, 1, 1, NULL);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 1);
+             INSERT INTO shingles (node_id, hash) VALUES (11, 111);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, resolved, arg_count) VALUES
+                 (1, 'local m', 'helper', 2, 2, 3, 0, 1);",
+        )
+        .unwrap();
+        let (nodes_before, edges_before, shingles_before) = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..35]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 35, "34 → 35, exactly one step");
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        assert_eq!(nodes_after.len(), nodes_before.len());
+        for (old, new) in nodes_before.iter().zip(&nodes_after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one nodes column added");
+            assert_eq!(&new[..old.len()], &old[..], "every pre-v35 nodes column is byte-for-byte unchanged");
+            assert_eq!(&new[old.len()..], ["NULL"], "not recorded on any existing row");
+        }
+        let last: String = conn
+            .query_row("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(last, "uninherited", "the appended column is the S-609 add");
+        assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
+        assert_eq!(read_table(&conn, "unresolved_refs", "id"), ledger_before, "the ledger is unchanged");
+        let hash: Option<String> = conn.query_row("SELECT content_hash FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(hash, None, "every hash is cleared so the next scan re-extracts");
+
+        // The CHECK: the marker is 1 or absent.
+        let set = |sql: &str| conn.execute(sql, []);
+        assert!(set("UPDATE nodes SET uninherited = 1 WHERE id = 11").is_ok());
+        assert!(set("UPDATE nodes SET uninherited = 0 WHERE id = 11").is_err(), "marked 1 or not at all");
+
+        // Forward-only: re-running the full ledger never re-applies migration 35.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 35", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 35 is recorded once and never re-applied");
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (an in-place ADD COLUMN, NFR-RA-09)");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 35");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

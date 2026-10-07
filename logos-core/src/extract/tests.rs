@@ -48,6 +48,7 @@ impl NoSymbolsPlugin {
                 wrapper_methods: Default::default(),
                 call_targets: crate::plugin::CallTargets::default(),
                 supertype_kind_follows_target: false,
+                inherits_interface_bodies: false,
                 package_modules: None,
                 module_model: crate::plugin::ModuleModelKind::Path,
                 package_stems: Vec::new(),
@@ -5566,6 +5567,47 @@ interface Port {\n    fun send(m: String)\n    fun ping() { send(\"ping\") }\n}\
     // never the whole declaration.
     let short = callable_bodies(&facts).into_iter().find(|(n, _, _)| n == "short").unwrap();
     assert_eq!(short.2, 4);
+}
+
+/// The names of the callables `facts` marks uninherited (S-609), sorted.
+fn uninherited(facts: &Facts) -> Vec<String> {
+    let mut names: Vec<String> = facts.nodes.iter().filter(|n| n.uninherited).map(|n| n.name.clone()).collect();
+    names.sort();
+    names
+}
+
+/// S-609, FR-RS-48: a Java interface's `static` and `private` methods are marked
+/// uninherited — `private static` too — and its `default` and abstract ones are
+/// not (an abstract one records no body instead). A class's own `static` and
+/// `private` methods, and those of a class nested in the interface, are no
+/// interface members and stay unmarked.
+#[test]
+#[cfg(feature = "lang-java")]
+fn java_static_and_private_interface_methods_are_marked_uninherited() {
+    let src = "package com.x;\n\
+interface Port {\n    void send(String m);\n    default void ping() { help(); }\n    static Port of() { return null; }\n    \
+private void help() {}\n    private static void util() {}\n    class Nested { static void inner() {} private void hidden() {} }\n}\n\
+class Impl implements Port {\n    public void send(String m) {}\n    static void make() {}\n    private void own() {}\n}\n";
+    let facts = extract_lang("java", "src/main/java/com/x/Port.java", src);
+    assert_eq!(uninherited(&facts), ["help", "of", "util"]);
+}
+
+/// S-609, FR-RS-48: a Kotlin interface's `private` `fun` and its companion
+/// object's functions are marked uninherited; its bodied and abstract ones, a
+/// class's `private fun`, and a class's companion members are not.
+#[test]
+#[cfg(feature = "lang-kotlin")]
+fn kotlin_private_interface_functions_are_marked_uninherited() {
+    let src = "package com.x\n\n\
+interface Port {\n    fun send(m: String)\n    fun ping() { help() }\n    private fun help() {}\n    \
+companion object { fun make() {} }\n}\n\n\
+class Impl : Port {\n    override fun send(m: String) {}\n    private fun own() {}\n}\n";
+    let facts = extract_lang("kt", "src/main/kotlin/com/x/Port.kt", src);
+    assert_eq!(uninherited(&facts), ["help", "make"]);
+    let class = "package com.x\n\nclass Box {\n    companion object { fun build() {} }\n}\n";
+    let facts = extract_lang("kt", "src/main/kotlin/com/x/Box.kt", class);
+    assert!(facts.nodes.iter().any(|n| n.name == "build"), "the class companion's `fun` is extracted");
+    assert_eq!(uninherited(&facts), Vec::<String>::new());
 }
 
 #[test]

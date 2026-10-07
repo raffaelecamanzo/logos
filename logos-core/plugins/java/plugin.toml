@@ -19,6 +19,15 @@ abi_version = 14
 # `overload-ambiguous`: no argument type is read.
 overloaded_calls = true
 
+# A class inherits the bodies of the interface members it implements (S-609,
+# FR-RS-48): a call no type of the class's `extends` chain answers goes on to
+# the interfaces the chain implements, then their super-interfaces — class
+# before interface, so a superclass `m(int)` beats a `default` `m(int)`. Only a
+# `default` method is a candidate there: an abstract interface method records
+# no body, and a `static` or `private` one is marked `@item.uninherited`
+# (`queries/symbols.scm`).
+inherits_interface_bodies = true
+
 capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "properties"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).

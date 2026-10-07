@@ -564,14 +564,17 @@ class C extends Base {
 /// A Kotlin unqualified in-class call falls through to a free function only
 /// when the class walk saw every supertype (S-592): a class with an external
 /// base — the eShop `ViewModelBase : ObservableObject` shape — or one
-/// implementing an interface, whose default body the walk does not climb, may
-/// inherit the overload the call reaches. Neither binds the free function.
+/// implementing an interface may inherit the overload the call reaches.
+/// Neither binds the free function. An interface `fun` with a body is now
+/// reached itself (S-609, FR-RS-48); an abstract one is never bound, and the
+/// call stays unbound.
 #[cfg(feature = "lang-kotlin")]
 #[test]
 fn a_call_whose_class_has_an_unseen_supertype_never_falls_through() {
-    for (supertype, preamble) in [
-        ("External()", ""),
-        ("I", "interface I {\n    fun top(a: Int) {}\n}\n"),
+    for (supertype, preamble, want, residue_of) in [
+        ("External()", "", &[][..], &[(R::NoApplicableOverload, 1)][..]),
+        ("I", "interface I {\n    fun top(a: Int)\n}\n", &[], &[(R::NoApplicableOverload, 1)]),
+        ("I", "interface I {\n    fun top(a: Int) {}\n}\n", &["top@4"], &[]),
     ] {
         let src = format!(
             "package app\n\n{preamble}fun top(a: Int) {{}}\n\nclass C : {supertype} {{\n    \
@@ -580,8 +583,8 @@ fn a_call_whose_class_has_an_unseen_supertype_never_falls_through() {
         let tmp = tree(&[("src/main/kotlin/app/C.kt", src.as_str())]);
         let engine = index(tmp.path());
         let caller = if preamble.is_empty() { "caller@7" } else { "caller@10" };
-        assert_eq!(calls_from(engine.runtime().unwrap(), caller), targets(&[]), "{supertype}");
-        assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]), "{supertype}");
+        assert_eq!(calls_from(engine.runtime().unwrap(), caller), targets(want), "{preamble}");
+        assert_eq!(residue(&engine, "kotlin"), reasons(residue_of), "{preamble}");
     }
 }
 

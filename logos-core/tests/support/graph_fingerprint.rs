@@ -55,11 +55,17 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .map(|f| (f.id.0, format!("{:?}|{:?}|{}", f.receiver_mode, f.variants, f.signature)))
             .collect();
 
+        // The callables an implementing type never inherits from an interface
+        // (S-609, migration 35: no body, or marked uninherited) — what the
+        // supertype walk's interface levels never bind.
+        let uninherited: std::collections::BTreeSet<i64> =
+            store.uninherited_members()?.into_iter().map(|id| id.0).collect();
+
         let mut node_lines: Vec<String> = nodes
             .iter()
             .map(|n| {
                 format!(
-                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}|{}",
+                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}",
                     n.symbol.as_str(),
                     n.kind,
                     n.name,
@@ -68,6 +74,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                     n.end_line,
                     arity_of.get(&n.id.0).map_or("None|None", String::as_str),
                     item_of.get(&n.id.0).map_or("None|None|false", String::as_str),
+                    uninherited.contains(&n.id.0),
                 )
             })
             .collect();

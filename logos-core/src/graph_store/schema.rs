@@ -67,6 +67,7 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (32, MIGRATION_32),
     (33, MIGRATION_33),
     (34, MIGRATION_34),
+    (35, MIGRATION_35),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2866,6 +2867,48 @@ CREATE INDEX idx_impl_blocks_file ON impl_blocks(file_id);
 
 -- 6. Trigger re-extraction: a file with no recorded hash is re-extracted on its
 -- next scan like a modified one, filling the columns and the table.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 35 — the interface members an implementing type does **not**
+/// inherit (S-609, [CR-202] Part 2, [FR-RS-48]).
+///
+/// One nullable column on `nodes`, added **in place** (the migration-28/33/34
+/// shape):
+///
+/// - **`nodes.uninherited`** — `1` for an interface member a type
+///   implementing the interface does not inherit: a Java `static` or
+///   `private` interface method, a Kotlin `private` interface `fun` or an
+///   interface's `companion object` `fun`. `NULL` on every other node. A supertype walk that goes on from a class's `Extends`
+///   chain to its interfaces never binds one, nor an abstract member (a
+///   callable recorded with `has_body` 0, migration 25); the interface's own
+///   members still include it, so a call in the interface's own body
+///   (`this.priv(a)` in a `default`) still binds it.
+///
+/// **Plugin-agnostic by construction**: no column names a language; a plugin
+/// fills it by declaring the `@item.uninherited` capture (`extract::assoc`),
+/// and one that declares none records nothing.
+///
+/// `NULL` until a file is re-extracted, and **re-extraction is triggered
+/// here** as migrations 25 and 28–34 do it: every `files.content_hash` is
+/// cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_35_adds_the_uninherited_marker` in [`super::migrate`].
+///
+/// [CR-202]: ../../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
+/// [FR-RS-48]: ../../../../docs/specs/requirements/FR-RS-48.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_35: &str = "\
+-- 1. An interface member its implementing types do not inherit (FR-RS-48): a
+-- static or private interface method. NULL elsewhere, and on rows indexed
+-- before this migration.
+ALTER TABLE nodes ADD COLUMN uninherited INTEGER CHECK (uninherited = 1);
+
+-- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column.
 UPDATE files SET content_hash = NULL;
 ";
 

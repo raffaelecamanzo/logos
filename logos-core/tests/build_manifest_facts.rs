@@ -141,13 +141,15 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// `files.namespace` column, of migration 31 (S-597), the alias in the ledger's
 /// identity index, of migration 32 (S-587), the ledger's `peeled` column in it,
 /// of migration 33 (S-591), the `nodes` arity columns and the ledger's
-/// `arg_count` in it, and of migration 34 (S-606), the associated-item columns
-/// and the impl-block table; the next [`Engine::start`] re-applies all
-/// thirteen, as it does on a real upgrade.
+/// `arg_count` in it, of migration 34 (S-606), the associated-item columns
+/// and the impl-block table, and of migration 35 (S-609), the
+/// `nodes.uninherited` column; the next [`Engine::start`] re-applies all
+/// fourteen, as it does on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
+        "ALTER TABLE nodes DROP COLUMN uninherited; DELETE FROM schema_versions WHERE version = 35; \
+         DROP TABLE impl_blocks; ALTER TABLE unresolved_refs DROP COLUMN exported; \
          ALTER TABLE nodes DROP COLUMN signature; ALTER TABLE nodes DROP COLUMN variants; \
          ALTER TABLE nodes DROP COLUMN receiver_mode; DELETE FROM schema_versions WHERE version = 34; \
          DROP INDEX idx_unresolved_refs_identity; ALTER TABLE unresolved_refs DROP COLUMN arg_count; \

@@ -1571,12 +1571,12 @@ fn health_reports_store_integrity_and_counts() {
     );
     // Migration 27 (S-513, CR-168) added the persist-failure record, after
     // migration 26 (S-498, CR-162) added the snapshot offender lists.
-    // This assertion tracks the latest applied migration — the store reports 34
+    // This assertion tracks the latest applied migration — the store reports 35
     // once fully migrated (`federation::broker`'s
     // `the_broker_arm_introduces_no_schema_migration`, `graph_store::tests`'s
     // four version-pinning tests and `build_dependency_relation.rs` carry the
     // same number).
-    assert_eq!(health.schema_version, 34, "migration 34 applied");
+    assert_eq!(health.schema_version, 35, "migration 35 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);

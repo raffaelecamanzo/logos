@@ -99,6 +99,13 @@ pub struct Semantics {
     ///
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     pub supertype_kind_follows_target: bool,
+    /// Whether this language's classes inherit the bodies of the interface
+    /// members they implement (S-609, [FR-RS-48]; see
+    /// [`PluginManifest::inherits_interface_bodies`]) — consumed by the
+    /// binder's supertype walk through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    pub inherits_interface_bodies: bool,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped (CR-149; see [`PluginManifest::package_modules`]) —
     /// consumed by the binder's module key through
@@ -381,6 +388,7 @@ impl CompiledPlugin {
             wrapper_methods: manifest.wrapper_methods,
             call_targets,
             supertype_kind_follows_target: manifest.supertype_kind_follows_target,
+            inherits_interface_bodies: manifest.inherits_interface_bodies,
             package_modules: manifest.package_modules,
             module_model,
             package_stems,

@@ -438,6 +438,18 @@ impl LanguageRegistry {
 
     /// The file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a class inherits the bodies of the interface members it
+    /// implements (S-609, [FR-RS-48]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set walks its `Extends` chain alone, as before.
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    pub fn interface_body_inheriting_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.inherits_interface_bodies)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
     /// declares that a namespace sees the types of its enclosing namespaces
     /// (S-595, [FR-RS-45]). Consumed through
     /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
@@ -1209,6 +1221,25 @@ mod tests {
         }
         for ext in ["rs", "java", "php", "py", "scala", "ts", "go", "rb", "c", "cpp", "md"] {
             assert!(!declaring.contains(ext), "`{ext}` spells each supertype's kind");
+        }
+    }
+
+    /// The interface-body key (S-609, FR-RS-48): Java and Kotlin classes
+    /// inherit an implemented interface's member bodies, so their every
+    /// extension declares it. C#'s default interface member is reachable only
+    /// through an interface-typed receiver, and Scala and PHP are unchanged:
+    /// every other grammar is absent.
+    #[test]
+    fn interface_body_inheritance_collects_only_the_declaring_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.interface_body_inheriting_extensions();
+        #[cfg(all(feature = "lang-java", feature = "lang-kotlin"))]
+        for ext in ["java", "kt", "kts"] {
+            assert!(declaring.contains(ext), "`{ext}` inherits interface member bodies");
+        }
+        for ext in ["rs", "cs", "php", "py", "scala", "ts", "go", "rb", "c", "cpp", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` walks its `Extends` chain alone");
         }
     }
 

@@ -2852,6 +2852,9 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             receiver_mode: n.receiver_mode,
             variants: n.variants.as_deref(),
             signature: n.signature,
+            // The S-609 marker on an interface member its implementors do not
+            // inherit (FR-RS-48) — NULL wherever not recorded.
+            uninherited: n.uninherited,
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
         // The CR-005 winnowed near-clone shingle set (FR-EX-09) — persisted into

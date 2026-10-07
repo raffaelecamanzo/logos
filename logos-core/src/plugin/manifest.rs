@@ -641,6 +641,22 @@ pub struct PluginManifest {
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     #[serde(default)]
     pub supertype_kind_follows_target: bool,
+    /// Whether this language's classes inherit the bodies of the interface
+    /// members they implement (S-609, [FR-RS-48]): a Java `default` method, a
+    /// Kotlin interface `fun` with a body. A call that no type of a class's
+    /// in-repository `Extends` chain answers then goes on to the interfaces
+    /// the chain's types implement, and their super-interfaces, nearest level
+    /// first — class before interface. Only a member with a body that a
+    /// subtype inherits is a candidate there: an abstract one, and one the
+    /// `symbols` query marks `@item.uninherited` (a `static` or `private`
+    /// interface member), never is. Defaults to `false`: the walk ends with the
+    /// `Extends` chain, as it does for C#, whose default interface member is
+    /// reachable only through an interface-typed receiver ([NFR-MA-01]).
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub inherits_interface_bodies: bool,
     /// Whether this language overloads callables by name (S-592, [FR-RS-43]):
     /// Java, Kotlin, Scala, C#, C++. A bare call of such a language binds only
     /// a callable whose parameter range admits its argument count, and a scope
@@ -2193,6 +2209,24 @@ mod tests {
         assert!(with("supertype_kind_follows_target = true").unwrap().supertype_kind_follows_target);
         assert!(!with("supertype_kind_follows_target = false").unwrap().supertype_kind_follows_target);
         assert!(with("supertype_kind_follows_target = \"yes\"").is_err());
+    }
+
+    /// The interface-body key (S-609) defaults to `false` — the walk ends with
+    /// the `Extends` chain — and refuses a non-boolean.
+    #[test]
+    fn the_interface_body_key_defaults_off_and_refuses_a_non_boolean() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(!m.inherits_interface_bodies);
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert!(with("inherits_interface_bodies = true").unwrap().inherits_interface_bodies);
+        assert!(!with("inherits_interface_bodies = false").unwrap().inherits_interface_bodies);
+        assert!(with("inherits_interface_bodies = \"yes\"").is_err());
     }
 
     /// The arity keys (S-592): overloading defaults off and refuses a

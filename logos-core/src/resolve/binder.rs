@@ -123,6 +123,15 @@ type ModKey = ModuleKey;
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 type Members = HashMap<NodeId, HashMap<String, Vec<NodeId>>>;
 
+/// Which phase of a supertype walk [`Ctx::climb_levels`] climbs (S-609).
+enum Levels<'a> {
+    /// The `Extends` chain, collecting every type it crosses.
+    Extends(&'a mut Vec<NodeId>),
+    /// The interfaces the chain implements, where only an inheritable member
+    /// is a candidate ([`Index::uninherited`]).
+    Interfaces,
+}
+
 /// What a supertype walk found ([`Ctx::supertype_walk`], S-592).
 #[derive(Debug, Clone, Copy)]
 struct Climb {
@@ -725,12 +734,38 @@ pub(crate) struct Index {
     ///
     /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
     supertypes: HashMap<NodeId, Vec<NodeId>>,
+    /// A type → the in-repository interfaces it implements, id-sorted (S-609,
+    /// [FR-RS-48]) — only for a type whose language inherits interface member
+    /// bodies ([`PackageLayout::inherits_interface_bodies`]): a supertype row
+    /// bound as `Implements`. What a supertype walk visits once the type's
+    /// `Extends` chain holds no applicable candidate. Empty for every other
+    /// language, whose walk ends with the chain.
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    interfaces: HashMap<NodeId, Vec<NodeId>>,
+    /// The classes whose base class the graph does not hold (S-609): of a
+    /// language that inherits interface member bodies, one with a supertype
+    /// row that binds nothing and may name its base; of any language, one with
+    /// several bases. That base may declare the method, and a class's member
+    /// beats an interface's, so a walk whose `Extends` chain crosses one never
+    /// goes on to the interfaces.
+    unseen_bases: HashSet<NodeId>,
+    /// The callables a type never inherits from an interface it implements
+    /// (S-609, [FR-RS-48]): an abstract one (no body) and one its plugin marks
+    /// uninherited — a `static` or `private` interface member. Never a
+    /// candidate at an interface level of a walk. Empty unless the run was
+    /// given the store's facts ([`Index::with_uninherited`]).
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    uninherited: HashSet<NodeId>,
     /// The name tokens of the type hierarchy: every hierarchy `Extends` row's
-    /// target, bound or not (S-468). A sync dirtying one of them may move
-    /// a supertype walk whose row spells none of them
-    /// ([`Index::hierarchy_touched`]). A type's own name is not needed: a walk
-    /// that crosses a type other than its start crosses it as some `Extends`
-    /// row's target, and a row starting at a type spells that type's name.
+    /// target, bound or not (S-468), and every `Implements` row's of a
+    /// language that inherits interface member bodies (S-609). A sync
+    /// dirtying one of them may move a supertype walk whose row spells none of
+    /// them ([`Index::hierarchy_touched`]) — an interface gaining or losing a
+    /// default body among them. A type's own name is not needed: a walk that
+    /// crosses a type other than its start crosses it as some supertype row's
+    /// target, and a row starting at a type spells that type's name.
     hierarchy_tokens: HashSet<String>,
     /// The interop families of those rows' sources (S-522,
     /// [`PackageLayout::family`]): the languages whose calls a supertype walk
@@ -825,8 +860,9 @@ pub(crate) struct Index {
     arities: HashMap<NodeId, ParamRange>,
     /// The types whose supertypes the walk cannot see in full (S-592): one with
     /// a supertype row that binds no walked `Extends` — an external base, an
-    /// interface (whose default bodies the walk does not climb), several bases
-    /// — or that uses a trait ([`Index::trait_users`]). A callable of the name
+    /// interface (whose abstract members the walk never binds, and whose
+    /// default bodies it reaches only in a language declaring so, S-609),
+    /// several bases — or that uses a trait ([`Index::trait_users`]). A callable of the name
     /// may sit there, so an implicit-receiver call whose class walk crossed one
     /// never goes on to a free function ([`Ctx::resolve_self_receiver`]).
     open_types: HashSet<NodeId>,
@@ -920,6 +956,9 @@ impl Index {
             files_by_namespace,
             impls_by_trait_method,
             supertypes: HashMap::new(),
+            interfaces: HashMap::new(),
+            unseen_bases: HashSet::new(),
+            uninherited: HashSet::new(),
             hierarchy_tokens: HashSet::new(),
             hierarchy_families: HashSet::new(),
             trait_users: HashSet::new(),
@@ -939,6 +978,8 @@ impl Index {
         };
         let hierarchy = build_supertypes(refs, &index);
         index.supertypes = hierarchy.supertypes;
+        index.interfaces = hierarchy.interfaces;
+        index.unseen_bases = hierarchy.unseen_bases;
         index.hierarchy_tokens = hierarchy.tokens;
         index.hierarchy_families = hierarchy.families;
         index.trait_users = hierarchy.trait_users;
@@ -1043,6 +1084,18 @@ impl Index {
                 .modules
                 .contains_key(&(node.crate_name.clone(), vec![head.clone()]));
         !local
+    }
+
+    /// Give the index the callables an implementing type never inherits from
+    /// an interface (S-609, [FR-RS-48];
+    /// [`GraphStore::uninherited_members`]): what a supertype walk never binds
+    /// at an interface level.
+    ///
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    /// [`GraphStore::uninherited_members`]: crate::graph_store::GraphStore::uninherited_members
+    pub(crate) fn with_uninherited(mut self, ids: impl IntoIterator<Item = NodeId>) -> Index {
+        self.uninherited = ids.into_iter().collect();
+        self
     }
 
     /// Give the index the self types the store records per node (S-493,
@@ -1348,8 +1401,8 @@ impl Index {
         names
     }
 
-    /// Whether `dirty` — the tokens a sync added or removed — names a type an
-    /// `Extends` row of the type hierarchy names (S-468). A supertype walk that crosses
+    /// Whether `dirty` — the tokens a sync added or removed — names a type a
+    /// supertype row of the type hierarchy names (S-468, S-609). A supertype walk that crosses
     /// such a type can change its answer although the calling row spells none
     /// of its names, so the incremental run re-binds every call that can walk
     /// it ([`walks_hierarchy`](Index::walks_hierarchy)) when this holds
@@ -1392,6 +1445,12 @@ impl Index {
     /// The in-repository supertypes of `ty` its `Extends` rows bind to.
     fn supertypes_of(&self, ty: NodeId) -> &[NodeId] {
         self.supertypes.get(&ty).map_or(&[], Vec::as_slice)
+    }
+
+    /// The in-repository interfaces `ty` implements, when its language
+    /// inherits their member bodies (S-609, [`Index::interfaces`]).
+    fn interfaces_of(&self, ty: NodeId) -> &[NodeId] {
+        self.interfaces.get(&ty).map_or(&[], Vec::as_slice)
     }
 
     /// [`supertypes_of`](Index::supertypes_of), for the binder's own tests.
@@ -2218,6 +2277,8 @@ fn build_impls_by_trait_method(
 /// [`Index::hierarchy_tokens`], [`Index::hierarchy_families`]).
 struct Hierarchy {
     supertypes: HashMap<NodeId, Vec<NodeId>>,
+    interfaces: HashMap<NodeId, Vec<NodeId>>,
+    unseen_bases: HashSet<NodeId>,
     tokens: HashSet<String>,
     families: HashSet<String>,
     trait_users: HashSet<NodeId>,
@@ -2258,6 +2319,17 @@ struct Hierarchy {
 ///   the graph. Such a class is a [`trait_users`](Index::trait_users) entry,
 ///   which no walk climbs through.
 ///
+/// A language that inherits interface member bodies (S-609, [FR-RS-48];
+/// [`PackageLayout::inherits_interface_bodies`]) also keeps each type's
+/// in-repository interfaces ([`Index::interfaces`]): a supertype row bound as
+/// `Implements`, whether its clause spells it so or its kind follows the target.
+/// Their names join the tokens, so a sync that gives an interface a default
+/// body, or takes one away, re-selects the calls a walk may move. Such a class
+/// with a supertype row that binds nothing and may name its base class is an
+/// [`unseen_bases`](Index::unseen_bases) entry, as is a class of any language
+/// with several bases. Every other language records no interface, so its
+/// walks are exactly as before.
+///
 /// Only the subtype's own rows count. A capture-before-delete `Symbol` row
 /// ([ADR-10]) is filed under the **supertype's** file and outlives the
 /// subtype's `extends` clause until that file is re-extracted, so reading it
@@ -2269,9 +2341,12 @@ struct Hierarchy {
 ///
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
+/// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
 fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
     let mut hierarchy = Hierarchy {
         supertypes: HashMap::new(),
+        interfaces: HashMap::new(),
+        unseen_bases: HashSet::new(),
         tokens: HashSet::new(),
         families: HashSet::new(),
         trait_users: HashSet::new(),
@@ -2289,7 +2364,11 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
         let Some(want) = relation_want_of(r, source, &ix.layout) else {
             continue;
         };
-        if r.kind == EdgeKind::Implements {
+        let path = source.and_then(|i| i.file_path.as_deref());
+        // Whether the source's language inherits interface member bodies
+        // (S-609): only then is an interface a level the walk visits.
+        let inherits = path.is_some_and(|p| ix.layout.inherits_interface_bodies(p));
+        if r.kind == EdgeKind::Implements && !inherits {
             if r.alias.as_deref() == Some(TRAIT_USE_ALIAS) {
                 hierarchy.trait_users.insert(source_id);
             }
@@ -2297,23 +2376,33 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
             continue;
         }
         hierarchy.tokens.extend(super::tokens(&r.target));
-        hierarchy.families.extend(
-            source
-                .and_then(|i| i.file_path.as_deref())
-                .and_then(|p| ix.layout.family(p)),
-        );
+        hierarchy.families.extend(path.and_then(|p| ix.layout.family(p)));
         let class = source.is_some_and(|i| i.kind != NodeKind::Interface);
         match bind(r, ix, BindingPolicy::Strict) {
             Outcome::Bound {
                 target,
                 kind: EdgeKind::Extends,
                 ..
-            } => {
+            } if r.kind == EdgeKind::Extends => {
                 hierarchy.supertypes.entry(source_id).or_default().push(target);
                 *bases.entry(source_id).or_default() += usize::from(class);
             }
-            Outcome::Unbound if want != Want::Supertype => {
-                *bases.entry(source_id).or_default() += usize::from(class);
+            Outcome::Bound {
+                target,
+                kind: EdgeKind::Implements,
+                ..
+            } if inherits => {
+                hierarchy.interfaces.entry(source_id).or_default().push(target);
+                hierarchy.open.insert(source_id);
+            }
+            Outcome::Unbound => {
+                if want != Want::Supertype && r.kind == EdgeKind::Extends {
+                    *bases.entry(source_id).or_default() += usize::from(class);
+                }
+                // An unbound `implements` names an interface, never a base.
+                if inherits && class && r.kind == EdgeKind::Extends {
+                    hierarchy.unseen_bases.insert(source_id);
+                }
                 hierarchy.open.insert(source_id);
             }
             _ => {
@@ -2324,8 +2413,9 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
     for (id, _) in bases.into_iter().filter(|&(_, n)| n > 1) {
         hierarchy.supertypes.remove(&id);
         hierarchy.open.insert(id);
+        hierarchy.unseen_bases.insert(id);
     }
-    for ids in hierarchy.supertypes.values_mut() {
+    for ids in hierarchy.supertypes.values_mut().chain(hierarchy.interfaces.values_mut()) {
         ids.sort_unstable();
         ids.dedup();
     }
@@ -5735,19 +5825,65 @@ impl Ctx<'_> {
     /// is passed over, as the language passes over an inapplicable overload to
     /// an inherited one, and exactly-one decides at the first level with any.
     ///
+    /// A language that inherits interface member bodies (S-609, [FR-RS-48])
+    /// goes on once the whole `Extends` chain is passed with nothing decided:
+    /// to the interfaces the chain's types implement ([`Index::interfaces`]),
+    /// then their super-interfaces, nearest level first — class before
+    /// interface, so a superclass's `m(int)` beats a default `m(int)`. At an
+    /// interface level only an inheritable member is a candidate: one with a
+    /// body that the plugin does not mark uninherited ([`Index::uninherited`]).
+    /// A level whose applicable callables are all uninheritable — an abstract
+    /// re-declaration hides the default above it — decides nothing and ends the
+    /// walk. A chain that crosses a class whose base the graph does not hold
+    /// ([`Index::unseen_bases`]) reaches no interface: that base may declare the
+    /// method.
+    ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
-    fn supertype_walk(&self, mut level: Vec<NodeId>, mut seen: HashSet<NodeId>, name: &str) -> Climb {
-        level.sort_unstable();
-        level.dedup();
-        seen.extend(level.iter().copied());
+    /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+    fn supertype_walk(&self, level: Vec<NodeId>, mut seen: HashSet<NodeId>, name: &str) -> Climb {
         let mut climb = Climb {
             res: Res::NotFound,
             inapplicable: false,
             closed: true,
         };
+        let mut chain = Vec::new();
+        if !self.climb_levels(level, &mut seen, name, Levels::Extends(&mut chain), &mut climb) {
+            return climb;
+        }
+        if chain.iter().any(|t| self.ix.unseen_bases.contains(t)) {
+            return climb;
+        }
+        let interfaces: Vec<NodeId> = chain
+            .iter()
+            .flat_map(|&t| self.ix.interfaces_of(t).iter().copied())
+            .filter(|i| seen.insert(*i))
+            .collect();
+        self.climb_levels(interfaces, &mut seen, name, Levels::Interfaces, &mut climb);
+        climb
+    }
+
+    /// One phase of a [`supertype_walk`](Ctx::supertype_walk), from `level`
+    /// up its `Extends` rows, recording what it found in `climb`: `true` when
+    /// it ran off the top of the chain with nothing decided, `false` when a
+    /// level decided, or the depth bound cut it. [`Levels::Extends`] collects
+    /// every type it crosses.
+    fn climb_levels(
+        &self,
+        mut level: Vec<NodeId>,
+        seen: &mut HashSet<NodeId>,
+        name: &str,
+        mut levels: Levels<'_>,
+        climb: &mut Climb,
+    ) -> bool {
+        level.sort_unstable();
+        level.dedup();
+        seen.extend(level.iter().copied());
         for _ in 0..MAX_SUPERTYPE_DEPTH {
             if level.is_empty() {
-                return climb;
+                return true;
+            }
+            if let Levels::Extends(chain) = &mut levels {
+                chain.extend(level.iter().copied());
             }
             climb.closed &= !level.iter().any(|t| self.ix.open_types.contains(t));
             let mut named: Vec<NodeId> = level
@@ -5757,13 +5893,19 @@ impl Ctx<'_> {
             named.sort_unstable();
             named.dedup();
             let held = !named.is_empty();
-            let found = self.applicable(named);
+            let mut found = self.applicable(named);
             climb.inapplicable |= held && found.is_empty();
+            if matches!(levels, Levels::Interfaces) && !found.is_empty() {
+                found.retain(|id| !self.ix.uninherited.contains(id));
+                if found.is_empty() {
+                    return false;
+                }
+            }
             match exactly_one(&found) {
                 Res::NotFound => {}
                 decided => {
                     climb.res = decided;
-                    return climb;
+                    return false;
                 }
             }
             // A class that uses a trait is never climbed through (S-522).
@@ -5774,14 +5916,14 @@ impl Ctx<'_> {
                 .filter(|s| seen.insert(*s))
                 .collect();
             if next.is_empty() {
-                return climb;
+                return true;
             }
             next.sort_unstable();
             level = next;
         }
         // The depth bound cut the chain: what lies beyond it is unseen.
         climb.closed = false;
-        climb
+        false
     }
 
     /// The type-like members of `scope` named `name`.

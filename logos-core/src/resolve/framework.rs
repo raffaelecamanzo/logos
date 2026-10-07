@@ -444,7 +444,7 @@ pub fn run(
 
     // Snapshot (one reader-pool read): the same consistent basis the
     // resolution pass binds against.
-    let (files, nodes, edges, refs, namespaces, associated) = runtime.submit_read(|store| {
+    let (files, nodes, edges, refs, namespaces, associated, uninherited) = runtime.submit_read(|store| {
         Ok((
             store.indexed_files()?,
             store.all_nodes()?,
@@ -452,6 +452,7 @@ pub fn run(
             store.unresolved_refs()?,
             store.file_namespaces()?,
             super::associated_items(store)?,
+            store.uninherited_members()?,
         ))
     })?;
     let (impl_blocks, item_facts) = associated;
@@ -517,11 +518,13 @@ pub fn run(
     let layout = PackageLayout::from_registry(registry)
         .with_declared_namespaces(namespaces)
         .with_import_root_overrides(&resolution.import_roots);
-    // A required signature binds nothing (S-606). A handler written `T::m`
+    // A required signature binds nothing (S-606), nor does an interface member
+    // an implementing type does not inherit (S-609). A handler written `T::m`
     // binds through the one associated-item lookup, as a call does (S-607).
     let (bind_nodes, bind_edges) = binder::bindable(&nodes, &edges, &signatures);
     let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone())
-        .with_associated_items(&bind_nodes, &impl_blocks, &item_facts);
+        .with_associated_items(&bind_nodes, &impl_blocks, &item_facts)
+        .with_uninherited(uninherited);
     let member = MemberConstants {
         root,
         registry,

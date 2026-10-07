@@ -3215,6 +3215,66 @@ fn a_super_call_binds_only_through_a_proven_extends() {
     }
 }
 
+/// An interface hierarchy in one package (S-609, FR-RS-48):
+///
+/// ```text
+/// com.x  Port.java (module 330) ─ interface Port (331) ─ ping (332), gone (333)
+///        Impl.java (module 340) ─ class Impl (341) implements Port ─ n (342)
+/// ```
+///
+/// Built with `layout`, and the `Implements` row of `Impl`.
+fn interface_index(r: &UnresolvedRefRow, layout: PackageLayout) -> Index {
+    let dir = "src/main/java/com/x";
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for (id, name, kind, file, parent) in [
+        (330, "Port", NodeKind::Module, "Port", None),
+        (331, "Port", NodeKind::Interface, "Port", Some(330)),
+        (332, "ping", NodeKind::Method, "Port", Some(331)),
+        (333, "gone", NodeKind::Method, "Port", Some(331)),
+        (340, "Impl", NodeKind::Module, "Impl", None),
+        (341, "Impl", NodeKind::Class, "Impl", Some(340)),
+        (342, "n", NodeKind::Method, "Impl", Some(341)),
+    ] {
+        nodes.push(node(id, name, kind, &format!("{dir}/{file}.java")));
+        edges.extend(parent.map(|p| contains(p, id)));
+    }
+    let refs = [
+        make_ref(1, IMPL_JAVA, 341, "Port", None, RefForm::Path, EdgeKind::Implements),
+        r.clone(),
+    ];
+    Index::build_with_layout(&nodes, &edges, &refs, layout)
+}
+
+const IMPL_JAVA: i64 = 34;
+
+/// The walk visits an implemented interface's member bodies only where the
+/// language declares `inherits_interface_bodies`, and never a member the store
+/// records as uninherited (S-609, FR-RS-48). The key is read off the layout,
+/// so the same graph keyed by a layout without it binds nothing — which is how
+/// every language that does not declare it keeps its graph.
+#[test]
+fn an_interface_body_is_reached_only_where_the_layout_declares_the_key() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = crate::plugin::LanguageRegistry::load(tmp.path()).expect("registry loads");
+    let declaring = || PackageLayout::from_registry(&registry);
+    let silent = || PackageLayout::new(registry.package_source_roots()).with_families(registry.families());
+    let own = Some(ReceiverShape::SelfInstance);
+    for policy in POLICIES {
+        let r = shaped(100, IMPL_JAVA, 342, "ping", own);
+        bound_to(bind(&r, &interface_index(&r, declaring()), policy), 342, 332, EdgeKind::Calls);
+        let ix = interface_index(&r, silent());
+        assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "no key, no interface level");
+        assert_eq!(residue(&r, &ix, policy), Some(Residue::SupertypeUnreached));
+        // An uninherited member (no body, or marked) is never a candidate.
+        let r = shaped(101, IMPL_JAVA, 342, "gone", own);
+        bound_to(bind(&r, &interface_index(&r, declaring()), policy), 342, 333, EdgeKind::Calls);
+        let ix = interface_index(&r, declaring()).with_uninherited([NodeId(333)]);
+        assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "an uninherited member is never bound");
+        assert_eq!(residue(&r, &ix, policy), Some(Residue::SupertypeUnreached));
+    }
+}
+
 #[test]
 fn a_super_call_never_reaches_the_callers_own_class_through_a_cyclic_hierarchy() {
     use super::binder::{residue, Residue};
