@@ -671,6 +671,8 @@ fn ruby_ranges_and_counts() {
 
 /// Only a callable records a range: a droppable Java override that captures a
 /// `record`'s component list still leaves the record's class node unknown.
+/// The override keeps Java's `@item.uninherited` capture, which a language
+/// declaring `inherits_interface_bodies` must carry to load (S-609).
 #[test]
 fn a_list_a_non_callable_owns_records_no_range() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -680,7 +682,8 @@ fn a_list_a_non_callable_owns_records_no_range() {
         dir.join("symbols.scm"),
         "(record_declaration name: (identifier) @symbol.class)\n\
          (record_declaration parameters: (formal_parameters) @arity.parameters)\n\
-         (formal_parameters (formal_parameter) @arity.required)\n",
+         (formal_parameters (formal_parameter) @arity.required)\n\
+         (interface_body (method_declaration (modifiers [\"static\" \"private\"])) @item.uninherited)\n",
     )
     .unwrap();
     let registry = LanguageRegistry::load(tmp.path()).expect("override loads");
