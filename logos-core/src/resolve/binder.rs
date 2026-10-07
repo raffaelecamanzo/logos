@@ -3860,7 +3860,7 @@ impl Ctx<'_> {
         let mut candidates: Vec<NodeId> = reachable.iter().copied().filter(|&c| self.trait_in_scope(c)).collect();
         let scoped_out = candidates.len() < reachable.len();
         if candidates.is_empty() {
-            let variant = named.is_empty() && ix.variants.get(&ty).is_some_and(|v| v.iter().any(|x| x == name));
+            let variant = named.is_empty() && self.is_variant(ty, name);
             self.note(Want::Callable, || {
                 if variant {
                     Residue::NotACallable
