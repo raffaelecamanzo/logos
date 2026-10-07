@@ -1749,12 +1749,18 @@ impl_block_lookup = true
 A language that declares it decides `Self::m()`, `self.m()`, a method call on a
 proven receiver and a written `T::m()` the same way: among the functions of
 every `impl` block whose self type resolves to `T`, from any crate and through
-`pub use` re-exports. A method call never reaches an associated function, an
-inherent function beats a trait's, and a trait's function counts only where the
-trait is in scope. Every unbound call of the language then carries a reason in
-`status`'s `call_residue`, so its `unclassified` reads `0` on a fresh index
-([Commands](commands.md)). The language's symbols query must record its impl
-blocks (the `@item.impl` captures). It defaults to `false`: a written `T::m()`
+`pub use` re-exports, plus the default bodies of the traits `T` implements that
+its impl does not override (an empty `impl Tr for T {}` included). A method call
+never reaches an associated function, an inherent function beats a trait's, and
+a trait's function counts only where the trait is in scope. A method call that
+finds nothing on `T` retries on `T`'s `Deref` target, each type once and at most
+8 hops; a path call never does. `<T as Tr>::m()` reads `T`'s impl of `Tr` (or
+`Tr`'s default), and `self.m()` in a trait's default body or a written
+`Tr::m(x)` reaches every impl of the method plus the default. Every unbound
+call of the language then carries a reason in `status`'s `call_residue`, so its
+`unclassified` reads `0` on a fresh index ([Commands](commands.md)). The
+language's symbols query must record its impl blocks (the `@item.impl`
+captures, `@item.impl.target` for a `Deref` target). It defaults to `false`: a written `T::m()`
 binds among the functions of `T`'s module, as before. Only Rust declares it.
 
 ### Outbound HTTP client calls (`invocations`)
