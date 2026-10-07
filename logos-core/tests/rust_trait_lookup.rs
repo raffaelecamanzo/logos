@@ -707,6 +707,24 @@ fn a_purged_empty_impl_takes_its_default_back() {
     assert!(from(&call_edges(rt), "src/callers.rs:f@3").is_empty());
 }
 
+/// An empty impl added for a `Deref` target lends its default to the outer
+/// type's method calls on sync, although neither the calls nor the change
+/// spell the outer type.
+#[test]
+fn an_empty_impl_on_a_deref_target_rebinds_on_sync() {
+    let initial = [
+        ("src/lib.rs", "pub mod t;\npub mod d;\npub mod callers;\n"),
+        (
+            "src/t.rs",
+            "pub trait Greet { fn hello(&self) {} }\npub struct Inner;\npub struct Outer;\nimpl std::ops::Deref for Outer {\n    type Target = Inner;\n    fn deref(&self) -> &Inner { &Inner }\n}\n",
+        ),
+        ("src/callers.rs", "use crate::t::{Greet, Outer};\npub fn o(x: &Outer) { x.hello(); }\n"),
+        ("src/d.rs", "\n"),
+    ];
+    let added = synced_equals_reindexed(&initial, &[("src/d.rs", "use super::t::*;\nimpl Greet for Inner {}\n")]);
+    assert_eq!(from(&added, "src/callers.rs:o@2"), targets(&["src/t.rs:hello@1"]));
+}
+
 /// A `Deref` impl added in a file of its own makes the outer types' callers
 /// reach the methods along the whole chain on sync — the target's own, a
 /// method and a trait default of a type further down the chain that the
