@@ -50,6 +50,16 @@
     (function_declaration
       (modifiers (visibility_modifier "private"))) @item.uninherited))
 
+; Nor does it inherit the interface's `companion object` functions: they are
+; recorded as the interface's members, but Kotlin links only a superCLASS's
+; companion scope into a subclass, never a super-interface's.
+(class_declaration
+  "interface"
+  (class_body
+    (companion_object
+      (class_body
+        (function_declaration) @item.uninherited))))
+
 ; A class property → Field — the bound LCOM4 field-sharing input read by
 ; `this.<name>` accesses (references.scm). Scoped to `class_body` so only true
 ; member properties are captured: Kotlin reuses `property_declaration` for

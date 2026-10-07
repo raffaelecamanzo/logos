@@ -2878,8 +2878,8 @@ UPDATE files SET content_hash = NULL;
 ///
 /// - **`nodes.uninherited`** — `1` for an interface member a type
 ///   implementing the interface does not inherit: a Java `static` or
-///   `private` interface method, a Kotlin `private` interface `fun`. `NULL` on
-///   every other node. A supertype walk that goes on from a class's `Extends`
+///   `private` interface method, a Kotlin `private` interface `fun` or an
+///   interface's `companion object` `fun`. `NULL` on every other node. A supertype walk that goes on from a class's `Extends`
 ///   chain to its interfaces never binds one, nor an abstract member (a
 ///   callable recorded with `has_body` 0, migration 25); the interface's own
 ///   members still include it, so `I.m()` written on the interface binds it as

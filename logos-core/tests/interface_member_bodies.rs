@@ -15,8 +15,9 @@
 //!   class before interface;
 //! - `up(1)` reaches a default of the super-interface, one level further up,
 //!   and `hidden(1)` reaches none: the interface re-declares it abstract;
-//! - an abstract, a `static` and a `private` interface member are never bound
-//!   through an implementing class, and a `private` one still binds from its
+//! - an abstract, a `static` and a `private` interface member, and a Kotlin
+//!   interface's `companion object` function, are never bound through an
+//!   implementing class, and a `private` one still binds from its
 //!   own interface's default;
 //! - two unrelated interfaces each supplying `both` bind nothing
 //!   (`overload-ambiguous`), and a call no default admits binds nothing;
@@ -329,6 +330,10 @@ interface I : J {
     fun abs(a: Int)
     private fun priv(a: Int) {}
     fun viaPriv(a: Int) { this.priv(a) }
+
+    companion object {
+        fun make(a: Int) {}
+    }
 }
 
 interface K {
@@ -349,6 +354,7 @@ abstract class C : Base(), I, K {
     fun callPriv() { priv(1) }
     fun callBoth() { both(1) }
     fun callNoArity() { m(1, 2) }
+    fun callMake() { make(1) }
 
     private fun check(a: String, b: String, c: Int, d: Int, e: String) {}
 }
@@ -376,6 +382,9 @@ fn a_kotlin_call_reaches_an_implemented_interfaces_bodied_member() {
             ("C.callPriv", &[]),
             ("C.callBoth", &[]),
             ("C.callNoArity", &[]),
+            // A super-interface's companion scope is never linked in: only
+            // `I.make(1)` reaches it.
+            ("C.callMake", &[]),
             ("Out.callUnseen", &[]),
             ("I.viaPriv", &["I.priv"]),
         ],

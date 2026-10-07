@@ -52,7 +52,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   crosses a superclass the graph does not hold reaches no interface. Plugins
   opt in with the new `inherits_interface_bodies` key (Java and Kotlin
   declare it; C#, whose default interface member is not inherited, does not)
-  and mark `static`/`private` interface members with `@item.uninherited`.
+  and mark `static`/`private` interface members (and a Kotlin interface's
+  `companion object` functions) with `@item.uninherited`.
   On the pec-services estate (60 Java members, 48,073 Java call rows), bound
   Java calls go from 7,128 to 7,568: 440 gained, 0 lost. Among them are the
   7 `MailboxControllerV1` → `verifyUserRetailOrPix` calls 1.13.0 left

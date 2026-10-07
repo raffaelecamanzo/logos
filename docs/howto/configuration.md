@@ -1657,7 +1657,8 @@ interfaces the chain's classes implement, then their super-interfaces, nearest
 level first. A superclass method always beats an interface default. Only a
 member with a body is a candidate there. An abstract member never is, nor one
 the `symbols` query marks `@item.uninherited` (Java's `static` and `private`
-interface methods, Kotlin's `private` interface functions). Two unrelated
+interface methods, Kotlin's `private` interface functions and an interface's
+`companion object` functions). Two unrelated
 defaults of one name bind nothing, and arity applies. A chain that crosses a
 class whose base class is not in the graph reaches no interface, since that base
 may declare the method. The key defaults to `false`: C#'s default interface

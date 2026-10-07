@@ -31,7 +31,8 @@
 //!   Rust trait's `fn m(&self);`).
 //! - `@item.uninherited` — an interface member that a type implementing the
 //!   interface does not inherit (S-609, [FR-RS-48]): a Java `static` or
-//!   `private` interface method, a Kotlin `private` interface `fun`.
+//!   `private` interface method, a Kotlin `private` interface `fun` or an
+//!   interface's `companion object` `fun`.
 //!
 //! # Type paths
 //!

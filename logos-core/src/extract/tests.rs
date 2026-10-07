@@ -5562,18 +5562,22 @@ class Impl implements Port {\n    public void send(String m) {}\n    static void
     assert_eq!(uninherited(&facts), ["help", "of", "util"]);
 }
 
-/// S-609, FR-RS-48: a Kotlin interface's `private` `fun` is marked uninherited;
-/// its bodied and abstract ones, a class's `private fun`, and a
-/// companion object's members are not.
+/// S-609, FR-RS-48: a Kotlin interface's `private` `fun` and its companion
+/// object's functions are marked uninherited; its bodied and abstract ones, a
+/// class's `private fun`, and a class's companion members are not.
 #[test]
 #[cfg(feature = "lang-kotlin")]
 fn kotlin_private_interface_functions_are_marked_uninherited() {
     let src = "package com.x\n\n\
 interface Port {\n    fun send(m: String)\n    fun ping() { help() }\n    private fun help() {}\n    \
-companion object { private fun make() {} }\n}\n\n\
+companion object { fun make() {} }\n}\n\n\
 class Impl : Port {\n    override fun send(m: String) {}\n    private fun own() {}\n}\n";
     let facts = extract_lang("kt", "src/main/kotlin/com/x/Port.kt", src);
-    assert_eq!(uninherited(&facts), ["help"]);
+    assert_eq!(uninherited(&facts), ["help", "make"]);
+    let class = "package com.x\n\nclass Box {\n    companion object { fun build() {} }\n}\n";
+    let facts = extract_lang("kt", "src/main/kotlin/com/x/Box.kt", class);
+    assert!(facts.nodes.iter().any(|n| n.name == "build"), "the class companion's `fun` is extracted");
+    assert_eq!(uninherited(&facts), Vec::<String>::new());
 }
 
 #[test]
