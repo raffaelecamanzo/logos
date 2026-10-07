@@ -66,6 +66,8 @@ fn map<V: Clone>(entries: &[(&str, V)]) -> BTreeMap<String, V> {
 
 const RUST: &str = r#"
 use std::pin::Pin;
+use std::rc::Rc;
+use std::sync::Arc;
 pub struct A;
 impl A {
     pub fn by_value(self) {}
@@ -73,6 +75,9 @@ impl A {
     pub fn by_ref(&self, x: i32) {}
     pub fn by_mut_ref(&mut self) {}
     pub fn by_lifetime<'a>(&'a mut self) {}
+    pub fn by_lifetime_ref<'a>(&'a self) {}
+    pub fn rc(self: Rc<Self>) {}
+    pub fn arc(self: Arc<Self>, z: u8) {}
     pub fn boxed(self: Box<Self>) {}
     pub fn pinned(self: Pin<&mut Self>, y: u8) {}
     pub fn new() -> Self { A }
@@ -80,6 +85,14 @@ impl A {
 }
 pub trait T {
     fn t(&self, a: i32) {}
+}
+pub trait Named {
+    fn name(&self);
+    fn make() -> Self;
+}
+impl Named for A {
+    fn name(&self) {}
+    fn make() -> Self { A }
 }
 pub fn free(a: i32, b: i32) {}
 pub fn caller(a: A) {
@@ -100,26 +113,33 @@ fn rust_ranges_skip_the_receiver() {
     assert_eq!(
         ranges("src/lib.rs", RUST),
         map(&[
+            ("arc", range(1, Some(1))),
             ("assoc", range(3, Some(3))),
             ("boxed", range(0, Some(0))),
             ("by_lifetime", range(0, Some(0))),
+            ("by_lifetime_ref", range(0, Some(0))),
             ("by_mut_ref", range(0, Some(0))),
             ("by_mut_value", range(0, Some(0))),
             ("by_ref", range(1, Some(1))),
             ("by_value", range(0, Some(0))),
             ("caller", range(1, Some(1))),
             ("free", range(2, Some(2))),
+            ("make", range(0, Some(0))),
+            ("name", range(0, Some(0))),
             ("new", range(0, Some(0))),
             ("pinned", range(1, Some(1))),
+            ("rc", range(0, Some(0))),
             ("t", range(1, Some(1))),
         ])
     );
 }
 
 /// CR-200: every `self` form — `self`, `mut self`, `&self`, `&mut self`,
-/// `&'a mut self`, `self: Box<Self>`, `self: Pin<&mut Self>` — takes `self`;
-/// `fn new() -> Self` and an associated function with parameters do not; a
-/// free function and a trait's method record nothing.
+/// `&'a self`, `&'a mut self`, `self: Box<Self>`, `self: Rc<Self>`,
+/// `self: Arc<Self>`, `self: Pin<&mut Self>` — takes `self`, in an inherent
+/// impl and in a trait impl alike; `fn new() -> Self`, a trait impl's
+/// `fn make() -> Self` and an associated function with parameters do not; a
+/// free function and a trait's own default method record nothing.
 #[test]
 fn a_rust_impl_function_records_whether_it_takes_self() {
     let takes_self: BTreeMap<String, Option<bool>> = facts("src/lib.rs", RUST)
@@ -131,17 +151,22 @@ fn a_rust_impl_function_records_whether_it_takes_self() {
     assert_eq!(
         takes_self,
         map(&[
+            ("arc", Some(true)),
             ("assoc", Some(false)),
             ("boxed", Some(true)),
             ("by_lifetime", Some(true)),
+            ("by_lifetime_ref", Some(true)),
             ("by_mut_ref", Some(true)),
             ("by_mut_value", Some(true)),
             ("by_ref", Some(true)),
             ("by_value", Some(true)),
             ("caller", None),
             ("free", None),
+            ("make", Some(false)),
+            ("name", Some(true)),
             ("new", Some(false)),
             ("pinned", Some(true)),
+            ("rc", Some(true)),
             ("t", None),
         ])
     );
