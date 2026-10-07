@@ -239,8 +239,9 @@ public abstract class Base {
 }
 
 /// [FR-QM-12]'s 25-method AC on Rust: a struct whose impl carries 25 bodied
-/// methods is god and a 5-method struct is not. Rust declares no body kind, so
-/// every callable is bodied ([FR-EX-11]) and the v7 narrowing moves nothing.
+/// methods is god and a 5-method struct is not. Rust declares `block` as its
+/// body kind (S-606), which every `impl` `function_item` carries, so each is
+/// bodied ([FR-EX-11]) and the v7 narrowing moves nothing.
 /// Ignored: the `impl` methods are not `Contains`-ed by the struct (module
 /// docs).
 ///
