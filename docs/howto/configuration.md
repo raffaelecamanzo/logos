@@ -1678,6 +1678,45 @@ the wrappers extraction peels (`Box`, `Arc`, `Rc`); another key never matches.
 Declaring the table also makes `status` report the language's `call_residue`
 ([Commands](commands.md)). It defaults to empty.
 
+### Arity (`overloaded_calls`, `arity_unchecked_extensions`, `implicit_call_falls_through`, `implicit_root_members`)
+
+Every callable records how many arguments it accepts, and every call how many it
+passes. A `self`, `super` or typed-receiver call in any language binds only a
+candidate whose parameter count admits the call ([Usage](usage.md)). Four
+`plugin.toml` keys decide the rest:
+
+```toml
+# Java, Kotlin, Scala, C#, C++: a bare `f(x)` also binds only an `f` that
+# admits one argument, and a scope whose `f`s admit none is passed over.
+overloaded_calls = true
+
+# TypeScript (`js`, `mjs`, `cjs`) and TSX (`jsx`): JavaScript enforces no
+# arity, so a call in these files is never filtered. The range is still recorded.
+arity_unchecked_extensions = ["js", "mjs", "cjs"]
+
+# Kotlin only: an unqualified in-class call that no member admits goes on to
+# the top-level functions and imports in scope ...
+implicit_call_falls_through = true
+# ... except these names, which every class inherits from a root (`Any`) the
+# graph never holds.
+implicit_root_members = ["equals", "hashCode", "toString"]
+```
+
+- `overloaded_calls` defaults to `false`: a bare call binds by name alone. It
+  decides only the bare-call rung; the receiver walks filter in every language.
+- Each `arity_unchecked_extensions` entry must be one of the plugin's own
+  `extensions`, written bare. It defaults to empty.
+- `implicit_call_falls_through` requires `implicit_receiver = "self"` and a
+  references query that captures supertypes; a plugin that breaks either rule
+  is refused at load. The fall-through is taken only when every supertype of the
+  class is in the graph. Java, C#, Scala and C++ leave it off, because a member
+  hides every outer name even when no overload applies.
+- `implicit_root_members` is accepted only beside `implicit_call_falls_through`.
+
+A call that two candidates admit stays unbound (`overload-ambiguous`), since logos
+reads no argument types. A call that nothing admits is counted
+`no-applicable-overload` in `status`'s `call_residue`.
+
 ### Outbound HTTP client calls (`invocations`)
 
 `invocations.scm` is the **consumer** side of cross-service coupling: it captures
