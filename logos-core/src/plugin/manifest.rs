@@ -653,6 +653,19 @@ pub struct PluginManifest {
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
     #[serde(default)]
     pub overloaded_calls: bool,
+    /// Whether a call to a type's method is decided by one associated-item
+    /// lookup over the language's recorded `impl` blocks (S-607, [FR-RS-47]):
+    /// `Self::m()`, `self.m()`, a proven `x.m()` and a written `T::m()` bind
+    /// among the functions of every impl block whose self type resolves to
+    /// `T`, inherent before trait, and every unbound call carries a reason.
+    /// Rust alone. Defaults to `false`: a written `T::m()` keeps the module
+    /// collapse and a `Self::m` call the recorded-self-type arm, as before
+    /// ([NFR-MA-01]).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub impl_block_lookup: bool,
     /// The extensions, among this plugin's own, of a language that enforces no
     /// arity (S-592, [FR-RS-43]): JavaScript, which the TypeScript grammars
     /// also parse (`js`, `mjs`, `cjs`, `jsx`). A call in such a file may pass
@@ -2199,6 +2212,9 @@ mod tests {
         };
         assert!(with("overloaded_calls = true").unwrap().overloaded_calls);
         assert!(with("overloaded_calls = \"yes\"").is_err());
+        assert!(!m.impl_block_lookup);
+        assert!(with("impl_block_lookup = true").unwrap().impl_block_lookup);
+        assert!(with("impl_block_lookup = \"yes\"").is_err());
         let claimed = with("arity_unchecked_extensions = [\"rs\"]").unwrap();
         assert_eq!(claimed.arity_unchecked_extensions, ["rs"]);
         let err = with("arity_unchecked_extensions = [\"js\"]").unwrap_err().to_string();

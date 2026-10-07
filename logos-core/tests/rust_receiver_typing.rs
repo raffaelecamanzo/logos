@@ -180,10 +180,10 @@ fn each_retyped_row_binds_the_method_of_the_type_it_records() {
     // S-588 binds every retyped row to its recorded type's `f` — `A::f` on
     // line 3, `B::f` on line 4 — and `Holder::via_field` through the
     // constructor proof. Before S-588 the caller file's one `Calls` edge was
-    // the written `Holder::new()`. The written `A::f(&x)` still binds nothing:
-    // the module path reads `A::f` as a name of `types`, where `A` and `B`
-    // both declare one (pre-existing, not a receiver row). The unproven
-    // receiver stays unbound.
+    // the written `Holder::new()`. The written `A::f(&x)` binds `A::f` too
+    // (S-607: one associated-item lookup — 1.13.0 read `A::f` as a name of
+    // `types`, where `A` and `B` both declare one, and bound nothing). The
+    // unproven receiver stays unbound.
     let tmp = fixture();
     let engine = index(&tmp);
     let rt = engine.runtime().unwrap();
@@ -199,7 +199,8 @@ fn each_retyped_row_binds_the_method_of_the_type_it_records() {
         (format!("{CALLER_FILE}:via_field@7"), b_f.clone()),
         (format!("{CALLER_FILE}:via_let@11"), b_f),
         (format!("{CALLER_FILE}:via_literal@13"), a_f.clone()),
-        (format!("{CALLER_FILE}:via_param@10"), a_f),
+        (format!("{CALLER_FILE}:via_param@10"), a_f.clone()),
+        (format!("{CALLER_FILE}:via_written@14"), a_f),
     ];
     expected.sort();
     assert_eq!(from_caller, expected);

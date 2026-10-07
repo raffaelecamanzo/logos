@@ -444,16 +444,18 @@ pub fn run(
 
     // Snapshot (one reader-pool read): the same consistent basis the
     // resolution pass binds against.
-    let (files, nodes, edges, refs, namespaces, signatures) = runtime.submit_read(|store| {
+    let (files, nodes, edges, refs, namespaces, associated) = runtime.submit_read(|store| {
         Ok((
             store.indexed_files()?,
             store.all_nodes()?,
             store.all_edges()?,
             store.unresolved_refs()?,
             store.file_namespaces()?,
-            super::signature_nodes(store)?,
+            super::associated_items(store)?,
         ))
     })?;
+    let (impl_blocks, item_facts) = associated;
+    let signatures = super::signatures_of(&item_facts);
 
     // Promoted nodes already in the graph (the reconcile baseline).
     let existing: Vec<&NodeRow> = nodes
@@ -515,9 +517,11 @@ pub fn run(
     let layout = PackageLayout::from_registry(registry)
         .with_declared_namespaces(namespaces)
         .with_import_root_overrides(&resolution.import_roots);
-    // A required signature binds nothing (S-606).
+    // A required signature binds nothing (S-606). A handler written `T::m`
+    // binds through the one associated-item lookup, as a call does (S-607).
     let (bind_nodes, bind_edges) = binder::bindable(&nodes, &edges, &signatures);
-    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone());
+    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone())
+        .with_associated_items(&bind_nodes, &impl_blocks, &item_facts);
     let member = MemberConstants {
         root,
         registry,

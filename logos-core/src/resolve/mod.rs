@@ -124,7 +124,9 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 use crate::config::{BindingPolicy, Resolution};
-use crate::graph_store::{EdgeRow, GraphStore, NodeArity, NodeRow, RelationCounts, UnresolvedRefRow};
+use crate::graph_store::{
+    EdgeRow, GraphStore, ImplBlockRow, NodeArity, NodeItemFacts, NodeRow, RelationCounts, UnresolvedRefRow,
+};
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::navigation::{
     CallResidue, CallResidueReason, LanguageResolution, RelationResolution, ResidueScope,
@@ -165,9 +167,12 @@ struct Snapshot {
     arities: Vec<NodeArity>,
     /// Every file's recorded declared namespace (S-518, `files.namespace`).
     namespaces: Vec<(String, String)>,
-    /// The required signatures (S-606, `nodes.signature`), which bind nothing
-    /// ([`binder::bindable`]).
-    signatures: HashSet<NodeId>,
+    /// Every recorded `impl` block and node item fact (S-606) — the universe
+    /// of the one associated-item lookup (S-607,
+    /// [`binder::Index::with_associated_items`]); the item facts also name the
+    /// required signatures, which bind nothing ([`binder::bindable`]).
+    impl_blocks: Vec<ImplBlockRow>,
+    item_facts: Vec<NodeItemFacts>,
     /// file_id → project-relative path, for an incremental run to test a row's
     /// owning file against the change-set. Empty on a full index.
     file_paths: HashMap<i64, String>,
@@ -219,12 +224,19 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 /// The required signatures the store records (S-606, `nodes.signature`): the
 /// nodes [`binder::bindable`] keeps out of every binding run.
 pub(crate) fn signature_nodes(store: &dyn GraphStore) -> Result<HashSet<NodeId>> {
-    Ok(store
-        .node_item_facts()?
-        .into_iter()
-        .filter(|f| f.signature)
-        .map(|f| f.id)
-        .collect())
+    Ok(signatures_of(&store.node_item_facts()?))
+}
+
+/// The required signatures among `facts` ([`signature_nodes`]).
+pub(crate) fn signatures_of(facts: &[NodeItemFacts]) -> HashSet<NodeId> {
+    facts.iter().filter(|f| f.signature).map(|f| f.id).collect()
+}
+
+/// The facts the one associated-item lookup reads (S-606, S-607): every
+/// recorded `impl` block and node item fact, the latter also naming the
+/// required signatures [`binder::bindable`] leaves out.
+pub(crate) fn associated_items(store: &dyn GraphStore) -> Result<(Vec<ImplBlockRow>, Vec<NodeItemFacts>)> {
+    Ok((store.impl_blocks()?, store.node_item_facts()?))
 }
 
 /// Run the resolution pass: bind every ledger row it can, persist the rest.
@@ -267,7 +279,8 @@ pub fn run(
             self_types: store.node_self_types()?,
             arities: store.node_arities()?,
             namespaces: store.file_namespaces()?,
-            signatures: signature_nodes(store)?,
+            impl_blocks: store.impl_blocks()?,
+            item_facts: store.node_item_facts()?,
             // The file_id → path map only an incremental run needs (to test a
             // row's owning file against the change-set); a full index skips it.
             file_paths: if want_file_paths {
@@ -304,10 +317,12 @@ pub fn run(
             .with_declared_namespaces(snap.namespaces.iter().cloned())
             .with_import_root_overrides(&resolution.import_roots)
     });
-    let (bind_nodes, bind_edges) = binder::bindable(&snap.nodes, &snap.edges, &snap.signatures);
+    let signatures = signatures_of(&snap.item_facts);
+    let (bind_nodes, bind_edges) = binder::bindable(&snap.nodes, &snap.edges, &signatures);
     let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
         .with_arities(&snap.arities)
+        .with_associated_items(&bind_nodes, &snap.impl_blocks, &snap.item_facts)
         .with_path_specifiers(specifier_targets, go_modules)
         .with_imported_bindings(&snap.refs, policy);
 
@@ -921,9 +936,10 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 /// ([`PackageLayout::peels_receivers`]: Rust), is re-walked by the binder
 /// under `policy` and counted under the reason the walk gave up with
 /// ([`binder::residue`]), so a reason can never describe a path the bind did not
-/// take. A Rust row the walk records no reason for — anything but a receiver
-/// call, a `Self::m` call inside an `impl` or a proven `T::m` call — is
-/// `unclassified`.
+/// take. Every unbound Rust row carries one (S-607): a path or bare call no
+/// lookup decided is read off its own resolution — `external-type`,
+/// `name-not-in-scope`, `not-a-callable` — so `unclassified` holds only rows
+/// the binder binds now.
 /// The index is [`run`]'s, built with the same package layout, minus the
 /// path-specifier and imported-binding scopes `run` chains on: those are read
 /// only for a path-grammar (TypeScript, JavaScript, Go) file, never for a
@@ -985,11 +1001,12 @@ pub(crate) fn call_residue_by_language(
     }
 
     let (nodes, edges, refs) = (store.all_nodes()?, store.all_edges()?, store.unresolved_refs()?);
-    let signatures = signature_nodes(store)?;
-    let (nodes, edges) = binder::bindable(&nodes, &edges, &signatures);
+    let (impl_blocks, item_facts) = associated_items(store)?;
+    let (nodes, edges) = binder::bindable(&nodes, &edges, &signatures_of(&item_facts));
     let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout)
         .with_self_types(store.node_self_types()?)
-        .with_arities(&store.node_arities()?);
+        .with_arities(&store.node_arities()?)
+        .with_associated_items(&nodes, &impl_blocks, &item_facts);
     let declared = index.declared_type_names();
 
     let mut out: BTreeMap<String, CallResidue> = BTreeMap::new();
@@ -1039,6 +1056,8 @@ pub(crate) fn call_residue_by_language(
             Some(binder::Residue::TypeAmbiguous) => CallResidueReason::TypeAmbiguous,
             Some(binder::Residue::SupertypeUnreached) => CallResidueReason::SupertypeUnreached,
             Some(binder::Residue::NoApplicableOverload) => CallResidueReason::NoApplicableOverload,
+            Some(binder::Residue::NotACallable) => CallResidueReason::NotACallable,
+            Some(binder::Residue::NameNotInScope) => CallResidueReason::NameNotInScope,
         };
         *residue.reasons.entry(reason).or_default() += 1;
     }

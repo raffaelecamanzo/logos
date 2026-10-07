@@ -500,6 +500,19 @@ impl LanguageRegistry {
     }
 
     /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares `impl_block_lookup = true` (S-607, [FR-RS-47]): a call to a
+    /// type's method there binds through the one associated-item lookup over
+    /// recorded `impl` blocks. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds as before.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    pub fn impl_block_lookup_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.impl_block_lookup)
+    }
+
+    /// The file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)) a code plugin
     /// declares in `arity_unchecked_extensions` (S-592, [FR-RS-43]): files of a
     /// language that enforces no arity — JavaScript, parsed by the TypeScript
@@ -1248,6 +1261,8 @@ mod tests {
         for ext in ["rs", "go", "py", "php", "ts", "js", "rb", "c", "md"] {
             assert!(!overloaded.contains(ext), "`{ext}`'s bare call binds by name");
         }
+        let lookup = reg.impl_block_lookup_extensions();
+        assert_eq!(lookup, HashSet::from(["rs".to_string()]), "Rust alone records impl blocks");
         let fallthrough = reg.free_call_fallthrough_extensions();
         for ext in ["kt", "kts"] {
             assert!(fallthrough.contains(ext), "`{ext}`'s instance call falls through");

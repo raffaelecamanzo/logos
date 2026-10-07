@@ -919,8 +919,10 @@ fn the_residue_is_on_the_serialised_status_and_its_internals_are_not() {
         residue["reasons"],
         serde_json::json!({
             "external-type": 0,
+            "name-not-in-scope": 0,
             "no-applicable-overload": 0,
             "no-receiver-evidence": 1,
+            "not-a-callable": 0,
             "overload-ambiguous": 0,
             "supertype-unreached": 0,
             "type-ambiguous": 0,

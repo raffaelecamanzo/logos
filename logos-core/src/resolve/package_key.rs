@@ -112,6 +112,12 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     overloaded_call_exts: HashSet<String>,
+    /// The extensions whose language decides a call to a type's method by the
+    /// one associated-item lookup over recorded `impl` blocks (S-607,
+    /// [FR-RS-47]).
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    impl_block_lookup_exts: HashSet<String>,
     /// Normalised extensions of a language that enforces no arity —
     /// JavaScript's — whose calls no parameter range filters (S-592,
     /// [FR-RS-43]).
@@ -207,6 +213,7 @@ impl PackageLayout {
             .with_free_call_fallthrough(registry.free_call_fallthrough_extensions())
             .with_implicit_root_members(registry.implicit_root_members())
             .with_overloaded_calls(registry.overloaded_call_extensions())
+            .with_impl_block_lookup(registry.impl_block_lookup_extensions())
             .with_arity_unchecked(registry.arity_unchecked_extensions())
             .with_wrapper_methods(registry.wrapper_methods())
     }
@@ -257,6 +264,14 @@ impl PackageLayout {
     /// returns).
     pub fn with_overloaded_calls(mut self, exts: impl IntoIterator<Item = String>) -> Self {
         extend_normalised(&mut self.overloaded_call_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose calls to a type's method bind
+    /// through the one associated-item lookup (S-607; the set
+    /// [`LanguageRegistry::impl_block_lookup_extensions`] returns).
+    pub fn with_impl_block_lookup(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.impl_block_lookup_exts, exts);
         self
     }
 
@@ -523,6 +538,15 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.overloaded_call_exts.contains(&ext))
     }
 
+    /// Whether a call to a type's method written in the file at `path` binds
+    /// through the one associated-item lookup over recorded `impl` blocks
+    /// (S-607, [FR-RS-47]), every unbound one with a reason.
+    ///
+    /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+    pub fn looks_up_impl_blocks(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.impl_block_lookup_exts.contains(&ext))
+    }
+
     /// Whether a call written in the file at `path` is filtered by its
     /// candidates' parameter ranges at all (S-592, [FR-RS-43]): `false` for a
     /// language that enforces no arity — a JavaScript file the TypeScript
@@ -581,12 +605,20 @@ impl PackageLayout {
 
     /// A registry-less layout folding the package-file stems the rust plugin
     /// declares (`mod`, `lib`, `main`) for `.rs` files — what a synthetic test
-    /// graph of Rust paths is keyed with (`binder::Index::build`). Pinned
-    /// against the loaded descriptor by
+    /// graph of Rust paths is keyed with (`binder::Index::build`) — and its
+    /// `impl_block_lookup` (S-607). Pinned against the loaded descriptor by
     /// `rust_tests::the_test_layout_folds_the_stems_the_rust_plugin_declares`,
     /// so the two cannot drift.
     #[cfg(test)]
     pub(crate) fn rust_stems_for_tests() -> Self {
+        Self::stems_only_for_tests().with_impl_block_lookup(["rs".to_string()])
+    }
+
+    /// [`rust_stems_for_tests`](Self::rust_stems_for_tests) without the
+    /// associated-item lookup: the `.rs` path model alone, as a language
+    /// recording no `impl` block would key its files (S-607).
+    #[cfg(test)]
+    pub(crate) fn stems_only_for_tests() -> Self {
         Self::default().with_path_models(HashMap::from([(
             "rs".to_string(),
             PathModelDecl {
@@ -663,6 +695,7 @@ impl PackageLayout {
                     .collect(),
             )
             .with_overloaded_calls(exts().filter(|_| semantics.overloaded_calls))
+            .with_impl_block_lookup(exts().filter(|_| semantics.impl_block_lookup))
             .with_arity_unchecked(semantics.arity_unchecked_extensions.iter().cloned())
             .with_wrapper_methods(
                 exts()
@@ -1158,7 +1191,8 @@ pub(crate) mod rust_tests {
     }
 
     /// The synthetic-graph layout (`binder::Index::build`) folds exactly the
-    /// stems the loaded rust plugin declares, and declares no import roots.
+    /// stems the loaded rust plugin declares, declares no import roots, and
+    /// looks its calls up through impl blocks as the plugin does (S-607).
     #[cfg(feature = "lang-rust")]
     #[test]
     fn the_test_layout_folds_the_stems_the_rust_plugin_declares() {
@@ -1166,6 +1200,8 @@ pub(crate) mod rust_tests {
         let test = PackageLayout::rust_stems_for_tests();
         assert_eq!(registry.path_models.get("rs"), test.path_models.get("rs"));
         assert!(registry.path_models["rs"].roots.is_none());
+        assert_eq!(registry.impl_block_lookup_exts, test.impl_block_lookup_exts);
+        assert!(!PackageLayout::stems_only_for_tests().looks_up_impl_blocks("src/lib.rs"));
     }
 
     /// Every `.rs` file of this repository keeps the module key the hard-coded
@@ -1478,12 +1514,13 @@ mod call_target_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
         let full = PackageLayout::from_registry(&registry);
-        let keys: [fn(&PackageLayout, &str) -> bool; 3] = [
+        let keys: [fn(&PackageLayout, &str) -> bool; 4] = [
             |layout, path| layout.falls_through_to_free_calls(path, "m"),
             PackageLayout::overloads_calls,
             PackageLayout::checks_arity,
+            PackageLayout::looks_up_impl_blocks,
         ];
-        let mut held = [(0, 0); 3];
+        let mut held = [(0, 0); 4];
         for plugin in registry.iter() {
             let own = PackageLayout::from_plugin(plugin);
             for ext in plugin.extensions() {

@@ -41,6 +41,36 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   clears every content hash, so the first `logos scan` (or `logos index`) after
   upgrading re-reads every file. A bare `logos sync` reads no file.
 
+### Changed
+
+- **A Rust call to a type's method resolves through one associated-item
+  lookup (CR-202, S-607).** `self.m()`, `Self::m()`, a method call on a proven
+  receiver and a written `T::m()` now all bind among the functions of every
+  `impl` block whose self type resolves to `T` — from any crate, through named
+  and glob `pub use` re-exports, and for module-relative headers such as
+  `impl a::X`. Syntax decides the filters: a method call never reaches an
+  associated function (`fn new()`), and a path call to a `self`-taking function
+  counts its receiver as an argument. An inherent function beats a trait's in
+  any module; a trait method binds only where its trait is in scope (declared
+  in the caller's module, imported by name, `as _` or a glob, or named by the
+  caller's own `impl` header); an inherent `&self` method beside a trait's
+  by-value `self` one binds nothing. A written `T::m()` no longer binds any
+  same-named function of `T`'s module: `CallersResult::default()` stops binding
+  `ResolutionDenominator::default`. Every unbound Rust call now carries a
+  reason, with two new ones in `status`'s `call_residue` (CLI, MCP, HTTP):
+  `not-a-callable` (an enum variant, a tuple-struct constructor) and
+  `name-not-in-scope` (a prelude function, a closure, an item the file does not
+  import); `unclassified` reads 0 on a fresh index. Java, Kotlin, C#, Scala
+  and PHP rows list both reasons at 0. On a full-indexed export of this
+  repository, 1.13.0 vs this release: `Calls` edges 23,916 → 26,121 (2,251
+  added, 46 removed — every removal a call bound to another type's method);
+  non-Rust graphs byte-identical; the Rust row's unclassified 16,360 → 0. The
+  quality signal reads 8168 → 8128 on that export, from the newly bound
+  cross-module calls (dependency depth 14 → 15, modularity −0.005). Plugins
+  opt in with `impl_block_lookup = true` in `plugin.toml` (Rust declares it).
+  Run `logos scan` (or `logos index`) to re-bind an existing graph; a bare
+  `logos sync` re-binds only the rows its change touches.
+
 ## [1.13.0] — 2026-10-07
 
 ### Added
