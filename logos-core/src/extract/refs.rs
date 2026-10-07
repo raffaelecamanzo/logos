@@ -372,7 +372,12 @@ fn bound_names<'a>(tt: Node<'_>, source: &'a [u8], out: &mut HashSet<&'a str>) {
                 }
             }
             "let" | "for" => {
-                let end = (i + 1..kinds.len()).find(|&j| matches!(kinds[j], "=" | ":" | ";" | "in"));
+                // `in` is an `identifier` token, not a keyword one.
+                let ends = |j: usize| {
+                    matches!(kinds[j], "=" | ":" | ";")
+                        || (kinds[j] == "identifier" && tt.child(j).and_then(|c| c.utf8_text(source).ok()) == Some("in"))
+                };
+                let end = (i + 1..kinds.len()).find(|&j| ends(j));
                 idents(i + 1, end.unwrap_or(kinds.len()));
             }
             "=>" | "if" => {
@@ -1277,6 +1282,11 @@ mod tree_tests {
             "m!(select! { recv(x) -> msg => { x.f() } })",
             // An earlier arm's body is no part of a later arm's pattern.
             "m!(select! { recv(y) -> a => { x.g() } recv(z) -> b => { x.f() } })",
+            // The `in` ends a `for` pattern; a `,` or `;` ends a guard's run.
+            "m!({ for y in x { x.f() } })",
+            "m!(x, Some(y) if x.f())",
+            "m!({ x; if t { x.f() } })",
+            "m!({ let _y = 1; match o { Some(_y) => x.f(), None => 0 } })",
         ] {
             assert_eq!(receiver_of_f(src), name, "{src}");
         }
@@ -1294,6 +1304,24 @@ mod tree_tests {
         ] {
             assert_eq!(receiver_of_f(src), None, "{src}");
         }
+    }
+
+    /// A fully qualified path inside a macro is no turbofish: the `<T as Tr>`
+    /// before `::m` is not opened by a `::`, so what precedes it (`a,`, `z::y,`)
+    /// is not a path segment of the call.
+    #[test]
+    fn a_qualified_path_after_a_name_is_not_joined_to_it() {
+        assert_eq!(want(&macro_calls("assert_eq!(a, <T as Tr>::m())")), want(&[path("m")]));
+        assert_eq!(want(&macro_calls("assert_eq!(z::y, <T as Tr>::m())")), want(&[path("m")]));
+    }
+
+    /// A turbofish call's line is its name token's, wherever its `>` and `(`
+    /// group sit.
+    #[test]
+    fn a_turbofish_call_is_on_the_line_of_its_name() {
+        let got = macro_calls("vec![\n    f::<\n        u8,\n    >(a),\n    Vec::<u8>\n        ::new(),\n]");
+        let lines: Vec<(String, u32)> = got.iter().map(|c| (c.target.clone(), c.line)).collect();
+        assert_eq!(lines, vec![("f".to_string(), 2), ("Vec::new".to_string(), 6)]);
     }
 
     /// An unclosed turbofish (`::<` with no `>`) records nothing and panics on

@@ -567,9 +567,12 @@ fn a_chain_a_path_or_a_field_of_another_value_is_never_a_macro_receiver() {
 #[test]
 fn a_macro_call_and_a_plain_call_of_one_receiver_are_one_row() {
     // The same site recorded by the query and by the token-tree walk would be
-    // two rows of one shape; they dedup to one.
+    // two rows of one shape; they dedup to one (counted before `calls_of_f`
+    // dedups, which would hide a second).
     let src = with_types("fn g(x: A) { x.f(); format!(\"{:?}\", x.f()); }");
     assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
+    let rows = extract_rust(&src).refs.iter().filter(|r| r.kind == EdgeKind::Calls && r.target == "A::f").count();
+    assert_eq!(rows, 1);
 }
 
 #[test]
