@@ -145,8 +145,10 @@
 ; How a callable writes its `self` parameter (`extract::assoc`): by value
 ; (`self`, `mut self`), `&self`, `&mut self` (a lifetime between them
 ; included), or typed (`self: Box<Self>`). Every `self_parameter` is captured
-; `value` and refined by the more specific patterns; the strongest wins. A
-; callable whose list writes no receiver records the mode `none`.
+; `value` and refined by the more specific patterns; the strongest wins. An
+; impl function or required signature whose list writes no receiver records
+; the mode `none`; every other callable (a free `fn`, a trait's default body)
+; records no mode, as it records no `takes_self`.
 (self_parameter) @item.receiver.value
 (self_parameter "&") @item.receiver.ref
 (self_parameter "&" (mutable_specifier)) @item.receiver.mut

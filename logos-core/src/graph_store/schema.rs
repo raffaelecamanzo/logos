@@ -2832,8 +2832,8 @@ UPDATE files SET content_hash = NULL;
 /// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
 const MIGRATION_34: &str = "\
 -- 1. How a callable writes its receiver (FR-EX-34): 0 none, 1 by value, 2 &,
--- 3 &mut, 4 typed. NULL wherever takes_self is, and on rows indexed before
--- this migration.
+-- 3 &mut, 4 typed. Recorded wherever takes_self is, NULL wherever takes_self
+-- is NULL, and on rows indexed before this migration.
 ALTER TABLE nodes ADD COLUMN receiver_mode INTEGER CHECK (receiver_mode IN (0,1,2,3,4));
 
 -- 2. An enum's variant names, space-joined in declaration order, '' for none.

@@ -973,7 +973,7 @@ impl ReceiverMode {
     }
 
     /// The lexicon token (matches the `serde` representation), and the
-    /// capture-name suffix a plugin's `@receiver.<mode>` capture spells.
+    /// capture-name suffix a plugin's `@item.receiver.<mode>` capture spells.
     pub const fn as_str(self) -> &'static str {
         match self {
             ReceiverMode::None => "none",

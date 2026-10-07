@@ -322,8 +322,9 @@ pub struct NewNode<'a> {
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     pub takes_self: Option<bool>,
     /// How the callable writes its receiver (S-606, [FR-EX-34]) — the
-    /// `nodes.receiver_mode` column, migration 34. `None` wherever `takes_self`
-    /// is, or the mode is unknown.
+    /// `nodes.receiver_mode` column, migration 34. Recorded wherever
+    /// `takes_self` is; `None` wherever `takes_self` is `None`, or when the
+    /// mode is unknown.
     ///
     /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
     pub receiver_mode: Option<ReceiverMode>,
