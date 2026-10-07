@@ -2307,8 +2307,9 @@ fn bind_text(
     };
     match binder::bind(&synthetic, index, policy) {
         binder::Outcome::Bound { target, .. } => Some(target),
-        // Framework refs are never cross-artifact module calls, so the multi-target
-        // outcome cannot arise here; treat it as no single target defensively.
+        // A fan-out (S-608: a trait-headed `Tr::m`, every impl plus the default)
+        // names no single handler — a route needs the impl type written, which
+        // `<X as Tr>::m` binds as one target — so it is no target.
         binder::Outcome::BoundMany { .. } => None,
         binder::Outcome::Unbound => {
             if target.contains("::") {
