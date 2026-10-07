@@ -397,6 +397,31 @@ pub fn cloned<T: Run + Clone>(t: &T) -> T { t.clone() }
     assert_eq!(residue(&engine), reasons(&[(R::OverloadAmbiguous, 1), (R::ExternalType, 1)]));
 }
 
+/// A bound is the trait the caller names: where the file imports
+/// `std::io::Write`, a `W: Write`, `impl Write` or `dyn Write` receiver never
+/// reaches a repository trait that happens to be called `Write` (an
+/// `external-type`), while a caller naming the repository trait by path
+/// reaches its impls.
+#[test]
+fn a_bound_is_the_trait_the_caller_names_never_a_same_named_repository_one() {
+    let tmp = tree(&[
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod c;\n"),
+        ("src/a.rs", "pub trait Write { fn flush(&mut self) {} }\npub struct Foo;\nimpl Write for Foo {\n    fn flush(&mut self) {}\n}\n"),
+        (
+            "src/b.rs",
+            "use std::io::Write;\npub fn generic<W: Write>(w: &mut W) { w.flush(); }\npub fn opaque(w: &mut impl Write) { w.flush(); }\npub fn object(w: &mut dyn Write) { w.flush(); }\n",
+        ),
+        ("src/c.rs", "pub fn named(w: &mut dyn crate::a::Write) { w.flush(); }\n"),
+    ]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    for caller in ["src/b.rs:generic@2", "src/b.rs:opaque@3", "src/b.rs:object@4"] {
+        assert!(from(&edges, caller).is_empty(), "{caller}: {edges:?}");
+    }
+    assert_eq!(from(&edges, "src/c.rs:named@1"), targets(&["src/a.rs:flush@1", "src/a.rs:flush@4"]));
+    assert_eq!(residue(&engine), reasons(&[(R::ExternalType, 3)]));
+}
+
 // ── Qualified paths ────────────────────────────────────────────────────────
 
 /// `<Q as Run>::go(q)` binds `Q`'s impl of `Run::go`, `<P as Run>::go(p)` the

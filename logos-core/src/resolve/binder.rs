@@ -4903,9 +4903,10 @@ impl Ctx<'_> {
     /// `target` is the trait-qualified form extraction emits for a *provable*
     /// trait-typed receiver — `&dyn T`, `impl T`, a generic parameter bounded
     /// by `T` — the method the last `::` segment, the head its trait, or its
-    /// several bounds joined by `+` (`A+B::f`). Each bound is read by its
-    /// unique name ([`Index::trait_by_name`]); one the graph cannot place
-    /// (`Send`, `Clone`) provides nothing it can see. The one bound whose set
+    /// several bounds joined by `+` (`A+B::f`). Each bound is read as the
+    /// caller names it ([`bound_trait`](Ctx::bound_trait)); one the graph
+    /// cannot place (`Send`, `Clone`, an imported `std::io::Write`) provides
+    /// nothing it can see. The one bound whose set
     /// ([`fan_out`](Ctx::fan_out)) is not empty decides the call. Two such
     /// bounds bind nothing ([`Residue::OverloadAmbiguous`]): rustc rejects the
     /// call as ambiguous. None is [`Residue::ExternalType`] beside an unplaced
@@ -4930,7 +4931,7 @@ impl Ctx<'_> {
         let mut unplaced = false;
         let mut providers: Vec<Vec<NodeId>> = Vec::new();
         for bound in head.split('+') {
-            match self.ix.trait_by_name(bound) {
+            match self.bound_trait(bound) {
                 Some(tr) => {
                     let set = self.fan_out(tr, method);
                     if !set.is_empty() {
@@ -4958,6 +4959,25 @@ impl Ctx<'_> {
                 self.note(Want::Callable, || Residue::OverloadAmbiguous);
                 Res::Ambiguous
             }
+        }
+    }
+
+    /// The repository trait a trait-typed call's bound `name` — a simple name
+    /// (S-281, S-608) — denotes at the caller: the one its scope names
+    /// ([`header_type`](Ctx::header_type), by scope and module model only),
+    /// else, where the caller's file imports no item of that name, the one
+    /// repository trait of the name ([`Index::trait_by_name`]: a bound written
+    /// as a path, `&dyn a::b::Tr`, records its last segment). An import that
+    /// names an item outside the repository (`use std::io::Write;`) shadows a
+    /// repository trait of the same name, as Rust's own `use` does: `None`.
+    fn bound_trait(&self, name: &str) -> Option<NodeId> {
+        let scoped = self.scope_only.replace(true);
+        let res = self.header_type(name);
+        self.scope_only.set(scoped);
+        match res {
+            Res::Found(id) => self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Trait).then_some(id),
+            Res::NotFound if !self.scope().is_some_and(|s| s.aliases.contains_key(name)) => self.ix.trait_by_name(name),
+            Res::NotFound | Res::Ambiguous => None,
         }
     }
 
