@@ -90,7 +90,7 @@ use std::path::Path;
 
 use crate::config::BindingPolicy;
 use crate::extract::doc::heading_slug;
-use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
+use crate::graph_store::{EdgeRow, NodeArity, NodeRow, UnresolvedRefRow};
 use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, ReceiverShape, RefForm};
 use crate::plugin::CallTargets;
 
@@ -653,6 +653,16 @@ pub(crate) struct Index {
     /// rung (S-493) and a proven receiver's call (S-588, [`Ctx::type_method`]):
     /// Rust resolves a method to an inherent `m` before a trait's.
     trait_impl_methods: HashSet<NodeId>,
+    /// The callables recorded as **not** taking `self` (S-604, [CR-200]; the
+    /// `nodes.takes_self` column, false) — a Rust associated function such as
+    /// `fn new() -> Self`, which a method call `x.m()` can never invoke. A
+    /// proven receiver's call ([`Ctx::type_method`]) drops them before any
+    /// rank; a callable whose fact is unknown is not here, so it is never
+    /// dropped. Empty unless the run was given the store's facts
+    /// ([`Index::with_arities`]).
+    ///
+    /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
+    without_self: HashSet<NodeId>,
 }
 
 impl Index {
@@ -751,6 +761,7 @@ impl Index {
             type_names: HashMap::new(),
             file_ids: HashMap::new(),
             trait_impl_methods: HashSet::new(),
+            without_self: HashSet::new(),
         };
         let hierarchy = build_supertypes(refs, &index);
         index.supertypes = hierarchy.supertypes;
@@ -894,6 +905,22 @@ impl Index {
         self.self_types = self_types.into_iter().collect();
         self.methods_by_self_type = by_type;
         self.type_names = type_names;
+        self
+    }
+
+    /// Give the index the arity facts the store records per node (S-604,
+    /// [CR-200]; [`GraphStore::node_arities`]): the callables recorded as not
+    /// taking `self`, which a proven receiver's method call never binds
+    /// ([`Index::without_self`]). A fact that is unknown records nothing.
+    ///
+    /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
+    /// [`GraphStore::node_arities`]: crate::graph_store::GraphStore::node_arities
+    pub(crate) fn with_arities(mut self, arities: &[NodeArity]) -> Index {
+        self.without_self = arities
+            .iter()
+            .filter(|(_, _, takes_self)| *takes_self == Some(false))
+            .map(|(id, _, _)| *id)
+            .collect();
         self
     }
 
@@ -3407,7 +3434,11 @@ impl Ctx<'_> {
 
     /// The one callable `name` among the in-repository type `ty`'s methods
     /// (S-588, [FR-RS-42]) — those recorded with its name as their self type in
-    /// its crate ([`Index::methods_by_self_type`], [S-493]'s universe).
+    /// its crate ([`Index::methods_by_self_type`], [S-493]'s universe), less
+    /// every one recorded as not taking `self` ([`Index::without_self`],
+    /// S-604): `x.m()` can never call an associated function, so one never
+    /// outranks — or ties with — the method rustc calls. A candidate whose fact
+    /// is unknown stays.
     ///
     /// When the crate declares that name for one type, every candidate is
     /// `ty`'s, wherever its impl block sits. Otherwise only the impls in `ty`'s
@@ -3416,8 +3447,8 @@ impl Ctx<'_> {
     /// decides is [`Residue::TypeAmbiguous`]. Among `ty`'s candidates an
     /// inherent method outranks a trait impl's, as Rust's method lookup does
     /// ([FR-RS-11]); two of one rank are [`Residue::OverloadAmbiguous`], and
-    /// none — a trait default, a derive, a `Deref` target supplies it — is
-    /// [`Residue::SupertypeUnreached`].
+    /// none — a trait default, a derive, a `Deref` target supplies it, or the
+    /// type's only `m` takes no `self` — is [`Residue::SupertypeUnreached`].
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
@@ -3427,14 +3458,18 @@ impl Ctx<'_> {
             return Res::NotFound;
         };
         let key = (info.crate_name.clone(), info.name.clone(), name.to_string());
-        let candidates = self
+        let candidates: Vec<NodeId> = self
             .ix
             .methods_by_self_type
             .get(&key)
-            .map_or(&[][..], Vec::as_slice);
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .copied()
+            .filter(|c| !self.ix.without_self.contains(c))
+            .collect();
         let one_type = self.ix.type_names.get(&(info.crate_name.clone(), info.name.clone())) == Some(&1);
         let own: Vec<NodeId> = if one_type {
-            candidates.to_vec()
+            candidates.clone()
         } else {
             let home = self.ix.nearest_module(ty);
             candidates

@@ -479,7 +479,8 @@ On the Rust row the reasons describe the calls Rust's receiver typing
 receiver's type is proven (`external-type` for `String`, `Vec`, an external
 crate's type or a method the peeled `Arc`/`Rc`/`Box` provides itself, such as
 `clone`; `supertype-unreached` when `T`'s impls in the repository declare no
-such method — a derive, a trait default or a `Deref` target supplies it;
+such method taking `self` — a derive, a trait default or a `Deref` target
+supplies it, or the only one is an associated function `x.m()` cannot call;
 `overload-ambiguous` for two trait impls' methods of that name and no inherent
 one; `type-ambiguous` when the file, or the file re-exporting `T`, imports its
 name twice, or the crate declares it for several types and no impl in `T`'s

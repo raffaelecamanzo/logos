@@ -498,6 +498,85 @@ pub fn plain() { Vec::<u8>::new(); nowhere(); }
     ("src/c.rs", "impl crate::b::A {\n    pub fn m(&self) {}\n}\n"),
 ];
 
+// ── S-604: a method call binds only a callable that takes `self` ────────────
+
+/// `P` has an inherent associated `name()` beside `Named`'s `name(&self)`
+/// (line 6), and two genuine `pair(&self)`s, inherent (line 5) and `Pair`'s
+/// (line 8); each proof form calls both. `Q`'s only `make` takes no `self`.
+const SELF_FORMS: &str = "\
+use std::rc::Rc;
+pub trait Named { fn name(&self) -> &'static str; }
+pub struct P;
+pub trait Pair { fn pair(&self); }
+impl P { pub fn new() -> Self { P } pub fn name() -> &'static str { \"p\" } pub fn pair(&self) {} }
+impl Named for P { fn name(&self) -> &'static str { \"named\" } }
+pub struct Q;
+impl Pair for P { fn pair(&self) {} }
+impl Q { pub fn make() -> Q { Q } }
+pub struct Holder { p: P, q: Box<P> }
+pub fn param(x: &P) { x.name(); x.pair(); }
+pub fn typed_let() { let x: Rc<P> = make(); x.name(); x.pair(); }
+pub fn ctor() { let x = P::new(); x.name(); x.pair(); }
+pub fn literal() { let x = P {}; x.name(); x.pair(); }
+impl Holder { pub fn own(&self) { self.p.name(); self.q.pair(); } }
+pub fn only_assoc(x: &Q) { x.make(); }
+";
+
+#[test]
+fn every_proof_form_binds_the_trait_method_over_an_associated_function_and_the_inherent_method_over_a_trait_one() {
+    let files = [("src/lib.rs", "pub mod forms;\n"), ("src/forms.rs", SELF_FORMS)];
+    let edges = edges_by_source(&files);
+    for (caller, line) in [("param", 11), ("typed_let", 12), ("ctor", 13), ("literal", 14), ("own", 15)] {
+        let source = format!("src/forms.rs:{caller}@{line}");
+        let bound: Vec<&String> = targets(&edges, &source)
+            .iter()
+            .filter(|t| t.contains(":name@") || t.contains(":pair@"))
+            .collect();
+        assert_eq!(bound, ["src/forms.rs:name@6", "src/forms.rs:pair@5"], "{caller}: {edges:#?}");
+    }
+    // `Q`'s only `make` takes no `self`: `x.make()` binds nothing, and the Rust
+    // row states why.
+    assert!(targets(&edges, "src/forms.rs:only_assoc@16").is_empty(), "{edges:#?}");
+    let tmp = tree(&files);
+    let residue = rust_row(&index(tmp.path())).call_residue.expect("the rust row states its call residue");
+    assert_eq!(residue.reasons.get(&R::SupertypeUnreached), Some(&1), "{residue:#?}");
+}
+
+#[test]
+fn a_trait_impls_associated_function_never_takes_a_method_call() {
+    // `Build::m` is an associated function, `Use::m` a method: `x.m()` calls
+    // `Use`'s, which is no longer tied with the other trait impl's.
+    let forms = "\
+pub struct P;
+pub trait Build { fn m() -> Self; }
+pub trait Use { fn m(&self); }
+impl Build for P { fn m() -> Self { P } }
+impl Use for P { fn m(&self) {} }
+pub fn param(x: &P) { x.m(); }
+";
+    let edges = edges_by_source(&[("src/lib.rs", "pub mod forms;\n"), ("src/forms.rs", forms)]);
+    assert_eq!(targets(&edges, "src/forms.rs:param@6"), ["src/forms.rs:m@5"]);
+}
+
+const SELF_CALLER: &str = "use crate::store::Store;\npub fn run(x: &Store) { x.get(); }\n";
+const ASSOC_GET: &str =
+    "pub struct Store;\npub trait G { fn get(&self); }\nimpl Store {\n    pub fn get() {}\n}\nimpl G for Store {\n    fn get(&self) {}\n}\n";
+const METHOD_GET: &str =
+    "pub struct Store;\npub trait G { fn get(&self); }\nimpl Store {\n    pub fn get(&self) {}\n}\nimpl G for Store {\n    fn get(&self) {}\n}\n";
+
+#[test]
+fn a_self_receiver_added_or_removed_on_sync_rebinds_the_call() {
+    let lib = ("src/lib.rs", "pub mod store;\npub mod caller;\n");
+    let caller = ("src/caller.rs", SELF_CALLER);
+    // The inherent `get` gaining `&self` outranks the trait impl's, without
+    // touching the caller's file…
+    let edges = synced_equals_reindexed(&[lib, caller, ("src/store.rs", ASSOC_GET)], &[("src/store.rs", METHOD_GET)]);
+    assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/store.rs:get@4"]);
+    // …and losing it hands the call back to the trait impl's.
+    let edges = synced_equals_reindexed(&[lib, caller, ("src/store.rs", METHOD_GET)], &[("src/store.rs", ASSOC_GET)]);
+    assert_eq!(targets(&edges, "src/caller.rs:run@2"), ["src/store.rs:get@7"]);
+}
+
 /// The Rust row of `status`.
 fn rust_row(engine: &Engine) -> LanguageResolution {
     engine

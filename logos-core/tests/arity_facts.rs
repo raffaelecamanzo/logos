@@ -5,9 +5,13 @@
 //!
 //! The facts ride beside the node (`nodes.param_min`, `param_max`,
 //! `takes_self`) and on the ledger row (`unresolved_refs.arg_count`, part of the
-//! row's identity), all added by migration 33. Nothing binds on them yet, so
-//! every edge is the one the facts' absence produced. A one-file edit re-derives
-//! them through sync to exactly what a fresh index of the edited tree records.
+//! row's identity), all added by migration 33. No range or count binds on them
+//! yet. The takes-`self` fact filters a proven Rust receiver's candidates
+//! (S-604, `rust_receiver_binding.rs`), but changes no edge here: the fixture's
+//! one proven call, `a.by_ref(1)`, has a single candidate, which takes `self`.
+//! So every edge here is the one the facts' absence produced. A one-file edit
+//! re-derives them through sync to exactly what a fresh index of the edited
+//! tree records.
 //!
 //! Fixtures are written inline into temp directories, like every sibling
 //! binding suite here: a fixture tree checked into this repository would be
@@ -178,7 +182,7 @@ fn indexing_persists_each_callables_range_and_each_calls_argument_count() {
     }
 }
 
-/// Nothing binds on the facts yet: `free(1, 2)` and `free(1, 2, 3)` are two
+/// Nothing binds on a range or a count yet: `free(1, 2)` and `free(1, 2, 3)` are two
 /// ledger rows and both bind the one `free`, so the caller keeps exactly the
 /// one `Calls` edge it had.
 #[test]
