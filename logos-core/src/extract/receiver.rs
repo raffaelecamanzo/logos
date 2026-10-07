@@ -75,8 +75,9 @@
 //! field — and hands each to [`Receivers::macro_site`], whose row [`Receivers::finish`]
 //! proves by the same `variable` / `self_field` rules, at the macro's own
 //! position: no scope boundary lies inside a token tree, so the macro sees the
-//! bindings its call sees. A name the macro itself binds
-//! (`matches!(o, Some(m) if m.f())`) is not told apart from the caller's own.
+//! bindings its call sees. A name a pattern inside the macro binds — a closure
+//! parameter, a `let` / `for`, a match arm or `matches!` guard — is no typable
+//! receiver (`refs::bound_names`); a binding form of a user macro is not seen.
 //! A chain, a path, a literal or a call result is no receiver and stays `other`.
 //!
 //! **2. Shape (S-514, every language).** Every Method-form row typing left

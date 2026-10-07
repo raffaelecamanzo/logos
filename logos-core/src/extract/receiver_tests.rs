@@ -587,3 +587,16 @@ fn a_turbofish_method_call_records_no_row_inside_a_macro_or_outside_one() {
     let inside = calls_of_f(&with_types("fn g(x: A) { let _ = format!(\"{:?}\", x.f::<u8>()); }"));
     assert_eq!((outside, inside), (vec![], vec![]));
 }
+
+#[test]
+fn a_name_a_macro_binds_proves_nothing_from_the_callers_binding() {
+    // The closure's `x` shadows the parameter inside the macro, as outside one.
+    let src = with_types(
+        "fn g(x: A, v: Vec<B>) { assert!(v.iter().all(|x| x.f())); }\n\
+         fn h(x: A, o: Option<B>) { assert!(matches!(o, Some(x) if x.f())); }\n",
+    );
+    assert_eq!(calls_of_f(&src), vec![other()]);
+    // A name the macro does not bind is still the parameter.
+    let src = with_types("fn g(x: A, v: Vec<B>) { assert!(v.iter().all(|y| y.g()) && x.f()); }");
+    assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
+}

@@ -55,8 +55,10 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   outside it, so `format!("{}", m.f())` with `m: &M` in scope records `M::f`;
   an unproven receiver (a chain, a path, a shadowed or generic name) stays the
   `other` row it was. A turbofish method call (`x.f::<T>()`) still records no
-  row, inside or outside a macro. A name the macro itself binds
-  (`matches!(o, Some(m) if m.f())`) is not told apart from the caller's own.
+  row, inside or outside a macro. A name a pattern inside the macro binds (a
+  closure parameter, `let`, `for`, a match arm or `matches!` guard) is not the
+  caller's: its receiver stays `other`. A binding form of a user macro is not
+  seen.
   On a full-indexed `git archive` export of this repository 195 `Calls` edges
   are added and none removed (47,025 → 47,220, all from Rust test and
   production code inside `assert!`, `format!`, `write!` and `params!`, each

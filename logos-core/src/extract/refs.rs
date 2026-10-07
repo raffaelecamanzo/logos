@@ -17,6 +17,8 @@
 //! [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
 //! [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 
+use std::collections::HashSet;
+
 use tree_sitter::Node;
 
 use crate::model::RefForm;
@@ -303,8 +305,10 @@ pub(crate) enum MacroReceiver {
 ///
 /// A method call also carries the receiver a proof form can type
 /// ([`MacroReceiver`]); `extract/receiver.rs` proves it, as for a call outside a
-/// macro. A name the macro itself binds (`matches!(o, Some(m) if m.f())`) is
-/// not told apart from the caller's own `m`.
+/// macro. A name a pattern inside the macro binds (`|m| m.f()`, `let m`,
+/// `for m`, `Some(m) =>` / `Some(m) if`) is no typable receiver
+/// ([`bound_names`]): it is not the caller's `m`. A binding form of a user
+/// macro is not seen.
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 pub(crate) fn macro_call_refs(macro_node: Node<'_>, source: &[u8]) -> Vec<MacroCall> {
@@ -315,9 +319,59 @@ pub(crate) fn macro_call_refs(macro_node: Node<'_>, source: &[u8]) -> Vec<MacroC
     for child in macro_node.children(&mut cursor) {
         if child.kind() == "token_tree" {
             scan_token_tree(child, source, &mut out);
+            let mut bound = HashSet::new();
+            bound_names(child, source, &mut bound);
+            for call in &mut out {
+                if matches!(&call.receiver, Some(MacroReceiver::Name(n)) if bound.contains(n.as_str())) {
+                    call.receiver = None;
+                }
+            }
         }
     }
     out
+}
+
+/// Every name a pattern inside `tt` (recursively) may bind: the parameters
+/// between a closure's `|`s, the pattern after `let` / `for`, and the run
+/// before a match arm's `=>` or a guard's `if` back to the preceding `,`. The
+/// run is over-read — it takes every identifier in it — because the cost of a
+/// name wrongly read as bound is an unproven receiver, and of one wrongly read
+/// as free a wrong type (S-610).
+fn bound_names<'a>(tt: Node<'_>, source: &'a [u8], out: &mut HashSet<&'a str>) {
+    let kinds: Vec<&str> = (0..tt.child_count()).filter_map(|i| tt.child(i)).map(|c| c.kind()).collect();
+    let mut idents = |from: usize, to: usize| {
+        for c in (from..to).filter_map(|i| tt.child(i)) {
+            let mut stack = vec![c];
+            while let Some(n) = stack.pop() {
+                if n.kind() == "identifier" {
+                    out.extend(n.utf8_text(source).ok());
+                }
+                stack.extend((0..n.child_count()).filter_map(|i| n.child(i)));
+            }
+        }
+    };
+    for (i, kind) in kinds.iter().enumerate() {
+        match *kind {
+            // `|a, (b, c): T|`: up to the closing `|` of the same group.
+            "|" => {
+                if let Some(close) = (i + 1..kinds.len()).find(|&j| kinds[j] == "|") {
+                    idents(i + 1, close);
+                }
+            }
+            "let" | "for" => {
+                let end = (i + 1..kinds.len()).find(|&j| matches!(kinds[j], "=" | ":" | ";" | "in"));
+                idents(i + 1, end.unwrap_or(kinds.len()));
+            }
+            "=>" | "if" => {
+                let start = (0..i).rev().find(|&j| kinds[j] == ",").map_or(0, |j| j + 1);
+                idents(start, i);
+            }
+            _ => {}
+        }
+    }
+    for c in (0..tt.child_count()).filter_map(|i| tt.child(i)).filter(|c| c.kind() == "token_tree") {
+        bound_names(c, source, out);
+    }
 }
 
 /// Scan one `token_tree`'s ordered children (named and anonymous) for call
@@ -1168,6 +1222,42 @@ mod tree_tests {
         assert!(macro_calls(r#"assert!(a b < c > (d))"#).is_empty());
         // No identifier before the `::<…>`: no name to record.
         assert!(macro_calls(r#"assert!(::<T>(d))"#).is_empty());
+    }
+
+    /// A name the macro itself binds — a closure parameter, a `let`, a `for`
+    /// variable, a match or `matches!` pattern — is not the caller's binding of
+    /// that name: its receiver is no typable one. A name no pattern in the macro
+    /// spells stays one.
+    #[test]
+    fn a_name_the_macro_binds_is_not_a_typable_receiver() {
+        let receiver_of_f = |src: &str| -> Option<MacroReceiver> {
+            let got = macro_calls(src);
+            let calls: Vec<&MacroCall> = got.iter().filter(|c| c.target == "f").collect();
+            assert_eq!(calls.len(), 1, "{src}: {got:?}");
+            calls[0].receiver.clone()
+        };
+        let name = Some(MacroReceiver::Name("x".to_string()));
+        for src in [
+            "assert!(x.f())",
+            "assert!(v.iter().all(|y| y.g()), x.f())",
+            "assert!(a | b, x.f())",
+            "assert!(matches!(o, Some(y) if y.g()), x.f())",
+        ] {
+            assert_eq!(receiver_of_f(src), name, "{src}");
+        }
+        for src in [
+            "assert!(v.iter().all(|x| x.f()))",
+            "assert!(v.iter().all(|x: &B| x.f()))",
+            "assert!(v.iter().any(|(a, x)| x.f()))",
+            "assert!(matches!(o, Some(x) if x.f()))",
+            "m!({ let x = g(); x.f() })",
+            "m!({ let mut x = g(); x.f() })",
+            "m!({ if let Some(x) = g() { x.f() } })",
+            "m!({ for x in v { x.f() } })",
+            "m!(match o { Some(x) => x.f(), None => 0 })",
+        ] {
+            assert_eq!(receiver_of_f(src), None, "{src}");
+        }
     }
 
     /// An unclosed turbofish (`::<` with no `>`) records nothing and panics on
