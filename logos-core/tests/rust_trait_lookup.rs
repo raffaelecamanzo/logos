@@ -540,6 +540,25 @@ impl X { pub fn own(&self) { <Self as Run>::go(self); } }
     assert_eq!(from(&edges, "src/lib.rs:twice@3"), targets(&["src/lib.rs:go@2", "src/lib.rs:go@7"]));
 }
 
+/// A qualified path that names no trait as `Tr` reads `supertype-unreached`,
+/// and one whose `T` is outside the repository `external-type`.
+#[test]
+fn a_qualified_path_that_binds_nothing_carries_its_reason() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "\
+pub trait Run { fn go(&self) {} }
+pub struct S;
+impl Run for S {}
+pub struct NotTrait;
+pub fn a(s: &S) { <S as NotTrait>::go(s); }
+pub fn b(e: &std::io::Error) { <std::io::Error as Run>::go(e); }
+",
+    )]);
+    let engine = index(tmp.path());
+    assert_eq!(residue(&engine), reasons(&[(R::SupertypeUnreached, 1), (R::ExternalType, 1)]));
+}
+
 // ── Sync ≡ reindex ─────────────────────────────────────────────────────────
 
 /// A synced edit equals a fresh index of the edited tree.
