@@ -171,8 +171,7 @@ struct Snapshot {
     /// of the one associated-item lookup (S-607,
     /// [`binder::Index::with_associated_items`]); the item facts also name the
     /// required signatures, which bind nothing ([`binder::bindable`]).
-    impl_blocks: Vec<ImplBlockRow>,
-    item_facts: Vec<NodeItemFacts>,
+    associated: (Vec<ImplBlockRow>, Vec<NodeItemFacts>),
     /// file_id → project-relative path, for an incremental run to test a row's
     /// owning file against the change-set. Empty on a full index.
     file_paths: HashMap<i64, String>,
@@ -279,8 +278,7 @@ pub fn run(
             self_types: store.node_self_types()?,
             arities: store.node_arities()?,
             namespaces: store.file_namespaces()?,
-            impl_blocks: store.impl_blocks()?,
-            item_facts: store.node_item_facts()?,
+            associated: associated_items(store)?,
             // The file_id → path map only an incremental run needs (to test a
             // row's owning file against the change-set); a full index skips it.
             file_paths: if want_file_paths {
@@ -317,12 +315,13 @@ pub fn run(
             .with_declared_namespaces(snap.namespaces.iter().cloned())
             .with_import_root_overrides(&resolution.import_roots)
     });
-    let signatures = signatures_of(&snap.item_facts);
+    let (impl_blocks, item_facts) = &snap.associated;
+    let signatures = signatures_of(item_facts);
     let (bind_nodes, bind_edges) = binder::bindable(&snap.nodes, &snap.edges, &signatures);
     let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
         .with_arities(&snap.arities)
-        .with_associated_items(&bind_nodes, &snap.impl_blocks, &snap.item_facts)
+        .with_associated_items(&bind_nodes, impl_blocks, item_facts)
         .with_path_specifiers(specifier_targets, go_modules)
         .with_imported_bindings(&snap.refs, policy);
 

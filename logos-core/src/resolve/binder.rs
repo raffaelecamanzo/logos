@@ -68,10 +68,21 @@
 //!
 //! [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
 //!
+//! A file of an **impl-block** language (Rust; S-607, [FR-RS-47]) decides a
+//! call to a type's method — `Self::m()`, `self.m()`, a proven `x.m()`, a
+//! written `T::m()` — by one associated-item lookup ([`Ctx::lookup`]) among
+//! the functions of every `impl` block whose header resolves to `T`
+//! ([`Index::assoc_items`]). Once a path's type segment is reached the lookup
+//! decides the call, whatever it found: no wider rung reads the path again
+//! ([`Ctx::type_reached`]).
+//!
+//! [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
+//!
 //! # Never fabricate ([NFR-RA-05])
 //!
 //! Every level ends in the same acceptance rule: bind **iff the candidate set
-//! has exactly one element**. Zero candidates falls through to the next level;
+//! has exactly one element**. Zero candidates falls through to the next level
+//! (except where a path's type was reached, above);
 //! two or more is [`Res::Ambiguous`] and aborts the whole attempt — escalating
 //! past a *known* ambiguity is how mis-binds happen ([AR-05]). The policy knob
 //! widens the search, never the acceptance rule.
@@ -221,9 +232,9 @@ pub(crate) enum Residue {
     /// them; a type nested under an in-graph type that does not declare it has
     /// none.
     ///
-    /// Also a recorded-self-type `Self::m` call whose self type the crate
-    /// declares no type of, or whose caller's file imports it from outside the
-    /// crate (S-493, Go); and in an impl-block language (S-607) a call whose
+    /// Also a recorded-self-type `Self::m` call (S-493) whose self type the
+    /// crate declares no type of, or whose caller's file imports it from
+    /// outside the crate; and in an impl-block language (S-607) a call whose
     /// `T` — an impl header's, a proven receiver's — is no repository type
     /// (`String`, `Vec`, `std::io::Error`, an `impl` for a primitive or a
     /// generic parameter), a method a peeled wrapper provides (`Arc::clone`,
@@ -735,9 +746,9 @@ pub(crate) struct Index {
     trait_users: HashSet<NodeId>,
     /// node → the self type its plugin query recorded for it (S-493,
     /// [FR-RS-11]; the `nodes.self_type` column). Empty unless the run was given
-    /// the store's self types ([`Index::with_self_types`]); empty binds no call
-    /// through a self type, and every `Self::m` row takes the path it took
-    /// before.
+    /// the store's self types ([`Index::with_self_types`]). What a Go `Self::m`
+    /// row binds through, and what marks a method no bare call reaches; an
+    /// impl-block language's call reads its impl header instead (S-607).
     ///
     /// [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
     self_types: HashMap<NodeId, String>,
@@ -1053,8 +1064,8 @@ impl Index {
             // method of an impl-block language binds through the one lookup
             // instead (S-607, [`Index::with_associated_items`]).
             if !Want::Callable.admits(info.kind)
-                || self.imports_foreign(info, self_type)
                 || info.file_path.as_deref().is_some_and(|p| self.layout.looks_up_impl_blocks(p))
+                || self.imports_foreign(info, self_type)
             {
                 continue;
             }
@@ -1081,10 +1092,12 @@ impl Index {
 
     /// Give the index the arity facts the store records per node (S-604,
     /// [CR-200]; [`GraphStore::node_arities`]): the callables recorded as not
-    /// taking `self`, which a proven receiver's method call never binds
-    /// ([`Index::without_self`]), and each callable's parameter range, which a
-    /// call's argument count must fit (S-592, [`Index::arities`]). A fact that
-    /// is unknown records nothing.
+    /// taking `self`, which a method-syntax call never binds
+    /// ([`Index::without_self`]), those recorded as taking it, to which a path
+    /// call passes its receiver as the first argument ([`Index::with_self`],
+    /// S-607), and each callable's parameter range, which a call's argument
+    /// count must fit (S-592, [`Index::arities`]). A fact that is unknown
+    /// records nothing.
     ///
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     /// [`GraphStore::node_arities`]: crate::graph_store::GraphStore::node_arities
@@ -1126,8 +1139,9 @@ impl Index {
     /// is resolved the same way ([`ImplHeader::trait_node`]).
     ///
     /// Read only for the files of an impl-block language
-    /// ([`PackageLayout::looks_up_impl_blocks`]); call after
-    /// [`with_arities`](Index::with_arities).
+    /// ([`PackageLayout::looks_up_impl_blocks`]). Reads no arity fact: the
+    /// facts [`with_arities`](Index::with_arities) gives only sharpen the
+    /// bind-time filters, which an index given none (the framework pass) skips.
     ///
     /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
@@ -2832,8 +2846,10 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // where `f` may be found ([FR-RS-12]):
             //
             // - `self` — among the caller's own class's members, then up its
-            //   proven `Extends` chain; for a caller with a recorded self type,
-            //   through that type ([`Ctx::resolve_self_receiver`]);
+            //   proven `Extends` chain; for a function of an `impl` block,
+            //   through its header's type by the one lookup (S-607), and for a
+            //   Go method through its recorded self type
+            //   ([`Ctx::resolve_self_receiver`]);
             // - `super` — only up that chain, never the caller's own class
             //   ([`Ctx::resolve_super_receiver`]);
             // - `other`, or no shape at all — nowhere. The caller's lexical,
@@ -3826,20 +3842,23 @@ impl Ctx<'_> {
     ///    this lookup reads yet — or [`Residue::NotACallable`] when `name` is
     ///    one of `ty`'s enum variants.
     /// 2. **Syntax** — method syntax drops every candidate recorded as not
-    ///    taking `self` ([`Index::without_self`]); path syntax keeps it. Then
-    ///    the argument count ([`admitted_by_count`](Ctx::admitted_by_count)).
-    ///    An unknown fact never filters.
+    ///    taking `self` ([`Index::without_self`]); path syntax keeps it. An
+    ///    unknown fact never filters.
     /// 3. **Scope** — a trait impl's function is no candidate where its trait
-    ///    is not in scope ([`trait_in_scope`](Ctx::trait_in_scope)). One left
-    ///    out beside external traits' functions alone binds nothing
-    ///    ([`Residue::OverloadAmbiguous`]): an external trait, never placed in
-    ///    or out of scope, does not win by default.
-    /// 4. **Precedence** — an inherent candidate beats a trait's, in any
-    ///    module. With method syntax, inherent candidates that all take
-    ///    `&self`/`&mut self` beside a trait's taking `self` by value bind
-    ///    nothing: rustc's by-value probe may pick the trait's, and which is
+    ///    is not in scope ([`trait_in_scope`](Ctx::trait_in_scope)). Nothing
+    ///    left after 2 and 3 is [`Residue::SupertypeUnreached`].
+    /// 4. **Arity** — the argument count as the syntax passes it
+    ///    ([`admitted_by_count`](Ctx::admitted_by_count)); nothing left is
+    ///    [`Residue::NoApplicableOverload`].
+    /// 5. **Precedence** — an inherent candidate beats a trait's, in any
+    ///    module. A repository trait's function left out by 3 beside external
+    ///    traits' functions alone binds nothing: an external trait, never
+    ///    placed in or out of scope, does not win by default. With method
+    ///    syntax, inherent candidates that all take `&self`/`&mut self` beside
+    ///    a trait's taking `self` by value bind nothing: rustc's by-value probe
+    ///    may pick the trait's, and which is
     ///    not decided here ([`Residue::OverloadAmbiguous`]).
-    /// 5. **Exactly one** — two of the deciding rank are
+    /// 6. **Exactly one** — two of the deciding rank are
     ///    [`Residue::OverloadAmbiguous`] ([NFR-RA-05]).
     ///
     /// A trait as `ty` (`Tr::m(x)`) is dispatched on its first argument, which
