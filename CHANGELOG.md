@@ -66,7 +66,7 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   added, 46 removed — every removal a call bound to another type's method);
   non-Rust graphs byte-identical; the Rust row's unclassified 16,360 → 0. The
   quality signal reads 8168 → 8128 on that export, from the newly bound
-  cross-module calls (dependency depth 14 → 15, modularity −0.005). Plugins
+  cross-module calls (dependency depth 14 → 15, raw modularity 0.733 → 0.726). Plugins
   opt in with `impl_block_lookup = true` in `plugin.toml` (Rust declares it).
   Run `logos scan` (or `logos index`) to re-bind an existing graph; a bare
   `logos sync` re-binds only the rows its change touches.

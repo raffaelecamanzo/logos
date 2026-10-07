@@ -469,7 +469,7 @@ member's type from a library's, so only the workspace read has a
 | `call_residue` reason | The call stays unbound because |
 |---|---|
 | `no-receiver-evidence` | the file proves no receiver type (a chained call, an untyped lambda parameter, a generic type variable, a bare call naming no import) |
-| `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member |
+| `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member — or, for a Rust path call, the path's head leaves the repository (`Vec::new()`, `serde_json::to_string(…)`) |
 | `type-in-another-member` | another workspace member declares the receiver's type (`workspace status` only) |
 | `overload-ambiguous` | the type, or the nearest supertype level holding an applicable method, declares two or more methods of that name whose parameter count admits the call, or two static imports each supply one — no argument type is read |
 | `no-applicable-overload` | methods of that name were found, and none admits the call's argument count — at no supertype level, and in no free function or import the language goes on to |

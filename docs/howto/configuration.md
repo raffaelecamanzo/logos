@@ -1717,6 +1717,24 @@ A call that two candidates admit stays unbound (`overload-ambiguous`), since log
 reads no argument types. A call that nothing admits is counted
 `no-applicable-overload` in `status`'s `call_residue`.
 
+### Methods through `impl` blocks (`impl_block_lookup`)
+
+```toml
+# Rust: a call to a type's method binds through one associated-item lookup.
+impl_block_lookup = true
+```
+
+A language that declares it decides `Self::m()`, `self.m()`, a method call on a
+proven receiver and a written `T::m()` the same way: among the functions of
+every `impl` block whose self type resolves to `T`, from any crate and through
+`pub use` re-exports. A method call never reaches an associated function, an
+inherent function beats a trait's, and a trait's function counts only where the
+trait is in scope. Every unbound call of the language then carries a reason in
+`status`'s `call_residue`, so its `unclassified` reads `0` on a fresh index
+([Commands](commands.md)). The language's symbols query must record its impl
+blocks (the `@item.impl` captures). It defaults to `false`: a written `T::m()`
+binds among the functions of `T`'s module, as before. Only Rust declares it.
+
 ### Outbound HTTP client calls (`invocations`)
 
 `invocations.scm` is the **consumer** side of cross-service coupling: it captures
