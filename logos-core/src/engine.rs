@@ -101,6 +101,37 @@ pub struct Engine {
     ///
     /// [web-surface]: ../../../docs/specs/architecture/components/web-surface.md
     native_wiki: std::sync::Mutex<Option<(u64, crate::wiki::NativeWiki)>>,
+    /// `status`'s per-language call residue ([FR-RS-09], CR-201), memoized by
+    /// [`ResidueKey`] the way [`native_wiki`](Self::native_wiki) is memoized by
+    /// the revision: `Some((key, residues))` when the walk at `key` is cached. A
+    /// `status` at the same key is one point read; anything that moves the key
+    /// re-walks. In memory only — the residue is computed, never stored.
+    ///
+    /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+    call_residue: std::sync::Mutex<Option<(ResidueKey, ResidueByLanguage)>>,
+    /// How many residue walks this engine has run: one per memo miss. Read by
+    /// the tests that prove a hit walks nothing (S-605).
+    call_residue_walks: AtomicU64,
+}
+
+/// The per-language call residue, keyed by language name.
+type ResidueByLanguage = std::collections::BTreeMap<String, crate::models::CallResidue>;
+
+/// What [`Engine::call_residue`]'s memo is keyed on (CR-201): every input of
+/// the walk that can change while an engine lives.
+///
+/// The graph is the revision ([FR-SY-09]); the schema version is there because
+/// a migration can rewrite ledger rows without advancing it. The whole
+/// `[resolution]` section is compared, not the keys the walk happens to read
+/// today, so a key the binder starts reading is covered without an edit here.
+/// The plugin registry is fixed for the engine's lifetime and needs no slot.
+///
+/// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResidueKey {
+    graph_revision: u64,
+    schema_version: i64,
+    resolution: crate::config::Resolution,
 }
 
 /// Per-phase cold-start attribution, produced by
@@ -244,6 +275,8 @@ impl Engine {
             nav_prologue_done: AtomicBool::new(false),
             governance: crate::governance::GovernanceState::default(),
             native_wiki: std::sync::Mutex::new(None),
+            call_residue: std::sync::Mutex::new(None),
+            call_residue_walks: AtomicU64::new(0),
         }
     }
 
@@ -506,6 +539,8 @@ impl Engine {
             nav_prologue_done: AtomicBool::new(false),
             governance: crate::governance::GovernanceState::default(),
             native_wiki: std::sync::Mutex::new(None),
+            call_residue: std::sync::Mutex::new(None),
+            call_residue_walks: AtomicU64::new(0),
         };
 
         // Finish the worktree bootstrap: reconcile only the main↔branch diff
@@ -686,6 +721,8 @@ impl Engine {
             nav_prologue_done: AtomicBool::new(false),
             governance: crate::governance::GovernanceState::default(),
             native_wiki: std::sync::Mutex::new(None),
+            call_residue: std::sync::Mutex::new(None),
+            call_residue_walks: AtomicU64::new(0),
         };
 
         if let Some(seed) = seed {
@@ -2628,6 +2665,64 @@ impl Engine {
             *cache = Some((revision, native.clone()));
             Ok(native)
         })
+    }
+
+    /// The per-language call residue `status` reports ([FR-RS-09]), walked at
+    /// most once per graph revision, schema version and `[resolution]` section
+    /// (CR-201, [`ResidueKey`]).
+    ///
+    /// Follows [`wiki_native`](Self::wiki_native): read the key, answer a hit
+    /// from the memo, and on a miss run
+    /// [`call_residue_by_language`](crate::resolve::call_residue_by_language) on
+    /// the read-only pool and keep its answer. The key is read **before** the
+    /// walk, and every writer advances the revision only after its rows commit,
+    /// so a walk that overlaps a write is cached under the older revision and the
+    /// next call misses — never the reverse. A failed read caches nothing.
+    ///
+    /// # Errors
+    /// Returns an error for a transient or registry-less engine, or when the
+    /// graph cannot be read.
+    ///
+    /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
+    pub(crate) fn call_residue(
+        &self,
+        resolution: &crate::config::Resolution,
+    ) -> Result<ResidueByLanguage> {
+        let runtime = self.nav_runtime_no_prologue()?;
+        let registry = self
+            .registry()
+            .context("an engine without its language registry states no call residue")?;
+        let key = runtime.submit_read(|store| {
+            Ok(ResidueKey {
+                graph_revision: store.graph_revision()?,
+                schema_version: store.store_health()?.schema_version,
+                resolution: resolution.clone(),
+            })
+        })?;
+
+        {
+            let cache = self.call_residue.lock().expect("call-residue cache lock");
+            if let Some((cached_key, residues)) = cache.as_ref() {
+                if *cached_key == key {
+                    return Ok(residues.clone());
+                }
+            }
+        }
+
+        self.call_residue_walks.fetch_add(1, Ordering::Relaxed);
+        let policy = key.resolution.policy;
+        let residues = runtime.submit_read(move |store| {
+            crate::resolve::call_residue_by_language(store, registry, policy)
+        })?;
+        let mut cache = self.call_residue.lock().expect("call-residue cache lock");
+        *cache = Some((key, residues.clone()));
+        Ok(residues)
+    }
+
+    /// How many residue walks [`call_residue`](Self::call_residue) has run.
+    #[cfg(test)]
+    pub(crate) fn call_residue_walks(&self) -> u64 {
+        self.call_residue_walks.load(Ordering::Relaxed)
     }
 
     /// Whether the `docs/` source file(s) for a consolidated documentation

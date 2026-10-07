@@ -982,6 +982,14 @@ pub fn reconcile(
     if let Some(fingerprint) = pending_fingerprint {
         record_admission_fingerprint(runtime, &fingerprint)?;
     }
+    // FR-SY-09: the purge deleted files outside the sync, and the re-bind above
+    // rewrote ledger rows after the sync's own advance (if it made one), so a
+    // purge advances the revision itself — last, after every write committed.
+    // Without it a reconcile that only narrowed the config left the revision
+    // where it was, and a cache keyed on it (CR-201) kept the purged graph.
+    if purge.count > 0 {
+        advance_graph_revision(runtime)?;
+    }
     Ok(ReconcileOutcome {
         full_index: false,
         // Purged files count toward the reconciled total the freshness line
@@ -1385,16 +1393,21 @@ fn unix_seconds_now() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-/// Advance the persisted monotonic graph revision after a completed `index` or a
-/// `sync` that mutated the graph (CR-027, [ADR-32], [FR-SY-09]).
+/// Advance the persisted monotonic graph revision after a completed `index`, a
+/// `sync` that mutated the graph, or a config-narrowing purge that removed files
+/// (CR-027, [ADR-32], [FR-SY-09]).
 ///
 /// The durable "the graph changed" signal: a single-row write on the existing
 /// post-`sync` write path ([NFR-PE-03]), submitted through the single-writer
 /// actor so the read-modify-write is atomic with respect to every other write
-/// ([NFR-RA-10]). Called once per completed `index` and once per mutating
-/// `sync`; a no-op `sync` (no dirty files) and a read-only navigation never
-/// reach it, so the revision stays a pure function of completed, graph-changing
-/// pipeline runs ([NFR-RA-06]).
+/// ([NFR-RA-10]). Called once per completed `index`, once per mutating `sync`,
+/// and once more by a `reconcile` or navigation prologue whose purge removed a
+/// file (CR-201: the purge writes outside the sync's own advance). Each caller
+/// advances only after its last write committed, which is what lets a reader
+/// that read the revision first cache what it then read under it. A no-op
+/// `sync` (no dirty files) and a read-only navigation never reach it, so the
+/// revision stays a pure function of completed, graph-changing pipeline runs
+/// ([NFR-RA-06]).
 ///
 /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
 /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
@@ -1463,6 +1476,13 @@ pub fn purge_on_config_change(
     // point-query path to honour the [NFR-PE-01] budget and the no-per-call-
     // reconcile rule.
     record_admission_fingerprint(runtime, &fingerprint)?;
+    // FR-SY-09: a purge that removed files changed the graph, so it advances
+    // the revision — last, as `index` and `sync` do — and every cache keyed on
+    // it (CR-201's call residue, the native wiki) re-reads. Nothing purged,
+    // nothing advanced.
+    if purged > 0 {
+        advance_graph_revision(runtime)?;
+    }
     Ok(purged)
 }
 

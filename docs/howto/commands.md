@@ -493,9 +493,14 @@ to one from the trait's default body reads `supertype-unreached`. In
 `workspace status` the Rust row's `type-in-another-member` stays `0`: a type of
 another member is not resolved, and is counted `external-type`.
 
-`call_residue` is computed when `status` runs and never stored. It costs a
-`status` call a fraction of a second on a Java project, about 0.4 s on a Rust
-project of ~90,000 calls, and nothing on a project of other languages only.
+`call_residue` is never stored. A long-lived engine — `logos serve`, its web
+dashboard and MCP server — computes it once per graph revision and `[resolution]`
+section and answers every later `status` from memory until an `index`, a `sync`
+that changes a file, a config-narrowing purge, a `[resolution]` edit or a schema
+migration moves one of them. The computation costs a fraction of a second on a
+Java project, about 0.4 s on a Rust project of ~90,000 calls, and nothing on a
+project of other languages only. A one-shot `logos status` is a new process, so
+it always pays it.
 
 Every figure counted over the reference ledger — `refs_total`/`refs_resolved`,
 each language's `references` and `bound`, the per-relation coverage and the

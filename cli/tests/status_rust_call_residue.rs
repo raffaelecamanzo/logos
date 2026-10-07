@@ -82,3 +82,43 @@ fn status_json_carries_the_rust_rows_call_residue() {
         "the denominator is the row's own unbound count: {calls}"
     );
 }
+
+/// HTTP states the CLI's residue on the first `GET /api/v1/status` and on the
+/// second, which the engine answers from its memo (S-605, CR-201): one engine
+/// behind the router serves both, so a cached figure that drifted from a
+/// fresh one would show here ([ADR-01] surface parity).
+///
+/// [ADR-01]: ../../docs/specs/architecture/decisions/ADR-01.md
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn http_states_the_clis_residue_on_a_miss_and_on_a_memo_hit() {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::write(tmp.path().join("src/lib.rs"), LIB_RS).unwrap();
+    logos_json(tmp.path(), &["index"]);
+    let cli = logos_json(tmp.path(), &["status"])["resolution_by_language"].clone();
+
+    let engine = std::sync::Arc::new(logos_core::Engine::start(tmp.path()).expect("engine starts"));
+    let router = web::router(engine);
+    let mut answers = Vec::new();
+    for _ in 0..2 {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/status")
+            .header(header::HOST, "127.0.0.1:4983")
+            .body(Body::empty())
+            .expect("a well-formed request");
+        let resp = router.clone().oneshot(request).await.expect("route responds");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let status: Value = serde_json::from_slice(&bytes).expect("/api/v1/status is JSON");
+        answers.push(status["resolution_by_language"].clone());
+    }
+    assert_eq!(answers[0], cli, "a miss states the CLI's figures");
+    assert_eq!(answers[1], cli, "a memo hit states the CLI's figures");
+}
