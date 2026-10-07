@@ -37,6 +37,12 @@ implicit_receiver = "self"
 # `overload-ambiguous`: no argument type is read.
 overloaded_calls = true
 
+# Kotlin's resolution tries each scope level for an applicable candidate: an
+# unqualified in-class call that no member of the class or its supertypes
+# admits goes on to the top-level functions and imports in scope (S-592,
+# FR-RS-43). C#, Java, Scala and C++ stop at the member that hides the name.
+implicit_call_falls_through = true
+
 # Calling a class constructs it (S-521, CR-170, FR-RS-16): a free `Foo()` whose
 # one candidate is a class records `Instantiates` to that class. A top-level
 # factory function and a class of one name are two candidates, and stay unbound.

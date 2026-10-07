@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use tree_sitter::{Language, Query};
 
 use super::error::PluginError;
-use super::manifest::NAMESPACE_CAPTURE;
+use super::manifest::{NAMESPACE_CAPTURE, SUPERTYPE_CAPTURE};
 
 /// A query whose source has been resolved (override-or-embedded), ready to
 /// compile.
@@ -255,6 +255,9 @@ pub(crate) struct LanguageQueries {
     /// Whether the language declares the namespace module model (S-518), whose
     /// `symbols` query must capture [`NAMESPACE_CAPTURE`].
     namespace_model: bool,
+    /// Whether the language declares `implicit_call_falls_through` (S-592),
+    /// whose `references` query must capture [`SUPERTYPE_CAPTURE`].
+    falls_through: bool,
     /// Every capability's resolved source, in declaration order.
     resolved: Vec<ResolvedQuery>,
     /// The compiled unit — or the error that refused it — once compiled.
@@ -273,6 +276,7 @@ impl LanguageQueries {
         grammar: &str,
         manifest_label: &'static str,
         namespace_model: bool,
+        falls_through: bool,
         resolved: Vec<ResolvedQuery>,
         language: &Language,
     ) -> Result<Self, PluginError> {
@@ -280,6 +284,7 @@ impl LanguageQueries {
             grammar: grammar.to_string(),
             manifest_label,
             namespace_model,
+            falls_through,
             resolved,
             compiled: OnceLock::new(),
         };
@@ -299,6 +304,7 @@ impl LanguageQueries {
             grammar: String::new(),
             manifest_label: "",
             namespace_model: false,
+            falls_through: false,
             resolved: Vec::new(),
             compiled: OnceLock::from(Ok(queries)),
         }
@@ -390,6 +396,9 @@ impl LanguageQueries {
         if self.namespace_model {
             check_namespace_capture(self.manifest_label, &queries)?;
         }
+        if self.falls_through {
+            check_supertype_capture(self.manifest_label, &queries)?;
+        }
         Ok((queries, compiled))
     }
 }
@@ -419,6 +428,33 @@ fn check_namespace_capture(
         detail: format!(
             "`[module_model]` kind 'namespace' requires the `symbols` query to capture \
              `@{NAMESPACE_CAPTURE}`, or every file would read as the global namespace"
+        ),
+    })
+}
+
+/// A language whose unqualified call falls through to a free function (S-592,
+/// [FR-RS-43]) must record its classes' supertypes: its compiled `references`
+/// query — embedded or an on-disk override — captures `@ref.extends`. The
+/// fall-through is taken only when the class walk saw every supertype, and a
+/// language recording none would read every class as having none, binding a
+/// free function where an unseen base holds the overload ([NFR-RA-05]).
+/// Checked at compile, beside [`check_namespace_capture`], so deciding the
+/// key never compiles a language nobody asked about (CR-197).
+///
+/// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn check_supertype_capture(manifest_label: &str, compiled: &CompiledQueries) -> Result<(), PluginError> {
+    let captures = compiled
+        .get("references")
+        .is_some_and(|q| q.capture_names().contains(&SUPERTYPE_CAPTURE));
+    if captures {
+        return Ok(());
+    }
+    Err(PluginError::Manifest {
+        file: manifest_label.to_string(),
+        detail: format!(
+            "`implicit_call_falls_through` requires the `references` query to capture \
+             `@{SUPERTYPE_CAPTURE}`, or no class's supertypes would be seen"
         ),
     })
 }
@@ -454,6 +490,7 @@ mod tests {
                     LanguageQueries::new(
                         &grammar,
                         "toyunit/plugin.toml",
+                        false,
                         false,
                         resolved,
                         &language,
@@ -516,7 +553,7 @@ mod tests {
                     overridden: false,
                 })
                 .to_vec();
-            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, resolved, &language)
+            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, false, resolved, &language)
                 .expect("no override, nothing compiles at construction")
         };
         let captured = Captured::default();

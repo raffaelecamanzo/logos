@@ -460,6 +460,13 @@ pub enum ModuleModelKind {
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
 
+/// The capture a `references` query records a type's supertype under (S-522):
+/// what a language that declares
+/// [`implicit_call_falls_through`](PluginManifest::implicit_call_falls_through)
+/// must capture, checked when its queries compile
+/// (`queries::check_supertype_capture`, S-592).
+pub(crate) const SUPERTYPE_CAPTURE: &str = "ref.extends";
+
 /// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the
 /// language's bodiless namespace declarations **compose** rather than replace
 /// one another — Scala's chained `package a` / `package b` is `a.b`, where
@@ -657,6 +664,20 @@ pub struct PluginManifest {
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     #[serde(default)]
     pub arity_unchecked_extensions: Vec<String>,
+    /// Whether an unqualified in-class call that no member of its class (nor
+    /// of a supertype) admits goes on to the free functions and imports in
+    /// scope (S-592, [FR-RS-43]) — Kotlin's resolution, which tries each
+    /// scope level for an applicable candidate. Not C#, Java, Scala or C++,
+    /// whose member of that name hides every outer one even when no overload
+    /// applies (C# §12.8.4, JLS 15.12.1, Scala binding precedence, C++ name
+    /// hiding). Requires `implicit_receiver = "self"`, and a `references`
+    /// query capturing [`SUPERTYPE_CAPTURE`]: the fall-through is taken only
+    /// when the class walk saw every supertype, which a language recording
+    /// none could never tell. Defaults to `false`.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    #[serde(default)]
+    pub implicit_call_falls_through: bool,
     /// The methods a peeled receiver wrapper provides itself (S-588,
     /// [FR-RS-42]): wrapper name → method names. A call on a receiver proven
     /// through such a wrapper (`x: Arc<T>`, recorded with `peeled = "Arc"`)
@@ -1176,7 +1197,7 @@ impl PluginManifest {
     }
 
     /// The rules of the extension lists a descriptor declares beside
-    /// `extensions` — one call site, for the reason [`validate_reach`] is its
+    /// `extensions`, and of the fall-through key — one call site, for the reason [`validate_reach`] is its
     /// own function: with S-592's rule inline, [`validate`](Self::validate)
     /// passed the `max_cc = 50` rule.
     ///
@@ -1187,9 +1208,14 @@ impl PluginManifest {
     /// - `arity_unchecked_extensions` names extensions the plugin claims (S-592,
     ///   [FR-RS-43]): one it does not would never match a file of this
     ///   language.
+    /// - `implicit_call_falls_through` is a rule of the unqualified in-class
+    ///   call on the instance, so it requires `implicit_receiver = "self"`.
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     fn validate_extension_lists(&self) -> Result<(), String> {
+        if self.implicit_call_falls_through && self.implicit_receiver() != ImplicitReceiver::SelfInstance {
+            return Err("`implicit_call_falls_through` requires `implicit_receiver = \"self\"`".to_string());
+        }
         if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
             return Err("`specifier_extensions` requires `import_specifier = \"path\"`".to_string());
         }
@@ -2165,6 +2191,12 @@ mod tests {
         assert_eq!(claimed.arity_unchecked_extensions, ["rs"]);
         let err = with("arity_unchecked_extensions = [\"js\"]").unwrap_err().to_string();
         assert!(err.contains("'js' is not one of `extensions`"), "{err}");
+        // The fall-through is a rule of the call on the instance.
+        assert!(!m.implicit_call_falls_through);
+        let err = with("implicit_call_falls_through = true").unwrap_err().to_string();
+        assert!(err.contains("requires `implicit_receiver = \"self\"`"), "{err}");
+        let both = with("implicit_receiver = \"self\"\nimplicit_call_falls_through = true").unwrap();
+        assert!(both.implicit_call_falls_through);
     }
 
     /// The specifier grammar is declared apart from the member-path separator

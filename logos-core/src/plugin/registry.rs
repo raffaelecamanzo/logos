@@ -40,14 +40,9 @@ use tree_sitter::Language;
 use super::abi::{assert_abi, AbiRange};
 use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
-use super::manifest::{CallTargets, ImplicitReceiver, PluginManifest};
+use super::manifest::{CallTargets, PluginManifest};
 use super::plugin::{CompiledPlugin, LanguagePlugin};
 use super::queries::{self, LanguageQueries};
-
-/// The `references` capture a type's supertype is recorded under (S-522) —
-/// whether a language records its classes' bases at all (S-592,
-/// [`LanguageRegistry::free_call_fallthrough_extensions`]).
-pub(crate) const SUPERTYPE_CAPTURE: &str = "ref.extends";
 
 /// One language's path-model declaration (S-519, [FR-RS-14]), as
 /// [`LanguageRegistry::path_models`] hands it to the module key: the package-file
@@ -477,27 +472,20 @@ impl LanguageRegistry {
     /// The file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)) whose unqualified
     /// in-class call, when no member of its class admits its arguments, goes on
-    /// to the free functions and imports in scope (S-592, [FR-RS-43]). Two
-    /// declarations make one: the plugin declares `implicit_receiver = "self"`
-    /// — such a call is on the current instance (S-514) — and its compiled
-    /// `references` query captures `@ref.extends`, so a class's supertypes are
-    /// recorded and a walk that met none has seen them all. A language whose
-    /// classes' bases go unrecorded (Scala, C++, Ruby today) may hold the
-    /// overload in a base the graph cannot see, so its call never falls
-    /// through ([NFR-RA-05]). Consumed through
+    /// to the free functions and imports in scope (S-592, [FR-RS-43]): the
+    /// plugin declares `implicit_call_falls_through` — Kotlin, whose
+    /// resolution tries each scope level for an applicable candidate. Read off
+    /// the descriptor, never the queries, so deciding it compiles no language
+    /// (CR-197); the language's compile checks its `references` query records
+    /// the supertypes the fall-through's guard needs. Consumed through
     /// [`crate::resolve::package_key::PackageLayout`].
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
-    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     pub fn free_call_fallthrough_extensions(&self) -> HashSet<String> {
         self.plugins
             .iter()
             .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().implicit_receiver == ImplicitReceiver::SelfInstance)
-            .filter(|p| {
-                p.query("references")
-                    .is_some_and(|q| q.capture_names().contains(&SUPERTYPE_CAPTURE))
-            })
+            .filter(|p| p.semantics().implicit_call_falls_through)
             .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
             .collect()
     }
@@ -788,6 +776,7 @@ fn compile_capabilities(
         &manifest.name,
         entry.manifest_label,
         manifest.module_model_kind() == super::ModuleModelKind::Namespace,
+        manifest.implicit_call_falls_through,
         resolved_queries,
         language,
     )?;
@@ -979,6 +968,52 @@ mod tests {
             crate::plugin::ModuleModelKind::Namespace
         );
         assert!(reg.namespace_extensions().contains("toyns"));
+    }
+
+    /// S-592: a language declaring `implicit_call_falls_through` must record
+    /// its classes' supertypes — its `references` query captures
+    /// `@ref.extends` — or its compile is refused naming the descriptor, as a
+    /// namespace model's missing capture is. Checked at compile, never when the
+    /// key is read.
+    #[test]
+    fn a_fall_through_language_without_the_supertype_capture_fails_its_compile() {
+        fn entry(source: &'static str) -> GrammarEntry {
+            GrammarEntry {
+                manifest_label: "toyft/plugin.toml",
+                manifest_toml: r#"
+                    name = "toyft"
+                    extensions = ["toyft"]
+                    module_separator = "."
+                    abi_version = 15
+                    implicit_receiver = "self"
+                    implicit_call_falls_through = true
+                    capabilities = ["references"]
+                    [queries]
+                    references = "queries/references.scm"
+                "#,
+                language: tree_sitter_rust::LANGUAGE,
+                embedded_queries: vec![grammars::EmbeddedQuery {
+                    relative_path: "queries/references.scm",
+                    label: "toyft/queries/references.scm",
+                    source,
+                }]
+                .leak(),
+            }
+        }
+        let load = |source: &'static str| {
+            let mut entries = grammars::compiled();
+            entries.push(entry(source));
+            LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+                .expect("an embedded query compiles on first use")
+        };
+        let err = load("(call_expression function: (identifier) @ref.call)")
+            .compile_all_queries()
+            .expect_err("no supertype capture fails the compile")
+            .to_string();
+        assert!(err.contains("toyft/plugin.toml") && err.contains("@ref.extends"), "{err}");
+        load("(call_expression function: (identifier) @ref.call)\n(type_identifier) @ref.extends")
+            .compile_all_queries()
+            .expect("the capture satisfies the check");
     }
 
     /// S-500 / FR-EX-11 / FR-PL-02: a `body_node_kinds` entry must name a node
@@ -1255,11 +1290,10 @@ mod tests {
 
     /// The arity sets (S-592, FR-RS-43): the overloading languages are Java,
     /// Kotlin, Scala, C# and C++; an implicit-instance call falls through to a
-    /// free function in C# and Kotlin, which record their classes' supertypes,
-    /// and not in Scala, C++ and Ruby, which declare `implicit_receiver =
-    /// "self"` but record none; and only JavaScript's extensions — claimed by
-    /// the two TypeScript grammars — are never filtered, while `.ts`/`.tsx`
-    /// are.
+    /// free function in Kotlin alone — in C#, Scala, C++ and Ruby a member of
+    /// that name hides every outer one; and only JavaScript's extensions —
+    /// claimed by the two TypeScript grammars — are never filtered, while
+    /// `.ts`/`.tsx` are.
     #[test]
     fn the_arity_extension_sets_name_the_declaring_grammars_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1272,10 +1306,10 @@ mod tests {
             assert!(!overloaded.contains(ext), "`{ext}`'s bare call binds by name");
         }
         let fallthrough = reg.free_call_fallthrough_extensions();
-        for ext in ["cs", "kt", "kts"] {
+        for ext in ["kt", "kts"] {
             assert!(fallthrough.contains(ext), "`{ext}`'s instance call falls through");
         }
-        for ext in ["scala", "cpp", "rb", "java", "rs", "go", "py", "php", "ts", "js", "c"] {
+        for ext in ["cs", "scala", "cpp", "rb", "java", "rs", "go", "py", "php", "ts", "js", "c"] {
             assert!(!fallthrough.contains(ext), "`{ext}`'s call never falls through");
         }
         let mut unchecked: Vec<String> = reg.arity_unchecked_extensions().into_iter().collect();
@@ -1830,6 +1864,22 @@ mod tests {
             rust.capabilities().iter().all(|c| rust.query(c).is_some()),
             "the first use compiled every capability of the language"
         );
+    }
+
+    /// CR-197 / S-592: building the layout the binder reads — every key a
+    /// resolution, sync or `status` run consults, the arity ones included —
+    /// compiles no language's queries. The fall-through key is read off the
+    /// descriptor; a key derived from a compiled query would compile every
+    /// language declaring it, whatever the repository holds.
+    #[test]
+    fn building_the_binders_layout_compiles_no_language() {
+        let root = tempfile::tempdir().unwrap();
+        let reg = LanguageRegistry::load(root.path()).expect("embedded grammars load");
+        let layout = crate::resolve::package_key::PackageLayout::from_registry(&reg);
+        assert!(layout.falls_through_to_free_calls("src/a.kt"), "the key is read");
+        let compiled: Vec<&str> =
+            reg.plugins.iter().filter(|p| p.queries_compiled()).map(|p| p.name()).collect();
+        assert!(compiled.is_empty(), "compiled by a layout build: {compiled:?}");
     }
 
     /// CR-197 / FR-PL-04: an override compiles its language at load — the

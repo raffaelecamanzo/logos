@@ -12,13 +12,12 @@
 //!   none, so there the call stays unbound: the own `inh` it bound by name
 //!   before is never bound, and the base it reaches is not in the graph;
 //! - `top` — an unqualified call whose same-named member cannot take it, beside
-//!   a free function (or C#'s `using static` import) that can: in a language
-//!   whose unqualified in-class call is on the instance and which records its
-//!   classes' bases (C#, Kotlin) the call goes on to the free function; in one
-//!   whose bare call never reaches a member (TypeScript, Python, PHP; S-590) it
-//!   binds the free function anyway; Java's member shadows the static import
-//!   (JLS 15.12.1), so the call stays unbound — as it does in Scala and C++,
-//!   whose unrecorded bases may hold the overload the call reaches;
+//!   a free function (or C#'s `using static` import) that can: Kotlin, whose
+//!   resolution tries each scope level for an applicable candidate, goes on to
+//!   the free function; a language whose bare call never reaches a member
+//!   (TypeScript, Python, PHP; S-590) binds the free function anyway; in Java,
+//!   C#, Scala and C++ the member hides every outer name even when no overload
+//!   applies (JLS 15.12.1, C# §12.8.4), so the call stays unbound;
 //! - `none` — nothing of the name admits the call: unbound, and a
 //!   package-shaped language's `status` counts it `no-applicable-overload`;
 //! - `same` — two overloads of one arity (the overloading languages only):
@@ -321,14 +320,16 @@ public class C : Base {
     )]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
+    // `Top(1)`: the class's own `Top` hides the `using static` one (C#
+    // §12.8.4), so no overload applies — as `None()`.
     assert_eq!(
         calls_from(rt, "Caller@21"),
-        targets(&["Dflt@20", "Inh@6", "Top@10", "Vari@19"]),
-        "the inherited `Inh`, the `using static` `Top`, and every admitted call"
+        targets(&["Dflt@20", "Inh@6", "Vari@19"]),
+        "the inherited `Inh`, and every admitted call"
     );
     assert_eq!(
         residue(&engine, "c-sharp"),
-        reasons(&[(R::NoApplicableOverload, 1), (R::OverloadAmbiguous, 1)])
+        reasons(&[(R::NoApplicableOverload, 2), (R::OverloadAmbiguous, 1)])
     );
 }
 
@@ -560,53 +561,28 @@ class C extends Base {
 
 // ── A class whose bases the walk cannot see never falls through ──────────
 
-/// An unqualified in-class call falls through to a free function only when the
-/// class walk saw every supertype (S-592): a C# class with an external base —
-/// the eShop `ViewModelBase : ObservableObject` shape — or a Kotlin class
+/// A Kotlin unqualified in-class call falls through to a free function only
+/// when the class walk saw every supertype (S-592): a class with an external
+/// base — the eShop `ViewModelBase : ObservableObject` shape — or one
 /// implementing an interface, whose default body the walk does not climb, may
 /// inherit the overload the call reaches. Neither binds the free function.
-#[cfg(all(feature = "lang-c-sharp", feature = "lang-kotlin"))]
+#[cfg(feature = "lang-kotlin")]
 #[test]
 fn a_call_whose_class_has_an_unseen_supertype_never_falls_through() {
-    let tmp = tree(&[(
-        "src/App/C.cs",
-        "using static App.Util;
-
-namespace App;
-
-public static class Util {
-    public static void Top(int a) {}
-}
-
-public class C : External.ObservableObject {
-    public void Top(int a, int b) {}
-    public void Caller() { Top(1); }
-}
-",
-    )]);
-    let engine = index(tmp.path());
-    assert_eq!(calls_from(engine.runtime().unwrap(), "Caller@11"), targets(&[]));
-    assert_eq!(residue(&engine, "c-sharp"), reasons(&[(R::NoApplicableOverload, 1)]));
-
-    let tmp = tree(&[(
-        "src/main/kotlin/app/C.kt",
-        "package app
-
-interface I {
-    fun top(a: Int) {}
-}
-
-fun top(a: Int) {}
-
-class C : I {
-    fun top(a: Int, b: Int) {}
-    fun caller() { top(1) }
-}
-",
-    )]);
-    let engine = index(tmp.path());
-    assert_eq!(calls_from(engine.runtime().unwrap(), "caller@11"), targets(&[]));
-    assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]));
+    for (supertype, preamble) in [
+        ("External()", ""),
+        ("I", "interface I {\n    fun top(a: Int) {}\n}\n"),
+    ] {
+        let src = format!(
+            "package app\n\n{preamble}fun top(a: Int) {{}}\n\nclass C : {supertype} {{\n    \
+             fun top(a: Int, b: Int) {{}}\n    fun caller() {{ top(1) }}\n}}\n"
+        );
+        let tmp = tree(&[("src/main/kotlin/app/C.kt", src.as_str())]);
+        let engine = index(tmp.path());
+        let caller = if preamble.is_empty() { "caller@7" } else { "caller@10" };
+        assert_eq!(calls_from(engine.runtime().unwrap(), caller), targets(&[]), "{supertype}");
+        assert_eq!(residue(&engine, "kotlin"), reasons(&[(R::NoApplicableOverload, 1)]), "{supertype}");
+    }
 }
 
 // ── Sync ≡ reindex ────────────────────────────────────────────────────────

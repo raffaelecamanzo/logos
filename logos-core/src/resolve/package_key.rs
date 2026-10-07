@@ -46,10 +46,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use crate::plugin::{
-    CallTargets, ImplicitReceiver, LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl,
-};
-use crate::plugin::registry::SUPERTYPE_CAPTURE;
+use crate::plugin::{CallTargets, LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl};
 
 /// A module identity: `(crate name, module path segments)` — the binder's
 /// `ModKey`.
@@ -507,7 +504,7 @@ impl PackageLayout {
     /// Whether an unqualified in-class call written in the file at `path`, when
     /// no member of its class admits it, goes on to the free functions and
     /// imports in scope (S-592, [FR-RS-43]): its language declares
-    /// `implicit_receiver = "self"` and records its classes' supertypes
+    /// `implicit_call_falls_through`
     /// ([`LanguageRegistry::free_call_fallthrough_extensions`]).
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
@@ -659,12 +656,7 @@ impl PackageLayout {
             )
             .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
             .with_free_only_bare_calls(exts().filter(|_| semantics.bare_calls_free_only))
-            .with_free_call_fallthrough(exts().filter(|_| {
-                semantics.implicit_receiver == ImplicitReceiver::SelfInstance
-                    && plugin
-                        .query("references")
-                        .is_some_and(|q| q.capture_names().contains(&SUPERTYPE_CAPTURE))
-            }))
+            .with_free_call_fallthrough(exts().filter(|_| semantics.implicit_call_falls_through))
             .with_overloaded_calls(exts().filter(|_| semantics.overloaded_calls))
             .with_arity_unchecked(semantics.arity_unchecked_extensions.iter().cloned())
             .with_wrapper_methods(

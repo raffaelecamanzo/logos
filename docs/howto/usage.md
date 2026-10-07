@@ -273,11 +273,13 @@ by each relation's payload token), read live from the graph.
 >   own-class `inh(a)` no longer takes `inh(1, 2)`: the call binds the base
 >   class's `inh(a, b)` when the language records its classes' bases (Java,
 >   Kotlin, C#, Python, PHP), and stays unbound in Scala, C++ and TypeScript,
->   which record none. A C# or Kotlin unqualified call whose same-named members
->   all mismatch goes on to the free function or `using static`/import of that
->   name, as the language does — but only when the class's supertypes are all
->   in the graph, since an external base class or an interface's default body
->   may hold the overload it reaches. Two candidates that both admit the count
+>   which record none. A Kotlin unqualified call whose same-named members all
+>   mismatch goes on to the top-level function or import of that name, as
+>   Kotlin's resolution does — but only when the class's supertypes are all in
+>   the graph, since an external base class or an interface's default body may
+>   hold the overload it reaches. In Java, C#, Scala and C++ the member hides
+>   every outer name even when no overload applies, so such a call stays
+>   unbound. Two candidates that both admit the count
 >   stay unbound (`overload-ambiguous`): logos reads no argument types. A call
 >   that fits nothing is counted `no-applicable-overload`. JavaScript enforces
 >   no arity, so a `.js`, `.mjs`, `.cjs` or `.jsx` call is never filtered;
