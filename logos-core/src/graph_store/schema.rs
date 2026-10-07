@@ -2882,8 +2882,8 @@ UPDATE files SET content_hash = NULL;
 ///   interface's `companion object` `fun`. `NULL` on every other node. A supertype walk that goes on from a class's `Extends`
 ///   chain to its interfaces never binds one, nor an abstract member (a
 ///   callable recorded with `has_body` 0, migration 25); the interface's own
-///   members still include it, so `I.m()` written on the interface binds it as
-///   before.
+///   members still include it, so a call in the interface's own body
+///   (`this.priv(a)` in a `default`) still binds it.
 ///
 /// **Plugin-agnostic by construction**: no column names a language; a plugin
 /// fills it by declaring the `@item.uninherited` capture (`extract::assoc`),

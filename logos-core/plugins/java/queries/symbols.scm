@@ -31,9 +31,9 @@
 ; (S-609, CR-202, FR-RS-48): a `static` one, called on the interface itself, and
 ; a `private` one, called only from the interface's own bodies. The marker keeps
 ; it out of the supertype walk's interface levels (`plugin.toml`'s
-; `inherits_interface_bodies`); the method stays the interface's member, so
-; `I.stat()` binds it as before. An abstract interface method needs no marker —
-; it records no body.
+; `inherits_interface_bodies`); the method stays the interface's member, so a
+; call in the interface's own body (`this.priv(a)` in a `default`) still binds
+; it. An abstract interface method needs no marker — it records no body.
 (interface_body
   (method_declaration
     (modifiers ["static" "private"])) @item.uninherited)
