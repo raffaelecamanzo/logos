@@ -3961,7 +3961,9 @@ impl Ctx<'_> {
     /// `lookup(T, m)` with path syntax, restricted to `T`'s impl of `Tr`, else
     /// `Tr`'s default body ([`Named`]). `T` and `Tr` are read in the caller's
     /// scope and module model only, as an impl header is
-    /// ([`header_type`](Ctx::header_type)). A `T` the repository does not
+    /// ([`header_type`](Ctx::header_type)); `Self` is the caller's own impl's
+    /// self type, and in a trait's default body the call fans out through `Tr`
+    /// ([`trait_call`](Ctx::trait_call)). A `T` the repository does not
     /// declare — a generic parameter, `std::io::Error` — is
     /// [`Residue::ExternalType`]; one the scope names twice
     /// [`Residue::TypeAmbiguous`]. A `Tr` the graph cannot place names the
@@ -3989,19 +3991,6 @@ impl Ctx<'_> {
             });
             return Res::NotFound;
         };
-        let ty = match self.header_type(ty) {
-            Res::Found(ty) => ty,
-            Res::Ambiguous => {
-                self.note(Want::Callable, || Residue::TypeAmbiguous);
-                return Res::Ambiguous;
-            }
-            Res::NotFound => {
-                self.note(Want::Callable, || Residue::ExternalType {
-                    candidates: Vec::new(),
-                });
-                return Res::NotFound;
-            }
-        };
         let named = match self.header_type(tr) {
             Res::Found(id) if self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Trait) => Named::Placed(id),
             Res::NotFound => Named::Unplaced(tr.rsplit("::").next().unwrap_or(tr)),
@@ -4012,6 +4001,27 @@ impl Ctx<'_> {
             Res::Ambiguous => {
                 self.note(Want::Callable, || Residue::TypeAmbiguous);
                 return Res::Ambiguous;
+            }
+        };
+        // `<Self as Tr>`: the caller's own impl's self type, or — in a trait's
+        // default body, whose `Self` is any implementor — a call through `Tr`.
+        let ty = match (ty == SELF_TYPE_HEAD, self.own_header(), self.own_trait(), named) {
+            (false, ..) => self.header_type(ty),
+            (true, Some(header), ..) => header.self_type,
+            (true, None, Some(_), Named::Placed(tr)) => return self.trait_call(tr, name),
+            (true, ..) => Res::NotFound,
+        };
+        let ty = match ty {
+            Res::Found(ty) => ty,
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                return Res::Ambiguous;
+            }
+            Res::NotFound => {
+                self.note(Want::Callable, || Residue::ExternalType {
+                    candidates: Vec::new(),
+                });
+                return Res::NotFound;
             }
         };
         self.lookup(ty, name, Syntax::Path, Some(named))

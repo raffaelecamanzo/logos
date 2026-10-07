@@ -474,6 +474,31 @@ pub fn foreign(e: &std::io::Error) { <std::io::Error as Run>::go(e); }
     assert!(from(&edges, "src/callers.rs:foreign@10").is_empty(), "{edges:?}");
 }
 
+/// `<Self as Run>::go(self)` reads `Self` as the caller's own impl's type —
+/// binding that type's impl of `Run::go` — and in `Run`'s default body fans
+/// out through `Run` as `self.go()` there does.
+#[test]
+fn a_qualified_self_path_reads_the_callers_own_type() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "\
+pub trait Run {
+    fn go(&self) {}
+    fn twice(&self) { <Self as Run>::go(self); }
+}
+pub struct X;
+impl Run for X {
+    fn go(&self) {}
+}
+impl X { pub fn own(&self) { <Self as Run>::go(self); } }
+",
+    )]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert_eq!(from(&edges, "src/lib.rs:own@9"), targets(&["src/lib.rs:go@7"]));
+    assert_eq!(from(&edges, "src/lib.rs:twice@3"), targets(&["src/lib.rs:go@2", "src/lib.rs:go@7"]));
+}
+
 // ── Sync ≡ reindex ─────────────────────────────────────────────────────────
 
 /// A synced edit equals a fresh index of the edited tree.
