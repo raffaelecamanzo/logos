@@ -53,7 +53,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   opt in with the new `inherits_interface_bodies` key (Java and Kotlin
   declare it; C#, whose default interface member is not inherited, does not)
   and mark `static`/`private` interface members (and a Kotlin interface's
-  `companion object` functions) with `@item.uninherited`.
+  `companion object` functions) with `@item.uninherited`; a plugin declaring
+  the key whose `symbols` query (an on-disk override included) has no such
+  capture is refused at load.
   On the pec-services estate (60 Java members, 48,073 Java call rows), bound
   Java calls go from 7,128 to 7,568: 440 gained, 0 lost. Among them are the
   7 `MailboxControllerV1` → `verifyUserRetailOrPix` calls 1.13.0 left
