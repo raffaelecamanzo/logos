@@ -325,3 +325,37 @@ fn the_graph_fingerprint_sees_every_associated_item_fact() {
         assert_ne!(before, after, "the fingerprint must see a changed {fact}");
     }
 }
+
+/// A Rust crate using axum whose handler `index` is handed to a route — and
+/// whose trait declares a required signature of that name.
+fn axum_tree(lib: &str) -> TempDir {
+    tree(&[
+        ("Cargo.toml", "[package]\nname = \"p\"\nversion = \"0.1.0\"\n[dependencies]\naxum = \"0.7\"\n"),
+        (LIB, lib),
+    ])
+}
+
+const AXUM_SIGNATURE_ONLY: &str = "\
+use axum::{routing::get, Router};
+pub trait Api {
+    fn index(&self);
+}
+pub fn app() -> Router {
+    Router::new().route(\"/\", get(index))
+}
+";
+
+/// S-606: the framework pass binds a route's handler among the same
+/// signature-free graph as the binder — a route naming only a trait's required
+/// signature reaches no node, as before the signature was one.
+#[test]
+fn a_route_never_reaches_a_required_signature() {
+    let tmp = axum_tree(AXUM_SIGNATURE_ONLY);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let routes: Vec<(String, String)> = edges(rt, EdgeKind::RoutesTo)
+        .into_iter()
+        .filter(|(source, target)| source != target)
+        .collect();
+    assert!(routes.iter().all(|(_, target)| target != "index@3"), "no route reaches the signature: {routes:?}");
+}

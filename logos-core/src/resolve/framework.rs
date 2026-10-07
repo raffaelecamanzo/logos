@@ -545,7 +545,8 @@ pub fn run(
         .map(|(_, _, m)| m.refusals.len() as u64)
         .sum();
 
-    let desired = desired_set(&scanned, &nodes, &edges, &files, &index, policy);
+    // Its file-local fallback reads the same signature-free graph (S-606).
+    let desired = desired_set(&scanned, &bind_nodes, &bind_edges, &files, &index, policy);
 
     let routes = desired
         .values()
