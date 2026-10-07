@@ -478,7 +478,8 @@ const TS: &str = "function f(a: number, b = 2, c?: number, ...d: number[]) { g(1
     const k = (a, b) => a;\n\
     const one = x => x;\n\
     const l = function (a) {};\n\
-    function d(a: number, b = 2, c?: number) {}\n";
+    function d(a: number, b = 2, c?: number) {}\n\
+    function tagged() { tag`x`(1); }\n";
 
 /// TypeScript (and TSX): `= v` and `?` are optional, `...d` variadic, a `this`
 /// parameter the receiver, a lone arrow parameter its own list; `...xs`
@@ -495,6 +496,7 @@ fn typescript_ranges_and_counts() {
                 ("l", range(1, Some(1))),
                 ("m", range(1, Some(1))),
                 ("one", range(1, Some(1))),
+                ("tagged", range(0, Some(0))),
             ]),
             "{path}"
         );
@@ -502,6 +504,9 @@ fn typescript_ranges_and_counts() {
         assert_eq!(counts["g"], vec![Some(2)], "{path}");
         assert_eq!(counts["h"], vec![None], "{path}");
         assert_eq!(counts["m"], vec![Some(1)], "{path}");
+        // The tagged template is the callee of a further call: never that
+        // call's count.
+        assert_eq!(counts["tag"], vec![None], "{path}: a tagged template is not counted");
     }
 }
 
