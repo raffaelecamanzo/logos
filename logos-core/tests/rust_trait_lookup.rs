@@ -159,6 +159,18 @@ fn an_empty_impl_in_an_inline_module_reads_its_header_there() {
     assert_eq!(from(&call_edges(engine.runtime().unwrap()), "src/lib.rs:f@3"), targets(&["src/lib.rs:hello@1"]));
 }
 
+/// One default lent through two blocks of one type (generics stripped) is one
+/// candidate, never two.
+#[test]
+fn a_default_lent_through_two_blocks_is_one_candidate() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "pub trait Greet { fn hello(&self) {} }\npub struct W<T>(T);\nimpl Greet for W<u8> {}\nimpl Greet for W<u16> {}\npub fn f(w: &W<u8>) { w.hello(); }\n",
+    )]);
+    let engine = index(tmp.path());
+    assert_eq!(from(&call_edges(engine.runtime().unwrap()), "src/lib.rs:f@5"), targets(&["src/lib.rs:hello@1"]));
+}
+
 /// An impl's own method beats the trait default it overrides.
 #[test]
 fn an_impls_override_beats_the_trait_default() {
