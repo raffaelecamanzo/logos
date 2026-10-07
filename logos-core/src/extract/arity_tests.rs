@@ -441,11 +441,11 @@ fn typescript_ranges_and_counts() {
 }
 
 /// Ruby: a default is optional, a keyword without one required, `*c`/`**f`
-/// variadic, `&g` none; `*xs` spreads, `x.n` passes none, and the constant a
-/// call is made on is no callee of it.
+/// variadic, `&g` none; `*xs` and a bare `key:` run make a count unknown, `x.n`
+/// passes none, and the constant a call is made on is no callee of it.
 #[test]
 fn ruby_ranges_and_counts() {
-    let src = "def f(a, b = 2, *c, d:, e: 1, **f, &g)\n  g(1, 2); h(*xs); m 1, 2; x.n; User.find(1)\nend\n\
+    let src = "def f(a, b = 2, *c, d:, e: 1, **f, &g)\n  g(1, 2); h(*xs); m 1, 2; x.n; User.find(1); cfg(1, timeout: 1, retries: 2)\nend\n\
         class C\n  def m(a)\n    self.m(1)\n  end\nend\n";
     assert_eq!(ranges("lib/a.rb", src), map(&[("f", range(2, None)), ("m", range(1, Some(1)))]));
     let counts = counts("lib/a.rb", src);
@@ -453,6 +453,7 @@ fn ruby_ranges_and_counts() {
     assert_eq!(counts["h"], vec![None]);
     assert_eq!(counts["m"], vec![Some(1), Some(2)]);
     assert_eq!(counts["n"], vec![Some(0)]);
+    assert_eq!(counts["cfg"], vec![None], "a bare `key:` run is one hash or several keywords");
     assert_eq!(counts["User"], vec![None], "the receiver row is no callee");
 }
 
