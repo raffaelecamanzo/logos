@@ -32,7 +32,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   Ruby call with a bare `key: value` run).
   Every Rust `impl` function also records whether it takes `self`. The facts
   come from new `@arity.*` captures in each plugin's queries, so a droppable
-  query override can tune them. Nothing binds on them yet: on this repository
+  query override can tune them. No range or count binds yet (the takes-`self`
+  fact does, below): on this repository
   symbols and edges are byte-identical, every node is unchanged apart from the
   new facts, and the quality signal is unchanged. A call's count joins its ledger row's identity, so `f(a)` and
   `f(a, b)` from one caller are now two rows; on this repository 268 `Calls`
@@ -55,6 +56,21 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   config or graph read that fails still states no residue and caches nothing.
 
 ### Fixed
+
+- **A Rust method call never binds an associated function without `self`
+  (CR-200, S-604).** On a receiver whose type is proven, `x.name()` used to
+  bind an inherent `fn name()` over a trait impl's `fn name(&self)`, because an
+  inherent candidate outranked a trait impl's whether or not it could be
+  called that way. rustc calls the trait method. A candidate recorded as not
+  taking `self` is now dropped before that rank, so the call binds the trait
+  impl's `name`; two genuine methods still bind the inherent one, and a type
+  whose only `m` takes no `self` leaves `x.m()` unbound with
+  `supertype-unreached`. A candidate whose fact is unknown is kept. `Self::m()`
+  calls are unchanged: they may name an associated function. On this
+  repository nodes, symbols and edges are byte-identical and the quality
+  signal is unchanged, as no type here pairs such a function with a method of
+  the same name. The fact is the one migration 33 records, so a store needs
+  the same one `logos scan` (or `logos index`) after upgrading.
 
 - **A config-narrowing purge advances the graph revision (CR-201, S-605).**
   When an `exclude` edit narrowed the configuration, two paths removed the

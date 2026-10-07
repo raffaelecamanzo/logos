@@ -21,8 +21,8 @@
 use super::binder::{bind, residue, Index, Outcome, Residue};
 use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
-use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
-use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind, ReceiverShape, RefForm};
+use crate::graph_store::{EdgeRow, NodeArity, NodeRow, UnresolvedRefRow};
+use crate::model::{ArtifactRelation, EdgeKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverShape, RefForm};
 
 /// File ids for the ledger rows.
 const LIB_RS: i64 = 10;
@@ -2746,6 +2746,157 @@ fn a_same_named_type_of_another_module_is_told_apart_by_its_own_module() {
     let ix = index(&r, &[lib_use(90, "crate::inner::Store", "Store")], &[413]);
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::TypeAmbiguous));
+}
+
+// ── S-604 / CR-200: a Rust method call binds only a callable that takes `self` ──
+//
+// S-591 records whether each Rust `impl` function takes `self`
+// (`nodes.takes_self`). A proven receiver's call drops every candidate
+// recorded as not taking it before the inherent-over-trait rank; an unknown
+// fact keeps the candidate. `Self::m` (S-493) reads no such fact.
+
+/// The receiver fixture plus `Store` methods in `src/util.rs`, each with its
+/// takes-`self` fact: an inherent associated `name()` (420) beside a trait
+/// impl's `name(&self)` (421); two genuine `pair`s, inherent (422) and a trait
+/// impl's (423); an associated `make()` (424) alone; an inherent `vague` whose
+/// fact is unknown (425) beside a trait impl's `vague(&self)` (426); and an
+/// inherent method `caller(&self)` (427) for `Self::m` calls. `facts` is
+/// whether the index is given the facts at all.
+fn self_fact_index(r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], facts: bool) -> Index {
+    let (mut nodes, mut edges, mut self_types, mut refs) = receiver_fixture();
+    let mut arities: Vec<NodeArity> = Vec::new();
+    for (id, name, takes_self) in [
+        (420, "name", Some(false)),
+        (421, "name", Some(true)),
+        (422, "pair", Some(true)),
+        (423, "pair", Some(true)),
+        (424, "make", Some(false)),
+        (425, "vague", None),
+        (426, "vague", Some(true)),
+        (427, "caller", Some(true)),
+    ] {
+        nodes.push(node(id, name, NodeKind::Method, "src/util.rs"));
+        edges.push(contains(4, id));
+        self_types.push((NodeId(id), "Store".to_string()));
+        // The store's shape: every callable carries its range, so a node whose
+        // takes-`self` fact is unknown is still a row.
+        arities.push((NodeId(id), Some(ParamRange { min: 0, max: Some(0) }), takes_self));
+    }
+    refs.extend([(421, "Named"), (423, "Pair"), (426, "Vague")].into_iter().enumerate().map(|(i, (id, tr))| {
+        make_ref(310 + i as i64, UTIL_RS, id, tr, None, RefForm::Path, EdgeKind::Implements)
+    }));
+    refs.extend(extra.iter().cloned());
+    refs.push(r.clone());
+    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    if facts {
+        ix.with_arities(&arities)
+    } else {
+        ix
+    }
+}
+
+#[test]
+fn a_method_call_binds_the_trait_method_over_an_inherent_associated_function() {
+    // `impl Store { fn name() }` + `impl Named for Store { fn name(&self) }`:
+    // rustc calls the trait method for `x.name()`. Without the facts the
+    // inherent associated function outranks it — the pre-S-604 edge.
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    for policy in POLICIES {
+        for (target, peeled) in [("Store::name", None), ("Store::name", Some("&")), ("Store::name", Some("Arc")), ("crate::util::Store::name", None)] {
+            let r = proven(100, target, peeled);
+            bound_to(bind(&r, &self_fact_index(&r, &store, true), policy), 2, 421, EdgeKind::Calls);
+        }
+    }
+    let r = proven(100, "Store::name", None);
+    bound_to(bind(&r, &self_fact_index(&r, &store, false), BindingPolicy::Strict), 2, 420, EdgeKind::Calls);
+}
+
+#[test]
+fn two_genuine_methods_still_bind_the_inherent_one() {
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    for policy in POLICIES {
+        for (target, peeled) in [("Store::pair", None), ("Store::pair", Some("&mut")), ("Store::pair", Some("Box")), ("crate::util::Store::pair", None)] {
+            let r = proven(100, target, peeled);
+            bound_to(bind(&r, &self_fact_index(&r, &store, true), policy), 2, 422, EdgeKind::Calls);
+        }
+    }
+    // Through a glob as well as a `use`.
+    let r = proven(101, "Store::pair", None);
+    bound_to(bind(&r, &self_fact_index(&r, &[lib_glob(91, "crate::util")], true), BindingPolicy::Strict), 2, 422, EdgeKind::Calls);
+}
+
+#[test]
+fn a_type_whose_only_m_takes_no_self_leaves_the_method_call_unbound() {
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    let r = proven(100, "Store::make", None);
+    let ix = self_fact_index(&r, &store, true);
+    for policy in POLICIES {
+        assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{policy:?}");
+    }
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::SupertypeUnreached));
+    // Without the fact it is the type's one `make`.
+    bound_to(bind(&r, &self_fact_index(&r, &store, false), BindingPolicy::Strict), 2, 424, EdgeKind::Calls);
+}
+
+#[test]
+fn a_candidate_without_self_elsewhere_leaves_nothing_to_tell_apart() {
+    // A second `Store` in `mod inner` (412) with no `get`: `util`'s lone `get`
+    // (402) may be the other type's, so the call is type-ambiguous (S-588).
+    // Recorded as taking no `self`, it is no candidate for `x.get()` whichever
+    // type it belongs to: nothing is left to tell apart, and the type has no
+    // such method.
+    let (mut nodes, mut edges, self_types, implements) = receiver_fixture();
+    nodes.push(node(412, "Store", NodeKind::Struct, "src/lib.rs"));
+    edges.push(contains(6, 412));
+    let r = proven(100, "Store::get", None);
+    let mut refs = implements;
+    refs.extend([lib_use(90, "crate::inner::Store", "Store"), r.clone()]);
+    let ix = Index::build(&nodes, &edges, &refs).with_self_types(self_types);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::TypeAmbiguous));
+    let ix = ix.with_arities(&[(NodeId(402), Some(ParamRange { min: 0, max: Some(0) }), Some(false))]);
+    for policy in POLICIES {
+        assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{policy:?}");
+    }
+    assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::SupertypeUnreached));
+}
+
+#[test]
+fn an_unknown_takes_self_fact_never_filters_a_candidate() {
+    // `vague` (425) records no fact: it stays a candidate, and as the inherent
+    // one it outranks the trait impl's `vague(&self)`, exactly as before.
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    for policy in POLICIES {
+        let r = proven(100, "Store::vague", None);
+        bound_to(bind(&r, &self_fact_index(&r, &store, true), policy), 2, 425, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn a_self_type_call_reads_no_takes_self_fact() {
+    // S-493's `Self::m` arm is unchanged: from `caller` (427), a `Self::m`
+    // row — and a `self.m()` row extracted without that rewrite, which takes
+    // the same arm — binds alike whether or not the index holds the facts, and
+    // `Self::make` binds the associated function, as `Self::make()` calls it.
+    for name in ["name", "make", "pair", "vague"] {
+        let path = call(100, UTIL_RS, 427, &format!("Self::{name}"));
+        let method = UnresolvedRefRow {
+            receiver: Some(ReceiverShape::SelfInstance),
+            ..make_ref(100, UTIL_RS, 427, name, None, RefForm::Method, EdgeKind::Calls)
+        };
+        for r in [path, method] {
+            let (with, without) = (self_fact_index(&r, &[], true), self_fact_index(&r, &[], false));
+            for policy in POLICIES {
+                assert_eq!(bind(&r, &with, policy), bind(&r, &without, policy), "{} at {policy:?}", r.target);
+            }
+            assert_eq!(residue(&r, &with, BindingPolicy::Aggressive), residue(&r, &without, BindingPolicy::Aggressive), "{}", r.target);
+        }
+    }
+    // `Self::name` sees both `name`s of the one module: the facts would leave
+    // one, so the arm reading them would bind the trait impl's.
+    let name = call(101, UTIL_RS, 427, "Self::name");
+    assert_eq!(bind(&name, &self_fact_index(&name, &[], true), BindingPolicy::Aggressive), Outcome::Unbound);
+    let make = call(101, UTIL_RS, 427, "Self::make");
+    bound_to(bind(&make, &self_fact_index(&make, &[], true), BindingPolicy::Strict), 427, 424, EdgeKind::Calls);
 }
 
 // ── S-514 / FR-RS-12: a receiver call binds by its receiver's shape ─────────

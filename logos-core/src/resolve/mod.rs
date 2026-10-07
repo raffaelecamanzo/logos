@@ -124,7 +124,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 use crate::config::{BindingPolicy, Resolution};
-use crate::graph_store::{EdgeRow, GraphStore, NodeRow, RelationCounts, UnresolvedRefRow};
+use crate::graph_store::{EdgeRow, GraphStore, NodeArity, NodeRow, RelationCounts, UnresolvedRefRow};
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::navigation::{
     CallResidue, CallResidueReason, LanguageResolution, RelationResolution, ResidueScope,
@@ -160,6 +160,9 @@ struct Snapshot {
     refs: Vec<UnresolvedRefRow>,
     /// Every node's recorded self type (S-493, `nodes.self_type`).
     self_types: Vec<(NodeId, String)>,
+    /// Every node's recorded arity facts (S-591; read by S-604 for
+    /// `nodes.takes_self`).
+    arities: Vec<NodeArity>,
     /// Every file's recorded declared namespace (S-518, `files.namespace`).
     namespaces: Vec<(String, String)>,
     /// file_id → project-relative path, for an incremental run to test a row's
@@ -248,6 +251,7 @@ pub fn run(
             edges: store.all_edges()?,
             refs: store.unresolved_refs()?,
             self_types: store.node_self_types()?,
+            arities: store.node_arities()?,
             namespaces: store.file_namespaces()?,
             // The file_id → path map only an incremental run needs (to test a
             // row's owning file against the change-set); a full index skips it.
@@ -287,6 +291,7 @@ pub fn run(
     });
     let index = binder::Index::build_with_layout(&snap.nodes, &snap.edges, &snap.refs, layout)
         .with_self_types(snap.self_types)
+        .with_arities(&snap.arities)
         .with_path_specifiers(specifier_targets, go_modules)
         .with_imported_bindings(&snap.refs, policy);
 
@@ -965,7 +970,8 @@ pub(crate) fn call_residue_by_language(
 
     let (nodes, edges, refs) = (store.all_nodes()?, store.all_edges()?, store.unresolved_refs()?);
     let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout)
-        .with_self_types(store.node_self_types()?);
+        .with_self_types(store.node_self_types()?)
+        .with_arities(&store.node_arities()?);
     let declared = index.declared_type_names();
 
     let mut out: BTreeMap<String, CallResidue> = BTreeMap::new();

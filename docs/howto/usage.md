@@ -216,11 +216,14 @@ by each relation's payload token), read live from the graph.
 >   file's `use` declarations (and a `pub use` re-export, so `cli` code's
 >   `engine.runtime()` reaches `logos_core`'s `Engine::runtime`) to one type
 >   declared in the repository, and the call binds that type's one `helper`,
->   an inherent method before a trait impl's. It stays unbound when `T` is not
->   declared in the repository (`String`, `Vec`, `str`, `std::io::Error`, an
->   external crate's type), when the wrapper provides the method itself
->   (`x.clone()` on an `Arc<T>` is `Arc::clone`), when no `use` names a
->   same-named type, and when `T` has no such method or two of one rank.
+>   an inherent method before a trait impl's. An associated function without
+>   `self` (`fn helper() -> u8`) is never a candidate, as rustc never calls
+>   one with `x.helper()`: a trait impl's `helper(&self)` beside it binds. It
+>   stays unbound when `T` is not declared in the repository (`String`, `Vec`,
+>   `str`, `std::io::Error`, an external crate's type), when the wrapper
+>   provides the method itself (`x.clone()` on an `Arc<T>` is `Arc::clone`),
+>   when no `use` names a same-named type, and when `T` has no such method
+>   taking `self`, or two of one rank.
 >   A glob of another crate or of a sibling module reads none of that module's
 >   imports (the graph cannot tell a `pub use` from a private one), and a name
 >   a file imports twice — at top level and in an inline `mod tests` — binds

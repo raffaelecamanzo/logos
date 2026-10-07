@@ -174,6 +174,75 @@ fn a_rust_impl_function_records_whether_it_takes_self() {
     );
 }
 
+/// The `self` forms beyond [`RUST`]'s, as S-604 binds on them: a typed
+/// `self` by value or reference, `mut self` with a type, an attributed
+/// receiver, `const`/`async`/`unsafe` qualifiers, a generic or path-qualified
+/// impl, a `where` clause and an impl nested in a function or module all
+/// record the fact the receiver decides; an associated function stays false
+/// whatever its qualifiers.
+#[test]
+fn every_rust_self_form_records_taking_self_and_an_associated_function_does_not() {
+    const FORMS: &str = r#"
+pub struct W<T>(T);
+impl<T: Clone> W<T> {
+    pub fn typed_value(self: Self) {}
+    pub fn typed_ref(self: &Self) {}
+    pub fn typed_mut_ref(self: &mut Self, x: u8) {}
+    pub fn mut_boxed(mut self: Box<Self>) {}
+    pub fn attributed(#[allow(unused)] &self) {}
+    pub const fn const_ref(&self) {}
+    pub async fn async_ref(&self) {}
+    pub unsafe fn unsafe_mut(&mut self) {}
+    pub fn bounded<U>(&self, u: U) where U: Clone {}
+    pub const fn const_new(t: T) -> Self { W(t) }
+    pub async fn async_make() -> Option<Self> { None }
+    pub fn generic_assoc<U: Into<T>>(u: U) -> Self { W(u.into()) }
+}
+pub mod inner {
+    pub struct V;
+    impl crate::inner::V {
+        pub fn path_ref(&self) {}
+        pub fn path_new() -> Self { V }
+    }
+}
+pub fn outer() {
+    struct L;
+    impl L {
+        fn nested_ref(&self) {}
+        fn nested_new() -> Self { L }
+    }
+}
+"#;
+    let takes_self: BTreeMap<String, Option<bool>> = facts("src/lib.rs", FORMS)
+        .nodes
+        .into_iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| (n.name, n.takes_self))
+        .collect();
+    assert_eq!(
+        takes_self,
+        map(&[
+            ("async_make", Some(false)),
+            ("async_ref", Some(true)),
+            ("attributed", Some(true)),
+            ("bounded", Some(true)),
+            ("const_new", Some(false)),
+            ("const_ref", Some(true)),
+            ("generic_assoc", Some(false)),
+            ("mut_boxed", Some(true)),
+            ("nested_new", Some(false)),
+            ("nested_ref", Some(true)),
+            ("outer", None),
+            ("path_new", Some(false)),
+            ("path_ref", Some(true)),
+            ("typed_mut_ref", Some(true)),
+            ("typed_ref", Some(true)),
+            ("typed_value", Some(true)),
+            ("unsafe_mut", Some(true)),
+        ])
+    );
+}
+
 /// No non-callable node records a range or the takes-`self` fact.
 #[test]
 fn a_non_callable_records_no_arity_fact() {
