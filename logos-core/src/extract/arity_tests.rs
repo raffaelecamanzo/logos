@@ -311,21 +311,36 @@ fn csharp_ranges_and_counts() {
 }
 
 /// C++: a default is optional, `...` and a pack are variadic, `(void)` and `()`
-/// declare none; a pack expansion spreads.
+/// declare none; a pack expansion spreads. A definition outside a class body
+/// records no range — its defaults may sit on a separate declaration — while a
+/// prototype and an in-class definition do.
 #[test]
 fn cpp_ranges_and_counts() {
-    let src = "int f(int a, int b = 2, ...) { g(1, 2); return 0; }\n\
+    let src = "class K {\n\
+        int f(int a, int b = 2, ...) { g(1, 2); return 0; }\n\
         template<typename... Ts> void v(Ts... xs) { w(xs...); }\n\
         int z(void) { return 0; }\n\
-        int y() { return 0; }\n";
+        int y() { return 0; }\n\
+        };\n\
+        int out(int a, int b = 2);\n\
+        int out(int a, int b) { return a; }\n";
+    let ranges: Vec<(String, Option<ParamRange>)> = facts("src/a.cpp", src)
+        .nodes
+        .into_iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| (n.name, n.params))
+        .collect();
     assert_eq!(
-        ranges("src/a.cpp", src),
-        map(&[
-            ("f", range(1, None)),
-            ("v", range(0, None)),
-            ("y", range(0, Some(0))),
-            ("z", range(0, Some(0))),
-        ])
+        ranges,
+        vec![
+            ("f".to_string(), range(1, None)),
+            ("v".to_string(), range(0, None)),
+            ("z".to_string(), range(0, Some(0))),
+            ("y".to_string(), range(0, Some(0))),
+            ("out".to_string(), range(1, Some(2))),
+            ("out".to_string(), None),
+        ],
+        "the prototype carries the default; the out-of-class definition records no range"
     );
     assert_eq!(counts("src/a.cpp", src), map(&[("g", vec![Some(2)]), ("w", vec![None])]));
 }
