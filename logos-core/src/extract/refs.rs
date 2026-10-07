@@ -388,9 +388,13 @@ fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
                 }
             }
             scan_token_tree(child, source, out);
-        } else if child.kind() == "::" && tt.child(i + 1).is_some_and(|n| n.kind() == "<") {
-            // A turbofish's type arguments: `Vec::<Box<dyn Fn(u8)>>::new()`.
+        } else if child.kind() == "::" && tt.child(i + 1).is_some_and(|n| matches!(n.kind(), "<" | "<<")) {
+            // A turbofish's type arguments: `Vec::<Box<dyn Fn(u8)>>::new()`. A
+            // `{ … }` const argument holds expressions: its calls are scanned.
             if let Some(close) = angle_close(tt, i + 1) {
+                for block in (i + 2..close).filter_map(|j| tt.child(j)).filter(|n| n.kind() == "token_tree" && !opens_with_paren(*n)) {
+                    scan_token_tree(block, source, out);
+                }
                 i = close;
             }
         }
@@ -497,14 +501,14 @@ fn angle_close(tt: Node<'_>, open: usize) -> Option<usize> {
 }
 
 /// The index of the `<` that opens the `>` at `tt`'s child `close`; `None` when
-/// it never opens there, or the matching token is not a lone `<`.
+/// it never opens there, or the matching token is not a `<` / `<<`.
 fn angle_open(tt: Node<'_>, close: usize) -> Option<usize> {
     let mut depth = 0;
     for i in (0..=close).rev() {
         let kind = tt.child(i)?.kind();
         depth -= angle_depth(kind);
         if depth == 0 {
-            return (kind == "<").then_some(i);
+            return matches!(kind, "<" | "<<").then_some(i);
         }
         if depth < 0 {
             return None;
@@ -1222,6 +1226,18 @@ mod tree_tests {
         assert!(macro_calls(r#"assert!(a b < c > (d))"#).is_empty());
         // No identifier before the `::<…>`: no name to record.
         assert!(macro_calls(r#"assert!(::<T>(d))"#).is_empty());
+    }
+
+    /// A turbofish opened by `<<` (`::<<T as Tr>::X>`) is a turbofish, and a
+    /// `{ … }` const argument in one still holds calls.
+    #[test]
+    fn a_turbofish_opened_by_a_shift_token_or_holding_a_block_is_read() {
+        let got = macro_calls(r#"vec![Vec::<<T as Tr>::X>::new(), f::<<T as Tr>::X>(a)]"#);
+        assert_eq!(want(&got), want(&[path("Vec::new"), path("f")]));
+        let mut got: Vec<String> =
+            macro_calls(r#"vec![f::<{ g(3) }>(1)]"#).into_iter().map(|c| c.target).collect();
+        got.sort();
+        assert_eq!(got, ["f", "g"]);
     }
 
     /// A name the macro itself binds — a closure parameter, a `let`, a `for`
