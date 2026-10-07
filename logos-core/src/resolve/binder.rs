@@ -1112,8 +1112,9 @@ impl Index {
     /// associated-item lookup (S-607, [FR-RS-47], [`Ctx::lookup`]).
     ///
     /// Each block's functions are the callables of its file whose first line
-    /// it holds — the innermost such block — less a function nested in one of
-    /// the block's own functions. A block holding none (an empty
+    /// it holds — the innermost such block, and none when two blocks of one
+    /// span hold it (two `impl`s on one line) — less a function nested in one
+    /// of the block's own functions. A block holding none (an empty
     /// `impl Greet for X {}`) records nothing here. Its header is resolved
     /// **once**, in its own file's scope, as a proven receiver's type is
     /// ([`Ctx::resolve_receiver_type`]): its `use` declarations, its module,
@@ -1163,12 +1164,19 @@ impl Index {
                 continue;
             }
             let Some(candidates) = by_file.get(path) else { continue };
-            let innermost = candidates
+            let holding: Vec<usize> = candidates
                 .iter()
                 .copied()
                 .filter(|&i| i64::from(blocks[i].start_line) <= line && line <= i64::from(blocks[i].end_line))
-                .min_by_key(|&i| (blocks[i].end_line - blocks[i].start_line, i));
-            let Some(i) = innermost else { continue };
+                .collect();
+            let span = |i: usize| blocks[i].end_line - blocks[i].start_line;
+            let Some(narrowest) = holding.iter().map(|&i| span(i)).min() else { continue };
+            // Two blocks of one span holding the line (`impl A { … } impl B {
+            // … }` on one line): which holds the function is unknown, so
+            // neither does — no candidate rather than a guess.
+            let [i] = holding.iter().copied().filter(|&i| span(i) == narrowest).collect::<Vec<_>>()[..] else {
+                continue;
+            };
             // A function nested in one of the block's own functions, or in a
             // trait the block's function declares, is no associated item.
             let nested = self.parent.get(&n.id).is_some_and(|p| {

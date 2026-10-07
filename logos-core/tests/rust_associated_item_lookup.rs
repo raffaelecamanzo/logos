@@ -654,3 +654,17 @@ fn an_external_trait_never_wins_where_a_repository_trait_is_left_out_of_scope() 
     // The two `Ok(())` name a prelude variant: `name-not-in-scope`.
     assert_eq!(residue(&engine), reasons(&[(R::OverloadAmbiguous, 1), (R::NameNotInScope, 2)]));
 }
+
+/// Two impl blocks on one line: which holds each function is not recorded, so
+/// neither function is a candidate — `A::g()` never binds `B`'s `g`.
+#[test]
+fn two_impl_blocks_on_one_line_lend_no_function_to_the_other() {
+    let tmp = tree(&[(
+        "src/lib.rs",
+        "pub struct A;\npub struct B;\nimpl A { pub fn f() {} } impl B { pub fn g() {} }\npub fn ca() { A::g(); }\npub fn cb() { B::g(); }\n",
+    )]);
+    let engine = index(tmp.path());
+    let edges = call_edges(engine.runtime().unwrap());
+    assert!(from(&edges, "src/lib.rs:ca@4").is_empty(), "{edges:?}");
+    assert!(from(&edges, "src/lib.rs:cb@5").is_empty(), "{edges:?}");
+}
