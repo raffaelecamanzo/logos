@@ -1020,6 +1020,7 @@ pub(crate) fn call_residue_by_language(
             Some(binder::Residue::OverloadAmbiguous) => CallResidueReason::OverloadAmbiguous,
             Some(binder::Residue::TypeAmbiguous) => CallResidueReason::TypeAmbiguous,
             Some(binder::Residue::SupertypeUnreached) => CallResidueReason::SupertypeUnreached,
+            Some(binder::Residue::NoApplicableOverload) => CallResidueReason::NoApplicableOverload,
         };
         *residue.reasons.entry(reason).or_default() += 1;
     }

@@ -41,7 +41,7 @@ use super::abi::{assert_abi, AbiRange};
 use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
 use super::manifest::{CallTargets, PluginManifest};
-use super::plugin::{CompiledPlugin, LanguagePlugin};
+use super::plugin::{CompiledPlugin, LanguagePlugin, Semantics};
 use super::queries::{self, LanguageQueries};
 
 /// One language's path-model declaration (S-519, [FR-RS-14]), as
@@ -375,6 +375,31 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The normalised extensions of every code plugin whose semantics
+    /// `declares` — the one shape of the per-key extension sets the binder's
+    /// [`PackageLayout`](crate::resolve::package_key::PackageLayout) reads
+    /// (S-592: written once, not once per key).
+    fn code_extensions_where(&self, declares: impl Fn(&Semantics) -> bool) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| declares(p.semantics()))
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
+    /// Each normalised extension of every code plugin for which `value` gives
+    /// a value, mapped to it — the per-key extension maps' one shape, as
+    /// [`code_extensions_where`](Self::code_extensions_where) is the sets'.
+    fn code_extension_map<V: Clone>(&self, value: impl Fn(&Semantics) -> Option<V>) -> HashMap<String, V> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter_map(|p| Some((p, value(p.semantics())?)))
+            .flat_map(|(p, v)| p.extensions().iter().map(move |e| (normalize_ext(e), v.clone())))
+            .collect()
+    }
+
     /// Every code plugin's file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)), each mapped to the
     /// interop family its plugin binds within (S-519, [NFR-RA-05]) — the
@@ -384,16 +409,7 @@ impl LanguageRegistry {
     ///
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     pub fn families(&self) -> HashMap<String, String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .flat_map(|p| {
-                let family = p.semantics().family.clone();
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), family.clone()))
-            })
-            .collect()
+        self.code_extension_map(|s| Some(s.family.clone()))
     }
 
     /// The file extensions (normalised as in
@@ -405,17 +421,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-16]: ../../../docs/specs/requirements/FR-RS-16.md
     pub fn call_targets(&self) -> HashMap<String, CallTargets> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().call_targets.any())
-            .flat_map(|p| {
-                let targets = p.semantics().call_targets;
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), targets))
-            })
-            .collect()
+        self.code_extension_map(|s| s.call_targets.any().then_some(s.call_targets))
     }
 
     /// The file extensions (normalised as in
@@ -427,12 +433,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     pub fn supertype_kind_follows_target(&self) -> HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().supertype_kind_follows_target)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.code_extensions_where(|s| s.supertype_kind_follows_target)
     }
 
     /// The file extensions (normalised as in
@@ -444,12 +445,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     pub fn enclosing_namespace_extensions(&self) -> HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().enclosing_namespaces)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.code_extensions_where(|s| s.enclosing_namespaces)
     }
 
     /// The file extensions (normalised as in
@@ -461,11 +457,60 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     pub fn free_only_bare_call_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.bare_calls_free_only)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose unqualified
+    /// in-class call, when no member of its class admits its arguments, goes on
+    /// to the free functions and imports in scope (S-592, [FR-RS-43]): the
+    /// plugin declares `implicit_call_falls_through` — Kotlin, whose
+    /// resolution tries each scope level for an applicable candidate. Read off
+    /// the descriptor, never the queries, so deciding it compiles no language
+    /// (CR-197); the language's compile checks its `references` query records
+    /// the supertypes the fall-through's guard needs. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`].
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn free_call_fallthrough_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.implicit_call_falls_through)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose plugin
+    /// declares `implicit_root_members` (S-592), each mapped to those names: a
+    /// call of one never falls through, as the root every class inherits may
+    /// hold it. Consumed through [`crate::resolve::package_key::PackageLayout`].
+    pub fn implicit_root_members(&self) -> HashMap<String, Vec<String>> {
+        self.code_extension_map(|s| {
+            (!s.implicit_root_members.is_empty()).then(|| s.implicit_root_members.clone())
+        })
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares `overloaded_calls = true` (S-592, [FR-RS-43]): a bare call
+    /// there binds only a callable whose parameter range admits it. Consumed
+    /// through [`crate::resolve::package_key::PackageLayout`]; an extension
+    /// absent from the set binds its bare calls by name, as before.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn overloaded_call_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.overloaded_calls)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) a code plugin
+    /// declares in `arity_unchecked_extensions` (S-592, [FR-RS-43]): files of a
+    /// language that enforces no arity — JavaScript, parsed by the TypeScript
+    /// grammars — whose calls are never filtered by a parameter range.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn arity_unchecked_extensions(&self) -> HashSet<String> {
         self.plugins
             .iter()
             .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| p.semantics().bare_calls_free_only)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .flat_map(|p| p.semantics().arity_unchecked_extensions.iter().map(|e| normalize_ext(e)))
             .collect()
     }
 
@@ -478,17 +523,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
     pub fn wrapper_methods(&self) -> HashMap<String, BTreeMap<String, Vec<String>>> {
-        self.plugins
-            .iter()
-            .filter(|p| !p.is_documentation() && !p.is_artifact())
-            .filter(|p| !p.semantics().wrapper_methods.is_empty())
-            .flat_map(|p| {
-                let declared = &p.semantics().wrapper_methods;
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), declared.clone()))
-            })
-            .collect()
+        self.code_extension_map(|s| (!s.wrapper_methods.is_empty()).then(|| s.wrapper_methods.clone()))
     }
 
     /// Grammars skipped at load due to an ABI mismatch ([FR-PL-03]).
@@ -723,6 +758,7 @@ fn compile_capabilities(
         &manifest.name,
         entry.manifest_label,
         manifest.module_model_kind() == super::ModuleModelKind::Namespace,
+        manifest.implicit_call_falls_through,
         resolved_queries,
         language,
     )?;
@@ -856,27 +892,7 @@ mod tests {
     #[test]
     fn a_namespace_model_without_the_namespace_capture_fails_its_compile() {
         fn entry(source: &'static str) -> GrammarEntry {
-            GrammarEntry {
-                manifest_label: "toyns/plugin.toml",
-                manifest_toml: r#"
-                    name = "toyns"
-                    extensions = ["toyns"]
-                    module_separator = "."
-                    abi_version = 15
-                    capabilities = ["symbols"]
-                    [module_model]
-                    kind = "namespace"
-                    [queries]
-                    symbols = "queries/symbols.scm"
-                "#,
-                language: tree_sitter_rust::LANGUAGE,
-                embedded_queries: vec![grammars::EmbeddedQuery {
-                    relative_path: "queries/symbols.scm",
-                    label: "toyns/queries/symbols.scm",
-                    source,
-                }]
-                .leak(),
-            }
+            toy_grammar("toyns", "", "[module_model]\nkind = \"namespace\"", "symbols", source)
         }
         let load = |source: &'static str, root: Option<&Path>| {
             let mut entries = grammars::compiled();
@@ -914,6 +930,33 @@ mod tests {
             crate::plugin::ModuleModelKind::Namespace
         );
         assert!(reg.namespace_extensions().contains("toyns"));
+    }
+
+    /// S-592: a language declaring `implicit_call_falls_through` must record
+    /// its classes' supertypes — its `references` query captures
+    /// `@ref.extends` — or its compile is refused naming the descriptor, as a
+    /// namespace model's missing capture is. Checked at compile, never when the
+    /// key is read.
+    #[test]
+    fn a_fall_through_language_without_the_supertype_capture_fails_its_compile() {
+        fn entry(source: &'static str) -> GrammarEntry {
+            let keys = "implicit_receiver = \"self\"\nimplicit_call_falls_through = true";
+            toy_grammar("toyft", keys, "", "references", source)
+        }
+        let load = |source: &'static str| {
+            let mut entries = grammars::compiled();
+            entries.push(entry(source));
+            LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+                .expect("an embedded query compiles on first use")
+        };
+        let err = load("(call_expression function: (identifier) @ref.call)")
+            .compile_all_queries()
+            .expect_err("no supertype capture fails the compile")
+            .to_string();
+        assert!(err.contains("toyft/plugin.toml") && err.contains("@ref.extends"), "{err}");
+        load("(call_expression function: (identifier) @ref.call)\n(type_identifier) @ref.extends")
+            .compile_all_queries()
+            .expect("the capture satisfies the check");
     }
 
     /// S-500 / FR-EX-11 / FR-PL-02: a `body_node_kinds` entry must name a node
@@ -1186,6 +1229,38 @@ mod tests {
         for ext in ["java", "cs", "kt", "kts", "scala", "cpp", "rb", "c", "md"] {
             assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
         }
+    }
+
+    /// The arity sets (S-592, FR-RS-43): the overloading languages are Java,
+    /// Kotlin, Scala, C# and C++; an implicit-instance call falls through to a
+    /// free function in Kotlin alone — in C#, Scala, C++ and Ruby a member of
+    /// that name hides every outer one; and only JavaScript's extensions —
+    /// claimed by the two TypeScript grammars — are never filtered, while
+    /// `.ts`/`.tsx` are.
+    #[test]
+    fn the_arity_extension_sets_name_the_declaring_grammars_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let overloaded = reg.overloaded_call_extensions();
+        for ext in ["java", "kt", "kts", "scala", "cs", "cpp", "hpp"] {
+            assert!(overloaded.contains(ext), "`{ext}` overloads by name");
+        }
+        for ext in ["rs", "go", "py", "php", "ts", "js", "rb", "c", "md"] {
+            assert!(!overloaded.contains(ext), "`{ext}`'s bare call binds by name");
+        }
+        let fallthrough = reg.free_call_fallthrough_extensions();
+        for ext in ["kt", "kts"] {
+            assert!(fallthrough.contains(ext), "`{ext}`'s instance call falls through");
+        }
+        for ext in ["cs", "scala", "cpp", "rb", "java", "rs", "go", "py", "php", "ts", "js", "c"] {
+            assert!(!fallthrough.contains(ext), "`{ext}`'s call never falls through");
+        }
+        let roots = reg.implicit_root_members();
+        assert_eq!(roots.keys().filter(|e| e.starts_with("kt")).count(), 2, "{roots:?}");
+        assert_eq!(roots["kt"], ["equals", "hashCode", "toString"]);
+        let mut unchecked: Vec<String> = reg.arity_unchecked_extensions().into_iter().collect();
+        unchecked.sort();
+        assert_eq!(unchecked, ["cjs", "js", "jsx", "mjs"]);
     }
 
     /// The wrapper-method table (S-588, FR-RS-42): Rust declares what `Arc`,
@@ -1655,6 +1730,20 @@ mod tests {
     /// language per call site, so its compiles and first-use reports are its
     /// own however the test binary interleaves.
     fn toy_entry(name: &'static str, source: &'static str) -> GrammarEntry {
+        toy_grammar(name, "", "", "symbols", source)
+    }
+
+    /// A language entry over the Rust grammar whose one query serves
+    /// `capability` with `source`, its descriptor carrying `top_keys` and then
+    /// `tables` (the descriptor checks' fixtures: a namespace model, a
+    /// fall-through key).
+    fn toy_grammar(
+        name: &'static str,
+        top_keys: &str,
+        tables: &str,
+        capability: &str,
+        source: &'static str,
+    ) -> GrammarEntry {
         GrammarEntry {
             manifest_label: format!("{name}/plugin.toml").leak(),
             manifest_toml: format!(
@@ -1663,16 +1752,18 @@ mod tests {
                 extensions = ["{name}"]
                 module_separator = "."
                 abi_version = 15
-                capabilities = ["symbols"]
+                {top_keys}
+                capabilities = ["{capability}"]
+                {tables}
                 [queries]
-                symbols = "queries/symbols.scm"
+                {capability} = "queries/{capability}.scm"
                 "#
             )
             .leak(),
             language: tree_sitter_rust::LANGUAGE,
             embedded_queries: vec![grammars::EmbeddedQuery {
-                relative_path: "queries/symbols.scm",
-                label: format!("{name}/queries/symbols.scm").leak(),
+                relative_path: format!("queries/{capability}.scm").leak(),
+                label: format!("{name}/queries/{capability}.scm").leak(),
                 source,
             }]
             .leak(),
@@ -1735,6 +1826,22 @@ mod tests {
             rust.capabilities().iter().all(|c| rust.query(c).is_some()),
             "the first use compiled every capability of the language"
         );
+    }
+
+    /// CR-197 / S-592: building the layout the binder reads — every key a
+    /// resolution, sync or `status` run consults, the arity ones included —
+    /// compiles no language's queries. The fall-through key is read off the
+    /// descriptor; a key derived from a compiled query would compile every
+    /// language declaring it, whatever the repository holds.
+    #[test]
+    fn building_the_binders_layout_compiles_no_language() {
+        let root = tempfile::tempdir().unwrap();
+        let reg = LanguageRegistry::load(root.path()).expect("embedded grammars load");
+        let layout = crate::resolve::package_key::PackageLayout::from_registry(&reg);
+        assert!(layout.falls_through_to_free_calls("src/a.kt", "m"), "the key is read");
+        let compiled: Vec<&str> =
+            reg.plugins.iter().filter(|p| p.queries_compiled()).map(|p| p.name()).collect();
+        assert!(compiled.is_empty(), "compiled by a layout build: {compiled:?}");
     }
 
     /// CR-197 / FR-PL-04: an override compiles its language at load — the

@@ -351,7 +351,7 @@ impl B {
 fn helper() {}
 
 fn free(x: &A) {
-    x.helper();
+    x.helper(&x.peer);
     helper();
 }
 ";
@@ -378,8 +378,8 @@ fn a_rust_self_call_binds_through_the_impl_and_every_other_receiver_is_unbound()
             // has no `again`.
             row(&a(12, "again"), "B::again", RefForm::Path, OTHER, false),
             row(&a(12, "again"), "Self::again", RefForm::Path, None, true),
-            // `x.helper()` in a free function binds `A::helper`, never the free
-            // `helper` beside it.
+            // `x.helper(..)` in a free function binds `A::helper`, never the
+            // free `helper` beside it.
             row(&a(24, "free"), "A::helper", RefForm::Path, OTHER, true),
             row(&a(24, "free"), "helper", RefForm::Path, None, true),
         ])

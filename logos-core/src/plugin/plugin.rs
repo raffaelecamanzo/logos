@@ -49,6 +49,30 @@ pub struct Semantics {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     pub bare_calls_free_only: bool,
+    /// Whether this language overloads callables by name (S-592, [FR-RS-43];
+    /// see [`PluginManifest::overloaded_calls`]) — consumed by the binder's
+    /// bare-call rung through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub overloaded_calls: bool,
+    /// The extensions of this plugin whose language enforces no arity (S-592,
+    /// [FR-RS-43]; see [`PluginManifest::arity_unchecked_extensions`]) —
+    /// consumed by the binder's arity filter through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub arity_unchecked_extensions: Vec<String>,
+    /// Whether an unqualified in-class call no member admits goes on to the
+    /// free functions and imports in scope (S-592, [FR-RS-43]; see
+    /// [`PluginManifest::implicit_call_falls_through`]) — consumed by the
+    /// binder's `self` arm through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub implicit_call_falls_through: bool,
+    /// The members a root the graph never holds gives every class (S-592; see
+    /// [`PluginManifest::implicit_root_members`]): names that never fall
+    /// through.
+    pub implicit_root_members: Vec<String>,
     /// The methods each peeled receiver wrapper provides itself (S-588,
     /// [FR-RS-42]; see [`PluginManifest::wrapper_methods`]) — consumed by the
     /// binder's proven-receiver arm through [`crate::resolve::package_key`].
@@ -342,6 +366,10 @@ impl CompiledPlugin {
             specifier_extensions: manifest.specifier_extensions,
             implicit_receiver,
             bare_calls_free_only,
+            overloaded_calls: manifest.overloaded_calls,
+            arity_unchecked_extensions: manifest.arity_unchecked_extensions,
+            implicit_call_falls_through: manifest.implicit_call_falls_through,
+            implicit_root_members: manifest.implicit_root_members,
             wrapper_methods: manifest.wrapper_methods,
             call_targets,
             supertype_kind_follows_target: manifest.supertype_kind_follows_target,

@@ -31,6 +31,12 @@ capabilities = ["symbols", "references"]
 # the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
 implicit_receiver = "self"
 
+# Callables overload by name (S-592, FR-RS-43): a bare call binds only a
+# callable whose parameter range admits its argument count, and a scope whose
+# same-named callables admit none is passed over. Same-arity overloads stay
+# `overload-ambiguous`: no argument type is read.
+overloaded_calls = true
+
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03) —
 # the C-family control-flow set, matching the Java/C# keyword vocabulary plus the
 # C++ `goto`.

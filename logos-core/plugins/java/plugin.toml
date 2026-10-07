@@ -13,6 +13,12 @@ module_separator = "."
 # tree-sitter-java 0.23 is generated against ABI 14.
 abi_version = 14
 
+# Callables overload by name (S-592, FR-RS-43): a bare call binds only a
+# callable whose parameter range admits its argument count, and a scope whose
+# same-named callables admit none is passed over. Same-arity overloads stay
+# `overload-ambiguous`: no argument type is read.
+overloaded_calls = true
+
 capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "properties"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).

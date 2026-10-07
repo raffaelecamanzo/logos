@@ -32,8 +32,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   Ruby call with a bare `key: value` run).
   Every Rust `impl` function also records whether it takes `self`. The facts
   come from new `@arity.*` captures in each plugin's queries, so a droppable
-  query override can tune them. No range or count binds yet (the takes-`self`
-  fact does, below): on this repository
+  query override can tune them. The ranges and counts bind from S-592 and the
+  takes-`self` fact from S-604 (both below); recording them alone moved
+  nothing: on this repository
   symbols and edges are byte-identical, every node is unchanged apart from the
   new facts, and the quality signal is unchanged. A call's count joins its ledger row's identity, so `f(a)` and
   `f(a, b)` from one caller are now two rows; on this repository 268 `Calls`
@@ -56,6 +57,35 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   config or graph read that fails still states no residue and caches nothing.
 
 ### Fixed
+
+- **A call binds only a callable whose arity admits it (CR-190, S-592).** The
+  `self`, `super` and typed `T::m` receiver walks, Rust's proven receivers and
+  a bare call in a language that overloads by name (Java, Kotlin, Scala, C#,
+  C++) first drop every candidate whose parameter range excludes the call's
+  argument count. A level left with none is passed over to the base class's
+  overload, where the language records its classes' bases (not yet Scala, C++
+  or TypeScript, whose call then stays unbound); a Kotlin unqualified call
+  whose members all mismatch goes on to the top-level function or import of
+  that name, unless the class has a base or interface the graph cannot see. Two candidates the count both admits stay
+  `overload-ambiguous` (no argument type is read), and a call nothing admits is
+  the new `status` `call_residue` reason `no-applicable-overload`. Defaults and
+  varargs widen a range, and an unknown range or count filters nothing;
+  JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`) is never filtered, `.ts`/`.tsx`
+  are. New descriptor keys `overloaded_calls`, `arity_unchecked_extensions`,
+  `implicit_call_falls_through` and `implicit_root_members` declare this per
+  language. Three miscounts were fixed in the queries: a
+  Kotlin/Scala `override` (whose defaults are inherited) and a Python
+  `cls.m(…)` or PHP `f(...)` record unknown, and a comment opening a Python
+  parameter list no longer hides `self`. Measured against the previous build
+  on the 2026-10-03 inspection repositories: 8 of the 17 Sprint 87 name-only
+  self-loops and the gitbucket `post` edge are gone (the rest, and eShop's
+  `OnPropertyChanged`, are same-arity type mismatches or C++ members whose
+  range is unknown); `Calls` edges move only in C# (−4/+307, mostly
+  different-arity overloads that were ambiguous), Scala (−11/+28), Kotlin
+  (−7/+14), C++ (−1/+24) and Java (+3), and a random sample re-judged against
+  source was correct for 80 of 83. This repository's graph, and Go's on zap
+  and ollama, are byte-identical; the quality signal is unchanged (8166).
+  No migration.
 
 - **A Rust method call never binds an associated function without `self`
   (CR-200, S-604).** On a receiver whose type is proven, `x.name()` used to

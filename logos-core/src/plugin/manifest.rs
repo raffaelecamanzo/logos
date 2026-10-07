@@ -455,10 +455,17 @@ pub enum ModuleModelKind {
 /// Scala's `package`. Its group is `module`, not the declaration group
 /// `symbol`, so extraction's declaration walk never reads it as a node; a
 /// namespace-model plugin whose `symbols` query lacks it fails to load
-/// (`registry::check_namespace_capture`).
+/// (`queries::check_capture`).
 ///
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
+
+/// The capture a `references` query records a type's supertype under (S-522):
+/// what a language that declares
+/// [`implicit_call_falls_through`](PluginManifest::implicit_call_falls_through)
+/// must capture, checked when its queries compile
+/// (`queries::check_capture`, S-592).
+pub(crate) const SUPERTYPE_CAPTURE: &str = "ref.extends";
 
 /// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the
 /// language's bodiless namespace declarations **compose** rather than replace
@@ -634,6 +641,51 @@ pub struct PluginManifest {
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     #[serde(default)]
     pub supertype_kind_follows_target: bool,
+    /// Whether this language overloads callables by name (S-592, [FR-RS-43]):
+    /// Java, Kotlin, Scala, C#, C++. A bare call of such a language binds only
+    /// a callable whose parameter range admits its argument count, and a scope
+    /// whose same-named callables admit none is passed over. Defaults to
+    /// `false`: a bare call binds by name alone, as before ([NFR-MA-01]). The
+    /// `self`, `super` and typed receiver walks filter in every language, so
+    /// this key decides the bare-call rung only.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub overloaded_calls: bool,
+    /// The extensions, among this plugin's own, of a language that enforces no
+    /// arity (S-592, [FR-RS-43]): JavaScript, which the TypeScript grammars
+    /// also parse (`js`, `mjs`, `cjs`, `jsx`). A call in such a file may pass
+    /// any number of arguments to any function, so no candidate is ever dropped
+    /// for its parameter range there; the range is still recorded. Defaults to
+    /// empty: every file of the language is filtered. Each entry must be one of
+    /// [`extensions`](Self::extensions), written bare.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    #[serde(default)]
+    pub arity_unchecked_extensions: Vec<String>,
+    /// Whether an unqualified in-class call that no member of its class (nor
+    /// of a supertype) admits goes on to the free functions and imports in
+    /// scope (S-592, [FR-RS-43]) — Kotlin's resolution, which tries each
+    /// scope level for an applicable candidate. Not C#, Java, Scala or C++,
+    /// whose member of that name hides every outer one even when no overload
+    /// applies (C# §12.8.4, JLS 15.12.1, Scala binding precedence, C++ name
+    /// hiding). Requires `implicit_receiver = "self"`, and a `references`
+    /// query capturing [`SUPERTYPE_CAPTURE`]: the fall-through is taken only
+    /// when the class walk saw every supertype, which a language recording
+    /// none could never tell. Defaults to `false`.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    #[serde(default)]
+    pub implicit_call_falls_through: bool,
+    /// The members every class of the language inherits from a root the graph
+    /// never holds (S-592): Kotlin's `Any` — `equals`, `hashCode`, `toString`.
+    /// A call of one of these names that no recorded member admits may be
+    /// the root's, which a member beats a top-level function to, so it never
+    /// falls through ([`implicit_call_falls_through`](Self::implicit_call_falls_through)).
+    /// Defaults to empty; declared only beside the fall-through.
+    #[serde(default)]
+    pub implicit_root_members: Vec<String>,
     /// The methods a peeled receiver wrapper provides itself (S-588,
     /// [FR-RS-42]): wrapper name → method names. A call on a receiver proven
     /// through such a wrapper (`x: Arc<T>`, recorded with `peeled = "Arc"`)
@@ -1152,6 +1204,50 @@ impl PluginManifest {
         Ok(manifest)
     }
 
+    /// The rules of the extension lists a descriptor declares beside
+    /// `extensions`, and of the fall-through key — one call site, for the reason [`validate_reach`] is its
+    /// own function: with S-592's rule inline, [`validate`](Self::validate)
+    /// passed the `max_cc = 50` rule.
+    ///
+    /// - Stripping is a path-grammar rule: a name-grammar language has no file
+    ///   extension in its specifiers to strip, so `specifier_extensions` there
+    ///   is a descriptor bug rather than a no-op to tolerate; each entry is a
+    ///   bare extension.
+    /// - `arity_unchecked_extensions` names extensions the plugin claims (S-592,
+    ///   [FR-RS-43]): one it does not would never match a file of this
+    ///   language.
+    /// - `implicit_call_falls_through` is a rule of the unqualified in-class
+    ///   call on the instance, so it requires `implicit_receiver = "self"`, and
+    ///   `implicit_root_members` only qualifies it.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    fn validate_extension_lists(&self) -> Result<(), String> {
+        if self.implicit_call_falls_through && self.implicit_receiver() != ImplicitReceiver::SelfInstance {
+            return Err("`implicit_call_falls_through` requires `implicit_receiver = \"self\"`".to_string());
+        }
+        if !self.implicit_root_members.is_empty() && !self.implicit_call_falls_through {
+            return Err("`implicit_root_members` requires `implicit_call_falls_through`".to_string());
+        }
+        if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
+            return Err("`specifier_extensions` requires `import_specifier = \"path\"`".to_string());
+        }
+        if let Some(bad) = self
+            .specifier_extensions
+            .iter()
+            .find(|e| e.is_empty() || e.contains(['.', '/']))
+        {
+            return Err(format!(
+                "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
+            ));
+        }
+        match self.arity_unchecked_extensions.iter().find(|e| !self.extensions.contains(e)) {
+            Some(bad) => Err(format!(
+                "`arity_unchecked_extensions` entry '{bad}' is not one of `extensions`"
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Semantic validation beyond what the type system enforces.
     fn validate(&self, file: &str) -> Result<(), PluginError> {
         let bail = |detail: String| {
@@ -1290,22 +1386,8 @@ impl PluginManifest {
         if self.module_separator.is_empty() {
             return bail("`module_separator` must not be empty".to_string());
         }
-        // Stripping is a path-grammar rule: a name-grammar language has no file
-        // extension in its specifiers to strip, so a list there is a descriptor
-        // bug rather than a no-op to tolerate.
-        if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
-            return bail(
-                "`specifier_extensions` requires `import_specifier = \"path\"`".to_string(),
-            );
-        }
-        if let Some(bad) = self
-            .specifier_extensions
-            .iter()
-            .find(|e| e.is_empty() || e.contains(['.', '/']))
-        {
-            return bail(format!(
-                "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
-            ));
+        if let Err(detail) = self.validate_extension_lists() {
+            return bail(detail);
         }
         if let Err(detail) =
             validate_module_model(self.module_model.as_ref(), self.package_modules.as_ref())
@@ -2098,6 +2180,37 @@ mod tests {
         assert!(with("supertype_kind_follows_target = true").unwrap().supertype_kind_follows_target);
         assert!(!with("supertype_kind_follows_target = false").unwrap().supertype_kind_follows_target);
         assert!(with("supertype_kind_follows_target = \"yes\"").is_err());
+    }
+
+    /// The arity keys (S-592): overloading defaults off and refuses a
+    /// non-boolean; an unchecked extension must be one the plugin claims, so a
+    /// misspelt `jsx` on the `.ts` plugin cannot silently filter nothing.
+    #[test]
+    fn the_arity_keys_default_off_and_an_unchecked_extension_must_be_claimed() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(!m.overloaded_calls);
+        assert!(m.arity_unchecked_extensions.is_empty());
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert!(with("overloaded_calls = true").unwrap().overloaded_calls);
+        assert!(with("overloaded_calls = \"yes\"").is_err());
+        let claimed = with("arity_unchecked_extensions = [\"rs\"]").unwrap();
+        assert_eq!(claimed.arity_unchecked_extensions, ["rs"]);
+        let err = with("arity_unchecked_extensions = [\"js\"]").unwrap_err().to_string();
+        assert!(err.contains("'js' is not one of `extensions`"), "{err}");
+        // The fall-through is a rule of the call on the instance.
+        assert!(!m.implicit_call_falls_through);
+        let err = with("implicit_call_falls_through = true").unwrap_err().to_string();
+        assert!(err.contains("requires `implicit_receiver = \"self\"`"), "{err}");
+        let both = with("implicit_receiver = \"self\"\nimplicit_call_falls_through = true").unwrap();
+        assert!(both.implicit_call_falls_through);
+        let err = with("implicit_root_members = [\"equals\"]").unwrap_err().to_string();
+        assert!(err.contains("requires `implicit_call_falls_through`"), "{err}");
     }
 
     /// The specifier grammar is declared apart from the member-path separator

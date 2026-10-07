@@ -91,7 +91,9 @@ use std::path::Path;
 use crate::config::BindingPolicy;
 use crate::extract::doc::heading_slug;
 use crate::graph_store::{EdgeRow, NodeArity, NodeRow, UnresolvedRefRow};
-use crate::model::{ArtifactRelation, EdgeKind, NodeId, NodeKind, ReceiverShape, RefForm};
+use crate::model::{
+    ArtifactRelation, EdgeKind, NodeId, NodeKind, ParamRange, ReceiverShape, RefForm,
+};
 use crate::plugin::CallTargets;
 
 use super::go_module::GoModule;
@@ -108,6 +110,21 @@ type ModKey = ModuleKey;
 ///
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 type Members = HashMap<NodeId, HashMap<String, Vec<NodeId>>>;
+
+/// What a supertype walk found ([`Ctx::supertype_walk`], S-592).
+#[derive(Debug, Clone, Copy)]
+struct Climb {
+    /// The deciding level's exactly-one, or [`Res::NotFound`] when no level
+    /// held an applicable callable of the name.
+    res: Res,
+    /// Some level held callables of the name, none of which admits the call's
+    /// argument count.
+    inapplicable: bool,
+    /// Every type the walk crossed has its supertypes in the graph
+    /// ([`Index::open_types`]): no level the walk could not see may hold the
+    /// name.
+    closed: bool,
+}
 
 /// The result of one binding attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +214,9 @@ pub(crate) enum Residue {
     /// with no candidates.
     ExternalType { candidates: Vec<Vec<String>> },
     /// The type (or the nearest supertype level holding the name) declares two
-    /// or more callables of that name, or two static imports each supply one.
+    /// or more callables of that name whose parameter range admits the call
+    /// (S-592: no argument type is read), or two static imports each supply
+    /// one.
     /// Also a `Self::m` call whose self type — a name the crate declares for
     /// one type — records several `m` that the caller's module does not narrow
     /// to one (S-493), and a proven Rust receiver's type with two methods `m`
@@ -219,6 +238,13 @@ pub(crate) enum Residue {
     /// it, none of which the graph records for that type (S-493) — and the same
     /// for a proven Rust receiver's type (S-588).
     SupertypeUnreached,
+    /// Callables of the name were found, and none admits the call's argument
+    /// count (S-592, [FR-RS-43]): every level of the walk holding the name
+    /// held only callables whose parameter range excludes it, and no free
+    /// function or import the language goes on to admits it either.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    NoApplicableOverload,
 }
 
 /// Which node kinds satisfy a lookup.
@@ -663,6 +689,22 @@ pub(crate) struct Index {
     ///
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     without_self: HashSet<NodeId>,
+    /// The parameter range each callable records (S-591, [FR-EX-32]; the
+    /// `nodes.param_min`/`param_max` columns) — the arguments a call may pass
+    /// it, which the `self`, `super`, typed and overloading bare-call arms
+    /// filter their candidates by (S-592, [`Ctx::applicable`]). A callable
+    /// whose range is unknown is not here, so it is never dropped. Empty
+    /// unless the run was given the store's facts ([`Index::with_arities`]).
+    ///
+    /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
+    arities: HashMap<NodeId, ParamRange>,
+    /// The types whose supertypes the walk cannot see in full (S-592): one with
+    /// a supertype row that binds no walked `Extends` — an external base, an
+    /// interface (whose default bodies the walk does not climb), several bases
+    /// — or that uses a trait ([`Index::trait_users`]). A callable of the name
+    /// may sit there, so an implicit-receiver call whose class walk crossed one
+    /// never goes on to a free function ([`Ctx::resolve_self_receiver`]).
+    open_types: HashSet<NodeId>,
 }
 
 impl Index {
@@ -762,12 +804,15 @@ impl Index {
             file_ids: HashMap::new(),
             trait_impl_methods: HashSet::new(),
             without_self: HashSet::new(),
+            arities: HashMap::new(),
+            open_types: HashSet::new(),
         };
         let hierarchy = build_supertypes(refs, &index);
         index.supertypes = hierarchy.supertypes;
         index.hierarchy_tokens = hierarchy.tokens;
         index.hierarchy_families = hierarchy.families;
         index.trait_users = hierarchy.trait_users;
+        index.open_types = hierarchy.open;
         index.trait_impl_methods = build_trait_impl_methods(refs, &index);
         // A capture-before-delete row (`Symbol`) is filed under its *target's*
         // file while its source sits in another (ADR-10): it never says which
@@ -911,7 +956,9 @@ impl Index {
     /// Give the index the arity facts the store records per node (S-604,
     /// [CR-200]; [`GraphStore::node_arities`]): the callables recorded as not
     /// taking `self`, which a proven receiver's method call never binds
-    /// ([`Index::without_self`]). A fact that is unknown records nothing.
+    /// ([`Index::without_self`]), and each callable's parameter range, which a
+    /// call's argument count must fit (S-592, [`Index::arities`]). A fact that
+    /// is unknown records nothing.
     ///
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
     /// [`GraphStore::node_arities`]: crate::graph_store::GraphStore::node_arities
@@ -920,6 +967,10 @@ impl Index {
             .iter()
             .filter(|(_, _, takes_self)| *takes_self == Some(false))
             .map(|(id, _, _)| *id)
+            .collect();
+        self.arities = arities
+            .iter()
+            .filter_map(|(id, range, _)| Some((*id, (*range)?)))
             .collect();
         self
     }
@@ -1866,6 +1917,7 @@ struct Hierarchy {
     tokens: HashSet<String>,
     families: HashSet<String>,
     trait_users: HashSet<NodeId>,
+    open: HashSet<NodeId>,
 }
 
 /// Build the [`Hierarchy`] from the `Extends` rows the type-relation arm binds
@@ -1879,7 +1931,10 @@ struct Hierarchy {
 /// binds an interface records `Implements` ([`relation_edge_kind`]) and stays
 /// out, as a Java class's `implements` does. A row of any other arm is
 /// skipped, and the map stays empty for a graph without one — a Rust graph —
-/// exactly as before.
+/// exactly as before. A type with a supertype row that binds no walked
+/// `Extends` — unbound, an interface, one of several bases — or a used trait
+/// is [`open`](Index::open_types) (S-592): the walk cannot see all it
+/// inherits.
 ///
 /// The walk reads one superclass per level, nearest first — the order of
 /// single inheritance. Two shapes break it, and neither binds a guess (S-522,
@@ -1916,6 +1971,7 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
         tokens: HashSet::new(),
         families: HashSet::new(),
         trait_users: HashSet::new(),
+        open: HashSet::new(),
     };
     let mut bases: HashMap<NodeId, usize> = HashMap::new();
     for r in refs {
@@ -1933,6 +1989,7 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
             if r.alias.as_deref() == Some(TRAIT_USE_ALIAS) {
                 hierarchy.trait_users.insert(source_id);
             }
+            hierarchy.open.insert(source_id);
             continue;
         }
         hierarchy.tokens.extend(super::tokens(&r.target));
@@ -1953,12 +2010,16 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
             }
             Outcome::Unbound if want != Want::Supertype => {
                 *bases.entry(source_id).or_default() += usize::from(class);
+                hierarchy.open.insert(source_id);
             }
-            _ => {}
+            _ => {
+                hierarchy.open.insert(source_id);
+            }
         }
     }
     for (id, _) in bases.into_iter().filter(|&(_, n)| n > 1) {
         hierarchy.supertypes.remove(&id);
+        hierarchy.open.insert(id);
     }
     for ids in hierarchy.supertypes.values_mut() {
         ids.sort_unstable();
@@ -2171,6 +2232,7 @@ fn bind_traced(
     let source_family = source_file.and_then(|p| ix.layout.family(p));
     let enclosing_namespaces = source_file.is_some_and(|p| ix.layout.sees_enclosing_namespaces(p));
     let bare_calls_free_only = source_file.is_some_and(|p| ix.layout.bare_calls_free_only(p));
+    let falls_through = source_file.is_some_and(|p| ix.layout.falls_through_to_free_calls(p, &r.target));
     let relation = relation_want_of(r, source_info, &ix.layout);
     let ctx = Ctx {
         source,
@@ -2180,16 +2242,51 @@ fn bind_traced(
         source_family,
         enclosing_namespaces,
         bare_calls_free_only,
+        falls_through,
+        arg_count: filtered_count(r, source_file, &ix.layout),
+        passed_over: Cell::new(false),
         policy,
         in_glob_resolution: Cell::new(false),
         in_rival_expansion: Cell::new(false),
         bare_path_call: Cell::new(false),
-        scope_only: relation.is_some() || is_proven_receiver_call(r),
+        scope_only: Cell::new(relation.is_some() || is_proven_receiver_call(r)),
         lexical_start: Cell::new(source),
         miss: RefCell::new(None),
     };
     let outcome = bind_in(&ctx, r, relation);
     (outcome, ctx.miss.into_inner())
+}
+
+/// The argument count `r`'s candidates are filtered by (S-592, [FR-RS-43]), or
+/// `None` when the row is filtered by none: its count, or its file's language's
+/// arity, is unknown — a JavaScript file the TypeScript grammars parse enforces
+/// none ([`PackageLayout::checks_arity`]) — or it takes no arm that chooses
+/// among same-named callables by their arguments.
+///
+/// The arms that do: a receiver call of shape `self` or `super` ([FR-RS-12]),
+/// in every language; a Rust call on a proven receiver (S-588); and every
+/// Path-form call — bare, or typed `T::m` — of a language that overloads
+/// callables ([`PackageLayout::overloads_calls`]: Java, Kotlin, Scala, C#,
+/// C++). None of those counts an explicit receiver among its arguments. A
+/// path a language without overloading writes — Python's `Base.__init__(self,
+/// x)`, Rust's `S::c(&self, 6)`, which pass the receiver as the first argument
+/// — and a `Self::m` call (S-493) keep binding by name, as before.
+///
+/// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+/// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+/// [`PackageLayout::checks_arity`]: crate::resolve::package_key::PackageLayout::checks_arity
+/// [`PackageLayout::overloads_calls`]: crate::resolve::package_key::PackageLayout::overloads_calls
+fn filtered_count(r: &UnresolvedRefRow, source_file: Option<&str>, layout: &PackageLayout) -> Option<u32> {
+    let file = source_file?;
+    if r.kind != EdgeKind::Calls || !layout.checks_arity(file) {
+        return None;
+    }
+    let receiver_shaped = r.form == RefForm::Method
+        && matches!(r.receiver, Some(ReceiverShape::SelfInstance | ReceiverShape::Super));
+    let overloaded_path = r.form == RefForm::Path && layout.overloads_calls(file);
+    (receiver_shaped || is_proven_receiver_call(r) || overloaded_path)
+        .then_some(r.arg_count)
+        .flatten()
 }
 
 /// `true` for a Rust call retyped from its proven receiver (S-587): the
@@ -2406,6 +2503,13 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
                 Res::NotFound if r.kind == EdgeKind::Imports => ctx
                     .package_reexport(&segs)
                     .map_or(Outcome::Unbound, bound),
+                // Some rung held callables of the name, and none admitted the
+                // call's arguments (S-592) — unless a rung that decided first
+                // recorded its own reason.
+                Res::NotFound if ctx.passed_over.get() => {
+                    ctx.note(want, || Residue::NoApplicableOverload);
+                    Outcome::Unbound
+                }
                 _ => Outcome::Unbound,
             }
         }
@@ -2609,6 +2713,23 @@ struct Ctx<'a> {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     bare_calls_free_only: bool,
+    /// Whether the source's language makes a `self` call no member of its
+    /// class admits go on to the free functions and imports in scope
+    /// ([`PackageLayout::falls_through_to_free_calls`], S-592;
+    /// [`resolve_self_receiver`](Ctx::resolve_self_receiver)).
+    falls_through: bool,
+    /// The argument count the arity-choosing arms filter candidates by
+    /// ([`filtered_count`], S-592, [FR-RS-43]) — `None` when this row is
+    /// filtered by none, so [`applicable`](Ctx::applicable) keeps every
+    /// candidate.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    arg_count: Option<u32>,
+    /// Set when [`applicable`](Ctx::applicable) dropped every candidate of a
+    /// non-empty set: some rung found callables of the name, and none admitted
+    /// the call — the [`Residue::NoApplicableOverload`] a row that stays
+    /// unbound records.
+    passed_over: Cell<bool>,
     policy: BindingPolicy,
     /// Re-entrancy guard for [`through_globs`](Ctx::through_globs): set while a
     /// glob's own module path is being resolved, so that resolution cannot fan
@@ -2647,9 +2768,14 @@ struct Ctx<'a> {
     /// hierarchy is built under the strict policy ([`build_supertypes`]), so the
     /// edge and the supertype walk agree under every policy.
     ///
+    /// Also set while a receiver call falls through to the free functions in
+    /// scope ([`free_call`](Ctx::free_call), S-592): a receiver call never
+    /// reaches a workspace guess, so a same-named method of an unrelated class
+    /// is never what `this.m(1)` meant.
+    ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    scope_only: bool,
+    scope_only: Cell<bool>,
     /// Where [`resolve_name`](Ctx::resolve_name)'s lexical chain — and a
     /// package-shaped path's lexical head — starts: the source itself, except
     /// while a type relation is read in its declaration's **header** (S-466;
@@ -2683,6 +2809,31 @@ impl Ctx<'_> {
                 *miss = Some(why());
             }
         }
+    }
+
+    /// `candidates` less every callable whose parameter range excludes the
+    /// call's argument count (S-592, [FR-RS-43]) — applied **before**
+    /// exactly-one by every arm that chooses among same-named callables, so a
+    /// callable the call cannot invoke never binds, nor makes an applicable one
+    /// ambiguous. Only a recorded range drops a candidate: an unknown range,
+    /// any node that is not a callable (a class a call constructs, a type), and
+    /// every candidate of a row with no filtered count
+    /// ([`arg_count`](Ctx::arg_count)) are kept. A default or a variadic
+    /// parameter widens the range itself, so it is admitted here. When every
+    /// candidate of a non-empty set is dropped, the rung is passed over and
+    /// [`passed_over`](Ctx::passed_over) remembers it.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    fn applicable(&self, mut candidates: Vec<NodeId>) -> Vec<NodeId> {
+        let Some(count) = self.arg_count else {
+            return candidates;
+        };
+        let named = !candidates.is_empty();
+        candidates.retain(|id| self.ix.arities.get(id).is_none_or(|range| range.admits(count)));
+        if named && candidates.is_empty() {
+            self.passed_over.set(true);
+        }
+        candidates
     }
 
     /// `true` for the declaration whose header is being read (S-522): a
@@ -2915,7 +3066,7 @@ impl Ctx<'_> {
         // 8) Policy-gated workspace fallback: unique module-path-suffix match —
         //    never for a type relation ([`scope_only`](Ctx::scope_only)). A
         //    receiver-method call never reaches here (S-514, CR-066).
-        if self.policy != BindingPolicy::Strict && !self.scope_only {
+        if self.policy != BindingPolicy::Strict && !self.scope_only.get() {
             return self.suffix_match(segs, want);
         }
         Res::NotFound
@@ -3438,7 +3589,10 @@ impl Ctx<'_> {
     /// every one recorded as not taking `self` ([`Index::without_self`],
     /// S-604): `x.m()` can never call an associated function, so one never
     /// outranks — or ties with — the method rustc calls. A candidate whose fact
-    /// is unknown stays.
+    /// is unknown stays. Then, after that filter, every one whose parameter
+    /// range excludes the call's argument count ([`applicable`](Ctx::applicable),
+    /// S-592): none left of a name `T` records is
+    /// [`Residue::NoApplicableOverload`].
     ///
     /// When the crate declares that name for one type, every candidate is
     /// `ty`'s, wherever its impl block sits. Otherwise only the impls in `ty`'s
@@ -3458,7 +3612,7 @@ impl Ctx<'_> {
             return Res::NotFound;
         };
         let key = (info.crate_name.clone(), info.name.clone(), name.to_string());
-        let candidates: Vec<NodeId> = self
+        let takes_self: Vec<NodeId> = self
             .ix
             .methods_by_self_type
             .get(&key)
@@ -3467,6 +3621,12 @@ impl Ctx<'_> {
             .copied()
             .filter(|c| !self.ix.without_self.contains(c))
             .collect();
+        let held = !takes_self.is_empty();
+        let candidates = self.applicable(takes_self);
+        if held && candidates.is_empty() {
+            self.note(Want::Callable, || Residue::NoApplicableOverload);
+            return Res::NotFound;
+        }
         let one_type = self.ix.type_names.get(&(info.crate_name.clone(), info.name.clone())) == Some(&1);
         let own: Vec<NodeId> = if one_type {
             candidates.clone()
@@ -3549,21 +3709,65 @@ impl Ctx<'_> {
     /// A caller in no class records [`Residue::NoReceiverEvidence`]: the
     /// receiver is its own instance, but nothing says of what.
     ///
+    /// Each level keeps only the callables whose parameter range admits the
+    /// call (S-592, [FR-RS-43]), so a member the call cannot invoke is passed
+    /// over for an inherited overload. When the class and its supertypes hold
+    /// the name but none applicable, a language whose unqualified in-class call
+    /// is on the instance, and which records its classes' supertypes
+    /// ([`falls_through`](Ctx::falls_through): C#, Kotlin), goes on to the free
+    /// functions and imports in scope, as its own lookup does — Kotlin's
+    /// `module { }` inside a class whose `module(a, b)` cannot take it calls
+    /// the imported `module`. The ledger does not tell `m()` from `this.m()`,
+    /// so this reads every such `self` row as the unqualified call; it is taken
+    /// only when the walk saw every supertype ([`Climb::closed`]), since an
+    /// external base or an interface's default body may hold the overload the
+    /// call reaches. Nothing applicable anywhere is
+    /// [`Residue::NoApplicableOverload`].
+    ///
     /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
     /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     fn resolve_self_receiver(&self, name: &str) -> Res {
         if self.ix.self_types.contains_key(&self.source) {
             if let Some(res) = self.resolve_self_type_call(&format!("{SELF_TYPE_HEAD}::{name}")) {
                 return res;
             }
         }
-        match self.caller_class() {
-            Some(class) => self.type_member(class, name),
-            None => {
-                self.note(Want::Callable, || Residue::NoReceiverEvidence);
-                Res::NotFound
+        let Some(class) = self.caller_class() else {
+            self.note(Want::Callable, || Residue::NoReceiverEvidence);
+            return Res::NotFound;
+        };
+        let climb = self.supertype_walk(vec![class], HashSet::from([class]), name);
+        if climb.res == Res::NotFound && climb.inapplicable && climb.closed && self.falls_through {
+            match self.free_call(name) {
+                Res::NotFound => {}
+                Res::Ambiguous => {
+                    self.note(Want::Callable, || Residue::OverloadAmbiguous);
+                    return Res::Ambiguous;
+                }
+                found => return found,
             }
         }
+        self.note_climb(&climb);
+        climb.res
+    }
+
+    /// `name` resolved as the unqualified free call the language makes once no
+    /// member of the caller's class admits it (S-592,
+    /// [`resolve_self_receiver`](Ctx::resolve_self_receiver)): the scope walk a
+    /// bare Path call takes, from the caller outward — the class's own members
+    /// are passed over again by their ranges — then the file's imports. A
+    /// callable only: a class of that name is not what `name()` on the instance
+    /// fell through to. By scope and imports only ([`scope_only`](Ctx::scope_only)):
+    /// the aggressive policy's workspace name match would bind a same-named
+    /// method of an unrelated class once the caller's own one is filtered out.
+    fn free_call(&self, name: &str) -> Res {
+        self.bare_path_call.set(true);
+        let scoped = self.scope_only.replace(true);
+        let res = self.resolve_path(&[name.to_string()], Want::Callable, MAX_ALIAS_DEPTH);
+        self.scope_only.set(scoped);
+        self.bare_path_call.set(false);
+        res
     }
 
     /// Bind a receiver call `super.name()` — shape `super` (S-514,
@@ -4315,9 +4519,12 @@ impl Ctx<'_> {
         //    source itself (or of its enclosing scope, for a declaration's
         //    header — `lexical_start`), then each enclosing scope up to the
         //    file module.
+        //    A scope whose callables of the name admit none of the call's
+        //    arguments is passed over (S-592, [`applicable`](Ctx::applicable)).
         let mut cursor = Some(self.lexical_start.get());
         while let Some(scope) = cursor {
-            let mut members = self.prefer_free_functions(self.ix.members_named(scope, name, want));
+            let mut members =
+                self.prefer_free_functions(self.applicable(self.ix.members_named(scope, name, want)));
             members.retain(|&id| !self.is_own_header(id));
             match exactly_one(&members) {
                 Res::NotFound => {}
@@ -4378,7 +4585,7 @@ impl Ctx<'_> {
         // 5) Workspace unique-name fallback — aggressive only for bare names,
         //    never for a type relation ([`scope_only`](Ctx::scope_only)). A
         //    receiver-method call never reaches here (S-514, CR-066).
-        if self.policy == BindingPolicy::Aggressive && !self.scope_only {
+        if self.policy == BindingPolicy::Aggressive && !self.scope_only.get() {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
@@ -4484,7 +4691,7 @@ impl Ctx<'_> {
                 return Res::Ambiguous;
             }
         }
-        if self.policy == BindingPolicy::Aggressive && !self.scope_only {
+        if self.policy == BindingPolicy::Aggressive && !self.scope_only.get() {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
@@ -4794,33 +5001,71 @@ impl Ctx<'_> {
         self.supertype_member(vec![ty], HashSet::from([ty]), name)
     }
 
+    /// [`type_member`](Ctx::type_member)'s walk, from the level `level` up
+    /// ([`supertype_walk`](Ctx::supertype_walk)), recording why it gave up.
+    fn supertype_member(&self, level: Vec<NodeId>, seen: HashSet<NodeId>, name: &str) -> Res {
+        let climb = self.supertype_walk(level, seen, name);
+        self.note_climb(&climb);
+        climb.res
+    }
+
+    /// Record why a [`Climb`] gave up: two callables at its deciding level are
+    /// [`Residue::OverloadAmbiguous`]; none applicable at any level holding the
+    /// name is [`Residue::NoApplicableOverload`] (S-592); no level holding it
+    /// at all is [`Residue::SupertypeUnreached`].
+    fn note_climb(&self, climb: &Climb) {
+        match climb.res {
+            Res::Found(_) => {}
+            Res::Ambiguous => self.note(Want::Callable, || Residue::OverloadAmbiguous),
+            Res::NotFound if climb.inapplicable => {
+                self.note(Want::Callable, || Residue::NoApplicableOverload);
+            }
+            Res::NotFound => self.note(Want::Callable, || Residue::SupertypeUnreached),
+        }
+    }
+
     /// [`type_member`](Ctx::type_member)'s walk, from the level `level` up —
     /// `seen` holds the types already visited, which the walk never revisits.
-    /// An empty first level is a chain that never entered the graph:
-    /// [`Residue::SupertypeUnreached`]. A class that uses a trait
-    /// ([`Index::trait_users`], S-522) is read for its own members and never
-    /// climbed through, so the walk ends there too.
-    fn supertype_member(&self, mut level: Vec<NodeId>, mut seen: HashSet<NodeId>, name: &str) -> Res {
+    /// An empty first level is a chain that never entered the graph. A class
+    /// that uses a trait ([`Index::trait_users`], S-522) is read for its own
+    /// members and never climbed through, so the walk ends there too.
+    ///
+    /// Each level's callables of the name are first narrowed to those whose
+    /// parameter range admits the call ([`applicable`](Ctx::applicable),
+    /// S-592, [FR-RS-43]): a level holding the name but no applicable callable
+    /// is passed over, as the language passes over an inapplicable overload to
+    /// an inherited one, and exactly-one decides at the first level with any.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    fn supertype_walk(&self, mut level: Vec<NodeId>, mut seen: HashSet<NodeId>, name: &str) -> Climb {
         level.sort_unstable();
         level.dedup();
         seen.extend(level.iter().copied());
+        let mut climb = Climb {
+            res: Res::NotFound,
+            inapplicable: false,
+            closed: true,
+        };
         for _ in 0..MAX_SUPERTYPE_DEPTH {
             if level.is_empty() {
-                break;
+                return climb;
             }
-            let mut found: Vec<NodeId> = level
+            climb.closed &= !level.iter().any(|t| self.ix.open_types.contains(t));
+            let mut named: Vec<NodeId> = level
                 .iter()
                 .flat_map(|&t| self.ix.members_named(t, name, Want::Callable))
                 .collect();
-            found.sort_unstable();
-            found.dedup();
+            named.sort_unstable();
+            named.dedup();
+            let held = !named.is_empty();
+            let found = self.applicable(named);
+            climb.inapplicable |= held && found.is_empty();
             match exactly_one(&found) {
                 Res::NotFound => {}
-                Res::Ambiguous => {
-                    self.note(Want::Callable, || Residue::OverloadAmbiguous);
-                    return Res::Ambiguous;
+                decided => {
+                    climb.res = decided;
+                    return climb;
                 }
-                decided => return decided,
             }
             // A class that uses a trait is never climbed through (S-522).
             let mut next: Vec<NodeId> = level
@@ -4830,13 +5075,14 @@ impl Ctx<'_> {
                 .filter(|s| seen.insert(*s))
                 .collect();
             if next.is_empty() {
-                break;
+                return climb;
             }
             next.sort_unstable();
             level = next;
         }
-        self.note(Want::Callable, || Residue::SupertypeUnreached);
-        Res::NotFound
+        // The depth bound cut the chain: what lies beyond it is unseen.
+        climb.closed = false;
+        climb
     }
 
     /// The type-like members of `scope` named `name`.
@@ -4886,7 +5132,8 @@ impl Ctx<'_> {
             };
             match self.resolve_fqn(glob, Want::Any) {
                 Res::Found(ty) if self.ix.info.get(&ty).is_some_and(|i| is_type_like(i.kind)) => {
-                    found.extend(self.ix.members_named(ty, name, want).into_iter().filter(admits));
+                    let members = self.ix.members_named(ty, name, want).into_iter().filter(admits);
+                    found.extend(self.applicable(members.collect()));
                 }
                 Res::Found(_) => {}
                 // Two declarations of the wildcard's type: `name` is ambiguous
@@ -5001,11 +5248,11 @@ impl Ctx<'_> {
                             .into_iter()
                             .any(|id| self.ix.info.get(&id).is_some_and(|n| is_type_like(n.kind)));
                         if type_here {
-                            return exactly_one(&self.ix.members_named(
+                            return exactly_one(&self.applicable(self.ix.members_named(
                                 scope_node,
                                 &segs[i + 1],
                                 Want::Callable,
-                            ));
+                            )));
                         }
                     }
                 }
@@ -5028,7 +5275,7 @@ impl Ctx<'_> {
             let Some(&scope_node) = self.ix.modules.get(&key) else {
                 return Res::NotFound;
             };
-            let mut members = self.ix.members_named(scope_node, seg, want);
+            let mut members = self.applicable(self.ix.members_named(scope_node, seg, want));
             // A bare call's `use` or glob import reaches the module's free
             // function, never an associated one collapsed beside it (S-590).
             if self.bare_path_call.get() {
@@ -5076,7 +5323,7 @@ impl Ctx<'_> {
             }
         };
         let candidates: Vec<NodeId> = all.iter().copied().filter(matches_suffix).collect();
-        self.prefer_crate(&candidates)
+        self.prefer_crate(&self.applicable(candidates))
     }
 
     /// Workspace unique-name fallback (method calls at balanced+, bare names
@@ -5090,7 +5337,7 @@ impl Ctx<'_> {
             .copied()
             .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind)))
             .collect();
-        self.prefer_crate(&candidates)
+        self.prefer_crate(&self.applicable(candidates))
     }
 
     /// The crate → workspace acceptance step shared by every workspace

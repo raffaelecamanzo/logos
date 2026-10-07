@@ -601,6 +601,7 @@ fn the_rust_row_states_its_call_residue_by_reason_over_its_unbound_calls() {
     );
     let expected: BTreeMap<R, u64> = [
         (R::ExternalType, 2),
+        (R::NoApplicableOverload, 0),
         (R::NoReceiverEvidence, 1),
         (R::OverloadAmbiguous, 1),
         (R::SupertypeUnreached, 1),

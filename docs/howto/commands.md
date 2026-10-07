@@ -460,7 +460,7 @@ member's type from a library's, so only the workspace read has a
 
 ```jsonc
 "call_residue": { "unbound": 4,
-  "reasons": { "external-type": 1, "no-receiver-evidence": 1,
+  "reasons": { "external-type": 1, "no-applicable-overload": 0, "no-receiver-evidence": 1,
                "overload-ambiguous": 0, "supertype-unreached": 1, "type-ambiguous": 0 },
   "unclassified": 1, "scope": "repository" }
 ```
@@ -470,7 +470,8 @@ member's type from a library's, so only the workspace read has a
 | `no-receiver-evidence` | the file proves no receiver type (a chained call, an untyped lambda parameter, a generic type variable, a bare call naming no import) |
 | `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member |
 | `type-in-another-member` | another workspace member declares the receiver's type (`workspace status` only) |
-| `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more methods of that name, or two static imports each supply one |
+| `overload-ambiguous` | the type, or the nearest supertype level holding an applicable method, declares two or more methods of that name whose parameter count admits the call, or two static imports each supply one — no argument type is read |
+| `no-applicable-overload` | methods of that name were found, and none admits the call's argument count — at no supertype level, and in no free function or import the language goes on to |
 | `type-ambiguous` | the type's name reaches two declarations (a `src/main` and a `src/test` class of one name) |
 | `supertype-unreached` | neither the type nor any supertype reached in the repository declares the name: the chain leaves the repository, stops at an interface, or cycles |
 
@@ -482,7 +483,8 @@ crate's type or a method the peeled `Arc`/`Rc`/`Box` provides itself, such as
 such method taking `self` — a derive, a trait default or a `Deref` target
 supplies it, or the only one is an associated function `x.m()` cannot call;
 `overload-ambiguous` for two trait impls' methods of that name and no inherent
-one; `type-ambiguous` when the file, or the file re-exporting `T`, imports its
+one; `no-applicable-overload` when every such method's parameters exclude the
+call's argument count; `type-ambiguous` when the file, or the file re-exporting `T`, imports its
 name twice, or the crate declares it for several types and no impl in `T`'s
 module decides), an unproven receiver (`no-receiver-evidence`), and `Self::m` calls
 inside an `impl`. Every other unbound Rust call — a path call such as

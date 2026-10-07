@@ -259,6 +259,33 @@ by each relation's payload token), read live from the graph.
 >   Where a bare call can mean the current instance — C#, Kotlin, Scala, C++,
 >   Ruby, and Java, whose `m()` inside a class is `this.m()` — a scope with only
 >   the method(s) still binds them.
+>   Every one of these choices first keeps only the callables whose parameter
+>   count admits the call's argument count
+>   ([FR-RS-43](../specs/requirements/FR-RS-43.md)): a `self` or `super` call
+>   in any language, a typed `T::m` call (Java, Kotlin, Scala, C#, C++, and
+>   Rust's proven receivers, after the `self` rule above), and a bare call in a
+>   language that overloads by name (Java, Kotlin, Scala, C#, C++). A default
+>   or variadic parameter (`b = 0`, `vararg`, `params`, `...`, `*args`) widens
+>   what a callable admits; a count logos cannot read — a spread `f(*xs)`, a
+>   Python `cls.m(…)` (which passes the instance itself to an instance method)
+>   — and a callable whose parameters it cannot count (a C++ out-of-line
+>   definition, whose defaults sit on a prototype) filter nothing. So an
+>   own-class `inh(a)` no longer takes `inh(1, 2)`: the call binds the base
+>   class's `inh(a, b)` when the language records its classes' bases (Java,
+>   Kotlin, C#, Python, PHP), and stays unbound in Scala, C++ and TypeScript,
+>   which record none. A Kotlin unqualified call whose same-named members all
+>   mismatch goes on to the top-level function or import of that name, as
+>   Kotlin's resolution does — but only when the class's supertypes are all in
+>   the graph, since an external base class or an interface's default body may
+>   hold the overload it reaches, and never for `equals`, `hashCode` or
+>   `toString`, which every class inherits from `Any`. In Java, C#, Scala and C++ the member hides
+>   every outer name even when no overload applies, so such a call stays
+>   unbound. Two candidates that both admit the count
+>   stay unbound (`overload-ambiguous`): logos reads no argument types. A call
+>   that fits nothing is counted `no-applicable-overload`. JavaScript enforces
+>   no arity, so a `.js`, `.mjs`, `.cjs` or `.jsx` call is never filtered;
+>   `.ts`/`.tsx` calls are. Go and Rust have no overloading, so compiling code
+>   binds as it did.
 > - **Ambiguous doc/prose tokens.** Doc→code links bind only on *exactly one*
 >   candidate. Common words that appear in prose but match zero or many code
 >   symbols (`index`, `sync`, `node`, `context`, …) correctly bind to nothing.

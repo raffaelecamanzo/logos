@@ -97,6 +97,27 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     free_only_bare_call_exts: HashSet<String>,
+    /// Normalised extensions whose unqualified in-class call, when no member
+    /// of its class admits it, goes on to the free functions and imports in
+    /// scope (S-592, [FR-RS-43]).
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    free_call_fallthrough_exts: HashSet<String>,
+    /// Normalised extension → the members the root every class of its language
+    /// inherits declares (S-592), names that never fall through.
+    implicit_root_members: HashMap<String, HashSet<String>>,
+    /// Normalised extensions whose language overloads callables by name, so a
+    /// bare call binds only a callable whose parameter range admits it (S-592,
+    /// [FR-RS-43]).
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    overloaded_call_exts: HashSet<String>,
+    /// Normalised extensions of a language that enforces no arity —
+    /// JavaScript's — whose calls no parameter range filters (S-592,
+    /// [FR-RS-43]).
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    arity_unchecked_exts: HashSet<String>,
     /// Normalised extension → the methods each peeled receiver wrapper of its
     /// language provides itself (S-588, [FR-RS-42]). An absent extension, or
     /// an absent wrapper, provides none.
@@ -183,6 +204,10 @@ impl PackageLayout {
             .with_kind_following_supertypes(registry.supertype_kind_follows_target())
             .with_enclosing_namespaces(registry.enclosing_namespace_extensions())
             .with_free_only_bare_calls(registry.free_only_bare_call_extensions())
+            .with_free_call_fallthrough(registry.free_call_fallthrough_extensions())
+            .with_implicit_root_members(registry.implicit_root_members())
+            .with_overloaded_calls(registry.overloaded_call_extensions())
+            .with_arity_unchecked(registry.arity_unchecked_extensions())
             .with_wrapper_methods(registry.wrapper_methods())
     }
 
@@ -204,10 +229,42 @@ impl PackageLayout {
     /// only (S-590; the set
     /// [`LanguageRegistry::free_only_bare_call_extensions`] returns).
     pub fn with_free_only_bare_calls(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.free_only_bare_call_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
+        extend_normalised(&mut self.free_only_bare_call_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose unqualified in-class call falls
+    /// through to a free function (S-592; the set
+    /// [`LanguageRegistry::free_call_fallthrough_extensions`] returns).
+    pub fn with_free_call_fallthrough(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.free_call_fallthrough_exts, exts);
+        self
+    }
+
+    /// This layout, with the members each extension's root class declares
+    /// (S-592; the map [`LanguageRegistry::implicit_root_members`] returns).
+    pub fn with_implicit_root_members(mut self, declared: HashMap<String, Vec<String>>) -> Self {
+        self.implicit_root_members.extend(
+            declared
+                .into_iter()
+                .map(|(ext, names)| (ext.trim_start_matches('.').to_ascii_lowercase(), names.into_iter().collect())),
         );
+        self
+    }
+
+    /// This layout, with the extensions whose language overloads callables by
+    /// name (S-592; the set [`LanguageRegistry::overloaded_call_extensions`]
+    /// returns).
+    pub fn with_overloaded_calls(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.overloaded_call_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose language enforces no arity
+    /// (S-592; the set [`LanguageRegistry::arity_unchecked_extensions`]
+    /// returns).
+    pub fn with_arity_unchecked(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.arity_unchecked_exts, exts);
         self
     }
 
@@ -215,10 +272,7 @@ impl PackageLayout {
     /// namespaces' types (S-595; the set
     /// [`LanguageRegistry::enclosing_namespace_extensions`] returns).
     pub fn with_enclosing_namespaces(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.enclosing_namespace_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.enclosing_namespace_exts, exts);
         self
     }
 
@@ -277,10 +331,7 @@ impl PackageLayout {
     /// its target (S-522; the set
     /// [`LanguageRegistry::supertype_kind_follows_target`] returns).
     pub fn with_kind_following_supertypes(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.kind_following_supertypes.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.kind_following_supertypes, exts);
         self
     }
 
@@ -447,6 +498,41 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.free_only_bare_call_exts.contains(&ext))
     }
 
+    /// Whether an unqualified in-class call written in the file at `path`, when
+    /// no member of its class admits it, goes on to the free functions and
+    /// imports in scope (S-592, [FR-RS-43]): its language declares
+    /// `implicit_call_falls_through`
+    /// ([`LanguageRegistry::free_call_fallthrough_extensions`]), and `name` is
+    /// none of the members the root every class inherits declares — Kotlin's
+    /// `hashCode()` beside a top-level `hashCode` is `Any.hashCode()`.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn falls_through_to_free_calls(&self, path: &str, name: &str) -> bool {
+        extension(path).is_some_and(|ext| {
+            self.free_call_fallthrough_exts.contains(&ext)
+                && !self.implicit_root_members.get(&ext).is_some_and(|roots| roots.contains(name))
+        })
+    }
+
+    /// Whether the language of the file at `path` overloads callables by name,
+    /// so a bare call there binds only a callable whose parameter range admits
+    /// it (S-592, [FR-RS-43]).
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn overloads_calls(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.overloaded_call_exts.contains(&ext))
+    }
+
+    /// Whether a call written in the file at `path` is filtered by its
+    /// candidates' parameter ranges at all (S-592, [FR-RS-43]): `false` for a
+    /// language that enforces no arity — a JavaScript file the TypeScript
+    /// grammars parse.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn checks_arity(&self, path: &str) -> bool {
+        !extension(path).is_some_and(|ext| self.arity_unchecked_exts.contains(&ext))
+    }
+
     /// Whether the file at `path`'s language proves a receiver's declared type
     /// through peeled wrappers (S-588, [FR-RS-42]): it declares a non-empty
     /// `[wrapper_methods]` table — the declaration is the signal, as the binder
@@ -515,10 +601,7 @@ impl PackageLayout {
     /// This layout, with the files of `exts` (extensions, with or without a
     /// leading dot) keyed by the namespace they declare.
     pub fn with_namespace_extensions(mut self, exts: impl IntoIterator<Item = String>) -> Self {
-        self.namespace_exts.extend(
-            exts.into_iter()
-                .map(|e| e.trim_start_matches('.').to_ascii_lowercase()),
-        );
+        extend_normalised(&mut self.namespace_exts, exts);
         self
     }
 
@@ -572,6 +655,15 @@ impl PackageLayout {
             )
             .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
             .with_free_only_bare_calls(exts().filter(|_| semantics.bare_calls_free_only))
+            .with_free_call_fallthrough(exts().filter(|_| semantics.implicit_call_falls_through))
+            .with_implicit_root_members(
+                exts()
+                    .filter(|_| !semantics.implicit_root_members.is_empty())
+                    .map(|ext| (ext, semantics.implicit_root_members.clone()))
+                    .collect(),
+            )
+            .with_overloaded_calls(exts().filter(|_| semantics.overloaded_calls))
+            .with_arity_unchecked(semantics.arity_unchecked_extensions.iter().cloned())
             .with_wrapper_methods(
                 exts()
                     .filter(|_| !semantics.wrapper_methods.is_empty())
@@ -732,6 +824,13 @@ fn under_import_root(path: &str, roots: &ImportRoots) -> (String, Vec<String>, O
         .unwrap_or(0);
     let mods = dirs[skip..].iter().map(|s| (*s).to_string()).collect();
     (roots.crate_name.clone(), mods, Some(file_stem(file)))
+}
+
+/// Add `exts` to `set`, each normalised as every extension key here is —
+/// without a leading dot, lower-cased — the one body of the per-key `with_*`
+/// set builders (S-592: written once, not once per key).
+fn extend_normalised(set: &mut HashSet<String>, exts: impl IntoIterator<Item = String>) {
+    set.extend(exts.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()));
 }
 
 /// `path`'s extension, lower-cased — the key both models are declared under.
@@ -1368,6 +1467,38 @@ mod call_target_tests {
         }
         assert!(declaring > 0, "some shipped plugin declares the free-only key");
         assert!(silent > 0, "a plugin that does not declare it binds as before");
+    }
+
+    /// The same parity for the three arity keys (S-592): the single-plugin
+    /// layout answers every extension as the registry's does, and each key is
+    /// held by some shipped extension and not by another — the unchecked one
+    /// inside a single plugin, `.js` in and `.ts` out.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_arity_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let keys: [fn(&PackageLayout, &str) -> bool; 3] = [
+            |layout, path| layout.falls_through_to_free_calls(path, "m"),
+            PackageLayout::overloads_calls,
+            PackageLayout::checks_arity,
+        ];
+        let mut held = [(0, 0); 3];
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                for (key, (yes, no)) in keys.iter().zip(held.iter_mut()) {
+                    let answer = key(&own, &path);
+                    assert_eq!(answer, key(&full, &path), "{path}");
+                    *yes += usize::from(answer);
+                    *no += usize::from(!answer);
+                }
+            }
+        }
+        assert!(held.iter().all(|&(yes, no)| yes > 0 && no > 0), "{held:?}");
+        assert!(full.checks_arity("a/b.ts") && !full.checks_arity("a/b.js"));
+        assert!(!full.falls_through_to_free_calls("a/b.kt", "hashCode"), "a root member never falls through");
     }
 
     /// The same parity for the wrapper-method table (S-588): the single-plugin

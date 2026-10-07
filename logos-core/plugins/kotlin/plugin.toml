@@ -31,6 +31,22 @@ capabilities = ["symbols", "references", "frameworks", "invocations", "propertie
 # the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
 implicit_receiver = "self"
 
+# Callables overload by name (S-592, FR-RS-43): a bare call binds only a
+# callable whose parameter range admits its argument count, and a scope whose
+# same-named callables admit none is passed over. Same-arity overloads stay
+# `overload-ambiguous`: no argument type is read.
+overloaded_calls = true
+
+# Kotlin's resolution tries each scope level for an applicable candidate: an
+# unqualified in-class call that no member of the class or its supertypes
+# admits goes on to the top-level functions and imports in scope (S-592,
+# FR-RS-43). C#, Java, Scala and C++ stop at the member that hides the name.
+implicit_call_falls_through = true
+# Every class inherits `Any`'s members, which the graph never holds: a call of
+# one of these names may be `Any`'s, which a member beats a top-level function
+# to, so it never falls through.
+implicit_root_members = ["equals", "hashCode", "toString"]
+
 # Calling a class constructs it (S-521, CR-170, FR-RS-16): a free `Foo()` whose
 # one candidate is a class records `Instantiates` to that class. A top-level
 # factory function and a class of one name are two candidates, and stay unbound.

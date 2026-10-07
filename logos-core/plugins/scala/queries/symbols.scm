@@ -86,3 +86,11 @@
 (parameters (parameter type: (repeated_parameter_type)) @arity.variadic)
 (parameters "using" @arity.unknown)
 (parameters "implicit" @arity.unknown)
+; An `override def` inherits the default arguments of the method it overrides,
+; which its own lists never write: its range is unknown (S-592).
+(function_definition
+  (modifiers "override")
+  (parameters) @arity.unknown)
+(function_declaration
+  (modifiers "override")
+  (parameters) @arity.unknown)

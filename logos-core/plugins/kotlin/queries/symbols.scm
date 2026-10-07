@@ -79,3 +79,10 @@
 (function_value_parameters
   (parameter_modifiers (parameter_modifier "vararg")) . (parameter) @arity.variadic)
 (function_value_parameters (parameter_modifiers) @arity.skip)
+; An `override fun` inherits the default values of the function it overrides,
+; which its own list never writes (`override fun drop(scope: Scope?)` under
+; `abstract fun drop(scope: Scope? = null)` admits `drop()`): its range is
+; unknown (S-592).
+(function_declaration
+  (modifiers (member_modifier "override"))
+  (function_value_parameters) @arity.unknown)

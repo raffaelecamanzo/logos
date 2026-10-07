@@ -27,6 +27,11 @@ abi_version = 14
 # `references.scm`.
 implicit_receiver = "none"
 
+# JavaScript enforces no arity (S-592, FR-RS-43; Sprint 91 Autonomous Decision
+# 3): a JS call may pass any number of arguments to any function, so a call in
+# one of these files is never filtered by a parameter range. `.ts` calls are.
+arity_unchecked_extensions = ["js", "mjs", "cjs"]
+
 capabilities = ["symbols", "references", "frameworks", "invocations"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).

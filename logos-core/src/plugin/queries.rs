@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use tree_sitter::{Language, Query};
 
 use super::error::PluginError;
-use super::manifest::NAMESPACE_CAPTURE;
+use super::manifest::{NAMESPACE_CAPTURE, SUPERTYPE_CAPTURE};
 
 /// A query whose source has been resolved (override-or-embedded), ready to
 /// compile.
@@ -255,6 +255,9 @@ pub(crate) struct LanguageQueries {
     /// Whether the language declares the namespace module model (S-518), whose
     /// `symbols` query must capture [`NAMESPACE_CAPTURE`].
     namespace_model: bool,
+    /// Whether the language declares `implicit_call_falls_through` (S-592),
+    /// whose `references` query must capture [`SUPERTYPE_CAPTURE`].
+    falls_through: bool,
     /// Every capability's resolved source, in declaration order.
     resolved: Vec<ResolvedQuery>,
     /// The compiled unit — or the error that refused it — once compiled.
@@ -273,6 +276,7 @@ impl LanguageQueries {
         grammar: &str,
         manifest_label: &'static str,
         namespace_model: bool,
+        falls_through: bool,
         resolved: Vec<ResolvedQuery>,
         language: &Language,
     ) -> Result<Self, PluginError> {
@@ -280,6 +284,7 @@ impl LanguageQueries {
             grammar: grammar.to_string(),
             manifest_label,
             namespace_model,
+            falls_through,
             resolved,
             compiled: OnceLock::new(),
         };
@@ -299,6 +304,7 @@ impl LanguageQueries {
             grammar: String::new(),
             manifest_label: "",
             namespace_model: false,
+            falls_through: false,
             resolved: Vec::new(),
             compiled: OnceLock::from(Ok(queries)),
         }
@@ -388,7 +394,10 @@ impl LanguageQueries {
             queries.insert(resolved.capability.clone(), query);
         }
         if self.namespace_model {
-            check_namespace_capture(self.manifest_label, &queries)?;
+            check_capture(self.manifest_label, &queries, "symbols", NAMESPACE_CAPTURE, NAMESPACE_REASON)?;
+        }
+        if self.falls_through {
+            check_capture(self.manifest_label, &queries, "references", SUPERTYPE_CAPTURE, SUPERTYPE_REASON)?;
         }
         Ok((queries, compiled))
     }
@@ -399,27 +408,45 @@ impl LanguageQueries {
 /// — carries the `@module.namespace` capture. Without it every file of the
 /// language would read as the global namespace, and every type of the
 /// repository would be visible to every other without an import — honest
-/// absence at the query becoming a fabricated binding ([NFR-RA-05]). Refused
-/// with the language's compile instead, naming the descriptor.
+/// absence at the query becoming a fabricated binding ([NFR-RA-05]).
 ///
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-fn check_namespace_capture(
+const NAMESPACE_REASON: &str =
+    "`[module_model]` kind 'namespace' requires the `symbols` query to capture `@module.namespace`, \
+     or every file would read as the global namespace";
+
+/// A language whose unqualified call falls through to a free function (S-592,
+/// [FR-RS-43]) must record its classes' supertypes: its compiled `references`
+/// query captures `@ref.extends`. The fall-through is taken only when the
+/// class walk saw every supertype, and a language recording none would read
+/// every class as having none, binding a free function where an unseen base
+/// holds the overload ([NFR-RA-05]). Checked at compile, so deciding the key
+/// never compiles a language nobody asked about (CR-197).
+///
+/// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+const SUPERTYPE_REASON: &str =
+    "`implicit_call_falls_through` requires the `references` query to capture `@ref.extends`, \
+     or no class's supertypes would be seen";
+
+/// A capture a descriptor key depends on ([`NAMESPACE_REASON`],
+/// [`SUPERTYPE_REASON`]): the compiled `capability` query — embedded or an
+/// on-disk override — carries `capture`, or the language's compile is
+/// refused, naming the descriptor and `reason`.
+fn check_capture(
     manifest_label: &str,
     compiled: &CompiledQueries,
+    capability: &str,
+    capture: &str,
+    reason: &str,
 ) -> Result<(), PluginError> {
-    let captures = compiled
-        .get("symbols")
-        .is_some_and(|q| q.capture_names().contains(&NAMESPACE_CAPTURE));
-    if captures {
+    if compiled.get(capability).is_some_and(|q| q.capture_names().contains(&capture)) {
         return Ok(());
     }
     Err(PluginError::Manifest {
         file: manifest_label.to_string(),
-        detail: format!(
-            "`[module_model]` kind 'namespace' requires the `symbols` query to capture \
-             `@{NAMESPACE_CAPTURE}`, or every file would read as the global namespace"
-        ),
+        detail: reason.to_string(),
     })
 }
 
@@ -454,6 +481,7 @@ mod tests {
                     LanguageQueries::new(
                         &grammar,
                         "toyunit/plugin.toml",
+                        false,
                         false,
                         resolved,
                         &language,
@@ -516,7 +544,7 @@ mod tests {
                     overridden: false,
                 })
                 .to_vec();
-            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, resolved, &language)
+            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, false, resolved, &language)
                 .expect("no override, nothing compiles at construction")
         };
         let captured = Captured::default();
