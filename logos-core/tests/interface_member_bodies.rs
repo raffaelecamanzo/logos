@@ -307,8 +307,13 @@ fn a_java_call_reaches_an_implemented_interfaces_default_body() {
             ("Gen.callGen", &["I.m"]),
         ],
     );
-    let reasons = residue(&engine, "java");
-    assert_eq!(reasons.get(&R::OverloadAmbiguous), Some(&1), "`both`: {reasons:?}");
+    // `callNoArity` no default admits; `callBoth` two defaults answer; the
+    // abstract, re-abstracted, `static`, `private` and unseen-base calls reach
+    // no candidate.
+    assert_eq!(
+        residue(&engine, "java"),
+        BTreeMap::from([(R::NoApplicableOverload, 1), (R::OverloadAmbiguous, 1), (R::SupertypeUnreached, 5)])
+    );
 }
 
 /// Sync ≡ reindex when an interface gains or loses a default, when it gains or
@@ -434,5 +439,11 @@ fn a_kotlin_call_reaches_an_implemented_interfaces_bodied_member() {
             ("Sub.callInherited", &["I.m"]),
             ("I.viaPriv", &["I.priv"]),
         ],
+    );
+    // As Java's, less the re-abstracted and `static` calls, plus the
+    // companion's.
+    assert_eq!(
+        residue(&engine, "kotlin"),
+        BTreeMap::from([(R::NoApplicableOverload, 1), (R::OverloadAmbiguous, 1), (R::SupertypeUnreached, 4)])
     );
 }
