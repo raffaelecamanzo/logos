@@ -634,6 +634,29 @@ pub struct PluginManifest {
     /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
     #[serde(default)]
     pub supertype_kind_follows_target: bool,
+    /// Whether this language overloads callables by name (S-592, [FR-RS-43]):
+    /// Java, Kotlin, Scala, C#, C++. A bare call of such a language binds only
+    /// a callable whose parameter range admits its argument count, and a scope
+    /// whose same-named callables admit none is passed over. Defaults to
+    /// `false`: a bare call binds by name alone, as before ([NFR-MA-01]). The
+    /// `self`, `super` and typed receiver walks filter in every language, so
+    /// this key decides the bare-call rung only.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub overloaded_calls: bool,
+    /// The extensions, among this plugin's own, of a language that enforces no
+    /// arity (S-592, [FR-RS-43]): JavaScript, which the TypeScript grammars
+    /// also parse (`js`, `mjs`, `cjs`, `jsx`). A call in such a file may pass
+    /// any number of arguments to any function, so no candidate is ever dropped
+    /// for its parameter range there; the range is still recorded. Defaults to
+    /// empty: every file of the language is filtered. Each entry must be one of
+    /// [`extensions`](Self::extensions), written bare.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    #[serde(default)]
+    pub arity_unchecked_extensions: Vec<String>,
     /// The methods a peeled receiver wrapper provides itself (S-588,
     /// [FR-RS-42]): wrapper name → method names. A call on a receiver proven
     /// through such a wrapper (`x: Arc<T>`, recorded with `peeled = "Arc"`)
@@ -1305,6 +1328,17 @@ impl PluginManifest {
         {
             return bail(format!(
                 "`specifier_extensions` entry '{bad}' must be a bare extension (no `.` or `/`)"
+            ));
+        }
+        // An unchecked extension the plugin does not claim would never match a
+        // file of this language, so it is a descriptor bug, not a no-op.
+        if let Some(bad) = self
+            .arity_unchecked_extensions
+            .iter()
+            .find(|e| !self.extensions.contains(e))
+        {
+            return bail(format!(
+                "`arity_unchecked_extensions` entry '{bad}' is not one of `extensions`"
             ));
         }
         if let Err(detail) =
@@ -2098,6 +2132,29 @@ mod tests {
         assert!(with("supertype_kind_follows_target = true").unwrap().supertype_kind_follows_target);
         assert!(!with("supertype_kind_follows_target = false").unwrap().supertype_kind_follows_target);
         assert!(with("supertype_kind_follows_target = \"yes\"").is_err());
+    }
+
+    /// The arity keys (S-592): overloading defaults off and refuses a
+    /// non-boolean; an unchecked extension must be one the plugin claims, so a
+    /// misspelt `jsx` on the `.ts` plugin cannot silently filter nothing.
+    #[test]
+    fn the_arity_keys_default_off_and_an_unchecked_extension_must_be_claimed() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(!m.overloaded_calls);
+        assert!(m.arity_unchecked_extensions.is_empty());
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert!(with("overloaded_calls = true").unwrap().overloaded_calls);
+        assert!(with("overloaded_calls = \"yes\"").is_err());
+        let claimed = with("arity_unchecked_extensions = [\"rs\"]").unwrap();
+        assert_eq!(claimed.arity_unchecked_extensions, ["rs"]);
+        let err = with("arity_unchecked_extensions = [\"js\"]").unwrap_err().to_string();
+        assert!(err.contains("'js' is not one of `extensions`"), "{err}");
     }
 
     /// The specifier grammar is declared apart from the member-path separator

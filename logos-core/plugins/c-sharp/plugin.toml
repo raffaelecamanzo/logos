@@ -22,6 +22,12 @@ capabilities = ["symbols", "references", "frameworks", "invocations"]
 # the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
 implicit_receiver = "self"
 
+# Callables overload by name (S-592, FR-RS-43): a bare call binds only a
+# callable whose parameter range admits its argument count, and a scope whose
+# same-named callables admit none is passed over. Same-arity overloads stay
+# `overload-ambiguous`: no argument type is read.
+overloaded_calls = true
+
 # A supertype's kind follows the type it binds (S-522, CR-170, FR-RS-15): a
 # `base_list` names the base class and the interfaces alike (`class A : B,
 # IC`), so each entry is captured once and its edge is `Extends` to the class it

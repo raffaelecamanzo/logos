@@ -40,9 +40,14 @@ use tree_sitter::Language;
 use super::abi::{assert_abi, AbiRange};
 use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
-use super::manifest::{CallTargets, PluginManifest};
+use super::manifest::{CallTargets, ImplicitReceiver, PluginManifest};
 use super::plugin::{CompiledPlugin, LanguagePlugin};
 use super::queries::{self, LanguageQueries};
+
+/// The `references` capture a type's supertype is recorded under (S-522) —
+/// whether a language records its classes' bases at all (S-592,
+/// [`LanguageRegistry::free_call_fallthrough_extensions`]).
+pub(crate) const SUPERTYPE_CAPTURE: &str = "ref.extends";
 
 /// One language's path-model declaration (S-519, [FR-RS-14]), as
 /// [`LanguageRegistry::path_models`] hands it to the module key: the package-file
@@ -466,6 +471,66 @@ impl LanguageRegistry {
             .filter(|p| !p.is_documentation() && !p.is_artifact())
             .filter(|p| p.semantics().bare_calls_free_only)
             .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose unqualified
+    /// in-class call, when no member of its class admits its arguments, goes on
+    /// to the free functions and imports in scope (S-592, [FR-RS-43]). Two
+    /// declarations make one: the plugin declares `implicit_receiver = "self"`
+    /// — such a call is on the current instance (S-514) — and its compiled
+    /// `references` query captures `@ref.extends`, so a class's supertypes are
+    /// recorded and a walk that met none has seen them all. A language whose
+    /// classes' bases go unrecorded (Scala, C++, Ruby today) may hold the
+    /// overload in a base the graph cannot see, so its call never falls
+    /// through ([NFR-RA-05]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`].
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    pub fn free_call_fallthrough_extensions(&self) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| p.semantics().implicit_receiver == ImplicitReceiver::SelfInstance)
+            .filter(|p| {
+                p.query("references")
+                    .is_some_and(|q| q.capture_names().contains(&SUPERTYPE_CAPTURE))
+            })
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares `overloaded_calls = true` (S-592, [FR-RS-43]): a bare call
+    /// there binds only a callable whose parameter range admits it. Consumed
+    /// through [`crate::resolve::package_key::PackageLayout`]; an extension
+    /// absent from the set binds its bare calls by name, as before.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn overloaded_call_extensions(&self) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .filter(|p| p.semantics().overloaded_calls)
+            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .collect()
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) a code plugin
+    /// declares in `arity_unchecked_extensions` (S-592, [FR-RS-43]): files of a
+    /// language that enforces no arity — JavaScript, parsed by the TypeScript
+    /// grammars — whose calls are never filtered by a parameter range.
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub fn arity_unchecked_extensions(&self) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .flat_map(|p| p.semantics().arity_unchecked_extensions.iter().map(|e| normalize_ext(e)))
             .collect()
     }
 
@@ -1186,6 +1251,36 @@ mod tests {
         for ext in ["java", "cs", "kt", "kts", "scala", "cpp", "rb", "c", "md"] {
             assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
         }
+    }
+
+    /// The arity sets (S-592, FR-RS-43): the overloading languages are Java,
+    /// Kotlin, Scala, C# and C++; an implicit-instance call falls through to a
+    /// free function in C# and Kotlin, which record their classes' supertypes,
+    /// and not in Scala, C++ and Ruby, which declare `implicit_receiver =
+    /// "self"` but record none; and only JavaScript's extensions — claimed by
+    /// the two TypeScript grammars — are never filtered, while `.ts`/`.tsx`
+    /// are.
+    #[test]
+    fn the_arity_extension_sets_name_the_declaring_grammars_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let overloaded = reg.overloaded_call_extensions();
+        for ext in ["java", "kt", "kts", "scala", "cs", "cpp", "hpp"] {
+            assert!(overloaded.contains(ext), "`{ext}` overloads by name");
+        }
+        for ext in ["rs", "go", "py", "php", "ts", "js", "rb", "c", "md"] {
+            assert!(!overloaded.contains(ext), "`{ext}`'s bare call binds by name");
+        }
+        let fallthrough = reg.free_call_fallthrough_extensions();
+        for ext in ["cs", "kt", "kts"] {
+            assert!(fallthrough.contains(ext), "`{ext}`'s instance call falls through");
+        }
+        for ext in ["scala", "cpp", "rb", "java", "rs", "go", "py", "php", "ts", "js", "c"] {
+            assert!(!fallthrough.contains(ext), "`{ext}`'s call never falls through");
+        }
+        let mut unchecked: Vec<String> = reg.arity_unchecked_extensions().into_iter().collect();
+        unchecked.sort();
+        assert_eq!(unchecked, ["cjs", "js", "jsx", "mjs"]);
     }
 
     /// The wrapper-method table (S-588, FR-RS-42): Rust declares what `Arc`,

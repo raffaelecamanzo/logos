@@ -957,6 +957,35 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         assert_eq!(rust_unbound(&first), 4, "the fixture states its four unbound calls");
     }
 
+    /// `no-applicable-overload` (S-592) is a reason of the memoized residue
+    /// like any other: counted on a miss, served unchanged on a hit, and moved
+    /// by a sync that changes a callable's parameters in another file than the
+    /// call's — each time equal to a fresh walk.
+    #[cfg(feature = "lang-java")]
+    #[test]
+    fn the_memo_counts_no_applicable_overload_and_a_range_change_re_walks_it() {
+        use crate::models::CallResidueReason;
+        let base = "src/main/java/com/x/Base.java";
+        let (tmp, engine) = indexed(&[
+            (base, "package com.x;\n\npublic class Base {\n    public void m(int a) {}\n}\n"),
+            (
+                "src/main/java/com/x/Kid.java",
+                "package com.x;\n\npublic class Kid extends Base {\n    public void k() { m(); }\n}\n",
+            ),
+        ]);
+        let reason = |status: &StatusInfo| stated(status)["java"].reasons[&CallResidueReason::NoApplicableOverload];
+        let miss = status_equal_to_fresh(&engine);
+        let hit = status_equal_to_fresh(&engine);
+        assert_eq!(engine.call_residue_walks(), 1, "the second status is a memo hit");
+        assert_eq!((reason(&miss), reason(&hit)), (1, 1), "`m()` fits no `m`");
+
+        write(tmp.path(), base, "package com.x;\n\npublic class Base {\n    public void m() {}\n}\n");
+        engine.sync(&[PathBuf::from(base)]);
+        let after = status_equal_to_fresh(&engine);
+        assert_eq!(engine.call_residue_walks(), 2, "the sync moved the revision");
+        assert_eq!(reason(&after), 0, "`m()` binds the base's `m()` now");
+    }
+
     #[test]
     fn a_sync_that_changes_a_ledger_row_re_walks() {
         let (tmp, engine) = lib_only();

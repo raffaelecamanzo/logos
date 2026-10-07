@@ -32,8 +32,9 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
   Ruby call with a bare `key: value` run).
   Every Rust `impl` function also records whether it takes `self`. The facts
   come from new `@arity.*` captures in each plugin's queries, so a droppable
-  query override can tune them. No range or count binds yet (the takes-`self`
-  fact does, below): on this repository
+  query override can tune them. The ranges and counts bind from S-592 and the
+  takes-`self` fact from S-604 (both below); recording them alone moved
+  nothing: on this repository
   symbols and edges are byte-identical, every node is unchanged apart from the
   new facts, and the quality signal is unchanged. A call's count joins its ledger row's identity, so `f(a)` and
   `f(a, b)` from one caller are now two rows; on this repository 268 `Calls`

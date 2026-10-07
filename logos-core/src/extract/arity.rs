@@ -52,6 +52,10 @@
 //!   passes none.
 //! - `@arity.opaque` — an argument form the plugin cannot count (a tagged
 //!   template's `` tag`…` ``): the count is unknown.
+//! - `@arity.unknown` — an argument list whose count says nothing about the
+//!   callee's parameters (S-592: Python's `cls.m(…)`, which passes the instance
+//!   itself to an instance method but not to a class method): the count is
+//!   unknown.
 //! - `@arity.receiver` — a call's receiver written as its direct child (Ruby's
 //!   `User` in `User.find(1)`, Java's `object`): a row captured there is no
 //!   callee of that call, and records unknown.
@@ -302,6 +306,9 @@ impl ArgCaptures {
                 if let Some(list) = node.parent() {
                     self.spread_lists.insert(list.id());
                 }
+            }
+            "unknown" => {
+                self.spread_lists.insert(id);
             }
             _ => {}
         }

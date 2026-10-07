@@ -65,6 +65,7 @@ fn status_json_carries_the_rust_rows_call_residue() {
             "unbound": 4,
             "reasons": {
                 "external-type": 1,
+                "no-applicable-overload": 0,
                 "no-receiver-evidence": 1,
                 "overload-ambiguous": 0,
                 "supertype-unreached": 1,

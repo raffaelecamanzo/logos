@@ -519,6 +519,22 @@ fn python_ranges_and_counts() {
     assert_eq!((&counts["g2"], &counts["g3"]), (&vec![None], &vec![None]), "`**kw` spreads");
 }
 
+/// Python's `cls.m(…)` (S-592): it may call a class method, whose `cls` is
+/// implicit, or an instance method, to which it passes the instance itself —
+/// so its count is unknown, never the explicit instance counted against `m`'s
+/// range. `self.m(…)` and any other receiver's call count as before.
+#[test]
+fn a_python_cls_call_records_an_unknown_argument_count() {
+    let src = "class C:\n    def m(self, a):\n        pass\n\
+        \x20   @classmethod\n    def c(cls):\n        cls.m(None, 1); cls.k(1); self.n(1); obj.p(1); clsx.q(1)\n";
+    let counts = counts("pkg/a.py", src);
+    assert_eq!(counts["m"], vec![None], "`cls.m(instance, a)`");
+    assert_eq!(counts["k"], vec![None], "`cls.k(a)`");
+    assert_eq!(counts["n"], vec![Some(1)], "`self.n(a)` counts its argument");
+    assert_eq!(counts["p"], vec![Some(1)]);
+    assert_eq!(counts["q"], vec![Some(1)], "only the exact name `cls`");
+}
+
 /// PHP: the required parameters (a promoted constructor's too) set the
 /// minimum, and the maximum is unbounded — a user function accepts surplus
 /// arguments (`func_get_args()`); `...$xs` spreads.

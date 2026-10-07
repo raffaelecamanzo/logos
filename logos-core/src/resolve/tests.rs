@@ -3945,3 +3945,144 @@ fn a_capture_row_is_spent_once_it_binds_or_its_source_is_re_bound() {
     spent.sort_unstable();
     assert_eq!(spent, [1, 2, 3, 6]);
 }
+
+// ── S-592 / FR-RS-43: a call binds only a callable whose arity admits it ────
+//
+// S-591 records each callable's parameter range and each call's argument
+// count. The `self`, `super`, typed and overloading bare-call arms drop every
+// candidate whose range excludes the count before exactly-one; a level left
+// with none is passed over; nothing applicable anywhere is
+// `no-applicable-overload`. An unknown range or count never filters.
+
+/// `r` with its argument count set.
+fn counted(r: UnresolvedRefRow, count: Option<u32>) -> UnresolvedRefRow {
+    UnresolvedRefRow { arg_count: count, ..r }
+}
+
+fn range(min: u32, max: Option<u32>) -> Option<ParamRange> {
+    Some(ParamRange { min, max })
+}
+
+/// [`hierarchy_index`] given the ranges of `Base.m` (302) and `A.m` (312).
+fn ranged_hierarchy(r: &UnresolvedRefRow, base_m: Option<ParamRange>, own_m: Option<ParamRange>) -> Index {
+    hierarchy_index(r).with_arities(&[(NodeId(302), base_m, None), (NodeId(312), own_m, None)])
+}
+
+#[test]
+fn a_self_call_passes_over_an_own_member_its_count_cannot_fit() {
+    let own = Some(ReceiverShape::SelfInstance);
+    for policy in POLICIES {
+        // `A.m()` takes none, `Base.m(x)` one: `self.m(1)` binds the inherited
+        // overload, and `self.m()` the own one.
+        let one = counted(shaped(100, A_JAVA, 313, "m", own), Some(1));
+        let ix = ranged_hierarchy(&one, range(1, Some(1)), range(0, Some(0)));
+        bound_to(bind(&one, &ix, policy), 313, 302, EdgeKind::Calls);
+        let none = counted(shaped(101, A_JAVA, 313, "m", own), Some(0));
+        let ix = ranged_hierarchy(&none, range(1, Some(1)), range(0, Some(0)));
+        bound_to(bind(&none, &ix, policy), 313, 312, EdgeKind::Calls);
+        // `super.m(1)` skips nothing of its own class, and binds `Base.m`.
+        let up = counted(shaped(102, A_JAVA, 313, "m", Some(ReceiverShape::Super)), Some(1));
+        let ix = ranged_hierarchy(&up, range(1, Some(1)), range(1, Some(1)));
+        bound_to(bind(&up, &ix, policy), 313, 302, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn a_call_nothing_admits_is_no_applicable_overload() {
+    for receiver in [ReceiverShape::SelfInstance, ReceiverShape::Super] {
+        let r = counted(shaped(100, A_JAVA, 313, "m", Some(receiver)), Some(2));
+        let ix = ranged_hierarchy(&r, range(1, Some(1)), range(0, Some(0)));
+        for policy in POLICIES {
+            assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{receiver:?} at {policy:?}");
+        }
+        assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::NoApplicableOverload), "{receiver:?}");
+    }
+    // A name no level holds at all is still `supertype-unreached`.
+    let r = counted(shaped(101, A_JAVA, 313, "nowhere", Some(ReceiverShape::SelfInstance)), Some(2));
+    let ix = ranged_hierarchy(&r, range(1, Some(1)), range(0, Some(0)));
+    assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::SupertypeUnreached));
+}
+
+#[test]
+fn an_unknown_range_or_count_never_filters_a_candidate() {
+    let own = Some(ReceiverShape::SelfInstance);
+    for policy in POLICIES {
+        // `A.m`'s range is unknown: it stays the own class's candidate, though
+        // `Base.m` admits the call too.
+        let r = counted(shaped(100, A_JAVA, 313, "m", own), Some(1));
+        let ix = ranged_hierarchy(&r, range(1, Some(1)), None);
+        bound_to(bind(&r, &ix, policy), 313, 312, EdgeKind::Calls);
+        // The call's count is unknown (a spread): nothing is filtered, and the
+        // own `A.m()` binds as it did by name.
+        let r = counted(shaped(101, A_JAVA, 313, "m", own), None);
+        let ix = ranged_hierarchy(&r, range(1, Some(1)), range(0, Some(0)));
+        bound_to(bind(&r, &ix, policy), 313, 312, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn a_variadic_or_defaulted_range_admits_the_call() {
+    let own = Some(ReceiverShape::SelfInstance);
+    for (count, own_m) in [(5, range(0, None)), (1, range(1, None)), (3, range(1, Some(3))), (1, range(1, Some(3)))] {
+        let r = counted(shaped(100, A_JAVA, 313, "m", own), Some(count));
+        let ix = ranged_hierarchy(&r, range(count, Some(count)), own_m);
+        bound_to(bind(&r, &ix, BindingPolicy::Strict), 313, 312, EdgeKind::Calls);
+    }
+}
+
+#[test]
+fn same_arity_overloads_stay_overload_ambiguous_and_others_are_told_apart() {
+    // `D` declares two `o` (211, 212).
+    let r = counted(shaped(100, PY_FILE, 213, "o", Some(ReceiverShape::SelfInstance)), Some(1));
+    let (nodes, edges) = shape_fixture();
+    let index = |o1: Option<ParamRange>, o2: Option<ParamRange>| {
+        Index::build(&nodes, &edges, std::slice::from_ref(&r))
+            .with_arities(&[(NodeId(211), o1, None), (NodeId(212), o2, None)])
+    };
+    let ix = index(range(1, Some(1)), range(1, Some(1)));
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::OverloadAmbiguous));
+    bound_to(bind(&r, &index(range(1, Some(1)), range(2, Some(2))), BindingPolicy::Strict), 213, 211, EdgeKind::Calls);
+    bound_to(bind(&r, &index(range(0, Some(0)), range(1, None)), BindingPolicy::Strict), 213, 212, EdgeKind::Calls);
+}
+
+#[test]
+fn a_bare_call_is_filtered_only_in_a_language_that_overloads() {
+    // `A.n`'s bare `m(1)` reaches `A.m` through the lexical chain. Java
+    // overloads: `A.m()` cannot take it, and nothing else of the name is in
+    // scope. Without the overloading key (a synthetic layout), it binds by
+    // name, as before.
+    let r = counted(call(100, A_JAVA, 313, "m"), Some(1));
+    let ix = ranged_hierarchy(&r, range(1, Some(1)), range(0, Some(0)));
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::NoApplicableOverload));
+    let (nodes, edges) = shape_fixture();
+    let bare = counted(call(101, PY_FILE, 204, "m"), Some(1));
+    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&bare))
+        .with_arities(&[(NodeId(203), range(0, Some(0)), None)]);
+    bound_to(bind(&bare, &ix, BindingPolicy::Strict), 204, 203, EdgeKind::Calls);
+}
+
+#[test]
+fn the_takes_self_filter_decides_before_the_arity_filter() {
+    let store = [lib_use(90, "crate::util::Store", "Store")];
+    // `Store`'s only `make` (424) takes no `self` and no argument: `x.make(1)`
+    // is unbound because no method of that name exists for it, not because
+    // one exists that takes no argument.
+    let r = counted(proven(100, "Store::make", None), Some(1));
+    let ix = self_fact_index(&r, &store, true);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::SupertypeUnreached));
+    // Both `pair`s take `self` and no argument: `x.pair(1)` fits neither.
+    let r = counted(proven(101, "Store::pair", None), Some(1));
+    let ix = self_fact_index(&r, &store, true);
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::NoApplicableOverload));
+    // The inherent `pair` (422) cannot take one argument and the trait impl's
+    // (423) can: the arity filter runs before the inherent-over-trait rank.
+    let ix = self_fact_index(&r, &store, false).with_arities(&[
+        (NodeId(422), range(0, Some(0)), Some(true)),
+        (NodeId(423), range(1, Some(1)), Some(true)),
+    ]);
+    bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 423, EdgeKind::Calls);
+}

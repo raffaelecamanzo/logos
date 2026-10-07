@@ -40,6 +40,8 @@ impl NoSymbolsPlugin {
                 specifier_extensions: Vec::new(),
                 implicit_receiver: crate::plugin::ImplicitReceiver::None,
                 bare_calls_free_only: false,
+                overloaded_calls: false,
+                arity_unchecked_extensions: Vec::new(),
                 wrapper_methods: Default::default(),
                 call_targets: crate::plugin::CallTargets::default(),
                 supertype_kind_follows_target: false,

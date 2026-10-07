@@ -125,3 +125,10 @@
 (argument_list (dictionary_splat) @arity.spread)
 (call
   arguments: (generator_expression) @arity.block)
+; `cls.m(…)` may call a class method, whose `cls` is implicit, or an instance
+; method, to which it passes the instance itself as the first argument: the
+; count says nothing about `m`'s parameters (S-592).
+(call
+  function: (attribute object: (identifier) @_cls)
+  arguments: (argument_list) @arity.unknown
+  (#eq? @_cls "cls"))

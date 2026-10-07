@@ -1119,6 +1119,7 @@ pub struct LanguageResolution {
 /// |---|---|
 /// | `no-receiver-evidence` | the file proves no receiver type (a bare Method-form row, or a bare call naming no import) — every receiver call whose shape is `other` or absent (S-514, [FR-RS-12]) |
 /// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member |
+/// | `no-applicable-overload` | callables of the name were found, and none admits the call's argument count — no free function or import the language goes on to admits it either (S-592) |
 /// | `type-in-another-member` | the receiver's type is declared by another workspace member (workspace scope only) |
 /// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name — or two static imports each supply one |
 /// | `type-ambiguous` | the type's name reaches two declarations here (a `src/main` and a `src/test` class of one name) |
@@ -1178,6 +1179,11 @@ pub struct CallResidue {
 pub enum CallResidueReason {
     /// The receiver's type is declared by no file of this repository.
     ExternalType,
+    /// Callables of the name were found, and none admits the call's argument
+    /// count (S-592, [FR-RS-43]).
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    NoApplicableOverload,
     /// The file proves no receiver type — a receiver call whose shape is
     /// `other` or absent (S-514), or a bare call naming no import.
     NoReceiverEvidence,
@@ -1205,8 +1211,9 @@ pub enum ResidueScope {
 
 impl CallResidue {
     /// The reasons a repository-scoped readout counts, in token order.
-    pub const REPOSITORY_REASONS: [CallResidueReason; 5] = [
+    pub const REPOSITORY_REASONS: [CallResidueReason; 6] = [
         CallResidueReason::ExternalType,
+        CallResidueReason::NoApplicableOverload,
         CallResidueReason::NoReceiverEvidence,
         CallResidueReason::OverloadAmbiguous,
         CallResidueReason::SupertypeUnreached,

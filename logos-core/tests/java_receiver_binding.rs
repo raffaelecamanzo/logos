@@ -392,17 +392,20 @@ fn a_jdk_or_library_type_and_its_super_call_are_external_type() {
     assert_eq!(nonzero(&residue), reasons(&[(R::ExternalType, 2)]));
 }
 
+/// Two overloads that both admit the call's argument count stay ambiguous: no
+/// argument type is read (S-592, FR-RS-43). Overloads of different arities are
+/// told apart by the call's count instead (`arity_binding.rs`).
 #[test]
 fn an_overloaded_target_on_the_type_or_on_a_supertype_is_overload_ambiguous() {
     let residue = residue_of(
         &[
             (
                 "src/main/java/com/x/mail/Mailer.java",
-                "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n    public void send(String to) {}\n}\n",
+                "package com.x.mail;\n\npublic class Mailer {\n    public void send(int n) {}\n    public void send(String to) {}\n}\n",
             ),
             (
                 "src/main/java/com/x/mail/Base.java",
-                "package com.x.mail;\n\npublic class Base {\n    public void go() {}\n    public void go(int n) {}\n}\n",
+                "package com.x.mail;\n\npublic class Base {\n    public void go(int n) {}\n    public void go(String s) {}\n}\n",
             ),
             (
                 "src/main/java/com/x/mail/Kid.java",
@@ -418,8 +421,8 @@ fn an_overloaded_target_on_the_type_or_on_a_supertype_is_overload_ambiguous() {
                  public class Caller {\n\
                      private Mailer mailer;\n\
                      private Kid kid;\n\
-                     public void m() { mailer.send(); }\n\
-                     public void k() { kid.go(); }\n\
+                     public void m() { mailer.send(1); }\n\
+                     public void k() { kid.go(1); }\n\
                  }\n",
             ),
         ],
@@ -916,6 +919,7 @@ fn the_residue_is_on_the_serialised_status_and_its_internals_are_not() {
         residue["reasons"],
         serde_json::json!({
             "external-type": 0,
+            "no-applicable-overload": 0,
             "no-receiver-evidence": 1,
             "overload-ambiguous": 0,
             "supertype-unreached": 0,
@@ -1051,7 +1055,9 @@ fn sync_equals_a_full_reindex_after_a_supertype_loses_the_method() {
 /// `sync` and re-binds to nothing, and the edge it bound before goes with it
 /// (S-596, FR-SY-12): the synced store equals a cold index over the same files,
 /// which leaves the call unbound as `overload-ambiguous`. Until S-596 the
-/// commit only flipped the row's `resolved` flag and kept the edge.
+/// commit only flipped the row's `resolved` flag and kept the edge. The new
+/// overload is variadic, so it admits the no-argument call too (S-592): an
+/// overload the call's count rules out would leave it bound.
 #[test]
 fn sync_equals_a_full_reindex_when_a_call_target_gains_an_overload() {
     let files = [MAILER_FILE, PAGER_FILE, CLIENT_FILE];
@@ -1064,7 +1070,7 @@ fn sync_equals_a_full_reindex_when_a_call_target_gains_an_overload() {
     write(
         tmp.path(),
         MAILER_FILE,
-        "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n    public void send(String to) {}\n}\n",
+        "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n    public void send(String... to) {}\n}\n",
     );
     engine.sync(&[MAILER_FILE.into()]);
 

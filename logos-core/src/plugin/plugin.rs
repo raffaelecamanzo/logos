@@ -49,6 +49,19 @@ pub struct Semantics {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     pub bare_calls_free_only: bool,
+    /// Whether this language overloads callables by name (S-592, [FR-RS-43];
+    /// see [`PluginManifest::overloaded_calls`]) — consumed by the binder's
+    /// bare-call rung through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub overloaded_calls: bool,
+    /// The extensions of this plugin whose language enforces no arity (S-592,
+    /// [FR-RS-43]; see [`PluginManifest::arity_unchecked_extensions`]) —
+    /// consumed by the binder's arity filter through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
+    pub arity_unchecked_extensions: Vec<String>,
     /// The methods each peeled receiver wrapper provides itself (S-588,
     /// [FR-RS-42]; see [`PluginManifest::wrapper_methods`]) — consumed by the
     /// binder's proven-receiver arm through [`crate::resolve::package_key`].
@@ -342,6 +355,8 @@ impl CompiledPlugin {
             specifier_extensions: manifest.specifier_extensions,
             implicit_receiver,
             bare_calls_free_only,
+            overloaded_calls: manifest.overloaded_calls,
+            arity_unchecked_extensions: manifest.arity_unchecked_extensions,
             wrapper_methods: manifest.wrapper_methods,
             call_targets,
             supertype_kind_follows_target: manifest.supertype_kind_follows_target,
